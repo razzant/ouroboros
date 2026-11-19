@@ -391,7 +391,7 @@ def prune_call_wire_journals(root, retention_days=None, *, now=None) -> dict:
 RETIRED_COPIES = "retired_copies.jsonl"  # in a task's source_handles/: one line per retired saved state
 SAVED_STATES_JOB = "saved_states"  # its pass row: what it released and what it holds, on Storage → Task results
 WORKED_COPIES = "worked_copies"  # obligation rows: finished tasks whose folder may still hold saved states
-_SEEDED = "worked_copies_seeded"  # this job row's fact: the one walk that put the history's rows ran
+_SEEDED = "worked_copies_seeded"  # this job row's fact: the walk that put the history's rows ran, under which body
 _OWNER_WAIT = re.compile(r"owner-wait-[0-9a-f]{32}-[0-9a-f]{64}\.json")
 _BUDGET_PAUSE = re.compile(r"budget-pause-(?:sleep-|owner-pause-)?[0-9a-f]{32}-[0-9a-f]{64}\.json")
 _FROZEN_WORKING = re.compile(r"working-a\d+-s\d+-[0-9a-f]{64}\.json")
@@ -459,26 +459,30 @@ def _call_records(root: pathlib.Path, task_id: str) -> list:
 def _lent_sources(root: pathlib.Path):
     """The tasks whose saved states a queued or running task may still load: ``working_checkpoint.load_recovery``
     reads the file of the task its handoff names (``source_task_id``, a relay's ``continued_from_task_id``), and a
-    retry reads its predecessors' sources (``source_retention._source_locations``). ``None`` without a readable
-    published queue: then every task holds."""
+    task reads its whole retry line's sources (``review_thread_retention.retry_line``, the reader's own walk).
+    ``None`` without a readable, fresh published queue: then every task holds."""
     from ouroboros.queue_observation import load_queue_document
+    from ouroboros.review_thread_retention import retry_line
+    from ouroboros.task_status import _snapshot_is_stale
 
     try:
         snapshot = load_queue_document(root)
     except (OSError, ValueError):  # a malformed document or a hole in its shared table
         return None
-    if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+    if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid") or _snapshot_is_stale(snapshot):
         return None
     lent = set()
     for entry in [*(snapshot.get("pending") or ()), *(snapshot.get("running") or ())]:
         task = entry.get("task") if isinstance(entry, dict) else None
-        if not isinstance(task, dict):
-            continue
+        task = task if isinstance(task, dict) else {}
         lent.update(str(task[key]) for key in ("timeout_retry_from", "original_task_id") if task.get(key))
         for field in ("_working_recovery", "_owner_wait_resume", "_budget_pause", "_budget_pause_resume"):
             carrier = task.get(field)
             if isinstance(carrier, dict):
                 lent.update(str(carrier[key]) for key in ("source_task_id", "continued_from_task_id") if carrier.get(key))
+        receiver = str((entry.get("id") if isinstance(entry, dict) else "") or task.get("id") or "")
+        if receiver:
+            lent.update(retry_line(root, receiver))
     return lent
 
 
@@ -561,7 +565,10 @@ def _retire(root: pathlib.Path, path: pathlib.Path, kind: str, info, *, task_id:
         return datetime.fromtimestamp(float(stamp), timezone.utc).isoformat()
 
     saved_at = iso(info.st_mtime)
-    if (path.name, info.st_size, saved_at) not in recorded:
+    if (path.name, info.st_size, saved_at) in recorded:  # a crashed pass's line: make it durable before the file goes
+        with open(_ledger(root, task_id), "ab") as handle:
+            os.fsync(handle.fileno())
+    else:
         sha = _SHA_TAIL.search(path.name)
         _append_line(_ledger(root, task_id), {
             "name": path.name, "folder": path.parent.name, "kind": kind, "bytes": info.st_size,
@@ -572,9 +579,11 @@ def _retire(root: pathlib.Path, path: pathlib.Path, kind: str, info, *, task_id:
     path.unlink()
 
 
-def _seed(root: pathlib.Path) -> None:
-    """Once per store: put a row for every finished task whose folder already holds saved states (the history
-    before ``task_written`` put them), then record that the walk ran."""
+def _seed(root: pathlib.Path, body) -> None:
+    """Put a row for every finished task whose folder already holds saved states, then record the walk under the
+    store's body fact (``meta.last_store_body``). It runs again only when another HEAD booted on the store since:
+    an older body puts no rows for the works it finishes, and a switch to it writes packed handles back loose
+    (``evidence_packs.restore_checkpoint_handles``)."""
     from ouroboros.task_status import SETTLED_STATUSES
 
     base = root / "task_results" / "artifacts"
@@ -595,7 +604,7 @@ def _seed(root: pathlib.Path) -> None:
                     txn.put_row(WORKED_COPIES, task_id, {})
         from ouroboros.utils import utc_now_iso
 
-        maintenance_jobs.record_in(txn, JOB, **{_SEEDED: utc_now_iso()})
+        maintenance_jobs.record_in(txn, JOB, **{_SEEDED: {"at": utc_now_iso(), "body": body}})
 
 
 def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
@@ -631,8 +640,10 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
 
     with store.open_store(root, write=False) as txn:
         seeded = (txn.meta(maintenance_jobs.PREFIX + JOB) or {}).get(_SEEDED)
-    if not seeded:
-        _seed(root)
+        body = txn.meta("last_store_body")
+    body = str(body.get("sha") or "") if isinstance(body, dict) else ""
+    if not isinstance(seeded, dict) or seeded.get("body") != body:
+        _seed(root, body)
     with store.open_store(root, write=False) as txn:
         owed = list(txn.set_rows(WORKED_COPIES))
         rows = {}
@@ -687,6 +698,11 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
             recorded_lines = {(line.get("name"), line.get("bytes"), line.get("saved_at")) for line in retired_lines(root, task_id)}
             left = 0
             with gate(root, task_id, timeout_sec=0) as why:
+                if not why:  # under the custody lock a promotion or reopening published meanwhile is seen
+                    with store.open_store(root, write=False) as txn:
+                        now_row = txn.row(task_id, "status", "has_pending_promotion")
+                    why = ("child_refs_pending" if now_row and now_row[1] == 1
+                           else "" if now_row and now_row[0] in SETTLED_STATUSES else "changed")
                 if why:
                     hold(why, len(found))
                     continue

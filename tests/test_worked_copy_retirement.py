@@ -139,8 +139,8 @@ def test_without_call_records_the_record_would_name_nothing_so_the_states_stay(r
 def test_live_ownership_or_an_unknown_probe_keeps_them(root, monkeypatch):
     handles = _task(root, "owned")
     copies = _copies(handles)
-    _queue(root, running=["owned"])
-    assert _prune(root)["held"] == {"not_proven_over": len(copies)} and all(path.exists() for path in copies)
+    _queue(root, running=["owned"])  # the queue runs it: a receiver of its own saved states
+    assert _prune(root)["held"] == {"lent_to_receiver": len(copies)} and all(path.exists() for path in copies)
     _queue(root)
     monkeypatch.setattr("ouroboros.body_candidate.live_lineage_processes", lambda *_: [123])
     assert _prune(root)["held"] == {"not_proven_over": len(copies)}
@@ -329,7 +329,7 @@ def test_a_finished_write_puts_its_row_and_the_pass_drops_it_once_nothing_is_lef
     from ouroboros.maintenance_retirement import WORKED_COPIES
 
     _prune(root)  # the one seeding walk of an empty history
-    assert maintenance_jobs.job(root, "runtime_retirement").get("worked_copies_seeded")
+    assert maintenance_jobs.job(root, "runtime_retirement").get("worked_copies_seeded", {}).get("at")
     handles = root / "task_results" / "artifacts" / "rowed" / "source_handles"
     copies = _copies(handles)
     _file(root / "observability" / "calls" / "rowed" / "llm-1.json", "{}")
@@ -403,3 +403,30 @@ def test_the_maintenance_child_waits_the_owners_days_not_the_default(root, monke
     monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "11")
     startup_historical_audit.spawn_maintenance_job(root, root, "maintenance")
     assert seen["OUROBOROS_GC_RETENTION_DAYS"] == "11"
+
+
+def test_a_whole_retry_line_of_a_queued_task_is_lent(root):
+    from ouroboros.utils import atomic_write_json
+
+    first, middle = _copies(_task(root, "first")), _copies(_task(root, "middle"))
+    write_task_result(root, "first", "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400), retry_task_id="middle")
+    write_task_result(root, "middle", "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400),
+                      timeout_retry_from="first", original_task_id="first", retry_task_id="last")
+    write_task_result(root, "last", "running", timeout_retry_from="middle", original_task_id="middle")
+    stamp = {"generation": "copies-test", "ts": _iso(time.time())}
+    atomic_write_json(root / "state/queue_snapshot.json", {**stamp, "pending": [], "running": [{"id": "last", "task": {"id": "last"}}]})
+    atomic_write_json(root / "state/queue.alive", stamp)
+    assert _prune(root)["held"] == {"lent_to_receiver": len(first) + len(middle)}
+    assert all(path.exists() for path in first + middle)
+
+
+def test_another_body_on_the_store_makes_the_history_walk_again(root):
+    from ouroboros import store
+
+    _prune(root)
+    handles = _task(root, "older")  # finished under a body that puts no rows: no row before the files appeared
+    copies = _copies(handles)
+    assert _prune(root)["removed"] == 0, "the walk ran under this body already"
+    with store.open_store(root, write=True) as txn:
+        txn.set_meta("last_store_body", {"sha": "0" * 40, "at": _iso(time.time())})
+    assert _prune(root)["removed"] == len(copies)
