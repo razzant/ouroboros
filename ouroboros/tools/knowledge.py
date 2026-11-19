@@ -573,7 +573,15 @@ def get_tools() -> List[ToolEntry]:
             "name": "knowledge_write",
             "description": (
                 "Create, revise, append, revert or reversibly archive durable Markdown understanding. YAML carries type, "
-                "optional title and an authored summary; unknown metadata survives. Each active summary stays resident in "
+                "an authored summary and optional title, keys and claims; unknown metadata survives. keys are exact outside "
+                "names of the note's subject (an account, an email), each {provider, namespace, id}: a place turn states its "
+                "speaker's key and the global notes holding it; equality alone joins them and grants no authority. claims "
+                "lists exact situation names as knowledge_read and knowledge_write state them (room:<id>, place:<id>, "
+                "conversation:…, thread:…; not the label in parentheses): where one is present, every integrating focus "
+                "holds this active global note's head, the body above its first `## ` line. No selected mode shortens a "
+                "held head; only the window can, to my summary and an exact reader, or in an emergency to the reader "
+                "alone. A name holds once I set it in a create or a whole-note overwrite. Each active summary stays "
+                "resident in "
                 "the index's whole view (a global note's in every room and place I work in, a project note's in that "
                 "project), never in a Safety check; body text never replaces it. A write does not refresh a context already built: a work "
                 "already running keeps the index it started with. Under physical window pressure, the outline names every active "
@@ -609,7 +617,7 @@ def get_tools() -> List[ToolEntry]:
                 "edits": {"type": "array", "minItems": 1, "description": "mode=edit: several exact replacements in one revision-checked write, all or nothing. Each item is {old_str, new_str}: old_str is exact body text found once in the revision you read; new_str replaces it, empty deletes. Spans may touch, not overlap.",
                           "items": {"type": "object", "additionalProperties": False, "required": ["old_str", "new_str"],
                                     "properties": {"old_str": {"type": "string"}, "new_str": {"type": "string"}}}},
-                "summary": {"type": "string", "description": "A summary names the note's enduring scope and says when to open this note, not a dated log of its latest edit: it is shown in the resident knowledge index, while the body is read on demand. Passed with overwrite, append or edit, it replaces the current summary in the same revision-checked write (mode=edit may pass it alone); omit it to keep the current one."},
+                "summary": {"type": "string", "description": "A summary names the note's enduring scope and says when to open this note, not a dated log of its latest edit: it is shown in the resident knowledge index and can stand for a held head that the window reduces; the whole note remains readable on demand. Passed with overwrite, append or edit, it replaces the current summary in the same revision-checked write (mode=edit may pass it alone); omit it to keep the current one."},
                 "expected_revision": {"type": "string", "description": "The note's current revision, as knowledge_read, a receipt or a refusal returns it. Required to replace an existing note: overwrite, edit, revert, archive, restore and an append with summary. Omit it for a bare append or to create a note; pass empty only to create a missing note (on an existing note an empty value is a stale revision). A stale revision writes nothing."},
                 "version": {"type": "string", "description": "mode=revert: the revision of an earlier version of this note (knowledge_read(view='history') lists them); its exact stored bytes become the current note."},
             }, "required": ["topic", "mode"]},
