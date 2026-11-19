@@ -1046,11 +1046,11 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) ->
     return members
 
 
-def published_generations(root: Any, task_id: str, listing: Optional[list] = None) -> List[Dict[str, Any]]:
-    """This task's published sidecars, oldest generation first: those its names spell (``_task_sidecar_names``),
-    or of one shared ``listing``; a homonym's (``a.2`` generation 1 beside ``a``) is told by its own ``task_id``."""
-    found = [sidecar for _, sidecar in (list_sidecars(root, names=_task_sidecar_names(root, task_id))
-                                        if listing is None else listing) if sidecar["task_id"] == str(task_id)]
+def published_generations(root: Any, task_id: str) -> List[Dict[str, Any]]:
+    """This task's published sidecars, oldest generation first: those its names spell (``_task_sidecar_names``);
+    a homonym's (``a.2`` generation 1 beside ``a``) is told by its own ``task_id``."""
+    found = [sidecar for _, sidecar in list_sidecars(root, names=_task_sidecar_names(root, task_id))
+             if sidecar["task_id"] == str(task_id)]
     return sorted(found, key=lambda sidecar: int(sidecar["generation"]))
 
 
@@ -1208,8 +1208,7 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     return report
 
 
-def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None, revision: Optional[str] = None,
-              sweep=None) -> Dict[str, Any]:
+def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str] = None, sweep=None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs. Only the
     generations an unlink relies on are re-read: the new one, and an older one while it still holds a
@@ -1221,10 +1220,10 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     if sweep is None:
         with pack_sweep(root) as sweep:
             sweep.collect_keep(keep_rows(root))
-            return pack_task(root, task_id, keep_shas=keep_shas, listing=listing, revision=revision, sweep=sweep)
+            return pack_task(root, task_id, keep_shas=keep_shas, revision=revision, sweep=sweep)
     if revision is None:
         revision = task_stamps(root, task_id)
-    generations = published_generations(root, task_id, listing)
+    generations = published_generations(root, task_id)
     already = {_member_key(m) for s in generations for m in s["members"]}
     missing: list = []
     members = loose_members(root, task_id, missing=missing)
@@ -1246,8 +1245,6 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
         pack_path, sidecar = write_pack(root, task_id, generation, fresh)
         report.update(generation=generation, members=len(fresh), raw=sidecar["raw_total"], packed=sidecar["packed_total"])
         relied.append(sidecar)
-        if listing is not None:
-            listing.append((pack_path.with_name(sidecar_name(task_id, generation)), sidecar))
     for sidecar in relied:
         pack_path = packs_dir(root) / pack_name(task_id, sidecar["generation"])
         verify_pack(pack_path, sidecar)  # from disk, EVERY member of a relied-on generation, before any unlink

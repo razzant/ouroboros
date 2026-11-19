@@ -251,8 +251,9 @@ def terminal_revision(root: pathlib.Path) -> int:
 
 
 def ordered_candidates(root: pathlib.Path, packable: List[str], *, rows: Optional[dict] = None) -> List[Tuple[str, int]]:
-    """Packable tasks with their loose raw size: the ones whose result changed after the newest
-    published pack first (newest result first), then the backfill by descending raw size."""
+    """Packable tasks with their loose raw size: the ones whose result changed after the packer's newest
+    verified pack (the index's ``packs.verified_at``: no sidecar is read) first, newest result first, then
+    the backfill by descending raw size. An index that cannot say leaves every candidate in the backfill."""
     from ouroboros.task_store import signature
 
     def timestamp(value):
@@ -261,12 +262,19 @@ def ordered_candidates(root: pathlib.Path, packable: List[str], *, rows: Optiona
         except (TypeError, ValueError):
             return 0
 
-    if not packable:  # nothing to order: no sidecar is read
+    if not packable:  # nothing to order: the index is not opened
         return []
-    newest_pack = max((timestamp(sidecar.get("created_at")) for _, sidecar in packs.list_sidecars(root)), default=0)
+    try:
+        with packs.open_index(root) as conn:
+            newest_pack = timestamp(conn.execute("SELECT max(verified_at) FROM packs").fetchone()[0])
+    except (store.StoreError, sqlite3.Error, OSError):
+        newest_pack = 0
     recent, backfill = [], []
     for task in packable:
-        raw = sum(int(m["size"]) for m in packs.loose_members(root, task))
+        try:
+            raw = sum(int(m["size"]) for m in packs.loose_members(root, task))
+        except packs.EvidenceUnavailable:
+            raw = 0  # where a shared blob lies is unknown now: the task's own pack_task meets it and stays owed
         row = rows.get(task) if rows is not None else None
         revision = row[1:] if row is not None else signature(root, task)
         touched = timestamp(revision[1]) if revision else 0
@@ -365,15 +373,11 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
             report["swept"] += 1
     candidates = ordered_candidates(root, packable, rows=rows)
     report["candidates"] = len(candidates)
-    # A pass from a position reads each candidate's own sidecars by name (``published_generations``); a whole
-    # census (no position: the first run, a repair) shares one listing of them all.
-    listing = packs.list_sidecars(root) if since is None and candidates else None
     if candidates:
         sweep.collect_keep(keep_rows(root))
-    for task, raw in candidates:
+    for task, raw in candidates:  # each reads its own sidecars by name (``published_generations``), never all
         try:
-            outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
-                                      sweep=sweep)
+            outcome = packs.pack_task(root, task, keep_shas=set(), revision=revisions[task], sweep=sweep)
         except Exception as exc:
             report["faults"] += 1
             report["unfinished"].append(task)
