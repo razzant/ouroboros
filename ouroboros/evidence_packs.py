@@ -901,7 +901,7 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
     located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
     if located is None:
         return None
-    from ouroboros.maintenance_retirement import owe_written_back, worked_copy
+    from ouroboros.saved_state_retirement import owe_written_back, worked_copy
 
     if _restore_handle(target, member_bytes(*located), located[1]["sha256"]) and worked_copy(rel.parts[1], rel.name):
         owe_written_back(root, task_id)  # a saved state back on disk is its retirer's again
@@ -910,7 +910,7 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
 
 def materialize_path(path: pathlib.Path, *, explain: bool = False) -> Optional[pathlib.Path]:
     """A missed checkpoint handle written back from its pack, else None; with ``explain`` (``read_file``) a saved
-    state retired after its work ended raises with its record line (``maintenance_retirement.retired_message``)."""
+    state retired after its work ended raises with its record line (``saved_state_retirement.retired_message``)."""
     parsed = _checkpoint_path(path)
     if not parsed or len(parsed[2]) != 3:
         if explain:  # a rolling working file has no pack, only its record
@@ -923,7 +923,7 @@ def materialize_path(path: pathlib.Path, *, explain: bool = False) -> Optional[p
 
 
 def _explain_retired(path: Any) -> None:
-    from ouroboros.maintenance_retirement import SavedStateRetired, retired_note_for
+    from ouroboros.saved_state_retirement import SavedStateRetired, retired_note_for
 
     note = retired_note_for(path)
     if note:
@@ -1063,9 +1063,9 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None, sa
     """The task's members whose bytes are at hand (loose checkpoint handles first, then the manifest
     blobs that are loose or already held by some pack on this root), each with its loose source path;
     a referenced blob that is neither is appended to ``missing`` as ``(kind, sha256, size)``. Saved states for
-    exact return (``maintenance_retirement.worked_copy``) are never new members; ``saved_states`` lists them alone."""
+    exact return (``saved_state_retirement.worked_copy``) are never new members; ``saved_states`` lists them alone."""
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.maintenance_retirement import worked_copy  # saved states wait loose for their retirer, never packed
+    from ouroboros.saved_state_retirement import worked_copy  # saved states wait loose for their retirer, never packed
 
     root = pathlib.Path(root)
     members: List[Dict[str, Any]] = []

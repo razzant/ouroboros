@@ -1584,7 +1584,7 @@ def test_wait_and_pause_source_prefixes_have_lifetime_rows():
         assert prefixes
         for prefix in prefixes:
             assert any("/context_checkpoints/" + prefix in line.split("|")[1]
-                       and "[disposable: ouroboros.maintenance_retirement.prune_worked_copies]" in line
+                       and "[disposable: ouroboros.saved_state_retirement.prune_worked_copies]" in line
                        for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("|"))
 
     for term in ("park_task", "cause", "auto_resume", "resume_policy", "authority_notice_registered", "selection_door"):

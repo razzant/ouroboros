@@ -195,8 +195,8 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                                       root / "task_results" / "artifacts" / task_id / WIRE_JOURNAL) if os.path.lexists(path)]
     unknown: List[str] = []
     pins: Dict[str, str] = {}
-    try:  # the folders whose saved states for exact return ``maintenance_retirement.prune_worked_copies`` would retire
-        from ouroboros.maintenance_retirement import worked_copies_in
+    try:  # the folders whose saved states for exact return ``saved_state_retirement.prune_worked_copies`` would retire
+        from ouroboros.saved_state_retirement import worked_copies_in
         places += sorted({SAVED_STATES_PLACE + str(path.parent)
                           for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
@@ -284,7 +284,7 @@ def _present(root: pathlib.Path, task_id: str, place: str, pins: Dict[str, str])
     from ouroboros.private_copy_read import record_at
 
     if place.startswith(SAVED_STATES_PLACE):  # the folder stays with its sources: present while a saved state is left
-        from ouroboros.maintenance_retirement import worked_copy
+        from ouroboros.saved_state_retirement import worked_copy
         folder = pathlib.Path(place[len(SAVED_STATES_PLACE):])
         try:
             with os.scandir(folder) as listing:
