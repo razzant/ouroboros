@@ -362,13 +362,16 @@ def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
 
 
 def index_owed(root: Any) -> bool:
-    """Whether the packing pass owes ``root`` a rebuild: packs exist and the cache's O(1) facts fail (missing,
-    foreign, another schema) or a read met damage behind them (``DAMAGED_MARK``). No lock is taken; a held
-    lock or file is no such fact."""
+    """Whether the packing pass owes ``root`` a rebuild: a read met damage behind the cache's O(1) facts
+    (``DAMAGED_MARK``, a file) or packs exist and those facts fail (missing, foreign, another schema), read under
+    the index lock taken without waiting: on the name tier it is SQLite's one serialization (a reader beside an
+    uncommitted write would roll its journal back). A held lock or file is no such fact."""
     root = pathlib.Path(root)
+    if not packs_dir(root).is_dir() or (packs_dir(root) / DAMAGED_MARK).exists():
+        return packs_dir(root).is_dir()  # no packs: no lock file; a mark: owed whoever holds the lock
     try:
-        return packs_dir(root).is_dir() and ((packs_dir(root) / DAMAGED_MARK).exists() or not _index_valid(
-            packs_dir(root) / INDEX_NAME, index_tier(root), wait_sec=0))
+        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=0):
+            return not _index_valid(packs_dir(root) / INDEX_NAME, index_tier(root), wait_sec=0)
     except store.StoreBusy:
         return False
 

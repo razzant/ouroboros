@@ -126,6 +126,53 @@ def test_discovery_does_not_rebuild_a_missing_index(root, monkeypatch):
     assert not (packs.packs_dir(root) / packs.INDEX_NAME).exists()
 
 
+def test_discovery_reads_the_index_only_under_its_lock_and_a_held_lock_owes_nothing(root, monkeypatch):
+    """On the name tier (a volume without kernel locks) the index lock is SQLite's one serialization: a reader
+    opening the live file beside the packer's uncommitted generation would roll the writer's journal back under
+    it and leave the committed index damaged. Discovery reads the cache's facts only under that lock, taken
+    without waiting: while the packer writes it opens nothing and owes nothing, and the generation commits whole.
+    A damage mark is a file, owed whoever holds the lock; with the lock free a missing index is owed as before,
+    and a root without packs gains no lock file."""
+    from ouroboros import platform_layer
+
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda *a, **k: False)
+    packs.ensure_index(root)
+    assert packs.index_tier(root) == store.TIER_NAME
+    index, mark = packs.packs_dir(root) / packs.INDEX_NAME, packs.packs_dir(root) / packs.DAMAGED_MARK
+    members = [{"sha256": f"{n:064x}", "kind": "json", "offset": n, "size": 1} for n in range(3000)]
+    opened, seen, connect, rows = [], [], store.connect, packs._index_rows
+
+    def traced(path, *args, **kwargs):
+        opened.append(pathlib.Path(path).name)
+        return connect(path, *args, **kwargs)
+
+    def writing(conn, *args):
+        conn.execute("PRAGMA cache_size = 8")  # its pages reach the file before COMMIT, as a big generation's do
+        rows(conn, *args)
+        opened.clear()
+        seen.append((packs.index_owed(root), packer.packing_pending(root, lambda: False), packs.INDEX_NAME in opened))
+
+    monkeypatch.setattr(store, "connect", traced)
+    monkeypatch.setattr(packs, "_index_rows", writing)
+    packs.index_upsert(root, packs.packs_dir(root) / "new.xz", {"task_id": "new", "generation": 1, "members": members})
+    with contextlib.closing(sqlite3.connect(index)) as conn:
+        try:
+            whole = conn.execute("PRAGMA quick_check").fetchone()[0], conn.execute("SELECT count(*) FROM members").fetchone()[0]
+        except sqlite3.DatabaseError as exc:
+            whole = str(exc), None
+    assert (seen, whole) == ([(False, False, False)], ("ok", len(members)))
+    with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0):
+        index.unlink()
+        assert not packs.index_owed(root)  # a held lock is no fact about the file
+        mark.touch()
+        assert packs.index_owed(root)  # the mark is one: owed whoever holds the lock
+    mark.unlink()
+    assert packs.index_owed(root) and packer.packing_pending(root, lambda: False)  # the lock free, no index: owed
+    bare = root.parent / "bare"
+    bare.mkdir()
+    assert not packs.index_owed(bare) and not (bare / "state").exists()
+
+
 @pytest.mark.parametrize("damage", ["missing", "garbage"])
 def test_a_resting_install_owes_its_pass_the_index_rebuild_and_the_pass_streams_it_once(root, monkeypatch, damage):
     """Only the packing pass rebuilds the cache. Once the packer rests, an index gone missing or unreadable
