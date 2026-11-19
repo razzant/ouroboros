@@ -18,6 +18,7 @@ has a companion that shows the boundary still does its job on both sizes.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import threading
@@ -526,6 +527,53 @@ def test_a_valid_index_keeps_a_placement_whose_own_sidecar_was_damaged(tmp_path,
         assert packs.handle_bytes(tmp_path, "kept", handle["path"]).startswith(b"# focus")
         assert packs.handle_info(tmp_path, "kept", handle["path"]) == {
             "size": handle["size"], "sha256": handle["sha256"], "loose": False}
+
+
+def test_a_handle_miss_and_an_ordering_hint_never_wait_for_the_index_lock(tmp_path, monkeypatch):
+    """With the packer holding the index lock: a handle miss is answered by its task's own readable
+    sidecars and never asks the index; ``read_position`` names a blob its owner's sidecars hold the
+    same way, and for one they do not hold asks the index without waiting (``EvidenceUnavailable``,
+    busy; never ``StoreBusy``); a blob read under a zero acquisition budget waits no more."""
+    from ouroboros import evidence_packer, evidence_packs as packs, store
+    from tests.test_evidence_packs import _task
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    (ref, *_), handle = _task(tmp_path, "a", blobs=1)
+    (foreign, *_), _ = _task(tmp_path, "b", blobs=1)
+    assert evidence_packer.run_pass(tmp_path)["faults"] == 0
+    held, release, waits, name_lock = threading.Event(), threading.Event(), [], store.name_lock
+
+    def hold():
+        with name_lock(tmp_path, packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(30)
+
+    @contextlib.contextmanager
+    def observed(root, filename, *, timeout_sec, **kwargs):
+        if filename == packs.INDEX_LOCK_NAME:
+            waits.append(timeout_sec)
+        with name_lock(root, filename, timeout_sec=timeout_sec, **kwargs):
+            yield
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    assert held.wait(5)
+    monkeypatch.setattr(store, "name_lock", observed)
+    try:
+        absent = handle["path"].replace("focus_source", "absent")
+        assert packs.handle_info(tmp_path, "a", absent) is None
+        assert packs.read_position(tmp_path, task_id="a", rel_path=absent) is None
+        position = packs.read_position(tmp_path, sha256=ref["sha256"], kind="json", task_id="a")
+        assert position[0].endswith("a.xz") and waits == []  # its own sidecars answered: the index was never asked
+        with pytest.raises(packs.EvidenceUnavailable) as hint:
+            packs.read_position(tmp_path, sha256=foreign["sha256"], kind="json", task_id="a")
+        with store.acquisition_budget(0), pytest.raises(packs.EvidenceUnavailable) as read:
+            packs.blob_bytes(tmp_path, foreign)
+        assert (hint.value.reason, read.value.reason, waits) == ("busy", "busy", [0, 0])
+    finally:
+        release.set()
+        holder.join(10)
+    assert packs.blob_bytes(tmp_path, foreign) == packs.blob_bytes(tmp_path, foreign, task_id="b")  # free: both answer
 
 
 # ---- the Host Service operation read: one accepted message over k-scaled room, routing and task history
