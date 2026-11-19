@@ -155,7 +155,7 @@ export const CAUSES = {
     nothing_unsaved: 'nothing in it is unsaved any more', nested_repository: 'a repository inside it cannot be saved as a patch',
     commits_unprotected: 'its commits are not held by a branch', generation_closed: 'stopped by a restart',
     removal_failed: 'its removal failed', younger_than_retention: 'it is still inside the retention days',
-    lent_to_receiver: 'a queued or running work may still load it', no_call_records: 'the work’s model-call records are missing',
+    lent_to_receiver: 'a queued or running work may still load it, or the queue could not be read', no_call_records: 'the work’s model-call records are missing',
     finish_time_unknown: 'when the work ended is not recorded', packs_unknown: 'an evidence pack that may hold its bytes could not be read',
     source_recovery_pending: 'startup recovery is not confirmed complete: old task folders and service logs are kept',
     closed_set_unrecorded: 'closed log files waiting for the next app restart (no earlier run of the app saw them closed)',
