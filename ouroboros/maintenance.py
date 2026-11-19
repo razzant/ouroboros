@@ -236,7 +236,7 @@ def _packing_inputs(root: pathlib.Path) -> Dict[str, Any]:
     """The facts the packing rule reads, cheaply: the store's terminal-write counter (a task closing
     or a closed task written again moves it; a live task's writes do not; one meta row, never a read
     over the rows), whether archived usage segments wait, whether the evidence index awaits its rebuild
-    (``evidence_packs.index_owed``: one header and one meta row) and whether any loose evidence exists."""
+    (``evidence_packs.index_owed``: stats, nothing of the packs opened) and whether any loose evidence exists."""
     from ouroboros import evidence_packer, evidence_packs
 
     return {"terminal": _plain(evidence_packer.terminal_revision(root)),
@@ -246,7 +246,8 @@ def _packing_inputs(root: pathlib.Path) -> Dict[str, Any]:
 
 def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
     """Evidence may wait when archived usage segments wait or the evidence index awaits its rebuild
-    (only the pass rebuilds it, so even a quiet install is due), or when loose evidence exists and the
+    (only the pass rebuilds it, so even a quiet install is due once its file is gone or a reader marked
+    it unusable), or when loose evidence exists and the
     terminal rows moved since the last pass, or the last pass unlinked (one more look is owed: it
     records the moved directories' stamps), or it left candidates unfinished (``pending``: deferred
     by a held custody lock, busy files, faults) and the store has been written since that pass began

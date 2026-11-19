@@ -126,67 +126,32 @@ def test_discovery_does_not_rebuild_a_missing_index(root, monkeypatch):
     assert not (packs.packs_dir(root) / packs.INDEX_NAME).exists()
 
 
-def test_discovery_reads_the_index_only_under_its_lock_and_a_held_lock_owes_nothing(root, monkeypatch):
-    """On the name tier (a volume without kernel locks) the index lock is SQLite's one serialization: a reader
-    opening the live file beside the packer's uncommitted generation would roll the writer's journal back under
-    it and leave the committed index damaged. Discovery reads the cache's facts only under that lock, taken
-    without waiting: while the packer writes it opens nothing and owes nothing, and the generation commits whole.
-    A damage mark is a file, owed whoever holds the lock; with the lock free a missing index is owed as before,
-    and a root without packs gains no lock file."""
-    from ouroboros import platform_layer
-
-    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda *a, **k: False)
-    packs.ensure_index(root)
-    assert packs.index_tier(root) == store.TIER_NAME
-    index, mark = packs.packs_dir(root) / packs.INDEX_NAME, packs.packs_dir(root) / packs.DAMAGED_MARK
-    members = [{"sha256": f"{n:064x}", "kind": "json", "offset": n, "size": 1} for n in range(3000)]
-    opened, seen, connect, rows = [], [], store.connect, packs._index_rows
-
-    def traced(path, *args, **kwargs):
-        opened.append(pathlib.Path(path).name)
-        return connect(path, *args, **kwargs)
-
-    def writing(conn, *args):
-        conn.execute("PRAGMA cache_size = 8")  # its pages reach the file before COMMIT, as a big generation's do
-        rows(conn, *args)
-        opened.clear()
-        seen.append((packs.index_owed(root), packer.packing_pending(root, lambda: False), packs.INDEX_NAME in opened))
-
-    monkeypatch.setattr(store, "connect", traced)
-    monkeypatch.setattr(packs, "_index_rows", writing)
-    packs.index_upsert(root, packs.packs_dir(root) / "new.xz", {"task_id": "new", "generation": 1, "members": members})
-    with contextlib.closing(sqlite3.connect(index)) as conn:
-        try:
-            whole = conn.execute("PRAGMA quick_check").fetchone()[0], conn.execute("SELECT count(*) FROM members").fetchone()[0]
-        except sqlite3.DatabaseError as exc:
-            whole = str(exc), None
-    assert (seen, whole) == ([(False, False, False)], ("ok", len(members)))
-    with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0):
-        index.unlink()
-        assert not packs.index_owed(root)  # a held lock is no fact about the file
-        mark.touch()
-        assert packs.index_owed(root)  # the mark is one: owed whoever holds the lock
-    mark.unlink()
-    assert packs.index_owed(root) and packer.packing_pending(root, lambda: False)  # the lock free, no index: owed
-    bare = root.parent / "bare"
-    bare.mkdir()
-    assert not packs.index_owed(bare) and not (bare / "state").exists()
-
-
 @pytest.mark.parametrize("damage", ["missing", "garbage"])
 def test_a_resting_install_owes_its_pass_the_index_rebuild_and_the_pass_streams_it_once(root, monkeypatch, damage):
-    """Only the packing pass rebuilds the cache. Once the packer rests, an index gone missing or unreadable
-    makes its job due again (one header and one meta row, nothing listed), and the pass rebuilds it from the
+    """Only the packing pass rebuilds the cache, and the maintenance look opens nothing of the packs (on the
+    name tier no SQLite read may run beside a writer without the index lock): once the packer rests, an index
+    file gone makes its job due at once (a stat), an unreadable one only when a reader first needs it, which
+    answers ``evidence_unavailable`` (damaged) and leaves the damage mark. The pass rebuilds it from the
     sidecars one at a time, checks its own private file whole before publishing it (never the live one),
-    records one ``storage_pack`` row of it and rests. The restore walks stream the sidecars the same way."""
-    for task in ("a", "b", "c", "d"):
-        _task(root, task, blobs=1)
+    records one ``storage_pack`` row of it, removes the mark and rests. The restore walks stream the sidecars
+    the same way."""
+    from tests._cost_meter import CostMeter, tagged
+
+    refs = [_task(root, task, blobs=1)[0][0] for task in ("a", "b", "c", "d")]
     for _ in range(2):  # packs, then the one more look that records the moved stamps
         maintenance.run_job(root, "evidence_packing")
     assert "evidence_packing" not in maintenance.due(root)
-    index = packs.packs_dir(root) / packs.INDEX_NAME
+    index, mark = packs.packs_dir(root) / packs.INDEX_NAME, packs.packs_dir(root) / packs.DAMAGED_MARK
     index.unlink() if damage == "missing" else index.write_bytes(b"not a database")
-    assert "evidence_packing" in maintenance.due(root)  # the quiet install is due for its index alone
+    with CostMeter(root) as meter:
+        due = tagged("look", lambda: maintenance.due(root))
+    opened = {key: amount for key, amount in meter.snapshot("look")["counts"].items()
+              if key.split(":")[0] in ("open", "os_open", "read_bytes", "connect") and key.endswith(":packs")}
+    assert not opened and ("evidence_packing" in due) == (damage == "missing"), (opened, due)
+    if damage == "garbage":  # its first reader meets it and marks it for the pass
+        with pytest.raises(packs.EvidenceUnavailable) as met:
+            packs.blob_bytes(root, refs[0])
+        assert met.value.reason == "damaged" and mark.exists() and "evidence_packing" in maintenance.due(root)
     alive, peak, checked, read, connect = [0], [0], [], packs.read_sidecar, store.connect
 
     class Parsed(dict):
@@ -215,7 +180,7 @@ def test_a_resting_install_owes_its_pass_the_index_rebuild_and_the_pass_streams_
     assert checked and all(name.startswith(".index.sqlite.tmp.") for name in checked), checked
     with packs.open_index(root) as conn:
         assert conn.execute("SELECT count(*) FROM packs").fetchone()[0] == 4
-    assert "evidence_packing" not in maintenance.due(root) and peak[0] <= 2, peak
+    assert not mark.exists() and "evidence_packing" not in maintenance.due(root) and peak[0] <= 2, peak
     peak[0] = 0
     assert packs.pending_restore_bytes(root) > 0 and packs.restore_checkpoint_handles(root)["handles"] == 4
     assert peak[0] <= 2, peak

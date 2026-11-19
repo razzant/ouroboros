@@ -216,7 +216,7 @@ def changed_stamps(root: pathlib.Path, **census) -> Dict[str, str]:
 
 def packing_pending(root: pathlib.Path, stop: Callable[[], bool], *, since: Optional[int] = None, owed=()) -> bool:
     """Advisory, stop-aware discovery: archives and an index awaiting its rebuild first (pass-level
-    work: ``packs.index_owed`` reads one header and one meta row, no listing), then only the first
+    work: ``packs.index_owed`` takes stats, opens nothing of the packs), then only the first
     changed stamp of the census (``since``/``owed`` as ``run_pass``: the rows written terminal since
     the position and the owed candidates; without a position, every loose folder).
 

@@ -781,6 +781,8 @@ def test_a_wal_evidence_index_another_runtime_built_is_rebuilt_not_converted(tmp
     store.close_connections()
     assert store.wal_file(index)
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
+    with pytest.raises(packs.EvidenceUnavailable), packs.open_index(tmp_path):  # a reader meets it and marks it
+        pass
     assert packs.index_owed(tmp_path) and packs.ensure_index(tmp_path)["sidecars"] == 1  # rebuilt, never converted
     assert _tasks(tmp_path) == {"t1"}
     store.close_connections()
