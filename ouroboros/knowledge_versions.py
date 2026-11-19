@@ -510,7 +510,7 @@ class ClaimWrite:
             _retire_held_bodies(address, history)
 
 
-def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool, host_claim: str | None) -> ClaimWrite | None:
+def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool) -> ClaimWrite | None:
     before = current.metadata if current is not None else {}
     after = updated.metadata
     path = claim_record_path(address.shelf, address.topic) if address.scope == "global" else None
@@ -526,8 +526,6 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
         active = list(dict.fromkeys(new))
     else:
         keep = set(old) & set(recorded)
-        if host_claim is not None:
-            keep.add(host_claim)
         active = list(dict.fromkeys(name for name in new if name in keep))
     value = after.get("claims")
     ignored = ([repr(item) for item in value if not isinstance(item, str)] if isinstance(value, list)
@@ -535,7 +533,7 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
     removed = bool((set(old) - set(new)) or (set(recorded) - set(active)))
     fields = ({"claims": data["claims"]} if "claims" in data else {} for data in (before, after))
     before_claims, after_claims = map(yaml_form, fields)
-    report = explicit or host_claim is not None or before_claims != after_claims or recorded != active
+    report = explicit or before_claims != after_claims or recorded != active
     return ClaimWrite(path, recorded, active, new, ignored, removed, report, publication)
 
 

@@ -26,9 +26,7 @@ import yaml
 
 from ouroboros import knowledge_rows, knowledge_versions, text_change, utils
 # The edit compiler lives beside its one caller's module; ``compile_anchored_edits`` stays importable here.
-from ouroboros.knowledge_edits import (
-    EditRefused, HostClaimPending, compile_anchored_edits, compile_edit_items, edit_items, with_host_claim, yaml_form,
-)
+from ouroboros.knowledge_edits import EditRefused, compile_anchored_edits, compile_edit_items, edit_items, yaml_form
 from ouroboros.knowledge_versions import body_chars as body_chars
 from ouroboros.markdown_source import MarkdownSource, parse_markdown_navigation, parse_markdown_source
 from ouroboros.platform_layer import file_lock_exclusive, file_unlock
@@ -787,7 +785,7 @@ def write_knowledge_note(
     *, writer: str = "", route: Any = None, writer_input_ref: Any = None,
     summary: str | None = None, focus: Any = None,
     reason: str = "", capture_previous: Callable[[KnowledgeNote], dict[str, Any]] | None = None,
-    edits: Any = None, version: str | None = None, _host_claim: str | None = None,
+    edits: Any = None, version: str | None = None,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock.
 
@@ -892,18 +890,12 @@ def write_knowledge_note(
                 raw = current.raw if version == revision else target.encode("utf-8")
             elif lifecycle:
                 raw = _lifecycle_content(current, mode, reason)
-            elif _host_claim is not None and current is not None:
-                raw = current.raw
             else:
                 raw, explicit_claims = _write_content(current, content, mode, old_str, summary, items)
             if mode in {"append", "overwrite"} and summary is not None:  # the written note's summary-only edit
                 raw, _ = _write_content(_note(address, raw), "", "edit", None, summary)
-            if _host_claim is not None:
-                raw = with_host_claim(_note(address, raw), _host_claim)
         except EditRefused as exc:
             return KnowledgeWriteResult(False, f"edit_refused: {exc}", current, revision, show_source=False)
-        except HostClaimPending as exc:
-            return KnowledgeWriteResult(False, f"host_claim_pending: {exc}", current, revision, show_source=False)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
@@ -924,8 +916,7 @@ def write_knowledge_note(
                       "archive and restore own that field")
             return KnowledgeWriteResult(False, f"revert_changes_archive_state: version {version} {states}", current,
                                         revision, show_source=False)
-        claims = knowledge_versions.prepare_claim_write(address, current, updated,
-                                               explicit=writer == "turn" and explicit_claims, host_claim=_host_claim)
+        claims = knowledge_versions.prepare_claim_write(address, current, updated, explicit=writer == "turn" and explicit_claims)
         unchanged = current is not None and raw == current.raw
         if unchanged and not (claims and claims.changed):
             try:
@@ -1005,13 +996,3 @@ def write_knowledge_note(
             return KnowledgeWriteResult(False, "publication_incomplete", observed, revision,
                                         delta if observed is not None and observed.raw == raw else None, history_ref)
         return KnowledgeWriteResult(True, "saved", updated, revision, delta, history_ref, previous, claims=claims)
-
-
-def write_host_claim(address: KnowledgeAddress, claim: str, *, expected_revision: str, reason: str,
-                     content: str = "") -> KnowledgeWriteResult:
-    """Add a one-time host claim or create its seed against the caller's observed revision."""
-    if (address.scope != "global" or not isinstance(expected_revision, str)
-            or not isinstance(claim, str) or not claim or not isinstance(reason, str) or not reason.strip()):
-        raise ValueError("a host claim needs a global note, a name, an expected revision and a reason")
-    return write_knowledge_note(address, content, expected_revision=expected_revision,
-                                reason=reason, writer="host", _host_claim=claim)
