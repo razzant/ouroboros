@@ -485,24 +485,28 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
     """Where one lookup's bytes lie in ``root``'s packs, in one order for a task's checkpoint handles
     (``handles``; ``rel_path``: that one) and its blobs: the task's own sidecars, then the shared index.
     A handle lives only in its task's packs, so those sidecars answer it whole, the index only when one
-    of them is unreadable (a valid index keeps its placement); a blob may lie in any task's pack, so a
-    miss there (or no task) asks the index. Nothing lists the packs or rebuilds the cache, and a task's
-    own unreadable sidecar is never answered as an absence."""
+    of them is unreadable (a valid index keeps its placement; a listing joins its rows, as the index may
+    lack a generation just published); a blob may lie in any task's pack, so a miss there (or no task)
+    asks the index. Nothing lists the packs or rebuilds the cache, and a task's own unreadable sidecar
+    is never answered as an absence."""
     if not packs_dir(root).is_dir():
         return []  # a root without packs is left untouched (no cache, no lock file)
     handles = handles or bool(rel_path)
     found, errors = _own_placements(root, task_id, key=None if handles else (sha256, kind),
                                     rel_path=rel_path) if task_id else ([], [])
-    if found or (handles and not errors):
+    if (found and not (errors and handles and not rel_path)) or (handles and not errors):
         return found
     query, params = (_MEMBER_SQL, (sha256, kind)) if not handles else (
         (_HANDLES_SQL + " AND h.rel_path=?", (task_id, CHECKPOINT, rel_path)) if rel_path
         else (_HANDLES_SQL, (task_id, CHECKPOINT)))
     try:
-        found = _indexed_placements(root, query, params)
+        indexed = _indexed_placements(root, query, params)
     except (EvidenceUnavailable, SidecarCorrupt):
         if not errors:
             raise
+        indexed = []
+    known = {(pack, member.get("path")) for pack, member in found}
+    found += [row for row in indexed if (row[0], row[1].get("path")) not in known]
     if found or not errors:
         return found
     raise errors[0]

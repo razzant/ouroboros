@@ -529,6 +529,30 @@ def test_a_valid_index_keeps_a_placement_whose_own_sidecar_was_damaged(tmp_path,
             "size": handle["size"], "sha256": handle["sha256"], "loose": False}
 
 
+def test_a_handle_listing_beside_an_unreadable_generation_joins_the_valid_index(tmp_path, monkeypatch):
+    """A task's handle listing beside an unreadable generation of its own asks the index the packer left and
+    lists both (its readable sidecars may hold a generation the index does not yet): every handle, the damaged
+    generation's one read exactly. An index that cannot answer leaves the readable generations' handles; with
+    every sidecar readable the index is never asked (``test_a_handle_miss_and_an_ordering_hint_never_wait_...``)."""
+    from ouroboros import evidence_packer, evidence_packs as packs, store
+    from ouroboros.artifacts import store_actor_source_bytes
+    from tests.test_evidence_packs import _task
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _refs, first = _task(tmp_path, "two", blobs=1)
+    assert evidence_packer.run_pass(tmp_path)["faults"] == 0
+    later = store_actor_source_bytes(tmp_path, "two", category="context_checkpoints", source_id="focus_source_later",
+                                     data=b"# later focus\n", extension="md")
+    assert evidence_packer.run_pass(tmp_path)["packed"] == 1  # its second generation
+    names = sorted(ref["path"].rsplit("/", 1)[-1] for ref in (first, later))
+    assert packs.packed_handle_names(tmp_path, "two") == names
+    (packs.packs_dir(tmp_path) / "two.members.json").write_text("{", encoding="utf-8")
+    assert packs.packed_handle_names(tmp_path, "two") == names
+    assert packs.handle_bytes(tmp_path, "two", first["path"]) == b"# focus\n" + b"y" * 3000
+    with store.name_lock(tmp_path, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        assert packs.packed_handle_names(tmp_path, "two") == [later["path"].rsplit("/", 1)[-1]]
+
+
 def test_a_handle_miss_and_an_ordering_hint_never_wait_for_the_index_lock(tmp_path, monkeypatch):
     """With the packer holding the index lock: a handle miss is answered by its task's own readable
     sidecars and never asks the index; ``read_position`` names a blob its owner's sidecars hold the
@@ -563,6 +587,7 @@ def test_a_handle_miss_and_an_ordering_hint_never_wait_for_the_index_lock(tmp_pa
         absent = handle["path"].replace("focus_source", "absent")
         assert packs.handle_info(tmp_path, "a", absent) is None
         assert packs.read_position(tmp_path, task_id="a", rel_path=absent) is None
+        assert packs.packed_handle_names(tmp_path, "a") == [handle["path"].rsplit("/", 1)[-1]]
         position = packs.read_position(tmp_path, sha256=ref["sha256"], kind="json", task_id="a")
         assert position[0].endswith("a.xz") and waits == []  # its own sidecars answered: the index was never asked
         with pytest.raises(packs.EvidenceUnavailable) as hint:
