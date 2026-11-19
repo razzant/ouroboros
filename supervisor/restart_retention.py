@@ -88,11 +88,13 @@ def panic_recorded(result_root: Any) -> bool:
     return pathlib.Path(result_root) == pathlib.Path(DATA_DIR) and server_control._restart_stop_requested
 
 
-def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = None) -> str:
-    """Classify ``task_id``'s durable pause row for a stop (see module docstring)."""
+def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = None, *, strict: bool = False) -> str:
+    """Classify ``task_id``'s durable pause row for a stop (see module docstring). ``strict``, for a
+    caller that reads again later: a busy store raises instead of reading as no pause to keep."""
     from ouroboros.budget_pause import (
         STATE_PAUSED, STATE_PAUSING, STATE_RESUME_GRANTED, budget_pause_row,
     )
+    from ouroboros.store import StoreBusy
 
     try:
         from ouroboros.owner_wait import saved_sleep_checkpoint
@@ -102,11 +104,15 @@ def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = Non
             return RETAIN_SLEEP
         if _owner_pause_park(result_root, task_id, attempt) and not _cancel_intent_active(result_root, task_id):
             return RETAIN_OWNER_PAUSE
-    except Exception:
+    except Exception as exc:
+        if strict and isinstance(exc, StoreBusy):
+            raise
         log.debug("Warm sleep source unreadable for %s at a stop", task_id, exc_info=True)
     try:
         row = budget_pause_row(pathlib.Path(result_root), str(task_id))
-    except Exception:
+    except Exception as exc:
+        if strict and isinstance(exc, StoreBusy):
+            raise
         log.debug("Pause row unreadable for %s at a stop", task_id, exc_info=True)
         return ""
     if not row:
@@ -250,8 +256,8 @@ def _latch_unseen_pause(task: Dict[str, Any], revoked=None) -> None:
         marker["fence_id"] = _set_root_budget_pause_locked(root_id, pause, revoked=revoked)["fence_id"]
 
 
-def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
-                     pause_source: str, sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY) -> Optional[Dict[str, Any]]:
+def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *, pause_source: str,
+                     sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY, strict: bool = False) -> Optional[Dict[str, Any]]:
     """Return ``task`` as a PENDING row under its exact pause marker, or ``None``.
 
     Shared by ``kill_workers`` (a RUNNING row whose checkpoint landed before its
@@ -259,6 +265,7 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
     running list). The final publication confirms a source-backed ``pausing`` row. An
     unused grant is revoked first, and a revocation that cannot be written
     keeps the row parked under a typed hold. Nothing here is a terminal.
+    ``strict`` is ``pause_retention``'s.
     """
     from ouroboros.budget_pause import (
         STATE_PAUSED, STATE_PAUSING, STATE_RESUME_GRANTED, budget_pause_row, exact_pause_marker,
@@ -268,7 +275,7 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
 
     task_id = str(task.get("id") or "")
     result_root = pathlib.Path(result_root)
-    retention = pause_retention(result_root, task_id, attempt)
+    retention = pause_retention(result_root, task_id, attempt, strict=strict)
     if retention not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP, RETAIN_OWNER_PAUSE}:
         return None
     try:

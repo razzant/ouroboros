@@ -416,3 +416,44 @@ def test_envelope_discovery_obeys_the_same_boot_decisions(tmp_path, monkeypatch,
         assert paused.get("_budget_pause")
         assert bool(continuation_refusal(paused)) == (decision == "acceptance")
         assert any(item.get("ok") for item in wake_ready_sleepers(q, only=tid)) == (decision == "ready")
+
+
+def test_a_busy_pause_read_leaves_the_late_decision_to_the_next_publication(tmp_path, monkeypatch):
+    """The late pass reads each saved envelope's pause row. While a writer holds the store that read decides
+    nothing: the saved queue stays and the next publication restores the pause, which then resumes. A readable
+    row whose cancel is confirmed is still not restored."""
+    from ouroboros import budget_pause as bp, store, store_hot_facts
+    from ouroboros.cancel_intents import has_active_intent, request_cancel
+    from supervisor.restart_retention import publish_pending_parks
+
+    q, _, workers = _install_queue(tmp_path, monkeypatch)
+    _parked(tmp_path, monkeypatch, task_id="known")
+    assert q.publish_queue_snapshot("before_restart")
+    workers.PENDING.clear()
+    q.init(tmp_path)
+    for tid in ("direct", "stopped"):
+        task, pause = _parked(tmp_path, monkeypatch, task_id=tid, extra={"_is_direct_chat": True})
+        bp.set_budget_pause(tmp_path, tid, {**pause, "state": "pausing", "park_task": dict(task)})
+    workers.PENDING.clear()
+    request_cancel(tmp_path, "stopped", reason="owner_cancel", source="task_cancel")
+
+    def busy(_root):
+        raise store.StoreBusy("index busy at boot")
+
+    with monkeypatch.context() as m:
+        m.setattr(store_hot_facts, "pausing_envelopes", busy)
+        assert q.restore_pending_from_snapshot() == 1
+    read, writer = bp.budget_pause_row, {"holds": True}
+
+    def contended(root, task_id):
+        if task_id == "direct" and writer["holds"]:
+            raise store.StoreBusy("a writer holds the store for this publication")
+        return read(root, task_id)
+
+    monkeypatch.setattr(bp, "budget_pause_row", contended)
+    first = q.publish_queue_snapshot("pause_row_busy")
+    writer["holds"] = False
+    second = q.publish_queue_snapshot("pause_row_readable")
+    publish_pending_parks(q, "confirm")
+    assert {row["id"] for row in q.PENDING} == {"known", "direct"} and not has_active_intent(tmp_path, "direct", strict=True)
+    assert [first, second] == [False, True] and q.resume_budget_paused_task("direct")["ok"]

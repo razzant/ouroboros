@@ -257,7 +257,8 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
 
 
 def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stale: bool, certified: bool = True,
-                             direct_caught: "list[str]" = (), handoffs: Optional[dict] = None, door=None) -> tuple:
+                             direct_caught: "list[str]" = (), handoffs: Optional[dict] = None, door=None,
+                             strict: bool = False) -> tuple:
     """Restore saved attempts under the door that stopped them. The direct roster names
     non-pooled turns. Their result or indexed envelope supplies chat, lane, origin and attempt.
     Only a matching saved source lets a direct turn join the parked RUNNING rows (#1196).
@@ -272,7 +273,8 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     hold at any age. Accepted or possibly dispatched work without proof of return waits for Resume.
     Return retained rows, unseen pauses, consumed ids and pre-park roots. An unseen root uses
     its prior selection to choose the latch generation. The caller's handoffs map identifies each
-    recovered successor by the interrupted attempt that owned it (#1183).
+    recovered successor by the interrupted attempt that owned it (#1183). ``strict`` (the late
+    pass) lets a busy pause read of a running row raise instead of leaving that row to the fence.
     """
     from ouroboros.budget_pause import budget_pause_restore_refusal, budget_pause_row
     from ouroboros.owner_wait import restore_owner_wait_allowed, saved_sleep_checkpoint
@@ -359,7 +361,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     before_park = {str(row["task"].get("id") or ""): pause_ids(row["task"]) for row in running_rows
                    if isinstance(row, dict) and isinstance(row.get("task"), dict)}
     parked = _park_pausing_running_rows(list(running_rows) + direct_rows + direct_saved, snapshot_pending,
-        sleep_hold_reason=sleep_hold_reason)
+        sleep_hold_reason=sleep_hold_reason, strict=strict)
     taken = {str(task.get("id") or "") for task in list(snapshot_pending) + direct_wait_handoffs + parked}
     # Interrupted work whose state was saved returns (or waits) under its own id
     # instead of the shutdown fence's cancellation (#1563).
@@ -675,12 +677,13 @@ def _append_held_pending_row(task: dict) -> None:
 
 
 def _park_pausing_running_rows(running_rows: list, snapshot_pending: list, *,
-                              sleep_hold_reason: str = "saved_sleep_recovery") -> list:
+                              sleep_hold_reason: str = "saved_sleep_recovery", strict: bool = False) -> list:
     """A worker can save its continuation before the park event reaches the queue. Park
     that running attempt through the normal retention predicate. The restore barrier then
     confirms its exact id for Resume. An unused grant is revoked first and a failed revocation
     keeps the saved work under a hold. A consumed grant or explicit Stop keeps running custody.
-    A row already present in PENDING has a custodian and needs no second placement."""
+    A row already present in PENDING has a custodian and needs no second placement.
+    ``strict``: a busy pause read raises (``pause_retention``) for the caller's retry."""
     from supervisor.restart_retention import PAUSE_REQUEST_ONLY, park_saved_pause, pause_retention
 
     pending_ids = {str(row.get("id") or "") for row in snapshot_pending if isinstance(row, dict)}
@@ -694,8 +697,9 @@ def _park_pausing_running_rows(running_rows: list, snapshot_pending: list, *,
             continue
         attempt = int(row.get("attempt") or task.get("_attempt") or 1)
         result_root = pathlib.Path(task.get("budget_drive_root") or _queue().DRIVE_ROOT)
+        retention = pause_retention(result_root, task_id, attempt, strict=strict)
         try:
-            if pause_retention(result_root, task_id, attempt) == PAUSE_REQUEST_ONLY:
+            if retention == PAUSE_REQUEST_ONLY:
                 from ouroboros.budget_pause import budget_pause_row
                 from ouroboros.cancel_intents import has_active_intent
                 from ouroboros.working_checkpoint import complete_pause_from_working
@@ -708,7 +712,7 @@ def _park_pausing_running_rows(running_rows: list, snapshot_pending: list, *,
         except Exception:
             log.warning("Could not complete interrupted pause of %s from saved work", task_id, exc_info=True)
         parked_task = park_saved_pause(task, attempt, result_root, pause_source="restart_during_pausing",
-                                       sleep_hold_reason=sleep_hold_reason)
+                                       sleep_hold_reason=sleep_hold_reason, strict=strict)
         if parked_task is not None:
             parked.append(parked_task)
     if parked:
@@ -887,7 +891,8 @@ def _saved_envelope_rows(pending, running):
 
 
 def retry_pausing_envelopes(q):
-    """Complete the original boot decision before another publication replaces its snapshot."""
+    """Complete the original boot decision before another publication replaces its snapshot. A busy read of a
+    saved pause leaves the whole decision to the next publication: read as no pause, it would cancel that work."""
     retry = q.PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes")
     if retry is None:
         return True
@@ -902,7 +907,7 @@ def retry_pausing_envelopes(q):
     try:
         rows = _saved_envelope_rows(pending, running)
         if rows:
-            retained, unseen, _, prior = _retain_snapshot_pending([], rows, stale=True, door=retry["door"])
+            retained, unseen, _, prior = _retain_snapshot_pending([], rows, stale=True, door=retry["door"], strict=True)
             fenced = _fence_snapshot_running_rows(rows, restored_ids={task["id"] for task in retained})
             roots, malformed, budget = retry["fences"]
             with q._queue_lock:
