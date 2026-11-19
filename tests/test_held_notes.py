@@ -274,7 +274,8 @@ def test_a_declared_child_holds_no_head_and_its_receipt_names_the_omission_only_
     plan = _plan(world, task=declared)
     claimed = receipt(plan)
     assert claimed["omitted_automatic"] == [*quiet["omitted_automatic"], "the heads of the knowledge notes that claim "
-                                            "this work's room, which a shared child holds: nova"]
+                                            "this work's room, and of the notes their heads link, which a shared "
+                                            "child holds: nova"]
     assert {**claimed, "omitted_automatic": quiet["omitted_automatic"]} == quiet
     assert not _held(plan) and "Nova working head." not in json.dumps(plan.messages_for(plan.initial_mode))
     assert work_order_fingerprint(declared) == fingerprint  # the omission is named outside the work order

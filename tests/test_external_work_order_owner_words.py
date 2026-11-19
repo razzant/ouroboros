@@ -379,8 +379,8 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     and the delivery is the one without heads. A note claiming the room: the session holds its head whole after the
     outline, its reader named unavailable to an external session, then the one host sentence, and the heads sent
     are kept by address and revision for the start's custody. The launcher's own capture (restored from a wait)
-    never stands in for the head as it stands now. A declared session holds none and names the omission. The work
-    order and its fingerprint never move."""
+    never stands in for the head as it stands now. A declared session holds none and names the omission, the linked
+    heads' too, only once a note claims the room. The work order and its fingerprint never move."""
     from ouroboros import held_notes
     from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
     from ouroboros.memory_view_events import CARRIED_NAMES
@@ -405,6 +405,9 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     with monkeypatch.context() as patch:
         patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
         assert started(plain)[1] == quiet and nanny._session_held_heads is None
+    _event, _stored, early = _schedule(_root(tmp_path), subagent_id="session-builder", input_sources="declared",
+                                       context="Judge the quotas.")
+    assert "because its input is declared" not in started(early)[1]  # no note claims the room: nothing to name
 
     address = resolve_knowledge_address(tmp_path, "quotas-page", "global")
     written = write_knowledge_note(address, f"---\ntitle: Quotas page\nclaims: ['room:{room}']\n---\nQuota head.\n## Detail\nBelow.\n",
@@ -439,8 +442,8 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     assert declared["metadata"][CARRIED_NAMES] == [f"room:{room}"]
     nanny, closed = started(declared)
     assert "## Held knowledge notes" not in closed and "Quota head" not in closed and nanny._session_held_heads is None
-    assert ("\n\n[Host: the heads of the knowledge notes that claim this work's room are not in this start, because "
-            "its input is declared: quotas-page.]") in closed.split(head, 1)[1]
+    assert ("\n\n[Host: the heads of the knowledge notes that claim this work's room, and of the notes their heads "
+            "link, are not in this start, because its input is declared: quotas-page.]") in closed.split(head, 1)[1]
     assert "because its input is declared" not in compile_external_work_order(declared)
 
 
