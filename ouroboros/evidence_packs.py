@@ -377,8 +377,9 @@ def index_owed(root: Any) -> bool:
 def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC) -> Iterator[sqlite3.Connection]:
     """One transaction under the name lock, narrowed by the caller's acquisition budget. A cache whose O(1)
     facts fail (``_index_valid``) is ``EvidenceUnavailable``: it awaits the packing pass's rebuild
-    (``ensure_index``), never its reader's; a non-busy SQLite error from the live file (damage behind those
-    facts) leaves ``DAMAGED_MARK`` for that pass, best effort. ``store.StoreBusy`` on contention."""
+    (``ensure_index``), never its reader's; SQLite's verdict that the live file is damaged (behind those facts;
+    never a caller's failed statement) leaves ``DAMAGED_MARK`` for that pass, best effort. ``store.StoreBusy``
+    on contention."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
     wait_sec = _index_wait(wait_sec)
@@ -391,7 +392,9 @@ def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_S
                 with store.transaction(conn, write=write):
                     yield conn
         except sqlite3.DatabaseError as exc:
-            if not store.busy(exc):
+            # SQLite's verdict on the file (SQLITE_CORRUPT, SQLITE_NOTADB) is exactly this class with these texts; a
+            # caller's mistyped, refused or interrupted statement (the mind's SQL in query_data) says nothing of it.
+            if type(exc) is sqlite3.DatabaseError and any(text in str(exc) for text in ("malformed", "not a database")):
                 with contextlib.suppress(OSError):  # a root may be read-only: the read's answer stands either way
                     (path.parent / DAMAGED_MARK).touch()
             raise

@@ -179,7 +179,7 @@ def test_page_damage_behind_a_sound_header_is_marked_where_it_is_met_and_healed_
     answers ``evidence_unavailable`` (damaged) and leaves the damage mark beside the index, which makes the
     packing job owe a rebuild; the pass rebuilds the cache, checks its own file, publishes it and removes the
     mark, and the same read answers again. A read naming its task answers from that task's sidecars
-    throughout; a sound index and a merely held lock leave no mark."""
+    throughout; a sound index, a merely held lock and a caller's failed statement leave no mark."""
     from tests._store_journal_shared import use_journal
 
     use_journal(monkeypatch, "PERSIST")  # the damaged page lies in the file itself, not in a WAL
@@ -193,6 +193,13 @@ def test_page_damage_behind_a_sound_header_is_marked_where_it_is_met_and_healed_
         with pytest.raises(packs.EvidenceUnavailable) as held:
             packs.blob_bytes(root, refs["a"])
     assert held.value.reason == "busy" and not mark.exists() and "evidence_packing" not in maintenance.due(root)
+    for failed in ("SELEC 1", "SELECT nope FROM members", None):  # a caller's statement, as query_data runs the mind's
+        with pytest.raises(sqlite3.DatabaseError), packs.open_index(root):
+            with contextlib.closing(sqlite3.connect(index)) as other:
+                if failed is None:  # refused by its authorizer: exactly ``DatabaseError``, as damage is
+                    other.set_authorizer(lambda *facts: sqlite3.SQLITE_DENY)
+                other.execute(failed or "SELECT 1")
+    assert not mark.exists() and "evidence_packing" not in maintenance.due(root)  # no fact about the file
     with contextlib.closing(sqlite3.connect(index)) as conn:  # the members' key, behind a sound header and meta row
         page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='sqlite_autoindex_members_1'").fetchone()[0]
         size = conn.execute("PRAGMA page_size").fetchone()[0]
