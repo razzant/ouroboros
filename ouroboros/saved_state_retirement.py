@@ -117,6 +117,14 @@ def worked_copies_in(folder: pathlib.Path) -> list:
     return found
 
 
+def _same_file(path: pathlib.Path, info) -> bool:
+    """Whether ``path`` is still the file ``worked_copies_in`` listed: a rewrite or a replacement moves its identity,
+    size or modification time. Its access time is no part of it: a read moves it on Linux (relatime, strictatime),
+    the pass's own read of an owner-wait head included."""
+    now = os.lstat(path)
+    return all(getattr(now, key) == getattr(info, key) for key in ("st_mode", "st_ino", "st_dev", "st_size", "st_mtime_ns"))
+
+
 def _call_records(root: pathlib.Path, task_id: str) -> list:
     """The addresses that hold the task's model calls, as checked now: its call folder with at least one record, and
     its first evidence pack (``evidence_packs`` names generation 1 ``<task>.xz``; later generations sit beside it)."""
@@ -487,7 +495,7 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
                     continue
                 for path, kind, info in found:
                     try:
-                        if os.lstat(path) != info:  # written or replaced while the facts were read
+                        if not _same_file(path, info):  # written or replaced while the facts were read
                             hold("changed", 1)
                             left += 1
                             continue
@@ -605,7 +613,7 @@ def _prune_running(root, task_id, found, row, promoting, *, days, stamp, cutoff,
                 continue
             basis = "" if _held_by_row(path.name, document) else _dead(path, kind, document, superseded, task_id, folder)
             try:
-                if not basis or os.lstat(path) != info:  # a pointer came to it, its proof lapsed, or it was rewritten
+                if not basis or not _same_file(path, info):  # a pointer came to it, its proof lapsed, or it was rewritten
                     hold("changed", 1)
                     continue
                 anchor = ("superseded_at", superseded[path.name]) if path.name in superseded else ("proven_at", proven[path.name])

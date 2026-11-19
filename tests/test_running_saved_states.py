@@ -532,3 +532,32 @@ def test_a_tasks_only_unreadable_pack_sidecar_holds_its_states_and_the_pass_keep
     index.unlink()
     assert _later(root)["removed"] == 1 and not first.exists()
     assert _ledger(handles)[0]["packed"] == [f"observability/packs/{TASK}.xz"]
+
+
+def test_the_passs_own_read_of_a_wait_head_is_no_change_and_a_new_write_is(root, monkeypatch):
+    from ouroboros import saved_state_retirement
+
+    _running(root, attempt=1)
+    _read, read = _park(root, attempt=1)
+    _written, written = _park(root, attempt=1)
+    write_task_result(root, TASK, "running", task_attempt=2)
+    _park(root, attempt=2, state="resumed")
+    _pass(root)
+    real_head, real_calls = saved_state_retirement._wait_attempt, saved_state_retirement._call_records
+
+    def relatime(path, task_id):  # Linux relatime: this read moves the access time of a file older than a day
+        attempt = real_head(path, task_id)
+        info = os.stat(path)
+        os.utime(path, ns=(info.st_atime_ns + 10**12, info.st_mtime_ns))
+        return attempt
+
+    def meanwhile(root_, task_id):  # after the listing, before the lock: a write lands on the other file
+        info = os.stat(written)
+        os.utime(written, ns=(info.st_atime_ns, info.st_mtime_ns + 10**9))
+        return real_calls(root_, task_id)
+
+    monkeypatch.setattr(saved_state_retirement, "_wait_attempt", relatime)
+    monkeypatch.setattr(saved_state_retirement, "_call_records", meanwhile)
+    report = _later(root)
+    assert not read.exists() and report["removed"] == 1, report
+    assert report["held"] == {"changed": 1} and written.exists()

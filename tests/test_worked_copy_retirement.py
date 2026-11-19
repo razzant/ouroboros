@@ -693,6 +693,25 @@ def test_a_task_written_after_the_pass_read_it_waits_for_the_next_pass(root, mon
     assert report["removed"] == 0 and report["waiting"] == len(copies), "the new end starts the owner's days again"
 
 
+def test_a_read_that_moves_only_the_access_time_is_no_change_and_a_new_write_is(root, monkeypatch):
+    from ouroboros import saved_state_retirement
+
+    read, rewritten = _copies(_task(root, "read")), _copies(_task(root, "rewritten"))
+    real = saved_state_retirement._call_records
+
+    def meanwhile(root_, task_id):  # after the listing: one task's files are read (Linux relatime), the other's written
+        for path in read if task_id == "read" else rewritten:
+            info = os.stat(path)
+            moved = (info.st_atime_ns + 10**12, info.st_mtime_ns) if task_id == "read" else (info.st_atime_ns, info.st_mtime_ns + 10**9)
+            os.utime(path, ns=moved)
+        return real(root_, task_id)
+
+    monkeypatch.setattr(saved_state_retirement, "_call_records", meanwhile)
+    report = _prune(root)
+    assert report["removed"] == len(read) and not any(path.exists() for path in read), report
+    assert report["held"] == {"changed": len(rewritten)} and all(path.exists() for path in rewritten)
+
+
 def test_every_removal_follows_a_folder_sync_of_its_record(root, monkeypatch):
     import errno
 
