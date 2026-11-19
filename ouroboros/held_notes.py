@@ -189,6 +189,34 @@ def linked_heads(note: knowledge.KnowledgeNote) -> tuple[dict[str, knowledge.Kno
     return carried, list(unheld)
 
 
+def standing_heads(root: Path, names, *, written: knowledge.KnowledgeNote | None = None) -> dict[str, tuple[int, int]]:
+    """``(heads, host tokens)`` standing whole wherever each name is present: the head of every active global note
+    whose recorded claims hold that name (``knowledge.active_claims``, the selection ``turn_sections`` makes); the
+    overview, which stands in its own place, aside. ``written``, a note just written, counts from its own bytes. A
+    write receipt's measure (``memory_floor.view_tokens``, as the held heads fact counts); no start reads it."""
+    from ouroboros.memory_floor import view_tokens
+
+    claims, sizes = knowledge.active_claims(root), {}
+
+    def size(address: knowledge.KnowledgeAddress) -> int | None:
+        if address.topic not in sizes:
+            try:
+                note = (written if written is not None and written.address.topic == address.topic
+                        else knowledge.read_knowledge_note(address))
+            except (ValueError, OSError):
+                note = None  # the source changed or disappeared since the inventory read
+            sizes[address.topic] = (view_tokens(note_head(note.source))
+                                    if note is not None and note.source is not None and note.state == "active" else None)
+        return sizes[address.topic]
+
+    found = {}
+    for name in names:
+        held = [tokens for address in claims.get(name, ())
+                if address.topic != knowledge.OVERVIEW_TOPIC and (tokens := size(address)) is not None]
+        found[name] = (len(held), sum(held))
+    return found
+
+
 def _reader_restriction(ctx: Any, root: Path, topic: str, revision: str, length: int) -> str:
     from ouroboros.tool_access_paths import workspace_mode_block_reason
     from ouroboros.tools.knowledge import _address, _knowledge_read, _range

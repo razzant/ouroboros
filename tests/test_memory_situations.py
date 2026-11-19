@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -180,7 +181,11 @@ def _write_claims(root, names, topic="nova"):
 
 
 def _claim_diagnostic(reply, prefix):
-    return next((line.removeprefix(prefix) for line in reply.splitlines() if line.startswith(prefix)), None)
+    """The names a receipt line lists. A present situation of a note that holds names also states the heads it holds
+    and their tokens (their home: ``test_knowledge_claims``); these tests read which names match, so only the names."""
+    line = next((line.removeprefix(prefix) for line in reply.splitlines() if line.startswith(prefix)), None)
+    return line if line is None or " hold" not in line else ", ".join(
+        re.split(" (?:each hold|holds) ", part)[0] for part in line.split("; "))
 
 
 def test_only_positive_typed_routes_that_derive_their_rooms_match_claims(tmp_path):
