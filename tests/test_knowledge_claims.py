@@ -23,6 +23,10 @@ def _write(registry, address, content, **kwargs):
                                                 "mode": "overwrite", "content": content, **kwargs})
 
 
+REMOVED = ("A removed name stops holding this head in works that start from now on; a work already running keeps "
+           "the heads it started with.")
+
+
 def _markdown(claims, body="Project notes.\n"):
     return "---\ntype: note\nclaims: " + json.dumps(claims) + "\n---\n" + body
 
@@ -190,7 +194,7 @@ def test_body_only_append_keeps_recorded_names_without_adopting_names_from_yaml(
     target.path.write_bytes(_markdown(["place:unrecorded"]).encode())
     assert knowledge.active_claims(tmp_path) == {}
     removed = _write(registry, target, "Third body append.", mode="append")
-    assert "Removing a claim clears no arrival, releases no mark, and withdraws no doubt." in removed
+    assert REMOVED in removed
     assert next(iter(knowledge_versions.NoteHistory(target)))[1]["active_claims"] == []
     target.path.write_bytes(raw.encode())
     assert knowledge.active_claims(tmp_path) == {}
@@ -343,7 +347,7 @@ def test_revert_between_explicit_claim_lists_carries_only_their_intersection(tmp
     assert knowledge.active_claims(tmp_path) == {"room:1": [target], "place:second": [target]}
     reverted = _write(registry, target, "", mode="revert", version=first.revision, expected_revision=current.revision)
     assert reverted.startswith("✅") and target.path.read_bytes() == first.raw
-    assert "Present situations holding this note: room:1" in reverted and "Removing a claim clears no arrival" in reverted
+    assert "Present situations holding this note: room:1" in reverted and REMOVED in reverted
     assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
 
 
@@ -379,7 +383,7 @@ def test_claim_receipt_reports_unmatched_names_and_nonstrings_and_project_claims
     assert "Ignored claims entries (expected a list of strings): 19, False, None" in receipt
     line = next(line for line in receipt.splitlines() if line.startswith("Claims with no matching"))
     assert line == "Claims with no matching situation found: " + ", ".join(repr(name) for name in unmatched)
-    assert "Removing a claim" not in receipt
+    assert "A removed name" not in receipt
 
     project = knowledge.resolve_knowledge_address(tmp_path, "project-only", "project:nova")
     local = _write(registry, project, _markdown(matching))
@@ -391,7 +395,7 @@ def test_claim_receipt_reports_unmatched_names_and_nonstrings_and_project_claims
     current = knowledge.read_knowledge_note(target)
     cleared = _write(registry, target, _markdown([]), expected_revision=current.revision)
     assert "Present situations holding this note: none" in cleared
-    assert "Removing a claim clears no arrival, releases no mark, and withdraws no doubt." in cleared
+    assert REMOVED in cleared
     assert "Claims with no matching" not in cleared and knowledge.active_claims(tmp_path) == {}
 
 
