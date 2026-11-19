@@ -7,20 +7,18 @@ removed. A failed capture is a receipt too, keeping the source and its gaps visi
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
 import os
 import pathlib
 import shutil
 import stat
-import tempfile
 import uuid
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_capture_attempt import POLICY, failure_retry
 from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
-from ouroboros.utils import atomic_write_json, file_identity
+from ouroboros.utils import atomic_write_json
 
 
 def linked(path):
@@ -50,11 +48,12 @@ def _raise(error):
 
 def private_git_blobs(references, values, dump_blob):
     """Check immutable Git sides, including deleted content, without loading a whole blob into memory."""
+    from tempfile import TemporaryFile
     from ouroboros.secret_masking import SecretScan
     gaps = {}
     for name, refs in references:
         for ref in refs:
-            with tempfile.TemporaryFile() as blob:
+            with TemporaryFile() as blob:
                 dump_blob(ref, blob)
                 blob.seek(0)
                 scan = SecretScan(values)
@@ -64,18 +63,9 @@ def private_git_blobs(references, values, dump_blob):
     return gaps
 
 
-def _input_stamp(path):
-    from ouroboros import work_domain
-    try:
-        return file_identity(work_domain.lstat(path))
-    except FileNotFoundError:
-        return None
-
-
-def _private_evidence_paths(root, paths, base_ref, base_sizes, *, checked=None):
+def _private_evidence_paths(root, paths, base_ref, base_sizes):
     import subprocess
     from ouroboros import work_domain
-    from ouroboros.artifacts import stream_artifact_file
     from ouroboros.git_observation import host_git_env
     from ouroboros.review_checking import _open_regular
     from ouroboros.secret_masking import SecretScan, installation_secret_bytes
@@ -84,21 +74,18 @@ def _private_evidence_paths(root, paths, base_ref, base_sizes, *, checked=None):
     private = {}
     for rel in sorted(paths) if values else ():
         path = root / rel
-        stamp, measured = _input_stamp(path), {}
         scan = SecretScan(values)
         kind = work_domain.kind(path)
         if kind == "file":
             if work_domain.is_work(path):
-                measured = work_domain.measure(path, scan, strict=True)
+                work_domain.measure(path, scan, strict=True)
             else:
                 with _open_regular(path) as handle:
-                    measured = stream_artifact_file(handle, scan)
+                    scan.read_from(handle)
         elif kind == "link":
             scan.write(os.fsencode(work_domain.readlink(path)))
         if scan.found:
             private[rel] = {"path": rel, "reason": "installation_settings", "size": scan.size}
-        elif checked is not None:
-            checked[rel] = {"stamp": stamp, **measured}
     if values:
         before = ((rel, [f"{base_ref}:{rel}"]) for rel in sorted((paths & base_sizes.keys()) - private.keys()))
         def dump(ref, blob):
@@ -131,29 +118,7 @@ def workspace_evidence_exclusions(root, host_evidence, paths, base_ref, base_siz
                                         destination, previous)
     excluded = {name: {"path": name, "reason": NAMED_EVIDENCE_EXCLUSION} for name in held}
     excluded.update((gap["path"], gap) for gap in (summary or {}).get("gaps", []) if gap["reason"] == "installation_settings")
-    checked = {}
-    excluded.update(_private_evidence_paths(root, paths - held, base_ref, base_sizes, checked=checked))
-    return excluded, summary, checked
-
-
-@contextmanager
-def checked_workspace_patch(path, root, checked, included, errors):
-    """A Git comparison of live files stays temporary until the inputs it actually used still match."""
-    if not checked:
-        with path.open("wb") as output:
-            yield output
-        return
-    with tempfile.TemporaryFile() as output:
-        yield output
-        changed = {name for name in included if name not in checked or checked[name]["stamp"] != _input_stamp(root / name)}
-        if changed:
-            private = _private_evidence_paths(root, changed, None, {})
-            errors.extend({"type": "workspace_input_changed", "path": name, **private.get(name, {})}
-                          for name in sorted(changed))
-        if not errors:
-            output.seek(0)
-            with path.open("wb") as target:
-                shutil.copyfileobj(output, target, 1 << 20)
+    return {**excluded, **_private_evidence_paths(root, paths - held, base_ref, base_sizes)}, summary
 
 
 def retain_files(area, paths, files_dir, *, gaps, preserve_mode=True):

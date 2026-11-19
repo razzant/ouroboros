@@ -70,9 +70,9 @@ def copy_directory_to_task_artifacts(
     kind: str = "process_output_directory",
     member_paths: Iterable[pathlib.Path] | None = None,
     member_sources: Iterable[tuple[str, pathlib.Path]] | None = None,
-    artifact_dir: pathlib.Path | None = None, expected_members: dict | None = None,
+    artifact_dir: pathlib.Path | None = None,
 ) -> List[Dict[str, Any]]:
-    """Package a directory and its ledger, checking any supplied member identities before publishing the ZIP."""
+    """Package a generated directory as a manifest ledger plus zip artifact."""
     from ouroboros import work_domain
     from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 
@@ -87,7 +87,7 @@ def copy_directory_to_task_artifacts(
         try:
             members = _received_members(source, entries, staged, policy_checked=member_sources is not None)
             return _package_directory(ctx, source, members, excluded, kind, artifact_dir,
-                                      policy_checked=member_sources is not None, expected_members=expected_members)
+                                      policy_checked=member_sources is not None)
         finally:
             shutil.rmtree(staged, ignore_errors=True)
     source = pathlib.Path(source_path).expanduser().resolve(strict=False)
@@ -98,11 +98,11 @@ def copy_directory_to_task_artifacts(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     entries, excluded = _directory_entries(source, member_paths, member_sources)
     return _package_directory(ctx, source, entries, excluded, kind, artifact_dir,
-                              policy_checked=member_sources is not None, expected_members=expected_members)
+                              policy_checked=member_sources is not None)
 
 
 def _package_directory(ctx: Any, source: pathlib.Path, entries: list, excluded: list, kind: str,
-                       artifact_dir: pathlib.Path, *, policy_checked: bool, expected_members=None) -> List[Dict[str, Any]]:
+                       artifact_dir: pathlib.Path, *, policy_checked: bool) -> List[Dict[str, Any]]:
     """The ledger and ZIP of validated ``(name, readable path)`` members, published beside the task's artifacts."""
     from ouroboros.artifacts import (
         _archive_previous_artifact_version,
@@ -121,8 +121,7 @@ def _package_directory(ctx: Any, source: pathlib.Path, entries: list, excluded: 
             for rel, path in entries:
                 path = _available_member(path, policy_checked)
                 with archive.open(rel, "w", force_zip64=True) as member:
-                    expected = {**expected_members[rel], "immutable": True} if expected_members is not None else None
-                    measured = stream_artifact_file(path, member, expected=expected)
+                    measured = stream_artifact_file(path, member)
                 file_records.append({"path": rel, **measured})
         ledger_name, zip_name = _pair_names(source, file_records)
         ledger_path, zip_path = artifact_dir / ledger_name, artifact_dir / zip_name
