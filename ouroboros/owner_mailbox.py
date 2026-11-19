@@ -330,20 +330,13 @@ def write_owner_message(
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
-    ``client_message_id`` is the owner message id this delivery relays, stored
-    (additively, like ``client_surface``) only when the writer knows it
-    STRUCTURALLY — never parsed back out of ``msg_id``, whose shape is a
-    transport key each producer composes for its own dedupe.
-
-    ``late_answer`` is the typed ``{task_id, quiz_id}`` provenance of an owner
-    message that answers a finished task's quiz card (stored additively when
-    valid): the drain rebuilds the card's frame for the model from it, while
-    ``text`` stays the owner's own words; ``card_press`` is the same for a press on a
-    finished author's card. ``card_delivery`` names the living-card press
-    ``{card_id, request_id, canonical_root}`` its read settles. ``admit``: a check run under the
-    mail lock before the append (a carried Presence author's intake), False writes nothing.
-    ``reply_reference`` names the quoted row; ``origin_message_ref`` names the
-    accepted row of these words, by value from the ingress door.
+    Store known ``client_message_id`` and ``client_surface`` additively; never parse the owner id from the
+    producer's dedupe key ``msg_id``. ``reply_reference`` names the quote; ``origin_message_ref`` carries the
+    accepted owner row from ingress by value.
+    Valid ``late_answer`` (``{task_id, quiz_id}``) and ``card_press`` carry provenance from a finished author's
+    card so the drain can rebuild the frame without changing owner ``text``. ``card_delivery`` names the
+    living-card press (``{card_id, request_id, canonical_root}``) whose read is settled here.
+    ``admit`` runs under the mail lock before append (e.g. carried Presence intake); False writes nothing.
     """
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
