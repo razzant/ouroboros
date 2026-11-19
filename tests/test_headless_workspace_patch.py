@@ -736,3 +736,74 @@ def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_cap
     finalize_task_artifacts(parent, later)
     mine = json.loads((task_artifacts_dir(parent, later["id"]) / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
     assert _retained_files(mine["summary_path"]) == {".review-evidence/later.txt": b"mine\n"}, "the first task's evidence stays its own"
+
+
+def test_machine_patch_ignores_a_projects_textconv_driver(tmp_path):
+    """A project may render a binary type for people through ``diff.<driver>.textconv``; the patch
+    a parent applies must still carry the bytes, so `git apply --binary` restores the child's file."""
+    from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _git(project, "init", "-q")
+    table = project / "table.dat"
+    before, after = b"\0\x0a\x01abc", b"\0\x0b\x02def"
+    table.write_bytes(before)
+    (project / ".gitattributes").write_text("*.dat diff=octets\n", encoding="utf-8")
+    _git(project, "config", "diff.octets.textconv", "od -An -tx1")
+    _git(project, "add", ".")
+    _git(project, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+    table.write_bytes(after)
+    assert "00 0b 02" in " ".join(_git(project, "diff").split()), "the driver is live: a person's diff shows its rendering"
+    _, receipt = write_workspace_patch_artifacts(project, tmp_path / "result", task={"id": "child"})
+    assert receipt["status"] == "ready_with_changes"
+    table.write_bytes(before)
+    applied = subprocess.run(["git", "apply", "--binary", str(tmp_path / "result" / "workspace.patch")],
+                             cwd=project, capture_output=True, text=True)
+    assert applied.returncode == 0 and table.read_bytes() == after, applied.stderr
+
+
+@pytest.mark.parametrize("activity", ["quiet", "touch", "append"])
+def test_public_patch_survives_benign_build_activity(tmp_path, monkeypatch, activity):
+    import os
+    from ouroboros import config, workspace_patch_capture as capture
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    public = copy / "feature.py"
+    before = public.stat()
+    classify = capture.untracked_binary_verdicts
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": "unused-fixture-value"})
+
+    def during_capture(*args, **kwargs):
+        if activity == "touch":
+            os.utime(public, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+        elif activity == "append":
+            with public.open("a", encoding="utf-8") as stream:
+                stream.write("# build complete\\n")
+        return classify(*args, **kwargs)
+
+    monkeypatch.setattr(capture, "untracked_binary_verdicts", during_capture)
+    out = tmp_path / "out"
+    capture.write_workspace_patch_artifacts(copy, out, task=task)
+    assert b"feature.py" in (out / "workspace.patch").read_bytes()
+
+
+@pytest.mark.parametrize("directory", ["node_modules", "__pycache__"])
+def test_excluded_path_is_never_opened_for_a_product_patch(tmp_path, monkeypatch, directory):
+    from ouroboros import config, review_checking, workspace_patch_capture as capture
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    path = copy / directory / "generated.data"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(b"build output")
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": "unused-fixture-value"})
+    open_regular = review_checking._open_regular
+
+    def checked_open(candidate):
+        assert candidate != path, "excluded build output must never be scanned for credentials"
+        return open_regular(candidate)
+
+    monkeypatch.setattr(review_checking, "_open_regular", checked_open)
+    out = tmp_path / "out"
+    capture.write_workspace_patch_artifacts(copy, out, task=task)
+    assert b"feature.py" in (out / "workspace.patch").read_bytes()

@@ -36,6 +36,7 @@ import subprocess
 import uuid
 from typing import Any, Dict, List, Mapping, Optional
 
+from ouroboros import delegate_named_evidence
 from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME, scratch_fact
 from ouroboros.unindexed import unindexed  # a seat's copy is born as area.noindex; an existing area keeps its name
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -481,15 +482,15 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
         payload_capture_git_env, payload_git_metadata_refusal, stage_raw_payload_inventory,
     )
 
+    from ouroboros.workspace_patch_rules import _ANY_SEGMENT_EXCLUDE_DIRS, _TOP_LEVEL_EXCLUDE_DIRS
+
     # A linked worktree's objects are where its marker recorded them; its own ``.git`` file is never read.
-    refusal = "" if git else payload_git_metadata_refusal(area)
-    if refusal:
+    if not git and (refusal := payload_git_metadata_refusal(area)):
         raise CheckingAreaUnavailable(refusal)
     excluded = (EVIDENCE_DIRNAME, *_IGNORED_EVIDENCE_DIRS)
     patch = evidence / "delta.patch"
-    # The reviewer owns its config and index. Capture through the existing
-    # host-owned control directory: only immutable objects are borrowed, and
-    # raw hashing never invokes .gitattributes clean/process/eol conversions.
+    # The reviewer owns its config and index. Borrow immutable objects through host-owned
+    # controls and hash raw bytes without invoking the reviewer's attributes or filters.
     with payload_capture_git_env(area, objects=pathlib.Path(str(git["objects"])) if git else None) as env:
         _git(area, "read-tree", str(source["tree"]), env=env)
         gitlinks = {}
@@ -499,24 +500,23 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
                 gitlinks[name.decode("utf-8", "surrogateescape")] = metadata.split()[1]
         listing_env = {**env, "LC_ALL": "C", "LANGUAGE": "C",
                        **{key: "0" for key in os.environ if key.startswith("GIT_TRACE")}}
-        inventory = _git(area, "ls-files", "--cached", "--others", "--exclude-standard", "-z", env=listing_env)
+        # ls-files applies excludes to untracked paths only. A tracked project input still has both Git sides.
+        untracked = ["--others", "--exclude-standard", "-z"]
+        untracked.extend(f"--exclude={name}/" for name in sorted(_ANY_SEGMENT_EXCLUDE_DIRS))
+        untracked.extend(f"--exclude=/{name}/" for name in sorted({*excluded, *_TOP_LEVEL_EXCLUDE_DIRS}))
+        inventory = _git(area, "ls-files", "--cached", *untracked, env=listing_env)
         listing_warning = inventory.stderr.decode("utf-8", "replace").strip()
-        # Git exits zero for an unlistable directory. Other warnings (for example
-        # a symlinked ignore file) do not prove missing entries and must not block
-        # the next reviewer turn. Pin the diagnostic locale for this CLI boundary.
+        # Git exits zero for an unlistable directory. Pin its diagnostic locale so a partial
+        # inventory fails capture while unrelated warnings, such as a symlinked ignore file, do not.
         if any(line.startswith("warning: could not open directory ") for line in listing_warning.splitlines()):
-            raise CheckingAreaUnavailable("the checking copy could not be fully listed: "
-                                          + listing_warning)
+            raise CheckingAreaUnavailable(f"the checking copy could not be fully listed: {listing_warning}")
         paths, kept_gitlinks = set(), []
-        for raw in sorted(set(inventory.stdout.split(b"\0"))):
-            if not raw:
-                continue
-            relative = raw.decode("utf-8", "surrogateescape")
+        for raw in sorted(set(inventory.stdout.split(b"\0")) - {b""}):
+            relative = os.fsdecode(raw)
             rel = pathlib.PurePosixPath(relative)
             if rel.parts[0] in excluded:
                 continue
-            # A tracked directory replaced with a link contributes that link,
-            # never reads files through it (possibly outside the checking copy).
+            # A tracked directory replaced with a link contributes the link, never its external target.
             if any((area / parent).is_symlink() for parent in rel.parents if str(parent) != "."):
                 continue
             path = area / relative
@@ -525,9 +525,8 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
             elif path.is_dir() and relative in gitlinks:
                 kept_gitlinks.append(b"160000 " + gitlinks[relative] + b"\t" + raw)
                 if any(path.iterdir()):
-                    # The frozen gitlink is retainable without trusting a
-                    # nested repository's controls. Its populated worktree is
-                    # not in this patch: the receipt discloses that gap.
+                    # The frozen gitlink is evidence. The reviewer controls the nested repository;
+                    # disclose that its populated worktree is absent from this patch.
                     gaps.append({"path": relative, "reason": "nested_git_worktree_not_captured"})
             elif path.is_dir() and os.path.lexists(path / ".git"):
                 raise CheckingAreaUnavailable(f"cannot retain new nested Git checking output {relative}")
@@ -541,20 +540,20 @@ def _git_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pathlib.
             _git(area, "update-index", "-z", "--index-info", env=env,
                  input_bytes=b"\0".join(kept_gitlinks) + b"\0")
         after = _out(_git(area, "write-tree", env=env))
-        # Stream while the host control ODB is alive. The patch is the retained
-        # artifact; neither reviewer Git metadata nor source controls are written.
+        trees = [str(source["tree"]), after]
+        private = delegate_named_evidence.private_review_paths(area, trees, env)
+        gaps.extend(private.values())
+        compare = ["--no-ext-diff", "--no-textconv", "--no-renames", *trees, "--",
+                   *(f":(exclude,literal){name}" for name in private)]
+        # Stream while the host control object database is alive. Only the patch is retained.
         with patch.open("wb") as output:
-            _git(area, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames",
-                 str(source["tree"]), after, env=env, stdout=output)
-        changed = _out(_git(area, "diff", "--name-status", "--no-ext-diff", "--no-textconv",
-                            "--no-renames", str(source["tree"]), after, env=env))
-        ignored = [raw.decode("utf-8", "surrogateescape") for raw in _git(
-            area, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
-            env=env).stdout.split(b"\0") if raw]
-        ignored = [path for path in ignored if pathlib.PurePosixPath(path).parts[0] not in excluded]
+            _git(area, "diff", "--binary", *compare, env=env, stdout=output)
+        changed = _out(_git(area, "diff", "--name-status", *compare, env=env))
+        listing = _git(area, "ls-files", "--ignored", "--directory", *untracked, env=env)
+        ignored = (os.fsdecode(raw) for raw in listing.stdout.split(b"\0") if raw)
     return {"after_tree": after, "patch_sha256": _sha(patch), "patch_bytes": patch.stat().st_size,
             "listing_warning": listing_warning, "patch_retained": True,
-            "changed": changed.splitlines(), "ignored_not_retained": ignored}
+            "changed": changed.splitlines(), "ignored_not_retained": [p for p in ignored if pathlib.PurePosixPath(p).parts[0] not in excluded]}
 
 
 def _open_regular(path: pathlib.Path) -> Any:
@@ -616,12 +615,10 @@ def _directory_delta(area: pathlib.Path, source: Mapping[str, Any], evidence: pa
             gaps.append({"path": path, "reason": "unsupported_entry_type"})
     # Links are data, never dereferenced into the files store; directory modes
     # and removals survive in the receipt even after a successful copy release.
-    from ouroboros.delegate_named_evidence import retain_files
-
     delta = {path: {"before": before.get(path), "after": after.get(path)}
              for path in sorted(set(changed) | set(removed))}
-    kept = retain_files(area, [path for path in changed
-                              if pathlib.PurePosixPath(path).parts[0] != EVIDENCE_DIRNAME], evidence / "files")
+    kept = delegate_named_evidence.retain_files(area, [path for path in changed
+                              if pathlib.PurePosixPath(path).parts[0] != EVIDENCE_DIRNAME], evidence / "files", gaps=gaps)
     return {"changed": changed, "removed": removed, "files": kept, "entries": delta}
 
 
@@ -726,13 +723,13 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str, *, hold: bo
             errors.append(f"{type(exc).__name__}: {exc}")
         # Named outputs still matter when the repository delta cannot be read.
         try:
-            from ouroboros.delegate_named_evidence import retain_named_evidence
-
-            delta["named_evidence"] = retain_named_evidence(area, evidence / "files", gaps)
+            delta["named_evidence"] = delegate_named_evidence.retain_named_evidence(area, evidence / "files", gaps)
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
         summary = {"status": "capture_failed" if errors else "partial" if gaps else "retained",
                    "evidence_dir": str(evidence), "source": dict(source), "gaps": gaps, **delta}
+        summary["retained_bytes"] = delta.get("patch_bytes", 0) + sum(
+            {f["path"]: f["size"] for f in [*delta.get("files", []), *delta.get("named_evidence", [])]}.values())
         if errors:
             summary.update(error="; ".join(errors), area=str(area))
         if errors and {k: v for k, v in summary.items() if k != "evidence_dir"} == {

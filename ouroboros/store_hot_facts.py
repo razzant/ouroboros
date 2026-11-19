@@ -495,6 +495,24 @@ _COLD_ROWS = ("SELECT task_id, budget_pause_facts FROM tasks INDEXED BY tasks_bu
               "json_extract(budget_pause_facts,'$.external_custody.state') IN ('requested','accepted') ELSE 1 END")
 
 
+def pausing_envelopes(root):
+    """Direct turns whose saved source can precede their first queue snapshot, by the pause index."""
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or VERSION) < VERSION:
+            return {}
+        rows = txn.conn.execute("SELECT task_id,budget_pause_facts FROM tasks INDEXED BY tasks_budget_pause "
+                                "WHERE budget_pause_state<>'' AND budget_pause_state='pausing' AND control_valid=1")
+        saved = {}
+        for task_id, facts in rows:
+            pause = json.loads(facts)
+            task = pause.get("park_task") or {}
+            if pause.get("source_ref") and task.get("id") == task_id and task.get("_is_direct_chat"):
+                saved[task_id] = task
+    return saved
+
+
 def cold_custody_rows(root, task_ids) -> dict:
     """Among ``task_ids``, each pause row carrying a saved cold request or receipt, in ONE indexed read:
     the cost follows the rows that carry one, never how many ids the caller holds. A row an older writer has not

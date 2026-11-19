@@ -61,7 +61,7 @@ _LOCKFILE_MANIFESTS = {
 }
 # A delegated copy's NEW files under its named evidence folder: retained beside the
 # capture by their owner (``subagent_integration_delegated.run_named_evidence``).
-NAMED_EVIDENCE_EXCLUSION = "named evidence, retained separately by its host"
+NAMED_EVIDENCE_EXCLUSION = "named evidence, see the host's retention record"
 _SENSITIVE_EXAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _SENSITIVE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 _SENSITIVE_FILENAMES = {

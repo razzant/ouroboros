@@ -63,17 +63,20 @@ def database_reader(root, *, exclusive=False, write=False, money=False, acquire_
 
 
 @pytest.mark.parametrize(("control", "phase"), [("open", "reserve"), ("budget", "dispatch"), ("pause", "reserve")])
-def test_publication_replacement_retries_same_attempt_after_rollback(root, monkeypatch, phase, control):
+def test_contention_retries_same_attempt_against_replaced_authority(root, monkeypatch, phase, control):
     publish(root, generation="old")
     original = ua._check_dispatch_fences
     injected, sends, ids, waits = [], [], [], []
     stage = ["reserve"]
+    probes = 0
 
-    def check(scope, drive, *, retry=True):
-        if not retry and stage[0] == phase and not injected:
+    def check(scope, drive):
+        nonlocal probes
+        probes += 1
+        if stage[0] == phase and probes > 1 and not injected:
             injected.append(True)
-            (root / "state/queue.alive").unlink()
-        return original(scope, drive, retry=retry)
+            raise store.StoreBusy("fixture", reason="contention")
+        return original(scope, drive)
 
     def resume(_seconds):
         # Another money writer and Pause publisher can proceed while we wait.

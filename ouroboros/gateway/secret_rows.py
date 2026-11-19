@@ -148,6 +148,13 @@ def mask_connections(rows: Any) -> list:
     return out
 
 
+def typed_connection_secret_fields(rows: Any) -> set:
+    """``(field, value)`` of each typed secret a row list carries, exactly as stored; a placeholder is not one."""
+    return {(field, row[field]) for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict)
+            for field, flat in _secret_fields(row)
+            if isinstance(row.get(field), str) and row[field].strip() and not looks_masked_settings_secret(flat, row[field])}
+
+
 def typed_connection_secrets(rows: Any) -> set:
     """The secrets a posted row list carries as typed text, a placeholder not among them: what this request's
     author may send anywhere, while a kept secret goes only where it was saved for (Provider Test's rule)."""

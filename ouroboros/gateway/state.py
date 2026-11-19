@@ -662,7 +662,7 @@ def _direct_activity_pause_projection(drive_root: Any, row: dict, availability: 
         if own.get("owner_wait_state") == "waiting" and own.get("owner_wait_reason") == "owner_pause":
             view = parked_stop_view(drive_root, row, task_id, {})
             activity.update(phase="budget_paused", live=False, stop=view["stop"],
-                            refusal=view["refusal"], pause_cause=view["pause_cause"])
+                            refusal=view["refusal"], pause_cause=view["pause_cause"], pause_reason=view["reason"]["text"])
             if state == "paused" and (finishing := _finishing_reviews(drive_root, row, task_id)):
                 activity["finishing_reviews"] = finishing
     return activity
@@ -846,7 +846,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 # Cancel stops a lineage-resolved root (``ChatOutbound.cancelable``); Resume is the
                 # parked row's own release rule (``work_stop.current_stop``).
                 "can_resume": bool(can_resume), "cancelable": bool(root),
-                **({"pause_cause": view["pause_cause"], "stop": view["stop"], "refusal": view["refusal"],
+                **({"pause_cause": view["pause_cause"], "pause_reason": view["reason"]["text"], "stop": view["stop"], "refusal": view["refusal"],
                     "live": live} if view else {}),
                 **({"finishing_reviews": finishing} if phase == "budget_paused" and (
                     finishing := _finishing_reviews(drive_root, row, task_id)) else {}),

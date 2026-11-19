@@ -1092,6 +1092,9 @@ def _make_outbound(api, cue: TypingCue | None = None):
                 return
 
             text = str(event.get("text") or "").strip()
+            if (event.get("system_type") == "task_pause_notice" and event.get("role") == "system"
+                    and event.get("pause_reason") == "authority"):
+                text = telegram_i18n.host_sentence(text, lang)
             # A relay quotes the owner's own words above Ouroboros's note; they are sent verbatim, as plain text.
             relayed = event.get("system_type") == "relay_entry" and isinstance(event.get("relay"), dict)
             if relayed:

@@ -98,8 +98,9 @@ def mind_tool_entries() -> list:
              _pause_task),
         ToolEntry("resume_task", _accepting_schema(_control_schema("resume_task",
              "Request Resume of listed paused work through the owner's existing grants. "
-             "Nothing returns a Pause by itself: Resume it when the return its sentence names has come, or on the "
-             "word of whoever decided it; a sleep wakes by itself on what it chose. Your human's general word to "
+             "A technical pause waits for the named billing or control record to become readable. "
+             "The host rechecks the saved task's controls then. Resume a deliberate Pause when its named return "
+             "has come or its author asks. A sleep wakes on what it chose. Your human's general word to "
              "continue returns what their general request paused; work they paused by name waits for their word "
              "about it or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "

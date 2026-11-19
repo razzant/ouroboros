@@ -52,6 +52,8 @@ _SPAWN_ALLOWLIST = {
     "ouroboros/cli.py",                   # dev CLI (foreground)
     "ouroboros/server_control.py",        # restart exec path
     "ouroboros/workspace_patch_capture.py",  # waited synchronous child
+    # One review delta's blob reader: waited in the call, killed at the same 600 s bound as review Git reads.
+    "ouroboros/delegate_named_evidence.py",
     # One raw-blob fast-import per staging call: reaped before the call returns,
     # killed on any early exit (stage_raw_payload_inventory).
     "ouroboros/subagent_worktrees.py",
