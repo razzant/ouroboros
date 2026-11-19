@@ -114,7 +114,7 @@ def read_retained_task_source(root, task_id, ref, *, anchor=None):
         except FileNotFoundError:
             continue
     name = pathlib.PurePosixPath(str(ref["path"])).name
-    for source_root, owner in tried:  # a saved state retired after its work ended says so and where its content is
+    for source_root, owner in tried:  # a retired saved state's record says when and why it went (its work ended or moved on) and where its content is
         note = retired_message(source_root, owner, name)
         if note:
             raise FileNotFoundError(f"actor source unavailable: {note}")

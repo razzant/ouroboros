@@ -922,8 +922,9 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
 
 
 def materialize_path(path: pathlib.Path, *, explain: bool = False) -> Optional[pathlib.Path]:
-    """A missed checkpoint handle written back from its pack, else None; with ``explain`` (``read_file``) a saved
-    state retired after its work ended raises with its record line (``saved_state_retirement.retired_message``)."""
+    """A missed checkpoint handle written back from its pack, else None; with ``explain`` (``read_file``) a retired
+    saved state raises with its record line, which says when it went and that its work ended or moved on
+    (``saved_state_retirement.retired_message``)."""
     parsed = _checkpoint_path(path)
     if not parsed or len(parsed[2]) != 3:
         if explain:  # a rolling working file has no pack, only its record
