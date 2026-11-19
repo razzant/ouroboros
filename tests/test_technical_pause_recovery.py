@@ -88,7 +88,8 @@ def test_restore_busy(tmp_path, monkeypatch):
     with monkeypatch.context() as m:
         m.setattr(store_hot_facts, "pausing_envelopes", busy)
         recovered = q.restore_pending_from_snapshot()
-        assert not q.publish_queue_snapshot("still_busy")
+        assert [q.publish_queue_changes() for _ in range(3)] == [None] * 3
+        assert q.publish_queue_snapshot("still_busy") is False
         assert q.QUEUE_SNAPSHOT_PATH.read_bytes() == before
     initial_pending = [row["id"] for row in q.PENDING]
     q.PENDING.append({"id": "new-arrival", "type": "task", "chat_id": 0})
@@ -331,3 +332,54 @@ def test_recovered_park_confirms_the_source_that_moved_it(tmp_path, monkeypatch)
     workers.PENDING.append(parked)
     queue_snapshot._publish_restored()
     assert bp.budget_pause_row(tmp_path, task["id"])["pause_source"] == "restart_owner_wait_handoff"
+
+
+@pytest.mark.parametrize("late", [False, True])
+@pytest.mark.parametrize("decision", ["acceptance", "cancel_intent", "terminal", "ready"])
+def test_envelope_discovery_obeys_the_same_boot_decisions(tmp_path, monkeypatch, decision, late):
+    from ouroboros import budget_pause as bp, store, store_hot_facts
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import write_task_result
+    from ouroboros.work_stop import continuation_refusal
+    from supervisor.restart_retention import publish_pending_parks
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, workers, _ = technical(tmp_path, monkeypatch)
+    tid = "direct"
+    if decision == "acceptance":
+        q.ACCEPTANCE_FENCES[tid] = {"status": "active", "root_task_id": tid, "token": "review", "generation": 1}
+    assert q.publish_queue_snapshot("before_restart")
+    workers.PENDING.clear()
+    q.init(tmp_path)
+    hidden, pause = _parked(tmp_path, monkeypatch, task_id=tid, extra={"_is_direct_chat": True})
+    pause.update(state="pausing", reason="authority", rail=bp.RAIL_CONTROL_AUTHORITY, scope="task",
+                 cause="dispatch_fence_invalid", auto_resume=True)
+    hidden["_budget_pause"] = bp.exact_pause_marker(pause)
+    bp.set_budget_pause(tmp_path, tid, {**pause, "park_task": dict(hidden)})
+    workers.PENDING.clear()
+
+    def busy(root):
+        raise store.StoreBusy("index busy at boot")
+
+    if late:
+        with monkeypatch.context() as m:
+            m.setattr(store_hot_facts, "pausing_envelopes", busy)
+            assert q.restore_pending_from_snapshot() == 1
+    if decision == "cancel_intent":
+        request_cancel(tmp_path, tid, reason="owner_cancel", source="task_cancel")
+    elif decision == "terminal":
+        write_task_result(tmp_path, tid, "cancelled", result="owner cancelled")
+    if not late:
+        q.restore_pending_from_snapshot()
+
+    q.PENDING.append({"id": "other", "type": "task", "chat_id": 0})
+    assert q.publish_queue_snapshot("other_work")
+    ids = {row["id"] for row in json.loads(q.QUEUE_SNAPSHOT_PATH.read_text())["pending"]}
+    assert {"other", "technical"} <= ids
+    assert (tid in ids) == (decision in {"ready", "acceptance"})
+    if tid in ids:
+        publish_pending_parks(q, "confirm")
+        paused = next(row for row in q.PENDING if row["id"] == tid)
+        assert paused.get("_budget_pause")
+        assert bool(continuation_refusal(paused)) == (decision == "acceptance")
+        assert any(item.get("ok") for item in wake_ready_sleepers(q, only=tid)) == (decision == "ready")

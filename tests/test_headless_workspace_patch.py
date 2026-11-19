@@ -736,3 +736,49 @@ def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_cap
     finalize_task_artifacts(parent, later)
     mine = json.loads((task_artifacts_dir(parent, later["id"]) / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
     assert _retained_files(mine["summary_path"]) == {".review-evidence/later.txt": b"mine\n"}, "the first task's evidence stays its own"
+
+
+@pytest.mark.parametrize("activity", ["quiet", "touch", "append"])
+def test_public_patch_survives_benign_build_activity(tmp_path, monkeypatch, activity):
+    import os
+    from ouroboros import config, workspace_patch_capture as capture
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    public = copy / "feature.py"
+    before = public.stat()
+    classify = capture.untracked_binary_verdicts
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": "unused-fixture-value"})
+
+    def during_capture(*args, **kwargs):
+        if activity == "touch":
+            os.utime(public, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+        elif activity == "append":
+            with public.open("a") as stream:
+                stream.write("# build complete\\n")
+        return classify(*args, **kwargs)
+
+    monkeypatch.setattr(capture, "untracked_binary_verdicts", during_capture)
+    out = tmp_path / "out"
+    capture.write_workspace_patch_artifacts(copy, out, task=task)
+    assert b"feature.py" in (out / "workspace.patch").read_bytes()
+
+
+@pytest.mark.parametrize("directory", ["node_modules", "__pycache__"])
+def test_excluded_path_is_never_opened_for_a_product_patch(tmp_path, monkeypatch, directory):
+    from ouroboros import config, review_checking, workspace_patch_capture as capture
+
+    copy, task, _ = _evidence_copy(tmp_path)
+    path = copy / directory / "generated.data"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(b"build output")
+    monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": "unused-fixture-value"})
+    open_regular = review_checking._open_regular
+
+    def checked_open(candidate):
+        assert candidate != path, "excluded build output must never be scanned for credentials"
+        return open_regular(candidate)
+
+    monkeypatch.setattr(review_checking, "_open_regular", checked_open)
+    out = tmp_path / "out"
+    capture.write_workspace_patch_artifacts(copy, out, task=task)
+    assert b"feature.py" in (out / "workspace.patch").read_bytes()

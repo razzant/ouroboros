@@ -253,9 +253,11 @@ def test_the_unselected_root_parking_under_the_childs_latch_keeps_the_owner_sele
         assert evidence["dispatch_allowed"] is True and evidence["child_state"] == budget_pause.STATE_RESUMED, evidence
 
 
-@pytest.mark.parametrize("child_state", ["pending_dispatch", "running"])
+@pytest.mark.parametrize(("child_state", "door"), [
+    ("pending_dispatch", "event"), ("running", "event"), ("pending_dispatch", "shutdown"),
+])
 def test_a_new_root_pause_after_its_own_resume_spends_the_childs_older_selection(
-        tmp_path, monkeypatch, child_state):
+        tmp_path, monkeypatch, child_state, door):
     """The root's own Resume lifts F; when the root later pauses again it raises a NEW
     latch G, and a selection made before G admits neither a dispatch nor a send."""
     from ouroboros import budget_pause
@@ -286,7 +288,14 @@ def test_a_new_root_pause_after_its_own_resume_spends_the_childs_older_selection
         granted = queue.resume_budget_paused_task(CHILD)
         assert granted["ok"] is True, granted
     evidence = {"fence_f": fence_f, "before_new_pause": _reserve(tmp_path, CHILD)}
-    _install(sup, ROOT, _planning_park(root_limit))
+    pause = _planning_park(root_limit)
+    if door == "shutdown":
+        budget_pause.end_dispatch_fence(ROOT)
+        workers.WORKERS.clear()
+        workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown",
+                             retain_saved_work=True, stop_source="server_shutdown")
+    else:
+        _install(sup, ROOT, pause)
     evidence["latch_g"] = dict(queue.BUDGET_ROOT_FENCES[ROOT])
     if child_state == "pending_dispatch":
         workers.assign_tasks()
@@ -302,7 +311,8 @@ def test_a_new_root_pause_after_its_own_resume_spends_the_childs_older_selection
         assert evidence["dispatched"] == [], evidence
         assert evidence["child_row"] == {"state": budget_pause.STATE_PAUSED,
                                          "revoke_reason": "new_root_budget_fence"}, evidence
-    assert not any(writes), "a new root fence revokes the selected child outside Q"
+    if child_state == "pending_dispatch":
+        assert writes == [False], "the selected child is revoked once, outside Q"
 
 
 @pytest.mark.parametrize("child_state", ["pending_dispatch", "running"])

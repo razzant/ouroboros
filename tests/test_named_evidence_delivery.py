@@ -84,6 +84,7 @@ def test_a_run_that_retained_no_named_evidence_shows_none(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("settings", [
     {"MCP_SERVERS": [{"auth_token": "fixture-value"}]},
+    {"MCP_SERVERS": [{"headers": {"Authorization": "Bearer fixture-value", "Accept": "application/json"}}]},
     {"MCP_SERVERS": [{"url": "https://fixture-value@example.invalid/"}]},
     {"OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "test", "api_key": "fixture-value"}]},
 ])
@@ -100,7 +101,7 @@ def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_pat
     for path in (private, public):
         path.parent.mkdir(parents=True)
     private.write_text(json.dumps({"OPENROUTER_API_KEY": "fixture-value"}))
-    public.write_text(json.dumps({"OPENAI_API_KEY": "${OPENAI_API_KEY}", "OUTPUT_FORMAT": "csv"}))
+    public.write_text(json.dumps({"OPENAI_API_KEY": "${OPENAI_API_KEY}", "Accept": "application/json"}))
     retained = tmp_path / "saved"
     summary = retain_workspace_evidence(copy, retained)
     assert summary["status"] == "retained"
@@ -166,7 +167,7 @@ def test_investigation_receipt(tmp_path, monkeypatch):
     assert result.get("retained_bytes") == 4
 
 
-def test_workspace_patch_filters_both_versions_and_arbitrary_names(tmp_path, monkeypatch):
+def test_product_patch_can_contain_owner_configured_values(tmp_path, monkeypatch):
     from ouroboros import config
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
     from tests.test_headless_workspace_patch import _evidence_copy, _git
@@ -183,12 +184,10 @@ def test_workspace_patch_filters_both_versions_and_arbitrary_names(tmp_path, mon
     (copy / "sample.json").write_text('{"OPENAI_API_KEY": "example"}')
     _, manifest = write_workspace_patch_artifacts(copy, tmp_path / "result", task=task)
     patch = (tmp_path / "result/workspace.patch").read_bytes()
-    assert b"sample.json" in patch and b"copy.txt" not in patch and key.encode() not in patch
-    assert {
-        r["path"]
-        for r in manifest["tracked_excluded"] + manifest["untracked_excluded"]
-        if r["reason"] == "installation_settings" and r["size"]
-    } == {"old.txt", "copy.txt"}
+    assert all(name in patch for name in (b"sample.json", b"old.txt", b"copy.txt"))
+    assert key.encode() in patch
+    assert not any(row["reason"] == "installation_settings"
+                   for row in manifest["tracked_excluded"] + manifest["untracked_excluded"])
 
 
 @pytest.mark.parametrize("payload", ["text", "binary", "archive", "late-path", "stable"])

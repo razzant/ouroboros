@@ -537,3 +537,33 @@ def test_phone_notice_uses_available_translation(phone, monkeypatch, mirror_prog
         assert delivered == ([translated] if mirror_progress == "on" else [])
     finally:
         plugin.telegram_i18n.configure(None)
+
+
+@pytest.mark.parametrize('old', [False,True])
+def test_queued_technical_notice_uses_the_translation_under_its_original_receipt(phone,monkeypatch,old):
+    from ouroboros import i18n_memory, obligations, pause_notices
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+    from tests.test_telegram_i18n import _seed
+    row={'reason':'authority'} if old else {'reason':'authority','cause':'dispatch_fence_invalid'}
+    identity='pause:task:episode-1' if old else 'pause:task:authority'
+    phrase=pause_notices.notice_text(row)
+    translated='Задача ждёт восстановления записи.'
+    root=phone.data
+    prepare_startup_state(root)
+    write_task_result(root,'task','running',chat_id=42,pause_notices={identity:row})
+    obligations.add(root,'pause_notices','task')
+    plugin=phone.plugin
+    plugin.telegram_i18n.configure(root)
+    monkeypatch.setenv('OUROBOROS_UI_LANGUAGE','ru')
+    try:
+        _seed(root,'ru',{phrase:{'text':translated}})
+        assert i18n_memory.tr(phrase,'ru',drive_root=root)==translated
+        monkeypatch.setattr(plugin,'_load_settings',lambda _:{'TELEGRAM_CHAT_ID':'42','TELEGRAM_MIRROR_MODE':'all','TELEGRAM_MIRROR_PROGRESS':'on'})
+        pause_notices.reconcile_pause_notices(root)
+        saved=next(rec for rec in phone.rows() if rec.get('system_type')=='task_pause_notice')
+        assert saved['card_row_id']==identity and saved['content']==phrase
+        delivered=[s['text'] for s in phone.sent()]
+        assert delivered==[translated]
+    finally:
+        plugin.telegram_i18n.configure(None)
