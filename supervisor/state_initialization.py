@@ -29,6 +29,9 @@ Bootstrap scaffolding that may precede init — empty ``state``/``logs``/
 the usage ledger import, a benchmark sentinel — is deliberately not evidence.
 A root whose every trace was deleted is indistinguishable from a new one: that
 is a disclosed residual, not proof of historylessness.
+
+What a created first state is born with is ``first_state`` (a re-mint after loss
+and an owner Reset included): today the update notices a fresh install owes nothing.
 """
 
 from __future__ import annotations
@@ -106,6 +109,18 @@ def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> D
                         "origin": str(origin or "first_boot"), "created_at": utc_now_iso(),
                         BASIS_KEY: APP_ROOT_BASIS})
     return {"create": True, "initialization_id": initialization_id}
+
+
+def first_state(drive_root: Any, initialization_id: str) -> Dict[str, Any]:
+    """What a created first state of ``drive_root`` is born with, before ``init_state`` writes it.
+
+    Runs under STATE_LOCK: nothing here calls ``update_state`` (the lock is not re-entrant) or
+    takes a settings lock. A fresh install never ran an earlier release, so the notices
+    ``upgrade_notices.BORN_SETTLED_NOTICE_KEYS`` names are born marked; that stamp is not a
+    delivery (no chat receipt exists for it), and the notices judged by facts stay owed."""
+    from ouroboros.upgrade_notices import BORN_SETTLED_NOTICE_KEYS  # D08 -> D11 is allowed only lazily
+
+    return {"initialization_id": initialization_id, **dict.fromkeys(BORN_SETTLED_NOTICE_KEYS, utc_now_iso())}
 
 
 def authority_reason(drive_root: Any, initialization_id: str) -> str:

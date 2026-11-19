@@ -558,7 +558,7 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
                     raise StateUnavailable(str(decision.get("reason") or "refused"),
                                            str(decision.get("detail") or ""))
                 created = str(decision["initialization_id"])
-                st = ensure_state_defaults({"initialization_id": created})
+                st = ensure_state_defaults(witness.first_state(DRIVE_ROOT, created))
             if not created:
                 try:
                     st["initialization_id"] = witness.prepare_adoption(DRIVE_ROOT, st)

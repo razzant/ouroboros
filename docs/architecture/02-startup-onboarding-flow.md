@@ -22,7 +22,7 @@ Before `_bootstrap_supervisor_repo` overwrites `state/state.json.current_sha`, `
 
 Fresh current/dialogue/usage stores commit schema, headers and seeds once before rename; `store.connect` keeps FULL/journal policy. Until publication, writes and task/history return 503 `migrating` (700 ms retries); supervisor/recovery/providerless readiness wait. Failures keep import open. After owner binding, `startup_notice` reports switches once (`switch_progress.json.reported`). Recovery reads sets; timings go to `supervisor.jsonl`. Seal audits/packing share `finish_maintenance_job`.
 
-With both state copies absent, `state_initialization.supervisor_evidence` counts a nonempty chat stream in `state/dialog.sqlite` (before cutover, a nonempty legacy chat file by stat) as prior history; an unreadable store is unknown and mints no identity, and the probe creates no store or import job.
+With both state copies absent, `state_initialization.supervisor_evidence` counts `state/dialog.sqlite` chat rows as history (unknown mints nothing; it makes no store or import). A first state, Reset included, is born of `first_state` with update news settled, undelivered (owner decision 2026-11-20).
 
 ### Onboarding wizard and completion
 
