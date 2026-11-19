@@ -29,19 +29,21 @@ class HeldNoteSection(HostSection):
 
     topic: str = ""
     revision: str = ""
-    window_label: str = ""  # a head this actor has an exact reader for
+    window_label: str = ""  # the label backed by a verified revision
     summary: str = ""
     outline_has_summary: bool = False
     index_has_summary: bool = False
     source_chars: int = 0
     index_row: Mapping[str, Any] | None = None
+    reader_restriction: str = ""
 
     def __new__(cls, section_id, full_text, *_args, **_kwargs):
         return super().__new__(cls, section_id, full_text)
 
     def __getnewargs__(self):
         return (*super().__getnewargs__(), self.topic, self.revision, self.window_label,
-                self.summary, self.outline_has_summary, self.index_has_summary, self.source_chars, self.index_row)
+                self.summary, self.outline_has_summary, self.index_has_summary, self.source_chars, self.index_row,
+                self.reader_restriction)
 
     def with_index(self, row: Mapping, navigation: Mapping) -> HeldNoteSection:
         """Locate the authored summary in either captured form of the index."""
@@ -57,29 +59,37 @@ class HeldNoteSection(HostSection):
                        index_has_summary=resident, index_row=index_row)
 
     def recheck_reader(self, ctx: Any, root: Path) -> HeldNoteSection:
-        if not self.reader or not (restriction := _reader_restriction(ctx, root, self.topic, self.revision,
-                                                                     self.source_chars)):
+        if not self.reader:
             return self
-        label = self.window_label or self.full_text.rsplit("\n", 1)[0]  # the overview has one reference line
-        prefix = label.removesuffix(f"Exact reader: {self.reader}")
-        return replace(self, full_text=prefix + f"Exact reader unavailable: {restriction}" + self.full_text[len(label):],
-                       reader="", window_label="", operative_view=None)
+        restriction = _reader_restriction(ctx, root, self.topic, self.revision, self.source_chars)
+        if restriction == self.reader_restriction:
+            return self
+        previous = _reader_line(self.reader, self.reader_restriction)
+        prefix = (self.window_label.removesuffix(_reader_line(self.reader, "")) if self.window_label else
+                  self.full_text.rsplit("\n", 1)[0].removesuffix(previous))  # the overview ends with one reference line
+        return replace(self, full_text=prefix + _reader_line(self.reader, restriction) +
+                       self.full_text[len(prefix) + len(previous):], operative_view=None,
+                       reader_restriction=restriction)
+
+    @property
+    def available_window_label(self) -> str:
+        return "" if self.reader_restriction else self.window_label
 
     def summary_is_resident(self, addressed: Mapping) -> bool:
         return self.outline_has_summary if "knowledge_index" in addressed else self.index_has_summary
 
     def _summary_view(self, resident: bool) -> str | None:
-        if not self.window_label or not self.summary.strip():
+        if not (label := self.available_window_label) or not self.summary.strip():
             return None
         marker = "[Head shortened to its authored summary for the physical window.]"
         if resident:
-            return f"{self.window_label}\n\n{marker} The summary is in the knowledge index."
-        return f"{self.window_label}\n\n{self.summary}\n\n{marker}"
+            return f"{label}\n\n{marker} The summary is in the knowledge index."
+        return f"{label}\n\n{self.summary}\n\n{marker}"
 
     def view_for_receipt(self, row: Mapping, addressed: Mapping) -> str | None:
         if row.get("held_note_form") == "reader":
-            return (self.window_label + "\n\n[Head omitted at the physical window's emergency floor.]"
-                    if self.window_label else None)
+            return (label + "\n\n[Head omitted at the physical window's emergency floor.]"
+                    if (label := self.available_window_label) else None)
         return self._summary_view(self.outline_has_summary) if "knowledge_index" in addressed else self.operative_view
 
     def window_receipt(self, form: str) -> dict:
@@ -97,7 +107,7 @@ def frame_key(mode: str, owner: str, window: int, record: Any, reserve: int, rat
 
 
 def can_replay_frame(core: Any, saved: list, current: list, receipts: Mapping) -> bool:
-    if saved != current or any(not part.window_label for part in core.dynamic_sections
+    if saved != current or any(not part.available_window_label for part in core.dynamic_sections
                                if isinstance(part, HeldNoteSection) and part.section_id in receipts):
         return False
     if index_receipt := receipts.get("knowledge_index"):
@@ -177,6 +187,10 @@ def _reader_restriction(ctx: Any, root: Path, topic: str, revision: str, length:
     return "Presence argument bindings do not request the complete note at this address and revision."
 
 
+def _reader_line(reader: str, restriction: str) -> str:
+    return f"Exact reader unavailable: {restriction}" if restriction else f"Exact reader: {reader}"
+
+
 def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ctx: Any) -> HeldNoteSection:
     topic, revision = note.address.topic, note.revision
     names = ", ".join(repr(name) for name in matched)
@@ -194,9 +208,7 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
             restriction = "This revision could not be retained and is unavailable in the journal."
     if restriction:
         reader = ""
-        label += f"Exact reader unavailable: {restriction}"
-    else:
-        label += f"Exact reader: {reader}"
+    label += _reader_line(reader, restriction)
 
     window_label = ""
     if topic == knowledge.OVERVIEW_TOPIC:

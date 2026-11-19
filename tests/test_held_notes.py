@@ -13,7 +13,7 @@ import yaml
 from ouroboros import context, context_budget, context_fit, held_notes, knowledge, knowledge_versions, memory_floor, memory_view
 from ouroboros.agent import Env, _restore_saved_clocks
 from ouroboros.memory import Memory
-from ouroboros.owner_wait import checkpoint_owner_wait, load_owner_wait, set_owner_wait
+from ouroboros.owner_wait import checkpoint_owner_wait, continuation_state, load_owner_wait, set_owner_wait
 from ouroboros.projects_registry import create_project
 from ouroboros.realtime_setup import input_from_context_plan
 from ouroboros.section_floor import section_views
@@ -538,19 +538,20 @@ def test_cold_restore_rechecks_the_saved_reader_against_the_current_grants(world
     note = _write(world, "restored-reader", head, summary="An authored summary.")
     initial = _plan(world, 16_000, mode="low")
     assert _cuts(initial) == [(note.address.topic, "summary")]
-    checkpoint = json.loads(json.dumps(held_notes.continuation_capture(initial, "low")))
+    checkpoint = {**held_notes.continuation_capture(initial, "low"), "messages": initial.messages_for("low"),
+                  "tool_schemas": []}
     args = {"topic": note.address.topic, "scope": "global", "version": note.revision}
 
-    for allowed in (True, False):
+    for allowed, window in ((True, 16_000), (False, 16_000), (True, 12_000)):
         registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
         ctx = registry._ctx
         ctx.task_id = TASK["id"]
         ctx.model_wait_context = None
         ctx.task_contract = {} if allowed else {"disabled_tools": ["knowledge_read"]}
         _restore_saved_clocks(ctx, TASK, checkpoint)
-        fresh = _plan(world, 16_000, mode="low", ctx=ctx)
-        messages = initial.messages_for("low")
-        sent = _rebind(monkeypatch, ctx, fresh, messages, 16_000)
+        fresh = _plan(world, window, mode="low", ctx=ctx)
+        messages = list(checkpoint["messages"])
+        sent = _rebind(monkeypatch, ctx, fresh, messages, window)
         shown = messages[0]["content"][-1]["text"]
         result = registry.execute_result("knowledge_read", args)
         if allowed:
@@ -561,6 +562,7 @@ def test_cold_restore_rechecks_the_saved_reader_against_the_current_grants(world
             assert result.code == "RESOURCE_CONSTRAINT_BLOCKED"
             assert not _cuts(sent) and head in shown and "Exact reader: knowledge_read(" not in shown
             assert "Exact reader unavailable:" in shown and "task_contract.disabled_tools" in shown
+        checkpoint = json.loads(json.dumps(continuation_state(ctx, messages, {}, {}, 1, [], set())))
 
 
 def test_reader_retains_an_unjournaled_revision_before_the_note_moves(world, monkeypatch):
