@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import pathlib
 from collections import deque
 
 import pytest
@@ -262,3 +263,65 @@ def test_a_response_two_carriers_read_apart_is_counted_once_by_the_part_cache(ro
     monkeypatch.setattr(packs._PartCache, "put", accounted)
     _proven(_walk(root, child, task))
     assert True in offers, offers  # the second carrier's read offered the cached response again
+
+
+def test_an_unanswered_catalog_leaves_the_queue_order_and_the_walk_whole(root, tmp_path, monkeypatch):
+    """A catalog that cannot answer now (``read_position`` raises ``EvidenceUnavailable``, never waiting) only takes
+    the order away: the members are read in queue order (one rewind each, as the control above shows) and every one
+    is still read, verified and retained; nothing is marked unavailable."""
+    task, child, calls = _packed_task(root)
+
+    def unanswered(_where, **_identity):
+        raise packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+
+    monkeypatch.setattr(packs, "read_position", unanswered)
+    decoding = count_decoding(monkeypatch)
+    state = _walk(root, child, task)
+    _proven(state)
+    assert decoding["starts"] >= MEMBERS / 2, decoding
+    for call in calls:
+        manifest = obs.read_call_manifest_ref(root, call["manifest_ref"], task_id=task)
+        assert obs.read_blob_ref(root, manifest["full_payload_ref"])
+
+
+def test_bytes_beside_their_producer_are_read_there_before_the_canonical_catalog(root, tmp_path, monkeypatch):
+    """A carrier may name the canonical address of bytes that still lie only beside their producer (a promoted
+    manifest's projection does). The read takes that loose copy before any root's packs: the canonical catalog is
+    asked by the ordering hint and the destination's proof (``_blob``: only the parent's own bytes prove it holds
+    them), neither of which waits for it, never by the read."""
+    obs.persist_call(root, task_id="settled", call_id="call_00", call_type="tool_call", payload={"answer": "packed"})
+    write_task_result(root, "settled", "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(root)["packed"] == 1  # the canonical root has packs and a catalog
+    task = "beside"
+    child = headless.prepare_task_drive(root, task, "empty")
+    loose = _blob(child, json.dumps({"result": "only beside the producer " + "z" * 600}).encode())
+    canonical = {**loose, "path": str(root / "observability" / "blobs" / pathlib.Path(loose["path"]).name)}
+    obs.persist_call(child, task_id=task, call_id="call_00", call_type="tool_call", payload={"response_ref": canonical})
+    opened, reads, phase, real = [], [], [""], packs.open_index
+
+    def counted(where, *args, **kwargs):
+        opened.append((phase[0], str(where)))
+        return real(where, *args, **kwargs)
+
+    def during(name, method):
+        def step(walk, node):
+            phase[0] = name
+            try:
+                answer = method(walk, node)
+            finally:
+                phase[0] = ""
+            if name == "read" and node["kind"] == "blob":
+                reads.append((node["ref"]["sha256"], str(answer[0][1])))
+            return answer
+        return step
+
+    monkeypatch.setattr(packs, "open_index", counted)
+    monkeypatch.setattr(source_retention.RetentionWalk, "_position",
+                        during("hint", source_retention.RetentionWalk._position))
+    monkeypatch.setattr(source_retention.RetentionWalk, "_read_source",
+                        during("read", source_retention.RetentionWalk._read_source))
+    _proven(_walk(root, child, task))
+    assert (loose["sha256"], loose["path"]) in reads, reads
+    assert [where for when, where in opened if when == "read"] == [], opened  # the read asked no catalog
+    assert ("", str(root)) in opened, opened  # the destination proofs still ask the canonical one
+    assert packs.blob_bytes(root, {**loose, "path": ""}) == packs.read_loose_gzip(pathlib.Path(loose["path"]))
