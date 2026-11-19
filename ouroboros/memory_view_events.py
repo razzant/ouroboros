@@ -271,7 +271,7 @@ def receipt_situation(ctx: Any, root: Path, *, claims_written: bool = False) -> 
     conversation = _mapping(route.get("conversation"))
     if route_names:
         descriptions[route_names[0]] = next((conversation[key] for key in ("title", "name", "full_name", "username")
-                                             if conversation.get(key)), "")
+                                             if isinstance(conversation.get(key), str) and conversation[key]), "")
     rendered = []
     for name in names:
         label = " ".join(str(descriptions.get(name) or "").split())

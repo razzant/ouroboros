@@ -63,6 +63,17 @@ def test_place_names_use_exact_carried_components_and_no_thread_name_without_a_t
     assert "place:p%2F%25 (Nova Team)" in reply
     assert f"{names[2]} (Nova discussion)" in reply
 
+    def conversation_label(conversation):
+        fields = deepcopy(metadata)
+        fields["presence"]["event"]["conversation"] = conversation
+        ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="place", task_metadata=fields)
+        return next(line for line in _knowledge_read(ctx, "unwritten", scope="global").splitlines()
+                    if line.startswith("This situation's names:"))
+
+    # The label is a string or nothing: a list, a mapping or a number under a label key never renders.
+    assert f"{names[2]}, {names[3]}" in conversation_label({"title": ["Nova", "talk"], "name": {"first": "Nova"}, "username": 7})
+    assert f"{names[2]} (nova_team), {names[3]}" in conversation_label({"title": ["Nova", "talk"], "username": "nova_team"})
+
     carried = consciousness_origin_metadata(metadata, started_root=True)
     assert "presence" not in carried
     ordinary_task = {"type": "task", "metadata": carried}
