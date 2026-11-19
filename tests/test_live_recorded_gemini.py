@@ -75,7 +75,7 @@ def test_recorded_unfinished_captions_release_share_and_named_look_at_quiet(gemi
             # The replay moves its clock as fast as the loop allows, and the gateway takes the page's frames on its
             # own turns. Unless the door has taken them before the clock moves, the clock outruns it wherever timers
             # are coarse: on Windows the replay passed only while the door's 10 ms timeout spun the loop (#3796).
-            while not page.incoming.empty():
+            while not (page.incoming.empty() or gateway.done()):  # an ended door leaves its disconnect queued
                 await asyncio.sleep(0)
             await asyncio.sleep(.001)
 
