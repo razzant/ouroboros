@@ -152,12 +152,13 @@ def task_written(txn, task_id, columns):
             continue
         deadlines.append(stamp + get_gc_retention_days() * 86400)
     if holds_worked_copy(txn.root / "task_results" / "artifacts" / task_id):  # owed to ``prune_worked_copies``
-        txn.put_row(WORKED_COPIES, task_id, {"write_seq": columns.get("write_seq")})
-        try:  # a past or unknown end is the next pass's: a write of an old work never makes a run of its own
+        row = txn.get_row(WORKED_COPIES, task_id)  # ``settled_at``: when the host first wrote it settled, kept after
+        txn.put_row(WORKED_COPIES, task_id, {"write_seq": columns.get("write_seq"), "settled_at": (row or {}).get("settled_at") or time.time()})
+        try:  # a new obligation is owed at least now; a later write of an old work only by an end still ahead
             deadline = float(columns["drive_retention_at"]) + get_gc_retention_days() * 86400
-            deadlines += [deadline] if deadline > time.time() else []
         except (KeyError, TypeError, ValueError):
-            pass
+            deadline = 0.0
+        deadlines += [max(deadline, time.time())] if row is None or deadline > time.time() else []
     if deadlines:
         schedule_in(txn, min(deadlines))
 
@@ -559,7 +560,7 @@ def owe_written_back(root: Any, task_id: str) -> None:
     never a wait (a missed one waits for the next walk after another body boots)."""
     try:
         with store.acquisition_budget(0), store.open_store(pathlib.Path(root), write=True) as txn:
-            txn.put_row(WORKED_COPIES, str(task_id), {"written_back": time.time()})
+            txn.put_row(WORKED_COPIES, str(task_id), {**(txn.get_row(WORKED_COPIES, str(task_id)) or {}), "written_back": time.time()})
             schedule_in(txn, time.time())
     except Exception:
         log.debug("A written-back saved state of %s waits for the next walk", task_id, exc_info=True)
@@ -674,7 +675,7 @@ def _seed(root: pathlib.Path, body) -> None:
                     "SELECT task_id, status, write_seq FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
                     (json.dumps(chunk),)):
                 if status in SETTLED_STATUSES:
-                    txn.put_row(WORKED_COPIES, task_id, {"write_seq": write_seq})
+                    txn.put_row(WORKED_COPIES, task_id, {"write_seq": write_seq, "settled_at": time.time()})
         from ouroboros.utils import utc_now_iso
 
         maintenance_jobs.record_in(txn, JOB, **{_SEEDED: {"at": utc_now_iso(), "body": body}})
@@ -753,6 +754,8 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
             except Exception:
                 hold("task_result_unreadable", len(found))
                 continue
+            if finished is None:  # no recorded end (a recovered crash, a legacy record): from when the host wrote it settled
+                finished = (observed.get(task_id) or {}).get("settled_at")
             if finished is None:
                 hold("finish_time_unknown", len(found))
                 continue

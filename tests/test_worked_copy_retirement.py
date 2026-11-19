@@ -28,6 +28,9 @@ def root(tmp_path, monkeypatch):
     data = tmp_path / "data"
     prepare_startup_state(data)
     monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", str(DAYS))
+    # A live publisher renews its stamp every few seconds; on a loaded runner one pass can outlast the 10-second
+    # freshness, so the test's queue stays fresh as long as a stale-queue test does not age it on purpose.
+    monkeypatch.setattr("ouroboros.task_status._SNAPSHOT_OWNERSHIP_FRESH_SEC", 600.0)
     _queue(data)
     return data
 
@@ -403,9 +406,10 @@ def test_a_creation_time_is_no_end(root):
     write_task_result(root, "undated", "completed", ts=old)
     _file(root / "observability" / "calls" / "undated" / "llm-1.json", "{}")
     copies = _copies(root / "task_results" / "artifacts" / "undated" / "source_handles")
-    report = _prune(root)
-    assert report["held"] == {"finish_time_unknown": len(copies)} or report["waiting"] == len(copies)
-    assert all(path.exists() for path in copies)
+    report = _prune(root)  # its window runs from when the host first saw it settled (the walk), never from ``ts``
+    assert report["waiting"] == len(copies) and report["held"] == {} and all(path.exists() for path in copies)
+    from ouroboros.maintenance_retirement import prune_worked_copies
+    assert prune_worked_copies(root, now=time.time() + (DAYS + 1) * 86400)["removed"] == len(copies)
 
 
 def test_the_maintenance_child_waits_the_owners_days_not_the_default(root, monkeypatch):
@@ -639,7 +643,8 @@ def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkey
 
     def pass_between_inventory_and_lock(*args, **kwargs):  # the pass holds the custody lock Keep then waits for
         found = real(*args, **kwargs)
-        assert _prune(root)["removed"] == len(copies)
+        report = _prune(root)
+        assert report["removed"] == len(copies), report
         return found
 
     monkeypatch.setattr(owner_keep, "inventory", pass_between_inventory_and_lock)
@@ -777,3 +782,70 @@ def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, mon
     assert _prune(root)["removed"] == 1 and not second.exists()
     line = next(line for line in _ledger(handles) if line["name"] == second.name)
     assert line["packed"] == ["observability/packs/multigen.2.xz"], "the generation that holds these bytes"
+
+
+
+def test_a_recovered_crash_with_no_recorded_end_goes_its_days_after_it_was_written_settled(root):
+    from ouroboros.maintenance_retirement import prune_worked_copies
+
+    handles = root / "task_results" / "artifacts" / "crashed" / "source_handles"
+    copies = _copies(handles)
+    _file(root / "observability" / "calls" / "crashed" / "llm-1.json", "{}")
+    _prune(root)  # the walk of an empty history
+    settled = time.time()
+    write_task_result(root, "crashed", "failed", reason_code="worker_crash_owner_wait")  # recovery: no observed end
+    report = _prune(root)
+    assert report["waiting"] == len(copies) and report["held"] == {}, "counted from the settled write, never unknown"
+    assert prune_worked_copies(root, now=settled + (DAYS + 1) * 86400)["removed"] == len(copies)
+    line = _ledger(handles)[0]
+    assert abs(datetime.fromisoformat(line["finished_at"]).timestamp() - settled) < 60
+
+
+def test_a_new_obligation_is_owed_now_and_a_later_write_only_by_an_end_ahead(root):
+    from ouroboros import maintenance_jobs, store
+
+    _prune(root)  # the walk of an empty history
+    handles = root / "task_results" / "artifacts" / "long" / "source_handles"
+    _copies(handles)
+    _file(root / "observability" / "calls" / "long" / "llm-1.json", "{}")
+    assert maintenance_jobs.job(root, "runtime_retirement").get("next_due") is None
+    before = time.time()  # it ran longer than the owner's days: its projected date is its creation
+    write_task_result(root, "long", "completed", ts=_iso(time.time() - (DAYS + 5) * 86400))
+    assert maintenance_jobs.job(root, "runtime_retirement")["next_due"] <= before + 5, "a new obligation is owed now"
+    assert _prune(root)["waiting"] == 5  # no recorded end: its days run from the settled write, and the row stays
+    with store.open_store(root, write=True) as txn:
+        maintenance_jobs.record_in(txn, "runtime_retirement", next_due=None)
+    write_task_result(root, "long", "completed", title="patched later")
+    assert maintenance_jobs.job(root, "runtime_retirement").get("next_due") is None, "an old work's patch wakes nothing"
+
+
+def test_a_promotion_published_after_the_first_read_holds_under_the_lock(root, monkeypatch):
+    from ouroboros import maintenance_retirement, store
+
+    copies = _copies(_task(root, "late-child"))
+    real = maintenance_retirement._call_records
+
+    def promotion_meanwhile(root_, task_id):
+        with store.open_store(root_, write=True) as txn:
+            txn.conn.execute("UPDATE tasks SET has_pending_promotion=1 WHERE task_id=?", (task_id,))
+        return real(root_, task_id)
+
+    monkeypatch.setattr(maintenance_retirement, "_call_records", promotion_meanwhile)
+    assert _prune(root)["held"] == {"child_refs_pending": len(copies)} and all(path.exists() for path in copies)
+
+
+def test_a_pooled_retry_reading_its_predecessors_retired_state_is_told_what_became_of_it(root):
+    from ouroboros.tools.core_file_tools import _read_file
+    from ouroboros.tools.tool_context import ToolContext
+
+    copy = _copies(_task(root, "pred"))[0]
+    write_task_result(root, "pred", "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400), retry_task_id="succ")
+    write_task_result(root, "succ", "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400),
+                      timeout_retry_from="pred", original_task_id="pred")
+    _prune(root)
+    assert not copy.exists()
+    child = root / "state" / "headless_tasks" / "succ" / "data"  # the pool runs it on its own drive
+    child.mkdir(parents=True)
+    ctx = ToolContext(repo_dir=root, drive_root=child, task_id="succ", budget_drive_root=str(root))
+    answer = _read_file(ctx, f"source_handles/context_checkpoints/{copy.name}", root="artifact_store")
+    assert "NOT_FOUND" in answer and "was retired at" in answer and "observability/calls/pred" in answer, answer
