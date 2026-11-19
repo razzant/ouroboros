@@ -256,86 +256,6 @@ def test_a_later_write_restores_a_committed_claim_after_projection_failure(tmp_p
     assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
 
 
-def test_host_claim_adds_only_its_name_and_seed_is_create_only(tmp_path):
-    registry = _registry(tmp_path)
-    target = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
-    assert _write(registry, target, _markdown(["room:1"])).startswith("✅")
-    target.path.write_bytes(_markdown(["room:1", "place:handwritten"]).encode())
-    before = knowledge.read_knowledge_note(target)
-    refusal = knowledge.write_host_claim(target, "place:carried", expected_revision="", reason="Binding migration")
-    assert refusal.reason == "revision_conflict" and target.path.read_bytes() == before.raw
-    added = knowledge.write_host_claim(target, "place:carried", expected_revision=before.revision, reason="Binding migration")
-    assert added.ok and added.current.metadata["claims"] == ["room:1", "place:handwritten", "place:carried"]
-    assert added.current.source.text_at(added.current.source.body_span) == before.source.text_at(before.source.body_span)
-    assert knowledge.active_claims(tmp_path) == {"room:1": [target], "place:carried": [target]}
-    change = next(iter(knowledge_versions.NoteHistory(target)))[1]
-    assert (change["writer"], change["reason"], change["old_sha256"], change["new_sha256"]) == (
-        "host", "Binding migration", before.revision, added.current.revision)
-
-    seed = knowledge.resolve_knowledge_address(tmp_path, "seed", "global")
-    result = knowledge.write_host_claim(seed, "wake", expected_revision="", reason="First Start", content="Seed body.\n")
-    assert result.ok and result.current.text.endswith("Seed body.\n")
-    assert knowledge.active_claims(tmp_path)["wake"] == [seed]
-    assert knowledge.write_host_claim(seed, "wake", expected_revision="", reason="First Start").reason == "revision_conflict"
-
-
-@pytest.mark.parametrize(("prefix", "insertion", "suffix"), [
-    ("---\r\ntype: 'note' # май\r\nclaims: # owned\r\n  - 'room:1' # keep\r\n",
-     '  - "place:carried"\r\n', "summary: 'keep me'\r\n...\r\n# Body\r\n"),
-    ("---\r\ntype: 'note' # keep\r\nclaims: ['room:1', # authored punctuation\r\n  ",
-     ' "place:carried"', "]\r\n---\r\n# Body\r\n"),
-    ("---\r\ntype: 'note' # keep\r\nsummary: 'important'\r\n",
-     'claims: ["place:carried"]\r\n', "---\r\n# Body\r\n"),
-    ("---\r\ntype: 'note' # keep\r\nclaims: ['room:1', 'place:carried']\r\n",
-     "", "---\r\n# Body\r\n"),
-    ("", '---\r\nclaims: ["place:carried"]\r\n---\r\n', "# Plain Markdown\r\n\r\nNo preamble.\r\n"),
-], ids=["block", "flow", "absent", "already-present", "plain"])
-def test_host_claim_splices_only_its_name_in_source_and_by_name_readers(tmp_path, prefix, insertion, suffix):
-    from ouroboros.improvement_backlog import authored_backlog_text
-    from ouroboros.memory_fallback import _remembering
-    from ouroboros.presence_context import focus_topics
-
-    raw, expected = (prefix + suffix).encode(), (prefix + insertion + suffix).encode()
-    for topic in ("improvement-backlog", "remembering"):
-        target = knowledge.resolve_knowledge_address(tmp_path, topic, "global")
-        target.path.parent.mkdir(parents=True, exist_ok=True)
-        target.path.write_bytes(raw)
-        host = knowledge.write_host_claim(target, "place:carried", expected_revision=knowledge.read_knowledge_note(target).revision,
-                                          reason="Binding migration")
-        assert host.ok and target.path.read_bytes() == expected
-        assert target in knowledge.active_claims(tmp_path)["place:carried"]
-        assert "room:1" not in knowledge.active_claims(tmp_path)
-        bound = focus_topics(tmp_path, {"context_topics": [topic]})
-        assert bound == f"### Knowledge topic: {topic}\n\n" + expected.decode().replace("\r\n", "\n")
-    assert authored_backlog_text(tmp_path).split("\n\n", 1)[1].encode() == expected
-    assert _remembering(tmp_path) == expected.decode().strip()
-
-
-@pytest.mark.parametrize("preamble", [
-    "claims: room:1\n",
-    "source: &names ['room:1']\nclaims: *names\n",
-    "claims: &names ['room:1']\nshared: *names\n",
-    "null # keep this\n",
-    "authored scalar\n",
-], ids=["scalar-field", "alias", "shared-anchor", "null-document", "scalar-document"])
-def test_host_claim_keeps_an_unextendable_note_pending_with_no_write(tmp_path, preamble):
-    target = knowledge.resolve_knowledge_address(tmp_path, "bound", "global")
-    target.path.parent.mkdir(parents=True)
-    unavailable = f"---\n{preamble}---\nOriginal body.\n".encode()
-    target.path.write_bytes(unavailable)
-
-    def add():
-        return knowledge.write_host_claim(target, "place:carried", reason="Binding migration",
-                                          expected_revision=knowledge.read_knowledge_note(target).revision)
-
-    result = add()
-    assert not result.ok and result.reason.startswith("host_claim_pending: ")
-    assert target.path.read_bytes() == unavailable and not knowledge_versions.journal_path(target).exists()
-    assert knowledge.active_claims(tmp_path) == {}
-    target.path.write_bytes(b"---\nclaims: ['room:1']\n---\nOriginal body.\n")
-    assert add().ok and knowledge.active_claims(tmp_path) == {"place:carried": [target]}
-
-
 def test_revert_keeps_the_continuously_present_claim_after_an_outside_removal(tmp_path):
     registry = _registry(tmp_path)
     target = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
@@ -370,8 +290,8 @@ def test_revert_reports_a_change_between_typed_nonstring_claim_entries(tmp_path)
     assert _write(registry, target, _markdown(["room:1", True])).startswith("✅")
     first = knowledge.read_knowledge_note(target)
     assert _write(registry, target, _markdown(["room:1", 1]), expected_revision=first.revision).startswith("✅")
-    append = _write(registry, target, "Unrelated body line.\n", mode="append")
-    assert append.startswith("✅") and "Ignored claims" not in append and "holding this note" not in append
+    append = _write(registry, target, "Unrelated body line.\n", mode="append")  # the head's cost, no claim diagnostics
+    assert append.startswith("✅") and "Ignored claims" not in append and "room:1 holds 1 head" in append
     current = knowledge.read_knowledge_note(target)
     reverted = _write(registry, target, "", mode="revert", version=first.revision, expected_revision=current.revision)
     assert reverted.startswith("✅") and target.path.read_bytes() == first.raw
@@ -392,7 +312,8 @@ def test_claim_receipt_reports_unmatched_names_and_nonstrings_and_project_claims
     unmatched = ["room:12345679", "place:unconnected", "place:team/room", " room:1", "Room:1", "thread:chat/T/C/missing"]
     receipt = _write(registry, target, _markdown([*matching, *unmatched, 19, False, None]))
     assert receipt.startswith("✅") and place.place_id == "team/room"
-    assert f"Present situations holding this note: {', '.join(matching)}" in receipt
+    # Situations that hold the same heads are named together: here each holds this one ("Project notes.\n", 5 tokens).
+    assert f"Present situations holding this note: {', '.join(matching)} each hold 1 head, 5 tokens\n" in receipt
     assert "Ignored claims entries (expected a list of strings): 19, False, None" in receipt
     line = next(line for line in receipt.splitlines() if line.startswith("Claims with no matching"))
     assert line == "Claims with no matching situation found: " + ", ".join(repr(name) for name in unmatched)
@@ -425,7 +346,7 @@ def test_a_claims_overwrite_that_carries_no_body_is_refused_and_writes_nothing(t
     stored = target.path.read_bytes(), journal.read_bytes(), record.read_bytes()
     said = ("⚠️ TOOL_ERROR: Knowledge write not completed: invalid_note: this overwrite sets claims and carries no body, so it "
             f"would erase the note's body ({len(body)} characters); an overwrite replaces the whole note: send its whole text "
-            "with the claims list in its YAML.")
+            "with the claims list in its YAML, or the YAML alone with mode=edit, which keeps the body.")
     alone = "---\nclaims: ['room:1', 'room:2']\n---"
     for content in (alone, alone + "\n", alone + "\n\n  \n", "---\nclaims: []\n---\n"):
         refused = _write(registry, target, content, expected_revision=before.revision)
@@ -455,14 +376,94 @@ def test_a_claims_overwrite_that_carries_no_body_is_refused_and_writes_nothing(t
     assert knowledge.active_claims(tmp_path)["room:3"] == [fresh]
 
 
-def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
-    """Where a name is present the note's head stands whole in every start, and a note with no `## ` line is all
-    head. So each completed write of a note that holds names states the head's size and what ends it; a write of a
-    note that holds none says nothing."""
+def test_a_yaml_only_edit_sets_names_and_keys_and_keeps_every_body_byte(tmp_path):
+    """A name or a key is set without resending the body: an edit whose content is only a YAML block merges its
+    fields as an overwrite does and keeps every body byte. Its claims are the turn's explicit write, adopted as an
+    overwrite's, so the name holds at once; body text that an edit or an append writes adopts no name, as before."""
+    registry = _registry(tmp_path)
+    target = knowledge.resolve_knowledge_address(tmp_path, "diary", "global")
+    body = "First entry.\r\n" + "An entry under no heading.\r\n" * 400 + "Last entry.\r\n"
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(("---\ntype: note\nsummary: A diary.\nclaims: ['room:1']\nseen: {by: hand}\n---\n"
+                             + body).encode("utf-8"))  # a claims field written by hand, which holds nothing yet
+
+    def edit(**arguments):
+        revision = knowledge.read_knowledge_note(target).revision
+        return registry.execute("knowledge_write", {"topic": "diary", "scope": "global", "mode": "edit",
+                                                    "expected_revision": revision, **arguments})
+
+    def body_of(note):
+        return note.raw[note.source.body_span.start_byte:]
+
+    assert edit(old_str="Last entry.", content="Last entry, revised.").startswith("✅")
+    assert _write(registry, target, "Appended entry.\r\n", mode="append").startswith("✅")
+    assert knowledge.active_claims(tmp_path) == {}  # body text adopted nothing
+    before = knowledge.read_knowledge_note(target)
+
+    # The name the YAML already lists by hand: the bytes stay, and the explicit write adopts it.
+    named = edit(content="---\nclaims: ['room:1']\n---\n")
+    assert named.startswith("✅") and "Present situations holding this note: room:1" in named
+    assert target.path.read_bytes() == before.raw and knowledge.active_claims(tmp_path) == {"room:1": [target]}
+    assert next(iter(knowledge_versions.NoteHistory(target)))[1]["active_claims"] == ["room:1"]
+
+    # A key: the YAML is merged and re-rendered, every body byte stays, and a place turn's speaker key joins the note.
+    key = {"provider": "chat", "namespace": "T-ONE", "id": "U-VELA"}
+    keyed = edit(content="---\nkeys: " + json.dumps([key]) + "\n---\n")
+    after = knowledge.read_knowledge_note(target)
+    assert keyed.startswith("✅") and body_of(after) == body_of(before) and after.raw != before.raw
+    assert after.metadata == {**before.metadata, "keys": [key]}  # the summary and the unknown field survive
+    assert knowledge.speaker_pages(tmp_path, "chat", "T-ONE", "U-VELA")["page"] == "knowledge_read(topic='diary', scope='global')"
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
+
+
+def test_a_yaml_only_edit_is_revision_checked_keeps_the_archive_field_and_takes_no_body_text(tmp_path):
+    """A YAML-only edit replaces an existing note, so it needs the note's current revision; the archive field stays
+    with archive and restore; content that carries body text and no old_str is still refused, by the tool and by the
+    writer. Each refusal writes nothing, and the same edit with the current revision lands."""
+    registry = _registry(tmp_path)
+    target = knowledge.resolve_knowledge_address(tmp_path, "diary", "global")
+    assert _write(registry, target, "---\ntype: note\n---\nA body under no heading.\n").startswith("✅")
+    current = knowledge.read_knowledge_note(target)
+    journal = knowledge_versions.journal_path(target)
+    stored = target.path.read_bytes(), journal.read_bytes()
+    names = "---\nclaims: ['room:1']\n---\n"
+
+    def edit(content, **arguments):
+        return registry.execute("knowledge_write", {"topic": "diary", "scope": "global", "mode": "edit",
+                                                    "content": content, **arguments})
+
+    for content, arguments, said in (
+            (names, {}, "revision_required"),
+            (names, {"expected_revision": "0" * 64}, "revision_conflict"),
+            ("---\narchive: {at: '2026-11-19', reason: done}\n---\n", {"expected_revision": current.revision},
+             "invalid_note: archive is owned by archive/restore modes"),
+            (names + "Body text sent beside it.\n", {"expected_revision": current.revision},
+             "mode=edit requires edits, or a non-empty old_str, or a summary, or YAML-only content"),
+            ("---\nclaims: [room:1\n---\n", {"expected_revision": current.revision}, "TOOL_ARG_ERROR: content: ")):
+        reply = edit(content, **arguments)
+        assert reply.startswith("⚠️") and said in reply, reply
+        assert (target.path.read_bytes(), journal.read_bytes()) == stored
+    with pytest.raises(ValueError, match="an edit's content alone is a YAML block"):
+        knowledge.write_knowledge_note(target, names + "Body.\n", "edit", expected_revision=current.revision)
+    assert (target.path.read_bytes(), journal.read_bytes()) == stored and knowledge.active_claims(tmp_path) == {}
+    assert edit(names, expected_revision=current.revision).startswith("✅")
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
+
+
+HELD_HEAD = "A held head takes its space ahead of the memory of other rooms and yields to the window last."
+
+
+def test_a_write_of_a_held_note_says_what_its_head_costs(tmp_path):
+    """Where a present situation holds a note, its head stands whole in every start, ahead of the memory of other
+    rooms; a note with no `## ` line is all head. So each completed write of a note that holds names states, per
+    present situation holding it, the heads that situation holds and their host tokens, then the head's characters
+    and tokens and what ends it. A note no present situation holds says so and gives no size; a note that holds no
+    name says nothing of a head."""
     registry = _registry(tmp_path)
 
     def said(receipt):
-        return [line for line in receipt.splitlines() if line.startswith("Held head:")]
+        return [line for line in receipt.splitlines()
+                if line.startswith(("Present situations holding this note:", "Held head:")) or line == HELD_HEAD]
 
     def write(address, content=None, **kwargs):
         revision = knowledge.read_knowledge_note(address).revision
@@ -471,23 +472,31 @@ def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
 
     # A head that a `## ` line ends: its size, and a later write below that line leaves it as it was.
     target = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
-    head = "Fact. " * 250 + "\n\n"
+    head = "Fact. " * 250 + "\n\n"  # 1,504 characters inside a request: 377 host tokens
     saved = _write(registry, target, _markdown(["room:1"], head + "## History\n\nOlder facts.\n"))
-    ended = [f"Held head: {len(head):,} characters, the body above the first `## ` line."]
+    ended = ["Present situations holding this note: room:1 holds 1 head, 377 tokens",
+             "Held head: 1,502 characters, 377 tokens, the body above the first `## ` line.", HELD_HEAD]
     assert saved.startswith("✅") and len(head) == 1_502 and said(saved) == ended
     assert said(write(target, "A later fact.\n", mode="append")) == ended
 
-    # No `## ` line, a fenced one included: the whole body is the head, and an append grows it.
+    # No `## ` line, a fenced one included: the whole body is the head; room:1 now holds both heads, and an append grows it.
     whole = knowledge.resolve_knowledge_address(tmp_path, "tools", "global")
     body = "Whole. " * 200 + "\n\n```\n## not a heading\n```\n"
     created = _write(registry, whole, _markdown(["room:1"], body))
-    assert said(created) == [f"Held head: {len(body):,} characters: this note has no `## ` line, "
-                             "so its whole body is the head."]
+    all_head = "this note has no `## ` line, so its whole body is the head."
+    assert said(created) == ["Present situations holding this note: room:1 holds 2 heads, 736 tokens",
+                             f"Held head: 1,427 characters, 359 tokens: {all_head}", HELD_HEAD]
     grown = write(whole, "More.\n", mode="append")
-    assert said(grown) == [f"Held head: {len(body) + len('More.') + 1:,} characters: this note has no `## ` line, "
-                           "so its whole body is the head."]
+    assert said(grown) == ["Present situations holding this note: room:1 holds 2 heads, 738 tokens",
+                           f"Held head: 1,433 characters, 361 tokens: {all_head}", HELD_HEAD]
 
-    # A note that holds no name says nothing: never adopted, on a project shelf, archived, cleared, or refused.
+    # A note whose names no present situation matches: it says so, and no size as if its head stood somewhere.
+    far = knowledge.resolve_knowledge_address(tmp_path, "far", "global")
+    unheld = _write(registry, far, _markdown(["room:99999"], body))
+    assert unheld.startswith("✅") and said(unheld) == ["Present situations holding this note: none"]
+    assert knowledge.active_claims(tmp_path)["room:99999"] == [far]
+
+    # A note that holds no name says nothing of a head: never adopted, on a project shelf, archived, cleared, or refused.
     plain = knowledge.resolve_knowledge_address(tmp_path, "plain", "global")
     assert _write(registry, plain, "---\ntype: note\n---\nA body.\n").startswith("✅")
     plain.path.write_bytes(_markdown(["room:1"], "A body.\n").encode("utf-8"))  # a field the writer never took
@@ -503,7 +512,7 @@ def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
     refused = write(whole, "---\nclaims: ['room:2']\n---", mode="overwrite")
     assert refused.startswith("⚠️") and not said(refused)
     cleared = write(whole, _markdown([], body), mode="overwrite")
-    assert cleared.startswith("✅") and REMOVED in cleared and not said(cleared)
+    assert cleared.startswith("✅") and REMOVED in cleared and said(cleared) == ["Present situations holding this note: none"]
 
 
 def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
