@@ -645,7 +645,7 @@ def _paid_at_limit(view: Any, provider: Any, bound: Any, model: Any) -> bool:
     return paid_admission(provider, bound, billed=unpriced_free and view.bucket("model", str(model or "")).cash[0] > 0)
 
 
-def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool = True) -> None:
+def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
     from ouroboros.budget_pause import budget_fence_selected, dispatch_fenced
 
     if dispatch_fenced(scope.task_id):
@@ -654,21 +654,17 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool
         raise DispatchFenced(
             f"model dispatch fenced: task {scope.task_id} is entering an exact pause",
             limit_scope="pausing", root_task_id=scope.root_task_id)
-    from ouroboros.queue_observation import dispatch_probe
-    from ouroboros._usage_wait import retry_presend
+    from ouroboros.queue_observation import dispatch_probe, valid_dispatch_facts
 
     root_task_id = str(scope.root_task_id or "").strip()
     snapshot_path = root / "state" / "queue_dispatch.json"
     if root_task_id and any((root / "state" / name).exists() for name in ("queue_dispatch.json", "queue_snapshot.json", "queue.alive")):
-        snapshot = retry_presend(lambda: dispatch_probe(root), check=False) if retry else dispatch_probe(root)
+        snapshot = dispatch_probe(root)
         if snapshot is None:
             raise ControlAuthorityUnavailable(f"root budget fence authority unavailable: {snapshot_path}", cause="dispatch_fence_unreadable")
-        rows = snapshot.get("budget_root_fences")
-        if not isinstance(rows, list):
+        if not valid_dispatch_facts(snapshot):
             raise ControlAuthorityUnavailable(f"invalid root budget fence authority: {snapshot_path}", cause="dispatch_fence_invalid")
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ControlAuthorityUnavailable(f"invalid root budget fence row: {snapshot_path}", cause="dispatch_fence_invalid")
+        for row in snapshot["budget_root_fences"]:
             if (str(row.get("root_task_id") or "") != root_task_id or row.get("cause") == "owner_pause"
                     or str(row.get("status") or "") not in {"active", "paused"}):
                 continue  # an owner Pause gates launches itself (owner_pause.py): never a money stop
@@ -690,7 +686,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
     root = _drive_root(scope.drive_root)
 
     _check_dispatch_fences(scope, root)
-    acquire = send_acquisition(lambda: _check_dispatch_fences(scope, root, retry=False))
+    acquire = send_acquisition(lambda: _check_dispatch_fences(scope, root))
     # Pricing I/O stays outside the monetary transaction.
     bound = _reservation_cost(request)
     pricing_known, attempt_id = bound is not None, uuid.uuid4().hex
@@ -699,7 +695,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         nonlocal scope
         _current_request, scope = _merge_scope(request)
         with acquire(root) as view:
-            _check_dispatch_fences(scope, root, retry=False)
+            _check_dispatch_fences(scope, root)
             global_limit = _global_limit(request)
             # Owner 2A: the reached global limit refuses paid admission only (root/group still refuse all).
             if view.exceeds_limit(global_limit) and _paid_at_limit(view, request.provider, bound, request.model):
@@ -979,7 +975,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
     from ouroboros.usage_ledger import is_abandoned_settlement
 
     def check_fences():
-        _check_dispatch_fences(reservation.scope or current_usage_scope() or UsageScope(), reservation.drive_root, retry=False)
+        _check_dispatch_fences(reservation.scope or current_usage_scope() or UsageScope(), reservation.drive_root)
     if state == "dispatched":
         check_fences()
     acquire = transition_acquisition(state, check_fences)
@@ -1036,7 +1032,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                                  root_limit_revision=scope.root_limit_revision)
             scope = replace(scope, **effective)
             fields.update(effective)
-            _check_dispatch_fences(scope, reservation.drive_root, retry=False)
+            _check_dispatch_fences(scope, reservation.drive_root)
             limit_request = AttemptRequest(model=reservation.model, provider=reservation.provider,
                 global_limit_usd=(current.get("global_limit_usd") if current.get("global_limit_source")
                                   not in {"", "settings_budget_resolver"} else None))

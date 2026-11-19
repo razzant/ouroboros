@@ -1215,8 +1215,8 @@ def _deepseek_tariff(monkeypatch, currency="USD"):
     for name, value in (("_cache", {}), ("_retry_after", {}), ("_currency", {}), ("_currency_fetching", set())):
         monkeypatch.setattr(pricing_catalog, name, value)
     monkeypatch.setattr(pricing_catalog, "_fetch_catalog", lambda: snapshot)
-    monkeypatch.setattr(pricing_catalog, "_fetch_currency",
-                        lambda key: asked.append(key) or (currency, "" if currency else "http_401"))
+    reading = pricing_catalog._CurrencyReading(currency, "" if currency else "http_401")
+    monkeypatch.setattr(pricing_catalog, "_fetch_currency", lambda key: asked.append(key) or reading)
     return asked
 
 

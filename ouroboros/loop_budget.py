@@ -676,7 +676,7 @@ def _handle_authority_unavailable(
         # The failed authority may name a billing group; the saved member keeps its own root lineage.
         budget_pause.request_pause(
             limit_ctx, rail=budget_pause.RAIL_BILLING_AUTHORITY if billing else budget_pause.RAIL_CONTROL_AUTHORITY,
-            scope="task", reason_text=str(exc))
+            scope="task", reason_text=str(exc), cause=exc.cause)
     fact = {"kind": exc.kind, "cause": exc.cause, "root_task_id": getattr(exc, "root_task_id", ""), "detail": str(exc),
             "exact_pause_unavailable": str(usage.get("exact_pause_unavailable") or "")}
     usage.update(execution_status="infra_failed", reason_code=code, billing_authority=fact)

@@ -222,6 +222,26 @@ def test_a_reason_stays_with_the_write_that_gave_it(tmp_path, place):
     assert "; the last write gave no reason; earlier, subagent" in full and "«The child's split of the varieties.»" in full
 
 
+
+def test_a_place_is_named_by_its_scalar_name_only(tmp_path, place):
+    """A conversation name that is not a string (a list the store keeps as shared references) is never printed as the
+    place's label; the next scalar name is (Astra r12)."""
+    odd = _arrival(place, "ann", "Seeds are in.", T0 + 5)
+    odd["transport"]["conversation"] = {"full_name": [{"text": "Garden"}], "title": "#garden"}
+    _rows(tmp_path, _owner("A.", T0, cmid="a"), odd, _owner("B.", T0 + 9, cmid="b"))
+    full = rf.render(rf.facts(tmp_path, _word(tmp_path, "b"), rf.Own(room=1)))[0]
+    assert "#garden" in full and "$shared" not in full and "[{" not in full
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    bare = _arrival(place, "ann", "Seeds again.", T0 + 15)
+    bare["chat_id"] = presence_chat_id(conversation_key("chat", "qa", "design"))  # a room keyed by its conversation
+    bare["transport"]["conversation"] = {"full_name": [{"text": "Garden"}]}  # no string name at all (Grok, Astra r13)
+    _rows(tmp_path, bare, _owner("C.", T0 + 19, cmid="c"))
+    later = rf.render(rf.facts(tmp_path, _word(tmp_path, "c"), rf.Own(room=1)))[0]
+    assert "«Seeds again.»" in later and "$shared" not in later and "{'" not in later
+
+
 def test_several_people_in_one_place_each_keep_their_newest_words_and_their_own_reader(tmp_path, place):
     _rows(tmp_path, _owner("A.", T0, cmid="a"), _arrival(place, "tomas", "First thought.", T0 + 1),
           _arrival(place, "mira", "Mira's only line.", T0 + 2), _arrival(place, "tomas", "Second thought, whole.", T0 + 3),

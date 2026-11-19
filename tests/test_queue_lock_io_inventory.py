@@ -296,6 +296,8 @@ def test_no_io_under_q_beyond_the_named_inventory(lane, tmp_path, monkeypatch, a
     _drive_settlement(tmp_path / "settlement")
     with monkeypatch.context() as scoped:
         _drive_restart_pending_admission(tmp_path / "restart", scoped)
+    with monkeypatch.context() as scoped:
+        _drive_exact_pause_and_wake(tmp_path / "sleep", scoped)
     drift = _unnamed_or_gone(set(audited))
     for key in drift.get("unnamed", []):
         sample, stack = _STATE["samples"].get(key, ("", ""))
@@ -363,3 +365,17 @@ def test_every_row_names_a_reason():
     events = _EVENTS | {event for _module, _attr, event in _STORE_SEAMS}
     for site, why in ALLOWED.items():
         assert site[1] in events and " in " in site[0] and why, site
+
+
+def _drive_exact_pause_and_wake(tmp_path, monkeypatch):
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests.test_model_sleep import _cold_park, _mail, _result
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    _tick_armed()
+    _result(tmp_path, "peer")
+    _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
+    _mail(tmp_path, "sleeper", "ready", sender="peer")
+    assert wake_ready_sleepers(q)[0]["ok"]

@@ -990,7 +990,8 @@ def _perform_supervisor_restart(server,
             server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
         from supervisor.queue import publish_queue_snapshot
 
-        publish_queue_snapshot(reason="pre_restart_exit")  # embedded rows: an older body restores it after a rollback
+        if publish_queue_snapshot(reason="pre_restart_exit") is False:
+            raise OSError("The final rollback-readable queue snapshot could not be saved")
     except BaseException:
         from supervisor.queue import reopen_queue_returns
 

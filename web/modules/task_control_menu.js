@@ -16,7 +16,7 @@ import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
 import { showToast } from './toast.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
@@ -325,8 +325,9 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         // and a held Continue's observed blockers as facts (#1721).
         // Handled here, never rethrown: the menu callback is fire-and-forget.
         const facts = heldWorkFacts(exc?.body?.blockers);
+        const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
         toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
-            ? ' Wait for that work or stop it.' : ''}` : exc?.body?.message || `Resume refused: ${exc?.message || exc}`, 'error');
+            ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`, 'error');
     } finally {
         inFlight.delete(id);
     }

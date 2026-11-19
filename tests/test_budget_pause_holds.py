@@ -756,3 +756,45 @@ def test_assignment_keeps_a_paused_roots_reason_over_the_selection_it_ran_under(
     assert load_task_result(tmp_path, "alpha", strict=True)["reason_code"] == "owner_paused"
     assert "_resume_selection" not in member and budget_hold_fact(member)
     assert member[BUDGET_HOLD_KEY]["detail"] == "root_resume_generation_stale"
+
+
+@pytest.mark.parametrize("presence", [False, True])
+def test_restart_finds_source_backed_direct_park_without_queue_or_handover(tmp_path, monkeypatch, presence):
+    from types import SimpleNamespace
+    from ouroboros import budget_pause as bp
+    from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _quiet_external
+
+    q, _, workers = _install_queue(tmp_path, monkeypatch)
+    task_id = "direct-park"
+    ctx, limit = _loop_ctx(tmp_path, task_id, direct=True)
+    task = {"id": task_id, "type": "task", "_is_direct_chat": True, "_attempt": 1,
+            "title": "Saved direct turn", "text": "original input", "chat_id": 0,
+            "task_contract": {"objective": "original input"}, "root_task_id": task_id}
+    if presence:
+        task.update(type="presence", _presence_turn=True)
+    ctx.model_wait_context = SimpleNamespace(task=task, continuation_state=lambda: {})
+    _fast_hold(monkeypatch, bp)
+    _quiet_external(monkeypatch, bp)
+    with pytest.raises(bp.BudgetPauseRequested) as saved:
+        bp.request_pause(limit, rail=bp.RAIL_CONTROL_AUTHORITY, scope="task",
+                         reason_text="invalid dispatch fence", cause="dispatch_fence_invalid")
+    bp.end_dispatch_fence(task_id)
+    assert saved.value.pause["state"] == "pausing"
+    assert saved.value.pause["park_task"]["task_contract"] == task["task_contract"]
+    assert not q.PRIOR_DIRECT_ROOTS.get("task_ids") and not workers.RUNNING and not workers.PENDING
+    original = q.publish_queue_snapshot
+    with monkeypatch.context() as failure:
+        failure.setattr(q, "publish_queue_snapshot", lambda **kw: False)
+        assert q.restore_pending_from_snapshot() == 1
+    assert bp.budget_pause_row(tmp_path, task_id)["state"] == "pausing"
+    assert workers.PENDING[0]["_budget_pause"]["cause"] == "dispatch_fence_invalid"
+    from supervisor.sleep_wake import wake_ready_sleepers
+    # A busy owner keeps recovery parked so this exercise observes the publication boundary itself.
+    from ouroboros.owner_pause import install_fence
+    install_fence(tmp_path, task_id, request_id="owner")
+    assert q.publish_queue_snapshot == original
+    wake_ready_sleepers(q)
+    row = bp.budget_pause_row(tmp_path, task_id)
+    assert (row["pause_source"], row["state"], row["source_ref"]) == (
+        "restart_during_pausing", "paused", saved.value.pause["source_ref"])
+    assert row["cause"] == workers.PENDING[0]["_budget_pause"]["cause"]
