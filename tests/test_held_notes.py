@@ -467,6 +467,35 @@ def test_admitted_rebind_compares_both_full_prices(world, deciding_cost):
         assert low_input < nano_input < low_input + reply - context_budget.NANO_MIN_HEADROOM_TOKENS
 
 
+@pytest.mark.parametrize("preferred,connections,schemas,kept", [
+    # A Max work lowered to its maps, two small tool schemas: Nano admits no more input and its fixed part is no
+    # smaller, so the mode is not paid for a note four characters shorter (the full prices would choose Nano).
+    ("max", ("", ""), 2, "low"),
+    # Low carries a connections map Nano does not: Nano's fixed part is smaller (the full prices would keep Low).
+    ("low", ("Low connections. " * 4, ""), 0, "nano"),
+])
+def test_a_running_work_that_holds_no_head_takes_low_or_nano_by_the_two_frames_alone(world, preferred, connections, schemas, kept):
+    """A work already running in Low whose request no longer fits: without held heads the choice is the frames' own
+    (Nano only where it admits more input or has a smaller fixed part), never the fully priced views that decide for
+    a capture with heads (``test_admitted_rebind_compares_both_full_prices``). In both cases here the two rules
+    disagree."""
+    tools = [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
+             for name in ("read_fixture", "memory_read")][:schemas]
+    memory = synthetic.snapshot(mark_count=1)
+    core = replace(_core(world), section_root="", memory_view_json=memory_view.snapshot_json(memory), connections=connections)
+    assert not any(isinstance(part, held_notes.HeldNoteSection) for part in core.dynamic_sections)
+    initial = _plan(world, 30_000, mode=preferred, core=core)
+    assert initial.initial_mode == "low"
+    messages = initial.messages_for("low")
+    # Three hundred tokens short of the request as it stands: Low cannot hold its own view, so the choice is real.
+    window = initial.projected_tokens_with_tools("low", tools) + RESERVE - 300
+    fit = dict(window_tokens=window, known_window=True, ratio=1.0, output_reserve=RESERVE, start_mode="low",
+               tool_schemas=tools, current_messages=messages, admitted=True)
+    plan, low = initial.reproject_for_route(**fit), initial.reproject_for_route(**fit, select_mode="low")
+    assert low.projected_tokens_with_tools("low", tools) + RESERVE > window
+    assert plan.initial_mode == kept and plan.messages_for(kept)[1:] == messages[1:]
+
+
 def test_physical_emergency_takes_only_the_inline_summary_past_the_bound(world):
     _write(world, "a-resident", "Person's head. " * 2_000, type="person", summary="This person stays in the index.")
     summary = "Ordinary authored telling. " * 14

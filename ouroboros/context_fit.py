@@ -1109,9 +1109,11 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     # ordinary memory and the work room; the same ordinary Nano is the last physical rescue for every
     # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
     # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
-    low = None
+    low = stays = None
     while True:
-        shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
+        # A view a Main work holds keeps Low where Nano admits no more input and is no smaller: no head held, decided before Nano is drawn.
+        stays = low is not None and not held_heads and window - reserve <= low[3] - low[2] and fixed >= low[1]
+        shown = floor.NO_VIEW if stays or (mode != "nano" and overflows()) else render()
         books_lost = (kept is None or start_work) and mode == "max" and bool(room_fact) and floor.max_room_lost(room_fact)
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
@@ -1132,9 +1134,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             shown = render()
             if overflows(shown):
                 shown = render(level=emergency_level)
-    if low is not None and spare(shown, section_views(sections[mode], receipts)) <= low[-1]:
-        # The running request keeps Low when the fully priced alternative leaves no more room.
-        mode = "low"
+    if low is not None and (stays or held_heads and spare(shown, section_views(sections[mode], receipts)) <= low[-1]):
+        mode = "low"  # decided above, or with held heads: Nano's full price leaves no more room than Low's
         sent, fixed, reserve, window, boundary, allowances, receipts, shown, _ = low
     if kept is None and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
         core_alone = overflows()
