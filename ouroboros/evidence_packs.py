@@ -682,21 +682,15 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                     failure = EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
                 except FileNotFoundError as exc:
                     failure = failure or exc
-                except ValueError as exc:
-                    failure = exc
-                except (OSError, EOFError, zlib.error) as exc:
+                except (ValueError, OSError, EOFError, zlib.error) as exc:
                     failure = exc  # retention repair distinguishes transient IO from damaged gzip
                 if kind == "json":
                     try:
                         raw = _shared_whole(candidate, sha256, size, max_bytes, admit, task_id)
                         if raw is not None:
                             return raw
-                    except FileNotFoundError as exc:
-                        failure = exc  # a part is gone: the fact names it; the whole may still be packed below
-                    except ValueError as exc:
-                        failure = exc
-                    except (OSError, EOFError, zlib.error) as exc:
-                        failure = exc
+                    except (ValueError, OSError, EOFError, zlib.error) as exc:
+                        failure = exc  # a part gone or damaged names itself; the whole may still be packed below
                 if not task_id:
                     continue
             try:
