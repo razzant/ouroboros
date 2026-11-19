@@ -29,7 +29,7 @@ from supervisor.task_admission import (
     restore_terminalization_retry_rows,
     restored_handoff_unproven,
 )
-from supervisor.queue_transitions import sweep_orphaned_budget_fences
+from supervisor.queue_transitions import clear_budget_root_fence_for_settled_tree, sweep_orphaned_budget_fences
 from supervisor.task_lifecycle import (
     _cancel_result_fields,
     restore_queue_fences, snapshot_acceptance_roots,
@@ -912,8 +912,13 @@ def retry_pausing_envelopes(q):
             lineage = {**live, **{task["id"]: task for task in retained}}
             _restore_retained(retained, lineage, fenced, (roots | current, malformed or invalid, budget), unseen, prior,
                              late=True)
-        if not any(retry["fences"][1:]):
-            sweep_orphaned_budget_fences(q.PENDING, q.BUDGET_ROOT_FENCES, q.DRIVE_ROOT)
+        # The boot's orphan rule on the live queue: only a latch that boot left, still that very row, over a tree
+        # with no PENDING or RUNNING member now (a finished task's check). A newer latch is the live queue's own.
+        swept = [root for root, fence in retry.get("orphans", {}).items()
+                 if clear_budget_root_fence_for_settled_tree({"id": root}, fence=fence)]
+        if swept:
+            q.append_jsonl(q.DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+                "ts": utc_now_iso(), "type": "budget_root_fence_orphan_swept", "root_task_ids": sorted(swept)})
         with q._queue_lock:
             from supervisor.queue_publication import mark_dirty_locked
             q.PRIOR_DIRECT_ROOTS.pop("retry_pausing_envelopes")
@@ -1010,8 +1015,11 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
             retry["fences"] = fences
         restored, changed = _restore_retained(snapshot_pending, pending_by_id, fenced_running, fences,
                                               unseen_pauses, prior_roots, restored, direct_roots.get("incomplete", False))
-        if not retry and not any(fences[1:]) and (snapshot_pending or restored or not stale):
-            sweep_orphaned_budget_fences(_queue().PENDING, _queue().BUDGET_ROOT_FENCES, _queue().DRIVE_ROOT)
+        if not any(fences[1:]) and (snapshot_pending or restored or not stale):
+            if retry:  # its late pass sweeps these very latches, once their trees are dead in the live queue
+                retry["orphans"] = dict(_queue().BUDGET_ROOT_FENCES)
+            else:
+                sweep_orphaned_budget_fences(_queue().PENDING, _queue().BUDGET_ROOT_FENCES, _queue().DRIVE_ROOT)
         if not unread:
             _RESTORED.add(key)
         if changed or normalized:

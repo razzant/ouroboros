@@ -99,6 +99,39 @@ def test_restore_busy(tmp_path, monkeypatch):
     assert published and set(ids) == {task["id"], hidden["id"], "new-arrival"}
 
 
+def test_late_orphan_sweep_reads_the_live_tree(tmp_path, monkeypatch):
+    """A boot whose envelope index was busy sweeps its orphaned latches later, in the live queue. A latch it left
+    over a dead tree goes as at boot; a tree that runs again and a latch raised since keep refusing money."""
+    from ouroboros import store, store_hot_facts
+    from ouroboros.queue_observation import dispatch_probe
+    from supervisor.events_budget import _handle_budget_root_fence, _set_root_budget_pause_locked
+    from tests.test_budget_pause_monetary_selection import CHILD, FENCED, ROOT, _reserve, _tree
+
+    q, _, workers = _tree(tmp_path, monkeypatch)
+    running = dict(workers.RUNNING)
+    workers.RUNNING.clear()
+    with q._queue_lock:
+        for root in (ROOT, "settled-root"):
+            _set_root_budget_pause_locked(root, {})
+    assert q.publish_queue_snapshot("latched")
+    q.init(tmp_path)
+
+    def busy(_root):
+        raise store.StoreBusy("index busy at boot")
+
+    with monkeypatch.context() as m:
+        m.setattr(store_hot_facts, "pausing_envelopes", busy)
+        assert q.restore_pending_from_snapshot() == 0
+    workers.RUNNING.update(running)  # the tree runs again in this process
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=SimpleNamespace(push_log=lambda _e: None),
+                          persist_queue_snapshot=q.persist_queue_snapshot)
+    _handle_budget_root_fence({"type": "budget_root_fence", "task_id": "later-child",
+                               "resource_limit": {"scope": "root", "root_task_id": "later-root"}}, ctx)
+    assert q.publish_queue_snapshot("after_late_pass")
+    latched = {row["root_task_id"] for row in dispatch_probe(tmp_path)["budget_root_fences"]}
+    assert latched == {ROOT, "later-root"} and _reserve(tmp_path, CHILD) == FENCED
+
+
 @pytest.mark.parametrize("presence", [False, True])
 def test_pause_during_shutdown(tmp_path, monkeypatch, presence):
     from ouroboros import budget_pause as bp

@@ -260,7 +260,7 @@ def release_turn_acceptance_fence(drive_root: Any, root_task_id: str) -> bool:
         return False
 
 
-def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
+def clear_budget_root_fence_for_settled_tree(task: dict, *, fence: Optional[dict] = None) -> bool:
     """Release a root budget fence once its tree has no live members left.
 
     The brother of ``clear_acceptance_fence_for_root``, keyed by the ROOT id
@@ -272,6 +272,7 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     (and the snapshot restore would resurrect it after a restart). An owner
     Pause latch also stays while its census names an answered root's running
     upkeep or a run an ended member left: a terminal result is not ended execution.
+    ``fence`` releases only that very latch: a boot's deferred orphan sweep never removes a newer one.
     """
     q = _queue_module()
     if not isinstance(task, dict):
@@ -284,7 +285,7 @@ def clear_budget_root_fence_for_settled_tree(task: dict) -> bool:
     held = (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get(
         "cause") == "owner_pause" and owner_latch_holds(q, root_id)
     with q._queue_lock:
-        if root_id not in q.BUDGET_ROOT_FENCES:
+        if root_id not in q.BUDGET_ROOT_FENCES or fence is not None and q.BUDGET_ROOT_FENCES[root_id] is not fence:
             return False
         if held and (q.BUDGET_ROOT_FENCES.get(root_id) or {}).get("cause") == "owner_pause":
             return False
