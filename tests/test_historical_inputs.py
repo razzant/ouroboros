@@ -323,3 +323,41 @@ def test_cold_attempt_without_original_handle_retains_explicit_first_gap(main_lo
     assert latest["position"] == "latest" and latest["status"] == "captured"
     current = json.loads(read_actor_source_bytes(f.ctx.drive_root, f.ctx.task_id, latest["source_ref"]))
     assert "CURRENT_COLD_ATTEMPT_INPUT" in json.dumps(current["selected_messages"])
+
+
+def test_a_physical_input_that_cannot_be_located_now_keeps_its_address(tmp_path, monkeypatch):
+    """The first anchor is pinned once. When its observed physical projection cannot be located now
+    (``EvidenceUnavailable``: the packs catalog cannot answer), the anchor keeps that projection's
+    address and the typed reason, never a bare ``unavailable`` that drops the address for good; the
+    address then reads back the exact physical messages. The read names the task."""
+    from ouroboros import evidence_packs
+    from ouroboros.context_input_selection import _historical_anchor
+    from ouroboros.observability import persist_call, read_blob_ref, read_call_manifest_ref
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    physical = [{"role": "user", "content": "PHYSICAL_PROJECTION " + "x" * 300}]
+    call = persist_call(tmp_path, task_id="t-anchor", call_id="physical_a1", call_type="physical_llm_candidate",
+                        payload={"messages": physical})
+    digest = read_call_manifest_ref(tmp_path, call["manifest_ref"], task_id="t-anchor")["full_payload_ref"]["sha256"]
+    observation = {"revision": "r1", "physical_attempt_id": "a1", "messages": [{"role": "user", "content": "SELECTED"}],
+                   "physical_source_status": "observed_projection", "physical_source_ref": call["manifest_ref"]}
+    real, tasks = evidence_packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == digest:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        anchor = _historical_anchor(SimpleNamespace(_historical_author_inputs={}), observation, [tmp_path], "t-anchor")
+    assert anchor["status"] == "captured" and "t-anchor" in tasks, (anchor, tasks)
+    payload = json.loads(read_actor_source_bytes(tmp_path, "t-anchor", anchor["source_ref"]))
+    assert "SELECTED" in json.dumps(payload["selected_messages"]) and "physical_messages" not in payload
+    assert payload["physical_source_status"] == "evidence_unavailable" and payload["physical_source_reason"] == "busy"
+    identity = payload["physical_source_identity"]
+    assert identity == call["manifest_ref"]
+    manifest = read_call_manifest_ref(tmp_path, identity, task_id="t-anchor")
+    assert read_blob_ref(tmp_path, manifest["full_payload_ref"])["messages"] == physical

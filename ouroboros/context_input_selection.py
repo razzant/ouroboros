@@ -61,6 +61,7 @@ def _historical_state(ctx, roots, task_id):
 def _historical_anchor(ctx, observation, roots, task_id):
     """One plain, redacted source, copied into the existing reader stores before publication."""
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref, read_call_manifest_ref, redact_projection
     from ouroboros.utils import truncate_within_limit
 
@@ -80,11 +81,12 @@ def _historical_anchor(ctx, observation, roots, task_id):
                "presence_origin": observation.get("historical_presence_origin"),
                "coverage": _HISTORICAL_COVERAGE, "physical_source_status": "unavailable"}
     if observation.get("physical_source_status") == "observed_projection":
+        unlocated = None
         for root in roots:
             try:
                 ref = observation["physical_source_ref"]
                 manifest = read_call_manifest_ref(root, ref, task_id=task_id)
-                physical = read_blob_ref(root, manifest["full_payload_ref"])["messages"]
+                physical = read_blob_ref(root, manifest["full_payload_ref"], task_id=task_id)["messages"]
                 if not isinstance(physical, list):
                     continue
                 payload.update(physical_messages=physical, physical_source_status="observed_projection",
@@ -92,8 +94,15 @@ def _historical_anchor(ctx, observation, roots, task_id):
                                physical_projection_seal=manifest.get("model_send_seal"),
                                physical_attempt_id=observation.get("physical_attempt_id"))
                 break
+            except EvidenceUnavailable as exc:
+                unlocated = exc
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+        else:
+            if unlocated is not None:  # observed, but where its bytes lie cannot be learned now: keep the address
+                payload.update(physical_source_status="evidence_unavailable", physical_source_reason=unlocated.reason,
+                               physical_source_identity=observation["physical_source_ref"],
+                               physical_attempt_id=observation.get("physical_attempt_id"))
     redacted = redact_projection(payload)
     # Call identity differs even for the same selected view. It is provenance,
     # not a reason to duplicate identical first/latest input bodies.
