@@ -118,9 +118,10 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
     for number in range(12):
         _task(root, f"settled-{number}", blobs=1)
     active = {"writer": False, "task": None}
-    scans = []
+    scans, rows = [], []
     open_store = store.open_store
     loose_ids, stamps, unlink = packer._loose_task_ids, packer.task_stamps, packs.unlink_loose
+    packable = packs.task_packable
 
     @contextlib.contextmanager
     def opened(*args, **kwargs):
@@ -141,6 +142,11 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
             assert task == active["task"], "foreign task evaluated during candidate unlink"
         return stamps(root, task, **kwargs)
 
+    def observed_packable(txn, task):
+        rows.append(task)
+        assert active["writer"] and task == active["task"], "a row read outside the candidate's barrier"
+        return packable(txn, task)
+
     def remove(root, task, *args, **kwargs):
         active["task"] = task
         try:
@@ -151,10 +157,12 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
     monkeypatch.setattr(store, "open_store", opened)
     monkeypatch.setattr(packer, "_loose_task_ids", ids)
     monkeypatch.setattr(packer, "task_stamps", observed_stamps)
+    monkeypatch.setattr(packs, "task_packable", observed_packable)
     monkeypatch.setattr(packs, "unlink_loose", remove)
     report = packer.run_pass(root)
     assert report["faults"] == 0 and report["unlinked"] == 24
     assert scans and not any(scans)
+    assert set(rows) == {f"settled-{number}" for number in range(12)}  # each candidate's row read under its barrier
 
 
 def test_a_blob_named_before_the_census_stays_loose_and_one_named_after_it_reads_from_the_pack(root, monkeypatch):

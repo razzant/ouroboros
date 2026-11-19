@@ -487,7 +487,7 @@ def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monk
     packed = _file(addressed("packed before", "6"), "packed before")
     with monkeypatch.context() as older_body:  # a body before this change packed every handle
         older_body.setattr(maintenance_retirement, "worked_copy", lambda folder, name: None)
-        evidence_packs.pack_task(root, "prepacked", keep_shas=set())
+        evidence_packs.pack_task(root, "prepacked")
     assert not packed.exists()
     from ouroboros import store
     from ouroboros.maintenance_retirement import WORKED_COPIES
@@ -496,7 +496,7 @@ def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monk
     assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
     with store.open_store(root, write=False) as txn:
         assert (txn.get_row(WORKED_COPIES, "prepacked") or {}).get("settled_at"), "written back: owed again, with a date"
-    evidence_packs.pack_task(root, "prepacked", keep_shas=set())
+    evidence_packs.pack_task(root, "prepacked")
     assert not packed.exists(), "the packer unlinks a loose copy of a member it already holds, as before"
     assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
     fresh = _file(addressed("never packed", "7"), "never packed")
@@ -774,9 +774,9 @@ def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, mon
     with monkeypatch.context() as older_body:  # a body before this change packed every handle, one generation a pass
         older_body.setattr(maintenance_retirement, "worked_copy", lambda folder, name: None)
         _file(addressed("first generation", "8"), "first generation")
-        evidence_packs.pack_task(root, "multigen", keep_shas=set())
+        evidence_packs.pack_task(root, "multigen")
         second = _file(addressed("second generation", "9"), "second generation")
-        evidence_packs.pack_task(root, "multigen", keep_shas=set())
+        evidence_packs.pack_task(root, "multigen")
     assert (root / "observability" / "packs" / "multigen.2.xz").exists() and not second.exists()
     assert evidence_packs.materialize_handle(root, "multigen", f"source_handles/context_checkpoints/{second.name}")
     assert _prune(root)["removed"] == 1 and not second.exists()

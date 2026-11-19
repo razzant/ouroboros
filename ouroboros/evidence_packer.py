@@ -30,7 +30,8 @@ log = logging.getLogger(__name__)
 # ``packed`` = new generations written; ``examined`` = candidates processed; ``verified_bytes`` = raw bytes re-read;
 # ``missing`` = referenced records neither loose nor packed; ``live``/``reading``/``storeless`` = folders still
 # holding loose evidence because their task runs / is terminal under an open review / has no store row;
-# ``deferred`` = candidates whose unlink waited for a held custody lock or a moved stamp (retried next pass).
+# ``deferred`` = candidates whose unlink waited for a held custody lock, a moved stamp, a row no longer packable or
+# a store phase that refuses deletion (retried next pass).
 COUNTERS = ("packed", "examined", "swept", "candidates", "raw", "compressed", "verified_bytes",
             "unlinked", "kept", "busy", "faults", "archived", "missing", "live", "reading", "storeless", "deferred")
 
@@ -364,7 +365,7 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
         sweep.collect_keep(keep_rows(root))
     for task, raw in candidates:  # each reads its own sidecars by name (``published_generations``), never all
         try:
-            outcome = packs.pack_task(root, task, keep_shas=set(), revision=revisions[task], sweep=sweep)
+            outcome = packs.pack_task(root, task, revision=revisions[task], sweep=sweep)
         except Exception as exc:
             report["faults"] += 1
             report["unfinished"].append(task)

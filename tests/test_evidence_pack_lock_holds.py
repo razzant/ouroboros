@@ -1,13 +1,14 @@
 """A model call's manifest takes no install-wide lock and never waits for the evidence packer, and the
-packer leaves the store's write lock to waiters while it deletes.
+packer holds the store's write lock only around its candidate's check and the unlink of one checkpoint handle.
 
 On a live install the first pass after the store migration held the store's write lock, and the
 publication lock every manifest then took, for 8-24 s per task while it unlinked hundreds of loose
 members on a busy disk: every model call's manifest gave up after 4 s and every store writer after
-10 s, and two dozen tasks failed (issue #1754). The manifests then queued on that lock behind one
-another and behind the packer's deletion (issue #3745). A manifest is now one atomic write; deletion
-runs in sections of one ``UNLINK_SECTION_SEC`` budget under a rollback barrier, a waiter gets a
-poll-length gap between sections, and a stale check defers the candidate.
+10 s, and two dozen tasks failed (issue #1754). Deletion in sections with gaps for waiters followed,
+and the manifests then queued on that lock behind one another and behind the packer (issue #3745).
+A manifest is now one atomic write. After one check of the candidate its blobs go under no store
+lock, and each handle, which a reader may hold by its path, under a barrier of its own that reads
+the store's phase and the task's row again.
 """
 from __future__ import annotations
 
@@ -15,53 +16,61 @@ import contextlib
 import os
 import pathlib
 import sqlite3
-import threading
-import time
 
 import pytest
 
 from ouroboros import evidence_packer as packer
 from ouroboros import evidence_packs as packs
 from ouroboros import observability, store
+from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.utils import utc_now_iso
 from tests._store_journal_shared import use_journal
-from tests.test_evidence_packs import _handle_path, _task
+from tests.test_evidence_packs import _handle_path, _result, _task
 from tests.test_evidence_packs import root as root  # noqa: F401  (the shared fixture)
 
 
-class _SlowUnlinks:
-    """``evidence_packs.os`` with each unlink slowed like a saturated disk; the rest is ``os``."""
+class _HookedUnlinks:
+    """``evidence_packs.os`` with ``on_unlink(path)`` run before each unlink; the rest is ``os``."""
 
-    def __init__(self, delay: float, on_unlink=None):
-        self.delay, self.on_unlink = delay, on_unlink
+    def __init__(self, on_unlink):
+        self.on_unlink = on_unlink
 
     def __getattr__(self, name):
         return getattr(os, name)
 
     def unlink(self, path, *args, **kwargs):
-        if self.on_unlink is not None:
-            self.on_unlink(path)
-        time.sleep(self.delay)
+        self.on_unlink(path)
         os.unlink(path, *args, **kwargs)
 
 
-def _between_sections(monkeypatch, hook):
-    """Run ``hook(n)`` before the n-th section of a deletion enters its phase gate (n >= 2: after section n-1)."""
+def _before_barrier(monkeypatch, hook):
+    """Run ``hook(n)`` before a deletion enters its n-th store barrier (``_unlink_phase``): n = 1 is the
+    candidate's check, n >= 2 the barrier of its (n - 1)-th checkpoint handle."""
     phase, calls = packs._unlink_phase, []
 
     @contextlib.contextmanager
     def observed(root):
         calls.append(None)
-        if len(calls) >= 2:
-            hook(len(calls))
+        hook(len(calls))
         with phase(root) as value:
             yield value
 
     monkeypatch.setattr(packs, "_unlink_phase", observed)
-    return calls
+
+
+def _handles(root, task_id, count):
+    """``count`` more checkpoint handles of the task, beside the one ``_task`` stores."""
+    return [store_actor_source_bytes(root, task_id, category="context_checkpoints", extension="md",
+                                     source_id=f"focus_source_{task_id}_{n}", data=b"# focus %d\n" % n + b"z" * 3000)
+            for n in range(count)]
 
 
 def _loose(refs):
     return [ref for ref in refs if pathlib.Path(ref["path"]).exists()]
+
+
+def _present(root, task_id, handles):
+    return [handle for handle in handles if _handle_path(root, task_id, handle).exists()]
 
 
 def test_a_call_manifest_takes_no_install_wide_lock_and_waits_for_no_holder(root):
@@ -92,41 +101,86 @@ def test_a_call_manifest_takes_no_install_wide_lock_and_waits_for_no_holder(root
     assert pathlib.Path(ref["path"]).exists()
 
 
-def test_a_long_deletion_leaves_the_locks_to_waiters_between_sections(root, monkeypatch):
-    refs, handle = _task(root, "big", blobs=60)
-    started = threading.Event()
-    monkeypatch.setattr(packs, "os", _SlowUnlinks(0.05, on_unlink=lambda _path: started.set()))
-    report: dict = {}
-    runner = threading.Thread(target=lambda: report.update(packer.run_pass(root)), daemon=True)
-    runner.start()
-    assert started.wait(60), "the pass never reached its deletion"
-    # A store writer gets in while members are still loose; the base held the lock to the end.
-    with store.open_store(root, write=True, wait_sec=30):
-        assert _loose(refs), "the store write lock came free only after the deletion"
-    runner.join(60)
-    assert not runner.is_alive() and report["faults"] == 0
-    # 60 blobs and the checkpoint handle, whose own unlink in section one moved the task's stamps
-    assert report["unlinked"] == 61 and not _loose(refs) and not _handle_path(root, "big", handle).exists()
+def test_a_long_deletion_holds_no_store_lock_over_its_blobs(root, monkeypatch):
+    """A store writer that will not wait commits midway through the unlink of a candidate's blobs, and the one
+    pass still removes every member."""
+    refs, handle = _task(root, "big", blobs=12)
+    blobs, loose_at_write = [], []
+
+    def midway(path):
+        if pathlib.Path(path).name.endswith(".gz"):
+            blobs.append(path)
+            if len(blobs) == 6:  # five blobs gone, seven still loose
+                with store.open_store(root, write=True, wait_sec=0) as txn:
+                    txn.store_task({"task_id": "unrelated", "status": "running", "_schema_version": 1,
+                                    "updated_at": utc_now_iso()})
+                loose_at_write.append(len(_loose(refs)))
+
+    monkeypatch.setattr(packs, "os", _HookedUnlinks(midway))
+    report = packer.run_pass(root)
+    assert report["faults"] == 0 and loose_at_write == [7]
+    assert report["unlinked"] == 13 and not _loose(refs) and not _handle_path(root, "big", handle).exists()
 
 
-def test_an_export_between_sections_stops_the_deletion_until_published_again(root, monkeypatch):
-    refs, _ = _task(root, "big", blobs=12)
+@pytest.mark.parametrize("reader", ["review", "resumed"])
+def test_a_reader_that_begins_after_the_check_keeps_the_handles_not_yet_unlinked(root, monkeypatch, reader):
+    """A review that opens, or a resumption, between two handle unlinks keeps the rest loose: each handle's barrier
+    reads the row again, since a reader may hold a handle by its path. The candidate stays owed, and the pass after
+    the reader ends removes the rest, every handle in one pass. One that begins before the candidate's check removes
+    nothing, neither blobs nor handles."""
+    refs, first = _task(root, "big", blobs=2)
+    handles = [first, *_handles(root, "big", 2)]
+
+    def begins():
+        if reader == "review":
+            _result(root, "big", review_operations={"op": {"surface": "task_acceptance", "state": "dispatched"}})
+        else:
+            _result(root, "big", "running")
+
+    def ends():
+        _result(root, "big", review_operations={"op": {"surface": "task_acceptance", "state": "closed"}})
+
+    def run(begin_at):
+        with monkeypatch.context() as patch:
+            _before_barrier(patch, lambda n: begins() if n == begin_at else None)
+            return packer.run_pass(root)
+
+    report = run(1)  # before the candidate's check
+    assert report["faults"] == 0 and (report["deferred"], report["unlinked"]) == (1, 0)
+    assert len(_loose(refs)) == 2 and len(_present(root, "big", handles)) == 3
+    ends()
+    report = run(3)  # the first handle unlinked, the second's barrier next
+    assert report["faults"] == 0 and report["deferred"] == 1 and report["unfinished"] == ["big"]
+    assert not _loose(refs) and len(_present(root, "big", handles)) == 2
+    ends()
+    report = packer.run_pass(root)
+    assert report["faults"] == 0 and (report["deferred"], report["unlinked"]) == (0, 2)
+    assert not _present(root, "big", handles)
+
+
+def test_an_export_that_begins_during_a_deletion_keeps_the_handles_until_published_again(root, monkeypatch):
+    """An export that begins after the candidate's check and its blobs' unlink stops the handles' unlinks (each
+    handle's barrier reads the phase); while it lasts a pass unlinks nothing, and the first pass after the store is
+    published again removes them. Packed bytes read throughout."""
+    refs, first = _task(root, "big", blobs=3)
+    handles = [first, *_handles(root, "big", 2)]
 
     def export(n):
-        if n == 2:
+        if n == 2:  # the candidate checked and its blobs unlinked: the first handle's barrier next
             with store.open_store(root, write=True, service=True) as txn:
                 txn.set_meta("phase", store.EXPORTING)
 
     with monkeypatch.context() as patch:
-        _between_sections(patch, export)
-        patch.setattr(packs, "os", _SlowUnlinks(0.1))
+        _before_barrier(patch, export)
         report = packer.run_pass(root)
-        assert report["faults"] == 0 and 0 < report["unlinked"] < 13 and _loose(refs)
-        loose_after_export = len(_loose(refs))
-    assert packer.run_pass(root)["unlinked"] == 0 and len(_loose(refs)) == loose_after_export
+    assert report["faults"] == 0 and report["deferred"] == 1 and report["unfinished"] == ["big"]
+    assert not _loose(refs) and len(_present(root, "big", handles)) == 3
+    assert all(packs.blob_bytes(root, ref) for ref in refs)
+    assert packer.run_pass(root)["unlinked"] == 0 and len(_present(root, "big", handles)) == 3
     with store.open_store(root, write=True, service=True) as txn:
         txn.set_meta("phase", store.PUBLISHED)
-    assert packer.run_pass(root)["faults"] == 0 and not _loose(refs)
+    assert packer.run_pass(root)["faults"] == 0 and not _present(root, "big", handles)
+    assert all(read_actor_source_bytes(root, "big", handle) for handle in handles)
 
 
 def _held_reader(root):

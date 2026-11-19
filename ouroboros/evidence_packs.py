@@ -26,8 +26,6 @@ INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
 DAMAGED_MARK = ".index.sqlite.damaged"  # left by a read that met the live index unusable or damaged; its rebuild removes it
 INDEX_WAIT_SEC = 5.0
-UNLINK_SECTION_SEC = 0.5  # one deletion section's budget under the store write lock
-UNLINK_SECTION_GAP_SEC = 0.15  # between sections: longer than a waiting writer's SQLite busy poll (100 ms)
 FORMAT_VERSION = 1
 INDEX_SCHEMA_VERSION = 2
 CODEC, PRESET = "xz", 1
@@ -1235,63 +1233,56 @@ def _unlink_phase(root: Any) -> Iterator[tuple]:
     yield False, None
 
 
-def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,
-                 sweep, members: list) -> Dict[str, int]:
-    """Remove loose files whose bytes a VERIFIED pack (``sidecars``) holds; a blob a live task's
-    manifests referenced at the pass's census (``keep_shas`` and the sweep's keep-set) stays loose. A busy file is
-    retried next pass."""
+def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, revision: str, sweep,
+                 members: list) -> Dict[str, int]:
+    """Remove loose files whose bytes a VERIFIED pack (``sidecars``) holds, under the task's custody lock; a blob
+    a live task's manifests referenced at the pass's census (the sweep's keep-set) stays loose. One check of the
+    candidate under a store barrier comes first (``_unlink_phase``: the phase allows deletion, the stamp is the
+    census's and the row is still packable, ``task_packable``), and a failed check defers everything. The blobs
+    then go under no store lock (their readers go through ``blob_bytes``), then each checkpoint handle, which a
+    reader may hold by its path, under a barrier of its own that reads the phase and the row again: an export, a
+    review or a resumption that began defers the rest. A busy file is retried next pass."""
     from ouroboros.evidence_packer import task_stamps
     from ouroboros.task_custody import task_custody_lock
 
     root = pathlib.Path(root)
     packed = {_member_key(m) for s in sidecars for m in s["members"]}
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
+    todo = [m for m in members if _member_key(m) in packed]
 
-    def remove(txn, todo: list, until: float) -> Optional[list]:
-        """One section under the store write lock: this task's own recheck (its row is still terminal and its
-        evidence directories are as the census saw them: the stamp carries both), then unlinks until ``until``;
-        the members left, or ``None`` when the candidate went stale."""
-        nonlocal revision
-        if task_stamps(root, task_id, txn=txn) != revision:
-            return None
-        for index, member in enumerate(todo):
-            if index and time.monotonic() >= until:
-                # Still under the lock: this section's own unlinks are the only change to the stamps.
-                revision = task_stamps(root, task_id, txn=txn)
-                return todo[index:]
-            if not member["source"].is_file():
-                continue
-            if member["kind"] != CHECKPOINT and (member["sha256"] in sweep.keep or member["sha256"] in keep_shas):
-                report["kept"] += 1
-                continue
-            try:
-                os.unlink(member["source"])
-                report["unlinked"] += 1
-            except FileNotFoundError:
-                pass
-            except PermissionError:
-                report["busy"] += 1
-        return []
+    def unlink(member: Dict[str, Any]) -> None:
+        try:
+            os.unlink(member["source"])
+            report["unlinked"] += 1
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            report["busy"] += 1
 
-    # Compression precedes custody -> store write locks. A section holds the store write lock (a rollback
-    # barrier) for one UNLINK_SECTION_SEC budget; every store writer waits on it. Inside, only this task's
-    # recheck; between sections a waiting writer gets a poll-length gap. A stale check defers the candidate.
-    todo: Optional[list] = [m for m in members if _member_key(m) in packed]
     with task_custody_lock(root, task_id) as acquired:
-        while acquired and todo:
-            left: Optional[list] = None
-            with _unlink_phase(root) as (allowed, txn):
-                until = time.monotonic() + UNLINK_SECTION_SEC
-                if allowed:
-                    left = remove(txn, todo, until)
-            todo = left
-            if todo:
-                time.sleep(UNLINK_SECTION_GAP_SEC)
-    report["deferred"] = int(todo != [])
+        if not acquired:
+            return report
+        with _unlink_phase(root) as (allowed, txn):
+            if not (allowed and task_stamps(root, task_id, txn=txn) == revision
+                    and (txn is None or task_packable(txn, task_id))):
+                return report
+        for member in todo:
+            if member["kind"] != CHECKPOINT and member["source"].is_file():
+                if member["sha256"] in sweep.keep:
+                    report["kept"] += 1
+                else:
+                    unlink(member)
+        for member in todo:
+            if member["kind"] == CHECKPOINT and member["source"].is_file():
+                with _unlink_phase(root) as (allowed, txn):
+                    if not allowed or (txn is not None and not task_packable(txn, task_id)):
+                        return report
+                    unlink(member)
+        report["deferred"] = 0
     return report
 
 
-def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str] = None, sweep=None) -> Dict[str, Any]:
+def pack_task(root: Any, task_id: str, *, revision: Optional[str] = None, sweep=None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs. Only the
     generations an unlink relies on are re-read: the new one, and an older one while it still holds a
@@ -1303,7 +1294,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str
     if sweep is None:
         with pack_sweep(root) as sweep:
             sweep.collect_keep(keep_rows(root))
-            return pack_task(root, task_id, keep_shas=keep_shas, revision=revision, sweep=sweep)
+            return pack_task(root, task_id, revision=revision, sweep=sweep)
     if revision is None:
         revision = task_stamps(root, task_id)
     generations = published_generations(root, task_id)
@@ -1336,8 +1327,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
         report["verified_bytes"] += int(sidecar["raw_total"])
     write_unpacker(root)
-    report.update(unlink_loose(root, task_id, relied, keep_shas=keep_shas, revision=revision,
-                               sweep=sweep, members=members))
+    report.update(unlink_loose(root, task_id, relied, revision=revision, sweep=sweep, members=members))
     if report["members"] or report["unlinked"] or missing:  # a row records production or a gap, never a re-visit
         record_storage_pack(root, phase="packed", **report)
     return report
