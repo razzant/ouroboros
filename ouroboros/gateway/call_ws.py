@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import time
 import uuid
 from contextlib import suppress
 from starlette.responses import JSONResponse
@@ -11,7 +12,10 @@ from ouroboros import call_protocol as cp
 from ouroboros.call_peers import CallPeerError, LiveCallHub, close_hub, get_hub
 from ouroboros.gateway.call_contracts import PEER_CONTROLS
 from ouroboros.gateway.schema import validate_ingress
-SOCKET_POLL_SECONDS = .01
+# Every periodic wait here outlasts one tick of the clock asyncio schedules by. Before Python 3.13 Windows' monotonic
+# clock moves in 15.6 ms steps and asyncio fires every timer due within one step at once, so two 10 ms waits in
+# different tasks (two joined peers' senders) kept each other due and held the loop at a full core (#3796).
+SOCKET_POLL_SECONDS = max(.01, 1.05 * time.get_clock_info("monotonic").resolution)
 # A microphone frame the hub refused waits, retained, until the call drains its input. The wait must stay above one
 # tick of Windows' monotonic clock (15.6 ms): asyncio fires a timer due within one tick as soon as any IO wakes the
 # loop, so a 10 ms retry ran thousands of times a second and starved the call it waited on (#3633).

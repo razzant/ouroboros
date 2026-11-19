@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import time
 
 import pytest
 
 from ouroboros import call_protocol as cp
 from ouroboros.call_peers import LiveCallHub
-from ouroboros.gateway.call_ws import serve_peer
+from ouroboros.gateway.call_ws import INPUT_RETRY_SECONDS, SOCKET_POLL_SECONDS, serve_peer
 
 PEER_CONTROL_BYTES = 16 * 1024  # published as call_socket.max_control_bytes
 # Fewer characters than a peer's control may carry bytes, and far more UTF-8 bytes than that.
@@ -120,14 +121,9 @@ def test_a_peers_control_stays_bounded_in_utf8_bytes_at_the_socket_door(over):
         assert events[1].message["text"] == words
 
 
-def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of_the_call(monkeypatch):
+def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of_the_call():
     """Beside the sender's 10 ms poll a receive timeout held Windows' loop (a 15.6 ms monotonic clock) at a full
     core for the whole call (#3796): after hello only the peer's message or the call's end may wake the door."""
-    real_wait, waits = asyncio.wait, []
-
-    async def observed_wait(fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
-        waits.append(timeout)
-        return await real_wait(fs, timeout=timeout, return_when=return_when)
 
     class SilentCloseSocket(PeerSocket):
         """A server close that hands no disconnect back (wsproto's waits for the peer's echo): only the sender's end
@@ -142,25 +138,41 @@ def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of
         return event
 
     async def scenario():
+        loop, timers = asyncio.get_running_loop(), []
+        arm = loop.call_at
+
+        def call_at(when, callback, *args, **kwargs):  # every asyncio timer, whichever call arms it
+            timers.append(asyncio.current_task())
+            return arm(when, callback, *args, **kwargs)
+
+        loop.call_at = call_at
         hub = LiveCallHub(cp.CallSpec("synthetic-quiet-peer", 1, "synthetic", "synthetic"))
         socket = SilentCloseSocket(hello())
         door = asyncio.create_task(serve_peer(socket, hub, role="owner"))
         await asyncio.wait_for(_joined(hub), 5)
-        joined = len(waits)  # the door entered its post-hello wait in the step that joined the peer
+        joined = len(timers)  # the door entered its post-hello wait in the step that joined the peer
         await asyncio.sleep(.2)  # twenty receive timeouts before #3796
-        quiet = waits[joined:]
+        quiet = [task for task in timers[joined:] if task is door]
         socket.incoming.put_nowait({"type": "websocket.receive", "text": json.dumps({"type": "mute", "muted": True})})
         control = await asyncio.wait_for(next_control(hub), 5)
         hub.close("finished")
         await asyncio.wait_for(door, 5)
         return quiet, control, socket
 
-    monkeypatch.setattr(asyncio, "wait", observed_wait)
     quiet, control, socket = asyncio.run(scenario())
-    assert quiet == [], "a quiet joined peer's door woke without a message"
+    assert quiet == [], "a quiet joined peer's door armed a timer"
     assert control.message == {"type": "mute", "muted": True}, "the door still reads a joined peer's messages"
     assert socket.sent[-1]["type"] == "state" and socket.sent[-1]["state"] == cp.STATE_CLOSED
     assert socket.closed and all(reason == {"code": 1000} for reason in socket.closed), "the sender's end ends the door"
+
+
+def test_the_doors_periodic_waits_outlast_one_tick_of_the_loops_clock():
+    """Two waits shorter than one clock tick in different tasks keep each other due and never let the loop block: on
+    Windows before Python 3.13 (15.6 ms ticks) two quiet peers' 10 ms senders held the server at a full core (#3796)."""
+    tick = time.get_clock_info("monotonic").resolution  # what asyncio's loop takes as its clock resolution
+    assert SOCKET_POLL_SECONDS > tick and INPUT_RETRY_SECONDS > tick
+    if tick < .01:
+        assert SOCKET_POLL_SECONDS == .01, "where the clock is fine the sender keeps its 10 ms poll"
 
 
 def test_bounded_codec_keeps_reading_server_controls(subtests):
