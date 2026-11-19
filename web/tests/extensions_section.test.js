@@ -114,7 +114,8 @@ function sectionWorld(t, { wide = false, draft = false, realTools = false } = {}
     };
     settings = initSettings({ state, layers, showPage, ws, openExtensions: (...args) => section.open(...args) });
     section = createExtensions({ ctx: { state, layers, showPage, ws, openSettings: settings.open },
-        viewsHtml: '<div class="skills-scroll"></div>', views: { show: view => views.push(view), hide: () => views.push('hidden') },
+        viewsHtml: '<div class="skills-scroll"><button data-view-link>Other view</button></div>',
+        views: { show: view => views.push(view), hide: () => views.push('hidden') },
         facts: () => ({ installed: 3, needs: 1, sources: 2 }) });
     for (const page of [settings.page, section.page]) {
         page.getBoundingClientRect = () => ({ width: wide ? 1000 : 390 });
@@ -349,7 +350,9 @@ test('passive MCP mounts and reconnects share a fresh status request, never a pr
 for (const draft of [false, true]) for (const wide of [false, true]) {
     test(`S → Accounts → T restores the same ${draft ? 'draft' : 'clean'} S across 40rem (${wide})`, async t => {
         const w = sectionWorld(t, { wide, draft });
-        await w.section.open('tools/S', { map: true }); await settle();
+        await w.section.open('tools', { map: true }); await settle();
+        const localOpener = w.bodies.get('tools').querySelector('[data-door]');
+        w.section.go('tools/S', { opener: localOpener }); await settle();
         const original = w.bodies.get('tools/S'), opener = original.querySelector('[data-door]');
         original.querySelector('[data-draft]').value = draft ? 'kept words' : '';
         opener.focus();
@@ -368,6 +371,9 @@ for (const draft of [false, true]) for (const wide of [false, true]) {
         assert.equal(original.querySelector('[data-draft]').value, draft ? 'kept words' : '');
         assert.equal(w.env.document.activeElement, opener);
         assert.equal(w.layers.returnPage(), null);
+        assert.equal(w.back().getAttribute('aria-label'), 'Back to MCP servers');
+        await w.close('button');
+        assert.equal(w.env.document.activeElement, localOpener, 'the restored level still owes its original local opener');
     });
     test(`map choice releases the held ${draft ? 'draft only after its save' : 'clean form'} (${wide})`, async t => {
         const w = sectionWorld(t, { wide, draft });
@@ -403,4 +409,21 @@ test('a pointer origin is captured before the asynchronous leave check, includin
     await w.close('button');
     assert.equal(w.env.document.activeElement, button);
     assert.equal(w.state.settingsPath, 'test-voice');
+});
+
+test('a link between Extensions views owes its own return; a rail row just replaces the page', async t => {
+    const w = sectionWorld(t, { wide: true });
+    await w.section.open('installed', { map: true }); await settle();
+    const link = w.section.page.querySelector('[data-view-link]');
+    await w.section.open('browse', { opener: link });
+    assert.deepEqual(w.current(), ['browse']);
+    assert.equal(w.back().getAttribute('aria-label'), 'Back to Extensions › Skills');
+    await w.close('button');
+    assert.deepEqual(w.current(), ['installed']);
+    assert.equal(w.env.document.activeElement, link);
+    await w.section.page.querySelector('[data-extensions-rail]').fire('click', {
+        target: w.section.page.querySelector('[data-extensions-open="browse"]'),
+    });
+    assert.deepEqual(w.current(), ['browse']);
+    assert.equal(w.layers.returnPage(), null);
 });

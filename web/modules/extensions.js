@@ -68,6 +68,11 @@ export function installedAnswer({ installed = null, needs = 0 } = {}) {
     return { text: needs ? `${words} · ${fmt(needs === 1 ? '{n} needs you' : '{n} need you', { n: needs })}` : words, owner: needs > 0 };
 }
 
+function readAnswer(answer, failed) {
+    if (!failed) return answer;
+    return { text: answer ? fmt('Last known: {answer}', { answer: answer.text }) : fmt('Could not read'), owner: false };
+}
+
 function rowHtml(row) {
     return `<button type="button" class="section-row" data-extensions-open="${escapeHtml(row.id)}">`
         + `<span class="section-row-glyph" aria-hidden="true">${fluentIcon(row.glyph, 18)}</span>`
@@ -101,8 +106,8 @@ export function extensionsTitle(path) {
 /**
  * Draw the section into `#content` and take its presses. `viewsHtml` is the skill views' block and `toolbarHtml` their
  * actions for the band's end; `views` is `{ show(view), hide(), placeShown() }` (placeShown: the section came on screen,
- * so its rows' facts are worth reading); `facts()` answers `{ installed, needs, working, sources }` from what skills.js
- * has read. Answers the section's open, capture/restore and disposal controls.
+ * so its rows' facts are worth reading); `facts()` answers `{ installed, needs, working, sources }` with a failure flag
+ * for each listing (`installedFailed`, `sourcesFailed`) from skills.js. Answers open, capture/restore and disposal.
  */
 export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', views = {}, facts = () => ({}) } = {}) {
     const { state, ws, layers = null, showPage, openSettings, openDashboardTab, setBeforePageLeave } = ctx;
@@ -258,10 +263,11 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
         let read = {};
         try { read = facts() || {}; } catch { /* a row keeps what it showed */ }
         const answers = {
-            installed: installedAnswer(read),
+            installed: readAnswer(installedAnswer(read), read.installedFailed),
             tools: tools === undefined ? null : mcpServersAnswer(tools),
             browse: null,
-            sources: Number.isFinite(read.sources) ? { text: fmt('{n} connected', { n: read.sources }), owner: false } : null,
+            sources: readAnswer(Number.isFinite(read.sources) ? { text: fmt('{n} connected', { n: read.sources }), owner: false } : null,
+                read.sourcesFailed),
         };
         rows().forEach((row) => {
             const id = row.dataset.extensionsOpen;
@@ -271,7 +277,7 @@ export function createExtensions({ ctx = {}, viewsHtml = '', toolbarHtml = '', v
             if (words.textContent !== text) words.textContent = text;
             // Work in flight on an installed skill keeps the moving mark the Installed tab's count stood for.
             paintStatusMark(row.querySelector('.extensions-mark'),
-                markView({ mark: id === 'installed' && read.working ? 'moving' : 'none', owner: Boolean(answer?.owner) }));
+                markView({ mark: id === 'installed' && !read.installedFailed && read.working ? 'moving' : 'none', owner: Boolean(answer?.owner) }));
         });
     }
 

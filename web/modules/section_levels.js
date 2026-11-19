@@ -205,13 +205,17 @@ export function createSectionLevels({ place, pane, layers = null, shown = () => 
     // The page-navigation owner holds this snapshot. Restoring the levels neither makes a jump nor captures a new
     // return. Its reading owner restores the actual opener after the section has painted.
     function capture() {
-        const kept = [...levels];
-        return { retains: el => kept.some(level => level.el === el), release: releaseAside,
+        const kept = levels.map(level => ({ level, opener: level.opener, jump: level.jump }));
+        return { retains: el => kept.some(({ level }) => level.el === el), release: releaseAside,
             restore() {
                 let shared = 0;
-                while (shared < kept.length && levels[shared] === kept[shared]) shared++;
+                while (shared < kept.length && levels[shared] === kept[shared].level) shared++;
                 closeLevels(shared);
-                kept.forEach((level, under) => { if (under >= shared) open(level.path, { under }); });
+                kept.forEach(({ level, opener, jump }, under) => {
+                    const restored = under < shared ? levels[under] : open(level.path, { under, view: level.view });
+                    // The outer return has its own opener; a later local Back still owes this level's original one.
+                    Object.assign(restored, { opener, jump });
+                });
             } };
     }
 

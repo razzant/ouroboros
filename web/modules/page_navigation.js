@@ -15,12 +15,12 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         for (const layer of returns) layer.returnTo.release?.();
     }
 
-    const currentPlace = () => {
+    const currentPlace = (opener) => {
         // WebKit checkpoints microtasks between click listeners without focusing the pressed button.
         const target = pressed?.eventPhase ? pressed.target : null;
-        return capture(target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
+        return capture(opener || target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
     };
-    async function go(key, commit, { map = false, row = '', origin = currentPlace(), current = () => true } = {}) {
+    async function go(key, commit, { map = false, row = '', opener, origin = currentPlace(opener), current = () => true } = {}) {
         const fromKey = pressed?.eventPhase ? pressed.detail === 0 : false;  // a key's click (Enter, Space) counts none
         // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
         if (await canLeave(key) === false || !current()) return false;

@@ -101,7 +101,7 @@ function installedHere(item, row) {
  * catalog item, its source, the installed listing (`listed`: it has been read)
  * and the installs started here.
  */
-export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false, pageModules = {} } = {}) {
+export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false, live = {}, pageModules = {} } = {}) {
     const id = escapeHtml(item.id);
     const act = (label, action, tone = 'default', extra = '') => buttonHtml(label, { tone, attrs: `data-browse-action="${action}" data-item="${id}"${extra ? ` ${extra}` : ''}` });
     if (pending && !installed?.lifecycle_virtual) {
@@ -133,7 +133,7 @@ export function browseCardState(item, { source = null, installed = null, listed 
             const other = installed.install?.source?.name || 'another source';
             return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(other)})`, 'warn'), action: act('Compare…', 'compare') };
         }
-        const model = installedSkillModel(installed, { reviewing, pageModules });
+        const model = installedSkillModel(installed, { reviewing, live, pageModules });
         const v = escapeHtml(versionText(installed.version));
         const update = installed.install?.update_available;
         const retryUpdate = update && installed.install?.update_rejected;
@@ -189,10 +189,10 @@ function groupHeadHtml(title, { copy = '', actions = '', count = '' } = {}) {
 
 /**
  * Mount the Browse view. `host` = {
- *   installedByName(): Map|null, refreshInstalled(): Promise, sources(force): Promise<sources[]>,
- *   catalog({refresh}): Promise<catalog>, runInstalledAction(name, action): Promise,
+ *   installedByName(): Map|null, live(): object, refreshInstalled(): Promise, sources(options): Promise<sources[]>,
+ *   catalog({refresh}): Promise<catalog>, runInstalledAction(name, action, options): Promise,
  *   confirmFirstStart(sourceId): Promise, compare(item, installedRow): Promise<'replace'|'keep'|null>,
- *   toast(msg, tone), showInstalled(name) }.
+ *   toast(msg, tone), showInstalled(name, opener) }.
  */
 export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi }) {
     const state = {
@@ -334,7 +334,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             source: sourceById().get(item.source_id) || null,
             installed: listing?.get(item.name) || null, listed: Boolean(listing),
             pending, failure: state.failures.get(item.id) || '',
-            pageModules,
+            live: host.live?.(), pageModules,
         });
     }
 
@@ -379,16 +379,26 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         };
     }
 
-    /** A rebuilt board gives the keyboard back to the same card and action it was on, while they are still shown. */
-    function keepFocus() {
-        const focused = document.activeElement;
-        if (!focused || !board.contains(focused)) return () => {};
-        const item = focused.closest('[data-item]')?.dataset.item || '';
-        const action = focused.closest('[data-browse-action]')?.dataset.browseAction || '';
+    // The name, Read more and the consequence row can all open one item; keep the pressed door, not the first action.
+    function currentControl(node) {
+        const item = node.closest('.marketplace-card')?.dataset.item;
+        const inActionRow = Boolean(node.closest('.skills-card-action-row'));
+        const selector = node.matches('.skills-card-name') ? '.skills-card-name'
+            : node.matches('.skills-read-more') ? '.skills-read-more' : `[data-browse-action="${CSS.escape(node.dataset.browseAction)}"]`;
         return () => {
-            const card = item ? board.querySelector(`[data-item="${CSS.escape(item)}"]`) : board;
-            const target = action ? card?.querySelector(`[data-browse-action="${CSS.escape(action)}"]`) : card;
-            if (target && target !== board && document.activeElement !== target) target.focus({ preventScroll: true });
+            if (board.contains(node)) return node;
+            const card = item ? board.querySelector(`article[data-item="${CSS.escape(item)}"]`) : board;
+            return (inActionRow ? card?.querySelector('.skills-card-action-row') : card)?.querySelector(selector);
+        };
+    }
+
+    function keepFocus() {
+        const focused = document.activeElement?.closest('[data-browse-action]');
+        if (!focused || !board.contains(focused)) return () => {};
+        const current = currentControl(focused);
+        return () => {
+            const target = current();
+            if (target && document.activeElement !== target) target.focus({ preventScroll: true });
         };
     }
 
@@ -485,7 +495,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     async function load({ refresh = false } = {}) {
         const current = ++loadGeneration;
-        const [catalog, sources] = await Promise.allSettled([host.catalog({ refresh }), host.sources(refresh)]);
+        const [catalog, sources] = await Promise.allSettled([host.catalog({ refresh }), host.sources({ replace: refresh })]);
         if (destroyed || current !== loadGeneration) return;
         if (catalog.status === 'fulfilled') { state.catalog = catalog.value; state.catalogError = ''; }
         else state.catalogError = catalog.reason?.message || String(catalog.reason);
@@ -607,6 +617,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     function openSheet(item, opener) {
         state.sheet?.handle.close();
+        const currentOpener = currentControl(opener);
         const handle = openSkillDetailSheet({
             item, installed: installedHere(item, host.installedByName()?.get(item.name)),
             source: sourceById().get(item.source_id) || null,
@@ -614,13 +625,13 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             // A registry hit has no entry to read until it is installed; its card is all there is.
             readDetail: sourceById().get(item.source_id)?.kind === 'registry' || item.registry_slug ? null
                 : ({ signal } = {}) => api.item(item.source_id, item.name, { signal }),
-            onAction: (action, button) => act(action, button),
-            returnFocus: opener,
+            onAction: (action, button) => act(action, button, currentOpener),
+            returnFocus: currentOpener,
         });
         state.sheet = { item, handle };
     }
 
-    async function act(action, node) {
+    async function act(action, node, sheetOpener = null) {
         const item = allKnownItems().get(node?.dataset?.item || '');
         if (action === 'hide_shelf') { writeHiddenShelf('1'); render(); return; }
         if (action === 'browse_more') { await showMore(); return; }
@@ -640,8 +651,15 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             if (await host.compare(item, installed) === 'replace') await install(item, { replace: true });
             return;
         }
-        if (action === 'installed') { host.showInstalled(item.name); return; }
-        const map = { skip: 'attest_review', update: 'update', turn_on: 'turn_on', widgets: 'open_widgets' };
+        if (action === 'installed' || action === 'widgets') {
+            // A departed sheet has no focus target; its opening control on Browse is the return.
+            const opener = sheetOpener ? sheetOpener() : node;
+            if (sheetOpener) state.sheet?.handle.close();
+            if (action === 'installed') await host.showInstalled(item.name, opener);
+            else await host.runInstalledAction(item.name, 'open_widgets', sheetOpener ? { opener } : undefined);
+            return;
+        }
+        const map = { skip: 'attest_review', update: 'update', turn_on: 'turn_on' };
         if (map[action]) {
             await host.runInstalledAction(item.name, map[action]);
             repaintStates();

@@ -2042,7 +2042,7 @@ def register(api):
     # the owner chooses Edit anyway, after which Save sends every field, so a
     # POST that replaces the whole document can erase what the owner never
     # saw. Implement GET for any form that edits stored settings. Any other
-    # failed read disables Save and tells the owner to reload. Password
+    # failed read locks fields and Save; reopen the form to retry. Password
     # fields are never pre-filled, so treat an empty password on save as
     # "unchanged". Reference: skills/telegram/plugin.py, GET+POST settings/save.
     # A form whose fields are all disabled is a status (Telegram's Connection):

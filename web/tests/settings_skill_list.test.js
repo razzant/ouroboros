@@ -96,6 +96,8 @@ test('a skill changed by anyone redraws the list on screen: the server says so o
 });
 
 test('a skill form the owner types into is not redrawn by a read that was on its way; untouched, it follows the server', async (t) => {
+    let handle;
+    t.after(() => handle?.unmount());
     const { env } = world(t);
     const component = { type: 'form', id: 'bot', route: 'save', submit_label: 'Save', fields: [{ name: 'chat_id', label: 'Chat ID', type: 'text' }] };
     const installed = { skills: [{ name: 'demo', title: 'Demo' }], live: { settings_sections: [{ ...section('demo', 'Demo'), render: { components: [component] } }] } };
@@ -109,13 +111,14 @@ test('a skill form the owner types into is not redrawn by a read that was on its
     const container = new Stub('div');
     container.replaceChildren = (...nodes) => { container.textContent = ''; container.append(...nodes); };  // the stub lacks it
     const state = { activePage: 'skills', settingsPath: 'skill/demo' };
-    const handle = await settingsPageFor('skill/demo').mount(container, { path: 'skill/demo', ctx: { openSettings() {}, state, onScreen: (path) => state.activePage === 'skills' && state.settingsPath === path } });
+    handle = await settingsPageFor('skill/demo').mount(container, { path: 'skill/demo', ctx: { openSettings() {}, state, onScreen: (path) => state.activePage === 'skills' && state.settingsPath === path } });
     await settle();
     const host = container.firstElementChild;
     const shown = () => host.querySelector('[name="chat_id"]')?.getAttribute('value');
     assert.equal(shown(), 'first');
     const changedElsewhere = () => heard.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'other', action: 'updated' });
 
+    assert.equal(handle.unsaved(), false);
     // Untouched, the form follows the server: another window or Ouroboros changed a skill, the form is read again.
     stored = 'second';
     changedElsewhere();
@@ -129,15 +132,21 @@ test('a skill form the owner types into is not redrawn by a read that was on its
     changedElsewhere();
     await settle();
     const field = host.querySelector('[name="chat_id"]');
-    await host.fire('input', { target: field });
+    const form = field.closest('form');
+    // The stub has neither reflected names, a named controls collection nor event propagation.
+    field.name = field.getAttribute('name');
+    field.value = 'my draft';
+    form.elements = { namedItem: (name) => form.querySelectorAll('[name]').find(node => node.getAttribute('name') === name) };
+    await form.fire('input', { type: 'input', target: field });
     release();
     gate = null;
     await settle();
     assert.equal(host.querySelector('[name="chat_id"]'), field, 'the field the owner types in stays the same node');
     assert.equal(shown(), 'second', 'the answer that arrived late was not drawn');
-    // Ordinary closure keeps the existing form policy (no `unsaved()`); jump custody belongs to the shared levels.
-    assert.equal(handle.unsaved, undefined);
-    handle.unmount();
+    assert.equal(field.value, 'my draft');
+    assert.equal(handle.unsaved(), true, 'the shared levels must keep only forms with explicit unsaved edits');
+    await form.fire('submit', { preventDefault() {} });
+    assert.equal(handle.unsaved(), false, 'the matching successful Save releases the draft');
 });
 
 test('a read on its way when the owner leaves or covers a skill form draws nothing; shown again, it is read and drawn', async (t) => {

@@ -616,6 +616,41 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     assert not subscription_ui['errors']
 
 
+def test_leaving_calls_settings_stops_the_preview_and_keeps_the_draft(subscription_ui, monkeypatch):
+    from playwright.sync_api import expect
+
+    # open_call_ui supplies synthetic tracks and a local config route; no hardware or call is opened.
+    page, calls = open_call_ui(subscription_ui, monkeypatch, width=1360, scheme='light')
+    rail = page.locator('#page-skills [data-extensions-open="tools"]')
+    form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
+    words = form.locator('[name="instructions"]')
+    subscription_ui['call_read_error'] = True
+    open_calls_settings(page)
+    expect(words).to_be_disabled()
+    expect(form.locator('button[type="submit"]')).to_be_disabled()
+    rail.click()
+    expect(form).to_have_count(0)
+    subscription_ui['call_read_error'] = False
+    open_calls_settings(page)
+    expect(form.locator('[data-call-device="mic"]')).to_be_visible()
+    subscription_ui['call_save_error'] = True
+    words.fill('Keep this draft when I change pages.')
+    form.locator('[name="provider"]').focus()
+    expect(form.locator('[data-extension-settings-status]')).to_contain_text('Synthetic save failed')
+    form.locator('[data-call-test="mic"]').click()
+    expect(form.locator('[data-call-meter]')).to_be_visible()
+    track = page.evaluate_handle('() => window.__callFixture.tracks.at(-1)')
+    assert track.evaluate('t => t.readyState') == 'live'
+    rail.click()
+    expect(form).to_have_count(0, timeout=3000)
+    assert track.evaluate('t => t.readyState') == 'ended', 'leaving the level releases its own preview now'
+    open_calls_settings(page)
+    expect(words).to_have_value('Keep this draft when I change pages.')
+    expect(form.locator('[data-call-meter]')).to_be_hidden()
+    assert calls == []
+    page.close()
+
+
 @pytest.mark.parametrize('start_width,end_width', [(390, 1087), (1440, 390)])
 def test_retained_calls_form_keeps_autosave_and_devices_after_another_skill_mount(subscription_ui, monkeypatch, start_width, end_width):
     from playwright.sync_api import expect

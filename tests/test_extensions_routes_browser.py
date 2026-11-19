@@ -188,6 +188,224 @@ def test_publish_one_returns_to_the_pressed_sources_door(subscription_ui, width,
     page.close()
 
 
+@pytest.mark.parametrize("width,height", SIZES, ids=["desk", "phone"])
+def test_empty_skills_browse_link_returns_to_pressed_button(subscription_ui, width, height):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, width, height)
+    page.route("**/api/extensions", lambda route: route.fulfill(json={"skills": []}))
+    page.route("**/api/skill-sources", lambda route: route.fulfill(json={"sources": []}))
+    page.route("**/api/skill-catalog", lambda route: route.fulfill(json={"items": [], "sources": []}))
+    page.goto(subscription_ui["url"] + "/#skills")
+    rail_skills = page.locator(f'{EXTENSIONS} [data-extensions-open="installed"]')
+    if width < 720:
+        rail_skills.click()
+    button = page.get_by_role("button", name="Browse skills", exact=True)
+    button.click()
+    expect(page.locator("#skills-pane-browse")).to_be_visible()
+    expect(header_back(page)).to_have_attribute("aria-label", "Back to Extensions › Skills")
+    header_back(page).click()
+    expect(button).to_be_focused()
+    if width < 720:
+        header_back(page).click()  # the Skills level still owes its own Back to the list on a phone
+        expect(rail_skills).to_be_focused()
+    page.locator(f'{EXTENSIONS} [data-extensions-open="browse"]').click()
+    expect(page.locator("#skills-pane-browse")).to_be_visible()
+    assert page.evaluate("() => window.__ouroLayers.returnPage() === null"), "the rail is a choice, not a jump"
+    page.close()
+
+
+@pytest.mark.parametrize("door", ["card", "sheet", "read-more"])
+def test_browse_open_installed_returns_to_its_origin(subscription_ui, door):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, 1360, 900)
+    listing = deepcopy(SKILLS)
+    listing["skills"][0].update(enabled=False, review_status="pending", review_gate="pending")
+    source = {"id": "fixture", "name": "Fixture catalog", "kind": "git", "trust": "review", "confirmed": True}
+    item = {"id": "fixture/gate_skill", "name": "gate_skill", "title": "Gate skill", "source_id": source["id"],
+            "description": "Long fixture description. " * 32}
+    page.route("**/api/extensions", lambda route: route.fulfill(json=listing))
+    page.route("**/api/skill-sources", lambda route: route.fulfill(json={"sources": [source]}))
+    page.route("**/api/skill-catalog", lambda route: route.fulfill(json={"items": [item], "sources": [source]}))
+    page.route("**/api/skill-catalog/item/fixture/gate_skill", lambda route: route.fulfill(json={"about": "A fixture skill."}))
+    page.goto(subscription_ui["url"] + "/#skills")
+    page.locator('.skills-installed-card[data-skill="gate_skill"]').wait_for()
+    page.locator(f'{EXTENSIONS} [data-extensions-open="browse"]').click()
+    card = page.locator('#skills-pane-browse .marketplace-card[data-item="fixture/gate_skill"]')
+    dialog = page.locator("dialog.skills-detail-sheet")
+    if door != "card":
+        opener = card.locator(".skills-read-more" if door == "read-more" else ".skills-card-name")
+        opener.click()
+        dialog.locator('[data-sheet-action="installed"]').click()
+        expect(dialog).to_have_count(0)
+    else:
+        opener = card.locator('[data-browse-action="installed"]')
+        opener.click()
+    expect(page.locator("#skills-installed-search")).to_have_value("gate_skill")
+    expect(header_back(page)).to_have_attribute("aria-label", "Back to Extensions › Browse")
+    item["description"] += "A changed catalog description."
+    header_back(page).click()
+    expect(card.locator('.skills-card-purpose')).to_contain_text("A changed catalog description.")
+    expect(opener).to_be_focused()
+    page.close()
+
+
+@pytest.mark.parametrize("door", ["card", "read-more"])
+def test_browse_widgets_closes_sheet_and_returns_to_its_origin(subscription_ui, door):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, 1360, 900)
+    tab = {"skill": "gate_skill", "tab_id": "radar", "title": "Fixture radar", "render": {
+        "kind": "declarative", "schema_version": 1, "components": [{"type": "metric", "label": "Count", "value": "42"}]}}
+    listing = deepcopy(SKILLS)
+    listing["skills"][0]["review_status"] = "clean"
+    listing["live"]["ui_tabs"] = [tab]
+    source = {"id": "fixture", "name": "Fixture catalog", "kind": "git", "trust": "review", "confirmed": True}
+    item = {"id": "fixture/gate_skill", "name": "gate_skill", "title": "Gate skill", "source_id": source["id"],
+            "description": "Long fixture description. " * 32}
+    page.route("**/api/extensions", lambda route: route.fulfill(json=listing))
+    page.route("**/api/widgets", lambda route: route.fulfill(json={"ui_tabs": [tab]}))
+    page.route("**/api/skill-sources", lambda route: route.fulfill(json={"sources": [source]}))
+    page.route("**/api/skill-catalog", lambda route: route.fulfill(json={"items": [item], "sources": [source]}))
+    page.route("**/api/skill-catalog/item/fixture/gate_skill", lambda route: route.fulfill(json={"about": "A fixture skill."}))
+    page.goto(subscription_ui["url"] + "/#skills")
+    page.locator('.skills-installed-card[data-skill="gate_skill"]').wait_for()
+    page.locator(f'{EXTENSIONS} [data-extensions-open="browse"]').click()
+    card = page.locator('#skills-pane-browse .marketplace-card[data-item="fixture/gate_skill"]')
+    dialog = page.locator("dialog.skills-detail-sheet")
+    if door == "card":
+        opener = card.locator('[data-browse-action="widgets"]')
+        opener.click()
+    else:
+        opener = card.locator('.skills-read-more')
+        opener.click()
+        dialog.locator('[data-sheet-action="widgets"]').press("Enter")
+    expect(dialog).to_have_count(0)
+    expect(page.locator('#page-widgets.active [data-widget-key="gate_skill:radar"]')).to_be_visible()
+    expect(header_back(page)).to_have_attribute("aria-label", "Back to Extensions › Browse")
+    item["description"] += "A changed catalog description."
+    header_back(page).click()
+    expect(card.locator('.skills-card-purpose')).to_contain_text("A changed catalog description.")
+    expect(opener).to_be_focused()
+    assert page.evaluate("() => window.__ouroLayers.returnPage() === null"), "one ordinary shell return"
+    page.close()
+
+
+def test_skill_form_draft_and_opener_survive_rail_switch_and_nested_return(subscription_ui):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, 1360, 900)
+    values, writes = {"address": "stored value"}, []
+
+    def form_values(route):
+        if route.request.method == "POST":
+            writes.append(route.request.post_data_json)
+            values.update(writes[-1])
+        route.fulfill(json=values)
+
+    page.route("**/api/extensions/gate_skill/settings", form_values)
+    page.goto(subscription_ui["url"] + "/#skills")
+    card = page.locator('.skills-installed-card[data-skill="gate_skill"]')
+    opener = card.locator('.skills-card-quiet-actions [data-skill-action="open_settings"]')
+    opener.click()
+    editor = settings_page(page, "skill/gate_skill")
+    field = editor.locator('[name="address"]')
+    expect(field).to_have_value("stored value")
+    original = editor.element_handle()
+    field.fill("typed value")
+    page.locator(f'{EXTENSIONS} [data-extensions-open="tools"]').click()
+    expect(editor).to_have_count(0)
+    page.locator(f'{EXTENSIONS} [data-extensions-open="installed"]').click()
+    opener.click()
+    expect(field).to_have_value("typed value")
+    assert original.evaluate("el => el.isConnected"), "the rail restores the actual editor"
+    assert writes == []
+
+    field.focus()
+    assert page.evaluate("() => window.__ouroSettings.open('accounts')") is not False
+    settings_page(page, "accounts").wait_for()
+    assert page.evaluate("() => window.__ouroSettings.open('tools/new')") is not False
+    settings_page(page, "tools/new").wait_for()
+    assert original.evaluate("el => !el.isConnected"), "the other visit displaces the retained editor"
+    header_back(page).click()
+    settings_page(page, "accounts").wait_for()
+    header_back(page).click()
+    expect(field).to_have_value("typed value")
+    expect(field).to_be_focused()
+    expect(header_back(page)).to_have_attribute("aria-label", "Back to Skills")
+    editor.get_by_role("button", name="Save", exact=True).click()
+    expect(editor.locator("[data-extension-settings-status]")).to_have_text("Saved.")
+    assert writes == [{"address": "typed value"}]
+    header_back(page).click()
+    expect(opener).to_be_focused()
+    expect(editor).to_have_count(0)
+    page.close()
+
+
+def test_extensions_counts_label_retained_data_after_refresh_failure(subscription_ui):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, 1360, 900)
+    reads_ok = {"skills": True, "sources": True}
+    source = {"id": "fixture", "name": "Fixture catalog", "kind": "git", "trust": "review", "confirmed": True}
+
+    def listing(route, kind, value):
+        route.fulfill(json=value if reads_ok[kind] else {"error": "Fixture cannot refresh"},
+                      status=200 if reads_ok[kind] else 503)
+
+    page.route("**/api/extensions", lambda route: listing(route, "skills", SKILLS))
+    page.route("**/api/skill-sources", lambda route: listing(route, "sources", {"sources": [source]}))
+    page.route("**/api/skill-catalog**", lambda route: route.fulfill(json={"items": [], "sources": []}))
+    page.goto(subscription_ui["url"] + "/#skills")
+    refresh = page.locator("#skills-refresh")
+    for kind, target, card in [
+        ("skills", "installed", page.locator('.skills-installed-card[data-skill="gate_skill"]')),
+        ("sources", "sources", page.locator("#skills-pane-sources .skills-source-rows").get_by_text(source["name"], exact=True)),
+    ]:
+        row = page.locator(f'{EXTENSIONS} [data-extensions-open="{target}"]')
+        row.click()
+        expect(card).to_be_visible()
+        answer = row.locator("[data-extensions-answer]")
+        previous = answer.inner_text()
+        assert previous.startswith("1 ")
+        reads_ok[kind] = False
+        refresh.click()
+        expect(answer).to_have_text(f"Last known: {previous}")
+        expect(card).to_be_visible()
+        if kind == "sources":
+            expect(page.locator("#skills-pane-sources .skills-sources-id")).to_contain_text("couldn’t be read:")
+        reads_ok[kind] = True
+        refresh.click()
+        expect(answer).to_have_text(previous)
+        if kind == "sources":
+            expect(page.locator("#skills-pane-sources .skills-sources-id")).to_contain_text("1 source connected")
+    page.close()
+
+
+def test_sources_last_page_arrival_uses_one_read_for_the_rail_and_list(subscription_ui):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, 1360, 900)
+    page.add_init_script("localStorage.setItem('ouroboros.extensions.last-page', 'sources')")
+    first = {"id": "fixture", "name": "Fixture catalog", "kind": "git", "trust": "review", "confirmed": True}
+    reads = []
+
+    def listing(route):
+        reads.append(route.request.url)
+        route.fulfill(json={"sources": [first]} if len(reads) == 1 else {"error": "Unexpected second read"},
+                      status=200 if len(reads) == 1 else 503)
+
+    page.route("**/api/skill-sources", listing)
+    page.route("**/api/skill-catalog", lambda route: route.fulfill(json={"items": [], "sources": []}))
+    page.goto(subscription_ui["url"] + "/#skills")
+    expect(page.locator(f'{EXTENSIONS} [data-extensions-open="sources"] [data-extensions-answer]')).to_have_text("1 connected")
+    expect(page.locator("#skills-pane-sources .skills-sources-id")).to_contain_text("1 source connected")
+    expect(page.locator('#skills-pane-sources [data-source-row="fixture"]')).to_be_visible()
+    assert len(reads) == 1
+    page.close()
+
+
 def test_leaving_extensions_for_settings_closes_the_server_import(subscription_ui):
     page, _ = _page(subscription_ui, 1360, 900)
     page.goto(subscription_ui["url"] + "/#skills")

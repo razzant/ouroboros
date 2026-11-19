@@ -304,6 +304,7 @@ export function initSkills(ctx = {}) {
     let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
+    let installedFailed = false;
     let activeMenu = null;
     let sheet = null;
     let pollTimer = 0;
@@ -320,20 +321,38 @@ export function initSkills(ctx = {}) {
     const stopHostFacts = hostModules?.onFactsChange?.(onPageModuleFacts);
 
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
-    const cache = { sources: null, sourcesValue: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    const cache = { sources: null, sourcesValue: null, sourcesError: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    function paintSourceFacts() {
+        if (visible && activeTab === 'sources') sourcesView.repaint();
+        section.paintAnswers();
+    }
     const store = {
-        sources(force = false) {
-            if (force || !cache.sources) {
-                cache.sources = skillSourcesApi.list().then((data) => {
-                    const list = Array.isArray(data) ? data : (Array.isArray(data?.sources) ? data.sources : []);
+        // Arriving views join the place's read. An explicit refresh or write can supersede it.
+        sources({ fresh = false, replace = false } = {}) {
+            if (!replace && cache.sources) return cache.sources;
+            if (!fresh && !replace && cache.sourcesValue && !cache.sourcesError) return Promise.resolve(cache.sourcesValue);
+            const current = () => cache.sources === read && !destroyed;
+            const read = skillSourcesApi.list().then((data) => {
+                const list = Array.isArray(data) ? data : data?.sources;
+                if (!Array.isArray(list)) throw new Error('Skill sources response is unavailable.');
+                return { list, data };
+            }).then(({ list, data }) => {
+                if (current()) {
                     cache.sourcesValue = list;
-                    queueMicrotask(() => section.paintAnswers());
+                    cache.sourcesError = null;
                     cache.sourcesProblem = String(data?.problem || '');
                     cache.sourceSuggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
-                    return list;
-                }).catch((error) => { cache.sources = null; throw error; });
-            }
-            return cache.sources;
+                    paintSourceFacts();
+                }
+                return list;
+            }, (error) => {
+                if (current()) {
+                    cache.sourcesError = error;
+                    paintSourceFacts();
+                }
+                throw error;
+            }).finally(() => { if (cache.sources === read) cache.sources = null; });
+            return (cache.sources = read);
         },
         catalog({ refresh = false } = {}) {
             if (refresh || !cache.catalog) {
@@ -363,9 +382,11 @@ export function initSkills(ctx = {}) {
     function sectionFacts() {
         return {
             installed: snapshot?.rawSkills ? snapshot.rawSkills.length : null,
+            installedFailed,
             needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts()).needs : 0,
             working: inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)),
             sources: Array.isArray(cache.sourcesValue) ? cache.sourcesValue.length : null,
+            sourcesFailed: Boolean(cache.sourcesError),
         };
     }
 
@@ -493,7 +514,7 @@ export function initSkills(ctx = {}) {
         const next = { rawSkills: null, live: {}, queue: snapshot?.queue || null, githubTokenConfigured: snapshot?.githubTokenConfigured };
         const optional = { state: 'loading', queue: 'loading' };
         const showReads = () => {
-            if (!current() || !snapshot?.rawSkills) return;
+            if (!current() || snapshot !== next) return;
             const notes = Object.entries(optional).filter(([, value]) => value === 'failed')
                 .map(([name]) => (name === 'state' ? 'Skill settings' : 'Lifecycle progress'));
             status.dataset.tone = notes.length ? 'warn' : 'muted';
@@ -532,6 +553,8 @@ export function initSkills(ctx = {}) {
             lastListingRead = Date.now();
         } catch (err) {
             if (!current()) return;
+            installedFailed = true;
+            section.paintAnswers();
             emptyEl.hidden = true;
             status.dataset.tone = 'danger';
             status.textContent = `Couldn’t refresh installed skills: ${err.message || err}.${snapshot ? ' Showing the previous list. Refresh to try again.' : ' Refresh to try again.'}`;
@@ -539,8 +562,7 @@ export function initSkills(ctx = {}) {
         }
         const firstPaint = !snapshot;
         snapshot = next;
-        if (!quiet && !firstPaint) status.textContent = '';
-        if (firstPaint) status.textContent = '';
+        installedFailed = false;
         paintInstalled({ replace: firstPaint });
         showReads();
         return true;
@@ -859,7 +881,11 @@ export function initSkills(ctx = {}) {
             return false;
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
-        if (action === 'open_widgets') { void ctx.showPage?.('widgets'); return false; }
+        if (action === 'open_widgets') {
+            if (options.opener) void ctx.showPage?.('widgets', { opener: options.opener });
+            else void ctx.showPage?.('widgets');
+            return false;
+        }
         if (action === 'open_secrets') {
             // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
             void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
@@ -876,7 +902,10 @@ export function initSkills(ctx = {}) {
             return false;
         }
         if (action === 'read_findings') { openFindings(name); return false; }
-        if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
+        if (action === 'find_in_browse') {
+            if (await section.open('browse', { opener: options.node }) && visible && activeTab === 'browse') void browse.searchFor(name);
+            return false;
+        }
         if (action === 'review' || action === 'rereview') {
             const ok = await openConfirmDialog({
                 title: `Review ${name}?`,
@@ -966,7 +995,7 @@ export function initSkills(ctx = {}) {
             return;
         }
         const goto = event.target.closest('[data-skills-goto]');
-        if (goto) { selectTab(goto.dataset.skillsGoto); return; }
+        if (goto) { void section.open(goto.dataset.skillsGoto, { opener: goto }); return; }
         const chip = event.target.closest('[data-installed-filter]');
         if (chip) { requestedSkill = ''; filter = chip.dataset.installedFilter; paintFilters(snapshot?.rawSkills ? projected() : null); applyInstalledFilter(); return; }
         const menuTrigger = event.target.closest('[data-skill-menu-trigger]');
@@ -1059,23 +1088,26 @@ export function initSkills(ctx = {}) {
     const host = {
         installedByName,
         installedSkills: () => (snapshot?.rawSkills ? projected() : null),
+        live: () => snapshot?.live,
         refreshInstalled: () => readInstalled({ quiet: true }),
-        sources: (force) => store.sources(force),
-        sourcesProblem: () => cache.sourcesProblem,
+        sources: store.sources,
+        sourceSnapshot: () => ({ rows: cache.sourcesValue, error: cache.sourcesError, problem: cache.sourcesProblem }),
         sourceSuggestions: () => cache.sourceSuggestions,
         catalog: (options) => store.catalog(options),
         // A source change moves the listing's source facts too (a re-added name's id, updates): read both again.
-        reloadAll: async () => { await Promise.all([store.sources(true).catch(() => null), readInstalled({ quiet: true })]); },
-        runInstalledAction: async (name, action) => {
+        reloadAll: async () => { await Promise.all([store.sources({ replace: true }).catch(() => null), readInstalled({ quiet: true })]); },
+        runInstalledAction: async (name, action, options) => {
             try {
-                const changed = await runInstalledAction(name, action);
+                const changed = await runInstalledAction(name, action, options);
                 if (changed !== false) await readInstalled({ quiet: true });
             } catch (err) {
                 if (!err.cancelled) showToast(`${name}: ${err.message || err}`, 'danger');
             }
         },
         confirmFirstStart: async (sourceId, canOpen = () => true) => {
-            const sources = await store.sources().catch(() => []);
+            // Browse and Sources have already requested these facts. A check after a failed visit is not another read.
+            await cache.sources?.catch(() => null);
+            const sources = cache.sourcesError ? [] : cache.sourcesValue || [];
             if (firstStartAsked || !canOpen() || !unconfirmedHubRows(sources).some((row) => !sourceId || row.id === sourceId)) return;
             await sourcesView.confirmFirstStart(() => {
                 if (firstStartAsked || !canOpen()) return false;
@@ -1092,9 +1124,9 @@ export function initSkills(ctx = {}) {
         }),
         toast: (message, tone) => showToast(message, tone),
         pageModuleFacts,
-        showInstalled: (name) => {
+        showInstalled: async (name, opener) => {
             const beforeOpen = renderGeneration;
-            selectTab('installed');
+            if (!await section.open('installed', { opener }) || !visible || activeTab !== 'installed') return;
             searchInput.value = name;
             applyInstalledFilter();
             requestInstalledSkill(name, beforeOpen);
@@ -1146,12 +1178,7 @@ export function initSkills(ctx = {}) {
 
     // Sources also supplies the trust facts used by the skill views.
     function placeShown() {
-        store.sources(true).catch(() => null);
-    }
-
-    // Another part of a view asks for a view: the section opens it as its page.
-    function selectTab(view) {
-        section.go(view);
+        store.sources({ fresh: true }).catch(() => null);
     }
 
     const onRefresh = async () => {
@@ -1200,7 +1227,7 @@ export function initSkills(ctx = {}) {
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
     // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js). The
-    // asked page opens whatever page this device last left the section on.
+    // explicit target opens regardless of the device's previously selected page.
     const onOpenSkills = async (event) => {
         const { skill = '', query = '', category = '' } = event?.detail || {};
         const request = ++openRequest;

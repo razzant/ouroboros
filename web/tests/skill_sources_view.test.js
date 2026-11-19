@@ -23,7 +23,7 @@ const FIXTURE_NOW = Date.parse('2026-10-17T15:10:00Z');
 test('Sources keeps a door focused during a pending return read, without taking focus from elsewhere', async (t) => {
     const { mount, document } = setup(t);
     let read = async () => SOURCES;
-    const view = createSkillSources({ pane: mount, host: { sources: () => read(), catalog: async () => CATALOG,
+    const view = createSkillSources({ pane: mount, host: { sources: () => read(), sourceSnapshot: () => ({ rows: SOURCES }), catalog: async () => CATALOG,
         installedSkills: () => [] } });
     await view.show({});
     let finish;
@@ -59,7 +59,7 @@ test('Sources translates its Made here sentence on language and dictionary chang
         [counted]: { text: 'Les compétences locales ({n}) ne viennent pas d’une source.' },
     } };
     let installed = null;
-    const view = createSkillSources({ pane: mount, host: { sources: async () => [], catalog: async () => null,
+    const view = createSkillSources({ pane: mount, host: { sources: async () => [], sourceSnapshot: () => ({ rows: [] }), catalog: async () => null,
         installedSkills: () => installed } });
     try {
         await view.show();

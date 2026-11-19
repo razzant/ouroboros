@@ -5,9 +5,10 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    CONNECTORS, browseCardState, categoryCounts, isConnector, matchesQuery, recommendedMissing, renderBrowseCard, shelfItems,
+    CONNECTORS, browseCardState, categoryCounts, createSkillBrowse, isConnector, matchesQuery, recommendedMissing, renderBrowseCard, shelfItems,
     sortCatalogItems,
 } from '../modules/skill_browse.js';
+import { domDouble } from './dom_double.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/skills_v4/${name}`, import.meta.url), 'utf8'));
 const CATALOG = fixture('skill_catalog.json');
@@ -236,5 +237,58 @@ test('Browse uses the optional title or connector label while retaining its cano
         assert.ok(html.includes(`<span data-i18n-authored>${title}</span>`));
         assert.match(html, /skills-card-who"><span data-i18n-authored>weather<\/span>/);
         assert.match(html, /data-item="ouroboros\/weather"/);
+    }
+});
+
+test('Browse redraw keeps each detail opener; Widgets leaves a sheet through the same action with its opener', async () => {
+    const { doc, el } = domDouble({ parseHtml: true });
+    const pane = el(), chrome = el();
+    doc.body.append(chrome, pane);
+    class Observer { observe() {} disconnect() {} }
+    const globals = { document: doc, CSS: { escape: String }, ResizeObserver: Observer, MutationObserver: Observer,
+        requestAnimationFrame: (fn) => fn() };
+    const previous = Object.fromEntries(Object.keys(globals).map((key) => [key, globalThis[key]]));
+    Object.assign(globalThis, globals);
+    const source = { id: 'fixture', kind: 'registry' };
+    const entry = { id: 'fixture/widget', name: 'widget', source_id: source.id, description: 'Long description. '.repeat(40) };
+    const ready = { name: entry.name, version: '1.0.0', type: 'extension', enabled: true, live_loaded: true,
+        review_status: 'clean' };
+    let live;
+    const jumps = [];
+    const browse = createSkillBrowse({ pane, chrome, host: {
+        installedByName: () => new Map([[ready.name, ready]]), live: () => live,
+        sources: async () => [source], catalog: async () => ({ items: [entry] }),
+        runInstalledAction(name, action, options) {
+            jumps.push({ name, action, options, modal: doc.body.querySelector('.skills-detail-sheet') });
+        },
+    } });
+    try {
+        await browse.show();
+        for (const selector of ['.skills-card-name', '.skills-read-more', '.skills-card-action-row [data-browse-action="open"]']) {
+            const before = pane.querySelector(selector);
+            assert.ok(before, selector);
+            before.focus();
+            await browse.show();
+            assert.equal(before.isConnected, false, 'a real board rebuild took place');
+            assert.equal(doc.activeElement, pane.querySelector(selector), selector);
+        }
+
+        live = { ui_tabs: [{ skill: ready.name }] };
+        await browse.show();
+        pane.querySelector('[data-browse-action="widgets"]').click();
+        assert.deepEqual(jumps[0], { name: 'widget', action: 'open_widgets', options: undefined, modal: null });
+
+        const opener = pane.querySelector('.skills-read-more');
+        opener.focus();
+        opener.click();
+        await browse.show();  // the modal remains up, but its opening button was replaced
+        assert.equal(opener.isConnected, false);
+        const current = pane.querySelector('.skills-read-more');
+        doc.body.querySelector('[data-sheet-action="widgets"]').click();
+        assert.deepEqual(jumps[1], { name: 'widget', action: 'open_widgets', options: { opener: current }, modal: null });
+        assert.equal(doc.activeElement, current);
+    } finally {
+        browse.destroy();
+        Object.assign(globalThis, previous);
     }
 });

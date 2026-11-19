@@ -1294,12 +1294,50 @@ registerSettingsPage('tools', {
     mount: (container, page) => (entryOf(page.path) ? mountEditor(container, page, entryOf(page.path)) : mountList(container, page)),
 });
 
+// This is a match for the public client-ID field only, not proof of an immutable row or credential revision.
+function sameClientEntry(view, next) {
+    const { server, boundEntry: before } = view;
+    const after = savedMcpSecrets.get(next);
+    if (!server?.id || server.id !== next?.id || !before?.token || !after?.token || before !== savedMcpSecrets.get(server)
+        || before.submitted || after.submitted || before.read !== after.read || before.enabled !== after.enabled
+        || dirty.has(server) || heldEditor(server) || heldEditor(next) || saving.has(server) || signInBusy.has(server)
+        || !['streamable_http', 'sse'].includes(server.transport) || server.auth_token || headerKeepsSavedValues(server)) return false;
+    try {
+        const url = new URL(before.url);
+        return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+    } catch { return false; } // no readable address
+}
+
+// A redraw binds all actions to the current entry and slot. Only the public client ID crosses that redraw.
+function clientIdDraft(host) {
+    const signIn = host.querySelector('[data-mcp-sign-in]');
+    const input = signIn?.querySelector('[data-mcp-sign-in-client-id]');
+    if (!input || signIn.querySelector('[data-mcp-sign-in-link]')) return null;
+    const key = signIn.dataset.signInKey;
+    const { value, selectionStart, selectionEnd, selectionDirection } = input;
+    const open = input.closest('details').open;
+    const focused = host.ownerDocument?.activeElement === input;
+    return () => {
+        const current = host.querySelector('[data-mcp-sign-in]');
+        const field = current?.querySelector('[data-mcp-sign-in-client-id]');
+        if (!field || current.dataset.signInKey !== key) return;
+        field.value = value || '';
+        field.closest('details').open = open;
+        if (!focused || !open) return;
+        field.focus({ preventScroll: true });
+        if (typeof selectionStart === 'number') field.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+    };
+}
+
 /** Take a read of the settings: the servers become the drafts of their forms. A form that holds unsaved text keeps
  *  it while its saved entry is the one it was read from; when that entry changed or went elsewhere, the form is held
  *  by its saved identity until the owner discards it. The views on screen are drawn from the result. */
 export function applyMcpSettings(settings) {
     const incoming = Array.isArray(settings?.MCP_SERVERS) ? settings.MCP_SERVERS : [];
     const token = settings?._meta?.tokens?.[KEY];
+    const previousServers = mcpServers;
+    const uniqueIncoming = id => incoming.filter(row => isServer(row) && canonicalServerId(serverIdentity(row)) === id).length === 1;
+    const uniquePrevious = id => previousServers.filter(row => isServer(row) && pageId(row) === id).length === 1;
     for (const [id, server] of heldDrafts) {
         if (!dirty.has(server)) heldDrafts.delete(id);
     }
@@ -1316,15 +1354,25 @@ export function applyMcpSettings(settings) {
         const { auth_configured: _authConfigured, ...s } = entry;
         const id = canonicalServerId(serverIdentity(s));
         const read = asRead(entry);
-        const previous = mcpServers[index];
+        const previous = previousServers[index];
         const savedPrevious = savedMcpSecrets.get(previous);
-        // A passive reread of the same saved entry is not a new form. Save and Discard still own their redraw.
-        const unchanged = savedPrevious && savedPrevious.read === read && savedPrevious.token === token
+        const unchanged = savedPrevious && savedPrevious.read === read
             && savedPrevious.enabled === Boolean(s.enabled) && !savedPrevious.submitted
             && !dirty.has(previous) && !held.has(previous) && !saving.has(previous);
-        let kept = typed.get(read) || (unchanged ? previous : null);
+        let kept = typed.get(read);
+        if (!kept && unchanged) {
+            if (savedPrevious.token === token) kept = previous;
+            else if (editorView?.server === previous && editorShown(editorView) && id && savedPrevious.url !== HEADER_PLACEHOLDER
+                && uniqueIncoming(id) && uniquePrevious(id)) {
+                // Same mounted form and slot, not necessarily the same list revision. Refresh the clean write
+                // baseline and put any revealed values away as a redraw would, without replacing form fields.
+                resetSecretReveals(editorView.host);
+                savedPrevious.token = token;
+                kept = previous;
+            }
+        }
         const draft = heldDrafts.get(id);
-        if (draft && savedMcpSecrets.get(draft).submitted && incoming.filter(row => isServer(row) && canonicalServerId(serverIdentity(row)) === id).length === 1) {
+        if (draft && savedMcpSecrets.get(draft).submitted && uniqueIncoming(id)) {
             const saved = savedMcpSecrets.get(draft);
             const sent = saved.submitted;
             const receipt = saved.token && saved.token === token;
@@ -1373,8 +1421,13 @@ export function applyMcpSettings(settings) {
     if (editorView && editorView.entry !== 'new' && !editorView.savedAs && saving.get(editorView.server) !== 'writing' && editorShown(editorView)) {
         const [was, next] = [editorView.server, serverOfPage(editorView.entry)];
         if (next !== was || !next || editorView.boundEntry !== savedMcpSecrets.get(next)) {
+            const before = previousServers.indexOf(was), after = mcpServers.indexOf(next);
+            const id = editorView.entry;
+            const restoreClientId = before >= 0 && after >= 0 && before !== after && uniquePrevious(id) && uniqueIncoming(id)
+                && sameClientEntry(editorView, next) ? clientIdDraft(editorView.host) : null;
             editorView.server = next;
             drawEditor();
+            restoreClientId?.();
         } else paintUse();
     }
     paintList();

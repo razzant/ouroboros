@@ -76,17 +76,16 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
 }
 
 /**
- * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, sourceSuggestions(): rows,
+ * Mount the Sources view. `host` = { sources(options), sourceSnapshot(): { rows, error, problem }, sourceSuggestions(),
  *   catalog({refresh}), installedSkills(): rows|null, reloadAll(): Promise, toast(msg, tone), showMadeHere(),
  *   openSettings(path, options) }.
  */
 export function createSkillSources({ pane, host, api = skillSourcesApi }) {
-    let sources = [];
     let catalog = null;
-    let error = '';
     let destroyed = false;
     let generation = 0;
     let activeMenu = null;
+    const sourceRows = () => host.sourceSnapshot().rows || [];
 
     const itemsBySource = () => {
         const map = new Map();
@@ -110,6 +109,10 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
 
     function render() {
         if (destroyed) return;
+        const { rows, error, problem } = host.sourceSnapshot();
+        const sources = rows || [];
+        const summary = error ? statusHtml(`couldn’t be read: ${escapeHtml(error.message || error)}`, 'danger')
+            : rows ? statusHtml(`${plural(sources.length, 'source')} connected`, 'muted') : '';
         // Keep the footer's navigation controls mounted: a jump's return may hold one during a Sources read.
         if (!pane.querySelector('.skills-sources-card')) pane.innerHTML = `
             <section class="ui-card skills-card skills-sources-card"></section>
@@ -127,11 +130,11 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         const pendingRows = unconfirmedHubRows(sources);
         card.innerHTML = `
                 <div class="skills-sources-head">
-                    <div class="skills-sources-id"><h3>Sources</h3>${statusHtml(error ? `couldn’t be read: ${escapeHtml(error)}` : `${plural(sources.length, 'source')} connected`, error ? 'danger' : 'muted')}</div>
+                    <div class="skills-sources-id"><h3>Sources</h3>${summary}</div>
                     ${buttonHtml('Add source', { attrs: 'data-source-action="add"' })}
                 </div>
                 <p class="skills-sources-copy">Skills come from these sources. For each one you chose once whether its skills install without review or are reviewed first.</p>
-                ${host.sourcesProblem?.() ? trayHtml({ sentence: `Your saved list of sources couldn’t be used (${escapeHtml(host.sourcesProblem())}), so the default sources are shown.` }) : ''}
+                ${problem ? trayHtml({ sentence: `Your saved list of sources couldn’t be used (${escapeHtml(problem)}), so the default sources are shown.` }) : ''}
                 ${pendingRows.length ? trayHtml({ sentence: 'Confirm how skills from the Ouroboros hub install. Suggested choices are shown until you do.',
                     actions: buttonHtml('Confirm…', { tone: 'primary', attrs: 'data-source-action="first_start"' }) }) : ''}
                 <div class="skills-source-rows">${sources.map((source) => renderSourceRow(source, { items: items.get(source.id) || [], health: health.get(source.id) })).join('')}</div>`;
@@ -143,25 +146,28 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         }
     }
 
-    async function load({ refresh = false } = {}) {
+    async function readCatalog({ refresh = false } = {}) {
         const current = ++generation;
-        const [list, read] = await Promise.allSettled([host.sources(true), host.catalog({ refresh })]);
-        if (destroyed || current !== generation) return;
-        if (list.status === 'fulfilled') { sources = Array.isArray(list.value) ? list.value : []; error = ''; }
-        else error = list.reason?.message || String(list.reason);
-        if (read.status === 'fulfilled') catalog = read.value;
+        const read = await host.catalog({ refresh }).catch(() => null);
+        if (destroyed || current !== generation || !read || read === catalog) return;
+        catalog = read;
         render();
+    }
+
+    async function load({ refresh = false } = {}) {
+        render();
+        await Promise.all([host.sources({ fresh: true, replace: refresh }).catch(() => null), readCatalog({ refresh })]);
     }
 
     async function afterChange(message) {
         await host.reloadAll();
-        await load();
+        await readCatalog();
         if (message) host.toast(message, 'ok');
     }
 
     async function confirmFirstStart(canOpen = () => true) {
-        if (!sources.length || !catalog) await load();
-        const rows = unconfirmedHubRows(sources);
+        if (!catalog) await readCatalog();
+        const rows = unconfirmedHubRows(sourceRows());
         if (!rows.length || destroyed || !canOpen()) return;
         const items = itemsBySource();
         const choice = await openFirstStartDialog(rows.map((row) => ({
@@ -178,7 +184,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     function openMenu(trigger) {
         activeMenu?.close();
         const id = trigger.dataset.sourceMenu;
-        const source = sources.find((row) => row.id === id);
+        const source = sourceRows().find((row) => row.id === id);
         if (!source) return;
         const menu = document.createElement('div');
         menu.className = 'ui-popup skills-card-menu-dialog';
@@ -232,7 +238,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         const target = event.target.closest('[data-source-action]');
         if (!target || target.disabled) return;
         const action = target.dataset.sourceAction;
-        const source = sources.find((row) => row.id === target.dataset.sourceId);
+        const source = sourceRows().find((row) => row.id === target.dataset.sourceId);
         try {
             if (action === 'add') {
                 const added = await openAddSourceDialog({ api, suggestions: host.sourceSuggestions?.() || [] });
@@ -251,6 +257,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     return {
         show: (options) => load(options),
         refresh: () => load({ refresh: true }),
+        repaint: render,
         confirmFirstStart,
         destroy() {
             destroyed = true;

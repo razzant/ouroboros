@@ -28,6 +28,7 @@ Having a key does not turn on calls; an unavailable selection is never replaced.
 The selected catalog supplies supported controls, privacy and memory-window
 facts. Call instructions and engine choices apply to the next call. Microphone,
 speaker, camera and echo/noise/gain choices stay on this client and apply live.
+Leaving the settings form ends a short device test. It does not end a call.
 
 Talk occupies Send while the composer is empty. Text or a file restores Send;
 empty Enter never starts a call. Dictation is hidden during the call. Keyboard

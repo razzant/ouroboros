@@ -5,7 +5,7 @@
  * list had ("Extension Settings", under Advanced). `skill/<id>` is the form a skill registered (its reviewed,
  * host-rendered settings sections), opened from that list, the skill's card, a place's Connect, Voice and calls,
  * and search. Each opened form has its own host element, `#extension-settings-sections`. A jump retains that same
- * host until its return is consumed or cleared; ordinary closure still releases it. Skill modules bind each drawing
+ * host until its return is consumed or cleared; ordinary closure releases clean forms. Skill modules bind each drawing
  * and only their forms in the page. Only that skill's routes are read, and `ouro:extension-settings-mounted` tells
  * a skill's own page module that its form stands (the bundled Calls skill enhances its form on it). The host draws
  * every field, reads the stored values from the route it posts to and owns the Save outcome.
@@ -21,7 +21,7 @@ import { registerSettingsPage } from './settings_pages.js';
 import { rowsOf } from './settings_rows.js';
 import { skillTitle } from './skill_presentation.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus } from './ui_helpers.js';
-import { clearResultOnEdit, errorWords, setResult } from './ui_primitives.js';
+import { errorWords, setResult } from './ui_primitives.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 const pendingExtensionSettings = new Set();
@@ -29,8 +29,8 @@ const pendingExtensionSettings = new Set();
 // A declarative extension form must show what is STORED (posting the bare schema once unbound the
 // Telegram skill's owner chat id). The host reads the current values from the SAME route it posts
 // to. A route with no GET handler (404/405) cannot say what is stored: its fields start locked
-// behind a warning until the owner chooses Edit anyway; any other failed read keeps Save disabled,
-// and a successful `{}` is a real empty document.
+// behind a warning until the owner chooses Edit anyway; any other failed read leaves both fields and Save locked
+// until a new read, and a successful `{}` is a real empty document.
 const EXTENSION_VALUES_UNREADABLE = 'Current values could not be read; Save is disabled so it does not overwrite them. Open this page again to retry.';
 const EXTENSION_VALUES_UNAVAILABLE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 const EXTENSION_EDITING_UNREAD = 'You chose to edit without reading the saved values. Review every field before sending.';
@@ -60,7 +60,9 @@ export function isStatusForm(component = {}) {
 
 const submitLabel = (spec, check) => spec.submit_label || spec.label || (check ? 'Check status' : 'Save');
 
-export async function renderExtensionSettingsSections(root, sections, { isCurrent = () => true, edits = new Map() } = {}) {
+export async function renderExtensionSettingsSections(root, sections, {
+    isCurrent = () => true, edits = new Map(), nextEdit = () => Symbol(),
+} = {}) {
     const host = root.querySelector('#extension-settings-sections');
     if (!host) return;
     const items = Array.isArray(sections) ? sections : [];
@@ -108,7 +110,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             const unread = read === 'unsupported' && !disabled;
             const failed = read === 'failed';
             const fieldOptions = {
-                disabled: disabled || unread,
+                disabled: disabled || failed || unread,
                 fieldClass: 'form-field ui-field',
                 inlineClass: 'settings-extension-checkbox ui-field ui-field-inline',
                 helpClass: 'settings-inline-note ui-field-help',
@@ -144,14 +146,26 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
         `;
     }).join('');
     host.querySelectorAll('[data-extension-settings-form]').forEach((form) => {
-        // An edit clears the form's last result; a warning that its stored values are unreadable is a current fact and stays.
+        const spec = formSpecs.get(form.dataset.extensionSettingsKey) || {};
+        const fields = Array.isArray(spec.fields) ? spec.fields : [];
         const result = form.querySelector('[data-extension-settings-status]');
-        if (!result?.textContent) clearResultOnEdit(form, result);
+        const onEdit = (event) => {
+            const field = event.target;
+            if (form.dataset.extensionSettingsBlocked || field.disabled || !field.name
+                || form.elements?.namedItem?.(field.name) !== field
+                || !fields.some((item) => !item?.disabled && String(item?.name || '') === field.name)) return;
+            // Text already reported its edit on input. Blur may deliver change after Save.
+            if (event.type === 'change' && field.matches('textarea, input:not([type="checkbox"]):not([type="radio"])')) return;
+            edits.set(form, nextEdit());
+            setResult(result, {});
+        };
+        // Capture before a skill's own change handler can redraw its controls. Only a field we submit owns a draft.
+        form.addEventListener('input', onEdit, true);
+        form.addEventListener('change', onEdit, true);
         // The owner's explicit choice to send this form without its stored values: it unlocks
         // the fields the schema does not disable, and Save sends every one of them as before.
         form.querySelector('[data-extension-settings-edit-anyway]')?.addEventListener('click', (event) => {
-            const spec = formSpecs.get(form.dataset.extensionSettingsKey) || {};
-            for (const field of spec.fields || []) {
+            for (const field of fields) {
                 const input = field.disabled ? null : form.elements?.namedItem?.(String(field.name || ''));
                 if (input) input.disabled = false;
             }
@@ -165,12 +179,10 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             const status = form.querySelector('[data-extension-settings-status]');
             const skill = form.dataset.skill || '';
             const route = form.dataset.route || '';
-            const formKey = form.dataset.extensionSettingsKey || `${skill}:${route}`;
-            const spec = formSpecs.get(formKey) || {};
             const requestKey = `${skill}:${route}`;
             if (!skill || !route || spec.disabled || form.dataset.extensionSettingsBlocked
                 || pendingExtensionSettings.has(requestKey)) return;
-            const values = collectSafeFieldValues(form, spec.fields || []);
+            const values = collectSafeFieldValues(form, fields);
             const sentRevision = edits.get(form);
             const button = form.querySelector('button[type="submit"]');
             const check = isStatusForm(spec);
@@ -195,7 +207,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 }
                 // A read-only field shows what the route answered just now, from the same source as its
                 // first render; an editable one keeps what the owner typed.
-                for (const field of spec.fields || []) {
+                for (const field of fields) {
                     const name = String(field?.name || '');
                     const input = field?.disabled && name && Object.prototype.hasOwnProperty.call(data, name)
                         ? form.elements?.namedItem?.(name) : null;
@@ -342,24 +354,17 @@ function mountSkillForm(container, { path, ctx }) {
             if (current() && !host.innerHTML) setResult(host.appendChild(Object.assign(document.createElement('p'), { className: 'ui-result' })), errorWords(err));
             return;
         }
-        if (current()) await renderExtensionSettingsSections(container, FORMS.get(skill)?.sections || [], { isCurrent: current, edits });
+        if (current()) await renderExtensionSettingsSections(container, FORMS.get(skill)?.sections || [], {
+            isCurrent: current, edits, nextEdit: () => ++serial,
+        });
     })().finally(() => { filling = null; }));
-    const onTyped = (event) => {
-        // Text controls already reported the edit on input. A later blur can deliver change after Save.
-        if (event.type === 'change' && event.target.matches?.('textarea, input:not([type="checkbox"]):not([type="radio"])')) return;
-        const form = event.target.closest?.('[data-extension-settings-form]');
-        if (form) edits.set(form, ++serial);
-    };
     const onShown = (event) => { if (event.detail?.path === path) void fill(); };
-    host.addEventListener('input', onTyped, true);
-    host.addEventListener('change', onTyped, true);
     window.addEventListener('ouro:settings-page-shown', onShown);
     const offLifecycle = getContributions().onLifecycle(() => { if (onScreen(ctx, path)) void fill(); });  // as the list above
     return Promise.resolve(fill()).then(() => ({
+        unsaved: () => edits.size > 0,
         unmount() {
             alive = false;
-            host.removeEventListener('input', onTyped, true);
-            host.removeEventListener('change', onTyped, true);
             window.removeEventListener('ouro:settings-page-shown', onShown);
             offLifecycle();
             window.dispatchEvent(new CustomEvent('ouro:extension-settings-unmounted', { detail: { root: host } }));

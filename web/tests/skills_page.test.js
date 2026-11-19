@@ -72,16 +72,18 @@ test('Update counts trusted candidates briefly in the band and keeps the full sc
 test('a skill opens Widgets as a jump; another view is the section\'s page, never a private tab', async () => {
     const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
     const shown = [], gone = [];
-    const context = vm.createContext({ ctx: { showPage: (...args) => shown.push(args) }, activeTab: 'installed',
-        section: { go: (...args) => gone.push(args) }, browse: { searchFor: (name) => gone.push(['search', name]) } });
+    const opener = {};
+    const context = vm.createContext({ ctx: { showPage: (...args) => shown.push(args) }, activeTab: 'installed', visible: true,
+        section: { async open(view, options) { gone.push([view, options.opener]); context.activeTab = view; return true; } },
+        browse: { searchFor: (name) => gone.push(['search', name]) } });
     vm.runInContext(source.match(/    async function runInstalledAction\([\s\S]+?\n    \}/)[0], context);
     await context.runInstalledAction('example', 'open_widgets');
     assert.deepEqual(shown, [['widgets']], 'the action does not press a primary map row');
-    // A view change goes through the section's levels; retaining a view across a jump is the section's
-    // capture (extensions_section.test.js), never a tab saved privately by skills.js.
-    vm.runInContext(source.match(/    function selectTab\(view\) \{\n        section\.go\(view\);\n    \}/)[0], context);
-    await context.runInstalledAction('example', 'find_in_browse');
-    assert.deepEqual(gone, [['browse'], ['search', 'example']], 'find-in-browse asks the section for the view and searches');
+    await context.runInstalledAction('example', 'open_widgets', { opener });
+    assert.equal(shown[1][0], 'widgets');
+    assert.equal(shown[1][1].opener, opener, 'the sheet hands the same jump its underlying Browse control');
+    await context.runInstalledAction('example', 'find_in_browse', { node: opener });
+    assert.deepEqual(gone, [['browse', opener], ['search', 'example']], 'Find in Browse jumps from its pressed action');
 });
 
 test('the active lifecycle job joins the event stream once', () => {
@@ -148,6 +150,10 @@ test('Sources Publish one filters the retained Installed cards even while the re
         await settle(); // Let optional facts arrive before the first list; this fixture does not model template enrichment.
         finish(initial);
         await settle();
+        const answer = document.getElementById('page-skills').querySelector('[data-extensions-open="installed"]')
+            .querySelector('[data-extensions-answer]');
+        const good = answer.textContent;
+        assert.match(good, /^2 installed/);
         const local = list.querySelector('[data-skill="local-example"]');
         const downloaded = list.querySelector('[data-skill="downloaded-example"]');
         assert.equal(local.hidden, false);
@@ -156,6 +162,8 @@ test('Sources Publish one filters the retained Installed cards even while the re
         await controls.open('sources');
         await settle();
         finish = undefined;
+        let finishState;
+        env.routes.set('/api/state', () => new Promise(resolve => { finishState = resolve; }));
         const pane = document.getElementById('skills-pane-sources');
         await pane.fire('click', { target: pane.querySelector('[data-source-action="made_here"]') });
         assert.equal(typeof finish, 'function', 'the fresh listing has started but has not answered');
@@ -167,11 +175,84 @@ test('Sources Publish one filters the retained Installed cards even while the re
 
         finish(reply({ error: 'fixture unavailable' }, 503));
         await settle();
+        finishState(reply({ github_token_configured: false }));
+        await settle();
         assert.match(document.getElementById('skills-status').textContent, /Showing the previous list/);
+        assert.equal(answer.textContent, `Last known: ${good}`);
         assert.equal(list.querySelector('[data-skill="local-example"]'), local);
         assert.equal(list.querySelector('[data-skill="downloaded-example"]'), downloaded);
         assert.equal(local.hidden, false);
         assert.equal(downloaded.hidden, true);
+        const retry = document.getElementById('skills-refresh').fire('click');
+        finishState(reply({ github_token_configured: false }));
+        finish(reply({ skills: [] }));
+        await retry;
+        await settle();
+        assert.equal(answer.textContent, 'None yet');
+    } finally {
+        controls.destroy();
+    }
+});
+
+test('Sources arrival and Refresh use one authoritative list for both the rail and page', async (t) => {
+    const { env, state, layers, showPage } = world(t);
+    const reply = (body, status = 200) => ({ ok: status === 200, status, json: async () => body });
+    const reads = [];
+    env.routes.set('/api/extensions', reply({ skills: [] }));
+    env.routes.set('/api/state', reply({ github_token_configured: false }));
+    env.routes.set('/api/skills/lifecycle-queue', reply({ events: [] }));
+    env.routes.set('/api/skill-sources', () => new Promise(resolve => reads.push(resolve)));
+    const catalog = reply({ items: [], sources: [] });
+    env.routes.set('/api/skill-catalog', catalog);
+    let finishCatalog;
+    env.routes.set('/api/skill-catalog?refresh=1', () => new Promise(resolve => { finishCatalog = resolve; }));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        env.document.getElementById('skills-installed-search').value = '';
+        const page = env.document.getElementById('page-skills');
+        const answer = page.querySelector('[data-extensions-open="sources"]').querySelector('[data-extensions-answer]');
+        const pane = env.document.getElementById('skills-pane-sources');
+        const refresh = env.document.getElementById('skills-refresh');
+        const status = () => pane.querySelector('.skills-sources-id')?.textContent || '';
+        const settleRead = async (finish, result) => { finish(result); await settle(); };
+        const fail = reply({ error: 'fixture unavailable' }, 503);
+        await controls.open('sources');
+        await settle();
+        assert.equal(reads.length, 1, 'the arriving page and place share one request');
+        assert.equal(answer.textContent, '');
+        assert.doesNotMatch(status(), /0 sources/);
+        await settleRead(reads[0], fail);
+        assert.equal(answer.textContent, 'Could not read');
+        assert.match(status(), /couldn’t be read:/);
+        assert.equal(reads.length, 1, 'a first-start check does not retry a failed arrival');
+
+        await showPage('chat');
+        await controls.open('sources');
+        await settle();
+        assert.equal(reads.length, 2, 'the return starts one fresh read');
+        const pending = refresh.fire('click');
+        await settle();
+        assert.equal(reads.length, 3, 'an explicit Refresh supersedes the arrival read');
+        await settleRead(reads[2], reply({ sources: [{ id: 'one', kind: 'git', name: 'Fresh list' }] }));
+        assert.equal(answer.textContent, '1 connected');
+        assert.match(status(), /1 source connected/);
+        assert.match(pane.querySelector('[data-source-row="one"]').textContent, /Fresh list/);
+        await settleRead(reads[1], fail);
+        assert.equal(answer.textContent, '1 connected');
+        assert.match(status(), /1 source connected/, 'an obsolete failure cannot repaint the view, even with catalog health pending');
+        finishCatalog(catalog);
+        await pending;
+
+        const failed = refresh.fire('click');
+        await settle();
+        assert.equal(reads.length, 4);
+        await settleRead(reads[3], fail);
+        assert.equal(answer.textContent, 'Last known: 1 connected');
+        assert.match(status(), /couldn’t be read:/);
+        assert.match(pane.querySelector('[data-source-row="one"]').textContent, /Fresh list/);
+        finishCatalog(catalog);
+        await failed;
+        assert.equal(reads.length, 4);
     } finally {
         controls.destroy();
     }

@@ -248,7 +248,7 @@ test('a server\'s page is drawn again only while it is the page on screen: a rea
     assert.equal(name(), 'Files (team)');
 });
 
-test('MCP list shows a passive failure and recovery while an unchanged editor keeps its live client ID control', async t => {
+test('an open MCP editor keeps its live client ID control across a neighbouring edit and status refreshes', async t => {
     const path = 'tools/slack';
     let top = path;
     const page = await open(t, path, { onScreen: (candidate) => candidate === top });
@@ -264,11 +264,13 @@ test('MCP list shows a passive failure and recovery while an unchanged editor ke
     const listSignIn = () => head(list, 'slack').querySelector('[data-entry-sign-in]');
     const lead = () => list.querySelector('[data-mcp-global]').textContent;
     const clientId = (container = page.container) => container.querySelector('[data-mcp-sign-in-client-id]');
+    const card = page.container.querySelector('[data-mcp-card]');
     const input = clientId();
     input.closest('details').open = true;
     input.focus();
     input.value = 'fixture-app-id';
     const retained = () => {
+        assert.ok(page.container.querySelector('[data-mcp-card]') === card, 'keep the mounted form');
         assert.ok(clientId() === input, 'keep the actual input, not an equivalent replacement');
         assert.ok(page.document.activeElement === input, 'the same input still has focus');
         assert.equal(input.value, 'fixture-app-id');
@@ -280,6 +282,15 @@ test('MCP list shows a passive failure and recovery while an unchanged editor ke
     await markShown();  // an ordinary equivalent settings/status read while actively typing
     retained();
     assert.equal(page.handle.unsaved(), false, 'not a settings edit');
+
+    const reads = page.server.reads;
+    page.server.values.MCP_SERVERS[1].name = 'Shared files';
+    page.server.tokens.MCP_SERVERS = 1;
+    await markShown();
+    assert.ok(page.server.reads > reads);
+    assert.match(head(list, 'files').textContent, /Shared files/, 'the other server really was refreshed');
+    retained();
+    assert.equal(page.handle.unsaved(), false, 'the ephemeral value is still not a settings edit');
 
     top = '';
     page.routes.set('/api/mcp/status', () => response({}, 503));
@@ -311,17 +322,17 @@ test('MCP list shows a passive failure and recovery while an unchanged editor ke
     await markShown();
     assert.equal(clientId(), null, 'a changed sign-in shape is drawn when the editor is shown again');
 
-    // Changing the actual saved entry starts a new form, even with the same sign-in status.
+    // Changing this server's saved address starts a new form, even with the same sign-in status.
     page.routes.set('/api/mcp/status', () => status({ state: 'not_signed_in', reason: 'expired' }));
     await refreshStatus();
-    const beforeRename = clientId();
-    beforeRename.value = 'different-fixture-id';
-    page.server.values.MCP_SERVERS[0].name = 'Renamed fixture';
+    const beforeAddressChange = clientId();
+    beforeAddressChange.value = 'different-fixture-id';
+    page.server.values.MCP_SERVERS[0].url = 'https://services.example.test/slack';
     page.server.tokens.MCP_SERVERS += 1;
     await markShown();
-    assert.ok(clientId() !== beforeRename);
+    assert.ok(clientId() !== beforeAddressChange);
     assert.equal(clientId().value || '', '');
-    assert.equal(page.container.querySelector('[data-mcp-field="name"]').getAttribute('value'), 'Renamed fixture');
+    assert.equal(page.container.querySelector('[data-mcp-field="url"]').getAttribute('value'), 'https://services.example.test/slack');
 
     await typeInto(page.container.querySelector('[data-mcp-field="url"]'), 'https://example.test/edit');
     const discarded = clientId();
@@ -338,6 +349,36 @@ test('MCP list shows a passive failure and recovery while an unchanged editor ke
     assert.equal(clientId(fresh).value || '', '', 'a new mount does not inherit the old form input');
     assert.deepEqual(page.server.posts, []);
     assert.ok(!page.calls.includes('/api/mcp/sign-in'));
+});
+
+test('removing a neighbouring MCP row keeps the open server’s public client ID and focus', async t => {
+    const path = 'tools/notes';
+    const [archive, notes] = ['archive', 'notes'].map(id => ({ id, name: id, enabled: true,
+        transport: 'streamable_http', url: `https://${id}.example.test/mcp` }));
+    const page = await open(t, path, { values: { MCP_SERVERS: [archive, notes] } });
+    page.routes.set('/api/mcp/status', () => response({ sdk_available: true, enabled: true, servers: [
+        { id: 'notes', enabled: true, tool_count: 0, sign_in: { state: 'not_signed_in', reason: 'not_signed_in' } },
+    ] }));
+    await refreshStatus();
+    const card = () => page.container.querySelector('[data-mcp-card]');
+    const input = () => card().querySelector('[data-mcp-sign-in-client-id]');
+    assert.equal(card().dataset.mcpIndex, '1');
+    input().closest('details').open = true;
+    input().focus();
+    input().value = 'fixture-notes-client';
+
+    page.server.values.MCP_SERVERS.shift();
+    page.server.tokens.MCP_SERVERS = 1;
+    page.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place: 'skills' } }));
+    await settle();
+    assert.equal(card().dataset.mcpIndex, '0', 'the editor is rendered and bound at its current slot');
+    assert.equal(card().dataset.entryId, 'notes');
+    assert.equal(input().value, 'fixture-notes-client');
+    assert.equal(input().closest('details').open, true);
+    assert.ok(page.document.activeElement === input(), 'focus is in the current card');
+    assert.equal(page.handle.unsaved(), false, 'the client ID is not a settings draft');
+    assert.deepEqual(page.server.posts, []);
+    assert.ok(page.calls.every(url => ['/api/settings', '/api/mcp/status'].includes(url)));
 });
 
 test('a new server is saved as one more entry with an ID, and a taken ID is refused before anything is sent', async (t) => {
