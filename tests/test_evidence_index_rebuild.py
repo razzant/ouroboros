@@ -175,6 +175,78 @@ def test_a_rebuild_never_publishes_beside_the_replaced_file_s_journal(tmp_path, 
     assert _tasks(tmp_path) == {"a", "b"} and packs.blob_bytes(tmp_path, ref) == raw
 
 
+def _wal_index_with_b(tmp_path, monkeypatch):
+    """A WAL index of tasks a and b (b's blob packed only), and that blob's ref and bytes."""
+    import pathlib
+
+    from tests.test_evidence_packs import _blob
+
+    use_journal(monkeypatch, "WAL")
+    monkeypatch.setattr(packs, "index_tier", lambda _root: store.TIER_ENFORCED)
+    _publish(tmp_path, "a")
+    packs.ensure_index(tmp_path)
+    raw = b'"the second generation"'
+    ref = _blob(tmp_path, raw)
+    pack, sidecar = packs.write_pack(tmp_path, "b", 1, [{key: ref[key] for key in ("sha256", "kind", "size")}])
+    pathlib.Path(ref["path"]).unlink()  # only its pack holds it now
+    index = packs.packs_dir(tmp_path) / packs.INDEX_NAME
+    return index, index.with_name(index.name + "-wal"), ref, raw, (pack, sidecar)
+
+
+def _killed_before_checkpoint(index, wal, write):
+    """Run ``write`` in one transaction of a WAL writer that never checkpoints, then leave the main file and its
+    WAL as the writer killed right after COMMIT leaves them (closing would checkpoint them together)."""
+    with contextlib.closing(store.connect(index, store.TIER_ENFORCED)) as conn:
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        with store.transaction(conn, write=True):
+            write(conn)
+        main, log = index.read_bytes(), wal.read_bytes()
+    store.close_connections()
+    index.write_bytes(main)
+    wal.write_bytes(log)
+
+
+def test_an_interrupted_publication_leaves_the_index_missing_never_the_old_file_without_its_wal(tmp_path, monkeypatch):
+    """A generation committed only in the old file's WAL (its writer killed before the checkpoint), and a rebuild the
+    pass ordered on its own failure to open the file (no mark): a publication interrupted at the rename must never
+    leave the old file without its WAL, which looks usable and answers that generation absent. The old file goes
+    first, then its journals, then the rename: interrupted, the index is missing and owed, a read by sha is unknown
+    now (never absent), and the next pass publishes every generation."""
+    import pathlib
+
+    index, wal, ref, raw, (pack, sidecar) = _wal_index_with_b(tmp_path, monkeypatch)
+    _killed_before_checkpoint(index, wal, lambda conn: packs._index_rows(conn, pack, sidecar))
+    valid, replace = packs._index_valid, packs.replace_atomic
+
+    def stop(src, dst, *args, **kwargs):
+        if pathlib.Path(dst) == index:
+            raise KeyboardInterrupt("publication interrupted at the rename")
+        return replace(src, dst, *args, **kwargs)
+
+    with monkeypatch.context() as patch:  # only the pass's own checks fail: no reader marked anything
+        patch.setattr(packs, "_index_valid", lambda *args, reader=False, **kwargs: reader and valid(*args, reader=True, **kwargs))
+        patch.setattr(packs, "replace_atomic", stop)
+        with pytest.raises(KeyboardInterrupt, match="interrupted at the rename"):
+            packs.ensure_index(tmp_path)
+    with pytest.raises(packs.EvidenceUnavailable):  # unknown now, never absent
+        packs.blob_bytes(tmp_path, ref)
+    assert packs.index_owed(tmp_path) and packs.ensure_index(tmp_path)["sidecars"] == 2
+    assert _tasks(tmp_path) == {"a", "b"} and packs.blob_bytes(tmp_path, ref) == raw
+
+
+def test_a_stale_wal_beside_a_missing_index_never_rolls_into_the_rebuilt_one(tmp_path, monkeypatch):
+    """The WAL of a writer killed before its checkpoint, its main file then gone: the pass rebuilds from the
+    sidecars, and that WAL never rolls into the new file: every pack and member stays, the blob reads by its sha."""
+    index, wal, ref, raw, (pack, sidecar) = _wal_index_with_b(tmp_path, monkeypatch)
+    packs.index_upsert(tmp_path, pack, sidecar)
+    _killed_before_checkpoint(index, wal, lambda conn: [conn.execute(f"DELETE FROM {table}") for table in ("members", "packs")])
+    index.unlink()
+    assert packs.index_owed(tmp_path) and packs.ensure_index(tmp_path)["sidecars"] == 2
+    with packs.open_index(tmp_path) as conn:
+        counts = [conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("packs", "members")]
+    assert counts == [2, 2] and packs.blob_bytes(tmp_path, ref) == raw
+
+
 @pytest.mark.parametrize("budget", [0.25, None, 10.0], ids=["slice", "ordinary", "larger-budget"])
 def test_name_lock_wait_respects_budget_and_ordinary_wait_still_succeeds(root, monkeypatch, budget):
     _publish(root, "first")

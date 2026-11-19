@@ -329,11 +329,11 @@ def _index_wait(wait_sec: float = INDEX_WAIT_SEC) -> float:
 def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
     """The cache's one builder, run by the packing pass (``evidence_packer.pack_sweep``, which serializes it
     with every sidecar publication): a cache whose O(1) facts fail is rebuilt from the sidecars, read one at a
-    time, into a private file outside the index lock; that file must pass a whole-file check before it
-    replaces the old one and its journal under the lock, where a usable index another builder published meanwhile
-    wins (with its later writes); a failure keeps the old file. ``None`` when the cache is usable; else the rebuild's
-    facts, also recorded as one ``storage_pack`` row (``phase: index_rebuilt``). A cache a read marked
-    (``DAMAGED_MARK``) counts as failing; its rebuild removes the mark."""
+    time, into a private file outside the index lock; that file must pass a whole-file check before it replaces
+    the old one and its journals under the lock, where a usable index another builder published meanwhile wins
+    (with its later writes); a failure keeps the old file, one while publishing leaves none (owed). ``None`` when
+    the cache is usable; else the rebuild's facts, also one ``storage_pack`` row (``phase: index_rebuilt``). A
+    cache a read marked (``DAMAGED_MARK``) counts as failing; its rebuild removes the mark."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
     mark = path.parent / DAMAGED_MARK
@@ -361,8 +361,8 @@ def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
                 return None  # another builder published; keep its subsequent writes too
             with contextlib.suppress(FileNotFoundError):
                 tmp.chmod(path.stat().st_mode)
-            for stale in (path.with_name(path.name + suffix) for suffix in ("-journal", "-wal", "-shm")):
-                with contextlib.suppress(FileNotFoundError):  # the replaced file's: never rolled into the new one
+            for stale in (path.with_name(path.name + suffix) for suffix in ("", "-journal", "-wal", "-shm")):
+                with contextlib.suppress(FileNotFoundError):  # the old file first: never left without its journals
                     stale.unlink()
             replace_atomic(tmp, path)
             store.fsync_directory(path.parent)
