@@ -472,29 +472,38 @@ def test_named_evidence_stays_a_stream_because_a_clone_would_be_refused_compress
     assert retained.read_bytes() == source.read_bytes()
 
 
-def test_git_checking_delta_obeys_same_settings_floor(author, tmp_path, monkeypatch):
-    from ouroboros import config
+@pytest.mark.parametrize("configured", [True, False])
+def test_git_checking_delta_obeys_same_settings_floor(author, tmp_path, monkeypatch, configured):
+    from ouroboros import config, review_checking as rc
 
-    monkeypatch.setattr(
-        config,
-        "load_settings",
-        lambda **kw: {
-            "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "sample", "api_key": "sample-fixture-value"}]
-        },
-    )
-    import json
-    from pathlib import Path
-    from ouroboros import review_checking as rc
-
+    settings = {"MCP_SERVERS": [{"headers": {"Accept": "application/json",
+                                            "Authorization": "Bearer sample-fixture-value"}}]}
+    monkeypatch.setattr(config, "load_settings", lambda **kw: settings if configured else {})
     data = tmp_path / "data"
     (author / "former-output").write_text("sample-fixture-value")
     _git(author, "add", "former-output")
     source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
-    area = Path(rc.prepare_seat_area(data, "task", "op-1", source))
+    area = pathlib.Path(rc.prepare_seat_area(data, "task", "op-1", source))
     (area / "former-output").unlink()
-    (area / "report.txt").write_text("fixture public report")
-    (area / "renamed.json").write_text(json.dumps({"OPENROUTER_API_KEY": "sample-fixture-value"}))
-    evidence = rc.capture_seat_evidence(data, "task", "op-1")
-    patch = (Path(evidence["evidence_dir"]) / "delta.patch").read_bytes()
-    assert {g["path"] for g in evidence["gaps"] if g["size"] > 0} == {"renamed.json", "former-output"}
-    assert b"fixture public report" in patch and b"sample-fixture-value" not in patch
+    (area / "report.txt").write_text("sample result application/json")
+    (area / "renamed.json").write_bytes(b"x" * ((1 << 20) - 4) + b"sample-fixture-value")
+    cache = area / "__pycache__"
+    cache.mkdir()
+    (cache / "byproduct.pyc").write_bytes(b"unused cache")
+    readers = []
+    popen = subprocess.Popen
+
+    def observe(argv, *args, **kwargs):
+        if "cat-file" in argv and ("--batch" in argv or "blob" in argv):
+            readers.append(argv[argv.index("cat-file") + 1])
+        return popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", observe)
+    receipt = rc.capture_seat_evidence(data, "task", "op-1")
+    patch = (pathlib.Path(receipt["evidence_dir"]) / "delta.patch").read_bytes()
+    assert readers == (["--batch"] if configured else [])
+    assert {g["path"] for g in receipt["gaps"] if g.get("reason") == "installation_settings" and g["size"]} == (
+        {"renamed.json", "former-output"} if configured else set())
+    assert b"sample result application/json" in patch
+    assert (b"sample-fixture-value" in patch) != configured
+    assert b"byproduct.pyc" not in patch

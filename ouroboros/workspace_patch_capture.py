@@ -156,14 +156,13 @@ def write_workspace_patch_artifacts(
     scratch = _declared_scratch(scratch_dir or artifact_dir, root)
     base_sizes = baseline_blob_sizes(root, base_ref, errors=errors)
     held, named_evidence = workspace_evidence_exclusions(
-        root, metadata.get("host_evidence"), set(untracked + changed_tracked + file_input_paths),
-        base_ref, base_sizes, file_baseline, retain_evidence_dir, retained_evidence)
+        root, metadata.get("host_evidence"), set(untracked + changed_tracked),
+        base_sizes.keys() | selected_files, retain_evidence_dir, retained_evidence)
     excluded.extend(held[rel] for rel in untracked if rel in held)
     held_tracked = sorted(held.keys() - set(untracked))
     tracked_excluded.extend(held[rel] for rel in held_tracked)
     changed_tracked = [rel for rel in changed_tracked if rel not in held]
     untracked = [rel for rel in untracked if rel not in held]
-    file_input_paths = [rel for rel in file_input_paths if rel not in held]
     # git's binary verdict for the whole inventory in one process (two when empty
     # files need their attribute verdict; #1241); the loop below keeps its per-file
     # order and reads the verdict instead of spawning ``git diff --numstat`` per file.
@@ -172,28 +171,21 @@ def write_workspace_patch_artifacts(
         if _is_declared_scratch(root, rel, *scratch):
             excluded.append({"path": rel, "reason": "declared ephemeral scratch (v6.52.2)"})
             continue
-        sensitive_reason = _sensitive_untracked_reason(rel)
-        if sensitive_reason:
-            sensitive.append({"path": rel, "reason": sensitive_reason})
-            continue
-        reason = _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
-        if reason:
-            excluded.append({"path": rel, "reason": reason})
-            continue
-        blob_reason = _untracked_blob_exclude_reason(
+        reason = untracked_capture_veto_reason(
             root, rel, file_outputs=file_output_paths, warnings=diagnostics, binary_verdicts=binary_verdicts)
-        if blob_reason:
-            excluded.append({"path": rel, "reason": blob_reason})
-            continue
-        included_untracked.append(rel)
+        if reason:
+            records = sensitive if _sensitive_untracked_reason(rel) else excluded
+            records.append({"path": rel, "reason": reason})
+        else:
+            included_untracked.append(rel)
     captured_inputs: List[str] = []
     for rel in file_input_paths:
+        if reason := _patch_exclude_reason(rel):
+            excluded.append({"path": rel, "reason": reason})
+            continue
         sensitive_reason = _sensitive_untracked_reason(rel) or pem_capture_refusal(root, rel, warnings=diagnostics)
         if sensitive_reason:
             sensitive.append({"path": rel, "reason": sensitive_reason})
-            continue
-        if reason := _patch_exclude_reason(rel):
-            excluded.append({"path": rel, "reason": reason})
             continue
         captured_inputs.append(rel)
         if work_domain.kind(root / rel) == "file":
@@ -901,10 +893,7 @@ def untracked_capture_veto_reason(root: pathlib.Path, rel: str, *, file_outputs:
     ``binary_verdicts`` comes from one :func:`untracked_binary_verdicts` batch over
     the whole inventory (``None`` = per-file git verdict, see the blob check).
     """
-    reason = _sensitive_untracked_reason(rel)
-    if reason:
-        return reason
-    reason = _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
+    reason = _sensitive_untracked_reason(rel) or _patch_exclude_reason(rel) or _wal_index_reason(root, rel)
     if reason:
         return reason
     return _untracked_blob_exclude_reason(root, rel, file_outputs=file_outputs, warnings=warnings,

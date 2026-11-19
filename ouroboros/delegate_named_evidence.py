@@ -46,33 +46,64 @@ def _raise(error):
     raise error  # a skipped subtree is not a complete inventory
 
 
-def private_git_blobs(references, values, dump_blob):
-    """Check immutable Git sides, including deleted content, without loading a whole blob into memory."""
-    from tempfile import TemporaryFile
-    from ouroboros.secret_masking import SecretScan
+def private_review_paths(area, trees, env):
+    """Scan the immutable old and new sides of a review delta once per blob, through one Git reader."""
+    import subprocess
+    from ouroboros.review_checking import CheckingAreaUnavailable, _git
+    from ouroboros.secret_masking import SecretScan, installation_secret_bytes
+
+    secrets = installation_secret_bytes()
+    if not secrets:
+        return {}
+    raw = _git(area, "diff", "--no-renames", "--raw", "--no-abbrev", "-z", *trees, env=env).stdout.split(b"\0")
+    names = {}
+    for change, path in zip(raw[::2], raw[1::2]):
+        old_mode, new_mode, old, new, _ = change.lstrip(b":").split()
+        for mode, oid in ((old_mode, old), (new_mode, new)):
+            if mode not in {b"000000", b"160000"}:
+                names.setdefault(oid, set()).add(os.fsdecode(path))
     gaps = {}
-    for name, refs in references:
-        for ref in refs:
-            with TemporaryFile() as blob:
-                dump_blob(ref, blob)
-                blob.seek(0)
-                scan = SecretScan(values)
-                if scan.read_from(blob):
-                    gaps[name] = {"path": name, "reason": "installation_settings", "size": scan.size}
-                    break
+    if not names:
+        return gaps
+    # Request one object at a time. Neither pipe can fill while the parent is writing the list.
+    with subprocess.Popen(["git", "cat-file", "--batch"], cwd=area, env=env,
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as git:
+        for oid, paths in names.items():
+            git.stdin.write(oid + b"\n")
+            git.stdin.flush()
+            header = git.stdout.readline().split()
+            if len(header) != 3 or header[:2] != [oid, b"blob"]:
+                raise CheckingAreaUnavailable("Git could not read an evidence blob")
+            size = int(header[2])
+            scan = SecretScan(secrets)
+            while scan.size < size:
+                chunk = git.stdout.read(min(1 << 20, size - scan.size))
+                if not chunk:
+                    raise CheckingAreaUnavailable("Git truncated an evidence blob")
+                scan.write(chunk)
+            if git.stdout.read(1) != b"\n":
+                raise CheckingAreaUnavailable("Git did not finish an evidence blob")
+            if scan.found:
+                for path in paths:
+                    gaps[path] = {"path": path, "reason": "installation_settings", "size": size}
+        git.stdin.close()
+        if git.wait():
+            raise CheckingAreaUnavailable("Git failed to read the evidence blobs")
     return gaps
 
 
-def _private_evidence_paths(root, paths, base_ref, base_sizes):
-    import subprocess
+def _private_evidence_paths(root, paths):
+    """Only named evidence returning through the patch fallback still needs the evidence floor."""
     from ouroboros import work_domain
-    from ouroboros.git_observation import host_git_env
+    from ouroboros.workspace_patch_rules import _patch_exclude_reason
     from ouroboros.review_checking import _open_regular
     from ouroboros.secret_masking import SecretScan, installation_secret_bytes
 
     values = installation_secret_bytes()
     private = {}
     for rel in sorted(paths) if values else ():
+        if _patch_exclude_reason(rel):
+            continue
         path = root / rel
         scan = SecretScan(values)
         kind = work_domain.kind(path)
@@ -86,12 +117,6 @@ def _private_evidence_paths(root, paths, base_ref, base_sizes):
             scan.write(os.fsencode(work_domain.readlink(path)))
         if scan.found:
             private[rel] = {"path": rel, "reason": "installation_settings", "size": scan.size}
-    if values:
-        before = ((rel, [f"{base_ref}:{rel}"]) for rel in sorted((paths & base_sizes.keys()) - private.keys()))
-        def dump(ref, blob):
-            work_domain.run(["git", "cat-file", "blob", ref], cwd=str(root), env=host_git_env(),
-                            stdout=blob, stderr=subprocess.DEVNULL, check=True)
-        private.update(private_git_blobs(before, values, dump))
     return private
 
 
@@ -104,21 +129,21 @@ def _held_named_evidence(root, host_evidence, paths, products, destination, prev
     summary = retain_workspace_evidence(root, destination, previous=previous, product_paths=products)
     if summary["status"] == "retained":
         return held, summary
-    private = _private_evidence_paths(root, held, None, {})
+    private = _private_evidence_paths(root, held)
     seen = {gap["path"] for gap in summary["gaps"]}
     summary["gaps"].extend(gap for name, gap in private.items() if name not in seen)
     return set(private), summary
 
 
-def workspace_evidence_exclusions(root, host_evidence, paths, base_ref, base_sizes, file_baseline, destination, previous):
-    """Classify named evidence and check both versions of remaining patch inputs against Settings."""
+def workspace_evidence_exclusions(root, host_evidence, paths, products, destination, previous):
+    """Keep retained evidence out of the product patch and carry its exact exclusions into the receipt."""
     from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
 
-    held, summary = _held_named_evidence(root, host_evidence, paths, base_sizes.keys() | file_baseline.keys(),
+    held, summary = _held_named_evidence(root, host_evidence, paths, products,
                                         destination, previous)
     excluded = {name: {"path": name, "reason": NAMED_EVIDENCE_EXCLUSION} for name in held}
     excluded.update((gap["path"], gap) for gap in (summary or {}).get("gaps", []) if gap["reason"] == "installation_settings")
-    return {**excluded, **_private_evidence_paths(root, paths - held, base_ref, base_sizes)}, summary
+    return excluded, summary
 
 
 def retain_files(area, paths, files_dir, *, gaps, preserve_mode=True):

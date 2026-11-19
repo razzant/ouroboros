@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Collection, Dict, Tuple
+from urllib.parse import unquote, urlsplit
 
 # Credentials the Settings API answers a GET with a PLACEHOLDER instead of the
 # stored value. The same set gates the read-side repair in
@@ -60,9 +61,9 @@ def is_custom_secret_setting_key(key: Any, *, known_setting_keys: Collection[str
 
 def installation_secret_bytes():
     """Exact configured values that Settings masks, including connection and MCP credentials."""
-    from urllib.parse import unquote, urlsplit
     from ouroboros.config import SETTINGS_DEFAULTS, load_settings
     from ouroboros.gateway.secret_rows import typed_connection_secrets
+    from ouroboros.utils import is_credential_header_name
 
     settings = load_settings(strict=True)
     values = {v for k, v in settings.items() if isinstance(v, str) and v and (
@@ -75,7 +76,9 @@ def installation_secret_bytes():
             values.add(token)
         headers = server.get("headers")
         if isinstance(headers, dict):
-            values.update(v for v in headers.values() if isinstance(v, str))
+            auth_header = str(server.get("auth_header") or "").casefold() if server.get("auth_token") else ""
+            values.update(v for k, v in headers.items() if isinstance(v, str)
+                          and (is_credential_header_name(k) or str(k).casefold() == auth_header))
             values.update(value.split(" ", 1)[1] for name, value in headers.items() if isinstance(value, str)
                           and str(name).lower() == "authorization" and value.lower().startswith("bearer "))
         url = str(server.get("url") or "")
@@ -193,8 +196,6 @@ def looks_masked_mcp_secret(value: Any) -> bool:
 
 def mask_mcp_url(value: Any) -> str:
     """Mask URL userinfo for the editable Settings surface, preserving its address."""
-    from urllib.parse import urlsplit
-
     text = str(value or "")
     try:
         authority = urlsplit(text).netloc
@@ -212,8 +213,6 @@ def rehydrate_mcp_url(value: Any, current_value: Any) -> str:
     remove the placeholder, never carry the old userinfo to a different target.
     A real new userinfo or an explicit URL without it is kept as supplied.
     """
-    from urllib.parse import urlsplit
-
     text, current = str(value or ""), str(current_value or "")
     if text == CONFIGURED_SECRET_PLACEHOLDER:
         return current if current and mask_mcp_url(current) == text else ""
