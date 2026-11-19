@@ -747,6 +747,7 @@ def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_
     from tests.test_evidence_packs import _blob, _result, _task
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(packs, "_KEPT", ("", {}))  # an earlier test may have read a task of this id in its own root
     refs = {task: _task(tmp_path, task, blobs=3)[0] for task in ("a", "a.2", "b")}
     assert evidence_packer.run_pass(tmp_path)["faults"] == 0
     for generation in range(2, 6):  # written terminal again with new evidence: four generations after a.2's name
