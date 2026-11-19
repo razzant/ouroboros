@@ -439,8 +439,9 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
 def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *, unread: Optional[list] = None,
                   whole: bool = False) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
     """This task's packed checkpoint handles (``rel_path``: that one), read as an addressed fact; ``unread`` collects
-    the task's unreadable sidecars behind a listing they may have left partial, and with ``whole`` the validated
-    index answers only when it recorded no unreadable sidecar (its rows may lack that generation).
+    the task's unreadable sidecars behind a listing they may have left partial (then no index that recorded an
+    unreadable sidecar answers for them), and with ``whole`` the validated index answers only when it recorded none
+    (its rows may lack that generation).
 
     A handle is named by its task and the task's own sidecars are its authority, so no other
     task's pack is read: the index answers while this process has validated its current bytes and
@@ -460,7 +461,7 @@ def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *, unrea
                     not rel_path or member["path"] == rel_path):
                 found.append((sidecar_path.with_name(pack_name(task_id, sidecar["generation"])), member))
     if errors and not found:
-        kept = _indexed_handles(root, task_id, rel_path, validated=False)
+        kept = _indexed_handles(root, task_id, rel_path, validated=False, whole=unread is not None)
         if kept:
             return kept
         if unread is None:

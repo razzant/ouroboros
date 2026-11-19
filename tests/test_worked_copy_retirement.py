@@ -827,7 +827,9 @@ def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the
         evidence_packs.pack_task(root, "partial", keep_shas=set())
     rel = f"source_handles/context_checkpoints/{first.name}"
     assert evidence_packs.materialize_handle(root, "partial", rel) and first.exists()
-    (evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("partial", 1)).write_text("{", encoding="utf-8")
+    sidecars = [evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("partial", generation) for generation in (1, 2)]
+    intact, index = [path.read_bytes() for path in sidecars], evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME
+    sidecars[0].write_text("{", encoding="utf-8")
     with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
         report = _prune(root)
     assert report["held"] == {"packs_unknown": 1} and report["removed"] == 0, report
@@ -835,9 +837,19 @@ def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the
     with evidence_packs.open_index(root, write=True) as conn:  # an index rebuilt while a sidecar was unreadable says so
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('sidecar_errors', ?)", (json.dumps(["unreadable sidecar"]),))
     assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists(), "its rows may miss that generation"
-    with evidence_packs.open_index(root, write=True) as conn:
-        conn.execute("DELETE FROM meta WHERE key='sidecar_errors'")
-    again = _prune(root)  # a checked index that recorded no unreadable sidecar makes the listing whole
+    index.unlink()
+    with evidence_packs.open_index(root):  # rebuilt while generation 1's sidecar is unreadable: generation 2's rows only
+        pass
+    sidecars[1].write_text("{", encoding="utf-8")  # then generation 2's sidecar fails too: no sidecar of it reads
+    assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists() and not _ledger(handles), \
+        "a faulted index's rows are not the whole listing"
+    for path, data in zip(sidecars, intact):
+        path.write_bytes(data)
+    index.unlink()
+    with evidence_packs.open_index(root):  # rebuilt from readable sidecars: every generation, no fault recorded
+        pass
+    sidecars[0].write_text("{", encoding="utf-8")
+    again = _prune(root)  # an index that recorded no unreadable sidecar makes the listing whole
     assert again["removed"] == 1 and not first.exists(), again["held"]
     line = next(line for line in _ledger(handles) if line["name"] == first.name)
     assert line["packed"] == ["observability/packs/partial.xz"], "the generation that holds these bytes"
