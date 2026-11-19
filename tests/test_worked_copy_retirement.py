@@ -445,6 +445,10 @@ def test_another_body_on_the_store_makes_the_history_walk_again(root):
     with store.open_store(root, write=True) as txn:
         txn.set_meta("last_store_body", {"sha": "0" * 40, "at": _iso(time.time())})
     assert _prune(root)["removed"] == len(copies)
+    later = _copies(_task(root, "older-again"))  # an older body booted, finished this, and the same body came back:
+    with store.open_store(root, write=True) as txn:  # the sha is the same, the fact's ``at`` is not
+        txn.set_meta("last_store_body", {"sha": "0" * 40, "at": _iso(time.time() + 60)})
+    assert _prune(root)["removed"] == len(later)
 
 
 def test_a_call_folder_holding_only_a_parts_manifest_records_no_call(root):
@@ -644,3 +648,116 @@ def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkey
     assert answer["status"] == "already_retired" and not answer["retained"], answer
     assert {place for place in answer["retired"] if place.startswith("saved_states:")} == {
         f"saved_states:{handles / 'context_checkpoints'}", f"saved_states:{handles / 'working'}"}
+
+
+
+def test_a_retry_walk_that_cannot_finish_lends_everything(root, monkeypatch):
+    from ouroboros import source_retention, store
+
+    copies = _copies(_task(root, "ancestor"))
+    write_task_result(root, "receiver", "running")
+    _queue(root, running=["receiver"])
+    real = source_retention._source_locations
+
+    def busy(root_, task_id, **kwargs):  # a competing transaction on one of the walk's reads
+        yield from list(real(root_, task_id, **kwargs))[:1]
+        raise store.StoreBusy("store busy")
+
+    monkeypatch.setattr(source_retention, "_source_locations", busy)
+    assert _prune(root)["held"] == {"lent_to_receiver": len(copies)}, "an unfinished walk proves no predecessor free"
+    monkeypatch.setattr(source_retention, "_source_locations", real)
+    assert _prune(root)["removed"] == len(copies)
+
+
+def test_a_task_written_after_the_pass_read_it_waits_for_the_next_pass(root, monkeypatch):
+    from ouroboros import maintenance_retirement
+
+    copies = _copies(_task(root, "finalized"))
+    real = maintenance_retirement._call_records
+
+    def finalize_meanwhile(root_, task_id):  # its artifacts are published after the pass read the row: the end moves
+        write_task_result(root_, task_id, "completed", completed_at=_iso(time.time() - (DAYS + 1) * 86400),
+                          artifact_finalized_at=_iso(time.time()))
+        return real(root_, task_id)
+
+    monkeypatch.setattr(maintenance_retirement, "_call_records", finalize_meanwhile)
+    report = _prune(root)
+    assert report["removed"] == 0 and report["held"] == {"changed": len(copies)} and all(path.exists() for path in copies)
+    monkeypatch.setattr(maintenance_retirement, "_call_records", real)
+    report = _prune(root)
+    assert report["removed"] == 0 and report["waiting"] == len(copies), "the new end starts the owner's days again"
+
+
+def test_every_removal_follows_a_folder_sync_of_its_record(root, monkeypatch):
+    import errno
+
+    from ouroboros import maintenance_retirement
+
+    copies = _copies(_task(root, "synced"))
+    synced = []
+    real = maintenance_retirement.fsync_folder
+
+    def first_fails(folder):
+        if not synced:
+            synced.append(False)
+            raise OSError(errno.EIO, "disk error")
+        real(folder)
+        synced.append(True)
+
+    monkeypatch.setattr(maintenance_retirement, "fsync_folder", first_fails)
+    report = _prune(root)
+    assert synced[0] is False and report["removed"] >= 1
+    assert synced.count(True) >= report["removed"], "no file goes before its record's folder entry is synced"
+    assert sum(path.exists() for path in copies) == len(copies) - report["removed"]
+
+
+def test_the_queue_is_read_once_per_publication_or_certificate(root, monkeypatch):
+    from ouroboros import maintenance_retirement
+    from ouroboros.maintenance_retirement import prune_worked_copies
+    from ouroboros.utils import atomic_write_json
+
+    for name in ("q-a", "q-b", "q-c"):
+        _copies(_task(root, name))
+    (root / "state/queue_snapshot.json").unlink()
+    parsed = []
+    real = maintenance_retirement._published_lent
+    monkeypatch.setattr(maintenance_retirement, "_published_lent", lambda root_: parsed.append(1) or real(root_))
+    assert _prune(root)["held"] == {"lent_to_receiver": 15} and len(parsed) == 1, "a missing queue is read once a pass"
+    old = {"generation": "copies-test", "ts": _iso(time.time() - 3600)}
+    atomic_write_json(root / "state/queue_snapshot.json", {**old, "running": []})
+    atomic_write_json(root / "state/queue.alive", old)
+    ends = []
+    real_end = maintenance_retirement._work_end
+
+    def renewed_after_the_first(document):  # the publisher renews the same generation's certificate between two tasks
+        ends.append(1)
+        if len(ends) == 2:
+            atomic_write_json(root / "state/queue.alive", {"generation": "copies-test", "ts": _iso(time.time())})
+        return real_end(document)
+
+    monkeypatch.setattr(maintenance_retirement, "_work_end", renewed_after_the_first)
+    report = prune_worked_copies(root)
+    assert report["held"] == {"lent_to_receiver": 5} and report["removed"] == 10, "a renewed certificate is read at once"
+
+
+def test_a_retired_line_names_the_pack_generation_that_holds_the_bytes(root, monkeypatch):
+    import hashlib
+
+    from ouroboros import evidence_packs, maintenance_retirement
+
+    handles = _task(root, "multigen")
+
+    def addressed(text, wait):
+        return handles / "context_checkpoints" / f"owner-wait-{wait * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
+
+    with monkeypatch.context() as older_body:  # a body before this change packed every handle, one generation a pass
+        older_body.setattr(maintenance_retirement, "worked_copy", lambda folder, name: None)
+        _file(addressed("first generation", "8"), "first generation")
+        evidence_packs.pack_task(root, "multigen", keep_shas=set())
+        second = _file(addressed("second generation", "9"), "second generation")
+        evidence_packs.pack_task(root, "multigen", keep_shas=set())
+    assert (root / "observability" / "packs" / "multigen.2.xz").exists() and not second.exists()
+    assert evidence_packs.materialize_handle(root, "multigen", f"source_handles/context_checkpoints/{second.name}")
+    assert _prune(root)["removed"] == 1 and not second.exists()
+    line = next(line for line in _ledger(handles) if line["name"] == second.name)
+    assert line["packed"] == ["observability/packs/multigen.2.xz"], "the generation that holds these bytes"

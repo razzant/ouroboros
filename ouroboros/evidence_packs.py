@@ -851,10 +851,15 @@ def handle_info(root: Any, task_id: str, rel_path: str, *, anchor: Any = None) -
 
 def packed_handle_names(root: Any, task_id: str) -> List[str]:
     """Names of this task's packed checkpoint handles (for directory listings)."""
+    return sorted(packed_handle_packs(root, task_id))
+
+
+def packed_handle_packs(root: Any, task_id: str) -> Dict[str, str]:
+    """Each packed checkpoint handle's name, with the data-root address of the pack generation that holds it."""
     if not packs_dir(root).is_dir():
-        return []
-    return sorted({pathlib.PurePosixPath(member["path"]).name
-                   for _, member in _task_handles(pathlib.Path(root), str(task_id))})
+        return {}
+    return {pathlib.PurePosixPath(member["path"]).name: f"observability/packs/{pack.name}"
+            for pack, member in _task_handles(pathlib.Path(root), str(task_id))}
 
 
 def _checkpoint_path(path: pathlib.Path) -> Optional[tuple]:

@@ -490,16 +490,19 @@ def _call_records(root: pathlib.Path, task_id: str) -> list:
 def _lent_sources(root: pathlib.Path):
     """The tasks whose saved states a queued or running task may still load: ``working_checkpoint.load_recovery``
     reads the file of the task its handoff names (``source_task_id``, a relay's ``continued_from_task_id``), and a
-    task reads its whole retry line's sources (``review_thread_retention.retry_line``, the reader's own walk).
-    ``None`` without a readable, fresh published queue: then every task holds. One parse per publication: a pass
-    asks before each task, so a receiver published meanwhile is seen (liveness itself stays ``_task_proven_over``'s)."""
-    try:
-        info = (root / "state" / "queue_snapshot.json").stat()
-        identity = (info.st_ino, info.st_mtime_ns, info.st_size)
-    except OSError:
-        identity = None
+    task reads its whole retry line's sources (``source_retention._source_locations``, the reader's own walk; a walk
+    that cannot finish proves nothing). ``None`` without a readable, fresh published queue: then every task holds. One
+    parse per publication or certificate (``queue.alive``): a pass asks before each task, so a receiver published or
+    a stamp renewed meanwhile is seen (liveness itself stays ``_task_proven_over``'s)."""
+    identity = []
+    for name in ("queue_snapshot.json", "queue.alive"):
+        try:
+            info = (root / "state" / name).stat()
+            identity.append((info.st_ino, info.st_mtime_ns, info.st_size))
+        except OSError:
+            identity.append(None)  # a missing file is an identity too: it is read again once it appears
     cached = _lent_cache.get(str(root))
-    if identity is not None and cached is not None and cached[0] == identity:
+    if cached is not None and cached[0] == identity:
         return cached[1]
     lent = _published_lent(root)
     _lent_cache[str(root)] = (identity, lent)
@@ -508,7 +511,7 @@ def _lent_sources(root: pathlib.Path):
 
 def _published_lent(root: pathlib.Path):
     from ouroboros.queue_observation import load_queue_document
-    from ouroboros.review_thread_retention import retry_line
+    from ouroboros.source_retention import _source_locations
     from ouroboros.task_status import _snapshot_is_stale
 
     try:
@@ -527,8 +530,10 @@ def _published_lent(root: pathlib.Path):
             if isinstance(carrier, dict):
                 lent.update(str(carrier[key]) for key in ("source_task_id", "continued_from_task_id") if carrier.get(key))
         receiver = str((entry.get("id") if isinstance(entry, dict) else "") or task.get("id") or "")
-        if receiver:
-            lent.update(retry_line(root, receiver))
+        try:  # a busy store or a torn link mid-walk: no predecessor is proven free
+            lent.update([receiver, *(owner for _root, owner in _source_locations(root, receiver))] if receiver else [])
+        except Exception:
+            return None
     return lent
 
 
@@ -605,9 +610,8 @@ def retired_note_for(path: Any) -> str:
 
 
 def _append_line(ledger: pathlib.Path, line: dict) -> None:
-    """One durable line: a torn tail left by a crash gets its newline first, the file and, when it was just created,
-    its folder entry are synced before the caller removes anything."""
-    created = not ledger.exists()
+    """One durable line: a torn tail left by a crash gets its newline first, the file and its folder entry are synced
+    before the caller removes anything (an earlier pass's folder sync may have failed after it made the file)."""
     with open(ledger, "ab+") as handle:
         handle.seek(0, os.SEEK_END)
         if handle.tell():
@@ -617,8 +621,7 @@ def _append_line(ledger: pathlib.Path, line: dict) -> None:
         handle.write((json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
         handle.flush()
         os.fsync(handle.fileno())
-    if created:
-        fsync_folder(ledger.parent)
+    fsync_folder(ledger.parent)
 
 
 def _retire(root: pathlib.Path, path: pathlib.Path, kind: str, info, *, task_id: str, status: str, finished: float,
@@ -715,7 +718,7 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
     with store.open_store(root, write=False) as txn:
         seeded = (txn.meta(maintenance_jobs.PREFIX + JOB) or {}).get(_SEEDED)
         body = txn.meta("last_store_body")
-    body = str(body.get("sha") or "") if isinstance(body, dict) else ""
+    body = dict(body) if isinstance(body, dict) else {}  # its ``at`` moves when another body booted and this one returned
     if not isinstance(seeded, dict) or seeded.get("body") != body:
         _seed(root, body)
     with store.open_store(root, write=False) as txn:
@@ -724,7 +727,7 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
         rows = {}
         for start in range(0, len(owed), 400):
             rows.update({record[0]: tuple(record[1:]) for record in txn.conn.execute(
-                "SELECT task_id, status, drive_retention_at, has_pending_promotion FROM tasks "
+                "SELECT task_id, status, drive_retention_at, has_pending_promotion, write_seq FROM tasks "
                 "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(owed[start:start + 400]),))})
     base = root / "task_results" / "artifacts"
     done = []
@@ -732,7 +735,7 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
         try:
             folder = base / task_id
             found = worked_copies_in(folder) if folder.is_dir() and not folder.is_symlink() else []
-            status, recorded, promoting = rows.get(task_id, (None, None, None))
+            status, recorded, promoting, seq = rows.get(task_id, (None, None, None, None))
             if not found or status not in SETTLED_STATUSES:
                 done.append(task_id)
                 continue
@@ -767,17 +770,17 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
             if not sources:
                 hold("no_call_records", len(found))
                 continue
-            from ouroboros.evidence_packs import packed_handle_names
+            from ouroboros.evidence_packs import packed_handle_packs
 
-            packed = set(packed_handle_names(root, task_id))  # a loose copy of packed bytes: its line names the pack
+            packed = packed_handle_packs(root, task_id)  # a loose copy of packed bytes: its line names that generation
             recorded_lines = {(line.get("name"), line.get("bytes"), line.get("saved_ns")) for line in retired_lines(root, task_id)}
             left = 0
             with gate(root, task_id, timeout_sec=0) as why:
                 if not why:  # under the custody lock a promotion or reopening published meanwhile is seen
                     with store.open_store(root, write=False) as txn:
-                        now_row = txn.row(task_id, "status", "has_pending_promotion")
-                    why = ("child_refs_pending" if now_row and now_row[1] == 1
-                           else "" if now_row and now_row[0] in SETTLED_STATUSES else "changed")
+                        now_row = txn.row(task_id, "status", "has_pending_promotion", "write_seq")
+                    why = ("child_refs_pending" if now_row and now_row[1] == 1  # written since it was read: the next pass's
+                           else "" if now_row and now_row[0] in SETTLED_STATUSES and now_row[2] == seq else "changed")
                 if why:
                     hold(why, len(found))
                     continue
@@ -787,8 +790,7 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
                             hold("changed", 1)
                             left += 1
                             continue
-                        in_pack = [f"observability/packs/{task_id}.xz"] if path.parent.name == "context_checkpoints" \
-                            and path.name in packed else []
+                        in_pack = [packed[path.name]] if path.parent.name == "context_checkpoints" and path.name in packed else []
                         _retire(root, path, kind, info, task_id=task_id, status=str(status), finished=finished,
                                 days=days, sources=sources, recorded=recorded_lines, packed=in_pack)
                     except FileNotFoundError:
