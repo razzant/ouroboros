@@ -100,11 +100,13 @@ def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_pat
     copy = tmp_path / "copy"
     declared = copy / ".review-evidence"
     private = declared / "state/copy-of-settings.txt"
+    quoted = declared / "logs/tools.jsonl"  # a tool result that read the file: the copy sits inside a JSON string
     public = declared / "examples/settings.json"
     report = declared / "notes/report.md"
-    for path in (private, public, report):
+    for path in (private, quoted, public, report):
         path.parent.mkdir(parents=True)
     private.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    quoted.write_text(json.dumps({"result": json.dumps(settings, ensure_ascii=False, indent=2)}) + "\n", encoding="utf-8")
     public.write_text(json.dumps({"OPENAI_API_KEY": "${OPENAI_API_KEY}", "Accept": "application/json"}), encoding="utf-8")
     report.write_text("The server answered fixture-value and application/json.\n", encoding="utf-8")
     retained = tmp_path / "saved"
@@ -113,12 +115,9 @@ def test_only_installation_settings_with_keys_are_excluded_from_evidence(tmp_pat
     assert sorted(f["path"] for f in summary["files"]) == [".review-evidence/examples/settings.json",
                                                             ".review-evidence/notes/report.md"]
     assert not (retained / "files" / private.relative_to(copy)).exists()
-    assert summary["gaps"] == [
-        {
-            "path": private.relative_to(copy).as_posix(),
-            "reason": "installation_settings",
-            "size": private.stat().st_size,
-        }
+    assert sorted(summary["gaps"], key=lambda gap: gap["path"]) == [
+        {"path": path.relative_to(copy).as_posix(), "reason": "installation_settings", "size": path.stat().st_size}
+        for path in (quoted, private)
     ]
 
 

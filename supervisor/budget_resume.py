@@ -787,10 +787,13 @@ def revoke_exact_budget_resume(task: Dict[str, Any], reason: str) -> bool:
     Money can vanish between the grant and the dispatch (a sibling spent it) and a restart may intervene;
     the grant is single-use and must not be dispatched into a refused send. A revocation is recorded ONLY
     against the pause, state and grant this handoff names (compare-and-set on all three). A grant the
-    durable row says was consumed is never re-armed: the task ran on, so the stale queue row takes a typed
-    hold and no ``_budget_pause`` marker is minted over a task that is not paused. A newer pause or a
-    different grant on the durable row is never written over; the spent handoff simply leaves the row.
-    A failed write leaves the row undispatchable under a hold rather than carrying a stale grant.
+    durable row says was consumed is never re-armed: the task ran on, so its spent carrier leaves (simply
+    retired when a newer continuation basis carries the task, otherwise the stale row takes a typed hold),
+    and no ``_budget_pause`` marker is minted over a task that is not paused. A newer pause or a different
+    grant on the durable row is not written over: the handoff leaves and the row re-reads the current
+    pause, except that at a restart (``restart_before_dispatch``) a newer grant no worker received is
+    revoked under its own identity too, so the next Resume finds a pause. A failed write leaves the row
+    undispatchable under a hold rather than carrying a stale grant.
     A caller may run it on a copy outside Q and carry the result back under Q (``_parking_lock``).
     """
     from ouroboros.budget_pause import (

@@ -61,8 +61,9 @@ def is_custom_secret_setting_key(key: Any, *, known_setting_keys: Collection[str
 
 def installation_secret_bytes():
     """Each configured secret beside its own setting name, as the settings file writes it (``"NAME": "value"``,
-    also compact and ASCII-escaped): a copy of that file, or of its connection or MCP section, carries these bytes,
-    while a report that only mentions a value (a local server's key may be ``ollama``) does not."""
+    also compact, ASCII-escaped, or quoted inside a JSON string): a copy of that file, or of its connection or MCP
+    section, carries these bytes, while a report that only mentions a value (a local server's key may be
+    ``ollama``) does not. Other forms (an env line, a printed bare value) are not a copy of the file."""
     from ouroboros.config import SETTINGS_DEFAULTS, load_settings
     from ouroboros.gateway.secret_rows import typed_connection_secret_fields
     from ouroboros.utils import is_credential_header_name
@@ -84,9 +85,11 @@ def installation_secret_bytes():
         url = str(server.get("url") or "")
         if url != mask_mcp_url(url):
             pairs.add(("url", url))
-    return {(json.dumps(k, ensure_ascii=ascii_only) + separator + json.dumps(v, ensure_ascii=ascii_only)).encode()
-            for k, v in pairs if v.strip() and v != CONFIGURED_SECRET_PLACEHOLDER
-            for ascii_only in (False, True) for separator in (": ", ":")}
+    written = {json.dumps(k, ensure_ascii=ascii_only) + separator + json.dumps(v, ensure_ascii=ascii_only)
+               for k, v in pairs if v.strip() and v != CONFIGURED_SECRET_PLACEHOLDER
+               for ascii_only in (False, True) for separator in (": ", ":")}
+    # A copy quoted inside a JSON string (a JSONL log or a tool result that read the file) is escaped once more.
+    return {form.encode() for pair in written for form in (pair, json.dumps(pair)[1:-1])}
 
 
 class SecretScan:
