@@ -800,11 +800,9 @@ def _confined_handle(root: Any, task_id: str, rel_path: str, anchor: Any, *, inf
         directory = None
     if directory is not None:
         try:
-            names = sorted(name for name, _ in directory.entries(include_links=True)
-                           if not name.startswith(".") and name.endswith(".members.json"))
-            errors = []
-            for name in [*(name for name in names if _own_sidecar(name, task_id)),
-                         *(name for name in names if not _own_sidecar(name, task_id))]:
+            errors = []  # only a name this task's generations may carry can hold its members (``_own_sidecar``)
+            for name in sorted(name for name, _ in directory.entries(include_links=True)
+                               if name.endswith(".members.json") and _own_sidecar(name, task_id)):
                 try:
                     try:
                         handle, _ = directory.open(name)
