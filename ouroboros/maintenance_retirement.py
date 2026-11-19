@@ -560,7 +560,8 @@ def owe_written_back(root: Any, task_id: str) -> None:
     never a wait (a missed one waits for the next walk after another body boots)."""
     try:
         with store.acquisition_budget(0), store.open_store(pathlib.Path(root), write=True) as txn:
-            txn.put_row(WORKED_COPIES, str(task_id), {**(txn.get_row(WORKED_COPIES, str(task_id)) or {}), "written_back": time.time()})
+            row = txn.get_row(WORKED_COPIES, str(task_id)) or {}
+            txn.put_row(WORKED_COPIES, str(task_id), {**row, "written_back": time.time(), "settled_at": row.get("settled_at") or time.time()})
             schedule_in(txn, time.time())
     except Exception:
         log.debug("A written-back saved state of %s waits for the next walk", task_id, exc_info=True)
@@ -675,7 +676,8 @@ def _seed(root: pathlib.Path, body) -> None:
                     "SELECT task_id, status, write_seq FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
                     (json.dumps(chunk),)):
                 if status in SETTLED_STATUSES:
-                    txn.put_row(WORKED_COPIES, task_id, {"write_seq": write_seq, "settled_at": time.time()})
+                    settled = (txn.get_row(WORKED_COPIES, task_id) or {}).get("settled_at")  # a new walk keeps the first date
+                    txn.put_row(WORKED_COPIES, task_id, {"write_seq": write_seq, "settled_at": settled or time.time()})
         from ouroboros.utils import utc_now_iso
 
         maintenance_jobs.record_in(txn, JOB, **{_SEEDED: {"at": utc_now_iso(), "body": body}})
@@ -689,8 +691,8 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
     work's model-call records. The work list is the ``worked_copies`` obligation rows (a terminal write puts one,
     ``_seed`` once the history's), so a pass costs the owed tasks, never a walk of every folder. A file goes when its
     task's row is settled, no child result is still being promoted into it, the owner's retention days have passed
-    since the work ended (``_work_end``; the row's ``drive_retention_at`` only lets a pass skip a task still inside
-    them), no queued or running task may still load it (``_lent_sources``), the task is proven over, its call records
+    since the work ended (``_work_end``, else the obligation row's ``settled_at``: when the host first wrote it settled;
+    the row's ``drive_retention_at`` only lets a pass skip a task still inside them), no queued or running task may still load it (``_lent_sources``), the task is proven over, its call records
     exist (else the record would name an address that is not there) and the owner did not keep it
     (``owner_keep.gate``). A line in ``source_handles/retired_copies.jsonl`` says what it was first. A row goes once its
     folder holds no saved state, or once its task is no longer settled (its next terminal write puts it back)."""

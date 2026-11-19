@@ -495,7 +495,7 @@ def test_a_saved_state_an_earlier_pack_holds_is_the_packers_to_unlink(root, monk
     _prune(root)  # the folder holds no loose saved state: its row goes
     assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
     with store.open_store(root, write=False) as txn:
-        assert txn.get_row(WORKED_COPIES, "prepacked") is not None, "written back: owed to its retirer again"
+        assert (txn.get_row(WORKED_COPIES, "prepacked") or {}).get("settled_at"), "written back: owed again, with a date"
     evidence_packs.pack_task(root, "prepacked", keep_shas=set())
     assert not packed.exists(), "the packer unlinks a loose copy of a member it already holds, as before"
     assert evidence_packs.materialize_handle(root, "prepacked", f"source_handles/context_checkpoints/{packed.name}")
@@ -849,3 +849,22 @@ def test_a_pooled_retry_reading_its_predecessors_retired_state_is_told_what_beca
     ctx = ToolContext(repo_dir=root, drive_root=child, task_id="succ", budget_drive_root=str(root))
     answer = _read_file(ctx, f"source_handles/context_checkpoints/{copy.name}", root="artifact_store")
     assert "NOT_FOUND" in answer and "was retired at" in answer and "observability/calls/pred" in answer, answer
+
+
+
+def test_a_new_walk_keeps_when_the_host_first_saw_a_work_settled(root):
+    from ouroboros import store
+    from ouroboros.maintenance_retirement import WORKED_COPIES, prune_worked_copies
+
+    write_task_result(root, "nodate", "completed", ts=_iso(time.time() - 30 * 86400))  # no recorded end
+    _file(root / "observability" / "calls" / "nodate" / "llm-1.json", "{}")
+    copies = _copies(root / "task_results" / "artifacts" / "nodate" / "source_handles")
+    assert _prune(root)["waiting"] == len(copies)  # the walk dates it now
+    with store.open_store(root, write=False) as txn:
+        first = txn.get_row(WORKED_COPIES, "nodate")["settled_at"]
+    with store.open_store(root, write=True) as txn:  # another body booted: the walk runs again
+        txn.set_meta("last_store_body", {"sha": "1" * 40, "at": _iso(time.time() + 60)})
+    _prune(root)
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(WORKED_COPIES, "nodate")["settled_at"] == first, "an install that updates often still gets there"
+    assert prune_worked_copies(root, now=first + (DAYS + 1) * 86400)["removed"] == len(copies)
