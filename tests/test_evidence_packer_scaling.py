@@ -544,9 +544,10 @@ def test_a_pass_reads_only_its_candidates_own_sidecars_and_an_empty_one_reads_no
     one (no position: a whole census) and one from a position find each candidate's generations by their
     names, and the newest-pack mark that orders the candidates comes from the index; a pass from a position
     with nothing to pack reads no sidecar. Each still packs what it should."""
-    whole, named = _sidecar_listings(monkeypatch)
     for number in range(6):
         _task(root, f"foreign-{number}", blobs=1)
+    packs.ensure_index(root)  # the builder's walk on a fresh install is not the pass's work
+    whole, named = _sidecar_listings(monkeypatch)
     report = packer.run_pass(root)  # no position: a whole census
     assert (report["candidates"], report["packed"], report["faults"], whole) == (6, 6, 0, [])
     assert len(packs._sidecar_names(root)) == 6

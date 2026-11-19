@@ -638,7 +638,10 @@ def test_money_defaults_direct_and_missing_packs_are_typed(ctx, monkeypatch):
 
 
 @pytest.mark.parametrize("cache", ["valid", "missing", "quick_check"])
-def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
+def test_pack_index_sql_answers_the_cache_the_packing_pass_rebuilds(ctx, cache):
+    """The plane reads the cache as the packing pass left it and never repairs it: a missing cache is a typed
+    ``evidence_unavailable`` refusal the pass owes a rebuild (from the sidecars, which nothing touches); damage
+    only a whole-file check sees is answered as the cache stands."""
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _task
 
@@ -671,8 +674,13 @@ def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
                 PRAGMA ignore_check_constraints=OFF;
             """)
             assert conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]
-    # Cold cache recovery is the subject, not a one-second completion SLA.
-    result = call(ctx, op="sql", db="packs", query="SELECT kind, size FROM members ORDER BY kind", timeout_sec=5)
+    query = "SELECT kind, size FROM members ORDER BY kind"
+    result = call(ctx, op="sql", db="packs", query=query, timeout_sec=5)
+    if cache == "missing":
+        assert (result["status"], result["code"], result["reason"]) == ("unavailable", "evidence_unavailable", "damaged")
+        assert not path.exists() and packs.index_owed(ctx.drive_root)
+        packs.ensure_index(ctx.drive_root)  # the packing pass's builder
+        result = call(ctx, op="sql", db="packs", query=query, timeout_sec=5)
     assert result["status"] == "ok", result
     if cache == "quick_check":  # damage only a whole-file check sees: no reader runs one, the cache answers as it stands
         assert result["data"]["rows"] == [["json", len(raw)]], result
@@ -686,8 +694,7 @@ def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
 
 def test_no_packs_depends_on_sidecars_not_an_empty_cache(ctx):
     from ouroboros import evidence_packs as packs
-    with packs.open_index(ctx.drive_root):
-        pass
+    packs.ensure_index(ctx.drive_root)
     result = call(ctx, op="sql", db="packs", query="SELECT count(*) FROM members")
     assert result["status"] == "unavailable" and result["code"] == "no_packs", result
 

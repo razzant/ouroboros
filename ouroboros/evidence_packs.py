@@ -165,18 +165,19 @@ def _task_sidecar_names(root: Any, task_id: str) -> set[str]:
 
 
 def list_sidecars(root: Any, *, errors: Optional[list] = None,
-                  names: Optional[set[str]] = None) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """Read pack authority, or a rebuild's filename delta; cache builders may collect faults."""
-    out = []
+                  names: Optional[set[str]] = None) -> Iterator[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """Read pack authority one sidecar at a time: ``names`` (a task's own), else every published one (the
+    builder's and the restore's walks, never a reader's); the index builder collects faults in ``errors``."""
     directory = packs_dir(root)
     for name in sorted(_sidecar_names(root) if names is None else names):
         try:
-            out.append((directory / name, read_sidecar(directory / name)))
+            sidecar = read_sidecar(directory / name)
         except SidecarCorrupt as exc:
             if errors is None:
                 raise
             errors.append(exc)
-    return out
+            continue
+        yield directory / name, sidecar
 
 
 
@@ -310,12 +311,21 @@ def _index_wait(wait_sec: float = INDEX_WAIT_SEC) -> float:
     return store.bounded_wait(min(wait_sec, INDEX_WAIT_SEC))
 
 
-def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> None:
-    """Build privately, refresh changed sidecars unlocked, then publish a still-current snapshot."""
+def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
+    """The cache's one builder, run by the packing pass (``evidence_packer.pack_sweep``, which serializes it
+    with every sidecar publication): a cache whose O(1) facts fail is rebuilt from the sidecars, read one at a
+    time, into a private file outside the index lock; that file must pass a whole-file check before it
+    replaces the old one under the lock, where a usable index another builder published meanwhile wins (with
+    its later writes); a failure keeps the old file. ``None`` when the cache is usable; else the rebuild's
+    facts, also recorded as one ``storage_pack`` row (``phase: index_rebuilt``)."""
+    root = pathlib.Path(root)
+    path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
+    with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):
+        if _index_valid(path, tier):
+            return None
+    started, faults, count = time.monotonic(), [], 0
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
-    indexed: set[str] = set()
-    names, faults = _sidecar_names(root), {}
     try:
         with contextlib.closing(store.connect(tmp, tier, create=True)) as conn:
             conn.execute(f"PRAGMA application_id = {_APPLICATION_ID[tier]}")
@@ -323,68 +333,59 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str, *, wait_se
             with store.transaction(conn, write=True):
                 conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(INDEX_SCHEMA_VERSION),))
                 conn.execute("INSERT INTO meta VALUES ('built_at', ?)", (utc_now_iso(),))
-        while True:
-            added, removed = names - indexed, indexed - names
-            errors: list = []
-            sidecars = list_sidecars(root, errors=errors, names=added)
-            for name in removed:
-                faults.pop(name, None)
-            failed = sorted(added - {sidecar_path.name for sidecar_path, _ in sidecars})
-            faults.update(zip(failed, map(str, errors)))
-            with contextlib.closing(store.connect(tmp, tier)) as conn:
-                with store.transaction(conn, write=True):
-                    for name in removed:
-                        row = conn.execute("SELECT task_id, generation FROM packs WHERE path=?",
-                                           (name.removesuffix(".members.json") + ".xz",)).fetchone()
-                        if row is not None:
-                            for table in ("packs", "members", "handles"):
-                                conn.execute(f"DELETE FROM {table} WHERE task_id=? AND generation=?", tuple(row))
-                    for sidecar_path, sidecar in sidecars:
-                        _index_rows(conn, sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), sidecar)
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('sidecar_errors', ?)",
-                                 (json.dumps(list(faults.values())),))
-            indexed = names
-            with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait(wait_sec)):
-                if _index_valid(path, tier, wait_sec=_index_wait(wait_sec)):
-                    return  # another builder published; keep its subsequent writes too
-                names = _sidecar_names(root)
-                if names == indexed:
-                    with contextlib.suppress(FileNotFoundError):
-                        tmp.chmod(path.stat().st_mode)
-                    replace_atomic(tmp, path)
-                    store.fsync_directory(path.parent)
-                    return
+                for sidecar_path, sidecar in list_sidecars(root, errors=faults):
+                    _index_rows(conn, sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), sidecar)
+                    count += 1
+                conn.execute("INSERT INTO meta VALUES ('sidecar_errors', ?)", (json.dumps([str(e) for e in faults]),))
+            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise sqlite3.DatabaseError("the rebuilt evidence index failed its whole-file check")
+        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):
+            if _index_valid(path, tier):
+                return None  # another builder published; keep its subsequent writes too
+            with contextlib.suppress(FileNotFoundError):
+                tmp.chmod(path.stat().st_mode)
+            replace_atomic(tmp, path)
+            store.fsync_directory(path.parent)
     finally:
         for leftover in (tmp, *(tmp.with_name(tmp.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
             with contextlib.suppress(FileNotFoundError):
                 leftover.unlink()
+    facts = {"sidecars": count, "unreadable": len(faults), "seconds": round(time.monotonic() - started, 3)}
+    record_storage_pack(root, phase="index_rebuilt", **facts)
+    return facts
+
+
+def index_owed(root: Any) -> bool:
+    """Whether the packing pass owes ``root`` a rebuild: packs exist and the cache's O(1) facts fail
+    (missing, foreign, another schema). No lock is taken; a held lock or file is no such fact."""
+    root = pathlib.Path(root)
+    try:
+        return packs_dir(root).is_dir() and not _index_valid(packs_dir(root) / INDEX_NAME, index_tier(root), wait_sec=0)
+    except store.StoreBusy:
+        return False
 
 
 @contextlib.contextmanager
-def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC,
-               rebuild: bool = True) -> Iterator[sqlite3.Connection]:
-    """One transaction under the name lock, narrowed by the caller's acquisition budget; the cache is
-    usable by its O(1) facts (``_index_valid``). Missing, foreign or other-version caches rebuild outside
-    the lock; ``rebuild=False`` (every reader, advisory discovery) raises ``sqlite3.DatabaseError``
-    instead. ``store.StoreBusy`` on contention.
-    """
+def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC) -> Iterator[sqlite3.Connection]:
+    """One transaction under the name lock, narrowed by the caller's acquisition budget. A cache whose O(1)
+    facts fail (``_index_valid``) is ``EvidenceUnavailable``: it awaits the packing pass's rebuild
+    (``ensure_index``), never its reader's. ``store.StoreBusy`` on contention."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
     wait_sec = _index_wait(wait_sec)
-    while True:
-        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
-            if _index_valid(path, tier, wait_sec=wait_sec):
-                with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
-                    with store.transaction(conn, write=write):
-                        yield conn
-                return
-            if not rebuild:
-                raise sqlite3.DatabaseError("evidence index requires reconstruction")
-        _rebuild_index(root, path, tier, wait_sec=wait_sec)
+    with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
+        if not _index_valid(path, tier, wait_sec=wait_sec):
+            raise EvidenceUnavailable("evidence_unavailable: the evidence index awaits the packing pass's rebuild",
+                                      reason="damaged")
+        with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
+            with store.transaction(conn, write=write):
+                yield conn
 
 
 def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
-    """Record one verified pack, or defer its caller without destroying a contended cache."""
+    """Record one verified pack (the packer's write: a cache awaiting its rebuild is rebuilt first,
+    ``ensure_index``), or defer its caller without destroying a contended cache."""
+    ensure_index(root)
     with open_index(root, write=True) as conn:
         _index_rows(conn, pack_path, sidecar)
 
@@ -412,7 +413,7 @@ def _indexed_placements(root: pathlib.Path, query: str, params: tuple) -> List[T
     cannot answer now (held, missing or damaged: never rebuilt or walked around here) is ``EvidenceUnavailable``;
     no row beside a sidecar it recorded as unreadable is that sidecar's ``SidecarCorrupt``."""
     try:
-        with open_index(root, rebuild=False) as conn:
+        with open_index(root) as conn:
             rows = conn.execute(query, params).fetchall()
             recorded = None if rows else conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
             unreadable = json.loads(recorded[0]) if recorded else []

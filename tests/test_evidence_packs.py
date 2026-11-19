@@ -374,6 +374,7 @@ def test_kill_at_each_packer_step_leaves_readable_state_and_rerun_completes(root
         real_upsert(root_, pack_path, sidecar)
         raise KeyboardInterrupt("kill -9 after the index upsert")
 
+    packs.ensure_index(root)  # the cache the pass's builder leaves: only the packer's own renames are counted
     with monkeypatch.context() as patch:
         patch.setattr(packs, "replace_atomic", replace)
         if step == "indexed":

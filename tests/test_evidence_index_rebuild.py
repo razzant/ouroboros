@@ -1,4 +1,5 @@
-"""An index rebuild never leases historical parsing, or loses a concurrent publication."""
+"""The evidence index's one builder never holds the index lock while it parses and keeps a competing usable
+index; every access checks the cache's O(1) facts and writes it by its keys."""
 import contextlib
 import hashlib
 import threading
@@ -43,15 +44,16 @@ def _paused_listing(monkeypatch):
     readings, failures, result = [], [], []
 
     def listing(*args, **kwargs):
-        rows = original(*args, **kwargs)
-        readings.append(set(kwargs.get("names", ())))
+        rows = list(original(*args, **kwargs))
+        readings.append({path.name for path, _sidecar in rows})
         if len(readings) == 1:
             entered.set()
             assert resume.wait(10), "test did not release sidecar parsing"
-        return rows
+        return iter(rows)
 
     def read(root):
         try:
+            packs.ensure_index(root)
             result.append(_tasks(root))
         except BaseException as exc:
             failures.append(exc)
@@ -75,31 +77,25 @@ def _paused_listing(monkeypatch):
         assert not failures
 
 
-@pytest.mark.parametrize("change", ["add", "delete"])
-def test_changed_sidecars_refresh_outside_lock_before_publication(root, monkeypatch, change):
-    first_path, _ = _publish(root, "first")
+def test_a_rebuild_parses_outside_the_index_lock(root, monkeypatch):
+    """Reading every sidecar is the builder's own work: while it parses, the index lock stays free for
+    readers and publishers; it is taken only to publish the file the builder checked."""
+    _publish(root, "first")
     _publish(root, "kept")
     with _paused_listing(monkeypatch) as (start, resume, readings, result):
         start(root)
-        # A second caller acquires immediately even while historical parsing is stalled.
         with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0):
-            if change == "delete":
-                (packs.packs_dir(root) / packs.sidecar_name("first", 1)).unlink()
-                first_path.unlink()
-        if change == "add":
-            _publish(root, "late")
+            pass  # a second caller acquires at once while the builder's parse is stalled
         resume.set()
-    expected = {"first", "kept", "late"} if change == "add" else {"kept"}
-    assert result == [expected] and _tasks(root) == expected
-    assert readings == [{"first.members.json", "kept.members.json"},
-                        {"late.members.json"} if change == "add" else set()]
+    assert result == [{"first", "kept"}] and readings == [{"first.members.json", "kept.members.json"}]
     with packs.open_index(root) as conn:
         for table in ("members", "handles"):
-            assert {row[0] for row in conn.execute(f"SELECT task_id FROM {table}")} == expected
+            assert {row[0] for row in conn.execute(f"SELECT task_id FROM {table}")} == {"first", "kept"}
 
 
 def test_failed_rebuild_preserves_old_usable_index(root, monkeypatch):
     _publish(root, "old")
+    packs.ensure_index(root)
     assert _tasks(root) == {"old"}
     path = packs.packs_dir(root) / packs.INDEX_NAME
     before = path.read_bytes(), store.file_identity(path)
@@ -118,7 +114,7 @@ def test_failed_rebuild_preserves_old_usable_index(root, monkeypatch):
         patch.setattr(packs, "_index_valid", rebuild_once)
         patch.setattr(packs, "list_sidecars", crash)
         with pytest.raises(KeyboardInterrupt, match="stopped before publication"):
-            _tasks(root)
+            packs.ensure_index(root)
     assert (path.read_bytes(), store.file_identity(path)) == before
     assert _tasks(root) == {"old"}
     assert not list(path.parent.glob(".index.sqlite.tmp.*"))
@@ -129,6 +125,7 @@ def test_concurrent_winner_and_its_later_write_survive(root, monkeypatch):
     with _paused_listing(monkeypatch) as (start, resume, _readings, result):
         start(root)
         _publish(root, "late")
+        packs.ensure_index(root)  # a competing builder publishes first
         with packs.open_index(root, write=True) as conn:
             conn.execute("INSERT INTO meta VALUES ('concurrent_receipt', 'kept')")
         winner = store.file_identity(packs.packs_dir(root) / packs.INDEX_NAME)
@@ -142,6 +139,7 @@ def test_concurrent_winner_and_its_later_write_survive(root, monkeypatch):
 @pytest.mark.parametrize("budget", [0.25, None, 10.0], ids=["slice", "ordinary", "larger-budget"])
 def test_name_lock_wait_respects_budget_and_ordinary_wait_still_succeeds(root, monkeypatch, budget):
     _publish(root, "first")
+    packs.ensure_index(root)
     assert _tasks(root) == {"first"}
     held, release = threading.Event(), threading.Event()
     original = store.name_lock
@@ -191,6 +189,7 @@ def test_name_lock_wait_respects_budget_and_ordinary_wait_still_succeeds(root, m
 
 def test_busy_upsert_keeps_existing_index_and_retries_successfully(root):
     _publish(root, "first")
+    packs.ensure_index(root)
     assert _tasks(root) == {"first"}
     late_path, late = _publish(root, "late")
     path = packs.packs_dir(root) / packs.INDEX_NAME
@@ -215,6 +214,7 @@ def test_pack_publication_obeys_index_lock_and_leaves_its_generation_free(root):
     path, sidecar = _publish(root, "first")
     assert sidecar["generation"] == 1 and sorted(p.name for p in directory.iterdir()) == ["first.members.json", "first.xz"]
     packs.verify_pack(path, sidecar)
+    packs.ensure_index(root)
     assert _tasks(root) == {"first"}
 
 
@@ -222,8 +222,8 @@ def test_index_access_checks_o1_facts_never_the_whole_file(root, monkeypatch):
     """Writing the cache and reading it after another writer's commit run no whole-file check (each
     ran one ``PRAGMA quick_check`` before: the bytes this process had validated changed) and build
     nothing: the header names the tier, the meta row the schema, a damaged page its own SQLite error."""
-    first_path, first = _publish(root, "first")
-    packs.index_upsert(root, first_path, first)  # the packer's first write of a pass leaves a cache
+    _publish(root, "first")
+    packs.ensure_index(root)  # the packing pass's builder leaves a cache
     index = packs.packs_dir(root) / packs.INDEX_NAME
     built, statements, connect = store.file_identity(index), [], store.connect
 
@@ -273,14 +273,16 @@ def test_indexing_a_recorded_generation_again_is_keyed_and_restores_a_lost_membe
         assert conn.execute("SELECT count(*) FROM members").fetchone()[0] == len(sidecar["members"]) == 1
 
 
-def test_valid_cache_avoids_sidecar_reads_and_advisory_open_never_rebuilds(root, monkeypatch):
+def test_valid_cache_avoids_sidecar_reads_and_an_open_never_rebuilds(root, monkeypatch):
     _publish(root, "first")
+    packs.ensure_index(root)
     assert _tasks(root) == {"first"}
     monkeypatch.setattr(packs, "list_sidecars", lambda *a, **kw: pytest.fail("unexpected sidecar scan"))
-    assert _tasks(root) == {"first"}
-    with packs.open_index(root, rebuild=False, wait_sec=0) as conn:
+    assert _tasks(root) == {"first"} and packs.ensure_index(root) is None
+    with packs.open_index(root, wait_sec=0) as conn:
         assert conn.execute("SELECT count(*) FROM packs").fetchone()[0] == 1
     (packs.packs_dir(root) / packs.INDEX_NAME).unlink()
-    with pytest.raises(packs.sqlite3.DatabaseError, match="reconstruction"):
-        with packs.open_index(root, rebuild=False, wait_sec=0):
+    with pytest.raises(packs.EvidenceUnavailable, match="awaits the packing pass"):
+        with packs.open_index(root, wait_sec=0):
             pytest.fail("missing index was opened")
+    assert not (packs.packs_dir(root) / packs.INDEX_NAME).exists() and packs.index_owed(root)

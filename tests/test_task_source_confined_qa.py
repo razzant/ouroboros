@@ -29,10 +29,9 @@ def _packed(root, task="wanted"):
 
 
 def _warm_index(root):
-    """Validate the shared placement cache (building it when absent) the way its owners do: the
-    packer and the readers that need every pack. An addressed handle read never builds or checks it."""
-    with packs.open_index(root):
-        pass
+    """Build the shared placement cache the way its one owner does, the packing pass (``ensure_index``).
+    An addressed handle read never builds or checks it."""
+    packs.ensure_index(root)
 
 
 def _finish_stream_lease(pack):

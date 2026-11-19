@@ -599,8 +599,7 @@ def test_a_private_build_publishes_its_choice_with_nothing_beside_it(tmp_path, m
     store_import.ensure_current_store(tmp_path, with_children=False)
     usage_store.migrate_from_journal(tmp_path)
     dialogue_store.create(tmp_path, tier=store.TIER_ENFORCED)
-    with evidence_packs.open_index(tmp_path):
-        pass
+    evidence_packs.ensure_index(tmp_path)
     monkeypatch.setattr(os, "replace", replace)
     store.close_connections()
     assert sorted(published) == ["current.sqlite", "dialog.sqlite", "index.sqlite", "usage.sqlite"]
@@ -776,11 +775,13 @@ def test_a_wal_evidence_index_another_runtime_built_is_rebuilt_not_converted(tmp
 
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "WAL")
     _publish(tmp_path, "t1")
+    packs.ensure_index(tmp_path)
     assert _tasks(tmp_path) == {"t1"}
     index = packs.packs_dir(tmp_path) / packs.INDEX_NAME
     store.close_connections()
     assert store.wal_file(index)
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
+    assert packs.index_owed(tmp_path) and packs.ensure_index(tmp_path)["sidecars"] == 1  # rebuilt, never converted
     assert _tasks(tmp_path) == {"t1"}
     store.close_connections()
     assert not store.wal_file(index)

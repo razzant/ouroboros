@@ -110,7 +110,7 @@ def swept_stamps(root: pathlib.Path, *, discovery: bool = False, ids=None) -> Op
     if ids is not None:
         query, params = query + " WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(ids)),)
     try:
-        with packs.open_index(root, **({"wait_sec": 0, "rebuild": False} if discovery else {})) as conn:
+        with packs.open_index(root, **({"wait_sec": 0} if discovery else {})) as conn:
             return {row["task_id"]: row["stamps"] for row in conn.execute(query, params)}
     except store.StoreBusy:
         if discovery:
@@ -215,17 +215,18 @@ def changed_stamps(root: pathlib.Path, **census) -> Dict[str, str]:
 
 
 def packing_pending(root: pathlib.Path, stop: Callable[[], bool], *, since: Optional[int] = None, owed=()) -> bool:
-    """Advisory, stop-aware discovery: archives first, then only the first changed stamp of the
-    census (``since``/``owed`` as ``run_pass``: the rows written terminal since the position and
-    the owed candidates; without a position, every loose folder).
+    """Advisory, stop-aware discovery: archives and an index awaiting its rebuild first (pass-level
+    work: ``packs.index_owed`` reads one header and one meta row, no listing), then only the first
+    changed stamp of the census (``since``/``owed`` as ``run_pass``: the rows written terminal since
+    the position and the owed candidates; without a position, every loose folder).
 
-    Contended stores defer the pass. Index reconstruction belongs to the pass (``run_pass``),
+    Contended stores defer the pass. Index reconstruction belongs to the pass (``pack_sweep``),
     not this reader. A quiet nonempty root without a position still needs a full stamp walk;
     the maintenance child runs it, never the server (``ouroboros/maintenance.py``).
     """
     if stop():
         return False
-    if archive_pending(root):
+    if archive_pending(root) or packs.index_owed(root):
         return not stop()
     with store.acquisition_budget(0):
         changed = next(_changed_stamps(root, stop=stop, since=since, owed=owed), None)
@@ -329,9 +330,11 @@ class PackSweep:
 
 @contextlib.contextmanager
 def pack_sweep(root: pathlib.Path):
-    """Serialize packer passes, tracking publications from before the census to the
-    last unlink. A crashed pass's scratch journal is replaced by the next pass."""
+    """Serialize packer passes: first the index's one builder (``packs.ensure_index``: every sidecar a
+    pass publishes waits behind it), then publications are tracked from before the census to the last
+    unlink. A crashed pass's scratch journal is replaced by the next pass."""
     with store.name_lock(root, "packs_sweep.lock", timeout_sec=packs.INDEX_WAIT_SEC):
+        packs.ensure_index(root)
         sweep = PackSweep(root)
         path = packs.packs_dir(root) / packs.PUBLICATIONS_NAME
         with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=packs.INDEX_WAIT_SEC):

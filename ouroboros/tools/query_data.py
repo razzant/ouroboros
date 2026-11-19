@@ -222,6 +222,16 @@ def _plane_path(ctx, plane, root, relative, local):
     return path
 
 
+def _holds_a_sidecar(directory):
+    """Whether one evidence-pack sidecar is published in ``directory``: the listing stops at the first,
+    so a history-sized packs directory is never read whole (a glob would list it all first)."""
+    try:
+        with os.scandir(directory) as entries:
+            return any(entry.name.endswith(".members.json") and not entry.name.startswith(".") for entry in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _child_root(ctx, canonical, child):
     from ouroboros.task_custody import own_child_drives
     caller = _name(ctx.task_id)
@@ -589,7 +599,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             if db == "money" and not child_task_id and root != canonical:  # one ledger, the owner's (USAGE_STORE §4)
                 root, plane = canonical, owner
             path = _plane_path(ctx, plane, root, sql.database_path(root, db).relative_to(root), local)
-            absent = not any(path.parent.glob("*.members.json")) if db == "packs" else not path.is_file()
+            absent = not _holds_a_sidecar(path.parent) if db == "packs" else not path.is_file()
             if absent:
                 result = {"status": "unavailable", "code": "no_packs" if db == "packs" else "not_found", "source": {"db": db}}
             else:

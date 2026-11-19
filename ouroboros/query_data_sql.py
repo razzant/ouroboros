@@ -116,7 +116,8 @@ def _source(root, db, budget):
             raise
     else:
         from ouroboros import evidence_packs
-        # The owner rebuilds the cache and holds its one lock through the SQL read.
+        # The cache's one lock is held through the SQL read; one awaiting the packing pass's rebuild is
+        # refused (``EvidenceUnavailable``), never rebuilt here.
         with evidence_packs.open_index(root, wait_sec=budget.remaining()):
             budget.remaining()
             yield evidence_packs.index_tier(root)
@@ -336,11 +337,16 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
 
 
 def _result(request):
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     try:
         return {"status": "ok", "data": _execute(request)}
     except QueryDeadline as exc:
         return {"status": "error", "code": "deadline", "phase": exc.phase,
                 "timeout_sec": exc.timeout_sec, "elapsed_sec": exc.elapsed_sec}
+    except EvidenceUnavailable as exc:  # db=packs whose cache awaits the maintenance pass's rebuild
+        return {"status": "unavailable", "code": "evidence_unavailable", "reason": exc.reason,
+                "message": str(exc), "phase": getattr(exc, "phase", "acquire")}
     except MemoryError as exc:
         return {"status": "error", "code": "memory_limit", "exception_class": "MemoryError", "phase": getattr(exc, "phase", "acquire")}
     except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:

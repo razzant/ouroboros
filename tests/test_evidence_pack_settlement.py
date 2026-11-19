@@ -334,6 +334,7 @@ def test_a_writer_commits_while_a_census_directory_probe_stalls(root, monkeypatc
     publish(root, tier=tier)
     _task(root, "stalled", blobs=1)
     _task(root, "other", blobs=1)
+    packs.ensure_index(root)  # the cache the pass's builder leaves, where the census records its stamps
     target = root / "observability" / "calls" / "stalled"
     entered, release, result = threading.Event(), threading.Event(), {}
     original = pathlib.Path.stat

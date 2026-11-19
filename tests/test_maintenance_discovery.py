@@ -4,8 +4,10 @@ packing authority."""
 from __future__ import annotations
 
 import json
+import pathlib
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -75,9 +77,7 @@ def test_reconcile_pass_reserves_the_child_and_walks_no_stamp_in_the_server(root
 def test_changed_discovery_short_circuits_but_quiet_install_still_scans(root, monkeypatch, count):
     for n in range(count):
         _task(root, f"task-{n:04}", blobs=1)
-    # Publish a valid cache before measuring; no packing child required to read it.
-    with packs.open_index(root):
-        pass
+    packs.ensure_index(root)  # a valid cache, as the packing pass leaves it, before measuring
     calls, original = [], packer._stamp
 
     def stamp(*args, **kwargs):
@@ -119,9 +119,57 @@ def test_archive_only_spawns_the_child_without_a_task_census_in_the_server(root,
 def test_discovery_does_not_rebuild_a_missing_index(root, monkeypatch):
     _task(root, "candidate", blobs=1)
     packs.packs_dir(root).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(packs, "_rebuild_index", lambda *a: pytest.fail("discovery rebuilt cache"))
+    monkeypatch.setattr(packs, "ensure_index", lambda *a: pytest.fail("discovery rebuilt cache"))
     assert packer.packing_pending(root, lambda: False)
     assert not (packs.packs_dir(root) / packs.INDEX_NAME).exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "garbage"])
+def test_a_resting_install_owes_its_pass_the_index_rebuild_and_the_pass_streams_it_once(root, monkeypatch, damage):
+    """Only the packing pass rebuilds the cache. Once the packer rests, an index gone missing or unreadable
+    makes its job due again (one header and one meta row, nothing listed), and the pass rebuilds it from the
+    sidecars one at a time, checks its own private file whole before publishing it (never the live one),
+    records one ``storage_pack`` row of it and rests. The restore walks stream the sidecars the same way."""
+    for task in ("a", "b", "c", "d"):
+        _task(root, task, blobs=1)
+    for _ in range(2):  # packs, then the one more look that records the moved stamps
+        maintenance.run_job(root, "evidence_packing")
+    assert "evidence_packing" not in maintenance.due(root)
+    index = packs.packs_dir(root) / packs.INDEX_NAME
+    index.unlink() if damage == "missing" else index.write_bytes(b"not a database")
+    assert "evidence_packing" in maintenance.due(root)  # the quiet install is due for its index alone
+    alive, peak, checked, read, connect = [0], [0], [], packs.read_sidecar, store.connect
+
+    class Parsed(dict):
+        pass
+
+    def counted(path, **kwargs):
+        parsed = Parsed(read(path, **kwargs))
+        alive[0] += 1
+        peak[0] = max(peak[0], alive[0])
+        weakref.finalize(parsed, lambda: alive.__setitem__(0, alive[0] - 1))
+        return parsed
+
+    def traced(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        conn.set_trace_callback(lambda sql: checked.append(pathlib.Path(path).name) if "quick_check" in sql else None)
+        return conn
+
+    monkeypatch.setattr(packs, "read_sidecar", counted)
+    monkeypatch.setattr(store, "connect", traced)
+    log = root / "logs" / "supervisor.jsonl"
+    seen = len(log.read_text(encoding="utf-8").splitlines())  # the first pass built the cache once, empty
+    assert maintenance.run_job(root, "evidence_packing")["state"] == "done"
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()[seen:]]
+    rebuilt = [row for row in rows if row.get("type") == "storage_pack" and row.get("phase") == "index_rebuilt"]
+    assert [(row["sidecars"], row["unreadable"]) for row in rebuilt] == [(4, 0)]
+    assert checked and all(name.startswith(".index.sqlite.tmp.") for name in checked), checked
+    with packs.open_index(root) as conn:
+        assert conn.execute("SELECT count(*) FROM packs").fetchone()[0] == 4
+    assert "evidence_packing" not in maintenance.due(root) and peak[0] <= 2, peak
+    peak[0] = 0
+    assert packs.pending_restore_bytes(root) > 0 and packs.restore_checkpoint_handles(root)["handles"] == 4
+    assert peak[0] <= 2, peak
 
 
 @pytest.mark.parametrize("busy", ["facts", "packs", "packs_sql"])
@@ -129,8 +177,7 @@ def test_real_contention_never_waits_and_discovery_defers_without_recording(root
     """The server's look never waits on a held store (it defers the spawn); in the child,
     discovery under contention defers too and records nothing, so the job stays due."""
     _task(root, "candidate", blobs=1)
-    with packs.open_index(root):
-        pass
+    packs.ensure_index(root)
     spawns = []
     monkeypatch.setattr(maintenance, "spawn_maintenance_job", lambda *a: spawns.append(a) or _FakeChild(_QUIET))
     unit = maintenance.MaintenanceChild()

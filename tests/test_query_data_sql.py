@@ -437,20 +437,13 @@ def test_late_parent_observation_keeps_exited_child_answer(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("db,lock_name", [("money", "usage_attempts.lock"), ("packs", "packs_index.lock")])
 def test_name_tier_money_and_index_reads_share_writer_locks(tmp_path, monkeypatch, db, lock_name):
-    from ouroboros import platform_layer
+    from ouroboros import evidence_packs, platform_layer
+    if db == "packs":  # the cache in the tier the query's own process sees: no reader rebuilds one of another tier
+        evidence_packs.ensure_index(tmp_path)
     monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda _, **_kw: False)
     store_import.ensure_current_store(tmp_path, with_children=False)
     if db == "money":
         usage_store.migrate_from_journal(tmp_path)
-    else:
-        from ouroboros import evidence_packs
-        path = evidence_packs.packs_dir(tmp_path) / evidence_packs.INDEX_NAME
-        path.parent.mkdir(parents=True)
-        conn = sqlite3.connect(path)
-        try:
-            conn.execute("CREATE TABLE members(name TEXT)")
-        finally:
-            conn.close()
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller")
     assert run(ctx, "SELECT 1", db=db)["data"]["rows"] == [[1]]
     with store.name_lock(tmp_path, lock_name, timeout_sec=1):
@@ -464,13 +457,19 @@ def test_pack_sql_holds_the_index_owner_lock(ctx, monkeypatch, tier):
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _task
 
+    own = packs.index_tier(ctx.drive_root)  # the tier the query's own process sees
     monkeypatch.setattr(packs, "index_tier", lambda _root: tier)
     _task(ctx.drive_root, "packed", blobs=1)
     packs.write_pack(ctx.drive_root, "packed", 1, packs.loose_members(ctx.drive_root, "packed"))
+    packs.ensure_index(ctx.drive_root)
     with packs.open_index(ctx.drive_root, write=True):
         result = run(ctx, "SELECT count(*) FROM members", db="packs", timeout_sec=0.05)
         assert result["status"] == "error" and result["code"] == "deadline" and result["phase"] == "acquire", result
-    assert run(ctx, "SELECT count(*) FROM members", db="packs")["data"]["rows"] == [[2]]
+    answer = run(ctx, "SELECT count(*) FROM members", db="packs")
+    if tier == own:
+        assert answer["data"]["rows"] == [[2]], answer
+    else:  # a cache of another tier is one the query may not use, and it rebuilds none
+        assert (answer["status"], answer["code"]) == ("unavailable", "evidence_unavailable"), answer
     # Admission retains the owner's one lock through the read-only query scope.
     with sql._source(ctx.drive_root, "packs", sql._Budget(1)) as observed:
         assert observed == tier
