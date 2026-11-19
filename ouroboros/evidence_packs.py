@@ -688,7 +688,10 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     index, a view's part) makes the read ``EvidenceUnavailable``, before any copy's damage or any absence.
 
     ``admit`` (optional) sees each loose, placement or pack file before it is opened; what it
-    raises propagates, so a refusal never becomes a miss, corruption or fallback."""
+    raises propagates, so a refusal never becomes a miss, corruption or fallback. A read a pack answered
+    counts once as the measured window's ``packed_reads`` (``context_timing.counted``)."""
+    from ouroboros.context_timing import counted
+
     root = pathlib.Path(root)
     sha256, kind, size = blob_ref_fields(ref)
     if expected_kind is not None and kind != expected_kind:
@@ -748,6 +751,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                         if size not in (-1, len(raw)):
                             failure, located = EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref"), None
                             break
+                        counted("packed_reads")
                         return raw
                     except FileNotFoundError as exc:
                         failure = failure or exc

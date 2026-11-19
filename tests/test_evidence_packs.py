@@ -172,6 +172,22 @@ def test_readers_resolve_loose_then_pack_and_blob_shared_with_active_task_stays_
     assert extent["source_revision"] == handle_a["sha256"] and _handle_path(root, "task-a", handle_a).exists()
 
 
+def test_a_read_a_pack_answers_counts_in_its_window_and_a_loose_read_does_not(root):
+    """``packed_reads`` in a measured window's ``work`` (a round receipt's): a blob read a pack answered counts once;
+    a read of the loose file adds no key."""
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    refs, _ = _task(root, "task-a", blobs=1)
+    with measured_sections():
+        assert packs.blob_bytes(root, refs[0])
+        loose = section_spans()["work"]
+    _run(root)
+    with measured_sections():
+        assert packs.blob_bytes(root, refs[0])
+        packed = section_spans()["work"]
+    assert "packed_reads" not in loose and packed.get("packed_reads") == 1, (loose, packed)
+
+
 def test_salvage_and_task_finalization_selectors_read_packed_evidence(root):
     refs, handle = _task(root, "task-a", blobs=2)
     _run(root)
