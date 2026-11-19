@@ -444,7 +444,8 @@ def test_a_press_admitted_after_its_card_changed_reads_the_press_it_accepted(tmp
                                              "card_press": press})
     if change == "retitled":
         assert head.task["text"] == (f"[Card input] The owner pressed «Book it» on the card «Flights» that task "
-                                     f"task-1 showed (card {card['card_id']}).")
+                                     f"task-1 showed (card {card['card_id']}). The label is the text of task task-1; "
+                                     "no words of their own.")
         assert (head.task["suggested_name"], lane.light.requests) == ("Flights", ["Flights Book it"])
     else:
         assert head.task["text"] == ("[Card input] On a card of task task-1 that can no longer be read, "

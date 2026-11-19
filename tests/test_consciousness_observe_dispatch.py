@@ -227,7 +227,8 @@ def test_owner_foci_keep_cited_model_choices_at_dispatch(tmp_path, monkeypatch, 
     assert result.status == "ok" and json.loads(result.text.splitlines()[0])["ok"], result.text
     writes, recents = model_effects
     if scope == "work":
-        assert requests == [{"kind": "model", "model": "vendor/chosen", "use_local": False, "cited": "use the other model"}]
+        assert requests == [{"kind": "model", "model": "vendor/chosen", "use_local": False, "cited": "use the other model",
+                             "source": "owner_words"}]
         assert not writes and not recents
     else:
         assert not requests and len(recents) == 1

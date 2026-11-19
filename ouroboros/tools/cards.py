@@ -31,6 +31,7 @@ _NOT_SHOWN = "The card was not shown."
 # The images one card reads from files, together: the card record and a Widgets pin carry them inline.
 _MAX_CARD_IMAGE_BYTES = 2 * 1024 * 1024
 # The only media a card draws (``safeMediaSrc`` in web/modules/widget_render.js): an inline data: URI.
+_MEDIA_TYPES = ("image", "audio", "video")
 _DRAWABLE_MEDIA = re.compile(
     r"data:(image/(?:png|jpeg|jpg|gif|webp)|audio/(?:mpeg|wav|ogg)|video/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+", re.I | re.A)
 
@@ -117,6 +118,16 @@ def _live_widget_problem(skill: str, tab_id: str) -> str:
     return ""
 
 
+def _component_groups(node: Dict[str, Any], kind: str, where: str) -> list[tuple[str, Any]]:
+    """The child lists of a group or tabs, at their positions in the declared card."""
+    if kind == "group":
+        return [(f"{where}.components", node.get("components"))]
+    if kind == "tabs" and isinstance(tabs := node.get("tabs"), list):
+        return [(f"{where}.tabs[{idx}].components", tab.get("components") if isinstance(tab, dict) else None)
+                for idx, tab in enumerate(tabs)]
+    return []
+
+
 def _nodes(components: Any, where: str = "components",
            targeted: bool = False) -> Iterator[Tuple[str, Dict[str, Any], str, bool]]:
     """``(path, node, type, plain)`` of every component of the tree.
@@ -130,17 +141,14 @@ def _nodes(components: Any, where: str = "components",
         here, aimed = f"{where}[{idx}]", targeted or bool(node.get("target")) or bool(node.get("condition_key"))
         kind = str(node.get("type") or "")
         yield here, node, kind, not aimed
-        if kind == "group":  # the only containers the renderer draws: a group's components and each tab's
-            yield from _nodes(node.get("components"), f"{here}.components", aimed)
-        for tab_idx, tab in enumerate(node.get("tabs") if kind == "tabs" and isinstance(node.get("tabs"), list) else []):
-            if isinstance(tab, dict):
-                yield from _nodes(tab.get("components"), f"{here}.tabs[{tab_idx}].components", aimed)
+        for child_where, children in _component_groups(node, kind, here):
+            yield from _nodes(children, child_where, aimed)
 
 
 def _media_nodes(components: Any) -> Iterator[Tuple[str, Dict[str, Any], str, bool]]:
     """``_nodes`` narrowed to every image, audio and video, a gallery's listed items included."""
     for here, node, kind, plain in _nodes(components):
-        if kind in ("image", "audio", "video"):
+        if kind in _MEDIA_TYPES:
             yield here, node, kind, plain
         for item_idx, item in enumerate(node.get("items") if kind == "gallery" and isinstance(node.get("items"), list) else []):
             if isinstance(item, dict):
@@ -190,40 +198,112 @@ def _inline_image_files(ctx: ToolContext, components: Any) -> Tuple[Any, int]:
 # The renderer's own reading of a source, mirrored: `getPath` (web/modules/widget_chart.js), then
 # `String(value || '').trim()` (`safeMediaSrc`). Where the two could disagree the card is not refused.
 _JS_SPACE = "\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_PATH_UNKNOWN = object()
+_OBJECT_PROTOTYPE_KEYS = frozenset({
+    "constructor", "__proto__", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+    "propertyIsEnumerable", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+})
+# String keys on JavaScript's Array.prototype. The reader below handles the array's own length and indices.
+_ARRAY_PROTOTYPE_KEYS = _OBJECT_PROTOTYPE_KEYS | {
+    "at", "concat", "copyWithin", "entries", "every", "fill", "filter", "find", "findIndex", "findLast",
+    "findLastIndex", "flat", "flatMap", "forEach", "includes", "indexOf", "join", "keys", "lastIndexOf",
+    "map", "pop", "push", "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice",
+    "toReversed", "toSorted", "toSpliced", "unshift", "values", "with",
+}
 
 
-def _data_value(data: Any, path: str) -> Any:
-    """What a component's ``path`` reads from the card's ``data``; None where the renderer falls back to ``src``."""
-    current = data
+def _js_truthy(value: Any) -> bool:
+    # JSON arrays and objects are truthy in the renderer even when empty.
+    return isinstance(value, (list, dict)) or (bool(value) and value == value)
+
+
+def _media_state(node: Dict[str, Any], data: dict) -> Any:
+    target = node.get("target")
+    if not _js_truthy(target) or target == "result":
+        return data
+    return _PATH_UNKNOWN if not isinstance(target, str) or target in _OBJECT_PROTOTYPE_KEYS else None
+
+
+def _data_value(current: Any, path: Any) -> Any:
+    """Read a JSON path as the renderer does, with a gap for non-JSON property lookups."""
+    if current is _PATH_UNKNOWN or not isinstance(path, str):
+        return _PATH_UNKNOWN
     for part in (part for part in path.split(".") if part):
         if isinstance(current, dict):
+            if part not in current and part in _OBJECT_PROTOTYPE_KEYS:
+                return _PATH_UNKNOWN
             current = current.get(part)
         elif isinstance(current, list):
-            index = int(part) if part.isascii() and part.isdigit() and str(int(part)) == part else -1
-            current = len(current) if part == "length" else current[index] if 0 <= index < len(current) else None
+            if part == "length":
+                current = len(current)
+                continue
+            if not (part.isascii() and part.isdecimal()):
+                return _PATH_UNKNOWN if part in _ARRAY_PROTOTYPE_KEYS else None
+            if (part != "0" and part.startswith("0")) or len(part) > len(str(len(current))):
+                return None
+            index = int(part)
+            current = current[index] if index < len(current) else None
         else:
             return None
     return current
 
 
-def _js_text(value: Any) -> str:
-    """JavaScript's ``String(value)`` for what JSON holds (a list joins its items with commas, null as nothing)."""
+def _js_text(value: Any) -> Optional[str]:
+    """Text for media matching, or None where JavaScript number conversion cannot be vouched for."""
     if isinstance(value, str):
         return value
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return str(int(value)) if float(value).is_integer() else repr(value)
+        if not -(2**53) < value < 2**53:  # JavaScript's safe integer range, without converting a large Python int
+            return None
+        return str(int(value)) if isinstance(value, int) or value.is_integer() else repr(value)
     if isinstance(value, list):
-        return ",".join("" if item is None else _js_text(item) for item in value)
+        parts = [_js_text(item) for item in value]
+        return None if any(part is None for part in parts) else ",".join(parts)
     return "" if value is None else "[object Object]"
 
 
+def _drawn_source(node: Dict[str, Any], data: Dict[str, Any]) -> Optional[str]:
+    """Inline media from the card state or its fallback ``src``. Empty for an invalid source, None for a gap."""
+    path = node.get("path")
+    value = _data_value(_media_state(node, data), path) if _js_truthy(path) else None
+    if value is _PATH_UNKNOWN:
+        return None
+    text = _js_text(node.get("src") if value is None else value)
+    if text is None:
+        return None
+    text = text.strip(_JS_SPACE)
+    return text if _DRAWABLE_MEDIA.fullmatch(text) else ""
+
+
 def _draws(node: Dict[str, Any], data: Dict[str, Any]) -> bool:
-    """Whether the card renderer finds a source for this media component (``safeMediaSrc``)."""
-    path = node.get("path") if isinstance(node.get("path"), str) else ""
-    value = _data_value(data, path) if path else None
-    return _DRAWABLE_MEDIA.fullmatch(_js_text((node.get("src") or "") if value is None else value).strip(_JS_SPACE)) is not None
+    """Allow an uncertain source through admission. Refuse only media known to have no source."""
+    return _drawn_source(node, data) != ""
+
+
+def _gallery_items(node: Dict[str, Any], data: dict) -> tuple[Optional[str], Optional[list]]:
+    """The data key (None for inline items) and its entries (None when the read is uncertain)."""
+    items = node.get("items")
+    if _js_truthy(items):
+        return None, items if isinstance(items, list) else []
+    key = next((node[k] for k in ("path", "items_key") if _js_truthy(node.get(k))), "")
+    read = _data_value(_media_state(node, data), key)
+    if read is _PATH_UNKNOWN:
+        return "", None
+    return key, read if isinstance(read, list) else []
+
+
+def _data_gallery_items(components: Any, data: Dict[str, Any]) -> Iterator[Tuple[str, int, str, Any, bool]]:
+    """``(gallery place, index, key, item, plain)`` for each item a gallery without listed items draws, as a component:
+    the list its ``path`` (else ``items_key``) reads from the card's ``data``; aimed at another target, it reads none."""
+    for where, node, kind, plain in _nodes(components):
+        if kind != "gallery":
+            continue
+        key, items = _gallery_items(node, data)
+        if key is not None:
+            for idx, item in enumerate(items or ()):
+                yield where, idx, key, item, plain
 
 
 def _undrawable_media(components: Any, data: Any) -> str:
@@ -237,18 +317,12 @@ def _undrawable_media(components: Any, data: Any) -> str:
             else "src: an inline data: URI (audio mpeg, wav or ogg; video mp4, webm or ogg)"
         note = f"; path {path!r} reads a value of data, not a file" if path else ""
         return f"{where}: this {kind} has no source a card can draw{note}. Give it {way}"
-    for where, node, kind, plain in _nodes(components):
-        # A gallery without listed items draws the list its path reads from data, each item as a component.
-        if kind != "gallery" or not plain or node.get("items") or isinstance(node.get("items"), list):
-            continue
-        key = next((node[k] for k in ("path", "items_key") if isinstance(node.get(k), str) and node[k]), "")
-        read = _data_value(data, key) if key else data
-        for idx, item in enumerate(read if isinstance(read, list) else []):
-            kind = str(item.get("type") or "image") if isinstance(item, dict) else "image"
-            if kind in ("image", "audio", "video") and not (
-                    isinstance(item, dict) and (item.get("target") or item.get("condition_key") or _draws(item, data))):
-                return (f"{where}: item {idx} of data {key!r} has no source a card can draw. Give each item src: an "
-                        f"inline data: URI, or list the images in the gallery's items, where an image takes file")
+    for where, idx, key, item, plain in _data_gallery_items(components, data):
+        kind = str(item.get("type") or "image") if isinstance(item, dict) else "image"
+        if plain and kind in _MEDIA_TYPES and not (
+                isinstance(item, dict) and (item.get("target") or item.get("condition_key") or _draws(item, data))):
+            return (f"{where}: item {idx} of data {key!r} has no source a card can draw. Give each item src: an "
+                    f"inline data: URI, or list the images in the gallery's items, where an image takes file")
     return ""
 
 
@@ -290,6 +364,88 @@ def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: A
     if len(json.dumps(body, ensure_ascii=False).encode("utf-8")) - inlined > _MAX_BODY_BYTES:
         raise ValueError(f"the {supplied[0]} body exceeds {_MAX_BODY_BYTES} bytes as JSON")
     return supplied[0], body, supplied[0] == "widget" or bool(checked["actions"])
+
+
+def _visible_media(components: Any, data: dict, *, replacing: bool) -> Iterator[tuple[str, Optional[str]]]:
+    """Media positions and sources in the card's draw, including groups and galleries read from data.
+
+    The card mount supplies only ``result`` data and no skill route. A new tab set draws its first tab.
+    A replacement may reuse the viewer's active tab, which the host cannot attest.
+    """
+    active: set[int] = set()
+
+    def walk(nodes, position, *, gallery=False, certain=True):
+        if not isinstance(nodes, list):
+            return
+        if id(nodes) in active:
+            raise ValueError("card data refers back to its own gallery")
+        active.add(id(nodes))
+        try:
+            for idx, node in enumerate(nodes):
+                where = position.format(idx)
+                if not isinstance(node, dict):
+                    if gallery and node is None:
+                        raise ValueError("card data has a null gallery entry")
+                    if gallery:
+                        yield f"media {where}", None
+                    continue
+                condition = node.get("condition_key")
+                state = _media_state(node, data)
+                visible = _data_value({} if state is None else state, condition) if _js_truthy(condition) else True
+                if not _js_truthy(visible):
+                    continue
+                known = certain and visible is not _PATH_UNKNOWN
+                raw_type = node.get("type")
+                kind = (_js_text(raw_type) or "") if _js_truthy(raw_type) else ("image" if gallery else "")
+                if kind in _MEDIA_TYPES:
+                    routed = any(_js_truthy(node.get(key)) for key in ("route", "api_route"))
+                    yield f"{kind} {where}", _drawn_source(node, data) if known and not routed else None
+                elif kind == "gallery":
+                    key, items = _gallery_items(node, data)
+                    if items is None or (items and _js_truthy(node.get("items_key")) and _js_truthy(node.get("route_prefix"))):
+                        yield f"gallery {where}", None
+                    else:
+                        item_position = f"{where}.items[{{}}]" if key is None else f"{where} item {{}}"
+                        yield from walk(items, item_position, gallery=True, certain=known)
+                else:
+                    children = _component_groups(node, kind, where)
+                    if kind == "tabs":
+                        if replacing and len(children) > 1:
+                            known = False
+                        else:
+                            children = children[:1]
+                    for child_where, rows in children:
+                        yield from walk(rows, f"{child_where}[{{}}]", certain=known)
+        finally:
+            active.remove(id(nodes))
+
+    yield from walk(components, "components[{}]")
+
+
+def _inline_media_base64(source: str) -> str:
+    """Pad a browser-decodable base64 payload for the shared byte receipt, or leave an unreadable one unknown."""
+    encoded = source.split(",", 1)[1]
+    if len(encoded) % 4 == 0:
+        encoded = encoded.removesuffix("=").removesuffix("=")
+    if not encoded or len(encoded) % 4 == 1 or "=" in encoded:
+        return ""
+    return encoded + "=" * (-len(encoded) % 4)
+
+
+def _shown_media(kind: str, body: Dict[str, Any], app: Any, *, replacing: bool) -> list:
+    """Known media bytes and any unresolved media, from the accepted body on its existing show receipt."""
+    from ouroboros.tools.owner_delivery import shown_material
+
+    if kind == "app":
+        path = app.get("path") if isinstance(app, dict) else None
+        return [{"name": pathlib.Path(path).name if path else "app page", **body["app"]}]
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    material = []
+    for name, source in _visible_media(body.get("components"), data, replacing=replacing):
+        encoded = _inline_media_base64(source) if source else ""
+        fact = shown_material(name, b64=encoded) if encoded else {}
+        material.append(fact or {"bytes_unknown": True})
+    return material
 
 
 def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", components: Any = None,
@@ -336,7 +492,7 @@ def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", compo
         "replace": bool(replace), "interactive": interactive,
     }
     mode = deliver_owner_event(ctx, event)
-    named = named_delivery_receipt(ctx, event, mode, "card")
+    named = named_delivery_receipt(ctx, event, mode, "card", lambda: _shown_media(kind, body, app, replacing=bool(replace)))
     identity = {"card_id": record["card_id"], "revision": int(record["revision"])}
     if mode in (UNDELIVERED, UNSUPPORTED_PEER):
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=json.dumps(

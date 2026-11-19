@@ -808,9 +808,9 @@ def quiz_states(drive_root: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
 
 
 def quiz_answer_frame(
-    block: Dict[str, Any], option_index: Optional[int], comment: str,
+    block: Dict[str, Any], option_index: Optional[int], comment: str, *, asker: str = "", reader: str = "",
 ) -> str:
-    """Host-authored structural frame around the owner's VERBATIM choice.
+    """Host-authored structural frame around the owner's VERBATIM answer.
 
     The ONE frame builder shared by the live mailbox control (the decision
     ingress) and the late-answer delivery (the drain / direct turn), so the
@@ -821,13 +821,14 @@ def quiz_answer_frame(
     ``option_index`` the owner took none of the offered options and wrote
     their own answer — say exactly that, without calling it a rejection the
     owner never stated, so the model never reads the free answer as a gloss on
-    a chosen option. A saved secret request has no owner words at all: its frame is the
+    a chosen option. A press is the owner's act on the label task ``asker`` wrote
+    (``answer_facts.option_answer``: "your text" only when ``reader`` is the asker).
+    A saved secret request has no owner words at all: its frame is the
     host's metadata-only ``secret_filled``/``secret_replaced`` message."""
     if secret_outcome_block(block) is block:
         from ouroboros.secret_requests import answer_frame
 
         return answer_frame(block)
-    options = block.get("options") if isinstance(block.get("options"), list) else []
     lines = [
         f"[Owner quiz answer] quiz {block.get('quiz_id')} — asked {block.get('asked_at')}, "
         f"answered {block.get('answered_at')}.",
@@ -843,10 +844,9 @@ def quiz_answer_frame(
             f"option. Verbatim: {comment}"
         )
     else:
-        label = str(options[option_index]) if 0 <= option_index < len(options) else ""
-        lines.append(f"The owner chose option {option_index + 1}: {label}")
-        if comment:
-            lines.append(f"Owner comment (verbatim): {comment}")
+        from ouroboros.answer_facts import option_answer
+
+        lines.append(option_answer(block, option_index, comment, asker=asker, reader=reader))
     ended_at_terminal = bool(block.get("wait_ended_at")) and (
         block.get("wait_ended_at") == block.get("reconciled_at")
     )
@@ -860,12 +860,12 @@ def quiz_answer_frame(
     return "\n".join(lines) + answer_source_context(block)
 
 
-def recorded_answer_frame(block: Dict[str, Any]) -> str:
-    """The frame of an ANSWERED block, read from what the projection recorded."""
+def recorded_answer_frame(block: Dict[str, Any], *, asker: str = "", reader: str = "") -> str:
+    """The frame of an ANSWERED block, read from what the projection recorded (``asker``/``reader``: whose label)."""
     index = block.get("answered_index")
     return quiz_answer_frame(
         block, index if isinstance(index, int) and not isinstance(index, bool) else None,
-        str(block.get("comment") or ""),
+        str(block.get("comment") or ""), asker=asker, reader=reader,
     )
 
 
@@ -900,12 +900,12 @@ def secret_facts(*views: Any) -> Dict[str, Dict[str, Any]]:
 
 
 def late_answer_owner_text(block: Dict[str, Any]) -> str:
-    """What the HUMAN said on the card, for the owner's own chat row and bubble.
+    """What the HUMAN did on the card, for the owner's own chat row and bubble (display).
 
     The verbatim comment when the owner wrote one; otherwise the pressed option
-    exactly as the button showed it, ``{n}. {label}``. Never the host frame:
-    the bubble is the owner's words, the frame is for the model. A secret request's outcome
-    is host metadata, never speakable as the owner's message."""
+    exactly as the button showed it, ``{n}. {label}``: an act, which every corpus
+    and model reader types as such (``answer_facts``), never as the owner's words.
+    Never the host frame. A secret request's outcome is host metadata, never speakable as the owner's message."""
     if block.get("secret_request"):
         return ""
     comment = str(block.get("comment") or "")
@@ -942,6 +942,20 @@ def late_answer_ref(value: Any) -> Optional[Dict[str, Any]]:
     return ref
 
 
+def resolved_late_quiz(drive_root: Any, ref: dict) -> dict:
+    """The accepted answer carried by this message, or its canonical quiz before snapshots were stored."""
+    if snapshot := ref.get("answer_snapshot"):
+        return snapshot["quiz"]
+    if drive_root:
+        try:
+            block = quiz_states(drive_root, ref["task_id"]).get(ref["quiz_id"]) or {}
+        except (OSError, ValueError, RuntimeError):
+            return {}
+        if block.get("state") == STATE_ANSWERED:
+            return block
+    return {}
+
+
 def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -> str:
     """The model-facing delivery of a LATE quiz answer (owner message ``owner_text``).
 
@@ -951,7 +965,7 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
     frame uses the accepted message's matching host-written snapshot, including
     its delivery-time source-work facts. Legacy messages without that snapshot
     read the canonical block on ``drive_root``.
-    When neither authority can be read, the owner's words are delivered with
+    When neither authority can be read, the displayed answer is delivered with
     one host line saying so — disclosed, never a silent loss of the card's
     context. Either form ends with the host's fact of its own route (this room
     only); a secret request's outcome never comes here, since it is never
@@ -960,25 +974,16 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
     ref = late_answer_ref(late_answer)
     if ref is None:
         return owner_text
-    snapshot = ref.get("answer_snapshot")
-    # The accepted message freezes the answer AND delivery-time source-work
-    # facts. The older ask block cannot replace its later promoted-work link.
-    block = dict(snapshot["quiz"]) if isinstance(snapshot, dict) else {}
-    if not block:
-        try:
-            block = quiz_states(drive_root, ref["task_id"]).get(ref["quiz_id"]) or {}
-        except Exception:
-            # Legacy intake still delivers the owner's words with the gap below.
-            block = {}
+    block = resolved_late_quiz(drive_root, ref)
     state = "which had finished" if block.get("answered_after_terminal") or block.get("delivery_after_terminal") else "which is not reading"
     head = f"[Late answer to a question asked by task {ref['task_id']}, {state}]\n"
     fact = "\n" + LATE_ANSWER_ROUTE_FACT
     if isinstance(block, dict) and str(block.get("state") or "") == STATE_ANSWERED:
-        return head + recorded_answer_frame(block) + fact
+        return head + recorded_answer_frame(block, asker=ref["task_id"]) + fact
     return (
         f"{head}{owner_text}\n"
         f"[Host note] This owner message answers quiz {ref['quiz_id']}; that card "
-        "could not be read, so only the owner's own words are shown." + fact
+        "could not be read. The displayed answer may include the asking task's label." + fact
     )
 
 

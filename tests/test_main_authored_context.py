@@ -144,13 +144,15 @@ def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, 
         return call("compact_context", {"working_note": note, "keep_unit_ids": []}, "compact")
 
     def restore(kwargs):
-        accounts = [block["text"] for message in kwargs["messages"]
+        from ouroboros.context_compaction import note_written
+
+        accounts = [(block["text"], note_written(block["_context_capsule"])) for message in kwargs["messages"]
                     if message.get("role") == "assistant" and not message.get("tool_calls")
                     and isinstance(message.get("content"), list)
                     for block in message["content"]
                     if block.get("type") == "text" and block.get("_context_capsule")]
-        assert any(text == "[Actor-authored working view; exact source retained by checkpoint]\n" + note
-                   for text in accounts)
+        assert any(text == f"[Actor-authored working view, written {written}; exact source retained by checkpoint]\n"
+                   + note for text, written in accounts)
         assert not any(m.get("tool_call_id") == "read" for m in kwargs["messages"])
         return call("compact_context", {"restore_unit_refs": [restored]}, "restore")
 

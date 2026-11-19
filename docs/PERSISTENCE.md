@@ -349,11 +349,12 @@ frame folds onto one RUNNING/direct activity record and disappears with that rec
 without persistence.
 
 `owner_model.admit` writes `metadata.lead` and task-document `owner_model` under the queue lock and mirrors them
-on the queue row. Recents and their completion patch run outside that lock. An `owner_words` lead retains the
-whole verified span in `cited`; a mind-chosen primary uses source `mind`. `owner_model` holds the latest `request_id`/`action`, a `recent_recorded` completion bit
+on the queue row. Recents and their completion patch run outside that lock. In `cited`, an `owner_words` lead retains
+the whole verified span and an `owner_press` lead retains the complete pressed label. A mind-chosen primary uses
+source `mind`. `owner_model` holds the latest `request_id`/`action`, a `recent_recorded` completion bit
 for the existing preferences writer, and `receipts` indexed by every accepted request id. A repeat, including an
 older id after a newer act, returns its original receipt and cannot replace the primary. One current lead keeps
-one full span, sized by its words; each new choice replaces it. Receipts grow with distinct owner presses (normally
+one full citation, sized by its text. Each new choice replaces it. Receipts grow with distinct owner presses (normally
 0.3–2 KB each, plus at most 4 KiB UTF-8 for a clipped cite; ids are at most 128 characters, routes at most 400).
 They live with the task document, including terminal history; no independent remover
 or expiry drops idempotency. Existing task-document retention/archiving owns their lifetime. A tier act

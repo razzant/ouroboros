@@ -60,7 +60,7 @@ def test_the_installation_holds_the_forms_found_on_a_live_one(tmp_path):
     # The owner's answer to a card, in the Project room: the frame repeats the question before the choice.
     answer = [meta for _address, meta, _pos in mi.open_room_rows(tmp_path, alpha) if meta.get("type") == "quiz_answer"]
     assert len(answer) == 1 and row_author(answer[0])["kind"] == "human"
-    chosen = "The owner chose option 2: " + shape.OPTIONS[1]
+    chosen = f"The owner pressed option 2 («{shape.OPTIONS[1]}», the text of task ta2) and wrote: {shape.COMMENT}"
     assert len(shape.QUESTION) > 500 and made.answer["text"].index(chosen) > 500
     assert render_row_text(made.answer) == f'[answer q-inventory] chose (2) {shape.OPTIONS[1]} — "{shape.COMMENT}"'
 

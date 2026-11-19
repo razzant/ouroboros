@@ -451,11 +451,14 @@ def _validate_card_component(
     if not isinstance(submit.get("once", False), bool):
         raise ExtensionRegistrationError(f"{path}.submit.once must be boolean")
     fields = component.get("fields") if isinstance(component.get("fields"), list) else []
+    heading = str(component.get("title") or component.get("label") or "") if component_type == "form" else ""
     actions[action_id] = {
         "path": path, "kind": component_type, "once": submit.get("once", False),
         # The label the renderer draws (widgets.js defaults), so a press is named as the owner saw it.
         "label": str(component.get("label") or "Run") if component_type == "action"
-        else str(component.get("submit_label") or component.get("title") or component.get("label") or "Submit"),
+        else str(component.get("submit_label") or "Submit"),
+        **({"form_title": heading} if heading else {}),
+        **({"bubble_label": heading} if heading and not component.get("submit_label") else {}),
         **({"fields": [_text(f.get("name")) for f in fields if isinstance(f, dict)]} if component_type == "form" else {}),
     }
 

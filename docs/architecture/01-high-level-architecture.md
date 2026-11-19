@@ -128,7 +128,7 @@ ouroboros/ — agent core and shared runtime (§6)
   loop.py — the LLM tool loop, finalization nudges and the FINAL ANSWER candidate (§6 Task lifecycle)
   late_review_marks.py — a review settled after its author could receive it (a plan reply, a left wave), kept in its room's view until the mind releases it (§6 Review stack)
   result_material.py — what a task produced, exact copies (§6 Result review)
-  owner_source.py — resolves owner chat/quiz/mailbox membership; action meaning belongs to Main (§6 Owner routing verbs)
+  owner_source.py, answer_facts.py — resolves owner chat/quiz/mailbox membership and answer frames; action meaning belongs to Main (§6 Owner routing verbs)
   delivery_seal.py — the root admission seal at an author stop, re-exported from `loop`; stored names keep the former fence's (§6 Result review)
   review_price.py — the measured price of one review by one reviewer row, from the usage ledger (§6 Result review; §7 Review pool)
   loop_llm_call.py — single-round LLM call, current-call event producer and usage accounting
@@ -202,7 +202,7 @@ ouroboros/ — agent core and shared runtime (§6)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
   request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, request_wire_temperature.py, effort_evidence.py — exact-route wire compatibility (§6 Context fitting, retry, and compaction; §10 invariant 13)
   anthropic_native_custody.py, openai_responses_custody.py — same-route replay custody: whole Anthropic reasoning blocks, whole Responses turns
-  reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe (inventory: docs/DEVELOPMENT.md)
+  reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe
   llm_observability.py — public call projections persisted; private sidecars stripped from durable records
   llm_probe.py — Provider Test, non-generating reachability; no chat retry, fallback or learning
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
@@ -252,7 +252,7 @@ ouroboros/ — agent core and shared runtime (§6)
   context_layout.py — doc-layout SSOT; `book_navigation` in Low/Nano, full ARCHITECTURE in Max; reduction relocates, never silently truncates (§6 Context fitting)
   reference_books.py — ordered book reader/validator; free worktree balance vs cached official merge-base, unknown if unavailable, nonblocking (DEVELOPMENT "Documentation contract")
   local_model_server.py — read-only local formatter measurement and serving-process probe
-  context_compaction.py, context_source_view.py, context_renewal.py, context_health.py — atomic compaction, source-address recovery, same-task renewal, provenance capsules, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
+  context_compaction.py, context_source_view.py, context_renewal.py, context_health.py, arrival_notes.py — atomic compaction, source-address recovery, same-task renewal, dated provenance capsules named at arrival, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
   context_runtime_facts.py, engine_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
   task_custody.py, owner_keep.py, review_thread_retention.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock; one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
