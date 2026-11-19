@@ -77,7 +77,8 @@ def _set_task_retention(ctx: ToolContext, task_id: str, keep: bool, reason: str,
 
 _DESCRIPTION = (
     "Keep, or stop keeping, the saved materials of exactly one task when the owner asks: its work folders, "
-    "copies, environments, review copies, result pins and call journals stay until the owner releases them. "
+    "copies, environments, review copies, result pins, call journals and saved states for exact return stay until "
+    "the owner releases them. "
     "It never stops running work or lossless compression, and never covers that task's children. "
     "It needs the owner's own words: by default the message this turn answers, or one of your held "
     "owner_quote_handles. The result lists retained material, retired material or closed future document-ID reuse "
