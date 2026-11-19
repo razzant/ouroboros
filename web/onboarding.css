@@ -825,6 +825,14 @@ textarea::placeholder {
   top: -1px;
 }
 
+/* A family's program line (docs/DESIGN.md §7): the model chooser's compact line under the row's status, shown only
+   with something to act on. Its Update takes the in-row control size so the line stays compact. */
+.agent-family-identity .harness-model-program {
+  --control-h: var(--control-h-sm);
+  --control-pad-x: var(--space-3);
+  --button-font-size: var(--type-meta);
+}
+
 .agent-service-note,
 .agent-outcome {
   font-size: var(--type-meta);

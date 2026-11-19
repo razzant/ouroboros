@@ -248,3 +248,117 @@ test('an unanswered native catalog releases the shared read at its bound; reopen
         { entry: { selection: { path: '/codex' }, updateAvailable: 'yes', newest: { status: 'available', version: '0.169.0' } } });
     assert.match(html, /<span>List from Codex 0\.162\.1<\/span><span class="harness-model-latest">0\.169\.0 available<\/span>/);
  });
+
+// The setup wizard's family line (docs/DESIGN.md §7): the same builder, led by the program's own version, shown only
+// with something to act on once the newest-release read has answered, and read only while the engine runs.
+const familyEntry = (harness, extra = {}) => ({harness, selection: {path: `/vendor/${harness}`, version: '0.50.0'},
+    newest: {status: 'available', version: '0.60.0', observedAt: 'now', source: 'registry'}, updateAvailable: 'yes',
+    actions: {update: {available: true, reason: null}, install: {available: true, reason: null}}, operation: null, ...extra});
+
+test('a family line shows what there is to act on and stays silent otherwise', async () => {
+    const {familyProgramShown} = await import('../modules/model_program.js');
+    const shown = (entry, view = {}) => familyProgramShown({entry, ...view});
+    for (const verdict of ['yes', 'cannot_tell']) {
+        const entry = familyEntry('f', {updateAvailable: verdict});
+        assert.equal(shown(entry), true, verdict);
+        const html = modelProgramMarkup({harness: 'f'}, {entry}, 'Program 0.50.0');
+        assert.match(html, /<span>Program 0\.50\.0<\/span>/);
+        assert.match(html, />Update<\/button>/);
+        assert.doesNotMatch(html, /List from|Details/);
+    }
+    assert.equal(shown(familyEntry('f', {updateAvailable: 'no'})), false, 'up to date says nothing here');
+    assert.equal(shown(familyEntry('f', {selection: {path: null, version: null}})), false, 'Connect installs a missing program');
+    assert.equal(shown(familyEntry('f', {newest: {status: 'not_read', source: null}})), false, 'the line waits for the newest read');
+    assert.equal(shown(familyEntry('f'), {inspectionError: 'Program inspection unavailable: refused'}), false);
+    assert.equal(shown(familyEntry('f'), {inventoryError: 'Program inspection unavailable: refused'}), false);
+    const refused = familyEntry('f', {actions: {update: {available: false, reason: 'Installed by another tool; update it there'}}});
+    assert.equal(shown(refused), true);
+    assert.match(modelProgramMarkup({harness: 'f'}, {entry: refused}, 'Program 0.50.0'), /Installed by another tool/);
+    assert.doesNotMatch(modelProgramMarkup({harness: 'f'}, {entry: refused}, 'Program 0.50.0'), /<button/);
+    const running = familyEntry('f', {updateAvailable: 'no', operation: {id: 'op', state: 'running'}});
+    assert.equal(shown(running), true, 'an operation under way stays in view');
+    assert.equal(shown(familyEntry('f', {updateAvailable: 'no'}), {operationError: 'Update not started: refused'}), true,
+        'the error of an operation the owner started is the one failure the line keeps');
+});
+
+test('the wizard asks the engine only while it runs, the newest release only for a selected program', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const store = {snapshot: {daemon: {state: 'stale'}}};
+    const calls = [], settled = [];
+    let updated = false, latest;
+    const rows = () => [familyEntry('wiz-one', updated ? {updateAvailable: 'no', selection: {path: '/vendor/wiz-one', version: '0.60.0'}} : {}),
+        familyEntry('wiz-none', {selection: {path: null, version: null}, updateAvailable: 'cannot_tell'})];
+    const api = {
+        async harnessMaintenanceInventory(query) {
+            calls.push(query);
+            const list = rows().filter((row) => !query.harness || row.harness === query.harness);
+            if (query.checkLatest) await latest?.promise;
+            return {harnesses: query.checkLatest ? list : list.map((row) => ({...row, newest: {status: 'not_read', source: null}, updateAvailable: 'cannot_tell'}))};
+        },
+        startHarnessMaintenance: async (body) => ({id: 'wiz-op', harness: body.harness, state: 'queued'}),
+        harnessMaintenanceOperation: async (id) => ({id, harness: 'wiz-one', state: 'succeeded', outcome: 'changed', mutation: 'changed',
+            before: {version: '0.50.0'}, after: {version: '0.60.0'}, finishedAt: '2026-11-20T00:00:00Z'}),
+    };
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    let changes = 0;
+    const programs = bindFamilyPrograms({harnesses: ['wiz-one', 'wiz-none'], store, api, onChange: () => { changes++; },
+        onSettled: (harness) => settled.push(harness)});
+    programs.observe({remount: true}); await programs.read(); await flush();
+    assert.deepEqual(calls, [], 'an engine that is not running is never asked, not even after a sign-in settles');
+    assert.equal(programs.line('wiz-one'), '');
+
+    store.snapshot = {daemon: {state: 'running'}};
+    latest = Promise.withResolvers();
+    programs.observe(); await flush();
+    assert.deepEqual(calls, [{harness: '', fresh: true, checkLatest: false}, {harness: 'wiz-one', fresh: true, checkLatest: true}],
+        'it comes up: one inventory, then the newest release of the one family with a program');
+    assert.equal(programs.line('wiz-one'), '', 'nothing flashes before the newest read answers');
+    latest.resolve(); await flush();
+    const line = programs.line('wiz-one');
+    assert.match(line, /<span>Program 0\.50\.0<\/span><span class="harness-model-latest">0\.60\.0 available<\/span>/);
+    assert.match(line, /data-program-action="latest"[^>]*>Update</);
+    assert.equal(programs.line('wiz-none'), '');
+    programs.observe(); await flush();
+    assert.equal(calls.length, 2, 'a tick of a running engine asks nothing new');
+
+    await programs.read();
+    assert.equal(calls.length, 4, 'a settled sign-in asks again');
+
+    let click;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'latest'}, closest: () => ({dataset: {program: 'wiz-one'}}),
+        addEventListener: (_type, fn) => { click = fn; }}]});
+    click(); await flush();
+    assert.match(programs.line('wiz-one'), /Update queued/);
+    updated = true;
+    programs.observe(); await flush();
+    assert.deepEqual(settled, ['wiz-one'], 'the status tick polls the operation until it settles');
+    assert.deepEqual(calls.slice(-2), [{harness: '', fresh: true, checkLatest: false}, {harness: 'wiz-one', fresh: true, checkLatest: true}],
+        'a settled operation asks again');
+    assert.equal(programs.line('wiz-one'), '', 'an up-to-date program leaves the row quiet');
+
+    const [before, asked] = [changes, calls.length];
+    programs.dispose();
+    await programs.read(); await flush();
+    assert.deepEqual([changes, calls.length], [before, asked], 'a disposed line asks and paints nothing more');
+});
+
+test('a refused or failed inventory read paints nothing', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    for (const [harness, failure] of [['wiz-old-engine', Object.assign(new Error('Update the app or connect an engine at version 6.0.0 or newer to install or update harness programs.'), {status: 503})],
+        ['wiz-attached', new TypeError('Failed to fetch')]]) {
+        let fail = false;
+        const api = {async harnessMaintenanceInventory() {
+            if (fail) throw failure;
+            return {harnesses: [familyEntry(harness)]};
+        }};
+        const programs = bindFamilyPrograms({harnesses: [harness], store, api, onSettled: () => {}});
+        programs.observe(); await flush();
+        assert.match(programs.line(harness), /Update/, 'the control: an answered read shows the line');
+        fail = true;
+        await programs.read(); await flush();
+        assert.equal(programs.line(harness), '', `${harness}: a refused read clears the line`);
+        programs.dispose();
+    }
+});

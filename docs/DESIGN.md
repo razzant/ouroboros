@@ -2885,11 +2885,19 @@ operation id. A changed receipt can offer Return to its prior version when suppo
 A nonzero installer exit can still mean Updated: retain the limitation sentence.
 A package-manager updater's advice remains advice, never an automatic command.
 
-Only an opened model list shows a non-option closing row per producer: “List from”
+An opened model list shows a non-option closing row per producer: “List from”
 when it supplies every suggestion, otherwise the supplied subset with its source label
 (e.g. “Claudexor entries supplied by Codex”), then the newest fact and Update when needed.
 Every editor built on the shared chooser follows this rule. Closed
-editors stay quiet; API-only lists have no such row. Mouse, touch and keyboard Update
+editors stay quiet; API-only lists have no such row. The wizard's Accounts step shows the
+same line under a family's status, led by its program's version (“Program 0.50.0”, then
+“0.60.0 available” and Update), only when there is something to act on (an update, a refused update
+with the engine's reason, an operation under way or the error of one the owner started) and
+the newest-release read has answered; without a Details disclosure. Its silence otherwise is
+intentional: an up-to-date program, a family with no program (Connect installs it), an engine
+that is not running or a read the engine refused say nothing there, while Accounts keeps
+“Program X · Up to date”. After a failed Connect that line is the offer, with no claim about
+the cause (owner decision 2026-11-20). Mouse, touch and keyboard Update
 keep the list open through progress and result, then refresh its suggestions. Typed
 values/carets survive; “Custom ID · Not in this list” stays under an unlisted input.
 Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator.

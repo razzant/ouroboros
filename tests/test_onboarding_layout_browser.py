@@ -136,6 +136,78 @@ def test_an_ordinary_accounts_state_fits_the_setup_window(wizard, connected, the
         assert page.locator("#agents-outcome").is_hidden()
 
 
+# An old program the engine can update: the Accounts step's one program line (docs/DESIGN.md §7), fictitious values.
+OLD_PROGRAM = {"harness": "codex", "selection": {"path": "/opt/vendor/bin/codex", "realPath": "/opt/vendor/bin/codex", "version": "0.50.0",
+               "versionOutput": "codex 0.50.0", "overrideEnv": None, "overrideValue": None},
+               "newest": {"status": "available", "source": "registry", "version": "0.60.0", "observedAt": "2026-11-20T00:00:00Z"},
+               "updateAvailable": "yes", "releaseNotesUrl": None, "operation": None, "observedAt": "2026-11-20T00:00:00Z",
+               "actions": {"update": {"available": True, "reason": None, "commands": []}, "install": {"available": True, "reason": None, "commands": []},
+                           "exactVersion": {"available": False, "reason": "Not offered"}}}
+PROGRAM_LINE = '[data-agent-family="codex"] .harness-model-program'
+
+
+def _serve_programs(page, asked):
+    def answer(route):
+        asked.append(route.request.url)
+        route.fulfill(json={"observedAt": "2026-11-20T00:00:00Z", "harnesses": [OLD_PROGRAM]})
+    page.route("**/api/claudexor/maintenance/harnesses**", answer)
+
+
+def _in_view(page, selector):
+    return page.locator(selector).first.evaluate("""el => { const b = el.getBoundingClientRect(), f = document.querySelector('.wizard-footer').getBoundingClientRect();
+        return b.top >= 0 && b.bottom <= f.top + 0.5 && b.left >= 0 && b.right <= innerWidth + 0.5; }""")
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_one_update_line_keeps_the_accounts_step_in_the_setup_window(wizard, theme, tmp_path):
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    asked = []
+    _serve_programs(wizard["page"], asked)
+    page = _open(wizard, SETUP_WINDOW, theme, connected=True)
+    page.wait_for_selector(PROGRAM_LINE)
+    page.screenshot(path=str(evidence / f"update-line-{SETUP_WINDOW[0]}x{SETUP_WINDOW[1]}-{theme}.png"), animations="disabled")
+    facts = _facts(page)
+    assert facts["overflow"] == 0, facts
+    assert all(row["inView"] and row["uncovered"] for row in facts["rows"] + facts["connects"])
+    _assert_way_forward(facts)
+    assert page.locator(PROGRAM_LINE).inner_text().split() == ["Program", "0.50.0", "0.60.0", "available", "Update"]
+    assert _in_view(page, f"{PROGRAM_LINE} [data-program-action]")
+    assert page.locator(".harness-model-program").count() == 1, "only the family with something to act on"
+    assert any("checkLatest=true" in url and "harness=codex" in url for url in asked), asked
+
+
+@pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
+def test_a_failed_sign_in_and_the_update_offer_share_the_viewport(wizard, size, tmp_path):
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    page = wizard["page"]
+    _serve_programs(page, [])
+    failed = {"job_id": "fixture-login", "job": {"state": "failed", "harness": "codex", "outcome": {"reason": "vendor_program_failed"}},
+              "sequence": 1, "cursor": "fixture"}
+    page.route("**/api/claudexor/login**", lambda route: route.fulfill(json=failed))
+    page = _open(wizard, size)
+    page.wait_for_selector(PROGRAM_LINE)
+    page.click('[data-agent-connect="codex"]')
+    page.wait_for_selector("[data-login-verdict]")
+    # Scrolled just far enough that the verdict clears the pinned footer (WebKit's own reveal ignores its clearance).
+    page.locator("[data-login-verdict]").evaluate("""el => window.scrollBy({behavior: 'instant', top: Math.max(0,
+        el.getBoundingClientRect().bottom - document.querySelector('.wizard-footer').getBoundingClientRect().top + 4)})""")
+    page.screenshot(path=str(evidence / f"failed-sign-in-{size[0]}x{size[1]}.png"), animations="disabled")
+    assert _in_view(page, "[data-login-verdict]") and _in_view(page, f"{PROGRAM_LINE} [data-program-action]")
+    _assert_way_forward(_facts(page))
+
+
+def test_a_stopped_engine_shows_no_program_line_and_no_warning(wizard, tmp_path):
+    asked = []
+    _serve_programs(wizard["page"], asked)
+    wizard["fixture"]["status"]["daemon"] = {"state": "stale"}
+    page = _open(wizard, SETUP_WINDOW)
+    page.wait_for_timeout(500)
+    page.screenshot(path=str(diagnostic_directory(tmp_path / "frames", "program-line", publish=True) / "stopped-engine.png"), animations="disabled")
+    assert page.locator(".harness-model-program").count() == 0
+    assert "Program inspection" not in page.locator("#agents-accounts").inner_text()
+    assert asked == [], "a stopped engine is never asked about its programs"
+
+
 @pytest.mark.parametrize("scene, size, harness, keys", [
     ("phone", (390, 640), None, False),
     ("short", (980, 500), None, False),
