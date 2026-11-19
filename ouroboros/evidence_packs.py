@@ -671,10 +671,9 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     """Verified bytes, cheapest place first, in two phases over every admissible root (``_blob_roots``):
     first the loose file, a view's skeleton placement spliced with its parts and, when the caller names
     the owning task (a cost hint, never a proof of absence), that task's own sidecars, in each root;
-    only then each root's shared index, one copy per question (the next only once that one fails: a common
-    digest lies in every pack that references it). Any copy found is right: its size and sha256 are checked. Without
-    bytes, the first place that could not answer now (an index, a view's part) makes the read
-    ``EvidenceUnavailable``, before any copy's damage and any absence: a sound copy may lie there.
+    only then each root's shared index, one copy per question (the next once that one fails). Any copy found
+    is right: its size and sha256 are checked. Without bytes, the first place that could not answer now (an
+    index, a view's part) makes the read ``EvidenceUnavailable``, before any copy's damage or any absence.
 
     ``admit`` (optional) sees each loose, placement or pack file before it is opened; what it
     raises propagates, so a refusal never becomes a miss, corruption or fallback."""
