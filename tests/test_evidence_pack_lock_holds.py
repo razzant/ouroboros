@@ -208,29 +208,35 @@ def test_a_reader_that_begins_after_the_check_keeps_the_handles_not_yet_unlinked
     assert not _present(root, "big", handles)
 
 
-def test_an_export_that_begins_during_a_deletion_keeps_the_handles_until_published_again(root, monkeypatch):
-    """An export that begins after the candidate's check and its blobs' unlink stops the handles' unlinks (each
-    handle's barrier reads the phase); while it lasts a pass unlinks nothing, and the first pass after the store is
-    published again removes them. Packed bytes read throughout."""
+def test_an_export_that_begins_during_a_pass_keeps_what_is_still_loose_until_published_again(root, monkeypatch):
+    """An export that begins after a candidate's check and its blobs' unlink stops its handles' unlinks (each
+    handle's barrier reads the phase), and a candidate checked after the export began loses nothing, neither blobs
+    nor handles (its check reads the phase). While it lasts a pass unlinks nothing, and the first pass after the
+    store is published again removes the rest. Packed bytes read throughout."""
     refs, first = _task(root, "big", blobs=3)
     handles = [first, *_handles(root, "big", 2)]
+    later, later_handle = _task(root, "later", blobs=1, payloads=[b"x"])  # smaller: the pass reaches it after big
 
     def export(n):
-        if n == 2:  # the candidate checked and its blobs unlinked: the first handle's barrier next
+        if n == 2:  # big checked and its blobs unlinked: its first handle's barrier next, then later's check
             with store.open_store(root, write=True, service=True) as txn:
                 txn.set_meta("phase", store.EXPORTING)
 
     with monkeypatch.context() as patch:
         _before_barrier(patch, export)
         report = packer.run_pass(root)
-    assert report["faults"] == 0 and report["deferred"] == 1 and report["unfinished"] == ["big"]
+    assert report["faults"] == 0 and report["deferred"] == 2 and report["unfinished"] == ["big", "later"]
     assert not _loose(refs) and len(_present(root, "big", handles)) == 3
+    assert _loose(later) == later and _present(root, "later", [later_handle])
     assert all(packs.blob_bytes(root, ref) for ref in refs)
     assert packer.run_pass(root)["unlinked"] == 0 and len(_present(root, "big", handles)) == 3
+    assert _loose(later) == later and _present(root, "later", [later_handle])
     with store.open_store(root, write=True, service=True) as txn:
         txn.set_meta("phase", store.PUBLISHED)
     assert packer.run_pass(root)["faults"] == 0 and not _present(root, "big", handles)
+    assert not _loose(later) and not _present(root, "later", [later_handle])
     assert all(read_actor_source_bytes(root, "big", handle) for handle in handles)
+    assert all(packs.blob_bytes(root, ref) for ref in later)
 
 
 def _held_reader(root):

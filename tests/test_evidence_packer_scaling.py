@@ -166,30 +166,51 @@ def test_no_global_scan_or_foreign_stamp_inside_unlink_locks(root, monkeypatch):
     assert set(rows) == {f"settled-{number}" for number in range(12)}  # each candidate's row read under its barrier
 
 
-def test_a_blob_named_before_the_census_stays_loose_and_one_named_after_it_reads_from_the_pack(root, monkeypatch):
+@pytest.mark.parametrize("step", ["census", "pack", "unlink", "writer"])
+def test_a_blob_named_before_the_census_stays_loose_and_one_named_after_it_reads_from_the_pack(
+        root, monkeypatch, step):
     """The keep-set is the pass's one census of live sharers, taken before its first unlink and never refreshed
     (``PackSweep``): a blob a live task's manifest named before it stays loose until that task's own pass; one a
     live task's manifest names after it leaves with the packed task, and its bytes read from that task's verified
-    pack, so every ref a manifest names stays readable."""
+    pack, so every ref a manifest names stays readable, at whichever step of the pass its writer names it: the census
+    taken, the pack written, the blob's own unlink next, or the whole pass between the writer storing the blob
+    (present, so kept as it is) and publishing its manifest."""
     (early, late), _ = _task(root, "packing", blobs=2)
     _task(root, "live", status="running", blobs=1)
     observability.write_call_manifest(root, task_id="live", call_id="early", manifest={"ref": early})
-    write, read, manifests = packs.write_pack, packs.manifest_blob_refs, []
+    write, read, collect, manifests = packs.write_pack, packs.manifest_blob_refs, packer.PackSweep.collect_keep, []
+
+    def name_late(at):
+        if at == step:
+            observability.write_call_manifest(root, task_id="live", call_id="late", manifest={"ref": late})
 
     def read_refs(root, task):
         manifests.append(task)
         return read(root, task)
 
+    def census(sweep, rows):
+        collect(sweep, rows)
+        name_late("census")
+
     def publish(*args, **kwargs):
         result = write(*args, **kwargs)
         assert "live" in manifests, "no keep-set census was taken before compression"
-        observability.write_call_manifest(root, task_id="live", call_id="late", manifest={"ref": late})
+        name_late("pack")
         return result
+
+    def unlink(path):
+        if str(path) == late["path"]:
+            name_late("unlink")
 
     with monkeypatch.context() as edits:
         edits.setattr(packs, "manifest_blob_refs", read_refs)
+        edits.setattr(packer.PackSweep, "collect_keep", census)
         edits.setattr(packs, "write_pack", publish)
+        edits.setattr(packs, "os", _HookedUnlinks(unlink))
+        if step == "writer":
+            observability.write_blob_bytes(root, packs.blob_bytes(root, late))
         report = packer.run_pass(root)
+    name_late("writer")
     assert report["faults"] == 0 and (report["kept"], report["unlinked"]) == (1, 2)  # unlinked: `late` and the handle
     assert len([task for task in manifests if task == "live"]) == 1  # one census
     assert pathlib.Path(early["path"]).exists() and not pathlib.Path(late["path"]).exists()
