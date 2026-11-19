@@ -191,7 +191,7 @@ def carried_situation(ctx: Any, root: Path, *, declared: bool) -> tuple[dict, st
     if not names:
         return {}, ""
     holds = ("its input is declared, so it holds no head" if declared else
-             "it holds the heads of the notes that claim them, read at its start")
+             "it holds the heads of the notes that claim them and of the notes their heads link, read at its start")
     topics = ", ".join(claimed_topics(root, names, claims=claims)) or "none"
     return {CARRIED_NAMES: list(names)}, (f"\nheld notes: the child carries my situation names ({', '.join(names)}); "
                                           f"{holds} (claiming now: {topics}).")

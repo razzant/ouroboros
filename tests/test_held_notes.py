@@ -233,7 +233,8 @@ def test_a_place_turns_helpers_hold_the_place_page_read_its_room_and_pass_its_na
     result, child = _scheduled(turn)
     assert child["metadata"][CARRIED_NAMES] == names
     assert result.endswith(f"\nheld notes: the child carries my situation names ({', '.join(names)}); it holds the heads "
-                           "of the notes that claim them, read at its start (claiming now: place-page).")
+                           "of the notes that claim them and of the notes their heads link, read at its start (claiming "
+                           "now: place-page).")
     without = {**child, "metadata": {key: value for key, value in child["metadata"].items() if key != CARRIED_NAMES}}
     plans = {"carried": _plan(world, task=child), "own facts": _plan(world, task=without)}
     facts = {kind: plan.projection(plan.initial_mode).memory_facts for kind, plan in plans.items()}
