@@ -347,3 +347,44 @@ def test_bytes_beside_their_producer_are_read_there_before_the_canonical_catalog
     assert [where for when, where in opened if when == "read"] == [], opened  # the read asked no catalog
     assert ("", str(root)) in opened, opened  # the destination proofs still ask the canonical one
     assert packs.blob_bytes(root, {**loose, "path": ""}) == packs.read_loose_gzip(pathlib.Path(loose["path"]))
+
+
+def test_a_root_that_cannot_answer_now_leaves_the_order_hint_to_the_next_root(root, tmp_path):
+    """The ordering hint asks the parent, then the child. A parent whose catalog cannot answer now passes the
+    question on, and the child's own sidecar names where its packed member lies; when both roots answer, the
+    parent's answer still comes first."""
+    import threading
+
+    from ouroboros import store
+
+    obs.persist_call(root, task_id="settled", call_id="call_00", call_type="tool_call", payload={"answer": "packed"})
+    write_task_result(root, "settled", "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(root)["packed"] == 1  # the parent has packs and a catalog
+    task, child, _calls = _packed_task(root)
+    _path, sidecar = next(iter(packs.list_sidecars(child)))
+    member = next(item for item in sidecar["members"] if item["kind"] == "json")
+    ref = {"sha256": member["sha256"], "kind": "json", "size": int(member["size"])}
+    node = {"kind": "blob", "task_id": task, "ref": ref}
+    walk = source_retention.RetentionWalk(root, child, {})
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="parent-catalog-held")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with pytest.raises(packs.EvidenceUnavailable):
+            packs.read_position(root, sha256=ref["sha256"], kind="json", task_id=task)
+        assert walk._position(node) == (str(packs.packs_dir(child) / packs.pack_name(task, 1)), int(member["offset"]))
+    finally:
+        release.set()
+        holder.join(10)
+    copy = obs.write_blob_bytes(root, packs.blob_bytes(child, {**ref, "encoding": "gzip"}, task_id=task))
+    pack, copied = packs.write_pack(root, "parent-copy", 1, [{**ref, "source": pathlib.Path(copy["path"])}])
+    packs.index_upsert(root, pack, copied)
+    pathlib.Path(copy["path"]).unlink()
+    assert walk._position(node) == (str(pack), int(copied["members"][0]["offset"]))

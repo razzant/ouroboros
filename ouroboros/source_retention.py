@@ -441,18 +441,19 @@ class RetentionWalk:
     def _position(self, node):
         """The ``(pack, offset)`` this node decodes first, ``()`` when a loose copy answers. The parent is asked first:
         a member it packed is decoded by the destination's proof even when the read takes a loose copy beside the
-        producer. Only an ordering hint: ``_read_source`` still resolves and verifies, and a lookup that cannot answer
-        now (``read_position`` never waits for a catalog) keeps the node in queue order."""
+        producer. Only an ordering hint: ``_read_source`` still resolves and verifies. A root that cannot answer now
+        (``read_position`` never waits for a catalog) leaves the question to the next one; when none answers, the node
+        keeps its queue order."""
         ref, kind = node["ref"], node["kind"]
-        try:
-            for root in dict.fromkeys((self.parent, self.child)):
+        for root in dict.fromkeys((self.parent, self.child)):
+            try:
                 position = (packs.read_position(root, task_id=node["task_id"], rel_path=ref["path"]) if kind == "source"
                             else packs.read_position(root, sha256=ref["sha256"], kind=ref["kind"],
                                                      task_id=node["task_id"]))
-                if position is not None:
-                    return position
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if position is not None:
+                return position
         return ()
 
     @staticmethod
