@@ -511,3 +511,52 @@ def test_selected_visual_source_adds_no_mask_of_its_own(evidence_context):
     # redaction: the view carries those stored bytes, neither re-masked nor restored.
     from ouroboros.observability import redact_projection
     assert row["following_visible_text"] == redact_projection("The page shows " + keyed).value
+
+
+@pytest.mark.parametrize("catalog", ["free", "held"])
+def test_a_packed_task_reads_its_selected_sources_from_its_own_packs(evidence_context, catalog):
+    """A task's selected sources may lie only in its own evidence pack (a task resumed after packing). Their reads
+    name the task, so its own sidecars answer them whether or not the shared packs catalog can: the exhibit stays
+    complete, a partial result still recovers from its call's projection, and no read waits for the catalog."""
+    import threading
+
+    from ouroboros import artifacts, evidence_packs, store
+
+    ctx = evidence_context
+    full = "Full observed result\n" + "x" * 20000 + "\nDECISIVE_END"
+    model_response(ctx, "before", "Inspect the screen")
+    call = tool_response(ctx, "visual", "before", result=full)
+    _, primary_ref, issue = artifacts.persist_exact_text_source(ctx.drive_root, ctx.task_id, source_id="visual", text=full)
+    assert not issue
+    call.update(result=full[:100], result_partial=True, result_source_ref=primary_ref)
+    (artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id) / primary_ref["path"]).unlink()
+    model_response(ctx, "after", "Recorded visible assessment")
+    members = evidence_packs.loose_members(ctx.drive_root, ctx.task_id)
+    pack, sidecar = evidence_packs.write_pack(ctx.drive_root, ctx.task_id, 1, members)
+    evidence_packs.index_upsert(ctx.drive_root, pack, sidecar)
+    for member in members:
+        member["source"].unlink()
+    assert not any((ctx.drive_root / "observability" / "blobs").glob("*.gz"))
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(ctx.drive_root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    if catalog == "held":
+        holder.start()
+        assert held.wait(5)
+    try:
+        with store.acquisition_budget(0):
+            packet = capture_commit_review_evidence(ctx)
+    finally:
+        release.set()
+        if catalog == "held":
+            holder.join(10)
+    raw = read_actor_source_bytes(ctx.budget_drive_root, ctx.task_id, packet["source_ref"]).decode("utf-8")
+    selected = json.loads(raw.split("\n\n", 2)[2])
+    assert packet["source_complete"] is True and packet["gap_count"] == 0, raw
+    assert selected["result_complete"] is True and selected["result"] == full
+    assert selected["following_visible_text"] == "Recorded visible assessment"

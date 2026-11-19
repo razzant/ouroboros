@@ -44,7 +44,7 @@ from collections import Counter, OrderedDict
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from ouroboros import chat_chain, memory_inventory
+from ouroboros import chat_chain, memory_inventory, memory_view_events
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, LEGACY_ROOM_LABEL, legacy_frontier, row_lineage
 from ouroboros.chronicle_store import (CHILD_DRAFT_RIGHT, DELEGATED_FOCUS_ROLES, ChronicleStore, capture, draft_signer,
                                        is_late_review_mark, source_time_span)
@@ -203,7 +203,7 @@ def _task_ctx(task: Mapping[str, Any]) -> SimpleNamespace:
 def view_room_id(task: Mapping[str, Any], ctx: Any, drive_root: Any, *, project_chat_ids: Any,
                  presence: bool = False) -> str:
     """The task's own room (``own_room_chat``): the internal Project it lives in, then a Presence
-    focus's own conversation, then any other own room.
+    focus's own conversation, then any other own room; a helper reads the room its carried names name.
 
     A result outside the Projects and Main, or none (the hidden partition, another
     transport chat, a task without a chat), is Main, as the old focused view was; a
@@ -212,6 +212,8 @@ def view_room_id(task: Mapping[str, Any], ctx: Any, drive_root: Any, *, project_
     """
     from ouroboros.dialogue_evidence import own_room_chat  # D03->D06 is lazy-only
 
+    if (carried := memory_view_events.carried_room(task)) is not None:
+        return carried
     try:
         own = own_room_chat(ctx if ctx is not None else _task_ctx(task), drive_root)
     except (TypeError, ValueError, OSError):

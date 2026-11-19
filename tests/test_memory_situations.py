@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 from ouroboros import dialogue_import, dialogue_store, places
 from ouroboros.consciousness_authority import consciousness_origin_metadata
-from ouroboros.memory_view_events import situation_names
+from ouroboros.memory_view import view_room_id
+from ouroboros.memory_view_events import CARRIED_NAMES, carried_room, helper_names, situation_names
 from ouroboros.places import connect_place, conversation_chat_id
 from ouroboros.presence_bindings import conversation_key
 from ouroboros.presence_context import focus_metadata
@@ -83,6 +84,35 @@ def test_place_names_use_exact_carried_components_and_no_thread_name_without_a_t
         focus = {"metadata": {**carried, "focus_transport": {**route, "thread_id": thread}}}
         assert situation_names(focus, str(chat)) == expected
     assert situation_names({"type": "task"}, "1") == ("room:1",)
+
+
+def test_a_helper_carries_its_place_turns_names_by_value_and_reads_their_room(tmp_path):
+    """A place turn's helper reads the names its scheduler stated, unchanged down the tree; one that carries none
+    computes the old mixture (Main's room and the place's names) and passes nothing on."""
+    place = connect_place(tmp_path, connector="fixture", provider="chat", label="Nova Team", place_id="team")
+    route = {"provider": "chat", "account_id": "team", "conversation_id": "nova", "thread_id": ""}
+    key = conversation_key(**route)
+    chat = conversation_chat_id(key)
+    event = PresenceTurnEvent(source_event_id="event-1", conversation_key=key, actor={"id": "member"},
+                              conversation={"name": "Nova"}, message={}, text="Status", **route)
+    admission = SimpleNamespace(place=place, binding_id=place.place_id, allowance={}, circle=None)
+    metadata = {**focus_metadata(admission, event, "place", chat), "presence": {"place_id": "team", "event": route}}
+    turn = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="place", task_metadata=metadata)
+    names = (f"room:{chat}", "place:team", "conversation:chat/team/nova")
+    assert helper_names(turn, tmp_path) == names  # the place turn's own names: its room is its conversation
+
+    inherited = {**consciousness_origin_metadata(metadata), "delegation_role": "subagent"}
+    child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child",
+                        task_metadata={**inherited, CARRIED_NAMES: list(names)})
+    for task in ({"metadata": child.task_metadata}, dict(child.task_metadata)):  # a record, and the flat metadata
+        assert situation_names(task, "1") == names and carried_room(task) == str(chat)
+        assert view_room_id(task, None, tmp_path, project_chat_ids=()) == str(chat)
+    assert helper_names(child, tmp_path) == names  # a grandchild inherits them unchanged
+
+    uncarried = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="old-child", task_metadata=inherited)
+    assert situation_names({"metadata": inherited}, "1") == ("room:1", *names[1:]) and carried_room(inherited) is None
+    assert view_room_id({"metadata": inherited}, None, tmp_path, project_chat_ids=()) == "1"
+    assert helper_names(uncarried, tmp_path) == ()
 
 
 def test_legacy_conversation_keys_resolve_only_unambiguous_components():

@@ -1004,6 +1004,7 @@ D20 = "Presence"
 "ouroboros/server_maintenance.py" = "D11"
 "ouroboros/maintenance.py" = "D11"
 "ouroboros/maintenance_retirement.py" = "D11"
+"ouroboros/saved_state_retirement.py" = "D11"  # the maintenance child's retirement of saved states for exact return
 "ouroboros/record_compression.py" = "D11"  # the maintenance child's job compressing finished records in place
 "ouroboros/terminal_cost_reconciliation.py" = "D11"
 "ouroboros/server_owner_routing.py" = "D11"

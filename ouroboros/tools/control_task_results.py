@@ -345,6 +345,7 @@ def _get_task_result(
 
         return authority_selection_response(ctx, data, status_drive_root, locals())
     if call_id:
+        from ouroboros.evidence_packs import EvidenceUnavailable
         from ouroboros.tools.task_result_views import retained_call_source
 
         try:
@@ -355,6 +356,10 @@ def _get_task_result(
         except FileNotFoundError:
             return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE",
                 text="Retained call has no available redacted projection."))
+        except EvidenceUnavailable as exc:  # neither absent nor damaged: whether to ask again is the mind's call
+            return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text=(
+                f"evidence_unavailable ({exc.reason}): where the retained call source lies cannot be learned now; "
+                "its address stays good, and the same call may be made again.")))
         except (OSError, ValueError, TypeError):
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR",
                 text="Retained call source is unreadable or failed verification."))

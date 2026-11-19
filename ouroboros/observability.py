@@ -241,17 +241,19 @@ def read_blob_ref(
     max_bytes: int | None = None,
     raw_bytes: bool = False,
     admit: Callable[[pathlib.Path], None] | None = None,
+    task_id: str | None = None,
 ) -> Any:
     """Read and verify one content-addressed blob below this drive root (loose, else its
     evidence pack; retained child roots the ref names are tried the same way). Only a bounded
     read (``max_bytes``) accepts a ref without a recorded size; ``raw_bytes`` returns the bytes.
-    ``admit`` sees every physical file before it is opened (``evidence_packs.blob_bytes``)."""
+    ``admit`` sees every physical file before it is opened (``evidence_packs.blob_bytes``);
+    ``task_id``, the owning task when the caller knows it, is the reader's cost hint."""
     from ouroboros.evidence_packs import blob_bytes, blob_ref_fields
 
     _sha256, kind, size = blob_ref_fields(ref)
     if size < 0 and max_bytes is None:
         raise ValueError("observability blob ref has no valid size")
-    raw = blob_bytes(drive_root, ref, expected_kind=expected_kind, max_bytes=max_bytes, admit=admit)
+    raw = blob_bytes(drive_root, ref, expected_kind=expected_kind, max_bytes=max_bytes, admit=admit, task_id=task_id)
     if raw_bytes:
         return raw
     return json.loads(raw.decode("utf-8")) if kind == "json" else raw.decode("utf-8", errors="replace")
@@ -368,7 +370,7 @@ def read_call_manifest_ref(
         try:
             raw = blob_bytes(
                 pathlib.Path(drive_root), manifest_version_ref(pathlib.Path(drive_root), expected_sha),
-                expected_kind="txt", max_bytes=max_bytes, admit=admit,
+                expected_kind="txt", max_bytes=max_bytes, admit=admit, task_id=str(task_id),
             )
         except PermissionError:
             raise
@@ -944,7 +946,7 @@ def read_call_payload(drive_root: pathlib.Path, *, task_id: str, call_id: str) -
     manifest = json.loads(raw)
     if not isinstance(manifest, dict) or manifest.get("task_id") != task_id or manifest.get("call_id") != call_id:
         raise ValueError("observability call identity mismatch")
-    payload = read_blob_ref(drive_root, manifest.get("full_payload_ref"))
+    payload = read_blob_ref(drive_root, manifest.get("full_payload_ref"), task_id=task_id)
     if manifest.get("call_type") == "llm_request" and isinstance(payload, dict) and "messages" in payload:
         payload.setdefault("send_messages", payload["messages"])
     ref = {"call_id": call_id, "manifest_ref": {"path": str(path), "call_id": call_id,
@@ -1146,7 +1148,9 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
     result instead of returning emptiness. Returns "" when nothing usable
     exists. Reads the authoritative payload blob — redacted by default (secret
     VALUES masked; cognitive/answer text preserved per P1), or raw under
-    OUROBOROS_OBSERVABILITY_KEEP_RAW.
+    OUROBOROS_OBSERVABILITY_KEEP_RAW. A response whose bytes cannot be located now
+    (``EvidenceUnavailable``) ends the search with "": it may hold the latest text, and an
+    older one is never passed off as the last.
     """
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or "")).strip("_")
     if not safe_task:
@@ -1166,9 +1170,12 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
     for manifest_path in manifests:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            from ouroboros.evidence_packs import blob_bytes
+            from ouroboros.evidence_packs import EvidenceUnavailable, blob_bytes
             try:
-                payload = json.loads(blob_bytes(drive_root, manifest.get("full_payload_ref")).decode("utf-8", errors="replace"))
+                payload = json.loads(blob_bytes(drive_root, manifest.get("full_payload_ref"), task_id=str(task_id)
+                                                ).decode("utf-8", errors="replace"))
+            except EvidenceUnavailable:
+                return ""
             except (OSError, ValueError):
                 continue
             message = payload.get("message") if isinstance(payload, dict) else None

@@ -285,9 +285,15 @@ def test_a_missing_part_is_reported_missing_and_a_damaged_one_refuses_the_pack(r
     kept = part_path.read_bytes()
     with gzip.open(part_path, "wb") as handle:
         handle.write(b"damaged")
+    packs.ensure_index(root)  # as a pass does first: only an index can say no pack holds a sound copy of the part
     with pytest.raises(packs.EvidenceCorrupt):
         packs.write_pack(root, "gap", 1, packs.loose_members(root, "gap"))
     part_path.unlink()
+    (packs.packs_dir(root) / packs.INDEX_NAME).unlink()
+    # A pass builds the index first (``pack_sweep``); only through it can this direct call prove the part absent.
+    with pytest.raises(packs.EvidenceUnavailable):
+        packs.loose_members(root, "gap", missing=[])
+    packs.ensure_index(root)
     members = packs.loose_members(root, "gap", missing=(missing := []))
     assert missing == [("json", part["sha256"], part["size"])]
     assert any(m["source"].name.endswith(packs.SHARED_PLACEMENT_SUFFIX) for m in members)

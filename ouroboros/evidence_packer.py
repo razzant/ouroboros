@@ -110,7 +110,7 @@ def swept_stamps(root: pathlib.Path, *, discovery: bool = False, ids=None) -> Op
     if ids is not None:
         query, params = query + " WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(sorted(ids)),)
     try:
-        with packs.open_index(root, **({"wait_sec": 0, "rebuild": False} if discovery else {})) as conn:
+        with packs.open_index(root, **({"wait_sec": 0} if discovery else {})) as conn:
             return {row["task_id"]: row["stamps"] for row in conn.execute(query, params)}
     except store.StoreBusy:
         if discovery:
@@ -215,17 +215,18 @@ def changed_stamps(root: pathlib.Path, **census) -> Dict[str, str]:
 
 
 def packing_pending(root: pathlib.Path, stop: Callable[[], bool], *, since: Optional[int] = None, owed=()) -> bool:
-    """Advisory, stop-aware discovery: archives first, then only the first changed stamp of the
-    census (``since``/``owed`` as ``run_pass``: the rows written terminal since the position and
-    the owed candidates; without a position, every loose folder).
+    """Advisory, stop-aware discovery: archives and an index awaiting its rebuild first (pass-level
+    work: ``packs.index_owed`` takes stats, opens nothing of the packs), then only the first
+    changed stamp of the census (``since``/``owed`` as ``run_pass``: the rows written terminal since
+    the position and the owed candidates; without a position, every loose folder).
 
-    Contended stores defer the pass. Index reconstruction belongs to the pass (``run_pass``),
+    Contended stores defer the pass. Index reconstruction belongs to the pass (``pack_sweep``),
     not this reader. A quiet nonempty root without a position still needs a full stamp walk;
     the maintenance child runs it, never the server (``ouroboros/maintenance.py``).
     """
     if stop():
         return False
-    if archive_pending(root):
+    if archive_pending(root) or packs.index_owed(root):
         return not stop()
     with store.acquisition_budget(0):
         changed = next(_changed_stamps(root, stop=stop, since=since, owed=owed), None)
@@ -251,8 +252,9 @@ def terminal_revision(root: pathlib.Path) -> int:
 
 
 def ordered_candidates(root: pathlib.Path, packable: List[str], *, rows: Optional[dict] = None) -> List[Tuple[str, int]]:
-    """Packable tasks with their loose raw size: the ones whose result changed after the newest
-    published pack first (newest result first), then the backfill by descending raw size."""
+    """Packable tasks with their loose raw size: the ones whose result changed after the packer's newest
+    verified pack (the index's ``packs.verified_at``: no sidecar is read) first, newest result first, then
+    the backfill by descending raw size. An index that cannot say leaves every candidate in the backfill."""
     from ouroboros.task_store import signature
 
     def timestamp(value):
@@ -261,12 +263,19 @@ def ordered_candidates(root: pathlib.Path, packable: List[str], *, rows: Optiona
         except (TypeError, ValueError):
             return 0
 
-    if not packable:  # nothing to order: no sidecar is read
+    if not packable:  # nothing to order: the index is not opened
         return []
-    newest_pack = max((timestamp(sidecar.get("created_at")) for _, sidecar in packs.list_sidecars(root)), default=0)
+    try:
+        with packs.open_index(root) as conn:
+            newest_pack = timestamp(conn.execute("SELECT max(verified_at) FROM packs").fetchone()[0])
+    except (store.StoreError, sqlite3.Error, OSError):
+        newest_pack = 0
     recent, backfill = [], []
     for task in packable:
-        raw = sum(int(m["size"]) for m in packs.loose_members(root, task))
+        try:
+            raw = sum(int(m["size"]) for m in packs.loose_members(root, task))
+        except packs.EvidenceUnavailable:
+            raw = 0  # where a shared blob lies is unknown now: the task's own pack_task meets it and stays owed
         row = rows.get(task) if rows is not None else None
         revision = row[1:] if row is not None else signature(root, task)
         touched = timestamp(revision[1]) if revision else 0
@@ -321,9 +330,11 @@ class PackSweep:
 
 @contextlib.contextmanager
 def pack_sweep(root: pathlib.Path):
-    """Serialize packer passes, tracking publications from before the census to the
-    last unlink. A crashed pass's scratch journal is replaced by the next pass."""
+    """Serialize packer passes: first the index's one builder (``packs.ensure_index``: every sidecar a
+    pass publishes waits behind it), then publications are tracked from before the census to the last
+    unlink. A crashed pass's scratch journal is replaced by the next pass."""
     with store.name_lock(root, "packs_sweep.lock", timeout_sec=packs.INDEX_WAIT_SEC):
+        packs.ensure_index(root)
         sweep = PackSweep(root)
         path = packs.packs_dir(root) / packs.PUBLICATIONS_NAME
         with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=packs.INDEX_WAIT_SEC):
@@ -365,15 +376,11 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
             report["swept"] += 1
     candidates = ordered_candidates(root, packable, rows=rows)
     report["candidates"] = len(candidates)
-    # A pass from a position reads each candidate's own sidecars by name (``published_generations``); a whole
-    # census (no position: the first run, a repair) shares one listing of them all.
-    listing = packs.list_sidecars(root) if since is None and candidates else None
     if candidates:
         sweep.collect_keep(keep_rows(root))
-    for task, raw in candidates:
+    for task, raw in candidates:  # each reads its own sidecars by name (``published_generations``), never all
         try:
-            outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
-                                      sweep=sweep)
+            outcome = packs.pack_task(root, task, keep_shas=set(), revision=revisions[task], sweep=sweep)
         except Exception as exc:
             report["faults"] += 1
             report["unfinished"].append(task)
