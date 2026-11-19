@@ -662,9 +662,12 @@ def _execute_single_tool(
             from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
         from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
-        from ouroboros.tools.extension_dispatch import dispatched_descriptor  # read with the publication it ran
+        from ouroboros.tools.extension_dispatch import dispatched_call
         tool_ctx = getattr(tools, "_ctx", None)
-        ran_with = dispatched_descriptor(tool_ctx, fn_name)
+        ran_with, effective_args = dispatched_call(tool_ctx, fn_name, args)
+        if effective_args is not args:
+            args = effective_args
+            args_for_log = sanitize_tool_args_for_log(fn_name, args)
         tool_result = tool_result if host_refusal else with_destination_facts(
             tool_ctx, fn_name, args, tool_result, ext_tool=ran_with)
         result = tool_result.text

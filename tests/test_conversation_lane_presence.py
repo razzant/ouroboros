@@ -11,6 +11,7 @@ author's mailbox lock against its durable intake fact.
 import json
 import pathlib
 import queue as stdqueue
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -50,7 +51,8 @@ def lane(pool, monkeypatch):
     return pool
 
 
-def test_the_host_dispatches_the_body_as_a_presence_lane_row(lane):
+@pytest.mark.parametrize("conditioned", [False, True])
+def test_the_host_dispatches_the_body_as_a_presence_lane_row(lane, conditioned):
     admission, event = _admission(), _event()
     registry = PresenceTurnExecutions()
     turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)  # the Host's id
@@ -71,12 +73,27 @@ def test_the_host_dispatches_the_body_as_a_presence_lane_row(lane):
     assert dispatched["id"] == tid and dispatched[PRESENCE_RUN_KEY]["skill_name"] == "telegram-bot"
     assert dispatched[PRESENCE_RUN_KEY]["event"]["source_event_id"] == event.source_event_id
     assert not workers.PENDING
+    ctx = SimpleNamespace(RUNNING=workers.RUNNING, WORKERS=workers.WORKERS)
+    # This test exercises carriage, not the Place policy that minted the condition.
+    binding = {"tool": "place_reply", "account_id": "9", "conversation_id": "55"} if conditioned else None
+    initial = PresenceTurnResult("deferred", "Hi", tid, work_ref="child", status="continuing",
+                                 output_ref="initial-output", owner_confirmation=binding)
+    frames = stdqueue.Queue()
+    assert presence_carrier.FrameExecution(tid, frames).publish_initial(initial, return_capacity=False)
+    frame = frames.get_nowait()
+    assert (frame["result"]["outcome"], frame["result"]["text"]) == ("deferred", "" if conditioned else "Hi")
+    assert "owner_confirmation" not in frame["result"] and "conditional_reply" not in frame["result"]
+    if conditioned:
+        assert frame["conditional_reply"] == {"outcome": "deferred", "text": "Hi", "owner_confirmation": binding}
+    presence_carrier.handle_presence_turn_initial(frame, ctx)
+    assert execution.initial.result(timeout=1) == initial and tid in workers.RUNNING
     # The settlement frame resolves the waiter and releases the row and the slot.
-    handle_presence_turn_settled({"turn_id": tid, "physical_id": tid, "error": None,
-                                  "result": presence_carrier._result_payload(
-                                      PresenceTurnResult(outcome="message", text="Hi", task_id=tid))},
-                                 SimpleNamespace(RUNNING=workers.RUNNING, WORKERS=workers.WORKERS))
-    assert execution.result.result(timeout=1).text == "Hi"
+    terminal = PresenceTurnResult("message", "Hi", tid, output_ref="terminal-output", owner_confirmation=binding)
+    frame = {"turn_id": tid, "physical_id": tid, "error": None, **presence_carrier._result_payload(terminal)}
+    assert (frame["result"]["outcome"], frame["result"]["text"]) == (("silent", "") if conditioned else ("message", "Hi"))
+    assert "owner_confirmation" not in frame["result"] and "conditional_reply" not in frame["result"]
+    handle_presence_turn_settled(frame, ctx)
+    assert execution.result.result(timeout=1) == terminal
     assert tid not in workers.RUNNING and lane.spare.busy_task_id is None and registry.find(tid) is None
 
 
@@ -85,6 +102,7 @@ def test_the_carrier_runs_the_turn_under_the_gate_and_settles_by_frame(tmp_path,
     repo.mkdir()
     data.mkdir()
     admission, event = _admission(), _event()
+    event = replace(event, direct_reply_key=event.conversation_key, direct_reply_version=2)
     from ouroboros import presence_admission
     monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **kw: admission)
     seen = {}
@@ -112,6 +130,8 @@ def test_the_carrier_runs_the_turn_under_the_gate_and_settles_by_frame(tmp_path,
     assert len(settled) == 1 and settled[0]["error"] is None and settled[0]["result"]["text"] == "Hi"
     assert seen["_execution_owner"]["lane"] == LANE_CONVERSATION  # the carrier facts rode the presence record
     assert seen["metadata"]["presence_request_waits"] is True  # the Host request waits: the post-task rule's fact
+    assert seen["metadata"]["presence"]["direct_reply_key"] == event.conversation_key
+    assert seen["metadata"]["presence"]["direct_reply_version"] == 2
     # The gate was taken and released by the carrier: a second turn in the conversation is admissible.
     gate = presence_runner._configured_gate(data)
     lease, busy = gate.try_admit(event.conversation_key)

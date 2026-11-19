@@ -86,9 +86,10 @@ def turn_door(tmp_path, monkeypatch):
 
     event = PresenceTurnEvent("event-wire", "chat", "a", "r", "", "chat:a:r", {"platform_actor_id": "person"},
                               {}, {}, "", facts=("any_message",))
-    payload = asdict(event)
-    for key in ("delivery_reporting_version", "continuation_version", "identity"):
-        payload.pop(key)
+    # The frozen top-level keys a connector sends; the event's other fields are the Host's own.
+    payload = {key: value for key, value in asdict(event).items() if key in (
+        "source_event_id", "provider", "account_id", "conversation_id", "thread_id", "conversation_key",
+        "actor", "conversation", "message", "text", "facts")}
     payload["facts"] = ["any_message"]
     with TestClient(host_service.create_host_service_app(tmp_path)) as client:
         client.app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(

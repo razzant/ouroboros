@@ -193,6 +193,25 @@ def test_registered_answer_reads_the_outbox_never_the_result_prose(tmp_path):
     assert registered_answer(tmp_path, tid)["text"] == ""
 
 
+@pytest.mark.parametrize("partial", [False, True])
+def test_presence_recovery_keeps_one_conditioned_reply_stamp(tmp_path, partial):
+    from ouroboros.working_checkpoint import adopt_registered_answer
+
+    tid, words = "conditioned-custody-read", "Fixture reply"
+    presence = {"transport_skill": "telegram-bot"}
+    stamp = {"presence_outcome": "silent", "presence_result_text": "", "presence_output_ref": "fixture-output",
+             "presence_conditional_reply": {"outcome": "message", "text": words,
+                                            "owner_confirmation": {"tool": "place_reply"}}}
+    metadata = {"presence": presence, **(stamp if partial else {})}
+    write_task_result(tmp_path, tid, "running", metadata=metadata)
+    evt = _event(tid, words)
+    evt["presence_delivery"] = ({"presence_work_ref": "child"} if partial else {**stamp, "presence_work_ref": "child"})
+    assert td.register_pending_delivery(tmp_path, evt)
+    stored = adopt_registered_answer(tmp_path, {"id": tid, "metadata": metadata}, tid, attempt=1, cause="worker_crash")
+    assert stored["result"] == words and stored["status"] == "failed"
+    assert stored["metadata"] == {"presence": presence, **stamp, "presence_work_ref": "child"}
+
+
 @pytest.mark.parametrize("state", ["owed", "delivered", "none"])
 def test_a_final_timeout_without_retry_also_finalizes_a_registered_answer(qenv, monkeypatch, state):
     """A hard deadline or ceiling adopts the held answer; without a registered answer the

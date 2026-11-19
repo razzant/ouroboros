@@ -17,6 +17,7 @@ from ouroboros.presence_continuation import output_ref
 from ouroboros.presence_runner import build_presence_result_event, run_presence_turn
 from ouroboros.task_results import write_task_result
 from ouroboros.tools.registry import ToolContext
+from tests._presence_wire import WIRE_KEYS
 from tests.test_place_focus import focus as focus
 from tests.test_place_focus import task_for
 from tests.test_place_followup import client as client
@@ -81,10 +82,7 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
 
     client.app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
         repo_dir=root, drive_root=root, agent_factory=lambda **_kw: Model(), **kw)
-    payload = asdict(event)
-    payload.pop("delivery_reporting_version")
-    payload.pop("continuation_version")
-    payload.pop("identity")
+    payload = {key: value for key, value in asdict(event).items() if key in WIRE_KEYS}
     payload.update(facts=[fact], text="Ordinary neutral words")
     body = {"event": payload, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     response = client.post("/presence/turn", json=body)

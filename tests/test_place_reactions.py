@@ -19,6 +19,7 @@ from ouroboros.presence_delivery import PresenceDeliveryRecorder
 from ouroboros.presence_runner import (PresenceTurnEvent, _build_task, _read_previous_turn, capture_presence_event,
                                        current_previous_turn, run_presence_turn)
 from ouroboros.task_results import write_task_result
+from tests._presence_wire import WIRE_KEYS
 
 THUMB = {"type": "name", "value": "thumbsup"}
 HEART = {"type": "emoji", "value": "❤"}
@@ -35,7 +36,7 @@ def fact(change="add", resolution="resolved", **extra):
 
 
 def wire(event, actor=USER, reaction=None, *, facts=None, message=None, text="", thread_id=""):
-    body = {k: v for k, v in asdict(event).items() if k not in {"delivery_reporting_version", "continuation_version", "identity"}}
+    body = {k: v for k, v in asdict(event).items() if k in WIRE_KEYS}
     if facts is not None:
         body["facts"] = facts
     return {"event": {**body, "text": text, "actor": dict(actor), "thread_id": thread_id,

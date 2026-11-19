@@ -157,7 +157,8 @@ def record_heard(root, task, event, reason, *, captured_task_id=None, recipient=
         if stored:
             if stored.get('status') not in {'completed', 'failed'}:
                 return None  # admitted custody is never overwritten by an attention decision
-            return replace(presence_result_from_stored(stored, task['id']), continuation_version=event.continuation_version)
+            return replace(presence_result_from_stored(stored, task['id'], root),
+                           continuation_version=event.continuation_version)
         with dialogue_store.transaction(root, write=True) as conn:
             row = _record(conn, arrival_id)
             if row is None or dialogue_store.decode(row['body']).get('presence_event_identity') != identity:

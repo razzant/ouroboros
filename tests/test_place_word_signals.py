@@ -20,6 +20,7 @@ from ouroboros.presence_runner import run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.presence import _configure_presence
 from ouroboros.tools.registry import ToolContext
+from tests._presence_wire import WIRE_KEYS
 from tests.test_extension_icons import PLACE
 from tests.test_place_focus import focus as focus
 from tests.test_place_followup import client as client
@@ -115,9 +116,7 @@ def test_real_host_capture_signal_provenance_silence_and_no_heard_replay(word_pl
 
     client.app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
         repo_dir=root, drive_root=root, agent_factory=lambda **_kw: Model(), **kw)
-    wire = asdict(event)
-    for key in ("delivery_reporting_version", "continuation_version", "identity"):
-        wire.pop(key)
+    wire = {key: value for key, value in asdict(event).items() if key in WIRE_KEYS}
     wire.update(facts=[SIGNAL], text="Ordinary neutral words")
     body = {"event": wire, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     answer = client.post("/presence/turn", json=body)
@@ -161,8 +160,7 @@ def test_undeclared_word_signal_is_refused_before_capture(word_place, client, mo
         **PLACE, "skill": "other", "facts": [{"id": SIGNAL, "label": LABEL}], "wakes": [SIGNAL],
     }]
     monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: rows)
-    wire = {key: value for key, value in asdict(event).items()
-            if key not in {"delivery_reporting_version", "continuation_version", "identity"}}
+    wire = {key: value for key, value in asdict(event).items() if key in WIRE_KEYS}
     wire.update(facts=[SIGNAL], text="Вик?")
     refused = client.post("/presence/turn", json={"event": wire})
     assert refused.status_code == 400

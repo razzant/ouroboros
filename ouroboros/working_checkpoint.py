@@ -611,20 +611,25 @@ def adopt_registered_answer(root: Any, task: Dict[str, Any], task_id: str, *, at
     if answer["text"] and origin:  # the producer's stamp travels; an unstamped legacy row claims none
         fields["terminal_origin"] = origin
     from ouroboros.dialogue_provenance import is_presence_task
+    from ouroboros.presence_runner import PRESENCE_REPLY_KEYS
 
     delivery, presence = answer.get("presence_delivery"), is_presence_task(task or {})
 
     def keep_delivery(existing: Dict[str, Any], projected: Dict[str, Any]) -> Dict[str, Any]:
-        # A Presence root's conversation hears what its result stamped before the death, explicit
-        # emptiness included; the local final's text is never its speech, so without those facts it hears none.
+        # A Presence root's local final is never its conversation's speech. Adopt a complete
+        # reply stamp as a unit; a partial receipt cannot replace pieces of the previous stamp.
         metadata = dict(existing.get("metadata") or {})
+        required = {"presence_outcome", "presence_result_text"}
         if isinstance(delivery, dict):
-            metadata.update(delivery)
-        elif (presence or isinstance(metadata.get("presence"), dict)) and "presence_outcome" not in metadata:
+            keys = {*PRESENCE_REPLY_KEYS, "presence_owner_confirmation"}
+            if required <= delivery.keys():
+                metadata = {key: value for key, value in metadata.items() if key not in keys}
+                metadata.update(delivery)
+            else:
+                metadata.update({key: value for key, value in delivery.items() if key not in keys})
+        if (presence or isinstance(metadata.get("presence"), dict)) and not required <= metadata.keys():
             metadata.update(presence_outcome="silent", presence_result_text="")
-        else:
-            return projected
-        return {**projected, "metadata": metadata}
+        return {**projected, "metadata": metadata} if metadata != (existing.get("metadata") or {}) else projected
 
     log.warning("Task %s attempt %s: finalizing from its registered answer (%s) instead of a retry (%s)",
                 task_id, attempt, answer["basis"], cause)

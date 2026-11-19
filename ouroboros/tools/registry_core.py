@@ -1213,7 +1213,7 @@ class ToolRegistry:
         acting_protected_grant = acting_subagent and bool(getattr(task_constraint, "protected_paths_grant", False))
         acting_tool_grants = self._acting_tool_grants() if acting_subagent else set()
         entry = self._entries.get(name)
-        ext_tool, extension_unavailable = extension_dispatch.bound_dispatch_candidate(self._ctx, name) if entry is None else (None, False)
+        ext_tool, extension_unavailable = extension_dispatch.bound_dispatch_candidate(self._ctx, name, args=args) if entry is None else (None, False)
         if entry is None and ext_tool is None:
             from ouroboros.mcp_client import is_mcp_tool_name
 

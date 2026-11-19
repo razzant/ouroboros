@@ -16,6 +16,7 @@ from ouroboros.conversation_lease import PresenceTurnGate
 from ouroboros.owner_mailbox import _mailbox_path, deliver_task_message
 from ouroboros.place_intake import author_hears, decide_attention
 from ouroboros.presence_bindings import conversation_key
+from tests._presence_wire import WIRE_KEYS
 from tests.test_place_focus import focus as focus
 from tests.test_place_followup import client as client
 
@@ -35,7 +36,7 @@ def _change(event, actor=UNNAMED, message=STATE_CHANGE, text="", facts=("assigne
 
 def _wire(event):
     body = {key: value for key, value in asdict(event).items()
-            if key not in {"delivery_reporting_version", "continuation_version"} and (key != "identity" or value)}
+            if key in WIRE_KEYS or (key == "identity" and value)}
     return {"event": body, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
 
 
@@ -75,9 +76,7 @@ def test_a_paused_place_still_says_paused(focus):
 
 def test_host_capture_keeps_the_own_post_and_starts_nothing(focus, client):
     root, _place, _admission, event = focus
-    wire = asdict(_own(event))
-    for key in ("delivery_reporting_version", "continuation_version"):
-        wire.pop(key)
+    wire = {key: value for key, value in asdict(_own(event)).items() if key in WIRE_KEYS | {"identity"}}
     body = {"event": wire, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     answer = client.post("/presence/turn", json=body)
     assert answer.status_code == 200, answer.text

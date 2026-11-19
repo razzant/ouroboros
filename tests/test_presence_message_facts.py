@@ -20,6 +20,7 @@ from ouroboros.presence_bindings import PresenceEndpoint
 from ouroboros.presence_message_facts import HEADING, attachment_outcome, carries_content, event_reader
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task, _live_task_rows, run_presence_turn
 from ouroboros.task_results import write_task_result
+from tests._presence_wire import WIRE_KEYS
 from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 
 TOO_LARGE_NOTE = ("Not staged: larger than the Bot API's 20 MiB download limit. "
@@ -94,9 +95,7 @@ def test_the_turn_door_gives_the_model_the_same_facts_and_keeps_the_words_empty(
                 terminal_origin="model_final", result="")
             return [{"type": "presence_result", "outcome": "silent", "text": ""}]
 
-    payload = asdict(event)
-    for key in ("delivery_reporting_version", "continuation_version", "identity"):
-        payload.pop(key)
+    payload = {key: value for key, value in asdict(event).items() if key in WIRE_KEYS}
     payload.update(facts=["any_message"], text="", message={"event_kind": "message", "message_id": 4242,
                                                             "attachments": [ZIP_TOO_LARGE]})
     with TestClient(host_service.create_host_service_app(root)) as client:

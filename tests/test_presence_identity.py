@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 from ouroboros import places
 from ouroboros.gateway import host_service
 from ouroboros.tools.presence import _configure_presence
+from tests._presence_wire import WIRE_KEYS
 from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.test_place_focus import focus as focus, task_for
 
@@ -27,8 +28,7 @@ def ingress(focus, monkeypatch, lone_host_world):  # its Host serves alone over 
     def run(**kwargs):
         calls.append(kwargs["event"])
         return SimpleNamespace(outcome="silent", text="", task_id="focus", work_ref="")
-    body = {"event": {k: v for k, v in asdict(event).items()
-                       if k not in {"delivery_reporting_version", "continuation_version", "identity"}}}
+    body = {"event": {k: v for k, v in asdict(event).items() if k in WIRE_KEYS}}
     with TestClient(host_service.create_host_service_app(root, presence_runner=run)) as client:
         yield client, body, calls
 

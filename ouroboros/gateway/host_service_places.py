@@ -64,8 +64,29 @@ def _presence_error(message: str, status: int, code: str, disposition: str, **fa
                          "disposition": disposition, **facts}, status_code=status)
 
 
+def _places_unavailable(exc):
+    return _presence_error("Ouroboros could not read whether this place allows sending right now.", 503,
+                           "places_unavailable", "retry", detail=str(exc))
+
+
+def _reply_response(body, status, skill, token):
+    """Only hand conditional speech to an authenticated publication that enforces its condition."""
+    from ouroboros.extension_registry_state import supports_owner_confirmation
+
+    for row in (body, *(body.get("outputs") or [])):
+        if row.get("text") and "owner_confirmation" in row:
+            binding = row["owner_confirmation"]
+            if (not isinstance(binding, dict) or binding.get("tool") != "place_reply"
+                    or not supports_owner_confirmation(skill, token.get("content_hash", ""), binding)):
+                return _presence_error("This reply requires a connector that checks its owner confirmation.",
+                                       409, "presence_recipient_capability_required", "blocked")
+    return JSONResponse(body, status_code=status)
+
+
 def _presence_exception(exc: Exception, status: int) -> JSONResponse:
     code = str(getattr(exc, "code", "presence_admission_failed"))
+    if code == "places_unreadable":
+        return _places_unavailable(exc)
     disposition = "blocked"
     if code in {"chat_log_unwritable", "presence_result_missing", "presence_bindings_unreadable",
                 "presence_resources_unavailable", "presence_attempt_outcome_unknown",
@@ -168,6 +189,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         # The whole event is checked before admission (``presence_events``); its place's origin after it.
         declared = declared_fact_labels(skill_name)  # the words its admission carries to the focus, by value
         event = parse_presence_event(event_payload, vouched_facts=declared,
+                                     authenticated_publication=(skill_name, _token_payload.get("content_hash", "")),
                                      staged_files=payload.get("staged_files"), reporting_version=reporting_version,
                                      continuing=continuing)
         admission = replace(await host._bounded_host_read(ctx, functools.partial(
@@ -248,8 +270,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
                 return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
             # Versions 1 and 2 take a continuing author's initial envelope; v0 waits for its terminal.
             result = await asyncio.wrap_future(execution.initial if continuing else execution.result)
-        return JSONResponse(await host._bounded_host_read(ctx, functools.partial(
-            turn_response, result, continuing, ctx.data_dir)))
+        body = await host._bounded_host_read(ctx, functools.partial(turn_response, result, continuing, ctx.data_dir))
+        return _reply_response(body, 200, skill_name, _token_payload)
     except json.JSONDecodeError:
         return _presence_error("invalid json", 400, "presence_payload_invalid", "rejected")
     except PresenceEventInvalid as exc:
@@ -264,6 +286,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
     except OSError as exc:
         return _presence_error(str(exc), 400, "presence_io_unavailable", "retry")
     except ValueError as exc:
+        if getattr(exc, "code", "") == "places_unreadable":
+            return _places_unavailable(exc)
         return _presence_error(str(exc), 400, "presence_payload_invalid", "rejected")
     except Exception as exc:
         log.debug("Host service presence turn failed", exc_info=True)
@@ -387,7 +411,7 @@ async def _api_presence_work(request: Request) -> JSONResponse:
             return _presence_exception(exc, 404)
         log.debug("Host service presence work lookup failed", exc_info=True)
         return _presence_error("presence work lookup failed", 500, "presence_work_unavailable", "retry")
-    return JSONResponse(body, status_code=status)
+    return _reply_response(body, status, skill_name, _token_payload)
 
 
 async def _api_presence_place(request: Request) -> JSONResponse:
@@ -403,6 +427,7 @@ async def _api_presence_place(request: Request) -> JSONResponse:
             from ouroboros.places import MATCH_SCOPE, MATCHES
             match = request.query_params.get("match", MATCH_SCOPE)  # absent: the previous scope lookup
             if (operation not in {"bind", "check"} or match not in MATCHES
+                    or "owner_confirmation" in request.query_params
                     or request.query_params.get("require_place", "false") not in {"true", "false"}):
                 return _presence_error("Invalid place binding operation.", 400, "place_binding_invalid", "rejected")
             try:
@@ -420,18 +445,36 @@ async def _api_presence_place(request: Request) -> JSONResponse:
                 if isinstance(exc, PlaceError):
                     raise
                 return _presence_error(str(exc), 400, "place_binding_invalid", "rejected")
-        place = await host._bounded_host_read(ctx, functools.partial(
-            outbox_place, ctx.data_dir, connector=skill,
-            provider=str(request.query_params.get("provider") or ""),
-            account_id=str(request.query_params.get("account_id") or ""),
-            conversation_id=str(request.query_params.get("conversation_id") or ""),
-            thread_id=str(request.query_params.get("thread_id") or "")))
+        target = {key: request.query_params.get(key, "") for key in ("provider", "account_id", "conversation_id", "thread_id")}
+        if "owner_confirmation" in request.query_params:
+            from ouroboros.extension_registry_state import supports_owner_confirmation
+            from ouroboros.place_guard import check_owner_dm, valid_owner_dm
+            from ouroboros.places import PLACE_STATES
+
+            try:
+                expected = json.loads(request.query_params["owner_confirmation"])
+            except (json.JSONDecodeError, RecursionError):
+                expected = None
+            if not valid_owner_dm(expected, skill, target):
+                return _presence_error("Expected an owner confirmation for this address.", 400, "place_binding_invalid", "rejected")
+            decision = await host._bounded_host_read(ctx, functools.partial(
+                check_owner_dm, ctx.data_dir, skill, target, expected))
+            if decision is None:
+                return _presence_error("This address no longer has the same owner confirmation.",
+                                       409, "place_owner_confirmation_changed", "rejected")
+            if not supports_owner_confirmation(skill, _token.get("content_hash", ""), expected):
+                return _presence_error("This connector cannot enforce the queued owner confirmation.",
+                                       409, "presence_recipient_capability_required", "blocked")
+            if decision["state"] not in PLACE_STATES:
+                return _presence_error("The current Place policy does not permit this conditional delivery.",
+                                       409, decision["code"], "blocked")
+            return JSONResponse({"place_id": decision["place_id"], "label": decision["label"],
+                                 "state": decision["state"], "owner_confirmation": expected})
+        place = await host._bounded_host_read(ctx, functools.partial(outbox_place, ctx.data_dir, connector=skill, **target))
         if place is None:
             return _presence_error("Add this place in Circles.", 404, "place_not_connected", "blocked")
         return JSONResponse({"place_id": place.place_id, "label": place.label, "state": place.state})
     except host.HostServiceAuthError as exc:
         return _presence_error(str(exc), 403, "presence_auth_blocked", "blocked")
     except (ValueError, OSError) as exc:
-        # The words a connector's Held row repeats; the exception stays a diagnostic beside them.
-        return _presence_error("Ouroboros could not read whether this place allows sending right now.", 503,
-                               "places_unavailable", "retry", detail=str(exc))
+        return _places_unavailable(exc)

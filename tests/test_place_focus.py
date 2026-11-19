@@ -10,6 +10,7 @@ from ouroboros import places as p
 from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task, capture_presence_event, presence_turn_replay
 from ouroboros.place_intake import decide_attention, settle_heard
+from tests._presence_wire import WIRE_KEYS
 from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 
 
@@ -445,7 +446,7 @@ def test_new_host_payload_captures_before_attention(focus, monkeypatch, state, f
         assert len(rows) == 1 and rows[0].row["text"] == event.text
         calls.append(kw)
         return SimpleNamespace(outcome="message", text="Hello", task_id="focus", work_ref="")
-    body = {"event": {k: v for k, v in event.__dict__.items() if k not in {"delivery_reporting_version", "continuation_version", "identity"}}}
+    body = {"event": {k: v for k, v in event.__dict__.items() if k in WIRE_KEYS}}
     body["event"]["facts"] = facts
     with TestClient(host_service.create_host_service_app(root, presence_runner=run)) as client:
         response = client.post("/presence/turn", json=body)
@@ -484,7 +485,7 @@ def test_off_retry_keeps_unknown_attempt_custody(focus, monkeypatch):
         raise AssertionError("an unknown attempt must not generate again")
     def run(**kw):
         return run_presence_turn(repo_dir=root, drive_root=root, agent_factory=factory, **kw)
-    body = {"event": {k: v for k, v in event.__dict__.items() if k not in {"delivery_reporting_version", "continuation_version", "identity"}}}
+    body = {"event": {k: v for k, v in event.__dict__.items() if k in WIRE_KEYS}}
     with TestClient(host_service.create_host_service_app(root, presence_runner=run)) as client:
         response = client.post("/presence/turn", json=body)
     assert response.status_code == 409
@@ -609,7 +610,7 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
         task = _build_task(replace(admitted, allowance={"status": "available", "remaining_usd": 2}), replace(
             event, actor={"platform_actor_id": "person", "display_name": "Pat Quill", **actor}), drive_root=root, staged_files=())
         rendered = frame_focus_content(task, "hello")
-        line = next(line for line in rendered.splitlines() if line.startswith("- the person (host facts): "))
+        line = next(line for line in rendered.splitlines() if line.startswith("- author of this input: "))
         return task["metadata"]["focus"]["actor"], rendered, line, task
 
     def page(topic, *keys):
@@ -620,7 +621,7 @@ def test_focus_names_the_speakers_pages_by_exact_key_never_authority(focus):
     for authentication in ({}, {"authenticated": False}):
         actor, rendered, line, task = admit(**authentication)
         assert actor["key"] == key and not {"page", "pages", "archived_pages", "matched_by"} & actor.keys()
-        assert line == "- the person (host facts): " + json.dumps(actor, ensure_ascii=False) + (
+        assert line == "- author of this input: " + json.dumps(actor, ensure_ascii=False) + (
             "; authenticated: no" if authentication else "")
         assert focus_frame_sources(task["metadata"], rendered) is not None
     page("people/pat", {"provider": "mail", "namespace": "", "id": "pat@example.org"}, key)
