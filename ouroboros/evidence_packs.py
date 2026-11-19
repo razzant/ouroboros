@@ -1379,8 +1379,9 @@ Each `<task>[.<gen>].xz` is one xz stream (LZMA2 preset 1) of a settled task's e
 `source_handles/context_checkpoints/*` files first, then every blob its call manifests
 reference, raw bytes back to back. `<task>[.<gen>].members.json` is the authority: header
 (task, generation, format_version, codec, preset, dict_size, raw_total, packed_total,
-pack_sha256, created_at, verified_at) and members (sha256, kind, size, offset, path for
-handles). `index.sqlite` is a cache rebuilt from the sidecars whenever it is missing or damaged.
+pack_sha256, created_at) and members (sha256, kind, size, offset, path for handles).
+`index.sqlite` is a cache of where each sha256 lies: Ouroboros's packing pass alone rebuilds it
+from the sidecars when it is missing or damaged; a task's own evidence is read without it.
 
 Ouroboros reads packed members in place. To get loose files back without the app:
 
