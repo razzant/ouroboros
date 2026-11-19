@@ -738,6 +738,31 @@ def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_cap
     assert _retained_files(mine["summary_path"]) == {".review-evidence/later.txt": b"mine\n"}, "the first task's evidence stays its own"
 
 
+def test_machine_patch_ignores_a_projects_textconv_driver(tmp_path):
+    """A project may render a binary type for people through ``diff.<driver>.textconv``; the patch
+    a parent applies must still carry the bytes, so `git apply --binary` restores the child's file."""
+    from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
+
+    project = tmp_path / "project"
+    project.mkdir()
+    _git(project, "init", "-q")
+    table = project / "table.dat"
+    before, after = b"\0\x0a\x01abc", b"\0\x0b\x02def"
+    table.write_bytes(before)
+    (project / ".gitattributes").write_text("*.dat diff=octets\n", encoding="utf-8")
+    _git(project, "config", "diff.octets.textconv", "od -An -tx1")
+    _git(project, "add", ".")
+    _git(project, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+    table.write_bytes(after)
+    assert "00 0b 02" in " ".join(_git(project, "diff").split()), "the driver is live: a person's diff shows its rendering"
+    _, receipt = write_workspace_patch_artifacts(project, tmp_path / "result", task={"id": "child"})
+    assert receipt["status"] == "ready_with_changes"
+    table.write_bytes(before)
+    applied = subprocess.run(["git", "apply", "--binary", str(tmp_path / "result" / "workspace.patch")],
+                             cwd=project, capture_output=True, text=True)
+    assert applied.returncode == 0 and table.read_bytes() == after, applied.stderr
+
+
 @pytest.mark.parametrize("activity", ["quiet", "touch", "append"])
 def test_public_patch_survives_benign_build_activity(tmp_path, monkeypatch, activity):
     import os

@@ -244,13 +244,13 @@ def write_workspace_patch_artifacts(
             for rel in tracked_lock_excludes:
                 tracked_excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
             diffstat = _git_stdout(
-                ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
+                ["git", "diff", "--stat", "--no-ext-diff", "--no-textconv", "--no-color", base_ref, *tracked_pathspec],
                 root,
                 allow_rc={0},
                 errors=errors,
             )
             total_size += _append_git_output(
-                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
+                ["git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", base_ref, *tracked_pathspec],
                 root,
                 fh,
                 allow_rc={0},
@@ -261,7 +261,7 @@ def write_workspace_patch_artifacts(
                 if total_size:
                     total_size += _write_patch_separator(fh)
                 total_size += _append_git_output(
-                    ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--no-color", "--", os.devnull, rel],
+                    ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--", os.devnull, rel],
                     root,
                     fh,
                     allow_rc={0, 1},

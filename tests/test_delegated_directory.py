@@ -602,7 +602,7 @@ def test_investigation_keeps_the_public_file_and_receipts_the_private_one(tmp_pa
     held = entry(ctx, target, "copy")
     held.authority_source = INVESTIGATION_AUTHORITY
     monkeypatch.setattr(
-        config, "load_settings", lambda **kw: {"MCP_SERVERS": [{"headers": {"X-Key": "binary result"}}]}
+        config, "load_settings", lambda **kw: {"MCP_SERVERS": [{"headers": {"X-Api-Key": "binary result"}}]}
     )
     manifest = directory.capture_directory_result(ctx.drive_root, held, engine)
     assert manifest["gaps"] == [
