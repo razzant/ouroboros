@@ -110,10 +110,14 @@ def test_only_saved_states_of_a_finished_work_leave_and_each_leaves_its_line(roo
     assert rolling["sha256"] is None and rolling["folder"] == "working"
 
 
-def test_a_running_work_keeps_its_saved_states_until_it_is_over(root):
+def test_a_running_works_first_pass_only_dates_and_its_end_lets_every_saved_state_go(root):
+    """While the work runs, a pass removes nothing the same day: the two pause copies its row never named are proven
+    and wait the owner's days, the rest is not proven (its rules: ``test_running_saved_states``). Once the work has
+    ended longer ago than those days, every saved state of it goes, whatever the running dates said."""
     handles = _task(root, "live", status="running")
     copies = _copies(handles)
-    assert _prune(root)["removed"] == 0 and all(path.exists() for path in copies), "a running work owes nothing yet"
+    report = _prune(root)
+    assert report["removed"] == 0 and report["waiting"] == 2 and all(path.exists() for path in copies), report
     write_task_result(root, "live", "failed", completed_at=_iso(time.time() - (DAYS + 1) * 86400))
     assert _prune(root)["removed"] == len(copies)
 
