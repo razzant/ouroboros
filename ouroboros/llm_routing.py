@@ -84,6 +84,7 @@ def openrouter_chat_routing(target: Mapping[str, Any], messages: Optional[list])
     A pricing projection without a transcript (None) bounds both possible sends: a continuity
     pin can widen Flex's price pool unless this family can replay even sealed reasoning anywhere.
     The adapter always supplies its actual send copy, including an empty list when appropriate.
+    OpenRouter publishes the accepted fields per endpoint at ``/api/v1/models/{author}/{slug}/endpoints``.
     """
     from ouroboros.reasoning_artifacts import sealed_reasoning_is_portable, transcript_has_sealed_reasoning
 
@@ -99,7 +100,13 @@ def openrouter_chat_routing(target: Mapping[str, Any], messages: Optional[list])
 
 
 def processing_transport_modes(target: Mapping[str, Any]) -> tuple[str, ...] | None:
-    """Modes this adapter can transmit on the selected API, independent of model or key eligibility."""
+    """Modes this adapter can transmit, not an entitlement of the selected model or key.
+
+    Sources checked 2026-11-17: https://openrouter.ai/docs/guides/features/service-tiers
+    lists ``service_tier=ultrafast`` on OpenRouter Chat; https://developers.openai.com/api/docs/guides/ultrafast-mode
+    shows it on direct Responses HTTP. We do not send Ultra on direct Chat. Recheck the guide for the exact
+    surface before widening it. Stale support can send a refused preference; stale absence can hide a usable tier.
+    """
     from ouroboros.openai_responses import responses_route
 
     provider = target.get("provider")

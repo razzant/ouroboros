@@ -482,6 +482,8 @@ _REFUSAL_STREAM_PRICES = {
 @pytest.mark.parametrize("evidence", ["unpriced", "sdk_zero", "charged", "output", "upstream", "charged_with_cause",
                                       "sdk_price", "invalid_price", "stream_receipt", "returned_charge", "returned_unpriced",
                                       "returned_zero", "conflicting_totals", "returned_conflicting_totals",
+                                      "quoted_json", "quoted_refusal", "quoted_native_delta", "quoted_unknown_frame",
+                                      "quoted_malformed_frame",
                                       "byok", "byok_partial", "strict", "returned_answer", "returned_finish", *_REFUSAL_COUNTERS,
                                       *_REFUSAL_STREAM_PRICES,
                                       "nested_under_bound", "nested_compatible", "sdk_price_under_bound",
@@ -543,6 +545,14 @@ def test_openrouter_ultrafast_retries_only_a_clean_refusal_at_standard(transport
         refusal.stream_receipt = {"model_output_received": True}
     if evidence == "upstream":
         envelope["openrouter_metadata"] = {"attempts": [{"provider": "upstream", "status": 503}]}
+    if evidence.startswith("quoted_"):
+        prior = {"quoted_native_delta": 'event: content_block_delta\ndata: {"type":"content_block_delta",'
+                 '"index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n',
+                 "quoted_unknown_frame": 'data: {"type":"unknown_event"}\n\n',
+                 "quoted_malformed_frame": 'data: {not JSON}\n\n'}.get(evidence, "")
+        raw_error = '{"type":"error","error":{"type":"rate_limit_error","status_code":429}}'
+        raw = raw_error if evidence == "quoted_json" else f"{prior}event: error\ndata: {raw_error}\n\n"
+        native["metadata"] = {"provider_name": "synthetic-upstream", "raw": raw}
     refusal.response = SimpleNamespace(status_code=400, json=lambda: envelope)
     if evidence in {"sdk_price", "sdk_price_under_bound"}:
         refusal.response.total_cost_usd = 0.125
@@ -552,7 +562,7 @@ def test_openrouter_ultrafast_retries_only_a_clean_refusal_at_standard(transport
         envelope["total_cost_usd"] = "invalid"
 
     def create(**candidate):
-        sent.append(candidate)
+        sent.append(copy.deepcopy(candidate))
         if len(sent) == 1:
             if evidence.startswith("returned_") or evidence == "strict":
                 native["status_code"] = 400
@@ -570,7 +580,7 @@ def test_openrouter_ultrafast_retries_only_a_clean_refusal_at_standard(transport
     monkeypatch.setattr(client, "_get_async_remote_client", lambda _: SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=async_create))))
     kwargs = dict(messages=[{"role": "user", "content": "hello"}], model="openrouter::same-model",
-                  processing_preference="ultrafast", cache_affinity="synthetic-session")
+                  processing_preference="ultrafast", cache_affinity="synthetic-session", max_tokens=123)
 
     def call():
         return asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
@@ -588,7 +598,7 @@ def test_openrouter_ultrafast_retries_only_a_clean_refusal_at_standard(transport
         [row] = ledger_rows(root)
         assert (row["settle_reason"], row["cost_usd"], row["cost_final"]) == ("processing_not_started", None, False)
         return
-    if evidence not in {"unpriced", "sdk_zero", "returned_unpriced", "returned_zero"}:
+    if evidence not in {"unpriced", "sdk_zero", "returned_unpriced", "returned_zero", "quoted_json", "quoted_refusal"}:
         with pytest.raises(RuntimeError) as failed:
             call()
         assert failed.value.processing_refusal_conflict
@@ -624,6 +634,9 @@ def test_openrouter_ultrafast_retries_only_a_clean_refusal_at_standard(transport
         _, usage = call()
         assert physical_attempt_headroom() == 0
     assert [p["service_tier"] for p in sent] == ["ultrafast", "default"]
+    first_payload, second_payload = sent
+    assert first_payload["max_tokens"] == 123
+    assert second_payload == {**first_payload, "service_tier": "default"}
     first, second = ledger_rows(root)
     assert (first["state"], first["settle_reason"]) == ("settled", "processing_not_started")
     if evidence in {"sdk_zero", "returned_zero"}:
@@ -652,8 +665,10 @@ def test_openrouter_ultrafast_retries_only_a_clean_refusal_at_standard(transport
     pytest.param([{"openrouter_metadata": {"attempts": [{"status": 400}]}}],
                  {"openrouter_metadata": {"attempts": []}, "usage": {"cost": 0}},
                  None, id="prior-routing-evidence-overwritten"),
-    pytest.param([{"usage": {"cost": 0.25, "completion_tokens": 2}}],
-                 {"usage": {"prompt_tokens": 7}}, 0.25, id="prior-bill-terminal-counters"),
+    pytest.param([{"usage": {"cost": 0.25, "completion_tokens": 2, "cached_tokens": 1, "cache_write_tokens": 1}},
+                  {"usage": {"completion_tokens": 4, "cache_write_tokens": 3}}],
+                 {"usage": {"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}},
+                 0.25, id="prior-bill-freshest-count-per-metric"),
     pytest.param([{"usage": {"cost": 0.125}}],
                  {"usage": {"is_byok": False, "cost": 0.25}}, 0.25, id="higher-ordinary-total"),
     pytest.param([{"usage": {"cost": 0.25}}],
@@ -708,8 +723,9 @@ def test_chat_sse_tier_refusal_reads_prior_reports_before_settlement(transport, 
     assert retained["body"] == error_body
     assert retained["stream_prior_usage"] == [body for body in prior if "choices" not in body]
     assert retained["stream_receipt"]["complete"] is False
-    if cost == 0.25 and terminal.get("usage") == {"prompt_tokens": 7}:
-        assert (first["prompt_tokens"], first["completion_tokens"]) == (7, 2)
+    if terminal.get("usage", {}).get("completion_tokens") == 5:
+        assert (first["prompt_tokens"], first["completion_tokens"], first["cached_tokens"],
+                first["cache_write_tokens"]) == (7, 5, 0, 3)
     if cost == 0.375:
         assert first["cost_basis"] == "byok_gateway_plus_upstream" and first["completion_tokens"] == 2
 

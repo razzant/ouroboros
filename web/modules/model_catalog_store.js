@@ -164,8 +164,9 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
 
     function read({ force = false } = {}) {
         if (state.reading) {
-            if (force) state.readAgain = true;  // the one out may be of an earlier source: another follows it
-            return state.reading;
+            if (!force) return state.reading;
+            state.readAgain = true;  // the one out may predate the change: wait for the read it queues
+            return state.reading.then(() => state.reading);
         }
         if (!force && state.catalog && !state.failed && now() - state.readAt < CATALOG_FRESH_MS) return Promise.resolve();
         state.readTier = state.cacheTier;

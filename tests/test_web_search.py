@@ -828,6 +828,69 @@ def test_terminal_openrouter_status_allows_next_backend(ctx, monkeypatch):
     assert [leg["outcome"] for leg in result["legs_tried"]] == ["failed", "succeeded"]
 
 
+_NO_ENDPOINTS = "No endpoints found for vendor/search-model."
+_TYPED_404 = {"code": "model_not_found", "type": "invalid_request_error", "message": _NO_ENDPOINTS}
+
+
+@pytest.mark.parametrize("error,envelope,advances", [
+    ({"code": 404, "message": _NO_ENDPOINTS}, {}, False),
+    ({"code": 404, "message": _NO_ENDPOINTS, "metadata": {"failed_routing_step": "Filter by Parameters"}}, {}, False),
+    ({"code": 404, "message": "No endpoints found matching your data policy."}, {}, False),
+    (_TYPED_404, {}, True),
+    (_TYPED_404, {"usage": {"cost": 0.25}}, False),
+], ids=["router-number", "router-number-naming-its-routing-step", "router-number-data-policy", "provider-typed",
+        "provider-typed-beside-a-charge"])
+def test_a_404_reaches_another_search_source_only_as_a_typed_refusal_nothing_contradicts(
+        ctx, monkeypatch, tmp_path, error, envelope, advances):
+    """One OpenRouter search leg answered HTTP 404 through the real attempt ledger, with a second source eligible.
+
+    OpenRouter types its own verdicts by a number and words only (``error.code`` equal to the status, a message,
+    optional ``metadata``). The ledger settles the "No endpoints found" 404 free, which is a price; the same words also
+    say that a data-policy or provider filter left no endpoint, and the routing step it may name serves the repair of
+    that one route (``request_wire_recovery``). None of them is a typed refusal before work, so a second source is
+    possible there and not supported: the search is held. With the status, the words and the free settlement all the
+    same, the provider's own typed code is what lets Auto try its next source, unless the same reply shows a charge.
+    """
+    from ouroboros import llm
+    from ouroboros import usage_accounting as ua
+
+    class NotFoundError(Exception):  # the SDK's class name, which is no provider's typed word
+        status_code = 404
+
+    failure = NotFoundError(f"Error code: 404 - {{'error': {error}}}")
+    failure.body = {"error": dict(error), **envelope}
+
+    def send(**_kwargs):
+        request = ua.AttemptRequest(
+            model="vendor/search-model", provider="openrouter", prompt_tokens_estimate=1000, max_completion_tokens=100,
+            reservation_usd=5.0, drive_root=tmp_path, task_id="task-web", root_task_id="root-web", global_limit_usd=100.0)
+        return ua.execute_physical_attempt(request, lambda: (_ for _ in ()).throw(failure))
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.delenv("OUROBOROS_WEBSEARCH_BACKEND", raising=False)
+    monkeypatch.setattr(llm, "openrouter_web_search_server_tool", send)
+    another = MagicMock(return_value=json.dumps({"answer": "another source", "backend": "anthropic_server_tool"}))
+    monkeypatch.setattr(search_module, "_web_search_anthropic", another)
+    monkeypatch.setattr(search_module, "_web_search_ddgs", lambda *_args, **_kwargs: pytest.fail("no scraper leg"))
+
+    result = json.loads(_web_search(ctx, "one search"))
+
+    [row] = ledger_rows(tmp_path)
+    assert result["legs_tried"][0]["ledger_attempt_ids"] == [row["attempt_id"]]
+    if not envelope:  # the ledger says the same of all four: free, by the router's status and words
+        assert (row["state"], row["settle_reason"], row["cost_usd"], row["cost_final"]) == (
+            "settled", "pre_routing_rejection", 0, True)
+    assert another.called is advances
+    if advances:
+        assert result["answer"] == "another source" and result["backend"] == "anthropic_server_tool"
+        assert [leg["outcome"] for leg in result["legs_tried"]] == ["failed", "succeeded"]
+    else:
+        assert result["reason_code"] == "provider_outcome_unknown" and result["backend"] == "openrouter_server_tool"
+        assert [leg["outcome"] for leg in result["legs_tried"]] == ["provider_outcome_unknown"]
+
+
 @pytest.mark.parametrize("status,body", [
     (408, None), (429, "gateway unavailable"), (503, {"error": {"code": 503}}),
     (502, {"error": {"type": "server_error"}}),

@@ -44,7 +44,7 @@ const storeOf = ({ catalog = CATALOG, recents = [], pins = [], connections = [{ 
     const answer = { recents, pins };
     const pinWrites = [];
     const store = createModelCatalogStore({
-        readCatalog: async () => { reads.catalog += 1; if (catalog instanceof Error) throw catalog; return catalog; },
+        readCatalog: async () => { reads.catalog += 1; if (catalog instanceof Error) throw catalog; return typeof catalog === 'function' ? catalog() : catalog; },
         readPreferences: async () => { reads.recents += 1; return answer.recents === undefined ? {} : { model_recents: answer.recents, model_pins: answer.pins }; },
         readSettings: async () => {
             reads.settings += 1;
@@ -825,6 +825,43 @@ test('an open follower never borrows the previous Main pin, and a route handover
     assert.match(means(r), /^Account: Auto · /);
 });
 
+test('an open follower asks for Main\'s pin again when Main returns to a route it left, never from a repaint', async () => {
+    // Another window moves Main away and back while this sheet stays open; the server drops a pin with its source.
+    // What was read before Main left is not the returned Main's: with a key's model between (it has no pin to read),
+    // or with another subscription model, whose own read came between.
+    for (const between of [GLM, SOL]) {
+        const replies = [];
+        const settings = (doc) => new Promise((resolve) => replies.push((model, main) => resolve({ ...doc,
+            OUROBOROS_MODEL: model, OUROBOROS_MODEL_ACCOUNTS: { main } })));
+        const r = room({ storeOptions: { catalog: TWO_ACCOUNTS, settings } });
+        await opened(r);
+        replies.shift()(ASTRA, 'home');
+        await flush();
+        assert.deepEqual([r.reads.settings, supports(r).ultrafast], [1, 'listed']);
+        assert.match(means(r), /^Pinned account home · /);
+
+        r.controls.syncState(r.state({ main_route: route(between) }));
+        await flush();
+        const asked = between === SOL ? 2 : 1;
+        assert.equal(r.reads.settings, asked, between);
+        if (between === SOL) { replies.shift()(SOL, 'home'); await flush(); }
+
+        r.controls.syncState(r.state({ main_route: route(ASTRA) }));
+        assert.match(means(r), /^Account not known · /, `${between}: the pin read before Main left is not the returned Main's`);
+        await flush();
+        assert.equal(r.reads.settings, asked + 1, `${between}: one read for the route Main returned to`);
+        replies.shift()(ASTRA, '');
+        await flush();
+        assert.match(means(r), /^Account: Auto · /);
+        assert.equal(supports(r).ultrafast, 'some');
+
+        r.controls.syncState(r.state({ main_route: route(ASTRA) }));
+        await flush();
+        assert.equal(r.reads.settings, asked + 1, `${between}: a repaint on the same route asks nothing`);
+        r.controls.destroy();
+    }
+});
+
 test('reopening a follower refreshes Main’s pin on the same model, even behind an older GET', async (t) => {
     const replies = [];
     const settings = (doc) => new Promise((resolve, reject) => replies.push({
@@ -1106,6 +1143,53 @@ test('a change of Main says what the new route makes of Main\'s own tier, before
 
 // A thenable the writer awaits: the server's typed refusal, without an unhandled rejection before it is read.
 const refusedWith = (code) => ({ then: (_resolve, reject) => reject(Object.assign(new Error('Changed on another device.'), { body: { code } })) });
+
+test('a pinned Main Ultrafast refusal rereads the account catalog; the owner\'s next choice is saved on what that read names, and nothing is written for them', async () => {
+    for (const writer of ['tier', 'model']) {
+        const first = structuredClone(TWO_ACCOUNTS);
+        const again = structuredClone(first);
+        again.store_id = 'store-after-conflict';
+        again.account_catalogs[0].accounts[0].catalog.accountFingerprint = 'new-home';
+        let catalog = first;
+        // The server's own comparison (owner_effort.check_main_ultrafast): the confirmed pin, store and fingerprint
+        // against its last catalog observation, which is what it last served and holds only while the engine has not
+        // moved on. So the second write is saved for the identity the reread brought, never for a repeat of the first.
+        let served = null;
+        const observed = () => (served === catalog ? ['home', served.store_id, served.account_catalogs[0].accounts[0].catalog.accountFingerprint] : null);
+        const tiers = { main: writer === 'model' ? 'ultrafast' : '', default: 'standard' };
+        // Each writer reaches its write as the owner does: the question about Ultrafast answered yes, the picked row in view.
+        const r = await opened(room({ projectId: '', chatId: 1, tiers, model: { askTier: async () => true },
+            storeOptions: { catalog: () => { served = catalog; return catalog; }, recents: [route(SOL)],
+                settings: { OUROBOROS_MODEL_ACCOUNTS: { main: 'home' }, OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: tiers.main } } } }));
+        const choose = () => writer === 'model' ? r.take(`route|${SOL}`) : r.chooseTier('ultrafast');
+        const requests = writer === 'model' ? r.modelPosts : r.tierPosts;
+        const answer = writer === 'model' ? r.modelAnswer : r.tierAnswer;
+        const sent = (at) => JSON.parse(requests().at(at).if_unchanged.ultrafast).slice(2);
+        answer.value = { then: (resolve, reject) => (JSON.stringify(sent(-1)) === JSON.stringify(observed())
+            ? resolve(null) : refusedWith('settings_changed_elsewhere').then(resolve, reject)) };
+        const before = r.reads.catalog;
+        catalog = again;  // The saved model, tier and pin name did not change; its engine observation did.
+        await choose();
+        await flush();
+        assert.equal(requests().length, 1);
+        assert.deepEqual(sent(0), ['home', 'store-a', 'fp-home']);
+        assert.equal(r.store.index().storeId, 'store-after-conflict');
+        assert.equal(r.reads.catalog, before + 1);
+        assert.match(r.toasts.at(-1)[0], /changed/i);
+        assert.deepEqual([r.store.tiers().main, r.value()], [tiers.main, 'gpt-6-astra'], 'refused: nothing was changed');
+
+        const said = r.toasts.length;
+        await opened(r);
+        await choose();
+        await flush();
+        assert.equal(requests().length, 2, 'only a second owner choice sends a second write');
+        assert.deepEqual(sent(1), ['home', 'store-after-conflict', 'new-home']);
+        assert.deepEqual([r.store.tiers().main, r.tierWord(), r.value()], ['ultrafast', 'Ultrafast', writer === 'model' ? 'gpt-6.1-sol' : 'gpt-6-astra'],
+            'saved: the same choice, on the store and fingerprint the reread named');
+        assert.deepEqual([r.reads.catalog, r.toasts.length], [before + 1, said], 'on that one reread, with nothing more to say');
+        r.controls.destroy();
+    }
+});
 
 test('two windows: a change of Main\'s model stands on Main as stored; a tier set elsewhere is said first, a move after the question is refused', async () => {
     // Window 2 set Main's Ultrafast after this page last read the tiers: the confirming sheet says what the new model

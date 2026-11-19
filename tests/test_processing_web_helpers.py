@@ -11,11 +11,15 @@ import pytest
 from ouroboros import llm, pricing, usage_accounting as ua
 from ouroboros.llm_attempt import _canonical_candidate_bytes
 from ouroboros.tools import search as search_module
-from tests.test_web_search import _FakeStream, _make_completed_event, _make_event, ctx, mock_openai, patch_env  # noqa: F401
+from tests.test_web_search import (
+    _FakeStream, _make_completed_event, _make_event,
+    ctx as _search_ctx, mock_openai as _search_mock_openai, patch_env as _search_patch_env,
+)
 from tests.test_usage_accounting import data_root as _usage_data_root
 from tests._usage_store_testing import ledger_rows
 
 data_root = _usage_data_root
+ctx, mock_openai, patch_env = _search_ctx, _search_mock_openai, _search_patch_env  # the search module's fixtures
 
 
 def test_search_ultrafast_uses_responses_even_with_chat_configured(ctx, patch_env, mock_openai, monkeypatch):

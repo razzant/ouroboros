@@ -88,6 +88,7 @@ def room(isolated_runtime, monkeypatch):  # noqa: F811 -- the imported fixture, 
                             Route("/api/state", api_state)])
     app.state.drive_root = isolated_runtime
     app.state.app_start = 0.0
+    app.state.bind_host = "127.0.0.1"  # the server's default bind; an unset host reads as a wildcard and probes the LAN
     return isolated_runtime, TestClient(app)
 
 
@@ -477,6 +478,10 @@ def test_replaced_pinned_identity_refuses_composer_and_settings(room, monkeypatc
 
     _, client = room
     client.app.router.routes.append(Route("/api/owner/safety-model", api_owner_safety_model, methods=["POST"]))
+    # A booted install: its locked boot read saved the one-time Safety upgrade. Otherwise the Settings writer's own
+    # locked read (``safety_settings._persist``) saves it before any refusal, as every writer's locked read may.
+    config.load_settings(migrate=True)
+    assert _saved()["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "full"
     seen = _binding()
     before = config.SETTINGS_PATH.read_bytes()
     monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin: new_identity)
@@ -485,6 +490,30 @@ def test_replaced_pinned_identity_refuses_composer_and_settings(room, monkeypatc
         reply = client.post(url, json={**body, "if_unchanged": seen})
         assert reply.status_code == 409 and not reply.json()["saved"]
         assert config.SETTINGS_PATH.read_bytes() == before
+
+
+@pytest.mark.parametrize("writer", ["tier", "model"])
+def test_a_choice_refused_for_a_replaced_pinned_identity_is_saved_when_made_again_on_the_one_observed(room, monkeypatch, writer):
+    """The owner's second choice after that 409. The refusal wrote nothing and moved no token, so the same read with
+    the store and fingerprint a catalog reread names is saved; the identity first shown, sent again, is refused again."""
+    _, client = room
+    if writer == "model":  # Main already holds Ultrafast: its model change carries the tier to the new destination
+        assert client.post(CHAT_PROCESSING, json={"processing": "ultrafast", "if_unchanged": _binding()}).status_code == 200
+    url, body, shown = ((CHAT_MODEL, CHOSEN, _binding(model=ASTRA)) if writer == "model"
+                        else (CHAT_PROCESSING, {"processing": "ultrafast"}, _binding()))
+    observed = ("replacement-store", "replacement-account")
+    monkeypatch.setattr("ouroboros.gateway.models.observed_profile", lambda source, pin: observed)
+    before = config.SETTINGS_PATH.read_bytes()
+    for _ in range(2):
+        refused = client.post(url, json={**body, "if_unchanged": shown})
+        assert refused.status_code == 409 and refused.json()["code"] == "settings_changed_elsewhere", refused.text
+        assert refused.json()["saved"] is False and config.SETTINGS_PATH.read_bytes() == before
+    again = {**shown, "ultrafast": json.dumps([*json.loads(shown["ultrafast"])[:3], *observed])}
+    reply = client.post(url, json={**body, "if_unchanged": again})
+    assert reply.status_code == 200, reply.text
+    saved = _saved()
+    assert saved["OUROBOROS_MODEL"] == (ASTRA if writer == "model" else SOL)
+    assert json.loads(saved[ROLES])["main"] == "ultrafast" and json.loads(saved[MODEL_ACCOUNTS_KEY])["main"] == "acc-main"
 
 
 def test_auto_ultrafast_confirms_the_model_without_freezing_account_membership(room, monkeypatch):

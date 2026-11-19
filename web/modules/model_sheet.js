@@ -71,16 +71,18 @@ export function openModelSheet({ anchor, label = 'Model', head = null, list, tie
     let closed = false;
     let position = null;
     let disposeFocus = null;
-    // Even for the same route, a pin kept from a previous opening may have changed in Settings elsewhere.
-    // Ask once per route in this sheet, before painting its support. A failed or mismatched read is not a poll.
-    const askedPins = new Set();
+    // Even for the same route, a pin kept from a previous opening may have changed in Settings elsewhere. Ask once
+    // each time a route comes under this sheet, before painting its support: when it opens and when Main moves, a
+    // return to a route it left included (the pin may have gone with the model). A repaint, a failed or a mismatched
+    // read is not a poll.
+    let askedPin = '';  // the route now under the sheet, once its pin was asked for
     function readMainPin() {
         const route = tier.mainRoute?.();
         const { store } = list;
-        if (!route || !pinDecides(store.index(), route)) return;
         const key = routeKey(route);
-        if (askedPins.has(key)) return;
-        askedPins.add(key);
+        if (key !== askedPin) askedPin = '';
+        if (!route || askedPin || !pinDecides(store.index(), route)) return;
+        askedPin = key;
         void store.readConnections?.({ fresh: true });
     }
     const rows = createModelList({ ...list, el: grid, input, id,

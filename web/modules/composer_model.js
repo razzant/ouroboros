@@ -26,11 +26,12 @@ import { MAIN_FOLLOW_NOTE } from './model_roles.js';
 import { openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
 import { MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, PIN_OBSERVATION, canChooseTier, confirmMainUltrafast, resolvedTier, routeTiers, tierBinding, tierNamed, tierWord } from './processing_choice.js';
+import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 import { clock, workControls } from './work_status.js';
 import {
-    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, sameRoute, sourceUnlisted,
+    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeSource, sameRoute, shortName, sourceUnlisted,
 } from './chat_model_routes.js';
 
 // When a pick of Main takes effect, its confirming sheet's rule line.
@@ -379,17 +380,23 @@ export function createModelControl({
         }
         const said = describe(read.route);
         const here = tiersOf(read.route, read.account);
+        const pinned = said?.lane === 'subscription' && Boolean(read.account);
         closeSheet({ focus: true });  // the sheet stays usable during the read; the question opens alone
-        const yes = await askTier({ model: said?.short || '', source: [said?.sourceLabel, here.accountLabel].filter(Boolean).join(' · '), pinned: Boolean(read.account),
+        const yes = await askTier({ model: said?.short || '', source: [said?.sourceLabel, here.accountLabel].filter(Boolean).join(' · '), pinned,
             explain: here.explain('ultrafast'), priceSaid: Boolean(here.priceOf('ultrafast')), doc });
         if (!yes || state.destroyed) return null;
-        if (stillShown()) return { ...read.binding, ultrafast: asked, ...(source ? { [CONNECTION_CONDITION]: source } : {}) };
+        if (stillShown()) return { pinned, condition: { ...read.binding, ultrafast: asked, ...(source ? { [CONNECTION_CONDITION]: source } : {}) } };
         showToast('Main changed while you were asked: Ultrafast was not set.', 'info');
         return null;
     }
 
     /* --- saving: a room's pick posts at once; Main's asks first, then writes Main itself --- */
-    function write(body, accept) {
+    function readChangedMain(pinned) {
+        // A pinned confirmation can be refused by the account observation even when none of the settings changed.
+        const settings = store.readConnections({ fresh: true });
+        return pinned ? Promise.all([settings, store.read({ force: true })]) : settings;
+    }
+    function write(body, accept, pinned = false) {
         if (state.saving || state.destroyed) return state.saving;
         el.dataset.disabled = 'true';
         state.saving = (async () => {
@@ -405,7 +412,7 @@ export function createModelControl({
                 state.lastOk = false;
                 if (error?.body?.code === 'settings_changed_elsewhere') {
                     showToast(MAIN_MODEL_CHANGED, 'info');
-                    void store.readConnections({ fresh: true });
+                    await readChangedMain(pinned);
                 } else showToast(error?.message || 'Could not change the model.', 'error');
             } finally {
                 state.saving = null;
@@ -450,9 +457,7 @@ export function createModelControl({
         await sayMoves({ results, doc });
     }
     async function changeMain(route) {
-        const next = describe(route);
         const shownSource = store.revisionOf?.(route) ?? null;  // the picked route's source as this sheet showed it
-        void store.readDetail?.(route);  // the picked model's own endpoints, for what it says of Main's tier
         // The sheet lists the works and rooms of the page's last state: read it once more first, so an act made a
         // moment ago (a card's model, another room's capsule) is in it. A slow read does not hold the sheet back.
         await Promise.race([Promise.resolve().then(() => refreshState(true)).catch(() => {}),
@@ -478,38 +483,43 @@ export function createModelControl({
         // source other than the one the sheet showed is read again before anything is asked.
         const source = kept === 'ultrafast' ? revisionIn(read.settings, route) : '';
         if (source === null) {
-            showToast(fmt('Could not verify the key {model} goes through. Reload, then choose again.', { model: next.short }), 'error');
+            showToast(fmt('Could not verify the key {model} goes through. Reload, then choose again.', { model: shortName(route) }), 'error');
             return false;
         }
-        if (source && shownSource && shownSource !== source) {
-            await store.readDetail?.(route);
-            showToast(fmt(SOURCE_CHANGED, { model: next.short }), 'info');
-            return false;
-        }
-        if (source) await store.readDetail?.(route);
+        const effective = kept || String(read.settings[PROCESSING_PREFERENCE_KEY] || '');
+        if (tierNamed(effective)) await store.readDetail?.(route);
         if (state.destroyed) return false;
-        const pin = next.source === describe(state.main)?.source ? read.account : '';
+        if (!sameRoute(read.route, state.main)) { showToast(MAIN_MODEL_CHANGED, 'info'); return false; }
+        const connectionMoved = () => source && (store.revisionOf?.(route) ?? null) !== source;
+        if ((source && shownSource && shownSource !== source) || connectionMoved()) {
+            showToast(fmt(SOURCE_CHANGED, { model: shortName(route) }), 'info');
+            return false;
+        }
+        // Standard's catalog amount and cache write do not describe a premium tier, even when its price is unknown.
+        const next = describeRoute(store.index(), route, { tier: effective });
+        const previous = describe(read.route);
+        const pin = next.lane === 'subscription' && next.source === routeSource(read.route) ? read.account : '';
         const confirmedTier = () => tierBinding(store.index(), route, pin);
         const asked = kept === 'ultrafast' ? confirmedTier() : '';
         const tiers = tiersOf(route, pin);
-        const tierNote = tierNamed(kept) ? fmt('Main keeps its tier, {tier}. {words}', { tier: tierWord(kept),
-            words: [tiers.accountLabel, tiers.explain(kept),
-                asked && !tiers.priceOf(kept) && !source && 'What Ultrafast costs on this route is not known here.',
+        const tierNote = tierNamed(effective) ? fmt('Main keeps its tier, {tier}. {words}', { tier: tierWord(effective),
+            words: [tiers.accountLabel, tiers.explain(effective),
+                asked && !tiers.priceOf(effective) && translateString('What Ultrafast costs on this route is not known here.'),
                 ...(asked ? [MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, pin && PIN_OBSERVATION]
                     .filter(Boolean).map((words) => translateString(words)) : [])].filter(Boolean).join(' ') }) : '';
-        const answer = await askMain({ next, previous: describe(state.main), doc, tierNote,
+        const answer = await askMain({ next, previous, doc, tierNote,
             census: { works: state.works, complete: state.complete, projects: state.projects, index: store.index() } });
         if (!answer || state.destroyed) return false;
         // A source that moved under the question was not the one asked about: nothing is written.
-        if ((asked && asked !== confirmedTier()) || (source && (store.revisionOf?.(route) ?? null) !== source)) {
+        if ((asked && asked !== confirmedTier()) || connectionMoved()) {
             showToast(fmt(SOURCE_CHANGED, { model: next.short }), 'info');
             return false;
         }
-        const written = await writeMain(route, { ...read.binding, ...(asked ? { ultrafast: asked } : {}), ...(source ? { [CONNECTION_CONDITION]: source } : {}) });
+        const written = await writeMain(route, { ...read.binding, ...(asked ? { ultrafast: asked } : {}), ...(source ? { [CONNECTION_CONDITION]: source } : {}) }, Boolean(asked && pin));
         if (written && answer.moves?.length && !state.destroyed) await moveToMain(answer.moves);
         return written;
     }
-    function writeMain(route, binding) {
+    function writeMain(route, binding, pinned) {
         return write({ kind: 'model', model: route.model, use_local: route.use_local, if_unchanged: binding }, (reply) => {
             const written = normalizeRoute(reply.main_route);
             if (!written) throw new Error('The server did not confirm the model.');
@@ -519,7 +529,7 @@ export function createModelControl({
             const also = [reply.account === 'auto' ? 'Main\'s account is Auto now.' : '',
                 reply.window_reset === true ? 'Main\'s context window set by hand was cleared.' : ''].filter(Boolean);
             if (also.length) showToast(also.join(' '), 'info');
-        });
+        }, pinned);
     }
     /** One pick from the sheet: null follows Main again (its own row); a route becomes the room's own, even Main's
      *  model now (a model row is always that route). In the Main chat a pick changes Main itself. */
@@ -543,12 +553,14 @@ export function createModelControl({
         const saving = state.tierSaving;
         void (async () => {
             let ok = false;
+            let pinned = false;
             try {
                 const body = projectId ? { processing: tier, project_id: projectId } : { processing: tier };
                 if (isMain && tier === 'ultrafast') {
-                    const condition = await confirmUltrafast();
-                    if (!condition || state.destroyed) return;
-                    body.if_unchanged = condition;
+                    const confirmation = await confirmUltrafast();
+                    if (!confirmation || state.destroyed) return;
+                    body.if_unchanged = confirmation.condition;
+                    pinned = confirmation.pinned;
                 }
                 const reply = await saveTier(body);
                 if (state.destroyed) return false;
@@ -561,7 +573,7 @@ export function createModelControl({
                 if (state.destroyed) return;
                 if (isMain && tier === 'ultrafast' && error?.body?.code === 'settings_changed_elsewhere') {
                     showToast(MAIN_TIER_CHANGED, 'info');
-                    await store.readConnections({ fresh: true });
+                    await readChangedMain(pinned);
                 } else showToast(error?.message || 'Could not change the processing tier.', 'error');
             } finally {
                 state.tierSaving = null;

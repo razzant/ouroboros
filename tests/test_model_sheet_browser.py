@@ -746,7 +746,7 @@ def test_default_fallback_tier_matches_the_real_call_and_explicit_standard(direc
             browser.close()
 
 
-def test_unavailable_inherited_ultrafast_can_be_left_by_keyboard(direct_server_with_data, monkeypatch):
+def test_unavailable_inherited_ultrafast_can_be_left_by_keyboard(direct_server_with_data, monkeypatch):  # noqa: F811
     from playwright.sync_api import expect, sync_playwright
 
     server = direct_server_with_data
@@ -1173,3 +1173,129 @@ def test_composer_main_model_change_stands_on_the_tier_shown_across_two_tabs(dir
             assert json.loads(stored[tier]).get("main", "") == ("fast" if second == "before_pick" else "")
             if second == "unrelated":
                 assert stored["OUROBOROS_MODEL_LIGHT"] == "claudexor::codex=gpt-test"
+
+
+@pytest.mark.parametrize("engine, premium", [("chromium", True), ("webkit", False)], ids=["wide-priced", "phone-unknown"])
+def test_main_model_confirmation_prices_only_the_refreshed_tier(direct_server_with_data, engine, premium, tmp_path):  # noqa: F811
+    """The old view quotes Standard, but the confirming read names Ultra. Neither old rate nor cache price belongs in it."""
+    from playwright.sync_api import expect, sync_playwright
+
+    server, target = direct_server_with_data, "fixture/next-model"
+    phone = engine == "webkit"
+    with sync_playwright() as pw, getattr(pw, engine).launch(headless=True) as browser:
+        path, page, _ = _main_ultrafast_tabs(server, browser, context_options=PHONE if phone else None, processing={"main": "ultrafast"})
+        writes = _record(page)
+        picked = False
+
+        def as_seen(route):
+            response = route.fetch()
+            shown = response.json()
+            if not picked:
+                shown["OUROBOROS_MODEL_PROCESSING_PREFERENCES"] = json.dumps({"main": "standard"})
+            shown["OUROBOROS_PROMPT_CACHE_TTL"] = "5m"
+            shown["_meta"]["connections"] = [{"id": "openrouter", "configured": True, "revision": "openrouter#fixture"}]
+            route.fulfill(response=response, json=shown)
+
+        def state_before_confirmation(route):
+            response = route.fetch()
+            shown = response.json()
+            shown["processing_tiers"] = {"main": "standard", "default": "standard"}
+            route.fulfill(response=response, json=shown)
+
+        page.route("**/api/settings", as_seen)
+        page.route("**/api/state*", state_before_confirmation)
+        page.route("**/api/model-catalog", lambda route: route.fulfill(json={
+            "items": [{"id": target, "value": target, "provider_id": "openrouter", "context_window": 128000,
+                       "price": {"input": 2, "output": 5, "cache_write": 7, "cache_write_ttl": "5m"}}],
+            "api_sources": [{"id": "openrouter", "label": "Fixture key", "processing_transport": ["standard", "ultrafast"]}],
+        }))
+        page.route("**/api/model-catalog?processing_model=*", lambda route: route.fulfill(json={
+            "value": target, "processing": {"complete": True, "modes": ["standard", "ultrafast"],
+                                            "endpoints": [{"mode": "ultrafast", "price": {"input": 17, "output": 31} if premium else None}]},
+        }))
+        _load(page, server["url"])
+        _open_sheet(page, MAIN_CAPSULE, finger=phone)
+        expect(page.locator(".model-tier-means")).to_contain_text("Account: Auto")  # the opening GET has answered
+        row = page.locator(_row(target))
+        expect(row).to_contain_text("$2 in / $5 out")
+        expect(page.locator(MAIN_CAPSULE)).to_have_attribute("data-tier", "standard")
+        choose = page.tap if phone else page.click
+        dialog = page.get_by_role("dialog", name="Change Main")
+        choose(f"{_row(target)} .chat-model-cell")
+        expect(dialog).to_contain_text("Cache write: $7 per 1M tokens.")
+        dialog.locator("[data-confirm-cancel]").click()
+        expect(dialog).to_have_count(0)
+
+        _open_sheet(page, MAIN_CAPSULE, finger=phone)
+        expect(page.locator(".model-tier-means")).to_contain_text("Account: Auto")
+        picked = True
+        choose(f"{_row(target)} .chat-model-cell")
+        expect(dialog).to_contain_text("Fixture key · paid by key · 128K window")
+        expect(dialog).to_contain_text("Main keeps its tier, Ultrafast")
+        expect(dialog).to_contain_text("$17 in / $31 out per 1M tokens" if premium else "Price unknown.")
+        expect(dialog).not_to_contain_text(re.compile(r"\$2 in|\$5 out|Cache write: \$7"))
+        _shot(page, _evidence(tmp_path), f"main-ultrafast-fresh-price-{engine}")
+        before = path.read_bytes()
+        dialog.locator("[data-confirm-cancel]").click()
+        expect(dialog).to_have_count(0)
+        assert not _sent(writes, "owner/chat-model") and path.read_bytes() == before
+
+
+def test_settings_pinned_ultrafast_conflict_rereads_the_catalog_without_resubmitting(direct_server_with_data):  # noqa: F811
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import press_editor_save
+
+    server = direct_server_with_data
+    with sync_playwright() as pw, pw.chromium.launch(headless=True) as browser:
+        path, page, _ = _main_ultrafast_tabs(server, browser)
+        writes, reads = [], []
+
+        def catalog_for(route):
+            replaced = bool(writes)
+            query = route.request.url.partition("?")[2]
+            kind = "scoped" if "credential_profile_id=work" in query else "other" if query else "general"
+            reads.append((replaced, kind))
+            route.fulfill(json={
+                "store_id": "replacement-store" if replaced else "initial-store",
+                "items": [{"value": "claudexor::codex=gpt-test", "id": "gpt-test", "credential_profile_id": "work"}],
+                "model_sources": [{"id": "codex", "label": "Codex", "credentialHarness": "codex",
+                                   "processingPreferences": ["standard", "fast", "ultrafast"]}],
+                "account_catalogs": [{"source": "codex", "accounts": [{"credentialProfileId": "work", "catalog": {
+                    "source": "codex", "credentialProfileId": "work", "accountFingerprint": "work-new" if replaced else "work-old",
+                    "provenance": "live", "models": [{"id": "gpt-test", "processing": {
+                        "modes": ["standard", "fast"] if replaced else ["standard", "fast", "ultrafast"],
+                    }}],
+                }}]}],
+            })
+
+        def refuse(route):
+            writes.append(route.request.post_data_json)
+            route.fulfill(status=409, json={"ok": False, "saved": False, "code": "settings_changed_elsewhere", "error": "The pinned account changed."})
+
+        page.route("**/api/model-catalog*", catalog_for)
+        page.route("**/api/owner/safety-model", refuse)
+        before = path.read_bytes()
+        form = _role_editor(server, page)
+        form.locator("[data-model-role-account]").select_option("work")
+        form.locator("summary").click()
+        tier = form.locator("[data-model-role-processing]")
+        expect(tier.locator("option[value=ultrafast]")).to_have_text("Ultrafast")
+        tier.select_option("ultrafast")
+        dialog = page.get_by_role("dialog", name="Ultrafast for Main")
+        expect(dialog).to_contain_text("Pinned account work")
+        dialog.get_by_role("button", name="Use Ultrafast").click()
+        assert "changed" in press_editor_save(page).lower()
+        assert len(writes) == 1 and path.read_bytes() == before
+        assert json.loads(writes[0]["if_unchanged"]["ultrafast"])[2:] == ["work", "initial-store", "work-old"]
+        assert (True, "general") in reads
+
+        # Existing conflict recovery restores the saved form. Re-select the same pin: it no longer confirms Ultra.
+        form.locator("[data-model-role-account]").select_option("work")
+        form.locator("summary").click()
+        expect(tier.locator("option[value=fast]")).to_have_text("Fast")  # the new scope answered, not merely absent
+        expect(tier.locator("option[value=ultrafast]")).to_have_text("Ultrafast · not confirmed")
+        assert (True, "scoped") in reads
+        tier.select_option("ultrafast")
+        expect(dialog).to_contain_text("Not confirmed for gpt-test here")
+        dialog.get_by_role("button", name="Cancel").click()
+        assert len(writes) == 1, "only the refused save was sent"

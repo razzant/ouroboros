@@ -345,14 +345,22 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     /** The question before Main's draft takes Ultrafast, for the route it has now. A yes stands only for the binding
      *  it was asked for, and only while the row still has it when the answer comes. */
     async function confirmUltrafast(row, carry = false) {
-        const tiers = rowTiers(row);
-        if (!only || !tiers || (!carry && !canChooseTier('ultrafast', tiers))) return false;
+        const before = row && rowTiers(row);
+        if (!only || !before) return false;
         const asked = tierIdentity(row);
         const revision = row.bindingRevision;
+        const processing = row.processing_preference;
+        const current = () => !destroyed && soleRow() === row && revision === row.bindingRevision
+            && processing === row.processing_preference && asked === tierIdentity(row);
+        // Reuse the role's addressed detail read, including one already started by the picker. Never show that
+        // answer under a model that replaced the one this press asked about (even if it later came back).
+        if (before.said.lane === 'api') await tierStore.readDetail(before.route);
+        if (!current()) return false;
+        const tiers = rowTiers(row);
+        if (!carry && !canChooseTier('ultrafast', tiers)) return false;
         const yes = await askUltrafast({ model: tiers.said.short, source: [tiers.said.sourceLabel, tiers.accountLabel].filter(Boolean).join(' · '),
-            explain: tiers?.explain('ultrafast') || '', priceSaid: Boolean(tiers?.priceOf('ultrafast')), pinned: Boolean(tiers.account), doc: getDoc() });
-        const confirmed = Boolean(yes) && !destroyed && soleRow() === row && revision === row.bindingRevision && asked === tierIdentity(row)
-            && (carry || canChooseTier('ultrafast', rowTiers(row) || {}));
+            explain: tiers.explain('ultrafast'), priceSaid: Boolean(tiers.priceOf('ultrafast')), pinned: Boolean(tiers.account), doc: getDoc() });
+        const confirmed = Boolean(yes) && current() && (carry || canChooseTier('ultrafast', rowTiers(row) || {}));
         if (confirmed) row.ultrafastFor = asked;
         return confirmed;
     }
@@ -580,12 +588,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
         const promise = Promise.resolve().then(() => catalogFetch(`/api/model-catalog?${query}`, { cache: 'no-store', signal: controller.signal }))
-            .then((data) => { if (!destroyed) {
+            .then((data) => { if (!destroyed && !requests.get(key)?.discard) {
                 if (!Array.isArray(data?.items)) throw new Error(data?.error || 'Model catalog response has no model list');
                 catalogs.set(key, mergeModelCatalog(catalogs.get(key), data));
                 if (Array.isArray(data.model_sources)) catalog.model_sources = mergeModelCatalog(catalog, data).model_sources;
             } })
-            .catch((error) => { if (!destroyed) catalogs.set(key, mergeModelCatalog(catalogs.get(key), {
+            .catch((error) => { if (!destroyed && !requests.get(key)?.discard) catalogs.set(key, mergeModelCatalog(catalogs.get(key), {
                 read_state: 'transport', errors: [{ error: error.message || String(error) }],
             })); })
             .finally(() => {
@@ -799,6 +807,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (Array.isArray(data.items)) {
                 for (const row of rows) void refreshRow(row, { force: true });
             }
+            updateCatalogViews();
+        },
+        /** A rejected pinned binding retires that scope's held evidence, not the saved assignment. A request
+         *  started before the refusal cannot put it back; the next visit to the scope reads it again. */
+        invalidateAccountCatalog({ value, account }) {
+            const key = catalogKey({ ...parseModelSource(value), account });
+            catalogs.delete(key);
+            if (requests.has(key)) Object.assign(requests.get(key), { discard: true, again: true });
             updateCatalogViews();
         },
         collect,
@@ -1239,9 +1255,15 @@ function mountRole(container, { path, ctx }, slot, index) {
                     throw new Error('Could not verify Main’s settings. Reopen the page before saving.');
                 }
             }
-            if (body && !moved) outcome = await writeModelKeys(`models:${slot}`, body, fresh, { ask: ctx.ask, unless,
-                held: { ...(shownSource ? { [CONNECTION_CONDITION]: shownSource } : {}),
-                    ...(binds && ultrafast ? { ultrafast: entry.tierBinding } : {}) } });
+            if (body && !moved) {
+                outcome = await writeModelKeys(`models:${slot}`, body, fresh, { ask: ctx.ask, unless,
+                    held: { ...(shownSource ? { [CONNECTION_CONDITION]: shownSource } : {}),
+                        ...(binds && ultrafast ? { ultrafast: entry.tierBinding } : {}) } });
+                if (binds && ultrafast && entry.account && outcome.state === 'changed_elsewhere') {
+                    editor.invalidateAccountCatalog(entry);
+                    await refreshModelCatalog();  // refreshes the general evidence and tells the role to reread its scope
+                }
+            }
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         if (landed(outcome) || outcome.state === 'changed_elsewhere' || outcome.state === 'unchanged') { dirty = false; await read(); }
         setButtonBusy(button, false);

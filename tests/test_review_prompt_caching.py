@@ -1284,14 +1284,13 @@ def test_review_wave_admission_decides_on_known_spend_not_the_wave_estimate(tmp_
     from ouroboros import pricing as pricing_mod
     from ouroboros import usage_accounting as ua
 
-    # Deterministic catalog: no live pricing fetch in the default test lane.
-    class _P(tuple):
-        tiers = ()
-
-    monkeypatch.setattr(
-        pricing_mod, "get_pricing",
-        lambda **k: {"anthropic/claude-fable-5": _P((10.0, 1.0, 12.5, 50.0))},
-    )
+    # Deterministic catalog: no live pricing fetch in the default test lane. A seat that names no tier is priced on
+    # its model's endpoint list (``pricing._ordinary_bound``), so the one endpoint states the tier it serves.
+    model = "anthropic/claude-fable-5"
+    source = {"provider": "openrouter", "model": model, "endpoint_tag": "fixture", "service_tier": None,
+              "processing": "standard"}
+    tariff = pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=20.0, source=source)
+    monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: {"fixture" if k.get("model") else model: tariff})
 
     # Seed the ledger with a settled row carrying a root limit.
     request = ua.AttemptRequest(

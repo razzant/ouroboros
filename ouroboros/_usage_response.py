@@ -515,6 +515,7 @@ class ProviderAnswer:
     codes: Tuple[Tuple[str, str, bool], ...] = ()  # (speaker, code or type value, history)
 
     objects: Tuple[AnswerObject, ...] = field(default=(), repr=False, compare=False)  # structural fields, read once with the sentences
+    walk_complete: bool = field(default=True, repr=False, compare=False)  # the bounded walk did not exhaust its budget
 
     def own_codes(self) -> List[str]:
         return [code for _speaker, code, history in self.codes if not history]
@@ -638,7 +639,7 @@ def provider_answer(source: Any) -> ProviderAnswer:
         status = read(source)
     for rows in (said, codes):
         rows.sort(key=lambda row: row[2])  # the current path first, then earlier attempts
-    return ProviderAnswer(status, tuple(dict.fromkeys(said)), tuple(dict.fromkeys(codes)), tuple(objects))
+    return ProviderAnswer(status, tuple(dict.fromkeys(said)), tuple(dict.fromkeys(codes)), tuple(objects), left[0] > 0)
 
 
 def refusal_failure_payload(error: BaseException) -> Any:
@@ -721,12 +722,16 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
             cost == 0 and (malformed or refusal_conflicts(error, check_stream_framing=False))):
         return None
     usage, _, _ = usage_from_response(carrier, payload=body, provider=provider, provider_reported_cost_only=True)
+    # Reports are newest first; the complete price and each cumulative counter are independent facts.
+    latest = {}
     for report, other, raw in reports:
-        if report is not body and isinstance(raw, dict) and raw:
-            counts, _, _ = usage_from_response(other, payload=report, provider=provider, provider_reported_cost_only=True)
+        if isinstance(raw, dict) and raw:
+            counts = usage if report is body and other is carrier else usage_from_response(
+                other, payload=report, provider=provider, provider_reported_cost_only=True)[0]
             for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
-                if usage.get(key) is None:
-                    usage[key] = counts.get(key)
+                if counts[key] is not None:
+                    latest.setdefault(key, counts[key])
+    usage.update(latest)
     usage.pop("cost_basis", None)  # Only the matching, complete wallet report supplies this basis.
     if basis:
         usage.update(cost=cost, cost_basis=basis)
@@ -792,13 +797,43 @@ def refusal_body_conflicts(body: Any, status: Optional[int] = None) -> bool:
     metadata = error.get("metadata") if isinstance(error, dict) else None
     if not isinstance(metadata, dict) or not metadata.get("raw"):
         return False
-    # A gateway can quote upstream replies as JSON or SSE. Each reply needs its own typed rejection before work.
+    # Read each quoted JSON/SSE reply, not just the recognizable objects in a diagnostic excerpt.
+    raw = metadata["raw"]
+    try:
+        if isinstance(raw, str) and raw.lstrip().startswith(("{", "[")):
+            raw = json.loads(raw)
+        elif isinstance(raw, str):
+            from ouroboros.llm_stream import _SSEFrames
+
+            # The gateway can quote only the frame data, omitting its final blank line.
+            events = _SSEFrames().feed((raw + "\n\n").encode(), final=True)
+            raw = []
+            for i, (event, data) in enumerate(events):
+                if i >= _ANSWER_WALK_LIMIT:
+                    return True
+                if (event, data) == ("", "[DONE]"):
+                    continue
+                frame = json.loads(data)
+                if not isinstance(frame, dict) or (event not in ("", "message") and event != frame.get("type")):
+                    return True
+                raw.append(frame)
+        replies = raw if isinstance(raw, list) else [raw]
+        if not replies or any(not isinstance(reply, dict) for reply in replies):
+            return True
+        answer = provider_answer({"raw": replies})
+    except (ValueError, RecursionError):
+        return True
+    if not answer.walk_complete:
+        return True
     outer_status = status or error.get("status_code", error.get("code"))
     rejected = False
-    for obj in provider_answer({"raw": metadata["raw"]}).objects:
+    for obj in answer.objects[1:]:  # skip the synthetic root; its direct children are the quoted frames
         if _reply_shows_work(obj.value):
             return True
         native = obj.value.get("error")
+        if obj.parent == 0 and obj.value != {"type": "ping"} and not (
+                isinstance(native, dict) and obj.value.get("type") in (None, "error")):
+            return True
         if not isinstance(native, dict):
             continue
         code = native.get("code")

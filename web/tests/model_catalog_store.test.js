@@ -542,6 +542,8 @@ test('a catalog read out when a key rotates never revives the earlier source\'s 
     // A refresh goes out under r1 and is held; the key rotates to r2 while it is out.
     const held = store.read({ force: true });
     store.adoptSettings(settings('openrouter#r2'));
+    let refreshed = false;
+    const next = store.read({ force: true }).then(() => { refreshed = true; });
     assert.equal(transport('z-ai/glm-5.3'), undefined, 'nothing of the earlier source is told at once');
     assert.deepEqual([ceiling('z-ai/glm-5.3'), ceiling('openai::gpt-6')], [null, ['standard', 'fast']],
         'the index too: the changed key\'s ceiling is unknown (never Standard-only), the unchanged one keeps its own');
@@ -556,8 +558,9 @@ test('a catalog read out when a key rotates never revives the earlier source\'s 
     assert.equal(ceiling('z-ai/glm-5.3'), null, 'nor through another reader\'s answer');
     await flush();
     assert.equal(answers.length, 1, 'a read under the new source follows the held one');
+    assert.equal(refreshed, false, 'callers recovering from a refusal wait for the queued read, not the one already out');
     answers.shift()(rows(['standard'], ['standard', 'fast']));
-    await flush();
+    await next;
     assert.deepEqual(transport('z-ai/glm-5.3'), ['standard'], 'and its answer is told whole');
     assert.deepEqual([ceiling('z-ai/glm-5.3'), ceiling('openai::gpt-6')], [['standard'], ['standard', 'fast']]);
 });

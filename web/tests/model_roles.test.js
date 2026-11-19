@@ -307,14 +307,14 @@ const CODEX_TIERS = (() => {
 /* One role alone on its page: its scoped catalog read answered by `fetched.value` (an Error: the read fails), its
    question and its endpoint reads recorded. `answer.value` is what the question is answered, or a function run while
    it stands. */
-async function rolePage(t, slot, settings, { answer = { value: true }, fetched = { value: CODEX_TIERS }, detail = () => null } = {}) {
+async function rolePage(t, slot, settings, { answer = { value: true }, fetched = { value: CODEX_TIERS }, detail = () => null, readDetail = () => {} } = {}) {
     const { Stub, world, settle } = await import('./helpers/settings_dom.js');
     const { env } = world(t);
     const host = new Stub(); host.id = 'roles'; env.document.body.append(host);
     const seen = { questions: [], endpoints: [], changes: 0 };
     const editor = createModelRolesEditor({ hostId: 'roles', doc: env.document, only: { slot, index: 0 }, store: { snapshot: {}, accountsKnown: true },
         catalogFetch: async () => { if (fetched.value instanceof Error) throw fetched.value; return fetched.value; }, onChange: () => { seen.changes += 1; },
-        tierStore: { detail, readDetail: async (route) => { seen.endpoints.push(route.model); }, subscribe: () => () => {} },
+        tierStore: { detail, readDetail: async (route) => { seen.endpoints.push(route.model); return readDetail(route); }, subscribe: () => () => {} },
         askUltrafast: async (facts) => { seen.questions.push(facts); return typeof answer.value === 'function' ? answer.value() : answer.value; } });
     t.after(() => editor.destroy());
     editor.load(settings, contract);
@@ -466,6 +466,69 @@ test('Main confirmation retains the general fingerprint when the scoped catalog 
     assert.equal(page.editor.ultrafastUnasked(read), false);
     await adopt('replaced-account');
     assert.equal(page.editor.ultrafastUnasked(read), true);
+});
+
+test('after a refused pinned Ultrafast the page asks again, and the yes stands on the store and fingerprint its reread names', async (t) => {
+    const read = (store, login) => {
+        const catalog = structuredClone(CODEX_TIERS);
+        catalog.store_id = store;
+        for (const account of catalog.account_catalogs[0].accounts) account.catalog.accountFingerprint = `${login}-${account.credentialProfileId}`;
+        return catalog;
+    };
+    const fetched = { value: read('store-a', 'first') };
+    const page = await rolePage(t, 'main', { ...MAIN_ON_CODEX, OUROBOROS_MODEL_ACCOUNTS: { main: 'home' } }, { fetched });
+    const asRead = page.editor.entry();
+    page.editor.adoptCatalog(read('store-a', 'first'));
+    await page.settle();
+    await page.tier('ultrafast');
+    const refused = page.editor.entry();
+    assert.deepEqual(JSON.parse(refused.tierBinding).slice(2), ['home', 'store-a', 'first-home']);
+    // Its Save answered 409 for the pinned account: the page retires what it held of that scope and reads again
+    // (mountRole's save). The account signed in anew under another engine store meanwhile.
+    fetched.value = read('store-b', 'second');
+    page.editor.invalidateAccountCatalog(refused);
+    assert.equal(page.options().at(-1)[1], 'Ultrafast · not confirmed', 'nothing held of the scope confirms it meanwhile');
+    page.editor.adoptCatalog(read('store-b', 'second'));
+    await page.settle();
+    assert.equal(page.editor.ultrafastUnasked(asRead), true, 'the yes was for the identity the server refused');
+    assert.equal(await page.editor.confirmUltrafast(), true);
+    assert.deepEqual(JSON.parse(page.editor.entry().tierBinding).slice(2), ['home', 'store-b', 'second-home']);
+    assert.deepEqual([page.editor.ultrafastUnasked(asRead), page.seen.questions.length], [false, 2]);
+});
+
+test('Settings confirms a key model after its priced detail answers, not after the picker moves away', async (t) => {
+    const first = 'fixture/first', second = 'fixture/second';
+    const reads = new Map();
+    const replies = new Map();
+    const page = await rolePage(t, 'main', { OUROBOROS_MODEL: first }, {
+        detail: (route) => replies.get(route.model),
+        readDetail: (route) => reads.get(route.model)?.promise,
+    });
+    const block = (model) => { let done; const promise = new Promise((resolve) => { done = resolve; }); reads.set(model, { promise }); return done; };
+    const firstDone = block(first);
+    const secondDone = block(second);
+    page.editor.adoptCatalog({ api_sources: [{ id: 'openrouter', label: 'Fixture key', processing_transport: ['standard', 'ultrafast'] }],
+        items: [first, second].map((value) => ({ id: value, value })) });
+    const awaitingPrice = page.put('[data-model-role-processing]', 'ultrafast');
+    await page.settle();
+    assert.equal(page.seen.questions.length, 0, 'the already requested model detail is still out');
+    replies.set(first, { state: 'ok', complete: true, modes: new Set(['standard', 'ultrafast']),
+        endpoints: [{ mode: 'ultrafast', price: { input: 19, output: 23 } }] });
+    firstDone();
+    await awaitingPrice;
+    assert.equal(page.seen.questions.length, 1);
+    assert.match(page.seen.questions[0].explain, /Listed at \$19 in \/ \$23 out per 1M tokens/);
+    assert.equal(page.editor.entry().processing, 'ultrafast');
+
+    const field = page.host.querySelector('[data-model-role-model]');
+    field.value = second;
+    await field.fire('input', { target: field });
+    const awaitingSecond = page.editor.confirmUltrafast(true);
+    field.value = first;
+    await field.fire('input', { target: field });
+    secondDone();
+    assert.equal(await awaitingSecond, false);
+    assert.equal(page.seen.questions.length, 1, 'the late reply cannot open a question under either model');
 });
 
 test('no other role may hold Ultrafast, and the whole list of roles keeps each role\'s tiers as they are', async (t) => {

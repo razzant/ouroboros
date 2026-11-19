@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 from typing import Any, Dict
 
 import pytest
@@ -66,7 +67,9 @@ def test_get_masks_row_secrets_and_describes_every_connection(settings_client):
     assert BYOK["api_key"] not in json.dumps(body)
     assert body[CONNECTIONS_KEY] == [{**BYOK, "api_key": "sk-or-v1..."}]
     meta = {row["id"]: row for row in body["_meta"]["connections"]}
-    assert meta["openrouter@byok"] == {
+    byok = dict(meta["openrouter@byok"])
+    assert re.fullmatch(r"[0-9a-f]{24}", byok.pop("revision"))  # ``connection_revisions``: a 24-hex token per row
+    assert byok == {
         "kind": "openrouter", "name": "byok", "label": "Claude credits", "builtin": False, "enabled": True,
         "configured": True, "source": "settings", "id": "openrouter@byok", "display": "OpenRouter · Claude credits"}
     assert meta["openrouter"]["display"] == "OpenRouter" and meta["openrouter"]["source"] == "settings"

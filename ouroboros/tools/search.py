@@ -1,7 +1,7 @@
-"""Web search accounts each physical provider attempt. Failed Responses, OpenRouter and Anthropic attempts can
-retry or cascade only after a proven no-send or a typed no-start refusal without contrary evidence. A confirmed
-empty Responses completion may advance Auto as a separate leg. DeepSeek follows its Search API contract.
-DDGS is an unofficial scraper."""
+"""Web search accounts each physical provider attempt. Failed Responses, OpenRouter and Anthropic attempts retry or
+cascade only after a proven no-send or a typed no-start refusal without contrary evidence. A router's status and words
+(OpenRouter's free 404 "No endpoints found") make another source possible, not supported. A confirmed empty Responses
+completion may advance Auto as a separate leg. DeepSeek follows its Search API contract. DDGS is an unofficial scraper."""
 
 from __future__ import annotations
 

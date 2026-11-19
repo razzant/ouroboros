@@ -872,14 +872,19 @@ def _owner_update_settings(
 
             for key in unedited_unauthored_slots(document, to_write, shown) - set(authored_keys):
                 to_write.pop(key, None)
+        from ouroboros.gateway.owner_effort import check_main_ultrafast
+
+        # Main's Ultrafast binding judges the document as it would land (prepared, ``unset`` removed) before the
+        # prologue's own effects, so its refusal writes nothing (invariant 2).
         to_write = _config.prepare_settings_for_persist(
             to_write, authored_keys=authored_keys,
             allow_context_lowering=allow_context_lowering,
-            allow_safety_lowering=allow_safety_lowering)
+            allow_safety_lowering=allow_safety_lowering,
+            judge=lambda prepared: check_main_ultrafast(
+                document, {key: value for key, value in prepared.items() if key not in unset}, if_unchanged))
         for key in unset:
             to_write.pop(key, None)
-        from ouroboros.gateway.owner_effort import check_main_ultrafast
-        check_main_ultrafast(document, to_write, if_unchanged)
+
         def commit():
             write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
             if boundary is not None:
