@@ -412,6 +412,32 @@ def test_model_wait_without_current_owner_action_evidence_discloses_gap(tmp_path
                                                "task_id": "task", "wait_id": "wait"}]
 
 
+def test_main_actions_require_a_known_room_even_in_a_partial_census(tmp_path):
+    from ouroboros import projects_registry
+
+    project = project_task(tmp_path)
+    projects_registry._save_bindings(tmp_path, {"bindings": {"bad-parent": None}})
+    parked = {"phase": "budget_paused", "pause_cause": "budget", "can_resume": True}
+    rows = [dict(parked, activity_id=task, chat_id=chat) for task, chat in (
+        ("native", 1), ("hidden", 0), ("internal", -7), ("elsewhere", 9), ("missing", None))]
+    rows.extend([{**parked, "activity_id": "project", "project_id": project["id"], "chat_id": project["chat_id"]},
+                 {**parked, "activity_id": "unresolved", "chat_id": 1, "project_id": "no-such-project"},
+                 {**parked, "activity_id": "descendant", "chat_id": 1, "parent_task_id": "bad-parent"}])
+    rows.extend({**parked, "activity_id": f"context-{chat}", "chat_id": chat, "project_id": project["id"]}
+                for chat in (0, -7, 9))
+    snapshot = main_decisions_snapshot(tmp_path, rows, {}, activities_complete=False)
+    assert {row["task_id"] for row in snapshot["main_attention"]} == {"native", "project"}
+    assert snapshot["main_attention_complete"] is False
+    assert snapshot["main_attention_gaps"] == [
+        {"reason": "action_room_unknown", "task_id": "unresolved"},
+        {"reason": "action_room_unknown", "task_id": "descendant"}]
+
+    unavailable = main_decisions_snapshot(tmp_path, rows, {}, bindings_complete=False)
+    assert [row["task_id"] for row in unavailable["main_attention"]] == ["project"]
+    assert not unavailable["main_attention_complete"]
+    assert unavailable["main_attention_gaps"] == [{"reason": "task_bindings_unavailable"}]
+
+
 @pytest.mark.parametrize("cause,can_resume,reason", [
     ("budget", True, "budget"), ("restart", True, "restart"), ("sleep", True, "resume"), ("owner", False, None), ("sleep", False, None), ("unknown", False, None)])
 def test_resume_attention_follows_the_parked_rows_release_rule(tmp_path, cause, can_resume, reason):

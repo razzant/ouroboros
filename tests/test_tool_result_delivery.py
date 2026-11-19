@@ -294,6 +294,31 @@ def test_a_batch_that_fits_is_delivered_byte_identical_without_sources_or_receip
     assert not _source_dir(tmp_path, ctx.task_id).exists()
 
 
+def test_a_batch_that_fills_the_window_exactly_is_a_fit_not_a_projection(tmp_path):
+    """A chosen read at the last available token still takes the whole-fit path."""
+    ctx = _ctx(tmp_path)
+    body = "x" * 120_000
+    reserve = 2_000
+
+    def rows():
+        # A CHOSEN form: the call named its range, so the produced body IS the
+        # requested one (it may use the frame's free room, not the eighth).
+        return [_row("chosen", "read_file", body, args={"path": "m.py", "max_lines": 600})]
+
+    probe = []
+    _messages, _trace = _deliver(ctx, rows(), measured_fit(reserve=reserve, calls=probe))
+    whole = probe[0]["estimated_input_tokens"]  # the measured whole batch
+    assert whole > 0
+    for room, fits in ((1, True), (0, True), (-1, False)):
+        messages, trace = _deliver(ctx, rows(), measured_fit(window=whole + reserve + room, reserve=reserve))
+        if fits:
+            assert "tool_result_delivery" not in trace, (room, trace)  # a fit leaves no receipt
+            assert messages[0]["content"] == body, room  # and no cut
+            assert all("result_partial" not in row for row in trace["tool_calls"]), room
+        else:
+            assert trace["tool_result_delivery"][0]["status"] != "complete", (room, trace)
+
+
 # --- the envelope -----------------------------------------------------------
 
 def test_source_write_failure_is_disclosed_without_any_readability_claim(tmp_path, monkeypatch):

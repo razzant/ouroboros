@@ -170,17 +170,20 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
 
     questions, attention = [], []
     gaps, action_gaps = [], []
-    questions_complete, attention_complete = bindings_complete, activities_complete
+    native_rooms_known = bindings_complete
+    questions_complete, attention_complete = bindings_complete, activities_complete and bindings_complete
     if not bindings_complete:
         gaps.append({"reason": "task_bindings_unavailable"})
+        action_gaps.append({"reason": "task_bindings_unavailable"})
     try:
         projects = {str(row["id"]): row for row in list_reserved_projects(drive_root, strict=True)}
         projects_by_chat = {int(row["chat_id"]): row for row in projects.values() if row.get("chat_id")}
     except Exception:
         log.debug("Main decisions Project registry unavailable", exc_info=True)
         projects, projects_by_chat = {}, {}
-        questions_complete = attention_complete = False
+        native_rooms_known = questions_complete = attention_complete = False
         gaps.append({"reason": "project_registry_unavailable"})
+        action_gaps.append({"reason": "project_registry_unavailable"})
     try:
         candidates = members(drive_root, "owner_questions")
     except Exception:
@@ -242,7 +245,13 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
     for activity in activities:
         task_id = str(activity.get("activity_id") or "")
         project = projects.get(str(activity.get("project_id") or ""))
-        if not task_id or not project:
+        chat_id = activity.get("chat_id")
+        if not task_id:
+            continue
+        if project:
+            if chat_id is not None and chat_id not in (WEB_UI_CHAT_ID, project.get("chat_id")):
+                continue  # a contextual Project ID does not address another room's work to its owner
+        elif type(chat_id) is not int or chat_id != WEB_UI_CHAT_ID:
             continue
         # A quiz-bound owner_wait is represented by that exact question above.
         # Other model wait IDs and a Resume remain independent decisions, even
@@ -257,6 +266,22 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         attempt = int(activity.get("task_attempt") or 1)
         parked = phase in {"budget_paused", "budget_pausing"}
         current_waits = {} if parked else activity.get("model_waits") or {}
+        if not project:
+            if not native_rooms_known or not (current_waits or parked and activity.get("can_resume")):
+                continue
+            # The census already applies known conversions. A missing Project or an
+            # unreadable ancestor is no proof that the task still belongs to Main.
+            try:
+                if activity.get("project_id"):
+                    raise ValueError("unresolved Project")
+                if rooms is None:
+                    rooms = RoomResolver(drive_root, strict=True)
+                if rooms.bindings and rooms(task_id, activity.get("parent_task_id"), activity.get("root_task_id")):
+                    continue
+            except Exception:
+                attention_complete = False
+                action_gaps.append({"reason": "action_room_unknown", "task_id": task_id})
+                continue
         for key, row in current_waits.items():
             if (isinstance(row, dict) and row.get("state") == "waiting"
                     and row.get("task_attempt") == attempt
@@ -272,7 +297,8 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
             continue
         from ouroboros.work_stop import activity_stop_view
         cause = activity_stop_view(activity)["pause_cause"]
-        attention.append({**activity, "task_id": task_id, "project_name": project.get("name") or "Project",
+        attention.append({**activity, "task_id": task_id,
+                          "project_name": (project.get("name") or "Project") if project else "",
                           "model_waits": waits, "can_resume": can_resume,
                           "cancelable": activity.get("cancelable") is True,
                           "attention_reason": (cause if cause in {"budget", "restart"} else "resume")

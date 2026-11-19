@@ -510,3 +510,52 @@ def test_a_blur_during_a_pinch_releases_the_keyboard_state_without_resizing_the_
     settle(page)
     assert not page.evaluate("document.body.classList.contains('keyboard-open')")
     assert page.evaluate('document.body.getBoundingClientRect().height') == before, 'a pinch only magnifies'
+
+
+FIND_GEOMETRY = """scope => {
+    const room = document.querySelector(scope), sheet = room.querySelector('.chat-find');
+    const bar = room.classList.contains('chat-instance-panel')
+        ? room.closest('.project-panel').querySelector('.project-panel-bar')
+        : room.querySelector('.chat-page-header');
+    const box = el => el.getBoundingClientRect(), p = box(room), s = box(sheet), h = box(bar);
+    return {barHeight: h.height, barFlow: getComputedStyle(bar).position, gap: s.top - p.top,
+        fromBar: s.top - h.bottom, sheetHeight: s.height,
+        focused: document.activeElement === sheet.querySelector('input'),
+        keyboard: document.body.classList.contains('keyboard-open')};
+}"""
+
+
+@pytest.mark.parametrize('height', [508, 250])
+@pytest.mark.parametrize('room', ['main', 'project'])
+def test_the_find_sheet_stays_a_step_under_the_rooms_bar_with_the_keyboard_up(shell_ui, room, height):
+    page = phone(shell_ui)
+    page.route('**/api/chat/history**', lambda route: route.fulfill(json=history([LONG_LINE] * 12)))
+    page.goto(shell_ui['url'])
+    page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+    scope = '#page-chat'
+    if room == 'project':
+        open_project(page)
+        scope = '.project-panel .chat-instance-panel'
+    page.locator(f'{scope} .chat-messages').click(position={'x': 40, 'y': 200})
+    page.keyboard.press('ControlOrMeta+f')
+    page.wait_for_function("s => document.querySelector(s + ' .chat-find input') === document.activeElement", arg=scope)
+    still(page)
+    rested = page.evaluate(FIND_GEOMETRY, scope)
+    page.evaluate(f'window.__viewport({height})')  # the page's own keyboard detection, not a class the test adds
+    page.wait_for_function("document.body.classList.contains('keyboard-open')")
+    still(page)
+    raised = page.evaluate(FIND_GEOMETRY, scope)
+    name = f'find-sheet-keyboard-{height}-{room}-{shell_ui["engine"]}'
+    facts(name, {'rested': rested, 'raised': raised})
+    shot(page, name, {'x': 0, 'y': 0, 'width': 390, 'height': height})
+    assert rested['focused'] and not rested['keyboard'] and rested['sheetHeight'] > 0, rested
+    assert raised['focused'] and raised['keyboard'] and raised['sheetHeight'] > 0, raised
+    assert 0 <= rested['fromBar'] <= 16, ('rested: the sheet floats a step under the floating bar', rested)
+    if room == 'project':
+        assert raised['barFlow'] == 'relative', raised
+        assert 0 <= raised['gap'] <= 16 and abs(raised['fromBar']) <= 16, \
+            ('keyboard up: a full bar of extra gap is the #3653 bug', raised)
+    else:
+        assert raised['barFlow'] == 'relative', raised
+        # The short viewport can shrink the bar itself; keep Find's gap from its lower edge.
+        assert abs(raised['fromBar'] - rested['fromBar']) <= 1, (rested, raised)

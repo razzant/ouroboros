@@ -1,5 +1,5 @@
 import { formatLimitUsd, formatUsd, number } from './storage_format.js';
-import { apiFetch } from './api_client.js';
+import { apiFetch, withinRequestLifetime } from './api_client.js';
 import { escapeHtmlAttr } from './ui_primitives.js';
 import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
 import { rowsOf } from './settings_rows.js';
@@ -9,7 +9,7 @@ import { readConsciousness, readConsciousnessFromState } from './consciousness_a
 import { allowanceHold, allowanceText, modelRouteWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
-import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
+import { READ_OK, STATUS_READ_LIFETIME_MS, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon, fluentIcon } from './page_icons.js';
 import { spendGapsWords } from './route_editor_primitives.js';
@@ -353,7 +353,8 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     let lastBreakdown = null;
     let allowanceRead = 0;
     let allowanceExpiry = null;
-    let subscriptionsRead = 0;
+    let subscriptionsRead = null;
+    let subscriptionsReadCompleted = false;
 
     function renderBreakdownTable(tableId, data, emptyLabel = 'No data') {
         const table = page.querySelector('#' + tableId);
@@ -472,17 +473,29 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         }
     }
 
-    // Read when the tab is shown and on Refresh, never on a save elsewhere: no answer of it changes with a setting.
+    function cancelSubscriptionsRead() {
+        const request = subscriptionsRead;
+        subscriptionsRead = null;
+        request?.abort();
+    }
+
+    // Read on show and Refresh, never on a settings save. A read and its body expire together. Refresh or leaving
+    // Costs cancels quietly; an expiry of the current read is a read failure, never an engine that stopped.
     async function loadSubscriptions() {
-        const read = ++subscriptionsRead;
+        cancelSubscriptionsRead();
+        subscriptionsReadCompleted = false;
+        const request = subscriptionsRead = new AbortController();
         let payload = null;
         let transportError = '';
         try {
-            const resp = await apiFetch('/api/claudexor/status?view=quota', { cache: 'no-store' });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            payload = await resp.json();
+            payload = await withinRequestLifetime(async (signal) => {
+                const resp = await apiFetch('/api/claudexor/status?view=quota', { cache: 'no-store', signal });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return resp.json();
+            }, { signal: request.signal, lifetimeMs: STATUS_READ_LIFETIME_MS });
         } catch (error) { transportError = String(error?.message || error || 'unreachable'); }
-        if (read !== subscriptionsRead) return;
+        if (request !== subscriptionsRead) return;
+        subscriptionsRead = null;
         const host = page.querySelector('[data-costs-subscriptions]');
         const focused = host.contains(document.activeElement) ? document.activeElement : null;
         const kept = new Map([...host.children].map((row) => [row.dataset.costsAccount, row]));
@@ -496,6 +509,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         }
         for (const row of kept.values()) row.remove();
         if (focused) (host.contains(focused) ? focused : host.querySelector('[data-costs-account="accounts"]'))?.focus({ preventScroll: true });
+        subscriptionsReadCompleted = true;
     }
 
     // What the limits cannot count, one line under them (pricing.spend_coverage). The words are composed
@@ -550,11 +564,20 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     }
 
     // A result the owner saw ends when the tab or the Dashboard is left.
+    const leaveCosts = () => { limits.leave(); cancelSubscriptionsRead(); };
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (event.detail?.tab !== 'costs') limits.leave();
-        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); periodCard.reload(); }  // the period is read when the tab is looked at
+        if (event.detail?.tab !== 'costs') leaveCosts();
+        else if (state.activePage === 'dashboard') {
+            refreshCostsPanel();
+            if (!subscriptionsRead) loadSubscriptions();
+            periodCard.reload();  // the period is read when the tab is looked at
+        }
     });
-    window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event.detail?.page !== 'dashboard') { leaveCosts(); return; }
+        // A two-pane return has no subtab event. Replace an abandoned initial read, not a completed answer.
+        if (state.dashboardActiveSubtab === 'costs' && !subscriptionsRead && !subscriptionsReadCompleted) loadSubscriptions();
+    });
     window.addEventListener('ouro:language-changed', paintGaps);
     window.addEventListener('ouro:settings-updated', (event) => {
         const { source, page: home, row } = event.detail || {};

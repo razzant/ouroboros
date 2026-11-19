@@ -848,14 +848,8 @@ def project_running() -> List[str]:
 
 
 def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Return a non-mutating evolution scheduling snapshot.
-
-    ``budget_projection``: optional pre-computed global usage projection from a
-    caller that already replayed the ledger this request (``/api/state``), so the
-    snapshot does not replay it again. Default ``None`` keeps the self-computing,
-    strict fail-closed behavior — a caller whose own computation FAILED must pass
-    nothing, so the paused-evolution disclosure still comes from this snapshot.
-    """
+    """Read scheduling state using a successful usage projection from this request.
+    Pass None after a failed read so this snapshot reports its own strict accounting result."""
     st = load_state()
     from supervisor.state import control_value
 
@@ -876,16 +870,8 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     # A reached limit blocks only paid admission: an evolution task opens on Main.
     exhausted = actual_remaining is not None and actual_remaining <= 0 and needs_paid_admission({"metadata": {}})
     queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
-    running_task = next(
-        (
-            (meta.get("task") if isinstance(meta, dict) else None)
-            for meta in RUNNING.values()
-            if isinstance(meta, dict)
-            and isinstance(meta.get("task"), dict)
-            and str(meta["task"].get("type") or "") == "evolution"
-        ),
-        None,
-    )
+    running_tasks = (meta.get("task") for meta in RUNNING.values() if isinstance(meta, dict))
+    running_task = next((task for task in running_tasks if isinstance(task, dict) and task.get("type") == "evolution"), None)
     project = project_running()  # what the idle gate waits for: never a conversation turn
     status = "disabled"
     detail = "Evolution mode is off."
@@ -908,8 +894,22 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         status = "running"
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
-        status = "queued"
-        detail = "Evolution task is queued."
+        from ouroboros.store_hot_facts import snapshot
+        from ouroboros.work_stop import current_stop, queue_control
+
+        status, detail = "queued", "Evolution task is queued."
+        # Only a possible money stop needs the census's addressed control read here.
+        if current_stop(queued_task, {"budget": BUDGET_ROOT_FENCES}).get("cause") == "money":
+            task_id = str(queued_task.get("id") or "")
+            root = queued_task.get("budget_drive_root") or DRIVE_ROOT
+            with snapshot(((root, task_id), (root, queued_task.get("root_task_id") or task_id))):
+                control = queue_control(root, queued_task, BUDGET_ROOT_FENCES)
+            view = control["view"]
+            if control["phase"] == "unknown":
+                status, detail = "state_unknown", "The queued cycle's pause state is unavailable."
+            elif control["phase"] == "budget_paused" and view["stop"].get("cause") == "money" and view["resumable"]:
+                status = "budget_stopped"
+                detail = "This cycle paused at the spending limit. Resume the task in Activity to continue."
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."

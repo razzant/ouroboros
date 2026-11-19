@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import json
 import logging
+import math
 import os
 import pathlib
 import threading
@@ -888,6 +889,24 @@ class _OpenRouterDiagnostic:
 _OPENROUTER_DIAGNOSTIC = _OpenRouterDiagnostic()
 
 
+def openrouter_spend_deltas(st: Dict[str, Any], *, legacy_ledger: bool = False) -> Optional[Tuple[float, float]]:
+    """Local and key deltas from one comparable diagnostic. Only /status reads a legacy unpaired ledger."""
+    if st.get("budget_drift_pct") is None:
+        return None  # the writer withheld comparison or established a new baseline
+    local = st.get("openrouter_checked_ledger_settled_usd", st.get("openrouter_ledger_settled_usd") if legacy_ledger else None)
+    local_base = st.get("session_openrouter_settled_snapshot")
+    key, key_base = st.get("openrouter_total_usd"), st.get("session_total_snapshot")
+    try:
+        if legacy_ledger:  # status_text also accepted numeric strings for the ledger side
+            local, local_base = float(local), float(local_base)
+        if any(type(n) not in (int, float) for n in (local, local_base, key, key_base)):
+            return None
+        pair = (float(local) - float(local_base), float(key) - float(key_base))
+        return pair if all(map(math.isfinite, pair)) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _apply_openrouter_ground_truth(st: Dict[str, Any], snapshot: Dict[str, Any],
                                   key_fp: str, ground_truth: Dict[str, float], *, shared: bool = False) -> None:
     """Publish one applicable observation under STATE_LOCK; money stays ledger-owned."""
@@ -1369,29 +1388,12 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
         if breakdown_parts:
             lines.append(f"budget_breakdown: {', '.join(breakdown_parts)}")
 
-    drift_pct = st.get("budget_drift_pct")
-    if accounting_available and drift_pct is not None:
-        # The ledger side captured with this diagnostic, not newer spend that
-        # arrived while HTTP was pending. Older snapshots predate this field.
-        session_total_snap = st.get("session_total_snapshot")
-        session_or_settled_snap = st.get("session_openrouter_settled_snapshot")
-        or_ledger_settled = st.get("openrouter_checked_ledger_settled_usd", st.get("openrouter_ledger_settled_usd"))
-        or_total = st.get("openrouter_total_usd")
-
-        if (
-            session_total_snap is not None
-            and session_or_settled_snap is not None
-            and or_ledger_settled is not None
-            and or_total is not None
-        ):
-            or_delta = or_total - session_total_snap
-            our_delta = float(or_ledger_settled) - float(session_or_settled_snap)
-
-            drift_icon = " ⚠️" if st.get("budget_drift_alert") else ""
-            lines.append(
-                f"budget_drift: {drift_pct:.1f}%{drift_icon} "
-                f"(openrouter tracked: ${our_delta:.2f} vs OpenRouter key: ${or_delta:.2f})"
-            )
+    deltas = openrouter_spend_deltas(st, legacy_ledger=True) if accounting_available else None
+    if deltas is not None:
+        our_delta, or_delta = deltas
+        drift_icon = " ⚠️" if st.get("budget_drift_alert") else ""
+        lines.append(f"budget_drift: {st['budget_drift_pct']:.1f}%{drift_icon} "
+                     f"(openrouter tracked: ${our_delta:.2f} vs OpenRouter key: ${or_delta:.2f})")
 
     models = model_breakdown(st)
     if models:

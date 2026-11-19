@@ -71,13 +71,46 @@ def consumed_cost_value(usage: Any) -> Any:
 
 def reported_price(usage: Dict[str, Any], *fallbacks: Any) -> Tuple[Optional[float], bool, str]:
     """``(price, invalid, cost_basis)`` of one reply: the first trustworthy amount among what
-    it consumed, its ``total_cost`` and the caller's ``fallbacks``. ``invalid`` = amounts were
+    it consumed, its total and the envelope's fallbacks. ``invalid`` = amounts were
     reported but none is trustworthy. The ledger and loop lanes share it so they cannot fork."""
     consumed = consumed_cost_value(usage)
-    candidates = (consumed, usage.get("total_cost"), *fallbacks)
+    candidates = (consumed, usage.get("total_cost"), usage.get("total_cost_usd"), *fallbacks)
     cost = next((number for value in candidates if (number := provider_cost_value(value)) is not None), None)
     byok = usage.get("is_byok") is True and cost is not None and provider_cost_value(consumed) is not None
     return cost, cost is None and any(value is not None for value in candidates), BYOK_COST_BASIS if byok else ""
+
+
+def update_snapshot(target: dict, update: dict) -> None:
+    """Usage counters and metadata are cumulative snapshots, never token deltas."""
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            update_snapshot(target[key], value)
+        elif value is not None:
+            target[key] = copy.deepcopy(value)
+
+
+_PRICE_AMOUNTS = ("cost", "total_cost", "total_cost_usd")
+_PRICE_REPORT = (*_PRICE_AMOUNTS, "is_byok", "cost_details", "cost_basis")
+
+
+def merge_usage_reports(previous: Any, latest: Any, *, previous_total: Any = None) -> dict:
+    """Overlay cumulative counters, taking the price and its qualifiers from a single report."""
+    previous = previous if isinstance(previous, dict) else {}
+    if not isinstance(latest, dict):
+        return copy.deepcopy(previous)
+    if not previous and previous_total is None:
+        return copy.deepcopy(latest)
+    counters = {key: copy.deepcopy(value) for key, value in previous.items() if key not in _PRICE_REPORT}
+    update_snapshot(counters, {key: value for key, value in latest.items() if key not in _PRICE_REPORT})
+    source = previous
+    if reported_price(latest)[0] is not None:
+        source = latest
+    elif reported_price(previous, previous_total)[0] is None:
+        # Keep the latest unusable amount for diagnosis. A counters-only frame cannot erase it.
+        if any(latest.get(key) is not None for key in _PRICE_AMOUNTS) or not any(key in previous for key in _PRICE_REPORT):
+            source = latest
+    counters.update({key: copy.deepcopy(source[key]) for key in _PRICE_REPORT if key in source})
+    return counters
 
 
 # Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``, Anthropic
@@ -224,6 +257,64 @@ def _reported_token_count(usage: Dict[str, Any], *keys: str) -> Optional[int]:
     return None
 
 
+def cache_write_split(usage: Dict[str, Any]) -> Dict[str, Optional[int]]:
+    """The reported lifetime bins. Keep explicit zeros and mark unreadable bins so they cannot look absent."""
+    bins = usage.get("cache_creation")
+    names = {"ephemeral_5m_input_tokens": "5m", "ephemeral_1h_input_tokens": "1h"}
+    if bins is None or bins == {}:
+        bins = usage.get("cache_write_tokens_by_ttl")
+        names = {"5m": "5m", "1h": "1h"}
+    if bins is None:
+        return {}
+    if not isinstance(bins, dict):
+        return {"unknown": None}
+    return {names.get(key, "unknown"): count if key in names and type(count) is int and count >= 0 else None
+            for key, count in bins.items()}
+
+
+def cache_write_total(usage: Dict[str, Any], split: Dict[str, Optional[int]]) -> Tuple[Optional[int], bool]:
+    """The ledger count and whether only malformed aggregates were reported.
+
+    A usable alias (including zero) or both lifetime bins can establish the total.
+    Otherwise the ledger keeps its historical int/clamp projection for reporting alone.
+    """
+    malformed = False
+    projection = None
+    detail_keys = ("cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens")
+    for source, keys in ((usage.get("prompt_tokens_details"), detail_keys), (usage.get("input_tokens_details"), detail_keys),
+                         (usage, ("cache_creation_input_tokens", "cache_write_tokens"))):
+        if isinstance(source, dict):
+            for key in keys:
+                value = source.get(key)
+                if value is None:
+                    continue
+                try:
+                    count = int(value)
+                    if not isinstance(value, bool) and count >= 0 and (isinstance(value, str) or value == count):
+                        return count, False
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                malformed = True
+                if projection is None:
+                    projection = _reported_token_count(source, key)
+    short, hourly = split.get("5m"), split.get("1h")
+    if len(split) == 2 and short is not None and hourly is not None:
+        return short + hourly, False
+    return projection, malformed
+
+
+def cache_pricing_usage(usage: Dict[str, Any], written: Optional[int], split: Dict[str, Optional[int]]) -> Dict[str, Any]:
+    """Cache counts, their validity and lifetime for the reply estimator, including detail-only reports."""
+    from ouroboros.event_usage import event_token_counts
+
+    read = usage.get("cached_tokens")
+    if read is None:
+        read = event_token_counts(usage)["cached_tokens"]
+    return {"cached_tokens": read, "cache_write_tokens": written, "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
+            "cache_write_tokens_by_ttl": split or None,
+            **({"cache_write_tokens_invalid": True} if usage.get("cache_write_tokens_invalid") else {})}
+
+
 def observed_processing_mode(provider: str, usage: Dict[str, Any]) -> str:
     """A pricing qualifier from observation; absent explicit-mode proof stays unknown."""
     receipt = usage.get("processing")
@@ -266,28 +357,30 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
     if not isinstance(usage, dict):
         usage = {}
     native_cache_read = _reported_token_count(usage, "cache_read_input_tokens")
-    native_cache_write = _reported_token_count(usage, "cache_creation_input_tokens")
     cache_read = _reported_token_count(  # DeepSeek's top-level prompt_cache_hit_tokens last; its details block wins
         usage, "cache_read_input_tokens", "cached_tokens", "precached_prompt_tokens", "prompt_cache_hit_tokens",
     )
-    cache_write = _reported_token_count(
-        usage, "cache_creation_input_tokens", "cache_write_tokens",
-    )
+    split = cache_write_split(usage)
+    cache_write, invalid_write = cache_write_total(usage, split)
+    native_cache_write = cache_write if usage.get("cache_creation_input_tokens") is not None else None
     input_tokens = _reported_token_count(usage, "input_tokens")
     prompt = _reported_token_count(usage, "prompt_tokens")
     if prompt is None and any(
         value is not None for value in (input_tokens, native_cache_read, native_cache_write)
     ):
-        # Anthropic native input_tokens excludes cache reads and writes.
-        prompt = int(input_tokens or 0) + int(native_cache_read or 0) + int(native_cache_write or 0)
+        if "input_tokens_details" in usage or (isinstance(payload, dict) and payload.get("object") == "response"):
+            prompt = input_tokens  # Responses already includes cache reads and writes.
+        elif split and (usage.get("cache_creation") is not None or native_cache_read is not None
+                        or native_cache_write is not None or isinstance(payload, dict) and payload.get("type") == "message"):
+            if cache_write is not None and not invalid_write:
+                prompt = (input_tokens or 0) + (native_cache_read or 0) + cache_write
+        elif not invalid_write:
+            # Native input excludes cache reads and writes. Older replies may name only the aggregate.
+            prompt = (input_tokens or 0) + (native_cache_read or 0) + (native_cache_write or 0)
     details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
     if isinstance(details, dict):
         detail_read = _reported_token_count(details, "cached_tokens")
         cache_read = detail_read if detail_read is not None else cache_read
-        detail_write = _reported_token_count(
-            details, "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens",
-        )
-        cache_write = detail_write if detail_write is not None else cache_write
     normalized = {
         **usage,
         "prompt_tokens": prompt,
@@ -295,6 +388,9 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         "cached_tokens": cache_read,
         "cache_write_tokens": cache_write,
     }
+    normalized.pop("cache_write_tokens_invalid", None)
+    if invalid_write:
+        normalized["cache_write_tokens_invalid"] = True
     # Tariff validation needs the reported counts, not the ledger's historical int/clamp projection.
     # Keep only token fields; never accept a provider-supplied witness under this internal key.
     reported = {key: usage[key] for key in (
@@ -325,16 +421,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
             normalized["service_tier"] = payload["service_tier"]
         if isinstance(payload.get("processing"), dict):
             normalized["processing"] = dict(payload["processing"])
-    creation = usage.get("cache_creation")
-    if isinstance(creation, dict):
-        split = {
-            tier: count
-            for tier, key in (("5m", "ephemeral_5m_input_tokens"),
-                              ("1h", "ephemeral_1h_input_tokens"))
-            if (count := _reported_token_count(creation, key)) is not None and count > 0
-        }
-        if split:
-            normalized["cache_write_tokens_by_ttl"] = split
+    if split:
+        normalized["cache_write_tokens_by_ttl"] = split
     cost, invalid, basis = reported_price(
         usage, payload.get("total_cost_usd") if isinstance(payload, dict) else None,
         getattr(response, "total_cost_usd", None),
@@ -347,9 +435,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
     if cost is not None:
         return normalized, cost, True
     completion = normalized["completion_tokens"]
-    split = normalized.get("cache_write_tokens_by_ttl")
     cache_usage_reported = bool(cache_read or cache_write or (
-        any(split.values()) if isinstance(split, dict) else split))
+        split and (cache_write is None or any(count != 0 for count in split.values()))))
     if (
         isinstance(payload, dict)
         and isinstance(payload.get("error"), dict)
@@ -364,6 +451,38 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         normalized.update(prompt_tokens=0, completion_tokens=0, cached_tokens=0, cache_write_tokens=0)
         return normalized, 0.0, True
     return normalized, None, False
+
+
+def usage_from_failure(payload: Any, stream_usage: Any) -> Tuple[Dict[str, Any], Optional[float], bool]:
+    """Settle reported money with this attempt's counters; only stream facts may support a failure estimate."""
+    has_frame = isinstance(stream_usage, dict) and bool(stream_usage)
+    if not isinstance(payload, dict):
+        if not has_frame:
+            return usage_from_response(payload)
+        payload = {}
+    payload = {key: value for key, value in payload.items() if key != "error"}
+    combined = merge_usage_reports(payload.get("usage"), stream_usage, previous_total=payload.get("total_cost_usd"))
+    if "cost_basis" in combined:
+        raw_price, _, basis = reported_price(combined)
+        envelope_only = raw_price is None and provider_cost_value(payload.get("total_cost_usd")) is not None
+        if envelope_only or (combined["cost_basis"] == BYOK_COST_BASIS and not basis):
+            combined.pop("cost_basis")  # An envelope fallback or standalone total does not prove a BYOK sum.
+    facts, cost, final = usage_from_response({**payload, "usage": combined})
+    if cost is not None or not has_frame:
+        return facts, cost, final
+    frame, _, _ = usage_from_response({"usage": stream_usage})
+    # A failed stream can report only one side. Keep its counters for the row;
+    # a complete text tariff needs both, before the ledger's legacy int/clamp projection.
+    if (None in (frame["prompt_tokens"], frame["completion_tokens"])
+            or any(type(value) is not int or value < 0
+                   for key in ("prompt_tokens", "completion_tokens", "input_tokens", "output_tokens")
+                   if (value := stream_usage.get(key)) is not None)):
+        frame["cost_coverage"] = "partial"
+    if frame.get("cost_basis") == BYOK_COST_BASIS:
+        frame.pop("cost_basis")
+    if facts.get("cost_invalid"):
+        frame["cost_invalid"] = True
+    return frame, None, False
 
 
 def provider_failure_payload(exc: BaseException) -> Any:

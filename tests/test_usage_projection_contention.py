@@ -34,8 +34,8 @@ from ouroboros import usage_accounting as ua
 from ouroboros import usage_store
 from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
 from ouroboros.usage_ledger import UsageLockUnavailable
+from tests._queue_state import assignment_with_an_evolution_row as _assignment_with_an_evolution_row
 from tests._store_journal_shared import exclusive_hold
-from tests.worker_pool_support import affirm_ready
 
 
 _WORKERS = 64  # the production CyberGym lane count
@@ -290,41 +290,6 @@ def test_a_pre_check_under_a_held_writer_is_exact_both_ways(data_root, superviso
         floor, elapsed = _timed(lambda: supervisor_state.budget_remaining(
             {}, strict=True, allow_stale=True, refuse_below=5.0))
         assert floor == pytest.approx(0.90) and elapsed < _MAX_READ_SEC
-
-
-def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
-    """The real ``assign_tasks`` over a real ledger: a $5 limit, one lane whose $4 hold is
-    in flight (the warmed snapshot still says $5: a hold is not spending, #1487) and then
-    settles at ``settle_at`` — the exact read must see that known charge."""
-    from types import SimpleNamespace
-
-    from supervisor import queue, state, workers
-
-    state.init(data_root, total_budget_limit=5.0)
-    queue.init(data_root)
-    for module in (workers, queue):
-        monkeypatch.setattr(module, "DRIVE_ROOT", data_root)
-    monkeypatch.setattr(state, "check_openrouter_ground_truth", lambda: None)
-    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})
-    monkeypatch.setattr(workers, "_evolution_assignment_error", lambda _task: "")
-    pending, running, pool = [], {}, {}
-    for name, value in (("PENDING", pending), ("RUNNING", running), ("WORKERS", pool)):
-        monkeypatch.setattr(workers, name, value)
-    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
-    queue.init_queue_refs(pending, running, workers.QUEUE_SEQ_COUNTER_REF)
-    reservation = ua.reserve_attempt(_request(data_root, reservation_usd=4.0, limit=5.0))
-    ua.mark_dispatched(reservation)
-    assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(5.0)  # warms the memo
-    ua.settle_attempt(reservation, {"prompt_tokens": 5, "completion_tokens": 2}, cost_usd=settle_at, cost_final=True)
-    sent: list = []
-    pool[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
-                              in_q=SimpleNamespace(put=lambda task: sent.append(dict(task)))))
-    pending.append({"id": "evo-1", "type": "evolution", "chat_id": 0, "priority": 1})
-    reasons: list = []
-    real_persist = queue.persist_queue_snapshot
-    monkeypatch.setattr(queue, "persist_queue_snapshot",
-                        lambda reason="", **kw: (reasons.append(reason), real_persist(reason=reason, **kw))[1])
-    return workers, pending, reasons
 
 
 def test_an_evolution_row_the_exact_budget_affords_is_assigned_under_a_held_writer(data_root, monkeypatch):

@@ -915,7 +915,7 @@ def _context_components(ctx: Any, *, measured: bool) -> list:
 def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unknown: str = "tariff unknown") -> str:
     """Quote fresh exact-model endpoint rates when they agree; never invent one. ``unknown`` words their absence: [ROUTE FACTS] says it, the round facts pass ""."""
     try:
-        from ouroboros.pricing import get_pricing
+        from ouroboros.pricing import get_pricing, pricing_at_prompt
         from ouroboros.provider_models import normalize_model_identity
 
         model, provider = normalize_model_identity(str(model or "")), str(provider or "")
@@ -923,12 +923,9 @@ def cached_tariff_text(model: str, provider: str, prompt: Optional[int], *, unkn
         rows = list(catalog.values()) if provider == "openrouter" else [catalog[model]] if model in catalog else []
         quoted = []
         for row in rows:
-            rates = row
             if getattr(row, "tiers", ()) and prompt is None:
                 return unknown and "tariff unknown (input tier unmeasured)"
-            for threshold, tier in getattr(row, "tiers", ()):
-                if int(prompt or 0) >= threshold:
-                    rates = tier
+            rates = pricing_at_prompt(row, prompt or 0)
             if len(rates) != 4 or rates[0] is None or rates[3] is None:
                 return unknown
             quoted.append(tuple(rates))

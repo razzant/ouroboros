@@ -211,6 +211,32 @@ def test_money_snapshot_and_direct_reads(ctx):
         assert result["status"] == "ok" and result["data"]["rows"][0][0] > 0, result
 
 
+def test_money_sql_reads_the_imported_history_from_the_summaries_not_the_typed_columns(ctx):
+    """A string amount in an imported aggregate survives in the advertised summary."""
+    from tests._usage_store_testing import write_compacted_journal
+
+    write_compacted_journal(ctx.drive_root, [{
+        "attempt_id": "fold-imported", "task_id": "t", "root_task_id": "r", "model": "m",
+        "provider": "openai", "category": "task", "source": "old", "folded_attempt_count": 7,
+        "cost_usd": "1.75", "cost_final": True}])
+    usage_store.migrate_from_journal(ctx.drive_root)
+
+    imported = run(ctx, "SELECT kind, cost_usd, extra FROM attempts WHERE kind='usage_baseline_group'",
+                   db="money")
+    assert imported["status"] == "ok", imported
+    kind, cost, extra = imported["data"]["rows"][0]
+    assert kind == "usage_baseline_group"
+    assert cost is None  # the typed money column is NULL ...
+    assert '"cost_usd":"1.75"' in extra  # ... and the amount is the string in extra
+    # The negative: the typed columns alone miss the imported history.
+    typed = run(ctx, "SELECT SUM(CAST(cost_usd AS REAL)) FROM attempts", db="money")
+    assert typed["data"]["rows"] == [[None]], typed
+    # The positive: the store's own summary carries it.
+    totals = run(ctx, "SELECT settled, confirmed, estimated FROM summaries WHERE scope='global' AND key=''",
+                 db="money")
+    assert totals["data"]["rows"] == [["1.75", "1.75", "0"]], totals
+
+
 @pytest.mark.parametrize("query,status", [("SELECT 1", "ok"), ("SELECT )", "error")])
 def test_snapshot_removes_real_temporary_directory(ctx, monkeypatch, query, status):
     usage_store.migrate_from_journal(ctx.drive_root)

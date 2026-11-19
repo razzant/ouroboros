@@ -24,6 +24,7 @@ import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
+from tests._queue_state import gateway, read_state  # noqa: F401
 from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 
@@ -415,6 +416,76 @@ def capture(page, name):
 
 # ------------------------------------------------------------------------------------------------
 # Main: each census state in its own words, tone and controls.
+
+def test_native_pill_reaches_each_source_without_acting(room_ui, gateway, monkeypatch):  # noqa: F811
+    from playwright.sync_api import expect
+
+    from ouroboros.model_wait import mutate_wait
+    from ouroboros.task_results import write_task_result
+
+    names = {"atlas": "Index the atlas", "symbols": "Check map symbols", "catalog": "Read the catalog"}
+    write_task_result(gateway.root, "maps", "completed", chat_id=1, root_task_id="maps")
+    gateway.pending.extend([
+        {"id": "atlas", "chat_id": 1, "suggested_name": names["atlas"],
+         "_budget_pause": {"status": "paused_before_dispatch", "replay_safe": True, "physical_calls": 0}},
+        {"id": "symbols", "chat_id": 1, "suggested_name": names["symbols"], "delegation_role": "subagent",
+         "parent_task_id": "maps", "root_task_id": "maps",
+         "_budget_pause_hold": {"reason": "root_fence_lifted_pending_selection", "release": "resume"}},
+    ])
+    task = {"id": "catalog", "chat_id": 1, "suggested_name": names["catalog"], "_attempt": 3}
+    write_task_result(gateway.root, "catalog", "running", chat_id=1)
+    wait = {"wait_id": "sign-in", "task_attempt": 3, "revision": 2, "state": "waiting",
+            "requires_owner_action": True, "reason": "auth", "role": "main", "source": "codex",
+            "model": "claudexor::codex=test-model", "credential_harness": "codex", "credential_profile_id": "fixture"}
+    mutate_wait(gateway.root, "catalog", "sign-in", lambda _: wait)
+    gateway.running["catalog"] = {"task": task, "attempt": 3, "started_at": 1.0}
+
+    state = read_state(gateway)
+    assert state["main_attention_complete"] and {a["task_id"] for a in state["main_attention"]} == set(names)
+    assert {a["activity_id"] for a in state["active_chat_activities"]} == {"atlas", "catalog"}
+    resumes = [c for work in state["works"] for c in work["controls"] if c["action"] == "resume"]
+    assert sorted(resumes, key=lambda c: c["target"]) == [
+        {"action": "resume", "target": "atlas"}, {"action": "resume", "target": "symbols", "scope": "single"}]
+
+    page = room_ui["page"]
+    details = {row["task_id"]: {**row, "status": "running" if row["task_id"] == "catalog" else "scheduled"}
+               for row in state["main_attention"]}
+    details["maps"] = {"task_id": "maps", "chat_id": 1, "status": "completed"}
+    transport = Transport(page, history={1: reading(24)}, details=details)
+    monkeypatch.setattr(transport, "body", lambda: {**state, "supervisor_ready": True})
+    open_app(room_ui, transport)
+    rows = page.locator("#chat-messages .chat-bubble.system[data-owner-action]")
+    expect(rows).to_have_count(3)
+    pill = page.locator("#page-chat .chat-question-nav")
+    passage = page.locator('#chat-messages [data-client-message-id="Main-read-3"]')
+    visited = set()
+    for _ in names:
+        passage.evaluate("el => el.scrollIntoView({block:'center'})")
+        settle_frames(page)
+        expect(pill.locator(".chat-question-nav-count")).to_have_text("3")
+        pill.click()
+        target = page.locator("#chat-messages .owner-action:focus")
+        task_id = target.get_attribute("data-owner-action")
+        assert task_id in names and task_id not in visited
+        visited.add(task_id)
+        expect(target.locator(".owner-action-body > .model-wait-heading strong")).to_have_text(names[task_id])
+        expect(target.locator('[data-intent="open-project"]')).to_have_count(0)
+        if task_id == "catalog":
+            expect(target.locator('[data-wait-id="sign-in"] [data-wait-login]')).to_be_visible()
+            expect(target.locator("[data-resume-run]")).to_have_count(0)
+        else:
+            expect(target.locator("[data-resume-run]")).to_be_enabled()
+            reason = "spending limit" if task_id == "atlas" else "Waiting for Ouroboros or you to resume it"
+            expect(target.locator(".owner-action-reason")).to_contain_text(reason)
+    assert not transport.posts and not transport.around_reads
+
+    for task_id in ("symbols", "atlas"):
+        path = f"/api/tasks/{task_id}/resume"
+        with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(path)) as reply:
+            page.locator(f'[data-owner-action="{task_id}"] [data-resume-run]').click()
+        assert reply.value.ok and reply.value.request.post_data is None
+    assert transport.posts == [("/api/tasks/symbols/resume", {}), ("/api/tasks/atlas/resume", {})]
+
 
 def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui):
     history = {1: [*reading(10), owner(ASK_TEXT, "cm-ask", 30),

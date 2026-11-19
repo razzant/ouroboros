@@ -9,7 +9,7 @@ import { projectReference, nameProjectReference } from './project_reference.js';
 import { createTaskResumeButton, openTaskControlMenu, requestStop, hurryTaskAction,
     resumeTaskAction, ACTION_RESUME, ACTION_HURRY, TASK_CONTROL_TRIGGER_LABEL } from './task_control_menu.js';
 import { syncParkedPhase } from './task_phase_chip.js';
-import { memberState, resumeAttemptWords, workOfEpisode } from './work_status.js';
+import { memberState, reasonText, resumeAttemptWords, workOfEpisode } from './work_status.js';
 import { ANSWERABLE_QUIZ_STATES, questionWaits, unknownDeliveryRemovable, vouchedBy } from './question_presentation.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
@@ -79,11 +79,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         heading.append(title, phaseEl);
         root.append(heading, reason, controls, timelineEl);
         bubble.append(sender, root);
-        const reference = row.project_id ? projectReference({ id: row.project_id, name: row.project_name },
-            { taskId: id, beside: title }) : null;
-        if (reference) controls.append(reference);
         // The message stands only while the census says the task needs the owner, so its chip is the owner's move.
-        record = { groupId: id, bubble, root, phaseEl, title, reason, controls, timelineEl, reference,
+        record = { groupId: id, bubble, root, phaseEl, title, reason, controls, timelineEl, reference: null,
             phaseSecondaryEl: null, row, available: true, finished: false, ownerMove: true };
         records.set(id, record);
         // The time it is first seen: a blocker is a current fact, so it stands at the live edge.
@@ -96,22 +93,36 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         && record.row.can_resume === true && record.row.pause_cause !== 'owner';
 
     function paint(record, row) {
+        if (record.reference && record.row.project_id !== row.project_id) {
+            record.reference.remove();
+            record.reference = null;
+        }
         record.row = row;
-        record.title.textContent = row.task_name || row.title || row.project_name || 'Task';
+        record.title.textContent = row.suggested_name || row.task_name || row.title || row.project_name || tx('Task');
         // What it needs, then its latest refused Resume as dated history in the door's words (never a second message).
         const attempt = resumeAttemptWords(row.last_resume);
-        // Beside its own Resume button a plain resume pause says nothing more: the button is the whole ask.
-        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? ''
+        // A named stop explains the button. A plain Resume needs no second instruction.
+        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? reasonText(row.resumeReason)
             : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
         record.reason.textContent = [needs, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
         record.reason.hidden = !record.reason.textContent;
-        if (record.reference) nameProjectReference(record.reference, { id: row.project_id, name: row.project_name });
+        if (row.project_id) {
+            const project = { id: row.project_id, name: row.project_name };
+            if (record.reference) nameProjectReference(record.reference, project);
+            else {
+                record.reference = projectReference(project, { taskId: record.groupId, beside: record.title });
+                record.controls.prepend(record.reference);
+            }
+        }
         syncParkedPhase(record, connected ? row.phase : 'unknown', row);
         if (canResume(record) && !record.resume) {
             record.resume = createTaskResumeButton(record.groupId, { canResume: () => canResume(record), onSettled: refresh });
             record.controls.append(record.resume);
         }
-        if (record.resume) record.resume.disabled = !canResume(record);
+        if (record.resume) {
+            record.resume.hidden = row.can_resume !== true || row.pause_cause === 'owner';
+            record.resume.disabled = !canResume(record);
+        }
         if (row.cancelable === true && !record.stop) {
             const button = document.createElement('button');
             button.type = 'button';
@@ -269,8 +280,9 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
                     if (!id) continue;
                     current.add(id);
                     // The same body's work projection says the task's latest refused Resume (`last_resume`).
-                    const attempt = memberState(data, id)?.last_resume || workOfEpisode(data, id)?.last_resume;
-                    const row = attempt ? { ...action, last_resume: attempt } : action;
+                    const member = memberState(data, id);
+                    const row = { ...action, last_resume: member?.last_resume || workOfEpisode(data, id)?.last_resume || action.last_resume,
+                        resumeReason: !action.project_id ? member?.because?.[0] : null };
                     const record = recordFor(row);
                     record.available = true;
                     paint(record, row);

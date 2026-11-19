@@ -34,7 +34,12 @@ export function compactTokens(value) {
     return n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(Math.round(n));
 }
 
-const percent = (share) => (share > 0 && share < 0.005 ? '<1%' : `${Math.round(share * 100)}%`);
+const percent = (share) => {
+    const rounded = Math.round(share * 100);
+    if (rounded === 0 && share > 0) return '<1%';
+    if (rounded === 100 && share < 1) return '>99%';
+    return `${rounded}%`;
+};
 
 /** The card's words for one period view: models by cost, each with its parts, and the cache writes by what they followed. */
 export function costPeriodPresentation(view) {
@@ -51,9 +56,13 @@ export function costPeriodPresentation(view) {
             + `${compactTokens(row.uncounted_input_tokens)} input tokens are in no class.`);
         if (row.open_rows) notes.push(`${number(row.open_rows)} ${row.open_rows === 1 ? 'call is' : 'calls are'} still open.`);
         if (row.unpriced_rows) notes.push(`${number(row.unpriced_rows)} ended without a price.`);
-        if (row.write_price_in_reads) {
-            const lifetime = { '5m': ' for 5 minutes', '1h': ' for 1 hour' }[row.write_price_lifetime] || '';
-            notes.push(`One token written${lifetime} costs ${number(row.write_price_in_reads)} read tokens at this model\u2019s base price.`);
+        const ratio = row.write_price_in_reads;
+        const lifetime = { '5m': ' for 5 minutes', '1h': ' for 1 hour' }[row.write_price_lifetime] || '';
+        if (Number.isFinite(ratio)) {
+            const reads = ratio > 0 && ratio < 0.1 ? 'less than 0.1' : number(ratio);
+            notes.push(`One token written${lifetime} costs ${reads} read tokens at this model\u2019s base price.`);
+        } else if (lifetime) {
+            notes.push(`The base price of a write${lifetime} cannot be expressed in read tokens.`);
         }
         // Where no cost can be shared (a subscription model, a call without a price list) the bar is by tokens, and says so.
         const counts = CLASS_WORDS.map(([key]) => Math.max(0, Number(row.tokens?.[key]) || 0));
@@ -68,7 +77,7 @@ export function costPeriodPresentation(view) {
         }
         // By money, a part's dollars, percent and tokens are of one population: the percent is of the sum in the head
         // and the tokens are the shared calls' own (the calls whose cost could not be shared are the "Not split" part).
-        const unsplit = byMoney ? Math.max(0, Number(row.unshared_cost) || 0) : 0;  // the server's rounded remainder
+        const unsplit = byMoney ? Math.max(0, Number(row.unshared_cost) || 0) : 0;
         const total = shared + unsplit;
         const sharedTokens = CLASS_WORDS.map(([key]) => Math.max(0, Number(row.tokens_shared?.[key]) || 0));
         const parts = CLASS_WORDS.map(([key, label], index) => {
@@ -122,14 +131,14 @@ export function costPeriodPresentation(view) {
 const modelHtml = (model) => `<article class="costs-period-model">
         <div class="costs-period-head"><span class="costs-period-name">${escapeHtmlAttr(model.name)}</span><span class="costs-period-sum">${escapeHtmlAttr(model.sum)}</span></div>
         ${model.bar ? `<div class="costs-period-bar" role="img" aria-label="${escapeHtmlAttr(model.parts.map((part) => `${part.label} ${percent(part.share)}`).join(', '))}">${
-        model.parts.filter((part) => part.share > 0).map((part) => `<i data-cost-class="${part.key}" style="--share:${(part.share * 100).toFixed(2)}"></i>`).join('')}</div>` : ''}
+        model.parts.filter((part) => part.share > 0).map((part) => `<i data-cost-class="${part.key}" style="--share:${part.share * 100}"></i>`).join('')}</div>` : ''}
         <dl class="costs-period-parts">${model.parts.map((part) => `<div><dt><i data-cost-class="${part.key}"></i>${part.label}</dt><dd>${escapeHtmlAttr(part.text)}</dd></div>`).join('')}</dl>
         ${model.notes.length ? `<p class="costs-copy">${escapeHtmlAttr(model.notes.join(' '))}</p>` : ''}
     </article>`;
 
 const writesHtml = (writes) => (writes.length ? `<h4 class="costs-period-subtitle">Cache writes by what they followed</h4>
         <table class="cost-table costs-period-writes"><thead><tr><th>Before the write</th><th class="cost-cell-right">Calls</th><th class="cost-cell-right">Written</th><th class="cost-cell-right">Share of cost</th></tr></thead>
-        <tbody>${writes.map((row) => `<tr><td>${escapeHtmlAttr(row.label)}</td><td class="cost-cell-right">${row.calls}</td><td class="cost-cell-right">${row.tokens}</td><td class="cost-cell-right">${row.cost}</td></tr>`).join('')}</tbody></table>` : '');
+        <tbody>${writes.map((row) => `<tr><td>${escapeHtmlAttr(row.label)}</td><td class="cost-cell-right">${row.calls}</td><td class="cost-cell-right">${row.tokens}</td><td class="cost-cell-right">${escapeHtmlAttr(row.cost)}</td></tr>`).join('')}</tbody></table>` : '');
 
 async function fetchPeriod(period, signal) {
     const response = await apiFetch(`/api/cost-breakdown?period=${encodeURIComponent(period)}`, { signal });

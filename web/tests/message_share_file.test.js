@@ -9,7 +9,7 @@ import { createMessageActions, messageRow, recordCardSource } from '../modules/m
 import { SHARE, cardFile, registerMessageShare } from '../modules/message_share.js';
 import { SHARE_APP_FILE_CSP, SHARE_FILE_CSP, drawingUnderWay, drawnAnswer, portableComponents, selectorParts,
     shareFileName } from '../modules/message_share_file.js';
-import { renderChartDataTable } from '../modules/widget_chart.js';
+import { renderChartDataTable, renderDrawnChartDataTable } from '../modules/widget_chart.js';
 
 test('a card’s components as a file shows them: each tab a labelled section, every press disabled, the card untouched', () => {
     const components = [
@@ -81,6 +81,29 @@ test('a chart’s data table keeps every value: points by series, x, y and r; a 
         + '<thead><tr><th>Label</th><th>Euro</th></tr></thead><tbody><tr><th scope="row">Museum</th><td data-label="Euro">24</td></tr>'
         + '<tr><th scope="row">Cafe</th><td data-label="Euro">—</td></tr></tbody></table></div></details>', 'labelled numbers read as before');
     assert.doesNotMatch(renderChartDataTable({ data: { labels: [], datasets: [] } }, 'chart', false), /Series/, 'an empty chart keeps its labelled head');
+});
+
+const drawnRows = (html) => [...html.matchAll(/<tr><th scope="row">(.*?)<\/th>(.*?)<\/tr>/g)]
+    .map(([, head, cells]) => [head, ...[...cells.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map(([, cell]) => cell)]);
+const drawnChart = (type, labels, dataset) => ({
+    config: { type, data: { labels, datasets: [dataset] } },
+    constructor: { helpers: { resolveObjectKey: (object, key) => object?.[key] } },
+    getDatasetMeta: () => ({ type, controller: { options: { parsing: true }, resolveDataElementOptions: () => ({ radius: 0 }) } }),
+});
+
+test('Share reads a drawn line dataset’s pairs as coordinates even when the series has labels', () => {
+    const chart = drawnChart('line', ['0', '1'], { label: 'Path', data: [[0, 4], [1, 8]] });
+    const html = renderDrawnChartDataTable(chart, 'chart');
+    assert.match(html, /<thead><tr><th>Series<\/th><th>Label<\/th><th>x<\/th><th>y<\/th><\/tr><\/thead>/);
+    assert.deepEqual(drawnRows(html), [['Path', '0', '0', '4'], ['Path', '1', '1', '8']]);
+});
+
+test('Share keeps a drawn bar dataset’s pairs as floating interval bounds', () => {
+    const chart = drawnChart('bar', ['0', '1'], { label: 'Range', data: [[0, 4], [1, 8]] });
+    const html = renderDrawnChartDataTable(chart, 'chart');
+    assert.match(html, /<thead><tr><th>Label<\/th><th>Range<\/th><\/tr><\/thead>/);
+    assert.deepEqual(drawnRows(html), [['0', '0 – 4'], ['1', '1 – 8']]);
+    assert.doesNotMatch(html, /<th>x<\/th>/);
 });
 
 // A drawn message's diagram and chart nodes as chat_markdown.js leaves them, read by what the File waits for.

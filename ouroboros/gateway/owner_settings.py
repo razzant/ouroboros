@@ -463,11 +463,15 @@ def check_setting_tokens(document: dict, condition: Any) -> None:
         raise SettingsChangedElsewhere("Changed on another device. Reload the current value before saving.")
 
 
-def settings_read_view() -> tuple[dict, dict]:
-    """GET values and tokens share one source read, including the loader's compatibility rules."""
+def settings_read_view(*, strict: bool = False) -> tuple[dict, dict]:
+    """Effective values and authored keys from the same bytes. A save refuses an unreadable document."""
     from ouroboros import config
 
-    raw = read_settings_json_verified(config.SETTINGS_PATH, behind_writer=True)
+    reader = read_settings_json_strict if strict else read_settings_json_verified
+    try:
+        raw = reader(config.SETTINGS_PATH, behind_writer=True)
+    except SettingsDocumentUnknown as exc:
+        raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL) from exc
     present = raw is not None or config.SETTINGS_PATH.exists()
     raw = normalize_context_mode_compat(raw, settings_path=config.SETTINGS_PATH, warn_ambiguous=True) if isinstance(raw, dict) else {}
     return config.settings_of_document(raw, present=present), config.normalize_settings_raw(raw)
@@ -481,6 +485,23 @@ def settings_in_place_of(document: dict) -> dict:
 
     with settings_read_environ(skill_environ()):
         return config.settings_of_document(document)
+
+
+def persisted_settings(effective: dict, document: dict, body: dict, unset: Sequence[str], kept: Sequence[str]) -> dict:
+    """What a whole-document save writes of ``effective``, the settings it puts in force. Each ``kept`` key, one
+    the operator's environment can put in force without the document (the bind and its Network Password), keeps the
+    document's own value, or stays absent where the document has none, unless the form assigns it (a masked secret
+    echo assigns nothing) or unsets it: a value in force only from that environment is never written as the owner's
+    choice. ``document`` is the save's strict read: an absent document is new and holds nothing, and an unreadable
+    one has already refused the save (``SettingsDocumentUnreadable``) instead of passing for an empty one."""
+    from ouroboros.secret_masking import looks_masked_settings_secret
+    from ouroboros.settings_setup_contract import SECRET_SETTING_KEYS
+
+    saved = {key: value for key, value in effective.items() if key not in kept}
+    saved.update((key, document[key]) for key in kept if key in document and key not in unset)
+    saved.update((key, effective[key]) for key in kept if key in body
+                 and not (key in SECRET_SETTING_KEYS and looks_masked_settings_secret(key, body[key])))
+    return saved
 
 
 def settings_roster_error(raw: Any, stored: dict, body: dict) -> str:
@@ -790,10 +811,13 @@ def _owner_update_settings(
 
             for key in unedited_unauthored_slots(document, to_write, shown) - set(authored_keys):
                 to_write.pop(key, None)
-        to_write = _config.prepare_settings_for_persist(
-            to_write, authored_keys=authored_keys,
-            allow_context_lowering=allow_context_lowering,
-            allow_safety_lowering=allow_safety_lowering)
+        try:
+            to_write = _config.prepare_settings_for_persist(
+                to_write, authored_keys=authored_keys,
+                allow_context_lowering=allow_context_lowering,
+                allow_safety_lowering=allow_safety_lowering)
+        except SettingsDocumentUnknown as exc:
+            raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL) from exc
         for key in unset:
             to_write.pop(key, None)
         write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))

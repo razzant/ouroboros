@@ -103,6 +103,20 @@ def cyber_settings(isolated_settings, monkeypatch):
     return isolated_settings
 
 
+def test_unrelated_save_leaves_launch_access_inherited(isolated_settings, monkeypatch):
+    from ouroboros import config as cfg
+
+    mode = "OUROBOROS_RUNTIME_MODE"
+    isolated_settings.write_text(json.dumps({"TOTAL_BUDGET": 10}), encoding="utf-8")
+    monkeypatch.setenv(mode, "pro")
+    cfg.initialize_runtime_mode_baseline("pro")
+    response = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": 25})
+    assert response.status_code == 200, response.text
+    saved = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert saved["TOTAL_BUDGET"] == 25 and mode not in saved
+    assert cfg.load_settings()[mode] == "pro" and mode not in response.json()["restart_state"]["restart_keys"]
+
+
 def test_cyber_save_settings_can_configure_supervisor_and_keys(cyber_settings):
     from ouroboros import config as cfg
 
@@ -1030,6 +1044,35 @@ def test_a_present_document_the_seam_cannot_read_is_refused_never_written_as_new
     assert json.loads(isolated_settings.read_text(encoding="utf-8"))["TOTAL_BUDGET"] == 25.0
 
 
+def test_a_transient_preimage_read_failure_does_not_drop_a_saved_choice(monkeypatch, isolated_settings):
+    from ouroboros.gateway.owner_settings import (
+        SettingsDocumentUnreadable, _owner_update_settings, fields_on_saved_document,
+    )
+
+    original = b'{\n  "OUROBOROS_MAX_WORKERS": 7,\n  "OUROBOROS_TOOL_TIMEOUT_SEC": 90\n}\n'
+    isolated_settings.write_bytes(original)
+    edit = fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 77})
+    real_open = pathlib.Path.open
+    reads = 0
+
+    def flaky_open(path, mode="r", *args, **kwargs):
+        nonlocal reads
+        if path == isolated_settings and mode == "rb":
+            reads += 1
+            if reads == 3:  # both the locked read and the transform's spelling check worked
+                raise OSError("injected: temporary settings I/O failure")
+        return real_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(pathlib.Path, "open", flaky_open)
+        with pytest.raises(SettingsDocumentUnreadable, match="nothing was written"):
+            _owner_update_settings(edit)
+    assert reads == 3 and isolated_settings.read_bytes() == original
+    _owner_update_settings(edit)
+    saved = json.loads(isolated_settings.read_bytes())
+    assert (saved["OUROBOROS_MAX_WORKERS"], saved["OUROBOROS_TOOL_TIMEOUT_SEC"]) == (7, 77)
+
+
 def test_the_capability_ack_is_not_a_settings_writer(monkeypatch, isolated_settings, tmp_path):
     """FINDING 3, decided the smaller way. `api_acknowledge_capability` wore
     `owner_write_guard` but never calls `_owner_write_settings`: it writes its own
@@ -1294,7 +1337,7 @@ def test_owner_only_generic_write_names_its_endpoint_only_outside_cyber(row_clie
     key = "OUROBOROS_RUNTIME_MODE"
     refused = client.post("/api/settings", json={key: "light"})
     assert refused.status_code == 200 and refused.json()["ignored_keys"][key] == "POST /api/owner/runtime-mode"
-    assert json.loads(path.read_text(encoding="utf-8"))[key] != "light"
+    assert key not in json.loads(path.read_text(encoding="utf-8"))
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline("cyber_pro")
     saved = client.post("/api/settings", json={key: "light"})

@@ -335,10 +335,10 @@ that reported both cache counts; the others are counted apart (`uncounted_calls`
 the same calls: `tokens_shared` are the tokens of the calls whose cost was shared (`tokens`
 counts every call), the cost no tariff or count could share is its own part with
 `unshared_calls`, and a cause row's `write_cost` is of its `shared_write_tokens`. A model
-none of whose calls has a recorded price has `cost: null`. `write_price_in_reads` is how many read tokens one
-written token costs at `write_price_lifetime` (the lifetime most of the model's
-tokens were written at, by the provider's split when it accounts for every write)
-at the model's base price.
+none of whose calls has a recorded price has `cost: null`. `write_price_lifetime` names the lifetime with the
+most written tokens, using the provider's split when it accounts for every write. `write_price_in_reads` divides
+that lifetime's base write rate by the base read rate. A missing rate or a zero read rate gives `null`.
+A zero write rate and a positive read rate give `0`.
 Delegated subscription sessions and unmetered dispatches carry no reservation time
 and are not in a period.
 A consciousness wake reads the 24-hour view once and carries its cache writes as one

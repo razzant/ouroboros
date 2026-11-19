@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { STATUS_READ_LIFETIME_MS } from '../modules/claudexor_status_store.js';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { AUTONOMY_LEVELS } from '../modules/consciousness_autonomy.js';
 import { cardWords, initConsciousnessDashboard, waitWords } from '../modules/consciousness_dashboard.js';
@@ -860,6 +861,118 @@ test('Costs reads subscriptions only through the passive view, on show and Refre
     shown(window, 'costs');
     await settle();
     assert.equal(document.activeElement, elsewhere, 'a refresh does not take focus from elsewhere');
+});
+
+test('Costs › Subscriptions whose status body never comes ends at the status reads\' lifetime as a read that failed; Refresh reads anew', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });  // before the fixture, so the timers it keeps are these
+    const { mount, routes, window } = setup(t);
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20 }));
+    routes.set('/api/consciousness', response({ enabled: true, spent_24h_usd: 1, daily_usd: 20 }));
+    // The engine answered the request and its body never comes, abort or not: a stalled read, not a host that is offline.
+    let bodies = 0;
+    routes.set('/api/claudexor/status?view=quota', async () => ({ ok: true, status: 200,
+        json: () => { bodies += 1; return new Promise(() => {}); } }));
+    initCosts({ mount, state: { activePage: 'dashboard' }, openSettings() {}, openDashboardTab() {} });
+    const block = mount.querySelector('.costs-subscriptions');
+    const doors = () => block.querySelectorAll('[data-costs-account]').map((door) => [door.dataset.costsAccount,
+        door.querySelector('.ui-row-meta').textContent]);
+    shown(window, 'costs');
+    await settle();
+    t.mock.timers.tick(STATUS_READ_LIFETIME_MS - 1);
+    await settle();
+    assert.deepEqual([bodies, doors()], [1, []], 'within its lifetime the read is still out');
+    assert.match(block.querySelector('[data-costs-subscriptions]').textContent, /Reading/);
+    t.mock.timers.tick(1);
+    await settle();
+    assert.deepEqual(doors(), [['accounts', 'The accounts could not be read now.']],
+        'at its lifetime it is a read that failed, said as such: no engine is called stopped');
+    routes.set('/api/claudexor/status?view=quota', response(passive()));
+    mount.querySelector('#btn-refresh-costs').fire('click');
+    await settle();
+    assert.deepEqual(doors().map(([path]) => path), ['accounts/codex', 'accounts/claude', 'accounts'], 'Refresh reads anew');
+});
+
+test('Costs › Subscriptions cancels its old quota body on Refresh and on either exit without painting it', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const state = { activePage: 'dashboard' };
+    routes.set('/api/settings', response({}));
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({}));
+    const pending = [];
+    routes.set('/api/claudexor/status?view=quota', (_url, { signal }) => {
+        const body = deferred();
+        pending.push({ signal, ...body });
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    initCosts({ mount, state });
+    const doors = () => mount.querySelectorAll('[data-costs-account]').map((door) => door.dataset.costsAccount);
+    const noAccounts = passive({ profiles: { profiles: [] }, quota: [] });
+    shown(window, 'costs');
+    await settle();
+    const [old] = pending;
+    assert.equal(old.signal.aborted, false);
+    await mount.querySelector('#btn-refresh-costs').fire('click');
+    assert.equal(old.signal.aborted, true, 'Refresh released the old transport while its body was pending');
+    assert.equal(pending.length, 2);
+    pending[1].resolve(passive());
+    old.resolve(noAccounts);  // a body reader that ignores abort
+    await settle();
+    const expected = ['accounts/codex', 'accounts/claude', 'accounts'];
+    assert.deepEqual(doors(), expected);
+
+    for (const leave of [() => shown(window, 'logs'), () => {
+        state.activePage = 'chat';
+        window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    }]) {
+        shown(window, 'costs');
+        await settle();
+        const latest = pending.at(-1);
+        assert.equal(latest.signal.aborted, false);
+        leave();
+        assert.equal(latest.signal.aborted, true, 'leaving Costs frees the transport');
+        latest.resolve(noAccounts);
+        await settle();
+        assert.deepEqual(doors(), expected, 'the hidden panel keeps its last completed read');
+    }
+});
+
+test('Costs › Subscriptions resumes an unfinished read when Dashboard is shown again', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'costs' };
+    routes.set('/api/settings', response({}));
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({}));
+    const pending = [];
+    routes.set('/api/claudexor/status?view=quota', (_url, { signal }) => {
+        const body = deferred();
+        pending.push({ signal, ...body });
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    initCosts({ mount, state });
+    const host = mount.querySelector('[data-costs-subscriptions]');
+    const doors = () => mount.querySelectorAll('[data-costs-account]').map((door) => door.dataset.costsAccount);
+    shown(window, 'costs');
+    await settle();
+    assert.equal(pending.length, 1);
+    assert.match(host.textContent, /Reading…/);
+
+    state.activePage = 'chat';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    assert.equal(pending[0].signal.aborted, true, 'leaving Dashboard still releases the transport');
+    assert.match(host.textContent, /Reading…/, 'the cancelled first read has not replaced its placeholder');
+
+    state.activePage = 'dashboard';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } }));
+    assert.equal(pending.length, 2, 'the page return starts one fresh read without a subtab event');
+    pending[1].resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    await settle();
+    assert.deepEqual(doors(), ['accounts']);
+    assert.doesNotMatch(host.textContent, /Reading…/);
+
+    pending[0].resolve(passive());
+    await settle();
+    assert.deepEqual(doors(), ['accounts'], 'the abandoned answer cannot repaint the resumed read');
 });
 
 test('in a wide window the Dashboard holds its list beside a page; an engine without container queries gets the list, then a page with Back', (t) => {

@@ -69,19 +69,53 @@ export function chartConfig(component, data) {
 // bubble's `[x, y, r]` where the chart plots points, a floating bar's `[from, to]` at its label.
 const isChartPoint = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const chartRange = (value) => (Array.isArray(value) ? value.map((part) => part ?? '—').join(' – ') : value);
+const RADIAL_VALUE_KEYS = { pie: 'value', doughnut: 'value', radar: 'r', polarArea: 'r' };
 
-/** The accessible table of a chart's data, every value kept: one row per label, or, for a chart of points (a scatter
- *  or bubble chart, a point value, values without labels), one row per point: its series, its label where the chart
- *  has labels, x, y and radius. */
+/** Read the same object keys as the drawn Chart.js series, before its scales turn category names into indexes or
+ *  coerce missing values to numbers. The mounted controller resolves parsing and Chart.js reads each path.
+ *  BubbleController's normal radius (Chart.js 4.4.8) uses parsed `_custom` or the point option, zero included:
+ *  it covers `[x, y]` and does not mistake a raw `r` for parsed data when parsing is off. */
+export function renderDrawnChartDataTable(chart, label) {
+    const { type, data } = chart.config;
+    const { resolveObjectKey } = chart.constructor.helpers;
+    const datasets = data.datasets.map((dataset, index) => {
+        const { controller, type: seriesType } = chart.getDatasetMeta(index);
+        const parsing = controller.options.parsing;
+        const radialKey = RADIAL_VALUE_KEYS[seriesType];
+        const bubble = seriesType === 'bubble';
+        const drawnRadius = (point) => controller.resolveDataElementOptions(point).radius;
+        const values = dataset.data.map((raw, point) => {
+            if (parsing !== false && Array.isArray(raw)) {
+                // Cartesian controllers read coordinates; a bar reads the same pair as a floating interval.
+                if (bubble) return { x: raw[0], y: raw[1], r: drawnRadius(point) };
+                if (seriesType === 'line' || seriesType === 'scatter') return { x: raw[0], y: raw[1] };
+            }
+            if (!isChartPoint(raw)) return raw;
+            if (parsing === false) return bubble ? { x: raw.x, y: raw.y, r: drawnRadius(point) } : raw;
+            if (radialKey) return resolveObjectKey(raw, parsing?.key ?? radialKey);
+            return {
+                x: resolveObjectKey(raw, parsing?.xAxisKey ?? 'x'),
+                y: resolveObjectKey(raw, parsing?.yAxisKey ?? 'y'),
+                r: bubble ? drawnRadius(point) : raw.r,
+            };
+        });
+        return { label: dataset.label ?? '', data: values };
+    });
+    return renderChartDataTable({ type, data: { labels: data.labels, datasets } }, label, false);
+}
+
+/** The accessible table keeps rows by label (by position for unnamed radial values) or by Cartesian point:
+ *  its series, label if present, x, y and radius. */
 export function renderChartDataTable(config, label, expanded) {
     const labels = config.data.labels || [];
     const datasets = config.data.datasets || [];
+    const unlabelledRadial = !labels.length && Object.hasOwn(RADIAL_VALUE_KEYS, config.type);
     const values = (dataset) => (Array.isArray(dataset?.data) ? dataset.data : []);
     const cell = (name, value) => `<td data-label="${escapeHtml(name)}">${escapeHtml(value ?? '—')}</td>`;
     let head;
     let rows;
     if (['scatter', 'bubble'].includes(config.type) || datasets.some((dataset) => values(dataset).some(isChartPoint))
-        || (!labels.length && datasets.some((dataset) => values(dataset).length))) {
+        || (!labels.length && !unlabelledRadial && datasets.some((dataset) => values(dataset).length))) {
         const points = datasets.flatMap((dataset) => values(dataset).map((value, idx) => {
             const point = isChartPoint(value) ? value : Array.isArray(value) ? { x: value[0], y: value[1], r: value[2] } : { y: value };
             return { series: dataset.label, label: labels[idx], x: point.x, y: point.y, r: point.r };
@@ -91,8 +125,9 @@ export function renderChartDataTable(config, label, expanded) {
         head = `<th>Series</th>${labelled ? '<th>Label</th>' : ''}<th>x</th><th>y</th>${radius ? '<th>r</th>' : ''}`;
         rows = points.map((point) => `<tr><th scope="row">${escapeHtml(point.series ?? '—')}</th>${labelled ? cell('Label', point.label) : ''}${cell('x', point.x)}${cell('y', point.y)}${radius ? cell('r', point.r) : ''}</tr>`).join('');
     } else {
-        head = `<th>Label</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}`;
-        rows = labels.map((item, idx) => `<tr><th scope="row">${escapeHtml(item)}</th>${datasets.map((dataset) => cell(dataset.label, chartRange(values(dataset)[idx]))).join('')}</tr>`).join('');
+        head = `<th>${unlabelledRadial ? 'Position' : 'Label'}</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}`;
+        const count = datasets.reduce((length, dataset) => Math.max(length, values(dataset).length), labels.length);
+        rows = Array.from({ length: count }, (_, idx) => `<tr><th scope="row">${escapeHtml(labels[idx] ?? (unlabelledRadial ? idx + 1 : '—'))}</th>${datasets.map((dataset) => cell(dataset.label, chartRange(values(dataset)[idx]))).join('')}</tr>`).join('');
     }
     return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }

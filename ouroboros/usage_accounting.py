@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_
 from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
-    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
+    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_failure, usage_from_response,
     _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
@@ -566,7 +566,8 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
         return _number(explicit)
     if request.force_unknown_reservation:
         return None
-    if str(request.provider or "").lower() == "local":
+    provider = str(request.provider or "").strip().lower()
+    if provider == "local":
         return 0.0
     # Deliberately the RAW estimate (base64-inclusive), NOT the bounded proxy:
     # for money reservation an over-count on image rounds is the safe
@@ -576,14 +577,9 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
     # OpenAI-family chars/4 estimates keep the measured 1.10 reservation envelope.
     from ouroboros.provider_models import normalize_model_identity
     normalized_model = normalize_model_identity(str(request.model or "").lstrip("~"))
-    if (
-        str(request.provider or "").strip().lower() in {"openai", "openrouter"}
-        and normalized_model.startswith("openai/")
-    ):
+    if provider in {"openai", "openrouter"} and normalized_model.startswith("openai/"):
         prompt_tokens = (prompt_tokens * 11 + 9) // 10
-    cache_write_tokens = (
-        prompt_tokens if str(request.model or "").lstrip("~").startswith(("anthropic/", "anthropic::")) else 0
-    )
+    cache_write_tokens = prompt_tokens if normalized_model.startswith("anthropic/") else 0
     cached_tokens = 0
     if cache_write_tokens:
         # Price the task's OWN last observed split, not a full write every round;
@@ -1176,8 +1172,9 @@ def settle_attempt(
     cost_usd: Optional[float] = None,
     cost_final: bool = False,
     expected_revision: Optional[int] = None,
+    estimate_cache_ttl: Optional[str] = None,
 ) -> None:
-    fields = _settlement_fields(reservation, usage, cost_usd, cost_final)
+    fields = _settlement_fields(reservation, usage, cost_usd, cost_final, estimate_cache_ttl=estimate_cache_ttl)
     _transition(reservation, "settled", _expected_revision=expected_revision, **fields)
     stash_task_cache_split(
         (_CURRENT_SCOPE.get() or UsageScope()).task_id, reservation.model,
@@ -1270,11 +1267,11 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
     return payload
 
 
-def _settlement_fields(reservation, usage, cost_usd, cost_final) -> Dict[str, Any]:
+def _settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cache_ttl=None) -> Dict[str, Any]:
     from ouroboros._usage_settlement import settlement_fields
 
     return settlement_fields(reservation, usage, cost_usd, cost_final,
-                             estimate_cost_optional=estimate_cost_optional)
+                             estimate_cost_optional=estimate_cost_optional, estimate_cache_ttl=estimate_cache_ttl)
 
 
 def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, cost_usd=None, pending=False) -> AttemptReservation:
@@ -1347,7 +1344,7 @@ def _return_physical_claim(attempt_id: str) -> None:
                 state.used -= 1
 
 
-def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException) -> str:
+def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException, request: Optional[AttemptRequest] = None) -> str:
     """Route a raised provider send to its honest terminal ledger state."""
     if getattr(exc, "receiver_abandoned", False):  # owner Pause: the sender settles it late; still dispatched
         return "dispatched"
@@ -1355,35 +1352,32 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
     if release_pre_dispatch_attempt(reservation, exc):
         _return_physical_claim(reservation.attempt_id)
         return "released"
-    provider = str(reservation.provider or "").strip().lower()
+    receipt = getattr(exc, "stream_receipt", None)
+    if isinstance(receipt, dict) and receipt.get("attempt_id") not in (None, "", reservation.attempt_id):
+        mark_unresolved(reservation, "Received stream evidence names another physical attempt")
+        return "unresolved"
     stream_usage = getattr(exc, "stream_usage", None)
-    for evidence in ({"usage": stream_usage}, payload):
-        if isinstance(evidence, dict):
-            evidence = {key: value for key, value in evidence.items() if key != "error"}
-        usage, cost, final = usage_from_response(evidence)
-        if final and cost is not None:
-            settle_attempt(reservation, usage, cost_usd=cost, cost_final=True)
-            return "settled"
-    if provider == "openrouter":
+    usage, cost, final = usage_from_failure(payload, stream_usage)
+    if final and cost is not None:
+        settle_attempt(reservation, usage, cost_usd=cost, cost_final=True)
+        return "settled"
+    if str(reservation.provider or "").strip().lower() == "openrouter":
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
             if predicate(exc):
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if isinstance(stream_usage, dict) and stream_usage:
-        # The usage frame was read before the body was judged unusable: money is
-        # known, so settle through the success path's extractor and cost derivation
-        # from that frame alone (no assembled-body facts such as service_tier, no
-        # cache-TTL injection or token-density observation); only the answer is missing.
-        usage, cost, final = usage_from_response({"usage": stream_usage})
-        settle_attempt(reservation, dict(usage or {}), cost_usd=cost, cost_final=final)
+        # Only a frame's own facts and its bound send's TTL can supply an estimate.
+        from ouroboros._usage_settlement import frame_estimate_ttl
+        settle_attempt(reservation, usage, cost_usd=None, cost_final=False,
+                       estimate_cache_ttl=frame_estimate_ttl(reservation, request, exc))
         return "settled"
-    else:
-        from ouroboros.transport_custody import attempt_custody_event_fields
-        cause = attempt_custody_event_fields(exc).get("transport_cause_type")
-        suffix = f" [cause: {cause}]" if cause else ""
-        # Suffix leads: a verbose provider body must not truncate it away (mark_unresolved keeps 500 chars).
-        mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}")
-        return "unresolved"
+    from ouroboros.transport_custody import attempt_custody_event_fields
+    cause = attempt_custody_event_fields(exc).get("transport_cause_type")
+    suffix = f" [cause: {cause}]" if cause else ""
+    # Suffix leads: a verbose provider body must not truncate it away (mark_unresolved keeps 500 chars).
+    mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}")
+    return "unresolved"
 
 
 def _record_attempt_capture(
@@ -1496,7 +1490,7 @@ def execute_physical_attempt(
     except BaseException as exc:
         terminal_state = "dispatched"
         try:
-            terminal_state = _terminalize_failed_attempt(reservation, exc)
+            terminal_state = _terminalize_failed_attempt(reservation, exc, request)
         except Exception:
             log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
         _record_attempt_capture(
@@ -1568,7 +1562,7 @@ async def execute_physical_attempt_async(
         except BaseException as exc:
             terminal_state = "dispatched"
             try:
-                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc)
+                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc, request)
             except Exception:
                 log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
             _record_attempt_capture(

@@ -45,31 +45,39 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
     // unanswered press here on top (`pinning`: `{ route | null, seq }`). `pinOut` counts the writes out or queued,
     // `pinWriting` is the last of them; `pinsWritten` counts the answers adopted, so a read knows whether one came after
     // it was sent.
-    const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
+    const state = { catalog: null, readAt: null, failed: false, reading: null, recents: [], recentsReading: null,
         recentsAgain: false, served: [], pins: [], pinning: new Map(), pinSeq: 0, pinOut: 0, pinWriting: null,
-        pinsWritten: 0, connections: null, connectionsReading: null, index: null, tiers: null, cacheTier: null,
-        readTier: undefined };
+        pinsWritten: 0, connections: null, connectionsReading: null, documentsApplied: 0, index: null, tiers: null,
+        cacheTier: null, readTier: null };
     const listeners = new Set();
     const notify = () => { state.index = null; listeners.forEach((listener) => listener()); };
 
-    // A row's cache-write figure names the tier it is of (`price.cache_write_ttl`): it is said only while the
-    // settings name that tier (`index`). A held figure of another tier (kept by a partial read, brought by a late or
-    // another reader's answer, or read before the first settings document) makes the catalog stale until this store
-    // has begun a read under the tier the settings name (`readTier`): one more read per tier, never one per opened
-    // capsule, since where that read cannot bring it (a value the server resolves otherwise, a tier changed from
-    // another window, a provider that keeps failing) the figure stays unsaid and the catalog keeps its usual life.
-    const staleForTier = () => state.cacheTier !== null && state.readTier !== state.cacheTier
+    // The index only shows figures stamped for the settings' tier. `readTier` is the tier when the latest read began
+    // (null before Settings, undefined after a tier change, including A→B→A). A read with no known tier can prove
+    // the now-known tier only through its figures. Otherwise the next ordinary read makes one corrective attempt.
+    const otherTierHeld = () => state.cacheTier !== null
         && (state.catalog?.items || []).some((item) => item?.price?.cache_write_ttl && item.price.cache_write_ttl !== state.cacheTier);
+    const namedTierFigures = () => (state.cacheTier === null ? 0
+        : (state.catalog?.items || []).filter((item) => item?.price?.cache_write_ttl === state.cacheTier).length);
+    const staleForTier = () => state.readTier === undefined || (state.readTier !== state.cacheTier
+        && (otherTierHeld() || namedTierFigures() === 0));
 
-    function adopt(data) {
+    /** `readAt` null means stale. A handed-over Models refresh has no known start tier or order: a held figure of
+     *  another tier or a drop in the named tier's figures owes one read. If the read then states no matching
+     *  figure, the price stays unsaid and the catalog keeps its usual life. */
+    function adopt(data, handed = false) {
+        const said = handed ? namedTierFigures() : 0;
         state.catalog = mergeModelCatalog(state.catalog || {}, data);
-        state.readAt = staleForTier() ? 0 : now();
+        state.readAt = staleForTier() || (handed && (otherTierHeld() || namedTierFigures() < said)) ? null : now();
         state.failed = false;
     }
 
     function read({ force = false } = {}) {
-        if (state.reading) return state.reading;
-        if (!force && state.catalog && !state.failed && now() - state.readAt < CATALOG_FRESH_MS) return Promise.resolve();
+        // An open while a read is out for a different or not-yet-known tier rechecks freshness when it answers.
+        if (state.reading) return state.readTier === state.cacheTier ? state.reading : state.reading.then(() => read({ force }));
+        if (!force && state.catalog && !state.failed && state.readAt !== null && now() - state.readAt < CATALOG_FRESH_MS) {
+            return Promise.resolve();
+        }
         state.readTier = state.cacheTier;
         state.reading = (async () => {
             try {
@@ -185,9 +193,9 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         // The tier a call is sent with: another one than before makes the held catalog stale (the next opened capsule
         // reads that tier's figures), and a held figure of another tier is unsaid at once (`index`).
         const cacheTier = String(settings?.OUROBOROS_PROMPT_CACHE_TTL || '').trim().toLowerCase();
-        const moved = state.cacheTier !== null && state.cacheTier !== cacheTier;
+        if (state.cacheTier !== null && state.cacheTier !== cacheTier) state.readTier = undefined;
         state.cacheTier = cacheTier;
-        if (state.catalog && (staleForTier() || moved)) state.readAt = 0;
+        if (state.catalog && staleForTier()) state.readAt = null;
     }
     /** Main's own tier and the default one (`/api/state` `processing_tiers`, or a settings document). */
     function adoptTiers(tiers) {
@@ -204,12 +212,17 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         : state.tiers.default) : true);
 
     /** The settings document, read once: which key a saved source names and why it cannot send, and the tiers.
-     *  A failed read is not repeated by every paint; Settings' own load or save brings the document again. */
+     *  A failed read is not repeated by every paint; Settings' own load or save brings the document again. A document
+     *  Settings applied while this read was out is the newer one: the read's late answer, or its failure, never stands
+     *  over it (`documentsApplied` counts them). */
     function readConnections() {
         if (state.connections || state.connectionsFailed) return Promise.resolve();
-        state.connectionsReading ||= Promise.resolve().then(readSettings)
-            .then(adoptSettings)
-            .catch(() => { state.connectionsFailed = true; })
+        if (state.connectionsReading) return state.connectionsReading;
+        const applied = state.documentsApplied;
+        const current = () => state.documentsApplied === applied;
+        state.connectionsReading = Promise.resolve().then(readSettings)
+            .then((settings) => { if (current()) adoptSettings(settings); })
+            .catch(() => { if (current()) state.connectionsFailed = true; })
             .finally(() => { state.connectionsReading = null; notify(); });
         return state.connectionsReading;
     }
@@ -217,9 +230,11 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
     return {
         read, readRecents, readConnections, setPinned,
         /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). */
-        adopt(data) { if (Array.isArray(data?.items)) { adopt(data); notify(); } },
+        adopt(data) { if (Array.isArray(data?.items)) { adopt(data, true); notify(); } },
         /** The settings document Settings loaded or saved: a changed tier or key reaches the list without a read. */
-        adoptSettings(settings) { if (settings && typeof settings === 'object') { adoptSettings(settings); notify(); } },
+        adoptSettings(settings) {
+            if (settings && typeof settings === 'object') { state.documentsApplied += 1; adoptSettings(settings); notify(); }
+        },
         /** `/api/state`'s `processing_tiers`: Main's own tier and the default one. */
         adoptTiers(tiers) { if (adoptTiers(tiers)) notify(); },
         /** The tiers as last read (`{ main, default }`, '' for none), or null before any read. */

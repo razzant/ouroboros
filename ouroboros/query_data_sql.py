@@ -91,6 +91,10 @@ def schema_hint(db: str) -> str:
     if db == "current":
         return (f"db=current SQL reads rows of {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks) "
                 "or SELECT * FROM pragma_table_info('tasks'); task bodies and cards: op=json kind=task_result")
+    if db == "money":
+        return ("Known spend: SELECT settled, confirmed, estimated, unknown_unmetered FROM summaries "
+                "WHERE scope='global' AND key=''. Scopes overlap. SUM(attempts.cost_usd) can miss imported "
+                "string amounts in extra. Tables: PRAGMA table_list; columns: PRAGMA table_info(<table>).")
     return "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
 
 

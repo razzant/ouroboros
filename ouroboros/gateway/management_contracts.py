@@ -877,7 +877,7 @@ class ReviewPoolResponse(TypedDict):
 # --- Local model, MCP and the model catalog ----------------------------------------------------
 
 class ModelPriceTier(TypedDict):
-    """From ``min_prompt_tokens`` input tokens on, a request is charged these USD per 1M tokens."""
+    """Effective USD per 1M tokens above ``min_prompt_tokens`` until the next threshold is exceeded."""
 
     min_prompt_tokens: int
     input: float

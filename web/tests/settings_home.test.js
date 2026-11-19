@@ -12,7 +12,7 @@ test('a door names its destination, without adding words to an internal row', ()
     assert.equal(settingsDoorName('Models', 'models'), 'Models');
 });
 
-import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
+import { STATUS_READ_LIFETIME_MS, createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
 import { getContributions } from '../modules/contributions.js';
 import { createHostStart } from '../modules/host_starting_status.js';
 import { initSettings } from '../modules/settings.js';
@@ -879,6 +879,38 @@ test('one read of a source at a time: asked again in flight it starts no second 
     gates[2].resolve(reply({ places: [] }));
     await settle();
     assert.equal(answer('page:circles'), '2 places');
+});
+
+test('the passive roster read ends at the status reads\' lifetime: one that never answers frees the read asked after it; off screen it is dropped', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });  // before the world, so the timers it keeps are these
+    const { env, content } = world(t);
+    const roster = { view: 'quota', quota: [], reads: { catalog: 'not_read', accounts: 'ok', quota: 'ok' },
+        profiles: { profiles: ['p0', 'p1'].map((id) => ({ profile: { harness_id: 'codex', profile_id: id, display_name: id,
+            enabled: true }, status: { verification: 'passed' }, identity: {} })) } };
+    const signals = [];
+    // The first request and the last never answer, abort or not: an engine that stalls, not a host that is offline.
+    env.routes.set('/api/claudexor/status?view=quota', async (_url, init = {}) => {
+        signals.push(init.signal);
+        return signals.length === 2 ? reply(roster) : new Promise(() => {});
+    });
+    const { home, answer } = listHome(t, content);
+    const first = home.refresh(['roster']);
+    void home.refresh(['roster']);                    // asked again while it runs: it waits for the first
+    await settle();
+    t.mock.timers.tick(STATUS_READ_LIFETIME_MS - 1);
+    await settle();
+    assert.equal(signals.length, 1, 'within its lifetime the read is out and the next one waits');
+    t.mock.timers.tick(1);
+    await first;
+    assert.deepEqual([signals.length, signals[0].aborted, answer('accounts')], [2, true, '2 accounts'],
+        'at its lifetime its transport ends and the read asked meanwhile goes out');
+    // Off screen the read in flight is dropped as before, freeing its connection, and paints nothing.
+    void home.refresh(['roster']);
+    await settle();
+    home.hide();
+    assert.equal(signals[2].aborted, true);
+    await settle();
+    assert.equal(answer('accounts'), '2 accounts');
 });
 
 test('the Tools status writer updates the list beside another page without reading; off screen it paints and reads nothing', async (t) => {

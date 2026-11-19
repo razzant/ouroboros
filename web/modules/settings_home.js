@@ -10,10 +10,10 @@
  * owner here (`needRows`), in its voice; search matches the words on screen and the words they replaced
  * (`searchSettings`), and its last line hands the words to Ouroboros as an unsent draft in Main. */
 
-import { apiClient, fetchJson } from './api_client.js';
+import { apiClient, fetchJson, withinRequestLifetime } from './api_client.js';
 import { confirmAndSendRestart, headerBudgetPresentation } from './chat_activity.js';
 import { routeSource, shortName } from './chat_model_routes.js';
-import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK } from './claudexor_status_store.js';
+import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK, STATUS_READ_LIFETIME_MS } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { PLACES_CHANGED_EVENT, normalizeConsciousness, parseRoster } from './consciousness_api.js';
 import { headlineView } from './consciousness_dashboard.js';
@@ -503,7 +503,9 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         storage: (signal) => fetchJson('/api/storage', { cache: 'no-store', signal }),
         autostart: (signal) => apiClient.desktopAutostart({ signal }),
         // The roster and the windows the engine last observed, as Costs reads them: it starts and refreshes nothing.
-        roster: async (signal) => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store', signal })),
+        // It ends within the status reads' lifetime, so a request that never answers frees the next roster read.
+        roster: async (signal) => (storeRead() ? facts.roster : withinRequestLifetime((transport) => fetchJson(
+            '/api/claudexor/status?view=quota', { cache: 'no-store', signal: transport }), { signal, lifetimeMs: STATUS_READ_LIFETIME_MS })),
         // The app's state snapshot, through the page's one sequencer: a read in flight is waited for, not doubled, and
         // its order keeps an older body from replacing a newer one.
         state: async () => {

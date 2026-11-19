@@ -49,8 +49,7 @@ def settings_client(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "_apply_settings_to_env", lambda *a, **k: None)
         monkeypatch.setattr(module, "apply_runtime_provider_defaults", defaults)
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", load)
-    monkeypatch.setattr(gateway, "_owner_settings_document", load)
-    monkeypatch.setattr(gateway, "settings_read_view", lambda: (load(), load()))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (load(), load()))
     monkeypatch.setattr(gateway, "_owner_write_settings", save)
     app = Starlette(routes=[Route("/api/settings", endpoint=srv.api_settings_get, methods=["GET"]),
                             Route("/api/settings", endpoint=srv.api_settings_post, methods=["POST"])])
@@ -413,8 +412,7 @@ def test_an_openai_key_already_read_stays_on_chat_completions(settings_client, m
     for module in (gateway, srv):
         monkeypatch.setattr(module, "load_settings", lambda: copy.deepcopy(view))
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", lambda: copy.deepcopy(document))
-    monkeypatch.setattr(gateway, "_owner_settings_document", lambda: copy.deepcopy(document))
-    monkeypatch.setattr(gateway, "settings_read_view", lambda: (copy.deepcopy(view), copy.deepcopy(view)))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (copy.deepcopy(view), copy.deepcopy(document)))
     response = client.post("/api/settings", json={"OPENAI_API_KEY": "sk-proj-typed-0123456789"})
     assert response.status_code == 200, response.text
     assert saved["OPENAI_API_KEY"] == "sk-proj-typed-0123456789" and saved["OPENAI_API_SURFACE"] == ""

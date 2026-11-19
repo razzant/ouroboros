@@ -898,8 +898,11 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     )
     if admission is None:
         return None
-    usd = lambda value: "unknown" if value is None else f"${float(value):.6f}"  # noqa: E731
-    from ouroboros.cost_projection import uncounted_money_text  # each uncounted part by its ledger name (P8)
+    from ouroboros.cost_projection import uncounted_money_text, usd_text
+
+    def usd(value):
+        return "unknown" if value is None else usd_text(float(value), decimals=6)
+
     _beside = lambda facts, prefix="": f" ({text}; not counted)" if (text := uncounted_money_text(facts, decimals=6, prefix=prefix)) else ""  # noqa: E731,E501
     bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
     wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
@@ -970,7 +973,7 @@ def managed_update_wave_estimate(remaining_usd: float) -> dict:
     total = estimate.get("estimated_wave_usd")
     event["unpriced_slots"] = int(estimate.get("unpriced_slots") or 0) + (len(models) if total is None else 0)
     if total is not None:
-        event["estimated_wave_usd"] = round(float(total), 6)
+        event["estimated_wave_usd"] = total
         event["exceeds_known_remaining"] = float(total) > float(remaining_usd) + 1e-9
     return event
 

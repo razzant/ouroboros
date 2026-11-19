@@ -425,13 +425,13 @@ def review_wave_admission(
                         allow_live_fetch=allow_live_fetch,
                     )
                 )
-            result["slot_bounds"].append(None if bound is None else round(float(bound), 6))
+            result["slot_bounds"].append(bound)
             if bound is None:
                 # Unknown contributes no invented price and remains explicitly counted.
                 result["unpriced_slots"] = int(result.get("unpriced_slots") or 0) + 1
                 continue
             total += float(bound)
-        result["estimated_wave_usd"] = round(total, 6)
+        result["estimated_wave_usd"] = total
         # The reservation's equality: no room once known spend reached the limit. A reached GLOBAL limit
         # refuses paid admission only (``usage_accounting.paid_admission``): a wave none of whose seats
         # needs it still fits; a root or group cap binds every seat.

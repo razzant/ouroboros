@@ -52,7 +52,9 @@ from ouroboros.request_wire_recovery import (
 )
 
 from ouroboros.usage_accounting import UsageAccountingError, last_physical_attempt_capture, UsageScope, usage_scope
-from ouroboros._usage_response import observed_processing_mode
+from ouroboros._usage_response import (
+    cache_pricing_usage, cache_write_split, cache_write_total, observed_processing_mode, reported_price,
+)
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts
 
 
@@ -328,29 +330,9 @@ class _AnthropicLaneMixin:
         return {"type": "tool", "name": tool_choice}
 
     @staticmethod
-    def _cache_write_split(raw_usage: Dict[str, Any]) -> Dict[str, int]:
-        """Anthropic's per-tier cache-write counters, when the provider reports them.
-
-        With the extended (1h) tier live, ``usage.cache_creation`` splits
-        ``cache_creation_input_tokens`` into ``ephemeral_5m_input_tokens`` /
-        ``ephemeral_1h_input_tokens`` — a 1h request can legitimately produce BOTH
-        (e.g. a server-tool block cached at the default tier beside the 1h prefix),
-        and pricing must bill only the genuine 1h share at the extended ratio.
-        Empty dict when the provider reported no split (older shapes) — the caller
-        then bills every write at the reported tier, never a loosened ratio.
-        """
-        split = raw_usage.get("cache_creation") if isinstance(raw_usage, dict) else None
-        if not isinstance(split, dict):
-            return {}
-        out: Dict[str, int] = {}
-        for tier, key in (("5m", "ephemeral_5m_input_tokens"), ("1h", "ephemeral_1h_input_tokens")):
-            try:
-                value = int(split.get(key) or 0)
-            except (TypeError, ValueError):
-                value = 0
-            if value > 0:
-                out[tier] = value
-        return out
+    def _cache_write_split(raw_usage: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        """The native write bins exposed by both native and OpenRouter replies."""
+        return cache_write_split(raw_usage) if isinstance(raw_usage, dict) else {}
 
     def _normalize_anthropic_response(
         self,
@@ -380,6 +362,11 @@ class _AnthropicLaneMixin:
                 })
 
         raw_usage = resp_dict.get("usage") or {}
+        write_split = self._cache_write_split(raw_usage)
+        written, invalid_write = cache_write_total(raw_usage, write_split)
+        # With no reported writes the historical billing default is zero.
+        if written is None and not (write_split or invalid_write):
+            written = 0
         usage: Dict[str, Any] = {
             # v6.77.0: Anthropic EXCLUDES cache reads/writes from `input_tokens`, while
             # `prompt_tokens` is the OpenAI-semantics TOTAL input every consumer assumes —
@@ -388,16 +375,18 @@ class _AnthropicLaneMixin:
             "prompt_tokens": (
                 int(raw_usage.get("input_tokens") or 0)
                 + int(raw_usage.get("cache_read_input_tokens") or 0)
-                + int(raw_usage.get("cache_creation_input_tokens") or 0)
-            ),
+                + written
+            ) if written is not None else None,
             "completion_tokens": int(raw_usage.get("output_tokens") or 0),
             "cached_tokens": int(raw_usage.get("cache_read_input_tokens") or 0),
-            "cache_write_tokens": int(raw_usage.get("cache_creation_input_tokens") or 0),
+            "cache_write_tokens": written,
+            **({"cache_write_tokens_invalid": True} if invalid_write else {}),
             "provider": "anthropic",
             "resolved_model": str(target.get("usage_model") or target.get("resolved_model") or ""),
         }
         # The counters above keep their billing shape; events read what was REPORTED (#1578).
-        usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(raw_usage)
+        usage[REPORTED_TOKENS_KEY] = anthropic_token_counts(
+            {**raw_usage, "cache_creation_input_tokens": written} if write_split and not invalid_write else raw_usage)
         for key in ("speed", "service_tier", "processing"):
             if key in raw_usage:
                 usage[key] = raw_usage[key]
@@ -406,22 +395,23 @@ class _AnthropicLaneMixin:
             usage["stream_receipt"] = dict(resp_dict["_stream_receipt"])
         if prompt_cache_ttl:
             usage["prompt_cache_ttl"] = prompt_cache_ttl
-        write_split = self._cache_write_split(raw_usage)
         if write_split:
             usage["cache_write_tokens_by_ttl"] = write_split
-        if usage["prompt_tokens"] or usage["completion_tokens"]:
+        amount, invalid, basis = reported_price(raw_usage, resp_dict.get("total_cost_usd"))
+        if basis:
+            usage["cost_basis"] = basis
+        if amount is not None:
+            usage["cost"] = amount
+        elif invalid:
+            usage["cost_invalid"] = True
+        elif usage["prompt_tokens"] or usage["completion_tokens"]:
             from ouroboros.pricing import estimate_cost_optional
 
             estimated_cost = estimate_cost_optional(
                 usage["resolved_model"],
                 usage["prompt_tokens"],
                 usage["completion_tokens"],
-                cache_usage={
-                    "cached_tokens": usage["cached_tokens"],
-                    "cache_write_tokens": usage["cache_write_tokens"],
-                    "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
-                    "cache_write_tokens_by_ttl": write_split or None,
-                },
+                cache_usage=cache_pricing_usage(usage, written, write_split),
                 provider="anthropic",
                 **({"processing_mode": observed_processing_mode("anthropic", usage)}
                    if usage.get("processing") else {}),
@@ -529,7 +519,7 @@ class _AnthropicLaneMixin:
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             stream=stream,
         )
-        prompt_cache_ttl = self._normalize_payload_cache_ttl(target, payload)
+        self._normalize_payload_cache_ttl(target, payload)
 
         url = f"{str(target.get('base_url') or '').rstrip('/')}/messages"
         headers = {
@@ -580,7 +570,7 @@ class _AnthropicLaneMixin:
                 )
                 note_wire_send_succeeded(last_physical_attempt_capture())
                 prior_capture = strongest_dispatch_capture(prior_capture, last_physical_attempt_capture())
-                return result
+                return result, request.prompt_cache_ttl
             except UsageAccountingError as exc:
                 self._pop_effort_clamp_disclosure()
                 note_wire_send_failed()
@@ -592,7 +582,7 @@ class _AnthropicLaneMixin:
                 raise
 
         try:
-            response = _send(payload)
+            response, prompt_cache_ttl = _send(payload)
         except UsageAccountingError:
             raise
         except Exception as exc:
@@ -608,14 +598,14 @@ class _AnthropicLaneMixin:
                     target, self._strip_openrouter_roundtrip_metadata(messages, keep_reasoning_content=True),
                     reasoning_effort, max_tokens, tool_choice, temperature, tools, stream=stream,
                 )
-                prompt_cache_ttl = self._normalize_payload_cache_ttl(target, retry_payload)
+                self._normalize_payload_cache_ttl(target, retry_payload)
                 reasoning_omitted = True
             if retry_payload is None:
                 self._pop_effort_clamp_disclosure()
                 raise
             for _ in range(8):
                 try:
-                    response = _send(retry_payload)
+                    response, prompt_cache_ttl = _send(retry_payload)
                     break
                 except UsageAccountingError:
                     raise

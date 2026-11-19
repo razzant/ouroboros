@@ -359,6 +359,23 @@ test('the reason names what the task needs from the owner', t => {
     assert.equal(reason('resume').textContent, '');
 });
 
+test('a native action keeps its source when it gains a Project or changes its required action', t => {
+    const main = mainPage(t);
+    const native = action('index', { project_id: '', project_name: '', task_name: '', suggested_name: 'Index the atlas' });
+    main.waiting.snapshot(census({ actions: [native] }));
+    const message = main.actionNode('index');
+    const pointer = () => find(message, node => node.dataset.intent === 'open-project');
+    const resume = find(message, node => node.dataset.resumeRun === '1');
+    assert.equal(message.children[1].children[0].children[0].textContent, 'Index the atlas');
+    assert.ok(!pointer() && !resume.disabled);
+    main.waiting.snapshot(census({ actions: [{ ...native, project_id: 'maps', project_name: 'Maps',
+        phase: 'working', can_resume: false, attention_reason: 'model_access' }] }));
+    assert.equal(main.actionNode('index'), message);
+    assert.equal(pointer().getAttribute('aria-label'), 'Open project Maps');
+    assert.ok(resume.hidden && resume.disabled);
+    assert.equal(find(message, node => node.classList.contains('owner-action-reason')).textContent, 'Needs you to restore model access.');
+});
+
 test('the pause row\'s Project reference does not repeat a title that already names the Project', t => {
     // A nameless work is titled by its Project; the capsule beside that title reads `Project` (audit 05.11, U014).
     const main = mainPage(t);

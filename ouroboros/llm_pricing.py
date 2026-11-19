@@ -42,86 +42,108 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     merge_request_wire_usage(total, usage)
 
 
-def openrouter_price_row(model: Dict[str, Any]) -> Optional[Tuple[Optional[float], ...]]:
-    """One OpenRouter catalog record as its per-1M price row, or None when it states none.
+def _openrouter_rate_per_million(value: Any, *, strict: bool = False) -> Optional[float]:
+    """Convert a stated per-token rate to dollars per million, keeping a missing or invalid rate unknown."""
+    from decimal import Decimal, DecimalException
 
-    The row is ``(input, cached_read, cache_write, output)``; prompt-length
-    overrides make it a ``PricingSchedule`` with those tiers. No row: a missing
-    or negative token price, or one over $1000 per 1M. A malformed base price
-    raises what ``float`` raises; a malformed override is skipped with a warning.
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+        if not number.is_finite() or number < 0:
+            return None
+        result = float(number * 1_000_000)
+        return result if isfinite(result) else None
+    except (DecimalException, TypeError, ValueError, OverflowError) as exc:
+        if strict:
+            raise ValueError("Malformed OpenRouter token price") from exc
+        return None
+
+
+_OPENROUTER_TOKEN_RATES = ("prompt", "input_cache_read", "input_cache_write", "completion", "input_cache_write_1h")
+_OPENROUTER_MODEL_RATE_CAP = 1000
+
+
+def _openrouter_base_rates(pricing: dict, *, strict: bool = False) -> Tuple[Optional[float], ...]:
+    return tuple(_openrouter_rate_per_million(pricing.get(key), strict=strict and key != "input_cache_write_1h")
+                 for key in _OPENROUTER_TOKEN_RATES)
+
+
+def _openrouter_minimum(rule: dict) -> Optional[int]:
+    value = rule.get("min_prompt_tokens")
+    return value if type(value) is int and value >= 0 else None
+
+
+def _openrouter_has_utc_condition(rule: dict) -> bool:
+    return any(str(key).startswith("utc_") for key in rule)
+
+
+def _openrouter_override_schedule(raw: Any, base_rates: tuple, *, source: Optional[dict] = None,
+                                  model_rate_cap: Optional[float] = None):
+    """Normalize provider-order, per-key overrides to the effective rows at each length boundary.
+
+    A missing key leaves the last applicable value (or base) alone. With an unresolved condition,
+    only listed rates that could change become unknown; a later definite price still wins.
     """
     from ouroboros.pricing import PricingSchedule
 
-    model_id = str(model.get("id") or "").strip()
-
-    pricing = model.get("pricing", {})
-    if not pricing or pricing.get("prompt") is None or pricing.get("completion") is None:
-        return None
-
-    raw_prompt = float(pricing.get("prompt", 0))
-    raw_completion = float(pricing.get("completion", 0))
-    raw_cached_str = pricing.get("input_cache_read")
-    raw_cached = float(raw_cached_str) if raw_cached_str is not None else None
-    raw_cache_write_str = pricing.get("input_cache_write")
-    raw_cache_write = float(raw_cache_write_str) if raw_cache_write_str is not None else None
-    if raw_prompt < 0 or raw_completion < 0:
-        return None
-    if raw_cached is not None and raw_cached < 0:
-        raw_cached = None
-    if raw_cache_write is not None and raw_cache_write < 0:
-        raw_cache_write = None
-
-    prompt_price = round(raw_prompt * 1_000_000, 4)
-    completion_price = round(raw_completion * 1_000_000, 4)
-    cached_price = round(raw_cached * 1_000_000, 4) if raw_cached is not None else None
-    cache_write_price = (
-        round(raw_cache_write * 1_000_000, 4)
-        if raw_cache_write is not None else None
-    )
-
-    if prompt_price > 1000 or completion_price > 1000:
-        log.warning(f"Skipping {model_id}: prices seem wrong (prompt={prompt_price}, completion={completion_price})")
-        return None
-
-    row = (prompt_price, cached_price, cache_write_price, completion_price)
-
-    tiers = []
-    raw_overrides = pricing.get("overrides") or []
-    if isinstance(raw_overrides, list):
-        for override in raw_overrides:
-            if not isinstance(override, dict):
+    raw = [] if raw is None else raw
+    if not isinstance(raw, list) or any(not isinstance(rule, dict) for rule in raw):
+        return PricingSchedule((None,) * 4, source=source)
+    rules = []
+    for rule in raw:
+        minimum = _openrouter_minimum(rule)
+        uncertain = minimum is None or _openrouter_has_utc_condition(rule)
+        changes = {}
+        for index, key in enumerate(_OPENROUTER_TOKEN_RATES):
+            if key not in rule:
                 continue
-            try:
-                min_prompt_tokens = int(override.get("min_prompt_tokens") or 0)
-                if min_prompt_tokens <= 0:
-                    continue
-                tier_raw_prompt = float(override.get("prompt", raw_prompt))
-                tier_raw_completion = float(override.get("completion", raw_completion))
-                tier_prompt = round(tier_raw_prompt * 1_000_000, 4)
-                tier_completion = round(tier_raw_completion * 1_000_000, 4)
-                override_cached = override.get("input_cache_read")
-                tier_cached = (
-                    round(float(override_cached) * 1_000_000, 4)
-                    if override_cached is not None else None
-                )
-                override_write = override.get("input_cache_write")
-                if override_write is not None:
-                    tier_write = round(float(override_write) * 1_000_000, 4)
-                else:
-                    tier_write = None
-                if tier_prompt > 1000 or tier_completion > 1000:
-                    continue
-                tier_row = (tier_prompt, tier_cached, tier_write, tier_completion)
-                tiers.append((min_prompt_tokens, tier_row))
-            except (TypeError, ValueError):
-                log.warning("Skipping malformed pricing override for %s", model_id)
-    return PricingSchedule(row, tuple(tiers)) if tiers else row
+            rate = _openrouter_rate_per_million(rule[key])
+            if (model_rate_cap is not None and key in ("prompt", "completion")
+                    and rate is not None and rate > model_rate_cap):
+                rate = None
+            changes[index] = rate
+        rules.append((minimum, uncertain, changes))
+
+    def row_at(prompt_tokens: int):
+        rates = list(base_rates)
+        for minimum, uncertain, changes in rules:
+            if minimum is not None and prompt_tokens <= minimum:
+                continue
+            for index, rate in changes.items():
+                rates[index] = None if uncertain and rates[index] != rate else rate
+        return PricingSchedule(tuple(rates[:4]), cache_write_1h=rates[4], source=source)
+
+    base = row_at(0)
+    thresholds = sorted({minimum for minimum, _, _ in rules if minimum is not None})
+    tiers = tuple((minimum, row_at(minimum + 1)) for minimum in thresholds)
+    return PricingSchedule(base, tiers, cache_write_1h=base.cache_write_1h, source=source)
+
+
+def openrouter_price_row(model: Dict[str, Any]) -> Optional[Tuple[Optional[float], ...]]:
+    """One model catalog record as four per-1M rates and its separate stated hourly write rate.
+
+    Missing, negative or implausibly large base input/output prices give no model row. An
+    unreadable base rate parsed strictly raises; invalid stated override rates are unknown.
+    """
+    pricing = model.get("pricing")
+    if not isinstance(pricing, dict) or pricing.get("prompt") is None or pricing.get("completion") is None:
+        return None
+    rates = _openrouter_base_rates(pricing, strict=True)
+    prompt_price, _, _, completion_price, _ = rates
+    if prompt_price is None or completion_price is None:
+        return None
+    if max(prompt_price, completion_price) > _OPENROUTER_MODEL_RATE_CAP:
+        model_id = str(model.get("id") or "").strip()
+        log.warning("Skipping %s: prices seem wrong (prompt=%s, completion=%s)", model_id, prompt_price, completion_price)
+        return None
+    return _openrouter_override_schedule(pricing.get("overrides"), rates, model_rate_cap=_OPENROUTER_MODEL_RATE_CAP)
 
 
 def _number(value: Any) -> bool:
     try:
         return isfinite(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -140,42 +162,49 @@ def openrouter_catalog_price(model: Any, cache_ttl: str = "") -> Optional[Dict[s
     a partial or false one, when the record states no complete token price, adds a
     per-request fee or bills reasoning at another rate, is free by tokens yet charges for
     something else, varies its price by anything but input length (a time window),
-    holds an unreadable, negative or non-finite figure or a tier accounting skips,
+    holds a malformed meter or an out-of-range input/output price in any tier,
     or charges less than four decimals per 1M print (it would read as free).
     """
     pricing = model.get("pricing") if isinstance(model, dict) else None
     if not isinstance(pricing, dict):
         return None
-    overrides = pricing.get("overrides") or []
+    overrides = pricing.get("overrides")
+    overrides = [] if overrides is None else overrides
     try:
         # A per-request fee is part of every call's price, which per-token figures would not say.
         if pricing.get("request") is not None and float(pricing["request"]) != 0:
             return None
         if not isinstance(overrides, list) or not all(
-                isinstance(tier, dict) and int(tier.get("min_prompt_tokens") or 0) > 0 and float(tier.get("request") or 0) == 0
-                and not any(str(key).startswith("utc_") for key in tier) for tier in overrides):
+                isinstance(tier, dict) and _openrouter_minimum(tier) is not None and float(tier.get("request") or 0) == 0
+                and not _openrouter_has_utc_condition(tier) for tier in overrides):
             return None
-        stated = (pricing.get("prompt"), pricing.get("completion"), *(tier.get(key) for tier in overrides for key in ("prompt", "completion")))
-        if any(isinstance(value, bool) for value in stated):
-            return None  # a flag is no price, though float() would read it as 0 or 1
+        stated = (pricing.get("prompt"), pricing.get("completion"), *(
+            tier[key] for tier in overrides for key in ("prompt", "completion") if key in tier))
+        # Before displaying a complete token price, keep rejecting tiers whose cache rates
+        # could not be parsed even when that invalid value never wins a length band.
+        for tier in overrides:
+            for key in ("input_cache_read", "input_cache_write"):
+                _openrouter_rate_per_million(tier.get(key), strict=True)
         reasoning = pricing.get("internal_reasoning")
         if reasoning is not None and float(reasoning) not in (0, float(pricing.get("completion"))):
             return None  # reasoning tokens billed at their own rate: the output figure is not the output price
-        figures = [float(value) for value in (pricing.get("prompt"), pricing.get("completion"), *(
-            tier[key] for tier in overrides for key in ("prompt", "completion") if tier.get(key) is not None))]
+        figures = [_openrouter_rate_per_million(value) for value in stated]
         row = openrouter_price_row(model)
     except (TypeError, ValueError, ArithmeticError):
         return None
     tiers = getattr(row, "tiers", ())
-    if row is None or len(tiers) != len(overrides) or not all(
-            isfinite(figure) and figure >= 0 and not (figure > 0 and round(figure * 1_000_000, 4) == 0) for figure in figures):
+    if row is None or any(figure is None or figure > _OPENROUTER_MODEL_RATE_CAP
+                          or (figure > 0 and round(figure, 4) == 0) for figure in figures):
         return None
-    others = [float(value) for key, value in pricing.items() if key not in ("prompt", "completion", "overrides")
-              and isinstance(value, (int, float, str)) and not isinstance(value, bool) and _number(value)]
-    if not any(figures) and any(value > 0 for value in others):
-        return None  # free by tokens, yet another part of the call is charged: "free" would be false
-    price = {"input": row[0], "output": row[3], **({"tiers": [
-        {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in tiers]} if tiers else {})}
+    if not (row[0] or row[3] or any(tier[0] or tier[3] for _, tier in tiers)):
+        # The picker would say "free". A cache, image or other meter may charge only in a length tier.
+        for band in (pricing, *overrides):
+            if any(_number(value) and float(value) > 0 for key, value in band.items()
+                   if key not in ("prompt", "completion", "overrides", "min_prompt_tokens") and not isinstance(value, bool)):
+                return None
+    price = {"input": round(row[0], 4), "output": round(row[3], 4), **({"tiers": [
+        {"min_prompt_tokens": minimum, "input": round(tier[0], 4), "output": round(tier[3], 4)}
+        for minimum, tier in tiers]} if tiers else {})}
     tier = str(cache_ttl or "").strip()
     stated = pricing.get("input_cache_write_1h" if tier == "1h" else "input_cache_write")
     if tier and not tiers and stated is not None and not isinstance(stated, bool) and _number(stated) and float(stated) >= 0:
@@ -249,41 +278,9 @@ def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Opt
 
 
 def _endpoint_pricing_schedule(pricing: Any, source: dict):
-    """Retain exact endpoint rates and prompt overrides; malformed prices stay unknown."""
-    from decimal import Decimal, InvalidOperation
-    from math import isfinite
-    from ouroboros.pricing import PricingSchedule
-
-    def rate(value):
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            number = Decimal(str(value))
-            result = float(number * 1_000_000)
-            return result if number >= 0 and isfinite(result) else None
-        except (InvalidOperation, TypeError, ValueError, OverflowError):
-            return None
-
-    def row(values):
-        return PricingSchedule(tuple(rate(values.get(key)) for key in (
-            "prompt", "input_cache_read", "input_cache_write", "completion")),
-            cache_write_1h=rate(values.get("input_cache_write_1h")), source=source)
-
-    if not isinstance(pricing, dict):
-        return row({})
-    tiers = []
-    try:
-        for override in pricing.get("overrides") or []:
-            minimum = int(override["min_prompt_tokens"])
-            if minimum <= 0:
-                return row({})
-            # An override replaces the fields it supplies. Missing base cache
-            # prices still remain unknown; none are inferred from token input.
-            tiers.append((minimum, row({**pricing, **override})))
-    except (TypeError, ValueError, KeyError, OverflowError):
-        return row({})
-    base = row(pricing)
-    return PricingSchedule(base, tuple(tiers), cache_write_1h=base.cache_write_1h, source=source)
+    """Retain exact endpoint rates and source, even when its tariff is unknown."""
+    pricing = pricing if isinstance(pricing, dict) else {}
+    return _openrouter_override_schedule(pricing.get("overrides"), _openrouter_base_rates(pricing), source=source)
 
 
 def fetch_openrouter_endpoint_pricing(model: str, *, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:

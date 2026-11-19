@@ -88,9 +88,15 @@ def run_driver(wire, *, asynchronous=False, provider="openrouter"):
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("phase", ["read", "close", "cancel"])
 @pytest.mark.parametrize("cost", [0.0, 1.25])
-def test_received_price_survives_stream_failure(isolated, asynchronous, phase, cost):
+@pytest.mark.parametrize("envelope", [False, True], ids=["usage", "envelope"])
+def test_received_price_survives_stream_failure(isolated, asynchronous, phase, cost, envelope):
     failure = asyncio.CancelledError("owner stop") if phase == "cancel" else RuntimeError("wire failed")
-    chunks = [frame(usage={"cost": cost, "prompt_tokens": 11, "completion_tokens": 3}, finish="stop")]
+    usage = {"prompt_tokens": 11, "completion_tokens": 3}
+    if not envelope:
+        usage["cost"] = cost
+    chunks = [frame(usage=usage, finish="stop")]
+    if envelope:
+        chunks.append(("data: " + json.dumps({"total_cost_usd": cost}) + "\n\n").encode())
     if phase == "close":
         chunks.append(b"data: [DONE]\n\n")
     wire = Wire(chunks, read_error=failure if phase != "close" else None,
@@ -101,7 +107,7 @@ def test_received_price_survives_stream_failure(isolated, asynchronous, phase, c
         assert caught.value is failure
     # The async accounting custody wrapper re-emits cancellation; the original
     # physical failure retains its usage and no caller receives a partial reply.
-    assert failure.stream_usage["cost"] == cost
+    assert failure.stream_usage["total_cost_usd" if envelope else "cost"] == cost
     rows = ledger_rows(isolated)
     assert len(rows) == 1  # No repeated generation after partial response or Stop.
     assert rows[0]["cost_usd"] == cost and rows[0]["cost_final"] is True

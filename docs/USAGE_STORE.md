@@ -175,6 +175,13 @@ recent measured waves on its current model is shown with its count and range, no
 history reads `cost unknown`, and one process keeps the table for half an hour
 so `## Review` never waits on the ledger.
 
+For known spend across the installation, read `settled`, `confirmed` and
+`estimated` from `summaries WHERE scope='global' AND key=''`; inspect
+`unknown_unmetered` separately. Do not sum across scopes: the same attempt
+contributes to several. Imported `usage_baseline_group` rows can carry a string
+amount in `extra` with NULL `attempts.cost_usd`, so summing that column alone
+can undercount even the known spend.
+
 From money to the round and its cause: a task result's `[SUBTASK_OUTCOME]`
 carries its `swarm_receipt`, whose `cost.attempts[]` names every physical
 attempt of the tree by `attempt_id` (one released before dispatch has no

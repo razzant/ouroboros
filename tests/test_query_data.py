@@ -982,7 +982,8 @@ def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_
                                 "task bodies and cards: op=json kind=task_result")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
-    assert query_data_sql.schema_hint("money") == "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
+    money_hint = query_data_sql.schema_hint("money")
+    assert "FROM summaries WHERE scope='global' AND key=''" in money_hint and "extra" in money_hint
 
 
 def test_a_malformed_knowledge_history_line_is_a_named_gap_and_later_rows_still_return(ctx):

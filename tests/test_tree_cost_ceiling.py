@@ -32,11 +32,8 @@ def _priced_anthropic_route(monkeypatch):
     monkeypatch.setattr(pricing, "_pricing_fetched_at", {})
     monkeypatch.setattr(pricing, "_pricing_retry_after", {})
     monkeypatch.setattr(pricing, "_pricing_fetch_in_progress", set())
-    monkeypatch.setattr(
-        "ouroboros.llm.fetch_openrouter_pricing",
-        # (input, cached_read, cache_write(5m), output) per 1M tokens.
-        lambda **_kwargs: {"anthropic/claude-test": (3.0, 0.3, 3.75, 15.0)},
-    )
+    schedule = pricing.PricingSchedule((3.0, 0.3, 3.75, 15.0), cache_write_1h=6.0)
+    monkeypatch.setattr("ouroboros.llm.fetch_openrouter_pricing", lambda **_kwargs: {"anthropic/claude-test": schedule})
     usage_accounting._reset_task_cache_splits()
     yield
     usage_accounting._reset_task_cache_splits()

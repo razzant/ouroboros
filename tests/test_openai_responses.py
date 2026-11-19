@@ -179,10 +179,31 @@ def test_completed_call_reply_keeps_exact_usage_and_unknown_cost_unknown():
                                       "function": {"name": "read_file", "arguments": '{"path":"a"}'}}]
     assert (usage["prompt_tokens"], usage["completion_tokens"], usage["cached_tokens"]) == (1000, 50, 600)
     assert usage["output_tokens_details"] == {"reasoning_tokens": 30}  # output already includes reasoning
-    assert "cache_write_tokens" not in usage  # a reported zero is not lifted into a fact
+    assert "cache_write_tokens" not in usage  # the wire's nested zero stays in details
     assert usage["response_finish_reason"] == "tool_calls" and usage["response_status"] == "completed"
     assert usage["cost"] is None and usage["cost_final"] is False  # no tariff offline: unknown, never zero
     assert usage_reply_usability(usage, message) == "usable"
+
+
+@pytest.mark.parametrize("field", ["cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens", None])
+def test_next_round_distinguishes_a_reported_zero_write_from_absence(field, monkeypatch):
+    from ouroboros import pricing
+    from ouroboros.loop_llm_call import _record_round_cache_facts
+    from ouroboros.transcript_prefix import previous_cache_fact
+
+    inputs = []
+    monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *args, cache_usage, **kw: inputs.append(cache_usage))
+    details = {"cached_tokens": 0}
+    if field is not None:
+        details[field] = 0
+    _, usage = _normalize(_body(_message("Done."), usage={**USAGE, "input_tokens_details": details}))
+    assert "cache_write_tokens" not in usage
+    assert inputs == [{"cached_tokens": 0, "cache_write_tokens": 0 if field else None,
+                       "cache_write_tokens_by_ttl": None, "prompt_cache_ttl": None}]
+    history = {}
+    _record_round_cache_facts(history, usage, round_idx=1, model=MODEL, provider="openai")
+    expected = "write unknown" if field is None else "write 0 tokens"
+    assert expected in previous_cache_fact(history)
 
 
 def test_absent_usage_stays_absent_never_zero():

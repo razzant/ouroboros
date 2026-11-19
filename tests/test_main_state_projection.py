@@ -12,48 +12,14 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import obligations, usage_store
-from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.gateway.state import api_state
 from ouroboros.model_wait import mutate_wait
 from ouroboros.owner_quiz import record_asked, record_publication, reconcile_terminal
 from ouroboros.projects_registry import create_project
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor.message_bus import log_chat
+from tests._queue_state import gateway, read_state as _state  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
-
-
-@pytest.fixture
-def gateway(tmp_path, monkeypatch):
-    """Real gateway handlers and source readers; no supervisor lifespan or workers."""
-    from ouroboros import config
-    from supervisor import active_activity, queue, state, workers
-
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
-    monkeypatch.setattr(config, "REPO_DIR", tmp_path / "repo")
-    monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
-    for name, relative in (("STATE_PATH", "state/state.json"),
-                           ("STATE_LAST_GOOD_PATH", "state/state.last_good.json"),
-                           ("STATE_LOCK_PATH", "locks/state.lock")):
-        monkeypatch.setattr(state, name, tmp_path / relative)
-    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
-    state.save_state({"owner_id": 1, "current_branch": "fixture", "current_sha": "a" * 40,
-                      "bg_consciousness_enabled": False, "evolution_mode_enabled": False})
-    usage_store.migrate_from_journal(tmp_path)
-    pending, running = [], {}
-    for module in (queue, workers):
-        monkeypatch.setattr(module, "DRIVE_ROOT", tmp_path)
-        monkeypatch.setattr(module, "PENDING", pending)
-        monkeypatch.setattr(module, "RUNNING", running)
-    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
-    monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(active_activity, "_DIRECT_ACTIVITY_REGISTRY", active_activity.DirectActivityRegistry())
-    app = Starlette(routes=[Route("/api/state", api_state),
-                            Route("/api/chat/history", make_chat_history_endpoint(tmp_path))])
-    app.state.drive_root = tmp_path
-    app.state.app_start = 0.0
-    with TestClient(app) as client:
-        yield SimpleNamespace(root=tmp_path, client=client, pending=pending, running=running)
 
 
 def _project_task(gateway, task_id):
@@ -75,12 +41,6 @@ def _ask(gateway, task_id="old-task"):
     log_chat("out", project["chat_id"], 1, block["question"], task_id=task_id,
              record_type="quiz", quiz=block, drive_root=gateway.root, require_write=True)
     return project, task
-
-
-def _state(gateway):
-    response = gateway.client.get("/api/state")
-    assert response.status_code == 200, response.text
-    return response.json()
 
 
 def test_optional_terminal_question_outside_history_and_sidebar_reaches_state(gateway):

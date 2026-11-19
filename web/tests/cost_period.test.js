@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { COST_PERIODS, compactTokens, costPeriodPresentation } from '../modules/cost_period.js';
+import { COST_PERIODS, compactTokens, costPeriodPresentation, mountCostPeriod } from '../modules/cost_period.js';
 
 // The period view as `GET /api/cost-breakdown?period=7d` answers it (ouroboros/gateway/cost_period.py).
 const VIEW = {
@@ -83,6 +83,51 @@ test('cache writes read by what they followed, in the fact\'s own words', () => 
         ['204', '149M', '$1,250.93'], ['444', '146M', '$1,189.29'], ['9', '1.2M', '$9.60 for 900k tokens · 2 not split'], ['5', '700', '—']]);
 });
 
+test('the hourly write note distinguishes zero, a small price, and an unavailable comparison', () => {
+    for (const [ratio, reads] of [[0, '0'], [0.002, 'less than 0.1'], [null, null]]) {
+        const row = { ...VIEW.models[0], write_price_in_reads: ratio };
+        const [model] = costPeriodPresentation({ available: true, models: [row] }).models;
+        const notes = model.notes.filter((note) => note.startsWith('One token written'));
+        assert.deepEqual(notes, reads === null ? [] : [`One token written for 1 hour costs ${reads} read tokens at this model’s base price.`]);
+        assert.equal(model.notes.includes('The base price of a write for 1 hour cannot be expressed in read tokens.'), reads === null);
+    }
+});
+
+test('a standard and a priority payment show only the standard tokens beside the shared dollars', async () => {
+    const tiny = 0.00000025;
+    const view = { available: true, models: [{
+        model: 'vendor/mixed', calls: 2, cost: 1 + tiny, tokens: { cache_write: 100 }, tokens_shared: { cache_write: 10 },
+        by_class: { cache_write: tiny }, unshared_calls: 1, unshared_cost: 1, write_price_lifetime: '1h', write_price_in_reads: null,
+    }], cache_writes: [{ class: 'not_recorded', calls: 2, write_tokens: 100, shared_write_tokens: 10, write_cost: tiny, unshared_calls: 1 }] };
+    const { models: [model], writes: [write] } = costPeriodPresentation(view);
+    assert.equal(model.sum, '$1.00 · 2 calls');
+    assert.equal(model.parts[0].text, '<$0.0001 · <1% · 10 tokens');
+    assert.deepEqual([model.parts.at(-1).label, model.parts.at(-1).text], ['Not split', '$1.00 · >99% · 1 call']);
+    assert.equal(write.cost, '<$0.0001 for 10 tokens · 1 not split');
+    assert.equal(write.tokens, '100');
+
+    const cells = {};
+    const host = { querySelector: (selector) => (cells[selector] ??= {}), querySelectorAll: () => [], addEventListener() {} };
+    await mountCostPeriod(host, { load: async () => view }).reload();
+    const html = cells['.costs-period-models'].innerHTML;
+    assert.ok(html.includes('&lt;$0.0001 · &lt;1% · 10 tokens'));
+    assert.ok(cells['.costs-period-writes-host'].innerHTML.includes('&lt;$0.0001 for 10 tokens · 1 not split'));
+    const width = html.match(/data-cost-class="cache_write" style="--share:([^"]+)"/);
+    assert.ok(width && Number(width[1]) > 0 && Number(width[1]) < 0.005);
+});
+
+test('one hourly write distinguishes a tiny payment, measured zero and missing money', () => {
+    for (const [cost, sum, writeCost] of [[0.00000025, '<$0.0001', '<$0.0001'], [0, '$0.00', '$0.00'], [null, 'no recorded cost', '—']]) {
+        const view = { available: true, models: [{ model: 'vendor/model', calls: 1, cost, tokens: { cache_write: 2 },
+            tokens_shared: { cache_write: 2 }, by_class: cost ? { cache_write: cost } : null }],
+            cache_writes: [{ class: 'not_recorded', calls: 1, write_tokens: 2, write_cost: cost, unshared_calls: cost === null ? 1 : 0 }] };
+        const { models: [model], writes: [write] } = costPeriodPresentation(view);
+        assert.equal(model.sum, `${sum} · 1 call`);
+        assert.equal(write.cost, writeCost);
+        if (cost) assert.equal(model.parts[0].text, '<$0.0001 · 100% · 2 tokens');
+    }
+});
+
 test('an unavailable or empty period says so and invents nothing', () => {
     for (const view of [null, undefined, { available: false, period: '7d', error_code: 'ledger_unavailable' }]) {
         const shown = costPeriodPresentation(view);
@@ -102,7 +147,6 @@ test('token counts keep a glance\'s precision, and the periods are the three the
 });
 
 test('a later period choice abandons the read it replaces', async () => {
-    const { mountCostPeriod } = await import('../modules/cost_period.js');
     const signals = [];
     const host = { innerHTML: '', querySelector: () => ({ textContent: '', innerHTML: '' }), querySelectorAll: () => [],
         addEventListener: () => {} };

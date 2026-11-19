@@ -732,6 +732,8 @@ def get_tools():
         "db, query, max_rows, snapshot and timeout_sec are op=sql only: omit them otherwise (another op refuses "
         "any snapshot and other non-default values); op=jsonl bounds rows with tail. "
         "Current SQL exposes tasks facts; use json/task_result for bodies. SQL defaults to guarded direct reads. "
+        "Money SQL: for known spend read summaries (scope='global', key=''); SUM(attempts.cost_usd) can miss "
+        "imported string amounts in extra. "
         f"Current-store reads hold the lock task writes wait on: at most {sql.CURRENT_HOLD_SEC:g} s; longer: snapshot=true. "
         "One SQL operation budget spans acquisition, optional snapshot copy/check and query; deadlines name the phase. "
         "The supervised child bounds functions that outlast interrupt, with separate startup/cleanup allowance. "

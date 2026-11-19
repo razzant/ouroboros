@@ -20,7 +20,10 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from ouroboros._usage_response import _reported_token_count, processing_receipt, observed_processing_mode, provider_cost_value
+from ouroboros._usage_response import (
+    _reported_token_count, cache_write_split, cache_write_total, observed_processing_mode, processing_receipt,
+    provider_cost_value,
+)
 
 
 def has_nontext_usage(usage) -> bool:
@@ -175,12 +178,26 @@ def settled_cost_facts(reply_usage: Mapping[str, Any]) -> Dict[str, Any]:
             **{key: row[key] for key in ("price_source", "cost_basis") if row.get(key)}}
 
 
-def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional) -> Dict[str, Any]:
+def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
+    """An OpenRouter failure frame may use its own measured send's tier for an estimate. Empty means unbound."""
+    if reservation.provider != "openrouter":
+        return None
+    receipt = getattr(exc, "stream_receipt", None)
+    if (request is not None and request.candidate_measurement_kind == "canonical_json_v1" and request.candidate_raw_sha256
+            and isinstance(receipt, dict) and receipt.get("attempt_id") == reservation.attempt_id):
+        return request.prompt_cache_ttl or ""
+    return ""
+
+
+def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional,
+                      estimate_cache_ttl: Optional[str] = None) -> Dict[str, Any]:
     """Normalize reported usage before the monetary transaction; no live pricing I/O."""
     normalized = dict(usage or {})
     evidence = copy.deepcopy(normalized.get("cost_evidence") or {})
     if not isinstance(evidence, dict):
         evidence = {"provider_evidence": evidence}
+    if reservation.provider == "openrouter":
+        evidence.pop("cache_write_ttl", None)  # only the measured send below can supply this source
     pinned = str(reservation.provider or "").lower() == "deepseek"
     if pinned:  # the reserved row's pin stays the attempt's evidence; a reply's own price claims are not
         own, dispatched_at = _pinned_attempt(reservation)
@@ -194,10 +211,21 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
                                  submitted_native=reservation.submitted_processing_mode)
     if receipt is not None:
         normalized["processing"] = receipt
-    prompt_tokens = _reported_token_count(normalized, "prompt_tokens", "input_tokens")
+    # The extractor can explicitly leave the inclusive prompt unknown. Native input_tokens is then only a subtotal.
+    prompt_tokens = _reported_token_count(normalized, "prompt_tokens" if "prompt_tokens" in normalized else "input_tokens")
     completion_tokens = _reported_token_count(normalized, "completion_tokens", "output_tokens")
     cached_tokens = _reported_token_count(normalized, "cached_tokens")
-    cache_write_tokens = _reported_token_count(normalized, "cache_write_tokens")
+    split = cache_write_split(normalized)
+    cache_write_tokens, invalid_write = cache_write_total(normalized, split)
+    if invalid_write:
+        normalized["cache_write_tokens_invalid"] = True
+    if split:
+        normalized["cache_write_tokens_by_ttl"] = split
+    reported_ttl = str(normalized.get("prompt_cache_ttl") or "")
+    pricing_ttl = reported_ttl or estimate_cache_ttl
+    # A failure frame needs an observation or the explicit tier on this send to price aggregate writes.
+    frame_tier_missing = (estimate_cache_ttl is not None and cache_write_tokens and not split
+                          and pricing_ttl not in ("5m", "1h"))
     cost = provider_cost_value(cost_usd)
     if cost_usd is not None and cost is None:
         normalized["cost_invalid"] = True
@@ -212,20 +240,21 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
             if cost is not None:
                 normalized["price_source"] = f"litellm@{evidence['tariff_quote']['fetched_at']}"
     elif (cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage
-          and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
+          and not normalized.get("cache_write_tokens_invalid")
+          and not frame_tier_missing and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
         cost = estimate_cost_optional(
             reservation.model,
             int(prompt_tokens or 0),
             int(completion_tokens or 0),
-            cache_usage={"cached_tokens": int(cached_tokens or 0),
-                         "cache_write_tokens": int(cache_write_tokens or 0),
-                         "cache_write_tokens_by_ttl": normalized.get("cache_write_tokens_by_ttl"),
-                         "prompt_cache_ttl": str(normalized.get("prompt_cache_ttl") or "")},
+            cache_usage={"cached_tokens": cached_tokens, "cache_write_tokens": cache_write_tokens,
+                         "cache_write_tokens_by_ttl": split, "prompt_cache_ttl": pricing_ttl},
             allow_live_fetch=False,
             provider=reservation.provider,
             **({"processing_mode": pricing_mode} if pricing_mode else {}),
         )
         cost_final = False
+        if cost is not None and estimate_cache_ttl and cache_write_tokens and not (reported_ttl or split):
+            evidence["cache_write_ttl"] = {"source": "sent_candidate", "ttl": estimate_cache_ttl}
         quote = getattr(cost, "quote", None)
         if quote:
             evidence["tariff_quote"] = copy.deepcopy(quote)
@@ -244,10 +273,11 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
         completion_tokens=completion_tokens,
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
-        prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
+        prompt_cache_ttl=reported_ttl,
         # ``response_provider``: the upstream that served the call, as the response named it (a cache is one
         # upstream's); ``cache_write_tokens_by_ttl``: the provider's own split of the writes by lifetime.
         **{key: copy.deepcopy(normalized[key]) for key in (
             "effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_coverage",
-            "price_source", "cost_invalid", "response_provider", "cache_write_tokens_by_ttl") if key in normalized},
+            "price_source", "cost_invalid", "response_provider", "cache_write_tokens_by_ttl", "cache_write_tokens_invalid")
+           if key in normalized},
     )

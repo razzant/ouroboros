@@ -463,10 +463,10 @@ def _guard_context_mode_lowering(settings: dict, *, allow_context_lowering: bool
 def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str] = (),
         allow_context_lowering: bool = False, allow_safety_lowering: bool = False) -> dict:
     """Normalize settings writes under existing ratchets. Only the actual writer names authored_keys; a defaults
-    merge preserves absent disk-owned intent, forwarded environment choices (an absent ``SAVED_CHOICE_SETTINGS``
-    key stays absent) and install-time provenance. A deployment policy judges the write first, before any effect."""
-    stored = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
-    settings = _deployment_policy.prepare_write(settings, lambda: normalize_settings_raw(stored) if isinstance(stored, dict) else {})
+    merge preserves disk-owned absences (including ``SAVED_CHOICE_SETTINGS``) and install-time provenance.
+    An unreadable pre-image refuses, as does deployment policy, before any write or receipt."""
+    stored = _settings_integrity.read_settings_json_strict(SETTINGS_PATH)
+    settings = _deployment_policy.prepare_write(settings, lambda: normalize_settings_raw(stored) if stored is not None else {})
     from ouroboros.review_pool_receipts import persist_write_receipts
     persist_write_receipts(DATA_DIR, settings, SETTINGS_PATH)  # the review-pool receipts THIS write owes, before the pre-image goes
     authored = set(authored_keys or ())
