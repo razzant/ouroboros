@@ -1,4 +1,4 @@
-"""Captured heads of the global notes that claim the acting focus's situation."""
+"""Captured heads of the global notes that claim the acting focus's situation, and of the notes their heads link."""
 from __future__ import annotations
 
 import hashlib
@@ -36,6 +36,7 @@ class HeldNoteSection(HostSection):
     source_chars: int = 0
     index_row: Mapping[str, Any] | None = None
     reader_restriction: str = ""
+    carried_by: tuple[str, ...] = ()  # the held heads linking a note no claim of its own holds here: it yields first
 
     def __new__(cls, section_id, full_text, *_args, **_kwargs):
         return super().__new__(cls, section_id, full_text)
@@ -43,7 +44,7 @@ class HeldNoteSection(HostSection):
     def __getnewargs__(self):
         return (*super().__getnewargs__(), self.topic, self.revision, self.window_label,
                 self.summary, self.outline_has_summary, self.index_has_summary, self.source_chars, self.index_row,
-                self.reader_restriction)
+                self.reader_restriction, self.carried_by)
 
     def with_index(self, row: Mapping, navigation: Mapping) -> HeldNoteSection:
         """Locate the authored summary in either captured form of the index."""
@@ -161,6 +162,33 @@ def note_head(source: MarkdownSource) -> str:
     return source.raw[start:heading.start() if heading else end].decode("utf-8")
 
 
+def linked_heads(note: knowledge.KnowledgeNote) -> tuple[dict[str, knowledge.KnowledgeNote], list[str]]:
+    """The active global notes this note's head links, by topic, and its head's other links to a knowledge address,
+    each named with why it holds nothing. The head is ``note_head``'s: a link below its first `## ` line, in a fenced
+    block or in a code span is not in it (``MarkdownSource.links``); a link to the note itself is neither."""
+    end = note.source.body_span.start_byte + len(note_head(note.source).encode("utf-8"))
+    carried, unheld = {}, {}
+    for link in knowledge.knowledge_links(note, before_byte=end):
+        where = link.get("address")
+        if where is None or (where["scope"], where["topic"]) == (note.address.scope, note.address.topic):
+            continue
+        if where["scope"] != "global":
+            why = "project shelf"
+        elif link["status"] != "present":
+            why = "no such note"
+        else:
+            try:
+                target = knowledge.read_knowledge_note(replace(note.address, topic=where["topic"]))
+                why = "malformed" if target.source is None else "archived" if target.state != "active" else ""
+            except (OSError, ValueError):
+                why = "unreadable"
+            if not why:
+                carried.setdefault(where["topic"], target)
+                continue
+        unheld.setdefault(f"{Path(where['path']).relative_to(where['canonical_root']).as_posix()} ({why})", None)
+    return carried, list(unheld)
+
+
 def _reader_restriction(ctx: Any, root: Path, topic: str, revision: str, length: int) -> str:
     from ouroboros.tool_access_paths import workspace_mode_block_reason
     from ouroboros.tools.knowledge import _address, _knowledge_read, _range
@@ -205,12 +233,20 @@ def _label_title(note: knowledge.KnowledgeNote, head: str) -> str:
                  if heading.level == 1 and start <= heading.span.start_byte < end), note.address.topic)
 
 
-def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ctx: Any) -> HeldNoteSection:
+def _reasons(carriers: tuple, unheld: tuple) -> str:
+    """The label lines naming each held head that links this note, and under a carrier its head links held nowhere."""
+    return "".join(f"Linked from the head of {title} (memory/knowledge/{topic}.md), held by "
+                   + ", ".join(repr(name) for name in names) + "\n" for topic, title, names in carriers) + (
+        f"Linked from this head, not held: {', '.join(unheld)}\n" if unheld else "")
+
+
+def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ctx: Any,
+           carriers: tuple = (), unheld: tuple = ()) -> HeldNoteSection:
     topic, revision, head = note.address.topic, note.revision, note_head(note.source)
     names = ", ".join(repr(name) for name in matched)
     label = (f"{_HEADING}\n\n" if first else "") + (
         f"### {_label_title(note, head)}\n\nGlobal note: memory/knowledge/{topic}.md\n"
-        f"Matched claims: {names}\nRevision: {revision}\n")
+        + (f"Matched claims: {names}\n" if matched else "") + _reasons(carriers, unheld) + f"Revision: {revision}\n")
     reader = f"knowledge_read(topic={topic!r}, scope='global', version={revision!r})"
     length = len(note.text)
     restriction = _reader_restriction(ctx, note.address.canonical_root, topic, revision, length)
@@ -232,7 +268,8 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
         if reader:
             window_label = label
     return HeldNoteSection("held_note:" + topic, full, reader=reader, topic=topic, revision=revision,
-                           window_label=window_label, summary=note.summary, source_chars=length)
+                           window_label=window_label, summary=note.summary, source_chars=length,
+                           carried_by=() if matched else tuple(carrier for carrier, _title, _names in carriers))
 
 
 def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Mapping,
@@ -263,7 +300,7 @@ def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Ma
                               task_contract=build_task_contract(dict(task)), project_id=task.get("project_id"))
     rows = {row["topic"]: row for row in inventory}
     bodies = navigation.get("bodies", {})
-    entries = []
+    held = []
     for address in sorted(matches, key=lambda item: item.topic):
         try:
             note = navigation.get("overview") if address.topic == knowledge.OVERVIEW_TOPIC else None
@@ -279,6 +316,30 @@ def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Ma
             current = knowledge.active_claims(root, inventory=(knowledge.note_descriptor(note),))
             matched = [name for name in matched if address in current.get(name, ())]
         if matched:
-            entry = _entry(note, matched, first=not entries, ctx=ctx)
-            entries.append(entry.with_index(rows[address.topic], navigation))
+            held.append((note, matched))
+    return _with_links(held, rows, navigation, ctx)
+
+
+def _with_links(held: list, rows: Mapping, navigation: Mapping, ctx: Any) -> list[HeldNoteSection]:
+    """The claimed heads in address order, then the active global notes their heads link, one hop: a linked head links
+    nothing further and ``overview`` carries nothing. A note stands once and its label names every reason."""
+    carriers, linked, unheld = {}, {}, {}
+    for carrier, matched in held:
+        if carrier.address.topic == knowledge.OVERVIEW_TOPIC:
+            continue
+        targets, unheld[carrier.address.topic] = linked_heads(carrier)
+        reason = (carrier.address.topic, _label_title(carrier, note_head(carrier.source)), matched)
+        for topic, note in targets.items():
+            carriers.setdefault(topic, []).append(reason)
+            linked.setdefault(topic, note)
+    entries = []
+    for note, matched in held:
+        topic = note.address.topic
+        entry = _entry(note, matched, first=not entries, ctx=ctx, carriers=tuple(carriers.pop(topic, ())),
+                       unheld=tuple(unheld.get(topic, ())))
+        entries.append(entry.with_index(rows[topic], navigation))
+    for topic in sorted(carriers):
+        entry = _entry(linked[topic], [], first=not entries, ctx=ctx, carriers=tuple(carriers[topic]))
+        entries.append(entry.with_index(rows.get(topic, {}), navigation))
     return entries
+

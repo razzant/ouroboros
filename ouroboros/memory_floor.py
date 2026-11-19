@@ -862,17 +862,17 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
 
     In a map frame each steps to its authored summary beside its exact reader, once the physical window has left no
     index or registry it could still outline and the request with memory at its shortest forms still exceeds the
-    heads' bound (``_host_steps``); a head without a summary stays whole. At the emergency floor only the exact
-    reader remains.
+    heads' bound (``_host_steps``); a head without a summary stays whole. A head only a link holds (``carried_by``)
+    yields before every claimed one. At the emergency floor only the exact reader remains.
     """
     from ouroboros.held_notes import HeldNoteSection
 
     addressed = section_views(sections, receipts)
     positions = {row["section_id"]: index for index, row in enumerate(receipts)}
     entries = [part for part in sections if isinstance(part, HeldNoteSection)]
-    if form == "reader":
-        # A resident summary already kept its meaning. Spend the label's small saving last.
-        entries.sort(key=lambda part: part.section_id in positions and part.summary_is_resident(addressed))
+    # At the emergency floor a resident summary already kept its meaning: spend the label's small saving last.
+    entries.sort(key=lambda part: (form == "reader" and part.section_id in positions
+                                   and part.summary_is_resident(addressed), not part.carried_by))
     saved = 0
     for part in entries:
         position = positions.get(part.section_id)

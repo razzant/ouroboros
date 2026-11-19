@@ -233,6 +233,158 @@ def test_claims_and_lifecycle_are_checked_on_the_bytes_that_supply_the_head(worl
     assert "Former " not in held
 
 
+def _entries(core):
+    return {part.topic: part for part in core.dynamic_sections if isinstance(part, held_notes.HeldNoteSection)}
+
+
+def test_a_link_in_a_claimed_head_brings_that_head_whole_under_max_and_a_selected_low_or_nano(world, monkeypatch):
+    head = "How to work with Sasha. " * 300 + "\n"
+    sasha = _write(world, "people/sasha", head + "## History\n\nOlder words.\n", claims=(), title="Sasha",
+                   summary="Sasha's summary.")
+    _write(world, "work/nova", "What is true of Nova; see [Sasha](../people/sasha.md).\n\n## History\n", title="Nova")
+    _write(world, "people/nina", "How to work with Nina.\n", claims=())
+    _write(world, "work/other", "Another work; see [Nina](../people/nina.md).\n", claims=(), title="Other")
+    entry = ("### Sasha\n\nGlobal note: memory/knowledge/people/sasha.md\n"
+             "Linked from the head of Nova (memory/knowledge/work/nova.md), held by 'room:1'\n"
+             f"Revision: {sasha.revision}\nExact reader: knowledge_read(topic='people/sasha', scope='global', "
+             f"version={sasha.revision!r})\n\n" + head)
+    monkeypatch.setattr(context_budget, "OWNER_LOW_TARGET_TOKENS", 1_000)
+    monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", 1_000)
+    for mode in ("max", "low", "nano"):
+        plan = _plan(world, 300_000, mode=mode)
+        assert plan.initial_mode == mode and not _cuts(plan)
+        assert _held(plan).endswith("\n\n" + entry)  # whole, after the claimed head that links it
+        assert "Older words." not in _held(plan) and "How to work with Nina." not in _held(plan)
+    assert plan.nano_projection.memory_facts["floor"]["target_missed"]
+    assert _entries(plan.core)["people/sasha"].carried_by == ("work/nova",)
+
+
+def test_only_a_claimed_heads_own_links_carry_one_hop_and_what_holds_nothing_is_named_under_it(world):
+    """Nothing carries from below the first `## ` line, a fenced block, a code span or an indented code block, from a
+    linked head (a second hop) or from the overview; a link to a missing, archived or project-shelf note is named in
+    one line under the head that links it, and a link to that head itself is neither."""
+    project = create_project(world[0].drive_root, "nova", name="Nova")
+    _write(world, "shelf-note", "A project note.", claims=(), scope=f"project:{project['id']}")
+    old = _write(world, "old", "An archived page.", claims=())
+    assert knowledge.write_knowledge_note(old.address, "", mode="archive", reason="Out of use.",
+                                          expected_revision=old.revision).ok
+    _write(world, "near", "One hop away; it links [far](far.md).", claims=())
+    for topic in ("far", "fenced", "spanned", "indented", "below", "from-overview"):
+        _write(world, topic, f"Only linked as {topic}.", claims=())
+    _write(world, "hub", "Hub head: [near](near.md), [gone](gone.md), [old](old.md), [self](hub.md), "
+           f"[shelf](../../projects/{project['id']}/knowledge/shelf-note.md).\n`[spanned](spanned.md)`\n\n"
+           "```\n[fenced](fenced.md)\n## inside the fence\n```\n\n    [indented](indented.md)\n\n"
+           "## History\n\n[below](below.md)\n", title="Hub")
+    _write(world, "overview", "Shared head: [from-overview](from-overview.md).")
+    held = _held(_plan(world))
+    assert re.findall(r"^Global note: memory/knowledge/(.+)\.md$", held, re.M) == ["hub", "overview", "near"]
+    assert held.count("Linked from this head, not held: ") == 1
+    assert ("Matched claims: 'room:1'\nLinked from this head, not held: memory/knowledge/gone.md (no such note), "
+            f"memory/knowledge/old.md (archived), projects/{project['id']}/knowledge/shelf-note.md (project shelf)\n"
+            "Revision: ") in held
+    assert "One hop away" in held and "Only linked as" not in held
+
+
+def test_a_cycle_and_a_diamond_hold_each_note_once_and_name_every_reason(world):
+    _write(world, "a", "A head links [b](b.md).", title="A")
+    _write(world, "b", "B head links back to [a](a.md) and on to [d](d.md).", claims=(), title="B")
+    _write(world, "c", "C head links [b](b.md) and [a](a.md).", title="C")
+    _write(world, "d", "D head, a second hop.", claims=())
+    plan = _plan(world)
+    held = _held(plan)
+    assert re.findall(r"^### (.+)$", held, re.M) == ["A", "C", "B"] and "D head" not in held
+    assert ("### A\n\nGlobal note: memory/knowledge/a.md\nMatched claims: 'room:1'\n"
+            "Linked from the head of C (memory/knowledge/c.md), held by 'room:1'\nRevision: ") in held
+    assert ("### B\n\nGlobal note: memory/knowledge/b.md\n"
+            "Linked from the head of A (memory/knowledge/a.md), held by 'room:1'\n"
+            "Linked from the head of C (memory/knowledge/c.md), held by 'room:1'\nRevision: ") in held
+    assert {topic: part.carried_by for topic, part in _entries(plan.core).items()} == {"a": (), "c": (), "b": ("a", "c")}
+
+
+def test_six_claims_and_one_claim_whose_head_links_the_rest_hold_the_same_heads(world):
+    """The owner's first circle either way: six notes that each claim the room, or the work's note alone claiming it
+    with its head linking the other five. The heads are the same text; a label differs only by its reason lines."""
+    others = ("joi", "sasha", "nina", "people-others", "tools")
+    nova = "What is true of Nova. " * 40 + "\n\n" + " ".join(f"[{topic}]({topic}.md)" for topic in others) + "\n"
+    written = {}
+
+    def install(each_claims):
+        for topic in ("nova", *others):
+            current = written.get(topic)
+            written[topic] = _write(world, f"circle/{topic}", nova if topic == "nova" else f"What stands on {topic}. " * 40,
+                                    claims=("room:1",) if topic == "nova" or each_claims else (), title=topic.title(),
+                                    revision=current.revision if current else None)
+        return _entries(_core(world))
+
+    def label(part):  # without the section heading, the reason lines and the revision its own YAML gives
+        return [line for line in part.window_label.removeprefix(HEADING + "\n\n").splitlines()
+                if not line.startswith(("Matched claims: ", "Linked from ", "Revision: ", "Exact reader: "))]
+
+    one, six = install(False), install(True)  # an overwrite keeps the YAML fields it omits: claims are added second
+    assert sorted(six) == sorted(one) == sorted(f"circle/{topic}" for topic in ("nova", *others))
+    for topic, part in six.items():
+        assert part.full_text[len(part.window_label):] == one[topic].full_text[len(one[topic].window_label):]
+        assert label(part) == label(one[topic])
+    for topic in others:
+        reason = "Linked from the head of Nova (memory/knowledge/circle/nova.md), held by 'room:1'\n"
+        assert reason in six[f"circle/{topic}"].window_label and reason in one[f"circle/{topic}"].window_label
+        assert "Matched claims" in six[f"circle/{topic}"].window_label
+        assert "Matched claims" not in one[f"circle/{topic}"].window_label
+        assert (six[f"circle/{topic}"].carried_by, one[f"circle/{topic}"].carried_by) == ((), ("circle/nova",))
+
+
+def test_links_without_a_recorded_claim_add_nothing_to_the_request_or_the_store(world, monkeypatch):
+    for number in range(6):
+        _write(world, f"linked-{number}", f"Linked understanding; see [next](linked-{(number + 1) % 6}.md).", claims=())
+    with monkeypatch.context() as patch:
+        patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
+        baseline = _plan(world)
+    plain = _plan(world)
+    for mode in ("max", "low", "nano"):
+        assert json.dumps(plain.messages_for(mode)) == json.dumps(baseline.messages_for(mode))
+    current = knowledge.read_knowledge_note(knowledge.resolve_knowledge_address(world[0].drive_root, "linked-0", "global"))
+    _write(world, "linked-0", "Rewritten; see [next](linked-1.md).", claims=(), revision=current.revision)
+    assert all(not (world[0].drive_root / "memory" / folder).exists()
+               for folder in ("knowledge_note_records", "knowledge_held_versions"))
+
+
+def test_a_restored_capture_replays_the_linked_heads_exactly_after_the_target_changed(world):
+    sasha = _write(world, "people/sasha", "Sasha before the wait.", claims=(), title="Sasha")
+    _write(world, "work/nova", "Nova links [Sasha](../people/sasha.md).", title="Nova")
+    first = _plan(world, mode="low")
+    saved = json.loads(json.dumps({**held_notes.continuation_capture(first, "low"), "messages": None,
+                                   "tool_schemas": None}))
+    _write(world, "people/sasha", "Sasha after the wait.", claims=(), title="Sasha", revision=sasha.revision)
+    assert "Sasha after the wait." in _held(_plan(world, mode="low"))
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    ctx._held_note_capture = held_notes.restored_capture(saved)
+    replayed = _plan(world, mode="low", ctx=ctx)
+    assert _held(replayed) == _held(first) and "Sasha before the wait." in _held(replayed)
+    assert tuple(_entries(replayed.core)["people/sasha"].carried_by) == ("work/nova",)
+
+
+def test_a_linked_head_yields_to_the_window_before_any_claimed_head(world):
+    """Down a sweep of windows the linked head is the first to step to its summary and the claimed head with a
+    summary follows; no head steps while an index or the registry can still take its outline. At the emergency floor
+    the linked head is the first to keep only its reader (`c`, without a summary, stays whole until then)."""
+    _write(world, "a", "Head a. " * 5_000 + "\n\nIt links [z](z.md).\n", summary="Authored telling of a.")
+    _write(world, "c", "Head c. " * 5_000)
+    _write(world, "z", "Head z. " * 5_000, claims=(), summary="Authored telling of z.")
+    _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 8_000)
+    captured = _core(world)
+    seen = []
+    for window in range(196_000, 8_000, -4_000):
+        plan = _plan(world, window, core=captured)
+        cuts = tuple(_cuts(plan))
+        assert not cuts or not _untaken_outlines(plan), window
+        if cuts not in seen:
+            seen.append(cuts)
+    assert [cuts for cuts in seen if all(form == "summary" for _topic, form in cuts)] == [
+        (), (("z", "summary"),), (("z", "summary"), ("a", "summary"))]
+    emergency = dict(next(cuts for cuts in seen if any(form == "reader" for _topic, form in cuts)))
+    assert emergency["z"] == "reader", emergency
+
+
 def _index(plan, mode=None):
     """The form of the global knowledge index in this request: ``whole``, or the ``outline`` the window chose."""
     text = _blocks(plan, mode)[-1]["text"]
