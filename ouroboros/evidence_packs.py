@@ -378,10 +378,11 @@ def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
 
 
 def index_owed(root: Any) -> bool:
-    """Whether the packing pass owes ``root`` a rebuild, by stats alone (a resting look opens nothing of the
-    packs, and no SQLite read runs outside the index lock): packs exist and the index file is missing, or a
-    read left ``DAMAGED_MARK`` (``open_index``: the cache's O(1) facts failed, or damage behind them). So a
-    quiet install's unusable index is owed once a reader first needs it, a missing one at once."""
+    """Whether the packing pass owes ``root`` a rebuild, by stats alone (a resting look opens nothing of the packs):
+    packs exist and the index file is missing, or a read left ``DAMAGED_MARK`` (``open_index``: the O(1) facts failed,
+    or damage behind them), so an unusable index is owed once a reader first needs it, a missing one at once. A file a
+    reader cannot open for its own or its environment's cause (no descriptor, I/O, a WAL it must not share) is not
+    marked and waits for a pass due for another reason (each pass checks the index itself)."""
     directory = packs_dir(root)
     return directory.is_dir() and ((directory / DAMAGED_MARK).exists() or not (directory / INDEX_NAME).exists())
 
