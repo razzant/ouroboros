@@ -144,13 +144,15 @@ def backfill_due(root, row, facts, child):
 
 
 def backfill(root, should_stop):
-    """One addressed pass over already-open requests, CAS against start/refusal races."""
+    """One addressed pass over already-open requests, CAS against start/refusal races. A request whose body
+    cannot be located now keeps no shape and leaves the job pending, so a later run reads it."""
     from ouroboros import maintenance_jobs, store
+    from ouroboros.evidence_packs import EvidenceUnavailable
 
     with store.open_store(root, write=False) as txn:
         request = txn.meta("job:" + JOB)
         rows = txn.set_rows("custody_open")
-    done = 0
+    done, owed = 0, False
     for key, facts in rows.items():
         if should_stop():
             return {"state": "pending", "items": done}
@@ -160,12 +162,18 @@ def backfill(root, should_stop):
         source = facts["request"]
         shape = source.get("request_shape")
         if shape is None:
-            shape = request_shape(request_body(root, source))
+            try:
+                shape = request_shape(request_body(root, source, raise_unavailable=True))
+            except EvidenceUnavailable:
+                owed = True
+                continue
         projected = pending_invocations(root, [{**source, "request_shape": shape}], materialize=False)
         with store.open_store(root, write=True) as txn:
             if txn.get_row("custody_open", key) == facts:
                 txn.put_row("custody_open", key, {**facts, "pending": projected})
         done += 1
+    if owed:
+        return {"state": "pending", "items": done}
     with store.open_store(root, write=True) as txn:
         if txn.meta("job:" + JOB) != request:
             return {"state": "pending", "items": done}  # an import/repair added open rows meanwhile
@@ -211,13 +219,16 @@ def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any, *, requ
             "its key or the run it continues")
 
 
-def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def request_body(drive_root: Any, row: Dict[str, Any], *,
+                 raise_unavailable: bool = False) -> Optional[Dict[str, Any]]:
     """Resolve the canonical replay envelope, legacy inline first, then raw CAS.
 
     The raw CAS blob holds the full unredacted envelope, stored before the
     start-requested row. Unreadable references leave the request unknown for
     the caller's existing refusal paths; never rebuild a paid invocation from
-    current settings.
+    current settings. A body whose bytes cannot be located now is unknown too,
+    never unrecorded: ``raise_unavailable`` hands its ``EvidenceUnavailable`` to a
+    caller that would otherwise record the request as unrecorded.
     """
     inline = row.get("request")
     if isinstance(inline, dict) and inline:
@@ -225,10 +236,16 @@ def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any
     ref = row.get("request_ref")
     if not isinstance(ref, dict) or not ref:
         return None
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref
 
     try:
-        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json")
+        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json",
+                             task_id=str(row.get("task_id") or "") or None)
+    except EvidenceUnavailable:
+        if raise_unavailable:
+            raise
+        return None
     except Exception:
         return None
     return body if isinstance(body, dict) and body else None

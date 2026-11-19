@@ -198,6 +198,19 @@ def carry_spans(prefix: str, receipt: Optional[Dict[str, Dict[str, int]]]) -> No
         span[1] += cpu.get(name, 0) / 1000
 
 
+def prologue_step(slot: Any, name: str, step: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """``step(*args, **kwargs)`` measured under ``name`` in a window of its own, raised or not, its spans added to
+    ``slot._round_prologue``: work done before a round's window opens, which that window names ``prologue.<name>``."""
+    with measured_sections():
+        try:
+            return timed(name, step, *args, **kwargs)
+        finally:
+            spent, start = section_spans(), getattr(slot, "_round_prologue", None) or {}
+            slot._round_prologue = {kind: {**start.get(kind, {}), **{
+                key: ms + start.get(kind, {}).get(key, 0) for key, ms in spent[kind].items()}}
+                for kind in ("sections_ms", "sections_cpu_ms")}
+
+
 def section_spans() -> Dict[str, Dict[str, int]]:
     """``sections_ms`` and ``sections_cpu_ms`` of the window being measured (with its ``total`` so far) and
     its counted ``work``, or nothing outside one."""

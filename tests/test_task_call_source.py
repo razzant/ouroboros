@@ -302,3 +302,46 @@ def test_call_arguments_refuse_before_selection(tmp_path, monkeypatch, extra):
     monkeypatch.setattr(results, "load_effective_task_result", lambda *_a: pytest.fail("selected before validation"))
     result, _ = _call(_ctx(tmp_path), **{"task_id": "task", "call_id": "call", "manifest_sha256": "a" * 64, **extra})
     assert result["code"] == "TOOL_ARG_ERROR"
+
+
+def test_a_source_whose_place_cannot_be_learned_now_is_a_typed_fact_never_unreadable(tmp_path, monkeypatch):
+    """A retained call source whose bytes cannot be located now (``EvidenceUnavailable``: the packs catalog
+    cannot answer) is neither absent nor damaged: the tool answers ``unavailable`` with the reason and that the
+    address stays good, and decides no retry itself. A projection that is gone and a damaged one keep their own
+    answers, and once the catalog answers the same call returns the exact bytes."""
+    from ouroboros import evidence_packs
+
+    task_id = "unknown-place"
+    calls = {name: persist_call(tmp_path, task_id=task_id, call_id=name, call_type="tool_call",
+                                payload={"result": f"exact {name} bytes"}) for name in ("retained", "gone", "damaged")}
+    write_task_result(tmp_path, task_id, STATUS_COMPLETED, result="done", trace_refs={
+        "tool_call_refs": [{"manifest_ref": call["manifest_ref"]} for call in calls.values()]})
+    Path(calls["gone"]["redacted_projection_ref"]["path"]).unlink()
+    Path(calls["damaged"]["redacted_projection_ref"]["path"]).write_bytes(b"corrupt-cas-bytes")
+    ctx, digest = _ctx(tmp_path), calls["retained"]["redacted_projection_ref"]["sha256"]
+    args = {name: {"task_id": task_id, "call_id": name, "manifest_sha256": call["manifest_ref"]["sha256"]}
+            for name, call in calls.items()}
+    real = evidence_packs.blob_bytes
+
+    def unlocatable(root, ref, **kwargs):
+        if ref.get("sha256") == digest:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        answers = {name: _call(ctx, **arguments)[0] for name, arguments in args.items()}
+    assert (answers["retained"]["status"], answers["retained"]["code"]) == ("unavailable", "LEGACY_UNAVAILABLE")
+    assert answers["retained"]["message"].startswith("evidence_unavailable (busy): "), answers["retained"]
+    assert "address stays good" in answers["retained"]["message"]
+    assert (answers["gone"]["status"], answers["gone"]["code"]) == ("unavailable", "LEGACY_UNAVAILABLE")
+    assert answers["gone"]["message"] == "Retained call has no available redacted projection."
+    assert (answers["damaged"]["status"], answers["damaged"]["code"]) == ("error", "TOOL_ERROR")
+    assert answers["damaged"]["message"] == "Retained call source is unreadable or failed verification."
+    meta_result, meta = _call(ctx, **args["retained"])
+    source_result, source = _call(ctx, **args["retained"], source_start_char=0,
+                                  source_end_char=meta["source"]["complete_chars"])
+    assert meta_result["status"] == source_result["status"] == "ok"
+    from ouroboros.evidence_packs import read_loose_gzip
+    assert source["source"]["text"] == read_loose_gzip(Path(calls["retained"]["redacted_projection_ref"]["path"])).decode()

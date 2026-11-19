@@ -253,6 +253,54 @@ def test_definite_retry_refusal_retires_handoff_without_false_pending_claim(
     custody._CUSTODY.clear()
 
 
+def test_a_pending_body_that_cannot_be_located_now_defers_the_holder(monkeypatch, tmp_path):
+    """The holder's replay reads its pending invocation's stored body. While that body, held only by another task's
+    pack, cannot be located (the packs catalog is held), the holder is deferred and kept for the next pass, never
+    refused as a missing prompt; once the body reads, the next pass replays exactly that body."""
+    import threading
+
+    import ouroboros.tools.delegate as delegate
+    from ouroboros import evidence_packs, store
+    from ouroboros.tools.registry import ToolContext
+
+    custody, recovery, task, _snapshot, invocation_id, _fingerprint, _authority = (
+        _pending_handoff(tmp_path, "recovery-unlocated")
+    )
+    [ref] = [row["request_ref"] for row in custody._iter_rows(custody.event_log_path(tmp_path))
+             if row["type"] == custody.START_REQUESTED]
+    evidence_packs.write_pack(tmp_path, "other", 1, [ref])
+    evidence_packs.ensure_index(tmp_path)
+    (tmp_path / "observability" / "blobs" / f"{ref['sha256']}.{ref['kind']}.gz").unlink()
+    starts = []
+    monkeypatch.setattr(delegate, "exact_start", lambda _ctx, prompt, retry: starts.append(
+        (prompt, retry["retry_of"])) or _fail("delegate_start", "subscription_window_exhausted", "spent"))
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"])
+    ctx.budget_drive_root = str(tmp_path)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(tmp_path, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with store.acquisition_budget(0):
+            result = recovery.adopt_handoff(ctx, task)
+    finally:
+        release.set()
+        holder.join(10)
+    assert result["status"] == "recovery_required" and result["reason"] == "evidence_unavailable", result
+    assert recovery._read(tmp_path, task["id"])["holders"][0]["status"] == "deferred"
+    assert starts == [] and task["id"] in recovery.recoverable_task_ids(tmp_path)
+    assert [row["invocation_id"] for row in custody.pending_invocations(tmp_path)] == [invocation_id]
+    assert recovery.adopt_handoff(ctx, task)["reason"] == "pending_recovery_deferred"
+    assert starts == [("stored canonical request", invocation_id)]
+    custody._CUSTODY.clear()
+
+
 def test_started_retry_race_adopts_same_durable_invocation(monkeypatch, tmp_path):
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.tools.delegate as delegate

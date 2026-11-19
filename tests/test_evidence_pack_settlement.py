@@ -334,6 +334,7 @@ def test_a_writer_commits_while_a_census_directory_probe_stalls(root, monkeypatc
     publish(root, tier=tier)
     _task(root, "stalled", blobs=1)
     _task(root, "other", blobs=1)
+    packs.ensure_index(root)  # the cache the pass's builder leaves, where the census records its stamps
     target = root / "observability" / "calls" / "stalled"
     entered, release, result = threading.Event(), threading.Event(), {}
     original = pathlib.Path.stat
@@ -393,6 +394,5 @@ def test_new_packs_order_checkpoints_then_blobs_smallest_first_and_old_order_sta
                     for ref, offset in zip(old, (0, len(raws[0])))]}), encoding="utf-8")
     for ref in old:
         pathlib.Path(ref["path"]).unlink()
-    (packs.packs_dir(root) / packs.INDEX_NAME).unlink()
-    packs._VALIDATED.clear()
-    assert [packs.blob_bytes(root, ref) for ref in old] == list(raws)
+    (packs.packs_dir(root) / packs.INDEX_NAME).unlink()  # the hand-written pack is read by its own sidecar
+    assert [packs.blob_bytes(root, ref, task_id="legacy") for ref in old] == list(raws)
