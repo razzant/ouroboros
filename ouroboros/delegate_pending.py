@@ -211,13 +211,16 @@ def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any, *, requ
             "its key or the run it continues")
 
 
-def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def request_body(drive_root: Any, row: Dict[str, Any], *,
+                 raise_unavailable: bool = False) -> Optional[Dict[str, Any]]:
     """Resolve the canonical replay envelope, legacy inline first, then raw CAS.
 
     The raw CAS blob holds the full unredacted envelope, stored before the
     start-requested row. Unreadable references leave the request unknown for
     the caller's existing refusal paths; never rebuild a paid invocation from
-    current settings.
+    current settings. A body whose bytes cannot be located now is unknown too,
+    never unrecorded: ``raise_unavailable`` hands its ``EvidenceUnavailable`` to a
+    caller that would otherwise record the request as unrecorded.
     """
     inline = row.get("request")
     if isinstance(inline, dict) and inline:
@@ -225,10 +228,16 @@ def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any
     ref = row.get("request_ref")
     if not isinstance(ref, dict) or not ref:
         return None
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref
 
     try:
-        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json")
+        body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json",
+                             task_id=str(row.get("task_id") or "") or None)
+    except EvidenceUnavailable:
+        if raise_unavailable:
+            raise
+        return None
     except Exception:
         return None
     return body if isinstance(body, dict) and body else None
