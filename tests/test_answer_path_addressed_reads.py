@@ -220,7 +220,7 @@ def test_a_packed_blob_read_is_flat_across_evidence_packs(tmp_path, monkeypatch,
     state; the sha-only read answers from a valid index and is otherwise ``EvidenceUnavailable``
     (the address stays good), never an absence; a sha no pack holds is ``FileNotFoundError`` once
     the index can say so; a task whose own sidecar is damaged keeps the placement a valid index
-    holds, else stays ``evidence_corrupt``. The reader writes no index."""
+    holds, and is as unknown as the index otherwise (never an absence). The reader writes no index."""
     from ouroboros import evidence_packs, store
 
     monkeypatch.setattr(store, "_journal_mode", lambda *_: journal)
@@ -269,9 +269,9 @@ def test_a_packed_blob_read_is_flat_across_evidence_packs(tmp_path, monkeypatch,
     assert answers[K_SMALL] == answers[K_LARGE]
     own, by_sha, missing, broken = answers[K_SMALL]
     unavailable = ("EvidenceUnavailable", "busy" if index == "busy" else "damaged")
-    assert own[0] == "bytes" and broken[0] in {"bytes", "SidecarCorrupt"}
-    assert (by_sha, missing, broken[0]) == ((own, ("FileNotFoundError", None), "bytes") if index == "valid"
-                                            else (unavailable, unavailable, "SidecarCorrupt"))
+    assert own[0] == "bytes"
+    assert (by_sha, missing, broken[0] if index == "valid" else broken) == (
+        (own, ("FileNotFoundError", None), "bytes") if index == "valid" else (unavailable, unavailable, unavailable))
     for k in (K_SMALL, K_LARGE):  # the reader rebuilt nothing
         path = evidence_packs.packs_dir(tmp_path / f"k{k:03d}" / "data") / evidence_packs.INDEX_NAME
         assert (path.read_bytes() if index == "garbage" else path.exists()) == {
@@ -601,6 +601,31 @@ def test_a_handle_miss_and_an_ordering_hint_never_wait_for_the_index_lock(tmp_pa
     assert packs.blob_bytes(tmp_path, foreign) == packs.blob_bytes(tmp_path, foreign, task_id="b")  # free: both answer
 
 
+def test_a_place_that_cannot_answer_now_leaves_the_read_unknown_before_a_copy_s_damage(tmp_path, monkeypatch):
+    """Without bytes, the first place that could not answer now decides the read: a torn loose copy beside a
+    sound packed one, read by its sha while the packer holds the index, is ``EvidenceUnavailable`` (a sound copy
+    may lie there, and does: the exact bytes once the lock is free); a torn loose copy no pack holds, with the
+    index free to say so, stays that copy's ``evidence_corrupt``."""
+    import gzip
+
+    from ouroboros import evidence_packs as packs, store
+    from tests.test_evidence_packs import _blob
+
+    raw, other = (json.dumps({"result": text}).encode() for text in ("packed", "loose only"))
+    ref, alone = _blob(tmp_path, raw), _blob(tmp_path, other)
+    packs.write_pack(tmp_path, "owner", 1, [{key: ref[key] for key in ("sha256", "kind", "size")}])
+    packs.ensure_index(tmp_path)
+    for blob, value in ((ref, raw), (alone, other)):
+        with gzip.open(blob["path"], "wb") as handle:  # torn: a sound gzip of a short copy
+            handle.write(value[:-3])
+    with store.name_lock(tmp_path, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        with pytest.raises(packs.EvidenceUnavailable) as unknown:
+            packs.blob_bytes(tmp_path, ref)
+    assert unknown.value.reason == "busy" and packs.blob_bytes(tmp_path, ref) == raw
+    with pytest.raises(packs.EvidenceCorrupt, match="failed size or sha256 verification"):
+        packs.blob_bytes(tmp_path, alone)
+
+
 def test_a_task_s_own_sidecars_are_parsed_once_per_file_and_only_a_few_are_kept(tmp_path, monkeypatch):
     """Reassembling one view reads hundreds of its parts from one owner, whose sidecar can hold tens of
     thousands of members: each sidecar is parsed once per file, never once per lookup; a new generation is
@@ -628,8 +653,10 @@ def test_a_task_s_own_sidecars_are_parsed_once_per_file_and_only_a_few_are_kept(
     assert decoded == ["a.2.members.json"]
     (packs.packs_dir(tmp_path) / packs.INDEX_NAME).unlink()  # no cache could vouch for the replaced file
     (packs.packs_dir(tmp_path) / "a.members.json").write_text("{", encoding="utf-8")
-    with pytest.raises(packs.SidecarCorrupt):
+    decoded.clear()
+    with pytest.raises(packs.EvidenceUnavailable):  # its own sidecar unreadable and no cache to say more now
         packs.blob_bytes(tmp_path, refs["a"][0], task_id="a")
+    assert decoded == ["a.members.json"]  # read again, never answered from the old parse
     for task in ("b", "c", "d", "e"):
         assert packs.blob_bytes(tmp_path, refs[task][0], task_id=task)
     kept = packs._brief.cache_info()

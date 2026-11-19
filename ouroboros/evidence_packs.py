@@ -666,8 +666,9 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     """Verified bytes, cheapest place first, in two phases over every admissible root (``_blob_roots``):
     first the loose file, a view's skeleton placement spliced with its parts and, when the caller names
     the owning task (a cost hint, never a proof of absence), that task's own sidecars, in each root;
-    only then each root's shared index. Any copy found is right: its size and sha256 are checked. An
-    index that cannot answer now leaves ``EvidenceUnavailable`` where an absence is not proven.
+    only then each root's shared index. Any copy found is right: its size and sha256 are checked. Without
+    bytes, the first place that could not answer now (an index, a view's part) makes the read
+    ``EvidenceUnavailable``, before any copy's damage and any absence: a sound copy may lie there.
 
     ``admit`` (optional) sees each loose, placement or pack file before it is opened; what it
     raises propagates, so a refusal never becomes a miss, corruption or fallback."""
@@ -678,6 +679,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     if max_bytes is not None and size > max_bytes:
         raise ValueError("blob exceeds byte limit")
     failure: Optional[Exception] = None
+    unknown: Optional[EvidenceUnavailable] = None  # the first place that could not answer now
     roots = _blob_roots(root, ref, sha256, kind)
     try:
         for indexed, candidate in [*((False, each) for each in roots), *((True, each) for each in roots)]:
@@ -699,6 +701,8 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                         raw = _shared_whole(candidate, sha256, size, max_bytes, admit, task_id)
                         if raw is not None:
                             return raw
+                    except EvidenceUnavailable as exc:
+                        unknown = unknown or exc
                     except (ValueError, OSError, EOFError, zlib.error) as exc:
                         failure = exc  # a part gone or damaged names itself; the whole may still be packed below
                 if not task_id:
@@ -710,8 +714,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                     placements, unreadable = _own_placements(candidate, task_id, key=(sha256, kind))
                     failure = unreadable[0] if unreadable else failure  # the task's own damage is never an absence
             except EvidenceUnavailable as exc:
-                if failure is None or isinstance(failure, FileNotFoundError):
-                    failure = exc  # absence is not proven: the address stays good
+                unknown = unknown or exc  # neither absence nor a copy's damage is proven: the address stays good
                 continue
             except (OSError, EvidenceCorrupt) as exc:
                 failure = exc
@@ -732,11 +735,11 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                     failure = exc
                 except OSError:
                     failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
-        raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
+        raise unknown or failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
     finally:
         # The kept error's traceback holds this frame: kept past an exit, it is a cycle retaining the callers'
         # frames and payloads until a GC pass. Every exit drops it; a raised error keeps its object and traceback.
-        failure = None
+        failure = unknown = None
 
 
 def _handle_path(root: Any, task_id: str, rel_path: str) -> pathlib.Path:

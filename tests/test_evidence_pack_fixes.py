@@ -35,11 +35,14 @@ def test_bad_sidecar_refuses_restore_and_packing_without_hiding_neighbour(root, 
     assert (directory / "broken.xz").read_bytes() == original
     (directory / packs.INDEX_NAME).unlink()  # no cache could vouch for either task's members
     assert packs.blob_bytes(root, other[0], task_id="healthy").startswith(b'{"message"')
-    with pytest.raises(OSError, match="evidence_corrupt"):
-        packs.blob_bytes(root, refs[0], task_id="broken")
-    with pytest.raises(packs.EvidenceUnavailable):  # by sha alone: unknown until the pass rebuilds the cache
-        packs.blob_bytes(root, refs[0])
+    for task in ({"task_id": "broken"}, {}):  # by its task or sha alone: unknown until the pass rebuilds the cache
+        with pytest.raises(packs.EvidenceUnavailable):
+            packs.blob_bytes(root, refs[0], **task)
     assert not (directory / packs.INDEX_NAME).exists()
+    packs.ensure_index(root)  # the pass's rebuild records the sidecar unreadable: then the damage is the answer
+    for task in ({"task_id": "broken"}, {}):
+        with pytest.raises(OSError, match="evidence_corrupt"):
+            packs.blob_bytes(root, refs[0], **task)
 
     sidecar.write_bytes(intact)
     assert packs.pending_restore_bytes(root) > 0
