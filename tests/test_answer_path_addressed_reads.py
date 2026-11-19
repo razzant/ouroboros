@@ -605,10 +605,11 @@ def test_a_place_that_cannot_answer_now_leaves_the_read_unknown_before_a_copy_s_
     """Without bytes, the first place that could not answer now decides the read: a torn loose copy beside a
     sound packed one, read by its sha while the packer holds the index, is ``EvidenceUnavailable`` (a sound copy
     may lie there, and does: the exact bytes once the lock is free); a torn loose copy no pack holds, with the
-    index free to say so, stays that copy's ``evidence_corrupt``."""
+    index free to say so, stays that copy's ``evidence_corrupt``; an admission refusal met inside a view's parts
+    stays that ``PermissionError`` while the index cannot answer."""
     import gzip
 
-    from ouroboros import evidence_packs as packs, store
+    from ouroboros import evidence_packs as packs, observability as obs, store
     from tests.test_evidence_packs import _blob
 
     raw, other = (json.dumps({"result": text}).encode() for text in ("packed", "loose only"))
@@ -624,6 +625,17 @@ def test_a_place_that_cannot_answer_now_leaves_the_read_unknown_before_a_copy_s_
     assert unknown.value.reason == "busy" and packs.blob_bytes(tmp_path, ref) == raw
     with pytest.raises(packs.EvidenceCorrupt, match="failed size or sha256 verification"):
         packs.blob_bytes(tmp_path, alone)
+    parts = {}
+    view = obs.write_shared_blob(tmp_path, {"messages": [{"role": "user", "content": "hello"}]}, parts)
+    refused = {f"{part['sha256']}.json.gz" for part in parts.values()}
+
+    def admit(path):  # the caller refuses the view's parts, admitting its skeleton placement
+        if path.name in refused:
+            raise PermissionError(f"refused: {path.name}")
+
+    with store.name_lock(tmp_path, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        with pytest.raises(PermissionError, match="refused"):
+            packs.blob_bytes(tmp_path, view, admit=admit)
 
 
 def test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_the_next(tmp_path, monkeypatch):
