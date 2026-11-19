@@ -476,3 +476,37 @@ def test_pack_sql_holds_the_index_owner_lock(ctx, monkeypatch, tier):
         with pytest.raises(store.StoreBusy):
             with store.name_lock(ctx.drive_root, packs.INDEX_LOCK_NAME, timeout_sec=0.01):
                 pytest.fail("index owner lock was released before SQL")
+
+
+def test_the_minds_sql_meeting_index_damage_marks_it_and_a_failed_statement_does_not(ctx, monkeypatch):
+    """The mind's SQL on the evidence index (``db=packs`` through the real child process) answers a failed
+    statement as ``query_failed`` either way; only SQLite's verdict that the file is damaged leaves the damage
+    mark, so the packing job owes the rebuild that heals it and the same SELECT answers again, while a mistyped
+    column on a sound index marks nothing."""
+    import contextlib
+
+    from ouroboros import evidence_packs as packs, maintenance
+    from tests._store_journal_shared import use_journal
+    from tests.test_evidence_packs import _task
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(ctx.drive_root))
+    use_journal(monkeypatch, "PERSIST")  # the damaged page lies in the file itself, not in a WAL
+    for task in ("a", "b", "c"):
+        _task(ctx.drive_root, task, blobs=1)
+    for _ in range(2):  # packs, then the one more look that records the moved stamps
+        maintenance.run_job(ctx.drive_root, "evidence_packing")
+    index, mark = packs.packs_dir(ctx.drive_root) / packs.INDEX_NAME, packs.packs_dir(ctx.drive_root) / packs.DAMAGED_MARK
+    query = "SELECT count(*) FROM members WHERE sha256 >= ''"  # through the members' key
+    mistyped = run(ctx, "SELECT nope FROM members", db="packs", timeout_sec=60.0)
+    assert (mistyped["status"], mistyped["code"], mark.exists()) == ("error", "query_failed", False), mistyped
+    with contextlib.closing(sqlite3.connect(index)) as conn:  # that key's root page, behind a sound header and meta row
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='sqlite_autoindex_members_1'").fetchone()[0]
+        size = conn.execute("PRAGMA page_size").fetchone()[0]
+    with open(index, "r+b") as handle:
+        handle.seek((page - 1) * size)
+        handle.write(b"\0" * size)
+    broken = run(ctx, query, db="packs", timeout_sec=60.0)
+    assert (broken["status"], broken["code"]) == ("error", "query_failed") and "malformed" in broken["message"], broken
+    assert mark.exists() and "evidence_packing" in maintenance.due(ctx.drive_root)
+    assert maintenance.run_job(ctx.drive_root, "evidence_packing")["state"] == "done" and not mark.exists()
+    assert run(ctx, query, db="packs", timeout_sec=60.0)["data"]["rows"] == [[6]]

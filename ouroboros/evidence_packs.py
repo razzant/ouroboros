@@ -276,9 +276,16 @@ def index_tier(root: pathlib.Path) -> str:
     return store.TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / store.LOCK_NAME) else store.TIER_NAME
 
 
-def _damaged(exc: BaseException) -> bool:
+def _damaged(exc: Optional[BaseException]) -> bool:
     """SQLite's verdict on the file itself: never a caller's failed statement or a process's own failure to open it."""
     return type(exc) is sqlite3.DatabaseError and any(text in str(exc) for text in ("malformed", "not a database"))
+
+
+def mark_if_damaged(root: Any, exc: Optional[BaseException]) -> None:
+    """Leave ``DAMAGED_MARK`` for the packing pass when ``exc`` is that verdict on ``root``'s index (best effort)."""
+    if _damaged(exc):
+        with contextlib.suppress(OSError):  # a root may be read-only: the read's answer stands either way
+            (packs_dir(root) / DAMAGED_MARK).touch()
 
 
 def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC, reader: bool = False) -> bool:
@@ -397,9 +404,7 @@ def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_S
                 with store.transaction(conn, write=write):
                     yield conn
         except sqlite3.DatabaseError as exc:
-            if _damaged(exc):  # SQLITE_CORRUPT, SQLITE_NOTADB; never the mind's mistyped or refused SQL (query_data)
-                with contextlib.suppress(OSError):  # a root may be read-only: the read's answer stands either way
-                    (path.parent / DAMAGED_MARK).touch()
+            mark_if_damaged(root, exc)  # SQLITE_CORRUPT, SQLITE_NOTADB; never a caller's mistyped or refused SQL
             raise
 
 

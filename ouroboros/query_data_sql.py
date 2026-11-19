@@ -120,7 +120,11 @@ def _source(root, db, budget):
         # refused (``EvidenceUnavailable``), never rebuilt here.
         with evidence_packs.open_index(root, wait_sec=budget.remaining()):
             budget.remaining()
-            yield evidence_packs.index_tier(root)
+            try:
+                yield evidence_packs.index_tier(root)
+            except ValueError as exc:  # the SQL's error (``_connection``): SQLite's verdict on the file still marks it
+                evidence_packs.mark_if_damaged(root, exc.__cause__)
+                raise
     budget.remaining()
 
 
