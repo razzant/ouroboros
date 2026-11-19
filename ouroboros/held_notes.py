@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +45,13 @@ class HeldNoteSection(HostSection):
         return (*super().__getnewargs__(), self.topic, self.revision, self.window_label,
                 self.summary, self.outline_has_summary, self.index_has_summary, self.source_chars, self.index_row,
                 self.reader_restriction, self.carried_by)
+
+    @classmethod
+    def restored(cls, entry: Mapping, carried: Mapping) -> HeldNoteSection:
+        """A saved entry, read by the fields this build knows (a capture a later build saved resumes here too), with
+        its carriers from the entry, else from the map ``continuation_capture`` keeps beside the entries."""
+        known = {item.name: entry[item.name] for item in fields(cls) if item.name in entry}
+        return cls(**{**known, "carried_by": tuple(entry.get("carried_by") or carried.get(entry["section_id"], ()))})
 
     def with_index(self, row: Mapping, navigation: Mapping) -> HeldNoteSection:
         """Locate the authored summary in either captured form of the index."""
@@ -125,7 +132,9 @@ def restored_capture(state: Mapping) -> dict:
 
 
 def continuation_capture(plan: Any, mode: str | None) -> dict:
-    """Carry the sent forms and their captured index and overview in the ordinary continuation."""
+    """Carry the sent forms and their captured index and overview in the ordinary continuation. An entry holds only
+    the fields a build since P1 restores, which refuses any other key; carriage stands beside the entries, only where
+    a head is carried, so a work saved here still resumes after a Rollback."""
     from ouroboros.context_budget import context_mode_limits
 
     core = getattr(plan, "core", None)
@@ -141,8 +150,10 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
     projection = plan.projection(mode)
     facts = projection.memory_facts
     request_tokens = facts.get("held_note_request_tokens")
+    carried = {part.section_id: list(part.carried_by) for part in entries if part.carried_by}
     return {CAPTURE_KEY: {
-        "entries": [asdict(part) for part in entries], "companions": companions,
+        "entries": [{key: value for key, value in asdict(part).items() if key != "carried_by"} for part in entries],
+        **({"carried": carried} if carried else {}), "companions": companions,
         "frame": frame_key(mode, plan.preferred_mode, plan.window_tokens, plan.window_record, reserve,
                            projection.calibration_ratio, request_tokens) if request_tokens is not None else None,
         "receipts": [row for row in facts.get("host_sections_addressed", ())
@@ -357,9 +368,9 @@ def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Ma
     if (captured := getattr(ctx, "_held_note_capture", None)) is not None:
         if not captured["entries"]:
             return []
-        rows = {row["topic"]: row for row in inventory}
-        return [HeldNoteSection(**entry).recheck_reader(ctx, root).with_index(rows.get(entry["topic"], {}), navigation)
-                for entry in captured["entries"]]
+        rows, carried = {row["topic"]: row for row in inventory}, captured.get("carried") or {}
+        return [HeldNoteSection.restored(entry, carried).recheck_reader(ctx, root)
+                .with_index(rows.get(entry["topic"], {}), navigation) for entry in captured["entries"]]
 
     claims = knowledge.active_claims(root, inventory=inventory)
     matches: dict[knowledge.KnowledgeAddress, list[str]] = {}

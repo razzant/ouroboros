@@ -4,7 +4,7 @@ from __future__ import annotations
 import errno
 import json
 import re
-from dataclasses import replace
+from dataclasses import make_dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -500,19 +500,43 @@ def test_links_without_a_recorded_claim_add_nothing_to_the_request_or_the_store(
                for folder in ("knowledge_note_records", "knowledge_held_versions"))
 
 
+# A held entry's fields in every build from P1 (bcd912017) to step 2 (ff85e901d), read from ff85e901d's
+# ``HeldNoteSection``: those builds restore an entry with ``HeldNoteSection(**entry)``, which refuses any other key.
+PREVIOUS_ENTRY_FIELDS = ("section_id", "full_text", "operative_view", "reader", "topic", "revision", "window_label",
+                         "summary", "outline_has_summary", "index_has_summary", "source_chars", "index_row",
+                         "reader_restriction")
+
+
 def test_a_restored_capture_replays_the_linked_heads_exactly_after_the_target_changed(world):
+    """A restored capture replays the heads it saved, carriers included, after a note changed. It also resumes on the
+    build before this one (a Rollback), and here when a later build saved it with a field this build does not know."""
+    previous = make_dataclass("PreviousHeldNoteSection", PREVIOUS_ENTRY_FIELDS)  # refuses an unknown key, as there
     sasha = _write(world, "people/sasha", "Sasha before the wait.", claims=(), title="Sasha")
-    _write(world, "work/nova", "Nova links [Sasha](../people/sasha.md).", title="Nova")
+    nova = _write(world, "work/nova", "Nova, before it links.", title="Nova")
+    claimed = held_notes.continuation_capture(_plan(world, mode="low"), "low")[held_notes.CAPTURE_KEY]
+    _write(world, "work/nova", "Nova links [Sasha](../people/sasha.md).", title="Nova", revision=nova.revision)
     first = _plan(world, mode="low")
     saved = json.loads(json.dumps({**held_notes.continuation_capture(first, "low"), "messages": None,
                                    "tool_schemas": None}))
+    capture = saved[held_notes.CAPTURE_KEY]
+    assert sorted(claimed) == ["companions", "entries", "frame", "receipts"]  # no head carried: no carriage beside
+    assert capture["carried"] == {"held_note:people/sasha": ["work/nova"]}
+    entries = [*claimed["entries"], *held_notes.restored_capture(saved)["entries"]]
+    assert {tuple(entry) for entry in entries} == {PREVIOUS_ENTRY_FIELDS}  # what the build before saves, key for key
+    assert [previous(**entry).topic for entry in entries] == ["work/nova", "work/nova", "people/sasha"]  # its restore
+
     _write(world, "people/sasha", "Sasha after the wait.", claims=(), title="Sasha", revision=sasha.revision)
     assert "Sasha after the wait." in _held(_plan(world, mode="low"))
     ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
-    ctx._held_note_capture = held_notes.restored_capture(saved)
-    replayed = _plan(world, mode="low", ctx=ctx)
-    assert _held(replayed) == _held(first) and "Sasha before the wait." in _held(replayed)
-    assert tuple(_entries(replayed.core)["people/sasha"].carried_by) == ("work/nova",)
+    later = {**saved, held_notes.CAPTURE_KEY: {**capture, "carried": {}, "entries": [  # carriage in the entry, a new field
+        {**entry, "carried_by": capture["carried"].get(entry["section_id"], []), "added_later": True}
+        for entry in capture["entries"]]}}
+    for state in (saved, later):
+        ctx._held_note_capture = held_notes.restored_capture(state)
+        replayed = _plan(world, mode="low", ctx=ctx)
+        assert _held(replayed) == _held(first) and "Sasha before the wait." in _held(replayed)
+        assert {topic: part.carried_by for topic, part in _entries(replayed.core).items()} == {
+            "work/nova": (), "people/sasha": ("work/nova",)}
 
 
 def test_a_linked_head_yields_to_the_window_before_any_claimed_head(world):
