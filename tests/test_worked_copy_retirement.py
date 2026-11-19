@@ -822,9 +822,9 @@ def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the
     with monkeypatch.context() as older_body:  # a body before #3789 packed every handle, one generation a pass
         older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
         first = _file(addressed("first generation", "8"), "first generation")
-        evidence_packs.pack_task(root, "partial", keep_shas=set())
+        evidence_packs.pack_task(root, "partial")
         _file(addressed("second generation", "9"), "second generation")
-        evidence_packs.pack_task(root, "partial", keep_shas=set())
+        evidence_packs.pack_task(root, "partial")
     rel = f"source_handles/context_checkpoints/{first.name}"
     assert evidence_packs.materialize_handle(root, "partial", rel) and first.exists()
     sidecars = [evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("partial", generation) for generation in (1, 2)]
@@ -868,10 +868,10 @@ def test_an_index_that_recorded_an_unreadable_sidecar_answers_no_whole_listing_t
     with monkeypatch.context() as older_body:  # a body before #3789 packed every handle
         older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
         _file(first, text)
-        evidence_packs.pack_task(root, "validated", keep_shas=set())
+        evidence_packs.pack_task(root, "validated")
     notes = hashlib.sha256(b"notes").hexdigest()
     _file(handles / "context_checkpoints" / f"working-notes-{notes}.json", "notes")  # a source: generation 2
-    evidence_packs.pack_task(root, "validated", keep_shas=set())
+    evidence_packs.pack_task(root, "validated")
     assert evidence_packs.materialize_handle(root, "validated", f"source_handles/context_checkpoints/{first.name}")
     sidecar = evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("validated", 1)
     intact = sidecar.read_bytes()
