@@ -830,3 +830,127 @@ def test_a_store_an_older_body_created_gains_the_window_index_once_at_boot(tmp_p
         assert allowance.allowance_window(root, now=NOW) == before
     finally:
         usage_store.forget(root)
+
+
+# ---- the round's source transfer: an applied fold's receipt promoted beside k-scaled packed history -------------
+
+TRANSFER_TASKS = ("warm-up", "turn")
+
+
+def _transfer_history(root, k):
+    """``_packed_history``'s unrelated packed tasks in the canonical root, and for each live task a drive holding an
+    applied fold's receipt and the evidence it names, all loose beside the producer: two request views (a skeleton and
+    its parts), a response and a tool result, with the call manifests that carry them."""
+    import hashlib
+
+    from ouroboros import headless, observability as obs
+    from ouroboros.artifacts import store_actor_source_bytes
+
+    _packed_history(root, k)
+    facts = {}
+    for task in TRANSFER_TASKS:
+        child = headless.prepare_task_drive(root, task, "empty")
+        settled = [{"role": "user", "content": f"settled turn {index} of {task} " + "x" * 400} for index in range(3)]
+        refs = [obs.persist_call(child, task_id=task, call_id=f"llm_{index}_request", call_type="llm_request",
+                                 payload={"messages": [*settled, {"role": "user", "content": f"question {index}"}]}
+                                 )["manifest_ref"] for index in range(2)]
+        for call_id, payload in (("llm_1_response", {"message": {"role": "assistant", "content": "an answer"}}),
+                                 ("tool_read_file_0", {"tool": "read_file", "result": "y" * 2000})):
+            refs.append(obs.persist_call(child, task_id=task, call_id=call_id, call_type="tool_call",
+                                         payload=payload)["manifest_ref"])
+        raw = json.dumps({"stage": "candidate_materialization", "published": False,
+                          "receipt": {"status": "applied", "refs": refs}}, sort_keys=True).encode("utf-8")
+        source = store_actor_source_bytes(child, task, category="context_checkpoints",
+                                          source_id=hashlib.sha256(raw).hexdigest(), data=raw, extension="json")
+        facts[task] = {"child": child, "source": source, "raw": raw}
+    return facts
+
+
+def _catalog_contract(monkeypatch):
+    """The packs reader's answer when no cheap copy holds a sha: its catalog within the caller's acquisition budget,
+    else ``EvidenceUnavailable``, never a pass over every sidecar; its ordering hint never waits. Emulated at the two
+    points an older reader differs (its whole-directory ``list_sidecars`` and ``read_position``'s own wait), so this
+    section measures the transfer itself."""
+    from ouroboros import evidence_packs, store
+
+    real_list, real_position = evidence_packs.list_sidecars, evidence_packs.read_position
+
+    def list_sidecars(root, *, errors=None, names=None):
+        if names is None:
+            raise evidence_packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now",
+                                                     reason="busy")
+        return real_list(root, errors=errors, names=names)
+
+    def read_position(root, **identity):
+        with store.acquisition_budget(0):
+            return real_position(root, **identity)
+
+    monkeypatch.setattr(evidence_packs, "list_sidecars", list_sidecars)
+    monkeypatch.setattr(evidence_packs, "read_position", read_position)
+
+
+@pytest.mark.parametrize("index", ["valid", "contended"])
+def test_a_fold_receipt_transfer_is_flat_across_evidence_packs(tmp_path, monkeypatch, request, index):
+    """After an applied fold the round's prologue promotes the receipt and everything it names into the canonical
+    root (``promote_task_source_ref``, ``source_retention.retain_tree``) before the next model call. The bytes lie
+    loose beside their producer; the canonical root only has to prove or receive them. However its packs catalog
+    stands (``valid``; ``contended``: the packer holds its lock past any wait), the transfer lists no packs directory,
+    costs the same beside 1 or 30 units of packed history and never waits for the catalog: a destination it cannot
+    prove now is carried and read back from the parent. The receipt and its sources are retained on both sizes and
+    nothing is marked unavailable (a pending address would also do; an unavailable one never)."""
+    from ouroboros import evidence_packs, observability as obs, store
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    def boundary(root, facts):
+        patches = pytest.MonkeyPatch()  # the next size's build runs the real packer: undone after the counted call
+        request.addfinalizer(patches.undo)
+        _catalog_contract(patches)
+
+        def promote(task):
+            try:
+                obs.promote_task_source_ref(facts[task]["child"], root, facts[task]["source"], task_id=task)
+                return "retained"
+            except obs.ObservabilityPromotionSourceError:
+                return "unavailable"
+            except OSError:
+                return "pending"
+
+        assert promote("warm-up") == "retained"
+        holder, waits, thread = None, [], threading.get_ident()
+        if index == "contended":
+            held, release = threading.Event(), threading.Event()
+
+            def hold():
+                with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+                    held.set()
+                    release.wait(600)
+
+            holder = threading.Thread(target=hold, name="packer-holds-index")
+            holder.start()
+            assert held.wait(5)
+        real_lock = store.name_lock
+
+        def name_lock(where, name, *args, **kwargs):
+            if name == evidence_packs.INDEX_LOCK_NAME and threading.get_ident() == thread:
+                waits.append(kwargs.get("timeout_sec"))
+            return real_lock(where, name, *args, **kwargs)
+
+        patches.setattr(store, "name_lock", name_lock)
+
+        def transfer():
+            try:
+                try:
+                    outcome = promote("turn")
+                finally:
+                    if holder is not None:
+                        release.set()
+                        holder.join(10)
+                fact = facts["turn"]
+                kept = outcome == "retained" and read_actor_source_bytes(root, "turn", fact["source"]) == fact["raw"]
+                return outcome, kept, max(waits, default=0)
+            finally:
+                patches.undo()
+        return transfer
+
+    answers = _flat(tmp_path, monkeypatch, _transfer_history, boundary, unlisted=("packs",))
+    assert answers[K_SMALL] == answers[K_LARGE] == ("retained", True, 0), answers
