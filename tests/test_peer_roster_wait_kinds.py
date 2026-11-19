@@ -15,6 +15,8 @@ from tests._shared import write_queue_document
 
 import types
 
+import pytest
+
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.utils import utc_now_iso
 
@@ -274,3 +276,49 @@ def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_folder(tmp_path)
     assert _note(tmp_path).count("folder_wait=") == 1
     # The hold lifted, the same row is eligible again: its noted folder wait is said once more.
     assert publish({"eligible": {}, "held": {}})["held"]["folder_wait"] == wait
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_visible_roster_names_the_saved_read(tmp_path, legacy):
+    from ouroboros import budget_pause as bp, peer_roster
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import utc_now_iso
+    from tests._shared import write_queue_document
+
+    tid = "visible"
+    row = {
+        "pause_id": "p",
+        "reason": "authority",
+        "rail": bp.RAIL_CONTROL_AUTHORITY,
+        "state": "paused",
+        "paused_at": 1790409600,
+        "task_attempt": 1,
+        "source_ref": "fixture",
+        "reason_text": "root budget fence authority unavailable: fixture/path",
+    }
+    if not legacy:
+        row["cause"] = "dispatch_fence_unreadable"
+    write_task_result(tmp_path, tid, "scheduled", reason_code="budget_paused", budget_pause=row)
+    marker = bp.exact_pause_marker(row)
+    if legacy:
+        marker.pop("cause", None)
+    write_queue_document(
+        tmp_path / "state/queue_snapshot.json",
+        {
+            "ts": utc_now_iso(),
+            "running": [],
+            "pending": [
+                {
+                    "id": tid,
+                    "attempt": 1,
+                    "task": {"id": tid, "title": tid, "_attempt": 1, "_budget_pause": marker},
+                }
+            ],
+        },
+    )
+    roster = peer_roster.independent_roots(tmp_path)
+    wait = next(r["waiting"] for r in roster["roots"] if r["task_id"] == tid)[0]
+    assert bp.saved_budget_pause({"budget_pause": row})["cause"] == "dispatch_fence_unreadable"
+    note = peer_roster.render_roster_note(roster)
+    assert wait["kind"] == "authority" and wait["cause"] == "dispatch_fence_unreadable"
+    assert "stopped for" in note

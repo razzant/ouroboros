@@ -697,6 +697,9 @@ test('a census pause says its word alone and what holds it on its line, never wh
     ]) {
         assert.deepEqual([view(cause).text, view(cause).secondary], [word, line], cause);
     }
+    const reason = 'The task will continue automatically when it can read which tasks are stopped for spending.';
+    assert.equal(taskActivityPresentation({ phase: 'budget_paused', pauseCause: 'authority', pauseReason: reason,
+        resumeAction: true }).secondary, reason);
     // The census's owner cause cannot tell the owner's Pause from Ouroboros's: the word alone, no line.
     assert.deepEqual([view('owner').text, view('owner').secondary], ['Paused', undefined]);
     assert.equal(view('owner', 'budget_pausing').text, 'Pausing…');

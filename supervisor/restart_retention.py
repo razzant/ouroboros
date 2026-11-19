@@ -88,11 +88,13 @@ def panic_recorded(result_root: Any) -> bool:
     return pathlib.Path(result_root) == pathlib.Path(DATA_DIR) and server_control._restart_stop_requested
 
 
-def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = None) -> str:
-    """Classify ``task_id``'s durable pause row for a stop (see module docstring)."""
+def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = None, *, strict: bool = False) -> str:
+    """Classify ``task_id``'s durable pause row for a stop (see module docstring). ``strict``, for a
+    caller that reads again later: a busy store raises instead of reading as no pause to keep."""
     from ouroboros.budget_pause import (
         STATE_PAUSED, STATE_PAUSING, STATE_RESUME_GRANTED, budget_pause_row,
     )
+    from ouroboros.store import StoreBusy
 
     try:
         from ouroboros.owner_wait import saved_sleep_checkpoint
@@ -102,11 +104,15 @@ def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = Non
             return RETAIN_SLEEP
         if _owner_pause_park(result_root, task_id, attempt) and not _cancel_intent_active(result_root, task_id):
             return RETAIN_OWNER_PAUSE
-    except Exception:
+    except Exception as exc:
+        if strict and isinstance(exc, StoreBusy):
+            raise
         log.debug("Warm sleep source unreadable for %s at a stop", task_id, exc_info=True)
     try:
         row = budget_pause_row(pathlib.Path(result_root), str(task_id))
-    except Exception:
+    except Exception as exc:
+        if strict and isinstance(exc, StoreBusy):
+            raise
         log.debug("Pause row unreadable for %s at a stop", task_id, exc_info=True)
         return ""
     if not row:
@@ -234,7 +240,7 @@ def unseen_pause(task: Dict[str, Any], before: tuple) -> bool:
                 and (pause_id != granted or str(task.get("root_task_id") or task_id) == task_id))
 
 
-def _latch_unseen_pause(task: Dict[str, Any]) -> None:
+def _latch_unseen_pause(task: Dict[str, Any], revoked=None) -> None:
     """A stop's half of the park event it pre-empted: the tree's monetary latch is
     raised now under the normal generation rule, so the final snapshot carries what
     restore trusts. An owner marker is left to its durable owner fence. Queue lock held."""
@@ -247,19 +253,19 @@ def _latch_unseen_pause(task: Dict[str, Any]) -> None:
     if marker.get("scope") == "root" and root_id and marker.get("reason") != REASON_OWNER:
         # An unused grant's old marker never replaces a newer current latch.
         pause = {**marker, "fence_id": None} if q.BUDGET_ROOT_FENCES.get(root_id) else marker
-        marker["fence_id"] = _set_root_budget_pause_locked(root_id, pause)["fence_id"]
+        marker["fence_id"] = _set_root_budget_pause_locked(root_id, pause, revoked=revoked)["fence_id"]
 
 
-def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
-                     pause_source: str, sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY) -> Optional[Dict[str, Any]]:
+def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *, pause_source: str,
+                     sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY, strict: bool = False) -> Optional[Dict[str, Any]]:
     """Return ``task`` as a PENDING row under its exact pause marker, or ``None``.
 
     Shared by ``kill_workers`` (a RUNNING row whose checkpoint landed before its
     park event) and the snapshot restore (such a row found in the snapshot's
-    running list). A ``pausing`` row is confirmed ``paused`` (its source already
-    exists; a failed confirmation leaves it ``pausing``, still retained); an
+    running list). The final publication confirms a source-backed ``pausing`` row. An
     unused grant is revoked first, and a revocation that cannot be written
     keeps the row parked under a typed hold. Nothing here is a terminal.
+    ``strict`` is ``pause_retention``'s.
     """
     from ouroboros.budget_pause import (
         STATE_PAUSED, STATE_PAUSING, STATE_RESUME_GRANTED, budget_pause_row, exact_pause_marker,
@@ -269,7 +275,7 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
 
     task_id = str(task.get("id") or "")
     result_root = pathlib.Path(result_root)
-    retention = pause_retention(result_root, task_id, attempt)
+    retention = pause_retention(result_root, task_id, attempt, strict=strict)
     if retention not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP, RETAIN_OWNER_PAUSE}:
         return None
     try:
@@ -280,7 +286,10 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
             pause = retain_owner_pause_park(result_root, task_id, attempt)
         else:
             pause = budget_pause_row(result_root, task_id)
-    except Exception:
+    except Exception as exc:
+        from ouroboros.store import StoreBusy
+        if strict and isinstance(exc, StoreBusy):
+            raise  # as in pause_retention: the late pass reads this row again at its next publication
         log.warning("Saved sleep retention could not be published for %s", task_id, exc_info=True)
         # Keep the validated locator for a later stop/restore retry. Never
         # terminalize a checkpoint merely because its conversion write failed.
@@ -303,25 +312,18 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
             log.warning("Stop could not revoke the unconsumed grant of %s; parked under a hold",
                         task_id, exc_info=True)
             held_reason = HOLD_RESTART_REVOCATION_UNWRITTEN
-    elif pause.get("state") == STATE_PAUSING and pause.get("settlement") != "external_writers_running":
-        # (An owner Pause over sent work still running stays ``pausing``: saved,
-        # retained, but never confirmed as a clean Paused by a stop.)
-        try:
-            set_budget_pause(result_root, task_id, {**pause, "state": STATE_PAUSED,
-                                                    "paused_confirmed_at": time.time(),
-                                                    "pause_source": pause_source},
-                             expected_pause_id=pause_id, expected_state=STATE_PAUSING)
-        except Exception:
-            log.warning("Parked pausing row %s stays 'pausing' (row unwritable at the stop)",
-                        task_id, exc_info=True)
     parked = dict(task)
+    if pause.get("state") == STATE_PAUSING and pause.get("settlement") != "external_writers_running":
+        parked["_park_confirmation"] = pause.get("pause_source") or pause_source
     parked["_attempt"] = int(attempt)
     parked.pop("_budget_pause_resume", None)
     parked.pop("_owner_wait_resume", None)
     parked["_budget_pause"] = exact_pause_marker(pause, default_root=str(task.get("root_task_id") or task_id))
     from ouroboros.model_detach import detached_fields
     parked.update(detached_fields(parked, pause))  # a detach a lane carrier saved rides the durable pause row
-    if retention == RETAIN_SLEEP:
+    from ouroboros.work_stop import reason_policy
+    # A technical pause, like a cold sleep, keeps the owner's Restart or a Panic: the stop table says which doors replace.
+    if retention == RETAIN_SLEEP or (pause.get("reason") == "authority" and reason_policy(sleep_hold_reason).get("replaces_door", True)):
         hold_after_stop(parked, result_root, sleep_hold_reason)
     if held_reason:
         hold_budget_row(
@@ -331,6 +333,38 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
                    "root_task_id": str(task.get("root_task_id") or task_id)},
             result_root=result_root)
     return parked
+
+
+def publish_pending_parks(q, reason, *, final=False):
+    """Retry interrupted placements. Their queue marker is a hint. Only the exact durable row can confirm."""
+    from ouroboros.budget_pause import budget_pause_row, set_budget_pause
+
+    with q._queue_lock:
+        parked = [(task, task["_budget_pause"], task["_park_confirmation"]) for task in q.PENDING
+                  if task.get("_park_confirmation") and task.get("_budget_pause")]
+    if not parked and not final:
+        return False
+    persisted = q.publish_queue_snapshot(reason=reason)
+    if persisted:
+        for task, marker, source in parked:
+            root = task.get("budget_drive_root") or q.DRIVE_ROOT
+            try:
+                row = budget_pause_row(root, task["id"])
+                if (row.get("state") == "pausing" and row.get("source_ref")
+                        and row.get("settlement") != "external_writers_running"
+                        and row["pause_id"] == (marker.get("checkpoint") or {}).get("pause_id")):
+                    set_budget_pause(root, task["id"], {**row, "state": "paused", "paused_confirmed_at": time.time(),
+                                     "pause_source": row.get("pause_source") or source}, expected_pause_id=row["pause_id"], expected_state="pausing",
+                                     expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""))
+                    if task.get("_presence_turn"):
+                        from ouroboros.presence_carrier import answer_parked_turn
+                        answer_parked_turn(root, task["id"])
+                with q._queue_lock:
+                    if task.get("_budget_pause") is marker:
+                        task.pop("_park_confirmation", None)
+            except Exception:
+                log.warning("Park of %s remains unconfirmed", task["id"], exc_info=True)
+    return persisted if final else True
 
 
 def retain_sleep_checkpoint(root: pathlib.Path, task_id: str, attempt: int, *, direct: bool = False) -> Dict[str, Any]:
@@ -421,7 +455,7 @@ def hold_after_stop(task: Dict[str, Any], drive_root: Any, reason: str) -> Dict[
 
 def park_saved_running_rows(running: Dict[str, Any], pending: List[Dict[str, Any]],
                             preserve: Iterable[str], drive_root: Any, *,
-                            sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY) -> List[str]:
+                            sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY, revoked=None) -> List[str]:
     """Move every RUNNING row whose pause is saved into PENDING under its marker.
 
     A checkpoint stored before its park event was handled leaves the row
@@ -441,7 +475,7 @@ def park_saved_running_rows(running: Dict[str, Any], pending: List[Dict[str, Any
         if parked is None:
             continue
         if unseen_pause(parked, before):
-            _latch_unseen_pause(parked)
+            _latch_unseen_pause(parked, revoked)
         running.pop(task_id, None)
         if not any(isinstance(row, dict) and str(row.get("id") or "") == str(task_id) for row in pending):
             pending.append(parked)
@@ -449,7 +483,7 @@ def park_saved_running_rows(running: Dict[str, Any], pending: List[Dict[str, Any
     return parked_ids
 
 
-def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "") -> bool:
+def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "", revoked=None) -> bool:
     """A queued saved pause (an unused grant is first returned to it) or an
     earlier owner-Restart hold: kept as the same queued task on every door.
     A stop cause also holds cold sleeps and marker-less failed conversions;
@@ -460,14 +494,14 @@ def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "") -> bo
         before = pause_ids(task)
         revoke_exact_budget_resume(task, "restart_before_dispatch")
         if unseen_pause(task, before):
-            _latch_unseen_pause(task)
+            _latch_unseen_pause(task, revoked)
     pause = task.get("_budget_pause")
     saved = isinstance(pause, dict) and pause.get("exact_continuation") is True
     from supervisor.events_budget import budget_hold_fact
     from ouroboros.work_stop import reason_policy, record_policy
 
     hold = budget_hold_fact(task)
-    if sleep_hold_reason and ((saved and pause.get("reason") == "sleep"
+    if sleep_hold_reason and ((saved and pause.get("reason") in {"sleep", "authority"}
                                and reason_policy(sleep_hold_reason).get("replaces_door", True))
                               or record_policy(hold).get("door_replaceable")):
         from supervisor import queue as q

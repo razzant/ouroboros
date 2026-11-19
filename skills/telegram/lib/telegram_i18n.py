@@ -15,10 +15,9 @@ Two seams:
   of truth moved from an ``en``/``ru`` pair to one English table plus the memory.
 * ``language()`` — the install's tag (``""`` reads as English) and ``label(tag)``.
 
-A sentence the host composed and this transport merely relays (a task's reason line, a
-question's host facts) is sent as the host wrote it, in English: it carries ids, times,
-the task-control words that stay English by decision and sometimes the author's own
-rationale, and the bridge has no typed clauses to translate around.
+A technical pause carries a host-authored reason with no quoted user content.
+Both Telegram and the browser translate that sentence by its text. Other relays
+can include ids and the author's own words.
 
 The bridge's former private ``TELEGRAM_LANGUAGE`` setting is migrated once
 (``migration_target``): an install that chose Russian in the bridge before the install-wide
@@ -152,6 +151,15 @@ class Index:
     @property
     def en(self) -> Dict[str, str]:
         return self.rows
+
+
+def host_sentence(source: str, tag: str) -> str:
+    if english(tag):
+        return source
+    found = memory.tr(source, tag, drive_root=drive_root())
+    if found is None:
+        _report_miss(source, tag, {"source": source, "role": "telegram"})
+    return found or source
 
 
 def _report_miss(key: str, tag: str, context: Dict[str, Any]) -> None:

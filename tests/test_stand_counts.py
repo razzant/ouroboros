@@ -138,13 +138,22 @@ def test_e4_a_change_lands_and_the_certificate_comes_last(stand):
 
 
 def test_e4_a_kill_after_each_step_never_certifies_what_did_not_land(stand):
-    """The publication dies after each of its file replacements in turn: a reader's certificate (``queue_stamp``) then names a
-    generation only if every document carries that generation: the old fence-free view is never certified by the new one."""
-    crashes = stand["live_set"]["crashes"]
-    assert len(crashes) >= 3 and not crashes[0]["certifies"], crashes  # it died before its first document landed
-    assert crashes[-1]["published"] and crashes[-1]["certifies"] and crashes[-1]["documents_agree"], crashes  # the whole one
-    for crash in crashes:
-        assert crash["certifies"] is False or crash["documents_agree"], crash
+    """The stamp certifies the snapshot. Dispatch reads its own generation, even while the stamp is absent."""
+    series = stand["live_set"]["crashes"]
+    assert set(series) == {"tighten", "relax"}
+    for direction, cuts in series.items():
+        tighten = direction == "tighten"
+        assert len(cuts) >= 4 and not cuts[0]["certified"] and not cuts[0]["published"], cuts
+        assert [len(cut["replaced"]) for cut in cuts] == list(range(len(cuts))), cuts
+        assert all(cut["dispatch_readable"] for cut in cuts), cuts
+        assert not any(cut["published"] for cut in cuts[:-1]), cuts
+        final = cuts[-1]
+        assert final["published"] and final["certified"], final
+        assert final["snapshot_fenced"] == final["dispatch_fenced"] == tighten, final
+        if tighten:
+            assert not [c for c in cuts if c["certified"] and c["snapshot_fenced"] and not c["dispatch_fenced"]]
+        else:
+            assert not [c for c in cuts if not c["dispatch_fenced"] and c["snapshot_fenced"]]
 
 
 # ---- E6: the owner's wait ------------------------------------------------------------------------------------------------

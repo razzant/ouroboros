@@ -43,7 +43,12 @@
   },
   {
    "name": "authority",
-   "text": "The task paused because of a technical fault: its billing or control authority could not be read, which says nothing about money left. Its work is retained. Use Resume on the task when available; it rechecks the conditions before continuing.",
+   "text": "The task could not read a saved decision about spending or permission to work. Its work is saved. Use Resume to check again.",
+   "words": null
+  },
+  {
+   "name": "dispatch_read",
+   "text": "The task will continue automatically when it can read which tasks are stopped for spending. Its work is saved.",
    "words": null
   }
  ]

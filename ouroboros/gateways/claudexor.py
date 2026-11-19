@@ -566,9 +566,9 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         # refusal that happened to carry one, an `idempotency_conflict` say, was announced
         # as a spent subscription window and retried on a timer. So a reset key is read
         # only inside a window code, and there only the pool's own `resetsAt` says whether
-        # it is a timer at all. At engine 3.14.0 the daemon serializes no `resetsAt` into a
-        # pool ControlProblem context (the dated producer is the run-detail RunFailure, and
-        # `cooldown_until` lives in a quota snapshot), so this seam yields the plain class.
+        # it is a timer at all. Since engine 6.3.0 the catalog GET projects the pool's own
+        # problem, so a dated pool refusal there arrives as the window class; every GET
+        # caller catches the base class, and an undated one still yields the plain class.
         error = (_window_exhausted_refusal(code, message, context.get("resetsAt"),
                                           status_code=response.status_code)
                 or ClaudexorUnavailable(code, message, status_code=response.status_code,

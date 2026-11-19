@@ -9,9 +9,9 @@ borrows another provider's entry.
 
 DeepSeek's entries are conditional and explicitly scoped (``DEEPSEEK_ENTRIES``): ``pin_tariff``
 pins one physical candidate's exact entry, its input kind and its key's billing currency
-(``/user/balance``, held in this process only) before the send; settlement prices that pin
-alone. A text call is priced only wholly inside the published off-peak windows, a search
-per documented billable answer; anything else stays unknown.
+(``/user/balance``) before the send; settlement prices that pin alone. Balances are not kept;
+an inference from multiple wallets is fresh for each pin. A text call is priced only wholly
+inside the published off-peak windows, a search per documented billable answer.
 """
 
 from __future__ import annotations
@@ -27,7 +27,8 @@ import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Mapping
+from decimal import Decimal, InvalidOperation
+from typing import Any, Mapping, NamedTuple
 
 from ouroboros.net_transport import requests_verify_kwargs
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -54,7 +55,7 @@ _retry_after: dict[pathlib.Path, float] = {}
 _fetching: set[pathlib.Path] = set()
 # A DeepSeek key's billing currency, by a digest of the key that never leaves RAM:
 # (currency or None, observed_at, monotonic expiry, reason).
-_currency: dict[str, tuple] = {}
+_currency: dict[str, tuple[str | None, str, float, str]] = {}
 _currency_fetching: set[str] = set()
 _TOKEN_RATES = ("input_cost_per_token", "cache_read_input_token_cost", "output_cost_per_token")
 # The DeepSeek entries in this delivery's scope, by exact id; their figures stay the catalog's.
@@ -298,8 +299,54 @@ def wholly_off_peak(windows: tuple, start: datetime, end: datetime) -> bool:
     return False
 
 
-def _fetch_currency(api_key: str) -> tuple:
-    """One documented ``GET /user/balance`` with the selected key: its single billing currency, else None and why.
+class _CurrencyReading(NamedTuple):
+    currency: str | None
+    reason: str = ""
+    inferred: bool = False
+
+
+def _wallet_funded(info: Mapping[str, Any]) -> bool | None:
+    """True for a valid positive total, False for three exact zeroes, None for unknown funding."""
+    zeros = []
+    for field in ("total_balance", "granted_balance", "topped_up_balance"):
+        value = info.get(field)
+        if not isinstance(value, str) or not value.isascii() or "_" in value:
+            return None
+        try:
+            amount = Decimal(value)
+        except InvalidOperation:
+            return None
+        zero = amount.is_zero()
+        if not amount.is_finite() or (amount.is_signed() and not zero):
+            return None
+        zeros.append(zero)
+    if not zeros[0]:
+        return True
+    return False if all(zeros) else None  # a positive component with zero total does not prove an empty wallet
+
+
+def _billing_currency(infos: list[dict[str, Any]], available: object) -> _CurrencyReading:
+    """Use a single named currency as-is. Across multiple currencies, infer only from one funded wallet
+    alongside provably empty alternatives; unreadable amounts are not evidence of funding."""
+    currencies = {info["currency"] for info in infos}
+    if len(currencies) == 1:
+        return _CurrencyReading(currencies.pop())
+    funded = None
+    for info in infos:
+        has_funds = _wallet_funded(info)
+        if has_funds is None or (has_funds and funded is not None):
+            return _CurrencyReading(None, "currency_not_single")
+        if has_funds:
+            funded = info["currency"]
+    if funded is None:
+        return _CurrencyReading(None, "currency_unfunded")
+    if available is not True:  # A positive balance alone need not be sufficient for any API call.
+        return _CurrencyReading(None, "balance_unavailable" if available is False else "balance_unreadable")
+    return _CurrencyReading(funded, inferred=True)
+
+
+def _fetch_currency(api_key: str) -> _CurrencyReading:
+    """One documented ``GET /user/balance`` with the selected key: evidence for a currency estimate, not a debit.
     A redirect is an answer (unknown), never followed with the key."""
     import requests
 
@@ -311,23 +358,23 @@ def _fetch_currency(api_key: str) -> tuple:
                                 headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
                                 **requests_verify_kwargs())
         if response.status_code != 200:
-            return None, f"http_{response.status_code}"
+            return _CurrencyReading(None, f"http_{response.status_code}")
         body = response.json()
     except Exception as exc:  # transport, TLS, JSON: no currency; neither key nor body reaches a log
-        return None, type(exc).__name__
+        return _CurrencyReading(None, type(exc).__name__)
     infos = body.get("balance_infos") if isinstance(body, dict) else None
     if not isinstance(infos, list) or not 1 <= len(infos) <= 8 or not all(
             isinstance(info, dict) and info.get("currency") in ("USD", "CNY") for info in infos):
-        return None, "balance_unreadable"  # the documented shape only: one or a few objects, each USD or CNY
-    found = {info["currency"] for info in infos}
-    return (found.pop(), "") if len(found) == 1 else (None, "currency_not_single")
+        return _CurrencyReading(None, "balance_unreadable")
+    return _billing_currency(infos, body.get("is_available"))
 
 
 def account_currency(api_key: str, *, allow_live_fetch: bool = True) -> dict | None:
-    """The key's billing currency fact: ``{currency, source, observed_at[, reason]}`` (``currency`` None when
-    unread), or None when no read was made (another read in flight, or none allowed). Only that fact is kept, in
-    this process; balances, the key and its digest never reach disk. A failure waits 30 seconds, a success the
-    pricing TTL. It never raises and never changes whether a call runs."""
+    """The key's billing currency fact: ``{currency, source, observed_at[, reason or basis]}``, or None with
+    no usable cached or live read. A failure pauses for 30 seconds; a single named currency uses the pricing TTL.
+    A currency inferred from wallet balances is only for this pin: balances can change before the next attempt.
+    Balances, the key and its digest never reach disk. A failed read leaves the currency unknown;
+    time spent reading counts against the caller's deadline."""
     from ouroboros.pricing import _pricing_ttl_sec
 
     if not api_key:
@@ -339,21 +386,29 @@ def account_currency(api_key: str, *, allow_live_fetch: bool = True) -> dict | N
             if not allow_live_fetch or digest in _currency_fetching:
                 return None
             _currency_fetching.add(digest)
+            _currency.pop(digest, None)  # retire expired evidence, also when the next result won't be cached
             held = None
     if held is None:
         try:
             try:
-                currency, reason = _fetch_currency(api_key)
+                currency, reason, inferred = _fetch_currency(api_key)
             except Exception as exc:  # a reader fault is an unread currency, paused like any failure
-                currency, reason = None, type(exc).__name__
-            held = (currency, utc_now_iso(), time.monotonic() + (_pricing_ttl_sec() if currency else 30.0), reason)
+                currency, reason, inferred = None, type(exc).__name__, False
+            observed_at = utc_now_iso()
+            if not inferred:
+                ttl = _pricing_ttl_sec() if currency else 30.0
+                held = (currency, observed_at, time.monotonic() + ttl, reason)
         finally:
-            with _lock:  # the answer is published before the in-flight mark goes: no second read in between
+            with _lock:  # publish reusable results before releasing the in-flight mark
                 if held is not None:
                     _currency[digest] = held
                 _currency_fetching.discard(digest)
-    return {"currency": held[0], "source": "deepseek_user_balance", "observed_at": held[1],
-            **({"reason": held[3]} if held[3] else {})}
+    else:
+        currency, observed_at, _, reason = held
+        inferred = False
+    return {"currency": currency, "source": "deepseek_user_balance", "observed_at": observed_at,
+            **({"reason": reason} if reason else {}),
+            **({"basis": "single_funded_wallet"} if inferred else {})}
 
 
 def pin_tariff(target: Mapping[str, Any], *, search: bool = False, text_only: bool = False,

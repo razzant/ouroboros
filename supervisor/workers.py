@@ -1417,7 +1417,7 @@ def kill_workers(
     A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
     """
     global _WORKER_POOL_DISABLED_REASON
-    from supervisor import conversation_lane, queue, restart_retention as retention  # every door retains saved pauses
+    from supervisor import conversation_lane, events_budget, queue, restart_retention as retention
     lane_spared = lanes is not None and LANE_CONVERSATION not in lanes  # a project fence: the lane's rows stay
     with _queue_lock:
         if disable_reason:
@@ -1440,7 +1440,7 @@ def kill_workers(
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
     _tear_down_slots(doomed)
-    with _queue_lock:
+    with events_budget._parking_lock() as revoked:
         # The spared rows are chosen under THIS hold, the one the terminalization below runs under:
         # a lane turn admitted during the teardown is spared with the rest.
         spared_rows = _spare_rows_for_stop(lanes, doomed)
@@ -1460,7 +1460,7 @@ def kill_workers(
             sleep_hold_reason = retention.saved_sleep_hold_reason(
                 DRIVE_ROOT, owner_restart=hold_never_started or stop_source == "owner_restart")
             retention.park_saved_running_rows(RUNNING, PENDING, preserve_running, DRIVE_ROOT,
-                                             sleep_hold_reason=sleep_hold_reason)
+                                             sleep_hold_reason=sleep_hold_reason, revoked=revoked)
             # An application stop keeps rows whose attempt saved work in RUNNING for the next boot.
             retained_running_ids = retention.retain_saved_running(RUNNING, preserve_running, DRIVE_ROOT) \
                 if retain_saved_work else []
@@ -1520,8 +1520,7 @@ def kill_workers(
                 if task_id in retained_running_ids:
                     continue
                 if task_id in preserve_running:
-                    from supervisor.events_budget import fold_consumed_resume
-                    fold_consumed_resume(meta, DRIVE_ROOT)
+                    events_budget.fold_consumed_resume(meta, DRIVE_ROOT)
                     successor = dict(task)
                     continuing_wait = isinstance(successor.get("_owner_wait_resume"), dict)
                     successor["_attempt"] = int(meta.get("attempt") or task.get("_attempt") or 1) + (0 if continuing_wait else 1)
@@ -1600,7 +1599,7 @@ def kill_workers(
                 if preserve_pending and tid in preserve_running:
                     PENDING.append(task)
                     continue
-                paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason)
+                paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason, revoked=revoked)
                 # Accepted work never ends with the application (boot decides), nor a returned owner turn with a project
                 # fence (1A), except a child whose parent this stop interrupted: invariant 19 settles it as before.
                 if paused or ((retain_saved_work or lane_spared and conversation_lane.resumes_on_lane(task))
@@ -1655,7 +1654,7 @@ def kill_workers(
     if reconcile_review_custody:
         _reconcile_review_owners(DRIVE_ROOT, dead_pids)
     try:
-        snapshot_ok = queue.publish_queue_snapshot(reason=stop_source or "kill_workers") is not False  # barrier (LB): the door names the export
+        snapshot_ok = retention.publish_pending_parks(queue, stop_source or "kill_workers", final=True) is not False
     except Exception:
         snapshot_ok = False
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)

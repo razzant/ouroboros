@@ -190,22 +190,17 @@ def _pause_by(fence: Any) -> str:
 
 
 def _pause_fact(pause: Dict[str, Any], fence: Any) -> Dict[str, Any]:
-    """Name an exact-pause record by its ``reason`` (``budget_pause._RAIL_REASONS``).
-
-    One carrier parks three different things: the model's cold or retained
-    sleep (``sleep``, whose recorded mode is shown as recorded, never inferred
-    from the carrier), the owner's Pause (``owner``, with the author its tree's
-    ``fence`` declared) and a monetary rail (``budget``, also every row written
-    before the field existed). A newer stated reason is ``unknown`` with that
-    reason, never silently money.
-    """
+    """Project the recorded sleep, owner Pause, monetary rail or technical cause.
+    Older rows without a reason use the legacy money rail; unfamiliar stated reasons stay unknown."""
     from ouroboros.work_stop import reason_policy, stop_presentation
     reason = _recorded_reason(pause)
     view = stop_presentation({"_budget_pause": {**pause, "reason": reason or "budget"}}, {"owner": fence or {}})
     cause = view["stop"].get("cause")
     kind = ("sleep" if reason_policy(reason)["cause"] == "wait" else
-            {"pause": "owner_pause", "money": "budget"}.get(cause, "unknown"))
+            {"pause": "owner_pause", "money": "budget", "authority": "authority"}.get(cause, "unknown"))
     fact: Dict[str, Any] = {"kind": kind, "state": str(pause["state"])}
+    if kind == "authority" and pause.get("cause"):
+        fact["cause"] = pause["cause"]
     if kind == "sleep":
         fact.update(_sleep_facts(pause.get("sleep")))
         if str(pause.get("retained_owner_wait_id") or "").strip():
@@ -233,7 +228,7 @@ def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]
     ``since`` is the wait's OWN recorded start and ``None`` when the record has
     none (a wait written before it was stamped) -- never the task's start.
     """
-    from ouroboros.budget_pause import LIVE_PAUSE_STATES
+    from ouroboros.budget_pause import LIVE_PAUSE_STATES, saved_budget_pause
 
     facts: List[Dict[str, Any]] = []
     wait = stored.get("owner_wait")
@@ -248,7 +243,7 @@ def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]
             if _iso_text(row.get("reset_at")):
                 fact["reset_at"] = _iso_text(row.get("reset_at"))
             facts.append(fact)
-    pause = stored.get("budget_pause")
+    pause = saved_budget_pause(stored)
     if (isinstance(pause, dict) and pause.get("state") in LIVE_PAUSE_STATES
             and _same_attempt(pause.get("task_attempt"), attempt)):
         facts.append(_pause_fact(pause, stored.get("owner_pause")))
@@ -263,14 +258,16 @@ def _queue_hold_facts(task: Dict[str, Any], stored: Dict[str, Any], waiting: Lis
     stop, entry = view["stop"], view["reason"]
     if not stop and not view["refusal"] and entry["code"] != "earlier_work_unconfirmed":
         return []
-    kind = {"pause": "owner_pause", "money": "budget", "authority": "budget"}.get(stop.get("cause"), "hold")
+    kind = {"pause": "owner_pause", "money": "budget", "authority": "authority"}.get(stop.get("cause"), "hold")
     prior = next((fact for fact in waiting if fact.get("kind") == kind), {})
     # The exact marker's wait fact is replaced by this one current decision.
-    waiting[:] = [fact for fact in waiting if fact.get("kind") not in {"owner_pause", "budget", "hold", "unknown"}]
+    waiting[:] = [fact for fact in waiting if fact.get("kind") not in {"owner_pause", "budget", "authority", "hold", "unknown"}]
     fact = {**prior, "kind": kind, "reason": entry["code"], "text": entry["text"],
             "release": view["release"], "since": (_iso_text(entry.get("since")) or iso_from_epoch(entry.get("since"))
                                                   or prior.get("since")),
             **({"refusal": view["refusal"]} if view["refusal"] else {})}
+    if kind == "authority" and (cause := (task.get("_budget_pause") or {}).get("cause")):
+        fact["cause"] = cause
     if kind == "owner_pause":
         fact["state"] = str(stop.get("state") or "")
         if by := _pause_by(stop):
@@ -640,7 +637,7 @@ def roster_fingerprint(roster: Dict[str, Any], *, exclude: str = "") -> tuple:
 
 
 _WAIT_LABELS = {"owner": "owner answer", "review": "review", "model": "model access", "budget": "budget pause",
-                "sleep": "sleep", "owner_pause": "Pause", "hold": "held", "unknown": "unknown wait"}
+                "authority": "technical wait", "sleep": "sleep", "owner_pause": "Pause", "hold": "held", "unknown": "unknown wait"}
 _WAIT_DETAILS = ("quiz_id", "reason", "text", "by", "release", "role", "mode", "retained", "state", "settlement", "rail", "until",
                  "reset_at", "wake_at", "senders", "tasks", "runs", "services", "any_mail")
 # What a source this read could not open (``row["unavailable"]``) leaves unknown on its row, never absent.
