@@ -567,8 +567,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             reason_code = "worker_crash_budget_pausing"
         elif replay_unsafe:
             result_text = (
-                "Worker process died after an owner-wait checkpoint. The continuation "
-                "source is retained; completed actions were not retried."
+                "Worker process died after an owner-wait checkpoint. Completed actions were not "
+                "retried; Continue starts a new work from this one's notes, and the saved state "
+                "goes after the days set in Keep finished work for."
             )
             reason_code = "worker_crash_owner_wait"
         else:
