@@ -20,7 +20,7 @@ import { createChatPreview } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
-import { SERVER_ANSWERS_EVENT } from './ws.js';
+import { keepsChatReceipt, SERVER_ANSWERS_EVENT } from './ws.js';
 import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, openCardControls, ownStopPress, reconcileWorkState, roomStatusView } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
@@ -67,6 +67,7 @@ import {
 import { composerMarkup, createComposer } from './composer.js';
 import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
+import { roomStorage, roomOpening, whenRoomOpens } from './desktop_room_session.js';
 import { createChatReplies } from './chat_reply.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { createChatRowMenu } from './chat_row_menu.js';
@@ -189,9 +190,10 @@ export function createChatInstance({
     onReadingLatest, revealQuotedSource,
 }) {
     const container = mountEl || document.getElementById('content');
-    const chatSessionId = getOrCreateChatSessionId(sessionStorage, globalThis.crypto);
+    let chatSessionId;
+    whenRoomOpens(() => { chatSessionId = getOrCreateChatSessionId(roomStorage(), globalThis.crypto); });
     const isMain = chatId === 1;
-    // Per-thread storage so a project thread never bleeds into the main chat.
+    // Main and each Project have separate slots.
     const storeKey = (base) => (isMain ? base : `${base}:${chatId}`);
 
     const page = document.createElement('div');
@@ -246,7 +248,7 @@ export function createChatInstance({
     const scrollActivityDot = scrollBottomBtn?.querySelector('.chat-scroll-activity-dot');
     let nestedSubagentsExpanded = false;
     let _remoteActivityDepth = 0;
-    // The composer (composer.js), wired once the room's feed owners exist; Main's bar (chat_header.js), once its status.
+    // Composer and header bind after their feed and status owners.
     let composer = null, header = null;
 
     // Destroyed instances ignore late async work and animation frames.
@@ -305,7 +307,7 @@ export function createChatInstance({
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
         root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: replies.compose,
-        storage: sessionStorage, storageKey: storeKey('ouro_chat_unconfirmed') });
+        storage: roomStorage(), storageKey: storeKey('ouro_chat_unconfirmed') });
 
     let _syncPass1Active = false;
     let _historyReplayActive = false;
@@ -2472,6 +2474,7 @@ export function createChatInstance({
     }
 
     async function syncHistory({ fromReconnect = false } = {}) {
+        if (roomOpening()) await roomOpening();
         if (destroyed || leaving) return false;
         if (historySyncPromise) return historySyncPromise;
         historySyncPromise = (async () => {
@@ -2595,7 +2598,7 @@ export function createChatInstance({
     });
 
     const opening = (async () => {
-        // The owners below exist first: no read stands between an opening and the saved text.
+        // Mount the room before its first read.
         await null;
         if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(); }
         await loadUiPreferences();
@@ -2605,11 +2608,11 @@ export function createChatInstance({
         await awaitInitialHydration();
         // A message this tab kept across a reload that the first read did not show saved is in doubt.
         if (!destroyed) unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
-            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
+            false, { source: 'web', senderSessionId: frame.sender_session_id, clientMessageId: frame.client_message_id, attachments: views }));
     })();
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
-    composer = createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
+    composer = createComposer({ page, byId, ws, replies, getSessionId: () => chatSessionId, isMain, chatId, projectId, storeKey,
         refreshState: refreshHeaderControlState, openSettings, onLayout: () => updateMessagesPadding(),
         onSent: showSent, readingBack: () => !reading.stick && reading.ownMove });
 
@@ -2626,9 +2629,8 @@ export function createChatInstance({
             attachments: views,
         });
         replies.clear();
-        // Only the host's saved echo proves acceptance: every message's frame stays (a bare slash command is a
-        // command); a queued one is the socket queue's until it is written.
-        if (views.length || !text.startsWith('/')) unconfirmed.track({ ...frame, client_message_id: result.clientMessageId },
+        // The host confirms saving this frame by its original ID, including when the words are a path.
+        if (keepsChatReceipt(frame)) unconfirmed.track({ ...frame, client_message_id: result.clientMessageId },
             { views, ts: sentTs, queued: result?.status === 'queued' });
         // Chat sends carry their minted client_message_id.
         const pendingId = result?.clientMessageId || '';
@@ -3360,7 +3362,10 @@ export function createChatInstance({
         const cid = String(msg?.clientMessageId || '');
         if (!cid) return;
         unconfirmed.flushed(cid);  // the kept frame offers Send again from now on
-        markPendingDropped(cid);
+        if (msg.held) {
+            markPendingDelivered(cid);  // remove the offline-queue note; the saved row or its doubt owns the bubble
+            unconfirmed.unsettle([cid]);
+        } else markPendingDropped(cid);
         localEchoJournal.delete(cid);
         if (pendingSubmissions.delete(cid)) syncChatStatus();
     });

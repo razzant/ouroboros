@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createRoomHeader, panicButtonHtml } from '../modules/chat_header.js';
+import { createChatInstance } from '../modules/chat.js';
+import { finishDesktopStartup, openDesktopRoomSession } from '../modules/desktop_room_session.js';
 import { WS } from '../modules/ws.js';
 import { panicWithoutSocket } from '../modules/panic.js';
 import { installDomDouble } from './dom_double.js';
+import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 function liveSocket() {
     const socket = new EventTarget();
@@ -58,6 +62,7 @@ test('offline or backlogged browser Panic reports failure and never waits for a 
 });
 
 test('legacy queued Panic is discarded at reconnect while ordinary chat survives', () => {
+    const installed = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
     globalThis.WebSocket = { OPEN: 1 };
     try {
         const ws = new WS('ws://unused');
@@ -66,7 +71,10 @@ test('legacy queued Panic is discarded at reconnect while ordinary chat survives
         ws._pendingMessages = [{ type: 'chat', content: '/panic' }, { type: 'chat', content: 'hello' }];
         ws._flushPendingMessages();
         assert.deepEqual(sent, [{ type: 'chat', content: 'hello' }]);
-    } finally { delete globalThis.WebSocket; }
+    } finally {
+        if (installed) Object.defineProperty(globalThis, 'WebSocket', installed);
+        else delete globalThis.WebSocket;
+    }
 });
 
 test('failed desktop bridge falls through only to the captured live socket', async (t) => {
@@ -112,4 +120,120 @@ test('a resolved bridge refusal is not acceptance and does not send again', asyn
         assert.equal(accepted, 0);
         assert.equal(socket.sent.length, 0);
     }
+});
+
+test('the room button calls the fake Stop sink once on click, before its desktop open reply', async t => {
+    const env = installDomDouble();
+    t.after(env.restore);
+    const calls = [], roomPosts = [];
+    const ticket = 'pressing-document';
+    let finishOpen;
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: { ouroborosRoomSession: {
+        postMessage(message) {
+            roomPosts.push(message.op);
+            return new Promise(done => { finishOpen = done; });
+        },
+    } } } });
+    host.top = host;
+    const doc = { documentElement: { dataset: {} }, querySelector: () => ({ content: ticket, remove() {} }) };
+    const opening = openDesktopRoomSession(host, doc, assert.fail);
+    const ws = new WS('unused');
+    ws.ws = liveSocket();
+    ws.connect = () => assert.fail('Panic must not reconnect');
+    env.doc.parseHtml = true;
+    const bar = env.el('header');
+    env.doc.body.append(bar);
+    bar.innerHTML = panicButtonHtml();
+    const header = createRoomHeader({ bar, ws });
+    t.after(() => header.destroy());
+    const button = bar.querySelector('[data-chat-command="panic"]');
+    let acceptStop;
+    const pendingStop = new Promise(done => { acceptStop = done; });
+    globalThis.pywebview = { api: { panic_stop(documentTicket) { calls.push(documentTicket); return pendingStop; } } };
+    t.after(() => delete globalThis.pywebview);
+    button.click();
+    assert.deepEqual(calls, [ticket]);
+    assert.deepEqual(roomPosts, ['open']);
+    finishOpen({});
+    await opening;
+    acceptStop({ status: 'stopping' });
+    await Promise.resolve();
+    assert.deepEqual(calls, [ticket]);
+    assert.deepEqual(ws.ws.sent, []);
+    assert.equal(ws._pendingMessages.length, 0);
+
+    const olderCalls = [];
+    globalThis.pywebview.api.panic_stop = (...args) => { olderCalls.push(args); return { status: 'stopping' }; };
+    button.click();
+    await Promise.resolve();
+    assert.deepEqual(olderCalls, [[]], 'an older zero-argument launcher still receives one call per press');
+    assert.deepEqual(ws.ws.sent, []);
+});
+
+test('a stamped desktop button during open and typed Panic before socket use only the bound native channel', async t => {
+    const env = installDom(), native = [], warnings = [];
+    let room;
+    t.after(() => { room?.destroy(); restoreDom(env.prior); });
+    const ws = new WS('unused');
+    ws.connect = () => assert.fail('Panic cannot reconnect');
+    let resolveOpen, rejectNext = false;
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: {
+        ouroborosRoomSession: { postMessage(message) {
+            if (message.op === 'open') return new Promise(resolve => { resolveOpen = resolve; });
+            return true;
+        } },
+        ouroborosDesktopPanic: { postMessage(ticket) {
+            native.push(ticket);
+            if (rejectNext) return Promise.reject(Error('reply missed'));
+            return { status: 'stopping' };
+        } },
+    } } });
+    host.top = host;
+    const doc = { documentElement: { dataset: {} }, querySelector: () => ({ content: 'bound-document', remove() {} }) };
+    openDesktopRoomSession(host, doc, text => warnings.push(text));
+    room = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set() }, mountEl: env.mount,
+        stateSnapshots: { begin: () => ({}), gate: async () => null, isCurrent: () => true, latest: () => null } });
+    const started = finishDesktopStartup(() => room, assert.fail, () => {});
+    // The chat fixture flattens template descendants. Mount a header with its actual button underneath it.
+    const bar = document.createElement('header');
+    env.mount.appendChild(bar);
+    bar.innerHTML = panicButtonHtml();
+    const header = createRoomHeader({ bar, ws });
+    t.after(() => header.destroy());
+    bar.querySelector('[data-chat-command="panic"]').click();
+    assert.deepEqual(native, ['bound-document']);  // before any reply from room open
+    assert.equal(ws.ws, null);
+    resolveOpen({});
+    await started;
+    room.composer.setDraft('/panic');
+    const key = { key: 'Enter', preventDefault() { this.defaultPrevented = true; } };
+    for (const listener of room.composer.input.listeners.get('keydown')) listener(key);
+    assert.deepEqual(native, ['bound-document', 'bound-document']);
+    await Promise.resolve();
+    assert.equal(room.composer.getDraft(), '');
+    assert.deepEqual(ws._pendingMessages, []);
+    assert.deepEqual(warnings, []);
+
+    rejectNext = true;
+    const socket = liveSocket();
+    await panicWithoutSocket({}, socket, assert.fail);
+    assert.deepEqual(native, Array(3).fill('bound-document'));
+    assert.deepEqual(socket.sent, [], 'missing native reply must not replay the stop on another transport');
+    assert.match(document.body.querySelector('.toast').children[0].textContent, /Panic was not confirmed/);
+});
+
+test('a lost reply from the stamped bridge fallback does not resend through the socket', async t => {
+    const env = installDom(), calls = [];
+    t.after(() => { delete globalThis.pywebview; restoreDom(env.prior); });
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: {
+        ouroborosRoomSession: { postMessage: () => ({}) },
+    } } });
+    host.top = host;
+    const doc = { documentElement: { dataset: {} }, querySelector: () => ({ content: 'this-document', remove() {} }) };
+    await openDesktopRoomSession(host, doc, assert.fail);
+    globalThis.pywebview = { api: { panic_stop(ticket) { calls.push(ticket); return Promise.reject(Error('reply missed')); } } };
+    const socket = liveSocket();
+    await panicWithoutSocket({}, socket, assert.fail);
+    assert.deepEqual(calls, ['this-document']);
+    assert.deepEqual(socket.sent, []);
 });

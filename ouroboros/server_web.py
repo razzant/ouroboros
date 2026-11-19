@@ -22,6 +22,8 @@ from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
+from ouroboros.desktop_room_session import KEY_ENV, META, PRESENTATION_HEADER, REQUEST_HEADER, RESPONSE_HEADER, document_ticket
+
 log = logging.getLogger(__name__)
 
 UI_DIR_SETTING = "OUROBOROS_UI_DIR"
@@ -111,19 +113,24 @@ def _core_owned(html: str, facts: str = "") -> str:
     return UI_OWNER_MARKER + facts + html
 
 
-def make_index_page(web_dir: pathlib.Path, head=None):
+def make_index_page(web_dir: pathlib.Path, head=None, *, desktop_key=""):
     """The builtin index: core-owned, so marked and never cached across a selection change.
     ``head(request)`` names the response's further leading metas (the appearance scope)."""
     async def index_page(_request) -> HTMLResponse:
         index = web_dir / "index.html"
         if index.exists():
             html = index.read_bytes().decode("utf-8")  # the checkout's exact bytes, line endings included
+            facts = head(_request) if head else ""
+            headers = _NO_STORE
             if _request.headers.get(TELEGRAM_MINIAPP_HEADER) == "1":
                 # The authenticated sidecar proxy already stamps this presentation
                 # hint. Bootstrap navigates to this document, so it needs its own SDK.
                 html = html.replace("<html", '<html data-ouroboros-host="telegram"', 1)
                 html = html.replace("<head>", '<head><script async src="https://telegram.org/js/telegram-web-app.js"></script>', 1)
-            return HTMLResponse(_core_owned(html, head(_request) if head else ""), headers=_NO_STORE)
+            elif ticket := document_ticket(desktop_key, _request.headers.get(REQUEST_HEADER, "")):
+                facts += f'<meta name="{META}" content="{ticket}">'
+                headers = {**_NO_STORE, RESPONSE_HEADER: ticket, "Vary": REQUEST_HEADER}
+            return HTMLResponse(_core_owned(html, facts), headers=headers)
         return HTMLResponse("<html><body><h1>Ouroboros — web/ not found</h1></body></html>", status_code=404)
 
     return index_page
@@ -209,7 +216,9 @@ class ServedUI:
         self.builtin_dir = resolve_web_dir(self.repo_dir)
         self.builtin_dir.mkdir(parents=True, exist_ok=True)
         self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir))
-        self._builtin_page = make_index_page(self.builtin_dir, head=lambda request: self.appearance_meta(request.headers))
+        self._desktop_key = os.environ.pop(KEY_ENV, "")
+        self._builtin_page = make_index_page(self.builtin_dir, head=lambda request: self.appearance_meta(request.headers),
+                                             desktop_key=self._desktop_key)
         self._current = _Generation(UiSelection("builtin", self.builtin_dir), self._builtin_static)
 
     @property
@@ -297,16 +306,23 @@ class ServedUI:
         await app(scope, receive, send)
 
     async def index_page(self, request):
-        current = self._current
-        if current.selection.source == "builtin":
+        selection = self.selection
+        if selection.source == "builtin":
             return await self._builtin_page(request)
-        if current.selection.source == "directory":
-            index = current.selection.root / "index.html"
-            if index.is_file():
-                return FileResponse(str(index), media_type="text/html", headers=_NO_STORE)
-            return HTMLResponse("<html><body><h1>The selected interface has no index.html</h1></body></html>",
-                                status_code=404, headers=_NO_STORE)
-        return HTMLResponse(_NO_MAIN_UI_PAGE, status_code=404, headers=_NO_STORE)
+        if selection.source == "directory":
+            index = selection.root / "index.html"
+            if not index.is_file():
+                return HTMLResponse("<html><body><h1>The selected interface has no index.html</h1></body></html>",
+                                    status_code=404, headers=_NO_STORE)
+            response = FileResponse(str(index), media_type="text/html", headers=_NO_STORE)
+        else:
+            response = HTMLResponse(_NO_MAIN_UI_PAGE, status_code=404, headers=_NO_STORE)
+        if request.headers.get(TELEGRAM_MINIAPP_HEADER) != "1":
+            ticket = document_ticket(self._desktop_key, request.headers.get(REQUEST_HEADER, ""), source=selection.source)
+            if ticket:
+                response.headers[PRESENTATION_HEADER] = ticket
+                response.headers["Vary"] = REQUEST_HEADER
+        return response
 
     async def static(self, scope, receive, send):
         app = self._current.static

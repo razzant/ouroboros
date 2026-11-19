@@ -1,3 +1,4 @@
+import { desktopRestartNote } from './desktop_room_session.js';
 // Pure chat-activity helpers shared by chat.js and dependency-free node tests:
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // census snapshot hydration. The room's status word is the server's (work_status.js).
@@ -470,7 +471,7 @@ export async function confirmAndSendRestart({ openConfirmDialog, ws, readActivit
         activities = null;
     }
     const confirmed = await openConfirmDialog({
-        title: 'Restart agent', body: restartConfirmBody(activities), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
+        title: 'Restart agent', body: restartConfirmBody(activities) + desktopRestartNote(), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
     });
     if (!confirmed) return 'cancelled';
     const result = ws?.send?.({ type: 'command', cmd: '/restart', ui_control: { name: 'restart' } }, { queue: false });

@@ -15,10 +15,10 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         for (const layer of returns) layer.returnTo.release?.();
     }
 
-    const currentPlace = () => {
+    const currentPlace = (capturePending = true) => {
         // WebKit checkpoints microtasks between click listeners without focusing the pressed button.
         const target = pressed?.eventPhase ? pressed.target : null;
-        return capture(target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
+        return capture(target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement, capturePending);
     };
     async function go(key, commit, { map = false, row = '', origin = currentPlace(), current = () => true } = {}) {
         const fromKey = pressed?.eventPhase ? pressed.detail === 0 : false;  // a key's click (Enter, Space) counts none
@@ -62,33 +62,38 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
 
 /** Capture from the existing page, level and reading owners; each return holds its own retained snapshot. */
 export function capturePagePlace({ state, navState, settingsControls, dashboardControls, skillsControls,
-    projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage, doc = document }, opener) {
+    projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage, pendingRoom, doc = document }, opener) {
     const page = state.activePage, projectId = navState.activeProjectId;
     const settings = page === 'settings' ? settingsControls?.capture(opener) : null;
     const dashboard = page === 'dashboard' ? dashboardControls?.capture() : null;
     const skills = page === 'skills' ? skillsControls?.capture() : null;
     const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
-    const root = project ? projectInstances.get(projectId)?.page : doc.getElementById(`page-${page}`);
+    const resume = page === 'chat' && !project && pendingRoom;
+    const room = project && projectInstances.get(projectId);
+    const root = project ? room?.page : doc.getElementById(`page-${page}`);
     const reading = restorePlaces.capture(root, opener);
-    const feed = page === 'chat' ? (project ? projectInstances.get(projectId) : mainChat)?.captureReading()
+    const feed = page === 'chat' ? (project ? room : mainChat)?.captureReading()
         : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
-    const label = project?.name || settings?.label || dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page));
+    const label = project?.name || settings?.label || dashboard?.label || (page === 'chat' && !resume ? 'Main' : pageLabel(page));
     return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
         : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || dashboard?.title || label,
         retains: settings?.retains, release: settings?.release,
         restore() {
-            commitPage(page, { reveal: true, enter: () => {
+            let returned;
+            commitPage(page, { reveal: true, initialRoom: Boolean(resume), enter: () => {
                 settings?.restore();
                 dashboard?.restore();
                 skills?.();
-                if (project && projectInstances.has(projectId)) {
+                returned = room && rooms.reopen(projectId, room);
+                if (returned) {
                     navState.activeProjectId = projectId;
                     projectPanelTitle.textContent = projectPanelTitle.title = project.name;
-                    projectInstances.get(projectId).page.hidden = false;
+                    returned.page.hidden = false;
                     rooms.show(projectId);
                 }
             } });
-            return (input) => { reading(input); feed?.(); };
+            if (resume) resume();  // retry the saved address only after the neutral chat is back onscreen
+            if (!project || returned) return (input) => { reading(input); feed?.(); };
         } };
 }
 

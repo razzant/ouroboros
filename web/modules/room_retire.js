@@ -165,6 +165,12 @@ export function createRoomRetirement({ instances, cancelPaint = () => {}, restor
             }
             release();  // a room whose project went away during its exit is let go now
         },
+        // Back can claim only the room it left. A fresh registry-backed open may want a replacement instance.
+        reopen(pid, expected) {
+            if (expected && (forgotten.has(pid) || (instances.get(pid) ?? retiring.get(pid)) !== expected)) return;
+            rooms.settle(pid, undefined, false);
+            return instances.get(pid);
+        },
         // A room on screen leaves without motion; one already away stays as it is.
         putAway(pid) {
             const inst = instances.get(pid);

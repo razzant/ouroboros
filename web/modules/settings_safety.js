@@ -1,3 +1,4 @@
+import { markDesktopEditor } from './desktop_room_session.js';
 // The Safety Supervisor in Settings. Permissions and checks, "Who watches its actions": the two levels are rows that
 // save themselves (settings_rows.js; settings_controls.js writes them through the owner endpoint and asks before a
 // level is lowered); this module says the facts beside them: which model checks, who re-checks, what a managed
@@ -185,6 +186,7 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     }
     const onInput = () => {
         unsavedRules = stored !== null && field.value === stored ? null : field.value;
+        markDesktopEditor('Your rules', unsavedRules !== null);
         say(null);  // an edit starts a new subject: the last result goes
     };
     const onSave = async () => {
@@ -196,7 +198,7 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
         const landed = outcome.state === 'saved' || outcome.state === 'saved_then_failed' || outcome.state === 'unchanged';
         if (landed) {
             stored = text;
-            if (field.value === text) unsavedRules = null;
+            if (field.value === text) forgetUnsavedRules();
         }
         if (gone) return;
         button.disabled = false;
@@ -218,5 +220,5 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     } };
 }
 
-/** Forget the unsaved text (a test). */
-export function forgetUnsavedRules() { unsavedRules = null; }
+/** The saved rules no longer hold a desktop window replacement. */
+export function forgetUnsavedRules() { unsavedRules = null; markDesktopEditor('Your rules', false); }

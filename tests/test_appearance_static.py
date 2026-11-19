@@ -206,6 +206,6 @@ def test_windows_before_the_server_wear_the_interface_not_a_fixed_palette():
     painted = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "paint_room"]
     assert len(painted) == len(pages)
     source = _read("launcher.py")
-    window_css = _constant("launcher.py", "_WINDOW_CSS")
+    window_css = _constant("ouroboros/standalone_page.py", "_WINDOW_CSS")
     assert not re.search(r"#[0-9a-fA-F]{3,6}\b", window_css)
     assert "background:#0f0f11" not in source and "color:#efeff2" not in source

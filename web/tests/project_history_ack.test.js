@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import * as readAhead from '../modules/read_ahead.js';
+import { desktopRoomStorage } from '../modules/desktop_room_session.js';
 import { createRoomRetirement } from '../modules/room_retire.js';
 import { forgetProjectPreviews } from '../modules/chat_preview.js';
 
@@ -392,6 +393,7 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
     const project = { id: 'p1', name: 'P', chat_id: 9, lifecycle: 'active', visible_revision: 5 };
     const context = vm.createContext({
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
+        desktopRoomStorage,
         navState: { activeProjectId: null, mobileDrawerOpen: false },
         projectInstances: new Map(), projectPaintRequests: new Map(), projectReveals: new Map(),
         lastProjectRows: [project], state: { projectSeenRevision: {} }, mainChat: null,
@@ -474,6 +476,10 @@ for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p
         assert.equal(h.built.length, 0, 'no room is built');
         assert.equal(h.context.navState.activeProjectId, null, 'the view stays');
         assert.equal(toasts.length, 1, 'and says why');
+        const result = [];
+        await h.api.openAs({ id: 'p1' }, { openOnly: true, unavailable: issue => result.push(issue) });
+        assert.deepEqual(result, [says === 'gone' ? 'missing' : says]);
+        assert.equal(toasts.length, 1, 'desktop startup owns its selection notice');
     });
 }
 

@@ -9,37 +9,20 @@ pywebview paints its theme frame's last subview, the title bar container, with t
 integration clears exactly that view and refuses when the view it painted does not hold the close
 button. Any failed step restores the ordinary title bar for the window's lifetime.
 
-The web UI is replaced independently of this shell, and a replacement may never speak to it: an
-older UI after Restore, a custom ``OUROBOROS_UI_DIR`` page, and every page until pywebview injects its
-bridge, which it does only after loading, when the first page is already on screen. So the opt-in is a
-static declaration (``<meta name="ouroboros-window-chrome" content="integrated">``) the window reads
-itself: one script, registered in ``before_show`` and injected at document start into the main
-frame, posts it here on the main thread. It runs in its own content world, so a replaced page's
-scripts can neither call nor overwrite it and no names collide. A document without the declaration
-gets the ordinary title bar back, and one that never ran the script (``before_load`` fires at each
-finished navigation) does too; messages name their document by ``performance.timeOrigin``, so an
-older document never undoes a newer one. The window starts integrated: pywebview adds the web view
-only after the first document loaded and declared, so the bar never flashes. The page reserves room
-only for what is applied: this leaf measures the overlap (content height above ``contentLayoutRect``)
-and the traffic lights' far edge and writes them into that document (``data-window-chrome``,
-``--window-chrome-top``, ``--window-chrome-start``). A browser, another OS, an older shell, full
-screen or a refused apply writes nothing, so nothing is reserved there; geometry that cannot be
-measured returns the window to the ordinary bar rather than leave a transparent one over the page.
+The main frame declares integrated chrome with its static meta. An isolated document-start script
+reads it before pywebview injects its bridge. Documents without it (older or custom UIs included)
+get the ordinary bar. Messages carry performance.timeOrigin. During renderer replacement only the
+incoming view's declaration and appearance wait for installation; an outgoing press cannot drag it.
+The shell measures contentLayoutRect and the traffic lights, publishing data-window-chrome,
+--window-chrome-top and --window-chrome-start to that document. Refusal, full screen and other
+platforms reserve nothing. If geometry is unavailable the shell restores the ordinary bar.
 
-WKWebView takes the clicks under a transparent bar, so AppKit's title bar never sees them: the script
-reports a plain left press inside the measured band, off any control and any text the page declares
-selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
-sends pressure events within half a millisecond of a press; one was AppKit's current event at 17 of 19 band
-reports, owner's probe 17.11), so it acts on the mouse-down a local monitor kept, when in this window's band. A first
-press, while the button is down, goes back to AppKit's ``performWindowDragWithEvent:``. A second cannot go back:
-natively the title bar view hands a press under a transparent bar to the web view again, never zooming. So this
-leaf performs the Mac's "Double-click a window's title bar" choice, read at each double-click as Chromium reads it:
-Zoom (stored as ``Maximize``, and the default) and Minimize by their public calls, Do Nothing by nothing.
-Fill uses AppKit's private ``_zoomFill:`` only when present, as Chromium does; it is not Zoom.
-An isolated macOS 26.4 probe matched the ordinary bar; other versions remain unqualified.
-A visible toolbar stays as an opaque band over a full-screen page, so it hides on entering full screen. AppKit
-ends the exit with the toolbar hidden again, one set during the exit too, so it is shown again once
-the window is out; the style mask never changes in full screen.
+WKWebView takes clicks under the transparent bar. The isolated script reports presses on its empty
+band; a local monitor keeps the matching AppKit mouse-down (a trackpad pressure event may already
+be current). It performs the native window drag, or the system double-click choice: Zoom (Maximize),
+Minimize, Do Nothing, or Fill via _zoomFill: when available, as Chromium does. An isolated macOS
+26.4 probe matched the ordinary bar. The toolbar hides while full screen and is shown after DidExit,
+when AppKit otherwise leaves it hidden. The style mask never changes in full screen.
 
 The window's full-screen phase is AppKit's four notifications, observed from ``before_show`` with or without the
 document script, and its two failures, which AppKit sends only to the window's delegate: a small delegate stands in
@@ -211,7 +194,7 @@ def _handler_class():
 
         class OuroborosWindowChromeHandler(Foundation.NSObject):
             def userContentController_didReceiveScriptMessage_(self, controller, message):
-                self.chrome.receive(message.body())
+                self.chrome.receive_from(message.webView(), message.body())
 
         _classes["handler"] = OuroborosWindowChromeHandler
     return _classes["handler"]
@@ -397,6 +380,7 @@ class WindowChrome:
     def __init__(self) -> None:
         self._window: Any = None
         self._native: Any = None
+        self._incoming, self._declarations = None, {}
         self._webview: Any = None
         self._world: Any = None
         self._press: Any = None  # the app's last left mouse-down as AppKit dispatched it (the monitor in before_show)
@@ -473,6 +457,23 @@ class WindowChrome:
         # first document is ordinary again before it is seen.
         self._wanted = True
         self._reconcile()
+
+    def prepare_renderer(self, view: Any) -> None:
+        self._incoming, self._declarations = view, {}
+
+    def receive_from(self, view: Any, body: Any) -> None:
+        if view is self._webview:
+            self.receive(body)
+        elif view is self._incoming and body.get("type") in ("declare", "appearance"):
+            self._declarations[body["type"]] = body
+
+    def renderer_changed(self, view: Any) -> None:
+        if self._webview is not None:
+            self._webview, self._doc, self._declared = view, -math.inf, False
+            self._sent, self._press = (), None
+            for body in self._declarations.values():
+                self.receive(body)
+        self.prepare_renderer(None)
 
     def receive(self, body: Any) -> None:
         """A message of a document's shell script (main thread, in the order its documents sent them)."""

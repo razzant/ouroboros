@@ -1,3 +1,4 @@
+import { markDesktopEditor } from './desktop_room_session.js';
 // Circles (docs/DESIGN.md "Circles"): the one home of the places Ouroboros lives in, gathered into circles of people
 // whose shared words every place in a circle inherits beside its own notes. The page header carries New circle; the
 // body is one .ui-card directory: each circle is a row that opens (details.ui-disclosure, the Dashboard's Details
@@ -254,6 +255,25 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     const paintedOpen = new WeakSet();
     const shown = () => !document.hidden && state?.activePage === 'circles';
     const circleById = (id) => (view?.circles || []).find((entry) => entry.id === id) || null;
+    const removedDrafts = new Map();
+    const fields = ['name', 'text', 'model'];
+    const changedFields = (id, circle) => fields.filter(field => {
+        const value = ui.drafts[`${id}:${field}`];
+        return value !== undefined && value !== (circle?.[field] ?? '');
+    });
+    function discardDraft(id) {
+        for (const field of [...fields, 'revision']) delete ui.drafts[`${id}:${field}`];
+        removedDrafts.delete(id);
+    }
+
+    function removedDraftHtml(circle) {
+        const labels = { name: tr('circles.name', 'Name'), text: tr('circles.delete.words', 'Its words'), model: tr('circles.model', 'Model') };
+        const note = fmt('“{circle}” is no longer listed. Copy any edits you want to keep.', { circle: circle.name });
+        return `<section class="ui-card consciousness-card"><p class="consciousness-copy">${escapeHtml(note)}</p>
+            ${changedFields(circle.id, circle).map(field => `<label class="ui-field">${escapeHtml(labels[field])}
+                <textarea class="ui-control" readonly data-i18n-authored data-circles-draft="${escapeHtml(circle.id)}:${field}" rows="${field === 'text' ? 4 : 1}">\n${escapeHtml(ui.drafts[`${circle.id}:${field}`])}</textarea></label>`).join('')}
+            ${actButton('discard-draft', tr('circles.discard_edits', 'Discard edits'), `data-circle="${escapeHtml(circle.id)}"`, 'btn-ghost')}</section>`;
+    }
 
     function html() {
         const top = readError ? { text: readError, tone: 'error' } : !view ? { text: tr('circles.reading', 'Reading…'), tone: '' } : ui.status.page;
@@ -267,11 +287,14 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
                 + unassignedFoldHtml(unassigned, ui, answered, { alone: !groups.length }) + '</section>';
         }
         return `<p class="ui-status consciousness-read-status" role="status"${top?.tone ? ` data-tone="${escapeHtml(top.tone)}"` : ''}>${escapeHtml(top?.text || '')}</p>${moved}`
-            + (ui.creating ? newCircleCardHtml(ui) : '') + directory;
+            + [...removedDrafts.values()].map(removedDraftHtml).join('') + (ui.creating ? newCircleCardHtml(ui) : '') + directory;
     }
 
     // A repaint keeps the reader's place: the scroll, the focused control and a field's selection.
+    const trackDraft = () => markDesktopEditor('Circles', removedDrafts.size || changedFields('new').length
+        || view?.circles.some(circle => changedFields(circle.id, circle).length));
     function paint() {
+        trackDraft();
         const scroll = body.scrollTop;
         const active = document.activeElement;
         const key = body.contains(active) ? focusKeyOf(active) : '';
@@ -323,6 +346,13 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             const data = await read();
             if (current !== generation) return;
             if (!Array.isArray(data.circles)) throw new Error(tr('circles.unavailable', 'Circles could not be read.'));
+            const listed = new Set(data.circles.map(circle => circle.id));
+            for (const circle of view?.circles || []) {
+                if (listed.has(circle.id)) continue;
+                if (changedFields(circle.id, circle).some(field => ui.drafts[`${circle.id}:${field}`])) removedDrafts.set(circle.id, circle);
+                else discardDraft(circle.id);
+            }
+            for (const id of listed) removedDrafts.delete(id);
             view = data;
             readError = '';
         } catch (error) {
@@ -396,6 +426,8 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         }
         delete ui.drafts[`${from}:revision`];
         if (kept) ui.drafts[`${circle.id}:revision`] = circle.revision;
+        if (!circleById(circle.id) && kept) removedDrafts.set(circle.id, circle);
+        else removedDrafts.delete(circle.id);
         return kept;
     }
 
@@ -413,7 +445,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         const done = await write(circle.id, async () => { removed = await writes.deleteCircle(circle.id, circle.revision); });
         if (!done) return;
         ui.editing = ''; ui.open = UNASSIGNED;
-        Object.keys(ui.drafts).filter((key) => key.startsWith(`${circle.id}:`)).forEach((key) => delete ui.drafts[key]);
+        discardDraft(circle.id);
         ui.status = { page: { text: fmt(removed.detached.length === 1 ? 'Deleted {circle}; its place is in no circle now.'
             : 'Deleted {circle}; its {n} places are in no circle now.', { circle: circle.name, n: removed.detached.length }), tone: 'ok' } };
         await refresh();
@@ -431,6 +463,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (!button || button.disabled || ui.busy) return;
         const act = button.dataset.circlesAct;
         const circle = circleById(button.dataset.circle);
+        if (act === 'discard-draft') { discardDraft(button.dataset.circle); paint(); return; }
         if (act === 'new') {
             ui.creating = true; ui.status = {}; ui.modelsFailed = false; paint();
             void readSuggestions();
@@ -438,7 +471,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             body.querySelector('[data-circles-draft="new:name"]')?.focus();
             return;
         }
-        if (act === 'cancel-new') { ui.creating = false; ['name', 'text', 'model'].forEach((field) => delete ui.drafts[`new:${field}`]); ui.status = {}; paint(); return; }
+        if (act === 'cancel-new') { ui.creating = false; discardDraft('new'); ui.status = {}; paint(); return; }
         if (act === 'create') {
             const name = String(ui.drafts['new:name'] || '').trim();
             if (!name) { ui.status = { new: { text: tr('circles.name.first', 'Name the circle first.'), tone: 'muted' } }; paint(); body.querySelector('[data-circles-draft="new:name"]')?.focus(); return; }
@@ -471,7 +504,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         }
         const editAgain = () => body.querySelector(`[data-circle="${CSS.escape(circle.id)}"] [data-circles-act="edit"]`)?.focus();
         if (act === 'cancel') {
-            ui.editing = ''; ['name', 'text', 'model', 'revision'].forEach((field) => delete ui.drafts[`${circle.id}:${field}`]); ui.status = {}; paint(); editAgain();
+            ui.editing = ''; discardDraft(circle.id); ui.status = {}; paint(); editAgain();
             return;
         }
         if (act === 'save') {
@@ -482,7 +515,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             if (!name) { ui.status = { [circle.id]: { text: tr('circles.name.first', 'Name the circle first.'), tone: 'muted' } }; paint(); return; }
             const change = { ...(name !== circle.name ? { name } : {}), ...(words !== circle.text ? { text: words } : {}),
                 ...(model !== circle.model ? { model } : {}) };
-            if (!Object.keys(change).length) { ui.editing = ''; ui.status = { [circle.id]: { text: tr('circles.unchanged', 'Nothing to save.'), tone: 'muted' } }; paint(); editAgain(); return; }
+            if (!Object.keys(change).length) { ui.editing = ''; discardDraft(circle.id); ui.status = { [circle.id]: { text: tr('circles.unchanged', 'Nothing to save.'), tone: 'muted' } }; paint(); editAgain(); return; }
             // Sent on the draft's own revision: a newer read never turns another client's edit into ours to overwrite.
             // A conflict re-bases the draft on the circle as it stands, so only a second Save writes over it.
             const sent = { name: ui.drafts[`${circle.id}:name`], text: ui.drafts[`${circle.id}:text`], model: ui.drafts[`${circle.id}:model`] };
@@ -519,6 +552,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         // The first key fixes the revision the draft is written on; later reads repaint around it.
         if (!(`${id}:revision` in ui.drafts) && circleById(id)) ui.drafts[`${id}:revision`] = circleById(id).revision;
         ui.drafts[key] = field.value;
+        trackDraft();
     };
     const onShown = (event) => { if (event?.detail?.page === 'circles') void refresh(); };
     const onChanged = () => { if (shown()) void refresh(); else behind = true; };
@@ -560,6 +594,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         destroy() {
             generation += 1;
             destroyed = true;
+            markDesktopEditor('Circles', false);
             disposeChoosers();
             statusReads.clear();  // a late status answer finds no read of this page
             offLifecycle();

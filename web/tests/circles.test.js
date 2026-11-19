@@ -10,6 +10,7 @@ import {
     placeRowHtml, placeRowsHtml, unassignedFoldHtml,
 } from '../modules/circles.js';
 import { normalizePlacesResponse } from '../modules/consciousness_api.js';
+import { openDesktopRoomSession } from '../modules/desktop_room_session.js';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
 
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -781,4 +782,30 @@ test('a circle editor names a model\'s catalog price while its places pay it, an
     } finally {
         language({ language: '', english: true, revision: 52, entries: {} });
     }
+});
+
+test('a refreshed directory keeps removed edits accessible and releases the desktop hold when they are discarded', async t => {
+    const holds = [];
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: { ouroborosRoomSession: {
+        postMessage(message) { if (message.op === 'editor') holds.push(message.dirty); return {}; },
+    } } } });
+    host.top = host;
+    await openDesktopRoomSession(host, { documentElement: { dataset: {} }, querySelector: () => ({ content: 'circle-test', remove() {} }) }, assert.fail);
+    const view = page(t);
+    await settled();
+    await view.press('[data-circles-act="edit"][data-circle="team"]');
+    await view.type('team:text', 'Changed');
+    await view.type('team:text', team.text);  // a reverted field still has a draft key
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await view.type('home:text', 'My unsaved\nwords');
+    await view.press('[data-circles-act="edit"][data-circle="team"]');  // Home's editor is now folded away
+    view.serve({ ...RESPONSE, circles: [] });
+    await view.controller.refresh();
+    assert.match(view.body.textContent, /Home.*is no longer listed/);
+    assert.ok(view.body.querySelector('textarea[readonly]').textContent.endsWith('My unsaved\nwords'));
+    assert.equal(view.body.querySelector('[data-circles-act="discard-draft"][data-circle="team"]'), null);
+    assert.deepEqual(holds, [true, false, true]);
+    await view.press('[data-circles-act="discard-draft"][data-circle="home"]');
+    assert.equal(view.body.querySelector('textarea[readonly]'), null);
+    assert.deepEqual(holds, [true, false, true, false]);
 });

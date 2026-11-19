@@ -424,6 +424,7 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         window: { dispatchEvent() {} },
         CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
         updateUnreadBadge() {}, acknowledgeMainAfterPaint() {},
+        desktopRoomStorage: () => null,
         syncNavigationState() { context.syncMainLifetime(); },
         // Its own return to Main is project_history_ack.test.js's; here it says only that it closed.
         closeProjectPanel(options) {

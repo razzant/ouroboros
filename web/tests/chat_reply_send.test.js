@@ -84,17 +84,20 @@ test('Reply on an answer sends the next message with that row\'s address; the ec
     } finally { f.close(); }
 });
 
-test('every owner message waits for its saved row: a closed socket offers Send again with the same frame', async () => {
+test('a path typed in chat waits for its saved row and Send again keeps the same frame', async () => {
     const f = fixture();
     try {
-        await f.send('please look at the logs');
+        const path = '/tmp/project logs';
+        await f.send(path);
         const { frame } = f.sent.at(-1);
+        assert.equal(f.kept().at(-1).frame.content, path);
         const mine = f.bubbleOf((node) => node.dataset.clientMessageId === frame.client_message_id);
         f.fire('close');
+        assert.equal(f.sent.length, 1);
         assert.deepEqual(f.actions(mine), ['Send again', 'Discard'], 'words, not only files, get the doubt');
         f.notes(mine)[0].children.find((child) => child.textContent === 'Send again').click();
         assert.deepEqual(f.sent.at(-1).frame, frame, 'the SAME frame and id: the host rejoins a row it saved after all');
-        f.echo(frame.client_message_id, 'please look at the logs');
+        f.echo(frame.client_message_id, path);
         assert.deepEqual(f.notes(mine).map((note) => note.textContent), ['Input saved']);
         assert.deepEqual(f.kept(), [], 'the saved row ends the doubt');
         assert.equal(f.instance.hasPendingWork(), false);

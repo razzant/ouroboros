@@ -1,3 +1,4 @@
+import { roomOpening, whenRoomOpens } from './desktop_room_session.js';
 import { isPanicFrame } from './panic.js';
 // Owner attachments inside the owner's own chat bubble (docs/DESIGN.md "Chat
 // attachments"): one message, attachments above the caption, whole images
@@ -10,7 +11,7 @@ import { isPanicFrame } from './panic.js';
 // response for the sender's own bubble, the echo for other tabs, history for
 // replay — the same dict everywhere. Nothing here builds a file URL.
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { documentReaderKind } from './document_reader.js';
 
@@ -241,9 +242,10 @@ async function degrade(atoms, block, node, view) {
  * file is staged, revoked when it is removed, sent or the composer is destroyed,
  * and kept across a failed send so the owner can retry.
  */
-export function createComposerAttachments({ preview, attachBtn, fileInput, input, onLayout, showToast }) {
+export function createComposerAttachments({ preview, attachBtn, fileInput, input, onLayout, showToast, fileCountStore = null, fileCountKey = '' }) {
     let pending = [];
     let uploading = false;
+    let missing = 0, destroyed = false;
 
     const thumbFor = (file) => (String(file?.type || '').startsWith('image/') && typeof URL?.createObjectURL === 'function'
         ? URL.createObjectURL(file) : '');
@@ -253,7 +255,11 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     };
 
     function render() {
-        preview.classList.toggle('visible', pending.length > 0);
+        const count = pending.length + missing;
+        if (fileCountStore && !roomOpening()) {
+            if (count) fileCountStore.setItem(fileCountKey, String(count)); else fileCountStore.removeItem(fileCountKey);
+        }
+        preview.classList.toggle('visible', count > 0);
         preview.innerHTML = pending.map((item) => `
             <span class="attach-badge" data-attachment-id="${escapeHtmlAttr(item.id)}">
                 ${item.thumb ? `<img class="attach-thumb" src="${escapeHtmlAttr(item.thumb)}" alt="">`
@@ -262,6 +268,21 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
                 <button class="attach-remove" type="button" title="Remove" aria-label="Remove attachment ${escapeHtmlAttr(item.display_name)}" data-attachment-remove="${escapeHtmlAttr(item.id)}" ${uploading ? 'disabled aria-disabled="true"' : ''}>×</button>
             </span>
         `).join('');
+        if (missing) {
+            const notice = document.createElement('span');
+            notice.className = 'ui-status';
+            notice.setAttribute('role', 'status');
+            notice.textContent = missing === 1 ? tr('chat.reattach_one', 'Attach your file again to include it in this message.')
+                : fmt('chat.reattach_many', { n: missing }, 'Attach your {n} files again to include them in this message.');
+            const dismiss = document.createElement('button');
+            dismiss.type = 'button';
+            dismiss.className = 'attach-remove';
+            dismiss.setAttribute('aria-label', tr('chat.drop_missing', 'Remove missing attachments from this draft'));
+            dismiss.textContent = '×';
+            dismiss.addEventListener('click', () => { missing = 0; render(); });
+            notice.append(document.createTextNode(' '), dismiss);
+            preview.prepend(notice);
+        }
         preview.querySelectorAll('[data-attachment-remove]').forEach((button) => {
             button.addEventListener('click', () => {
                 if (uploading) return;
@@ -280,6 +301,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
             showToast('Wait for the current upload to finish before changing attachments.', 'error');
             return;
         }
+        missing = Math.max(0, missing - incoming.length);
         pending = pending.concat(incoming.map((file) => ({
             id: (globalThis.crypto && typeof crypto.randomUUID === 'function')
                 ? crypto.randomUUID()
@@ -332,16 +354,23 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     }
 
     function clear() {
+        missing = 0;
         pending.forEach(revoke);
         pending = [];
         render();
     }
 
+    whenRoomOpens(() => {
+        if (destroyed || !fileCountStore) return;
+        missing = Math.max(0, (Number(fileCountStore.getItem(fileCountKey)) || 0) - pending.length);
+        if (missing || pending.length) render();
+    });
     return {
         stage,
         upload,
+        get missing() { return missing; },
         clear,
-        destroy() { pending.forEach(revoke); pending = []; },
+        destroy() { destroyed = true; pending.forEach(revoke); pending = []; },
         get count() { return pending.length; },
         get busy() { return uploading; },
     };
@@ -407,20 +436,24 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     const frames = new Map();  // id -> { frame, views, ts, restored, queued }
     const bubbleOf = (id) => [...(root()?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
         .find((node) => node.dataset.clientMessageId === id) || null;
-    let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
-    try {
-        const kept = storage && storageKey ? storage.getItem(storageKey) : null;
-        for (const entry of kept === null ? [] : JSON.parse(kept)) {
-            const frame = keptFrame(entry?.frame);
-            if (frame) frames.set(String(frame.client_message_id), { frame, views: attachmentViews(entry.views),
-                ts: String(entry.ts || ''), restored: true });
-            else unreadable = true;
-        }
-    } catch { unreadable = true; }
-    // The tab's own storage, not an action of the owner's that failed: said, but not felt (toast.js, haptics.js).
-    if (unreadable) showToast(tr('chat.send_unconfirmed_unread',
-        'This tab could not read an unsaved message it kept for a reload, so it cannot be offered again.'), 'error',
-        { haptic: false });
+    let released = false;
+    whenRoomOpens(() => {
+        if (released) return;
+        let unreadable = false;  // a kept copy this tab cannot read restores nothing, and says so
+        try {
+            const kept = storage && storageKey ? storage.getItem(storageKey) : null;
+            for (const entry of kept === null ? [] : JSON.parse(kept)) {
+                const frame = keptFrame(entry?.frame);
+                if (frame) frames.set(String(frame.client_message_id), { frame, views: attachmentViews(entry.views),
+                    ts: String(entry.ts || ''), restored: true });
+                else unreadable = true;
+            }
+        } catch { unreadable = true; }
+        // The tab's own storage, not an action of the owner's that failed: said, but not felt (toast.js, haptics.js).
+        if (unreadable) showToast(tr('chat.send_unconfirmed_unread',
+            'This tab could not read an unsaved message it kept for a reload, so it cannot be offered again.'), 'error',
+            { haptic: false });
+    });
 
     function persist() {
         if (!storage || !storageKey) return;
@@ -536,7 +569,12 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
          *  has since ended (neither dispatch fact) ends it in a delivery doubt. */
         settle(row) {
             const id = String(row?.client_message_id || '');
-            if (row?.role !== 'user' || row.ingress_accepted !== true || !frames.has(id)) return;
+            if (row?.role !== 'user' || row.ingress_accepted !== true || !id) return;
+            if (roomOpening()) {
+                whenRoomOpens(() => { if (!released) this.settle(row); });
+                return;
+            }
+            if (!frames.has(id)) return;
             const bubble = bubbleOf(id);
             if (row.ingress_dispatched === true) {
                 forget(id);
@@ -566,6 +604,6 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         },
         get count() { return frames.size; },
         /** Room teardown: this instance forgets; the tab's kept copies stay for the room's next instance. */
-        release() { frames.clear(); },
+        release() { released = true; frames.clear(); },
     };
 }

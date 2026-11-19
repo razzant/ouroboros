@@ -8,6 +8,7 @@
 import { bindComposerFileTargets, cleanupUploadedAttachments } from './chat_media.js';
 import { composerText, createComposerAttachments } from './chat_attachments.js';
 import { loadChatInputHistory, saveChatInputHistory, sendPanic } from './chat_activity.js';
+import { roomStorage, desktopRoomStorage, roomOpening, whenRoomOpens } from './desktop_room_session.js';
 import { isPanicFrame } from './panic.js';
 import { clientSurfaceField } from './client_surface.js';
 import { apiClient, apiFetch } from './api_client.js';
@@ -176,17 +177,33 @@ export function createPlusMenu({ button, hostItems = [] }) {
  * added (the sent draft rises into it, send_flight.js), and `readingBack()`
  * says whether the owner's own gesture took the room off its newest row (the phone fold reads it: composer_fold.js).
  */
-export function createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
+export function createComposer({ page, byId, ws, replies, chatSessionId, getSessionId = () => chatSessionId, isMain, chatId, projectId, storeKey,
     refreshState, openSettings = null, onLayout, onSent, readingBack }) {
     const input = byId('input');
+    const storage = roomStorage();
     const sendBtn = byId('send');
     const plusBtn = byId('plus');
     const fileInput = byId('file-input');
     let destroyed = false, cognitionRead = false;
+    const session = desktopRoomStorage();
+    const editable = () => input.dataset.desktopRoomOpening !== '1';
+    let releaseInput = () => {};
+    if (session?.inputLocked()) {
+        const hint = input.placeholder;
+        input.dataset.desktopRoomOpening = '1';
+        input.placeholder = 'Restoring the room… Choose Main or a Project to type.';
+        input.readOnly = sendBtn.disabled = plusBtn.disabled = fileInput.disabled = true;
+        releaseInput = session.onInputReady(() => {
+            delete input.dataset.desktopRoomOpening;
+            input.placeholder = hint;
+            input.readOnly = sendBtn.disabled = plusBtn.disabled = fileInput.disabled = false;
+        });
+    }
 
     // Staged files, their thumbnails and object URLs, and the upload on Send ("+" waits while it runs).
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
-        input, showToast, onLayout: () => requestAnimationFrame(() => onLayout()) });
+        input, showToast, fileCountStore: session, fileCountKey: storeKey('ouro_chat_files'), onLayout: () => requestAnimationFrame(() => onLayout()) });
+    const stageFiles = files => { if (editable()) attachments.stage(files); };
 
     // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
@@ -198,12 +215,12 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     fileInput.addEventListener('change', () => {
         const files = Array.from(fileInput.files || []);
         fileInput.value = '';
-        attachments.stage(files);
+        stageFiles(files);
     });
 
-    bindComposerFileTargets({ page, inputArea: byId('input-area'), input, stagePendingFiles: attachments.stage });
+    bindComposerFileTargets({ page, inputArea: byId('input-area'), input, stagePendingFiles: stageFiles });
 
-    const inputHistory = loadChatInputHistory(sessionStorage, CHAT_INPUT_HISTORY_KEY);
+    const inputHistory = [];
     let inputHistoryIndex = inputHistory.length;
     let inputDraft = '';
     let inputHistorySeededFromServer = false; // set true only after a successful server-side recall seed
@@ -211,7 +228,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     function rememberInput(text) {
         if (!text) return;
         if (inputHistory[inputHistory.length - 1] !== text) inputHistory.push(text);
-        saveChatInputHistory(sessionStorage, CHAT_INPUT_HISTORY_KEY, inputHistory);
+        saveChatInputHistory(storage, CHAT_INPUT_HISTORY_KEY, inputHistory);
         inputHistoryIndex = inputHistory.length;
         inputDraft = '';
     }
@@ -228,7 +245,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         const deduped = [...new Set([...serverTexts, ...inputHistory].reverse())].reverse();
         inputHistory.length = 0;
         inputHistory.push(...deduped.slice(-50));
-        saveChatInputHistory(sessionStorage, CHAT_INPUT_HISTORY_KEY, inputHistory);
+        saveChatInputHistory(storage, CHAT_INPUT_HISTORY_KEY, inputHistory);
         inputHistoryIndex = inputHistory.length;
         inputHistorySeededFromServer = true;
     }
@@ -253,6 +270,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             input.value = inputHistoryIndex === inputHistory.length ? inputDraft : (inputHistory[inputHistoryIndex] || '');
         }
         resizeChatInput();
+        saveInputDraft();
         const cursor = input.value.length;
         input.setSelectionRange(cursor, cursor);
     }
@@ -273,11 +291,12 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
                     resizeChatInput();
                 }
                 try {
-                    if (sessionStorage.getItem(storeKey(CHAT_DRAFT_KEY)) === sentDraft) clearInputDraft();
+                    if (storage.getItem(storeKey(CHAT_DRAFT_KEY)) === sentDraft) clearInputDraft();
                 } catch {}
             } });
             return;
         }
+        if (!editable() || roomOpening()) return;
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
         if (ownerControls.hasPendingSave()) {  // the room's settings land before the next message
             setSendBusy(true, 'Saving');
@@ -310,7 +329,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         const frame = {
             type: 'chat',
             content: text,
-            sender_session_id: chatSessionId,
+            sender_session_id: getSessionId(),
             ...(isMain ? {} : { chat_id: chatId }),
             ...(projectId ? { project_id: projectId } : {}),
             // Structured metadata rides the frame: model staging and native image blocks.
@@ -326,7 +345,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         }
         // Where the draft stands, read before the field empties: the sent bubble rises from here (send_flight.js).
         const draft = draftPlace(input.closest('.chat-field'), input);
-        if (hasAttachments) attachments.clear();
+        if (hasAttachments || attachments.missing) attachments.clear();
         rememberInput(text);
         input.value = '';
         clearInputDraft();
@@ -365,10 +384,16 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         finally { cognitionRead = false; }
     }
 
-    sendBtn.addEventListener('click', () => sendMessage());
+    const submit = () => {
+        const work = sendMessage();
+        desktopRoomStorage()?.trackSend(work);
+        return work;
+    };
+    sendBtn.addEventListener('click', submit);
     // The send path admits Panic even while an ordinary upload/save disables Send.
-    bindEnterSubmit(input, sendBtn, () => sendMessage());
+    bindEnterSubmit(input, sendBtn, submit);
     input.addEventListener('keydown', (e) => {
+        if (!editable()) return;
         if (e.key === 'ArrowUp' && !e.shiftKey) {
             restoreInputHistory(-1);
         } else if (e.key === 'ArrowDown' && !e.shiftKey) {
@@ -378,28 +403,33 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
 
     // Per-thread drafts survive room closure; Send clears them.
     function saveInputDraft() {
+        if (roomOpening()) return;
         try {
-            if (input.value) sessionStorage.setItem(storeKey(CHAT_DRAFT_KEY), input.value);
-            else sessionStorage.removeItem(storeKey(CHAT_DRAFT_KEY));
+            if (input.value) storage.setItem(storeKey(CHAT_DRAFT_KEY), input.value);
+            else storage.removeItem(storeKey(CHAT_DRAFT_KEY));
         } catch {}
     }
 
     function clearInputDraft() {
-        try { sessionStorage.removeItem(storeKey(CHAT_DRAFT_KEY)); } catch {}
+        try { storage.removeItem(storeKey(CHAT_DRAFT_KEY)); } catch {}
     }
 
-    try {
-        const savedDraft = sessionStorage.getItem(storeKey(CHAT_DRAFT_KEY)) || '';
-        if (savedDraft && !input.value) {
-            input.value = savedDraft;
-            inputDraft = savedDraft;
-            resizeChatInput();
-        }
-    } catch {}
+    whenRoomOpens(() => {
+        if (destroyed) return;
+        inputHistory.push(...loadChatInputHistory(storage, CHAT_INPUT_HISTORY_KEY));
+        inputHistoryIndex = inputHistory.length;
+        try {
+            const saved = storage.getItem(storeKey(CHAT_DRAFT_KEY)) || '';
+            // Desktop restores this room's slots before unlocking ordinary input.
+            if (saved) { input.value = saved + input.value; inputDraft = input.value; resizeChatInput(); }
+            if (input.value && input.value !== saved) saveInputDraft();
+        } catch {}
+    });
 
     // Typing, and every change this module makes on another's behalf, keeps the recall's draft, the height and the
     // room's draft current.
     function onInput() {
+        if (!editable()) return;
         if (inputHistoryIndex === inputHistory.length) inputDraft = input.value;
         resizeChatInput();
         saveInputDraft();
@@ -418,12 +448,14 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         getDraft: () => input.value,
         /** Replace the draft (it is kept for the room like typed words). */
         setDraft(text) {
+            if (!editable()) return false;
             input.value = String(text ?? '');
             onInput();
             input.dispatchEvent?.(new Event('change', { bubbles: true }));
         },
         /** Insert words at the caret, replacing a selection, and leave the caret after them in the focused field. */
         insertAtCursor(text) {
+            if (!editable()) return false;
             const words = String(text ?? '');
             const start = input.selectionStart ?? input.value.length;
             const end = input.selectionEnd ?? start;
@@ -456,6 +488,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         hasPendingWork: () => attachments.count > 0 || attachments.busy,
         destroy() {
             destroyed = true;
+            releaseInput();
             for (const dispose of contributed) dispose();
             plusMenu.destroy();
             attachments.destroy();

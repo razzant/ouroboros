@@ -233,11 +233,16 @@ def test_task_bound_saved_skill_export_matches_detail_and_bridge_prefix(tmp_path
     launcher = pathlib.Path(__file__).resolve().parents[1] / "launcher.py"
     function = next(n for n in ast.walk(ast.parse(launcher.read_text()))
                     if isinstance(n, ast.FunctionDef) and n.name == "_resolve_bridge_file_url")
-    namespace = {"actual_port": 8000, "urllib": urllib}
+    namespace = {"actual_port": 8000, "_main_renderer": None, "urllib": urllib}
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(launcher), "exec"), namespace)
     assert namespace["_resolve_bridge_file_url"](url) == "http://127.0.0.1:8000" + url
     with pytest.raises(ValueError):
         namespace["_resolve_bridge_file_url"]("/api/skills/weather/review-history/exact-job?format=text")
+    namespace.update(_main_renderer=object(), _generation_port=8001)
+    assert namespace["_resolve_bridge_file_url"](url) == "http://127.0.0.1:8001" + url
+    namespace["_generation_port"] = None
+    with pytest.raises(ValueError, match="has not confirmed its port"):
+        namespace["_resolve_bridge_file_url"](url)
     with client_for(tmp_path) as client:
         response = client.get(url)
         assert response.status_code == 200

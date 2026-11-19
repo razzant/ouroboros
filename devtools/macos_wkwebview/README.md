@@ -60,3 +60,5 @@ checkout. The disposable root is removed after its processes are proven gone; `-
 outlived teardown, keeps it with `OUROBOROS_RETAINED.txt`.
 
 Not covered: iOS, phone keyboards, the Telegram host, the desktop launcher itself and page zoom other than 100 %.
+
+For the real launcher, the manual native check compares a frozen baseline and candidate on one hosted Mac. It follows the installed window, room drafts, message receipts and two tasks across Restart, managed Update, source handoff and Quit. [Window renewal and its evidence](window_renewal.md).

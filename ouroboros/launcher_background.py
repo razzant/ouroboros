@@ -827,7 +827,7 @@ class DesktopApi:
     _background = None  # set by the inheriting MainApi; a leading underscore keeps it off the bridge
     _shell_facts = {}  # installed seed and loaded source, supplied by launcher.MainApi
 
-    def panic_stop(self) -> dict:
+    def panic_stop(self, document: str = "") -> dict:
         """Independent desktop emergency door; no server or reconnect dependency."""
         self._background.request_panic("desktop_bridge")
         return {"status": "stopping"}

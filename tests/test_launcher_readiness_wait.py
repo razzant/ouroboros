@@ -4,11 +4,16 @@ stays rejected (tests/test_launcher_generation_custody.py)."""
 
 from __future__ import annotations
 
+import io
+import json
 import threading
 from types import SimpleNamespace
 
 import pytest
 
+
+class _HealthReply(io.BytesIO):
+    status = 200
 
 
 class _Clock:
@@ -95,28 +100,17 @@ def test_the_lifecycle_loop_marks_an_exit_before_readiness_but_not_a_restart_or_
 
 
 def test_the_health_probe_waits_while_the_child_lives_and_ends_on_its_exit(launcher, monkeypatch):
-    import io
-
     from ouroboros import launcher_readiness
 
     clock = _Clock(step=10.0)
     monkeypatch.setattr(launcher_readiness, "time", clock)  # the probe's own clock module
     probes = []
 
-    class _Response(io.BytesIO):
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     def urlopen(url, timeout=None):
         probes.append(timeout)
         if len(probes) < 15:  # 150 simulated seconds of refused connections: the boot is long
             raise ConnectionRefusedError(url)
-        return _Response(b'{"status": "ok", "boot": {"phase": "serving", "dialogue_ready": false, "tasks_ready": false}}')
+        return _HealthReply(b'{"status": "ok", "boot": {"phase": "serving", "dialogue_ready": false, "tasks_ready": false}}')
 
     monkeypatch.setattr(launcher.urllib.request, "urlopen", urlopen)
     child = SimpleNamespace(poll=lambda: None)
@@ -129,3 +123,31 @@ def test_the_health_probe_waits_while_the_child_lives_and_ends_on_its_exit(launc
     dead_soon = SimpleNamespace(poll=lambda: next(exits))
     assert launcher._wait_for_server(1, proc=dead_soon) is False
     assert len(probes) == 2, "the probe ends with the child's exit, not with a deadline"
+
+
+def test_replacement_waits_for_dialogue_and_project_reconciliation_on_the_serving_child(launcher, monkeypatch):
+    from ouroboros import launcher_readiness
+
+    serving = {"phase": "serving", "dialogue_ready": True, "tasks_ready": False}
+    projects = [{"name": "projects", "state": "done"}]
+    phases = [{**serving, "steps": []}, {**serving, "steps": projects, "dialogue_ready": False},
+              {**serving, "steps": projects}]
+    replies = [b'{"boot":'] + [json.dumps({"boot": phase}).encode() for phase in phases]
+    clock = _Clock(step=60)
+    monkeypatch.setattr(launcher_readiness, "time", clock)
+    monkeypatch.setattr(launcher.urllib.request, "urlopen", lambda *_a, **_kw: _HealthReply(replies.pop(0)))
+    child = SimpleNamespace(poll=lambda: None if replies else 1)
+    assert launcher._wait_for_server(1, proc=child, for_room=True)
+    assert clock.sleeps == 3  # well beyond the renderer startup deadline, without waiting for task workers
+
+
+@pytest.mark.parametrize("health", [b"", {"status": "ok"}, {"boot": {"phase": "ready", "dialogue_ready": False}},
+                                    {"boot": {"phase": "failed"}}, {"boot": {"phase": "serving", "dialogue_ready": True}}])
+def test_replacement_can_try_a_legacy_providerless_or_failed_boot(launcher, monkeypatch, health):
+    from ouroboros import launcher_readiness
+
+    body = health if isinstance(health, bytes) else json.dumps(health).encode()
+    monkeypatch.setattr(launcher_readiness, "time", _Clock(step=1))
+    monkeypatch.setattr(launcher.urllib.request, "urlopen", lambda *_a, **_kw: _HealthReply(body))
+    polls = iter([None, None, 1] if not body else [None, 1])
+    assert launcher._wait_for_server(1, proc=SimpleNamespace(poll=lambda: next(polls)), for_room=True)

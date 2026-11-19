@@ -1,3 +1,4 @@
+import { markDesktopEditor } from './desktop_room_session.js';
 import { bindPageHeader, renderPageHeader, revealStripChoice } from './page_header.js';
 import { PAGE_ICONS, SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
@@ -143,10 +144,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     let viewRequest = 0;
     let draftRevision = 0;
 
-    // A page too narrow for both (style.css, the `files` container) shows the folder's list first and the chosen file
-    // once one is chosen, never both: `data-files-view` says which. Back to folder returns to the list and keeps an
-    // unsaved draft, which the file's row (or a new file's own row) reopens and which leaving the file still asks
-    // about. Side by side the view changes nothing on screen; focus moves there only off a control a resize hid.
+    // In a narrow Files page, Back to folder leaves the draft in its row. In the two-pane layout, only a resize
+    // hiding the focused control moves focus. data-files-view identifies the selected pane.
     // The file shown alone is one layer of the shell's stack (layers.js, DESIGN "Layers and dismissal"), so Escape,
     // the system Back and Telegram's Back close it exactly as Back to folder does; beside the list it is no layer.
     const FILE_LAYER = 'files-file';
@@ -201,6 +200,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     function updateEditorActions() {
+        markDesktopEditor('Files', state.editorDirty);
         const visible = state.editorWritable && state.selectedType === 'file';
         const canSave = visible && (
             state.editorIsNew

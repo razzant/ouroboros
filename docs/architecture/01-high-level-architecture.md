@@ -325,6 +325,7 @@ ouroboros/ — agent core and shared runtime (§6)
   launcher_bootstrap.py, runtime_venv.py, launcher_onboarding.py — Bootstrap/sync, source-shell handoff and compatibility probe, native host and body interpreter; desktop onboarding on the gateway /onboarding page (§2)
   launcher_server_reaper.py — Startup strays; close/Panic cleanup; Windows generation Job drain; Quit's engine stop (§9)
   launcher_readiness.py — Launcher `/api/health` probe (§2 Boot order)
+  launcher_webkit.py, launcher_webkit_diagnostics.py, desktop_room_session.py — Main view renewal, native failure reports and session-only room input (§2; Runtime topology below)
   launcher_windows_runtime.py — Windows runtime; pre-import legacy GUI handoff (§2)
   launcher_background.py — Desktop close/quit, consent, second-launch activation (§9); `DesktopApi` supplies `MainApi` alerts, shell facts and Panic (§3)
   panic_source.py, platform_peer.py — Diagnostic Panic source (§9)
@@ -608,7 +609,7 @@ ouroboros/ — agent core and shared runtime (§6)
 
 ### Devtools boundary
 
-`devtools/` is excluded from runtime imports and package discovery; review applies; outputs stay external. A benchmark launcher stamps the isolated-benchmark sentinel in its throwaway data root, turning off JSONL log rotation there (`supervisor/state.py`). Each devtool's README keeps its module map and methodology: `devtools/benchmarks/cybergym/` pauses dispatch on typed gates (`cybergym_dispatch.py`); `devtools/benchmarks/cowork_bench/` keeps scoring authority in its audit (`METHODOLOGY.md`); `devtools/benchmarks/osworld/` splits runners from their owner leaves; `devtools/macos_wkwebview/` is the optional system-WKWebView composer check. `devtools/e2e_live/` is the live E2E stand (DEVELOPMENT "Live E2E stand").
+`devtools/` is reviewed, never imported or packaged by the runtime; outputs stay external. A benchmark launcher's isolated-benchmark sentinel disables JSONL rotation in its throwaway data root (`supervisor/state.py`). Each README maps its modules and method: `devtools/benchmarks/cybergym/` pauses dispatch on typed gates (`cybergym_dispatch.py`); `devtools/benchmarks/cowork_bench/` keeps scoring in its audit (`METHODOLOGY.md`); `devtools/benchmarks/osworld/` separates runners from owner leaves. `devtools/macos_wkwebview/` checks native composer clearance and window renewal; `devtools/e2e_live/` runs the live E2E stand (DEVELOPMENT).
 
 ### Gateway Boundary v1
 
@@ -642,7 +643,7 @@ Same-install reaper (`launcher_server_reaper.py`; proof: its docstring): under t
 
 Durable process custody (`process_custody.py`): `spawn_supervised()` ledgers long-lived children in `process_ledger.jsonl` (scope `task|session|daemon`), and the reaper (startup, sweep) kills only entries whose generation or task owner died, by strict `(pid, start_time, cmd_sha256)` fingerprint or launch identity (§9), never command-line class, so dev and packaged installs coexist; daemon rows stay, skill companions are reaped on owner uninstall or foreign generation (log-only default: `process_would_reap`), and worker tree-kills (`kill_worker_tree`) spare retained daemon subtrees. `start_parent_lifeline()` group-suicides a Python entrypoint on spawner death; multiprocessing children await the parent sentinel; ppid 1 at start is live only for a spawn/fork child of PID 1 or under `OUROBOROS_PARENT_PID`.
 
-Launcher lifecycle: each generation resolves its predecessor, re-checks the automatic Panic gate and starts the server; ready is the endpoint this child published, proven against its handle, answering health. `RESTART_EXIT_CODE` requests a managed restart that refreshes bundle metadata and dependencies (§2); `MAX_CRASH_RESTARTS` crashes within `CRASH_WINDOW_SEC` stop automatic restart; a panic exit cleans up and ends the outer process. Presentation: the Linux browser fallback checks `DISPLAY`/`WAYLAND_DISPLAY` before touching pywebview; GTK needs a live default display, Qt is trusted on env alone: probing it constructs a `QGuiApplication` that can itself abort. On probe failure the same launcher supervises the same server, prints the authoritative URL and opens the system browser best-effort (the browser is the owner's application, outside process custody).
+Before each start the launcher resolves its predecessor and rechecks Panic. `RESTART_EXIT_CODE` refreshes bundle metadata and dependencies (§2). macOS renews the WKWebView in its NSWindow at the child's confirmed port unless source handoff supplies the view. A native failure report is not a diagnosis. `MAX_CRASH_RESTARTS` within `CRASH_WINDOW_SEC` stops automatic restart; Panic cleans up and exits. Linux checks `DISPLAY`/`WAYLAND_DISPLAY` before pywebview: GTK probes the default display, Qt trusts the environment because constructing `QGuiApplication` can abort. Without a display the launcher supervises the same server, prints its URL and best-effort opens the owner's browser outside custody.
 
 #### Android host (experimental)
 

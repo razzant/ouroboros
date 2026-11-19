@@ -25,10 +25,10 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D15 | Memory, knowledge, consciousness & self-evolution | 41 | 0 |
 | D16 | Observability, usage accounting & cost | 32 | 0 |
 | D17 | Projects, workspaces & task results | 60 | 0 |
-| D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
+| D18 | Launcher, packaging, platform & shared substrate | 45 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1063** | **0** |
+| **total** | | **1066** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -1244,6 +1244,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/desktop_autostart.py`
 - `ouroboros/desktop_media.py`
 - `ouroboros/desktop_notifications.py`
+- `ouroboros/desktop_room_session.py`
 - `ouroboros/force_remove.py`
 - `ouroboros/git_observation.py`
 - `ouroboros/host_memory.py`
@@ -1257,6 +1258,8 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/launcher_server_reaper.py`
 - `ouroboros/launcher_tray.py`
 - `ouroboros/launcher_tray_macos.py`
+- `ouroboros/launcher_webkit.py`
+- `ouroboros/launcher_webkit_diagnostics.py`
 - `ouroboros/launcher_window_chrome.py`
 - `ouroboros/launcher_windows_runtime.py`
 - `ouroboros/markdown_source.py`
