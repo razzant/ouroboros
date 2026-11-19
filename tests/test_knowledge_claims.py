@@ -345,7 +345,7 @@ def test_a_claims_overwrite_that_carries_no_body_is_refused_and_writes_nothing(t
     stored = target.path.read_bytes(), journal.read_bytes(), record.read_bytes()
     said = ("⚠️ TOOL_ERROR: Knowledge write not completed: invalid_note: this overwrite sets claims and carries no body, so it "
             f"would erase the note's body ({len(body)} characters); an overwrite replaces the whole note: send its whole text "
-            "with the claims list in its YAML.")
+            "with the claims list in its YAML, or the YAML alone with mode=edit, which keeps the body.")
     alone = "---\nclaims: ['room:1', 'room:2']\n---"
     for content in (alone, alone + "\n", alone + "\n\n  \n", "---\nclaims: []\n---\n"):
         refused = _write(registry, target, content, expected_revision=before.revision)
@@ -373,6 +373,80 @@ def test_a_claims_overwrite_that_carries_no_body_is_refused_and_writes_nothing(t
     fresh = knowledge.resolve_knowledge_address(tmp_path, "fresh", "global")
     assert _write(registry, fresh, "---\nclaims: ['room:3']\n---").startswith("✅")
     assert knowledge.active_claims(tmp_path)["room:3"] == [fresh]
+
+
+def test_a_yaml_only_edit_sets_names_and_keys_and_keeps_every_body_byte(tmp_path):
+    """A name or a key is set without resending the body: an edit whose content is only a YAML block merges its
+    fields as an overwrite does and keeps every body byte. Its claims are the turn's explicit write, adopted as an
+    overwrite's, so the name holds at once; body text that an edit or an append writes adopts no name, as before."""
+    registry = _registry(tmp_path)
+    target = knowledge.resolve_knowledge_address(tmp_path, "diary", "global")
+    body = "First entry.\r\n" + "An entry under no heading.\r\n" * 400 + "Last entry.\r\n"
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(("---\ntype: note\nsummary: A diary.\nclaims: ['room:1']\nseen: {by: hand}\n---\n"
+                             + body).encode("utf-8"))  # a claims field written by hand, which holds nothing yet
+
+    def edit(**arguments):
+        revision = knowledge.read_knowledge_note(target).revision
+        return registry.execute("knowledge_write", {"topic": "diary", "scope": "global", "mode": "edit",
+                                                    "expected_revision": revision, **arguments})
+
+    def body_of(note):
+        return note.raw[note.source.body_span.start_byte:]
+
+    assert edit(old_str="Last entry.", content="Last entry, revised.").startswith("✅")
+    assert _write(registry, target, "Appended entry.\r\n", mode="append").startswith("✅")
+    assert knowledge.active_claims(tmp_path) == {}  # body text adopted nothing
+    before = knowledge.read_knowledge_note(target)
+
+    # The name the YAML already lists by hand: the bytes stay, and the explicit write adopts it.
+    named = edit(content="---\nclaims: ['room:1']\n---\n")
+    assert named.startswith("✅") and "Present situations holding this note: room:1" in named
+    assert target.path.read_bytes() == before.raw and knowledge.active_claims(tmp_path) == {"room:1": [target]}
+    assert next(iter(knowledge_versions.NoteHistory(target)))[1]["active_claims"] == ["room:1"]
+
+    # A key: the YAML is merged and re-rendered, every body byte stays, and a place turn's speaker key joins the note.
+    key = {"provider": "chat", "namespace": "T-ONE", "id": "U-VELA"}
+    keyed = edit(content="---\nkeys: " + json.dumps([key]) + "\n---\n")
+    after = knowledge.read_knowledge_note(target)
+    assert keyed.startswith("✅") and body_of(after) == body_of(before) and after.raw != before.raw
+    assert after.metadata == {**before.metadata, "keys": [key]}  # the summary and the unknown field survive
+    assert knowledge.speaker_pages(tmp_path, "chat", "T-ONE", "U-VELA")["page"] == "knowledge_read(topic='diary', scope='global')"
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
+
+
+def test_a_yaml_only_edit_is_revision_checked_keeps_the_archive_field_and_takes_no_body_text(tmp_path):
+    """A YAML-only edit replaces an existing note, so it needs the note's current revision; the archive field stays
+    with archive and restore; content that carries body text and no old_str is still refused, by the tool and by the
+    writer. Each refusal writes nothing, and the same edit with the current revision lands."""
+    registry = _registry(tmp_path)
+    target = knowledge.resolve_knowledge_address(tmp_path, "diary", "global")
+    assert _write(registry, target, "---\ntype: note\n---\nA body under no heading.\n").startswith("✅")
+    current = knowledge.read_knowledge_note(target)
+    journal = knowledge_versions.journal_path(target)
+    stored = target.path.read_bytes(), journal.read_bytes()
+    names = "---\nclaims: ['room:1']\n---\n"
+
+    def edit(content, **arguments):
+        return registry.execute("knowledge_write", {"topic": "diary", "scope": "global", "mode": "edit",
+                                                    "content": content, **arguments})
+
+    for content, arguments, said in (
+            (names, {}, "revision_required"),
+            (names, {"expected_revision": "0" * 64}, "revision_conflict"),
+            ("---\narchive: {at: '2026-11-19', reason: done}\n---\n", {"expected_revision": current.revision},
+             "invalid_note: archive is owned by archive/restore modes"),
+            (names + "Body text sent beside it.\n", {"expected_revision": current.revision},
+             "mode=edit requires edits, or a non-empty old_str, or a summary, or YAML-only content"),
+            ("---\nclaims: [room:1\n---\n", {"expected_revision": current.revision}, "TOOL_ARG_ERROR: content: ")):
+        reply = edit(content, **arguments)
+        assert reply.startswith("⚠️") and said in reply, reply
+        assert (target.path.read_bytes(), journal.read_bytes()) == stored
+    with pytest.raises(ValueError, match="an edit's content alone is a YAML block"):
+        knowledge.write_knowledge_note(target, names + "Body.\n", "edit", expected_revision=current.revision)
+    assert (target.path.read_bytes(), journal.read_bytes()) == stored and knowledge.active_claims(tmp_path) == {}
+    assert edit(names, expected_revision=current.revision).startswith("✅")
+    assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
 
 
 def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):

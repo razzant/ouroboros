@@ -978,7 +978,7 @@ def test_item_shapes_and_spellings_that_cannot_mean_one_thing_are_argument_error
             ({"edits": [_item("", new_str="x")]}, "item 1: old_str must be non-empty exact body text"),
             ({"edits": [{"old_str": "Text."}]}, "item 1: new_str must be text"),
             ({"edits": [_item("Text.", new_str=None)]}, "item 1: new_str must be text"),
-            ({"edits": []}, "mode=edit requires edits, or a non-empty old_str, or a summary (edits=[] ignored"),
+            ({"edits": []}, "mode=edit requires edits, or a non-empty old_str, or a summary, or YAML-only content (edits=[] ignored"),
             ({"edits": [_item("Text.", new_str="x")], "old_str": "Text."}, "edits carries its own replacements"),
             ({"edits": [_item("Text.", new_str="x")], "content": "x"}, "edits carries its own replacements")):
         reply = tools._knowledge_write(ctx, "shape", mode="edit", scope="global", expected_revision=original.revision, **kwargs)
@@ -1029,7 +1029,7 @@ def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
             ({"mode": "append", "content": "x", "old_str": "Four."}, "old_str is used only with mode=edit"),
             ({"mode": "revert", "version": "", "expected_revision": current.revision}, "mode=revert requires version"),
             ({"mode": "edit", "edits": [], "expected_revision": current.revision},
-             "mode=edit requires edits, or a non-empty old_str, or a summary (edits=[] ignored")):
+             "mode=edit requires edits, or a non-empty old_str, or a summary, or YAML-only content (edits=[] ignored")):
         reply = write(**arguments)
         assert reply.startswith("⚠️ TOOL_ARG_ERROR") and refusal in reply, (arguments, reply)
     assert _files(tmp_path) == before

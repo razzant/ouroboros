@@ -455,10 +455,12 @@ def _knowledge_write(
                              "or omit summary to keep the current one")
         if mode not in ("overwrite", "append", "edit") and summary is not None and mode in _MODES:
             raise ValueError(f"summary is used only with mode=overwrite, append or edit, not mode={mode}")
+        fields = (mode == "edit" and old_str in (None, "") and edits is None and isinstance(content, str) and bool(content)
+                  and knowledge_store.yaml_fields(content) is not None)  # a YAML block alone sets fields, keeps the body
         content, old_str, edits = check_arguments(
             mode, content, old_str, new_str, edits, version, reason, notes, modes=_MODES,
             no_content=("revert", "archive", "restore"), reason_required=("archive",), alone="summary",
-            alone_given=summary is not None, version_reader="knowledge_read(version=...)")
+            alone_given=summary is not None, fields=fields, version_reader="knowledge_read(version=...)")
         address = _address(ctx, sanitized, scope)
         # The turn is the writer; the route stamp is the route that ANSWERED the
         # loop's last round (provider + resolved model, account when Claudexor
@@ -594,18 +596,19 @@ def get_tools() -> List[ToolEntry]:
                 "lists exact situation names as knowledge_read and knowledge_write state them (room:<id>, place:<id>, "
                 "conversation:…, thread:…; not the label in parentheses): where one is present, every integrating focus "
                 "holds this active global note's head, the body above its first `## ` line. No selected mode shortens a "
-                "held head; only the window can, to my summary and an exact reader, or in an emergency to the reader "
-                "alone. A name holds once I set it in a create or a whole-note overwrite. Each active summary stays "
-                "resident in "
+                "held head; only the window can, to my summary and an exact reader I can open, or in an emergency to "
+                "the reader alone. A name holds once a create, an overwrite or a YAML-only edit sets it. Each active "
+                "summary stays resident in "
                 "the index's whole view (a global note's in every room and place I work in, a project note's in that "
-                "project), never in a Safety check; body text never replaces it. A write does not refresh a context already built: a work "
-                "already running keeps the index it started with. Under physical window pressure, the outline names every active "
-                "topic and keeps type person summaries; others remain readable with knowledge_list. A summary names the "
+                "project), never in a Safety check; body text never replaces it. A write does not refresh a built context: a "
+                "running work keeps the index it started with. Under physical window pressure, the outline names every active "
+                "topic and keeps type person summaries; others stay readable with knowledge_list. A summary names the "
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
                 "mode is required and has no default; a call without it writes nothing. "
                 "overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
                 "append adds content at the end. edit replaces exact body text of the revision you read: one old_str by "
-                "content (or new_str), or edits, a list of {old_str, new_str} items. Each old_str must occur exactly "
+                "content (or new_str), or edits, a list of {old_str, new_str} items; YAML-only content sets only its "
+                "fields. Each old_str must occur exactly "
                 "once in that revision's body (never in an earlier item's result); items may touch but not overlap; all "
                 "apply or none; an empty new_str deletes; a refused item is named by its number. "
                 "revert puts back an earlier version byte for byte: version is its revision. Text a write removes stays "
@@ -613,7 +616,7 @@ def get_tools() -> List[ToolEntry]:
                 "back (mode='revert'). archive and restore own only the archive field and keep the body bytes; archive "
                 "requires reason. Archive hides default navigation rows; direct reads and explicit Presence topics stay "
                 "available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, "
-                "including later edits. Ordinary writes preserve the lifecycle-owned archive field, and a revert across "
+                "including later edits. Other writes keep the archive field; a revert across "
                 "archive states refuses. summary may ride with overwrite, append or edit (alone with edit). reason, "
                 "optional on every mode, is kept in the note's history, never in its body. expected_revision (from "
                 "knowledge_read, a receipt or a refusal) is required to replace an existing note: overwrite, edit, "
