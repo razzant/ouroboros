@@ -760,8 +760,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                     except OSError:
                         failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
                 after = (located[1]["task_id"], located[1]["generation"]) if indexed and placements and located else ()
-        raise (failure if isinstance(failure, PermissionError) else unknown) or failure or FileNotFoundError(
-            str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))  # an admission refusal met in a view's parts first
+        raise unknown or failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
     finally:
         # The kept error's traceback holds this frame: kept past an exit, it is a cycle retaining the callers'
         # frames and payloads until a GC pass. Every exit drops it; a raised error keeps its object and traceback.
