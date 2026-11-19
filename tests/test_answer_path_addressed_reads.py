@@ -18,6 +18,7 @@ has a companion that shows the boundary still does its job on both sizes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from collections import deque
@@ -36,14 +37,15 @@ TAG = "answer_path"
 
 
 def _flat(tmp_path, monkeypatch, build: Callable[[Any, int], Any], boundary: Callable[[Any, Any], Callable[[], Any]],
-          *, unlisted: Tuple[str, ...] = ()) -> Dict[int, Dict[str, Any]]:
+          *, unlisted: Tuple[str, ...] = (), sql: bool = True) -> Dict[int, Dict[str, Any]]:
     """Build each root, let ``boundary(root, facts)`` warm up and return the counted call; compare.
 
     Cached store connections are closed after the build, so every connection the boundary uses
     is opened under the meter and its SQL is counted (a connection opened before the meter is
-    installed carries no trace callback). The meter counts a directory listing once, whatever it
-    returns, so a location in ``unlisted`` must not be listed at all: the names the call examines
-    there are its counted stats and opens, compared like every other count."""
+    installed carries no trace callback); ``sql=False`` names a call answered from files alone.
+    The meter counts a directory listing once, whatever it returns, so a location in ``unlisted``
+    must not be listed at all: the names the call examines there are its counted stats and opens,
+    compared like every other count."""
     from ouroboros import store
 
     counted, answers = {}, {}
@@ -58,7 +60,7 @@ def _flat(tmp_path, monkeypatch, build: Callable[[Any, int], Any], boundary: Cal
             answers[k] = tagged(TAG, call)
             assert not meter.join_spawned(TAG), "a thread the boundary started is still running"
         counted[k] = meter.snapshot(TAG)
-        assert counted[k]["counts"].get("statements"), "the counted call ran no SQL the meter could see"
+        assert counted[k]["counts"].get("statements") or not sql, "the counted call ran no SQL the meter could see"
         listed = {key: amount for key, amount in counted[k]["counts"].items()
                   if key.split(":")[0] in ("listdir", "scandir") and key.partition(":")[2] in unlisted}
         assert not listed, f"k={k}: the counted call listed {listed}: " + "; ".join(
@@ -189,6 +191,91 @@ def test_send_message_receipt_capture_is_flat_across_evidence_packs(tmp_path, mo
 
     answers = _flat(tmp_path, monkeypatch, _packed_history, boundary, unlisted=("packs",))
     assert answers[K_SMALL] == answers[K_LARGE] == (True, True, True)
+
+
+# ---- a packed blob: read by its task and by its sha alone, over k-scaled evidence packs ----------
+
+def _packed_blobs(root, k):
+    """The read's own facts at every size: ``wanted`` and ``broken`` packed beside the history of
+    ``_packed_history``, then ``broken``'s sidecar damaged (the index the packer left still holds it)."""
+    from ouroboros import evidence_packs
+    from tests.test_evidence_packs import _task
+
+    refs = {task: _task(root, task, blobs=1)[0][0] for task in ("wanted", "broken")}
+    _packed_history(root, k)
+    (evidence_packs.packs_dir(root) / "broken.members.json").write_text("{", encoding="utf-8")
+    return refs
+
+
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
+@pytest.mark.parametrize("index", ["valid", "busy", "garbage", "absent"])
+def test_a_packed_blob_read_is_flat_across_evidence_packs(tmp_path, monkeypatch, index, journal):
+    """A packed blob named with its task is read from that task's own sidecars, found by their names;
+    named by its sha alone it asks the shared index. Neither lists the packs directory, and no
+    counter grows with the packs beside it.
+
+    ``valid``: the index the packer left answers; ``busy``: the packer holds the index lock past the
+    read's acquisition slice; ``garbage``: the file is not a database; ``absent``: no index (both
+    await the maintenance pass's rebuild, never the reader's). The task's own read answers in every
+    state; the sha-only read answers from a valid index and is otherwise ``EvidenceUnavailable``
+    (the address stays good), never an absence; a sha no pack holds is ``FileNotFoundError`` once
+    the index can say so; a task whose own sidecar is damaged keeps the placement a valid index
+    holds, else stays ``evidence_corrupt``. The reader writes no index."""
+    from ouroboros import evidence_packs, store
+
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: journal)
+    nothing = {"kind": "json", "encoding": "gzip", "sha256": "0" * 64, "size": 1}
+
+    def outcome(root, ref, **task):
+        try:
+            return "bytes", hashlib.sha256(evidence_packs.blob_bytes(root, ref, **task)).hexdigest()
+        except (OSError, ValueError) as exc:
+            return type(exc).__name__, getattr(exc, "reason", None)
+
+    def boundary(root, refs):
+        def reads():
+            return (outcome(root, refs["wanted"], task_id="wanted"), outcome(root, refs["wanted"]),
+                    outcome(root, nothing, task_id="wanted"), outcome(root, refs["broken"], task_id="broken"))
+
+        reads()  # the process-wide first uses (imports, the lock-tier probe) over the valid index
+        path, holder = evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME, None
+        if index == "garbage":
+            path.write_bytes(b"not a database")
+        elif index == "absent":
+            path.unlink()
+        elif index == "busy":
+            held, release = threading.Event(), threading.Event()
+
+            def hold():
+                with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+                    held.set()
+                    release.wait(30)
+
+            holder = threading.Thread(target=hold, name="packer-holds-index")
+            holder.start()
+            assert held.wait(5)
+
+        def read():
+            try:
+                with store.acquisition_budget(0.1):
+                    return reads()
+            finally:
+                if holder is not None:
+                    release.set()
+                    holder.join(10)
+        return read
+
+    answers = _flat(tmp_path, monkeypatch, _packed_blobs, boundary, unlisted=("packs",), sql=index == "valid")
+    assert answers[K_SMALL] == answers[K_LARGE]
+    own, by_sha, missing, broken = answers[K_SMALL]
+    unavailable = ("EvidenceUnavailable", "busy" if index == "busy" else "damaged")
+    assert own[0] == "bytes" and broken[0] in {"bytes", "SidecarCorrupt"}
+    assert (by_sha, missing, broken[0]) == ((own, ("FileNotFoundError", None), "bytes") if index == "valid"
+                                            else (unavailable, unavailable, "SidecarCorrupt"))
+    for k in (K_SMALL, K_LARGE):  # the reader rebuilt nothing
+        path = evidence_packs.packs_dir(tmp_path / f"k{k:03d}" / "data") / evidence_packs.INDEX_NAME
+        assert (path.read_bytes() if index == "garbage" else path.exists()) == {
+            "garbage": b"not a database", "absent": False}.get(index, True)
 
 
 

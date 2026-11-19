@@ -178,7 +178,7 @@ def test_confined_placement_work_stays_constant(tmp_path, monkeypatch, record_pr
                              "median_seconds": statistics.median(times), "sidecars_decoded_total": len(decoded),
                              "enumerated_entries_total": sum(enumerated), "sidecar_scans_total": len(scans),
                              "confined_open_calls_total": len(reads)})
-        assert decoded == []
+        assert set(decoded) <= {packs.sidecar_name("zz-target", 1)}  # its own sidecar, by name; never history
         assert enumerated == []
         assert scans == []
     record_property("placement_cost", json.dumps(measurements))

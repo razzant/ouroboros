@@ -299,29 +299,34 @@ def test_damaged_pack_is_explicit_evidence_corrupt_and_neighbours_unaffected(roo
 
 
 def test_index_is_a_cache_rebuilt_from_sidecars(root):
+    """Only the packer's pass rebuilds the cache. A reader never does: a task's own sidecars answer its
+    handle and its blobs, and a sha read alone answers ``evidence_unavailable`` until the pass ran."""
     refs, handle = _task(root, "task-a", blobs=2)
     _run(root)
     index = root / "observability" / "packs" / "index.sqlite"
-    index.unlink()
-    assert obs.read_blob_ref(root, refs[1])["message"]["content"].startswith("answer")
-    assert index.exists()
-    with contextlib.closing(sqlite3.connect(index)) as conn:
-        assert conn.execute("PRAGMA application_id").fetchone()[0] in packs._APPLICATION_ID.values()
-        assert conn.execute("SELECT count(*) FROM members").fetchone()[0] == 3
-        assert conn.execute("SELECT count(*) FROM handles").fetchone()[0] == 1
-    index.write_bytes(b"not a database at all")
-    packs._VALIDATED.clear()
-    # A handle is addressed by its task: its own sidecar answers, and the damaged cache is
-    # left to the readers that need every pack (a blob lookup here, the packer's pass).
-    assert read_actor_source_bytes(root, "task-a", handle).startswith(b"# focus")
-    assert index.read_bytes() == b"not a database at all"
-    assert obs.read_blob_ref(root, refs[1])["message"]["content"].startswith("answer")
-    with contextlib.closing(sqlite3.connect(index)) as conn:
-        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-    # a stale index schema is rebuilt without changing the sidecar format
+    for damage in (index.unlink, lambda: index.write_bytes(b"not a database at all")):
+        damage()
+        before = index.read_bytes() if index.exists() else None
+        assert json.loads(packs.blob_bytes(root, refs[1], task_id="task-a"))["message"]["content"].startswith("answer")
+        assert read_actor_source_bytes(root, "task-a", handle).startswith(b"# focus")
+        with pytest.raises(packs.EvidenceUnavailable) as unavailable:
+            obs.read_blob_ref(root, refs[1])
+        assert unavailable.value.reason == "damaged" and not isinstance(unavailable.value, FileNotFoundError)
+        assert (index.read_bytes() if index.exists() else None) == before  # the readers rebuilt nothing
+        _run(root)
+        with contextlib.closing(sqlite3.connect(index)) as conn:
+            assert conn.execute("PRAGMA application_id").fetchone()[0] in packs._APPLICATION_ID.values()
+            assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            assert conn.execute("SELECT count(*) FROM members").fetchone()[0] == 3
+            assert conn.execute("SELECT count(*) FROM handles").fetchone()[0] == 1
+        assert obs.read_blob_ref(root, refs[1])["message"]["content"].startswith("answer")
+    # a stale index schema is rebuilt by the pass without changing the sidecar format
     with contextlib.closing(sqlite3.connect(index)) as conn, conn:
         conn.execute("UPDATE meta SET value='0' WHERE key='schema_version'")
     packs._VALIDATED.clear()
+    with pytest.raises(packs.EvidenceUnavailable):
+        obs.read_blob_ref(root, refs[1])
+    _run(root)
     with packs.open_index(root) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(packs.INDEX_SCHEMA_VERSION)
 
