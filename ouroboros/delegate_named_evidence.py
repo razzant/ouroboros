@@ -13,7 +13,9 @@ import os
 import pathlib
 import shutil
 import stat
+import threading
 import uuid
+from contextlib import contextmanager
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_capture_attempt import POLICY, failure_retry
@@ -46,6 +48,16 @@ def _raise(error):
     raise error  # a skipped subtree is not a complete inventory
 
 
+@contextmanager
+def _killed_after(seconds, process):
+    deadline = threading.Timer(seconds, process.kill)
+    deadline.start()
+    try:
+        yield
+    finally:
+        deadline.cancel()
+
+
 def private_review_paths(area, trees, env):
     """Scan the immutable old and new sides of a review delta once per blob, through one Git reader."""
     import subprocess
@@ -66,8 +78,9 @@ def private_review_paths(area, trees, env):
     if not names:
         return gaps
     # Request one object at a time. Neither pipe can fill while the parent is writing the list.
+    # The reader keeps _git's 600 s bound: a stuck Git is killed, and its short read fails the capture.
     with subprocess.Popen(["git", "cat-file", "--batch"], cwd=area, env=env,
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as git:
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as git, _killed_after(600, git):
         for oid, paths in names.items():
             git.stdin.write(oid + b"\n")
             git.stdin.flush()
