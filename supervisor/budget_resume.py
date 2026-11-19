@@ -782,8 +782,17 @@ def revalidate_consumed_resume_holds() -> None:
 
 
 def revoke_exact_budget_resume(task: Dict[str, Any], reason: str) -> bool:
-    """Revoke by pause, state and grant. A consumed grant never re-arms. A superseding
-    pause keeps its own authority. An unwritable revocation keeps the task held."""
+    """Return a granted-but-undispatched task to its exact pause.
+
+    Money can vanish between the grant and the dispatch (a sibling spent it) and a restart may intervene;
+    the grant is single-use and must not be dispatched into a refused send. A revocation is recorded ONLY
+    against the pause, state and grant this handoff names (compare-and-set on all three). A grant the
+    durable row says was consumed is never re-armed: the task ran on, so the stale queue row takes a typed
+    hold and no ``_budget_pause`` marker is minted over a task that is not paused. A newer pause or a
+    different grant on the durable row is never written over; the spent handoff simply leaves the row.
+    A failed write leaves the row undispatchable under a hold rather than carrying a stale grant.
+    A caller may run it on a copy outside Q and carry the result back under Q (``_parking_lock``).
+    """
     from ouroboros.budget_pause import (
         LIVE_PAUSE_STATES, STATE_PAUSED, STATE_RESUME_GRANTED, STATE_RESUMED, budget_pause_row,
         exact_pause_marker, set_budget_pause,

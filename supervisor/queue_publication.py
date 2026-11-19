@@ -1,15 +1,31 @@
-"""Publish queue revisions with one writer at a time. Capture under Q, encode and write outside Q.
+"""Queue publication by revision: transitions under Q, documents outside it.
 
-Transitions mark the revision. The tick offers the latest frozen capture to its writer and refreshes
-the snapshot's queue.alive stamp with heartbeats and pool counts. Ordinary captures share repeated
-values by content address; process-ending exports embed complete rows for rollback readers.
+Every queue transition marks the publication dirty under Q (``persist_queue_snapshot``: one revision bump,
+no bytes). ONE publisher, the supervisor tick (``publish_queue_changes``), captures the rows under Q when the
+revision moved and serializes and writes them outside Q, one writer at a time, only from a process that
+initialized the queue. The capture copies containers only (``_frozen``), so the owner's text is never copied
+under the lock. A large value that appears in more than one place is published once, by content address
+(``$shared``); ``queue_observation.load_queue_document`` expands it, so every reader still sees whole rows.
 
-The atomic dispatch file certifies itself. Tightening can precede the snapshot. Relaxation lands
-after the durable snapshot and its stamp. A mixed change first publishes the intersection of permissions.
-A failed replacement leaves the preceding fence readable and forces the next capture to rewrite.
+Two documents. The snapshot is certified by ``queue.alive``: the old certificate is revoked, the snapshot
+lands (fsync, rename), the new certificate names its generation (no fsync). ``queue.alive`` also carries the
+heartbeats and the pool's counts and is rewritten only when one of them or the snapshot's generation changed,
+or its stamp aged past ``QUEUE_ALIVE_REFRESH_SEC``. The dispatch projection (``queue_dispatch.json``, the
+money paths' fence) certifies itself: an atomic replacement under its own generation, so admission to a paid
+call never waits for the snapshot. A tightening may land before the snapshot; a relaxation lands only after
+the durable snapshot and its stamp; a mixed change first publishes the intersection of old and new
+permissions. A failed replacement leaves the preceding fence readable and forces the next capture to rewrite.
 
-An explicit barrier publishes synchronously. Without a live tick publisher marks also publish
-synchronously. An uninitialized queue or a restore outside this process's custody keeps the saved queue.
+Durability before an effect is an explicit barrier (``publish_queue_snapshot``), used only where a caller acts
+on the publication, outside Q. The tick's own writes leave the supervisor thread: one publisher thread
+(``start_queue_writer`` / ``stop_queue_writer``) holds the newest capture only, so a slow disk never queues a
+backlog; the tick reports each completed write failure once, and after ``LOOP_CRASH_LIMIT`` consecutive
+failures answers False until a write lands. While the boot still owes its late decision on saved pause
+envelopes (their index was unreadable), the tick answers None and a barrier False: no publication replaces
+the saved queue before that decision. A process with no live tick publisher (startup, shutdown, tests)
+publishes synchronously from every mark. A process-ending door (``pre_restart_exit``; the shutdown kill as
+``server_shutdown``) publishes embedded rows without the shared table, so an older body restores after a
+rollback; an export in another form never counts as that door's publication.
 """
 
 from __future__ import annotations
