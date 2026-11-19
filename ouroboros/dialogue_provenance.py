@@ -1280,7 +1280,7 @@ def _derives(facts: Mapping[str, Any], chat_id: int) -> bool:
     from ouroboros.presence_runner import _stable_numeric_id
 
     provider, account, conversation, thread = (
-        _text(facts.get(key)) for key in ("provider", "account_id", "conversation_id", "thread_id"))
+        facts.get(key) for key in ("provider", "account_id", "conversation_id", "thread_id"))
     return bool(provider and conversation) and _stable_numeric_id(
         "presence-conversation", conversation_key(provider, account, conversation, thread)) == chat_id
 

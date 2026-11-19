@@ -48,7 +48,7 @@ def _registry(root, **fields):
 
 def _ok(reply):
     assert reply.startswith("✅"), reply
-    return json.loads(reply.split("\n", 1)[1])
+    return json.loads(reply.split("\n", 2)[1])
 
 
 def _history(root, topic):

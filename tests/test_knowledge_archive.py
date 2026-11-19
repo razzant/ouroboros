@@ -29,7 +29,7 @@ def body(note):
 
 def receipt(reply):
     assert reply.startswith("✅"), reply
-    return json.loads(reply.split("\n", 1)[1])
+    return json.loads(reply.split("\n", 2)[1])
 
 
 def history(address):
@@ -577,8 +577,10 @@ def test_a_revert_never_crosses_archive_states_while_restore_still_unarchives(tm
         before = files()
         reply = registry.execute("knowledge_write", {"topic": TOPIC, "mode": "revert", "version": version,
                                                      "expected_revision": current.revision})
-        assert reply == (f"⚠️ TOOL_ERROR: Knowledge write not completed: revert_changes_archive_state: version {version} "
-                         f"{states}. Nothing was written."), reply  # no note: neither its body nor its summary
+        assert reply.splitlines() == [
+            f"⚠️ TOOL_ERROR: Knowledge write not completed: revert_changes_archive_state: version {version} "
+            f"{states}. Nothing was written.", "This situation's names: room:1 (Main)",
+        ], reply  # no note: neither its body nor its summary
         assert files() == before
 
     change = "archive and restore change that state"

@@ -1237,6 +1237,13 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # rotates it through ``rotate_jsonl_log_if_needed``, which takes the name as a
     # parameter the scan does not resolve.
     "logs/task_reflections.jsonl",
+    # Live writers the scan cannot root: ``knowledge_versions.claim_record_path`` and ``_held_version_path`` build
+    # ``shelf.parent / "knowledge_note_records" | "knowledge_held_versions"`` from the shelf they are handed. Every
+    # writing call site hands them the global shelf: ``prepare_claim_write`` takes a record path only for
+    # ``address.scope == "global"`` (a project note's claims hold nowhere), ``ClaimWrite.publish`` retires held
+    # bodies only with that path, and ``held_notes._entry`` retains versions of global notes alone.
+    "memory/knowledge_note_records/*.json",
+    "memory/knowledge_held_versions/*",
 })
 
 

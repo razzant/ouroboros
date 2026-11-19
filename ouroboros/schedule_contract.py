@@ -13,6 +13,7 @@ RESERVED_TEMPLATE_FIELDS = frozenset({
     "lead",  # the room's primary is captured by the host when the occurrence is admitted
     "processing",  # and so is its processing tier, beside it
     "work_kind", "owner_ingress", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
+    "focus_transport",
     "workspace_root", "workspace_mode", "memory_mode", "drive_root",
     "child_drive_root", "budget_drive_root", "parent_task_id",
     "root_task_id", "delegation_role", "task_constraint",

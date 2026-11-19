@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 
 from ouroboros import query_data_sql as sql, store
+from ouroboros.knowledge_versions import is_claim_commit
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -400,6 +401,8 @@ def _knowledge_history(path, where, tail, gaps=None):
                 if gaps is not None:
                     gaps["malformed_lines"] = gaps.get("malformed_lines", 0) + 1
                     gaps.setdefault("first_malformed_offset", at)
+                continue
+            if is_claim_commit(value):
                 continue
             if isinstance(value, dict):
                 for field in _HISTORY_BODY_FIELDS:
