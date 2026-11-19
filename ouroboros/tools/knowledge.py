@@ -390,43 +390,65 @@ def _mode_refusal(ctx: ToolContext, mode: object) -> str:
     return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=_with_lines(text, situation)))
 
 
-def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: SituationReceipt) -> list[str]:
-    claims = result.claims
-    lines = []
-    if claims.ignored:
-        lines.append("Ignored claims entries (expected a list of strings): " + ", ".join(claims.ignored))
+def _holds_names(result: knowledge_store.KnowledgeWriteResult) -> bool:
+    """The written note holds names: an active global note whose recorded names are not empty after the write. The
+    overview is not one here: it stands in its own place, named in the held section, not copied."""
+    note, claims = result.current, result.claims
+    return bool(note is not None and claims is not None and claims.active and note.state == "active"
+                and note.source is not None and note.address.topic != OVERVIEW_TOPIC)
+
+
+def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: SituationReceipt,
+                 root: Path | None = None) -> list[str]:
+    """What a write that sets or changes names says of them; with ``root`` (the note holds names, ``_holds_names``)
+    every write of it also says what its head costs: per present situation holding it, the heads that situation
+    holds and their tokens (``held_notes.standing_heads``), and how large a head this write leaves."""
+    from ouroboros.held_notes import standing_heads
+
+    claims, note = result.claims, result.current
+    lines, heads = [], {}
     matching, unverified = situation.matching(claims.written)
-    names = dict.fromkeys(claims.written)
-    if unmatched := [repr(name) for name in names if name not in matching and name not in unverified]:
-        lines.append("Claims with no matching situation found: " + ", ".join(unmatched))
-    if unverified:
-        lines.append("Claims with unverified situations: " + ", ".join(repr(name) for name in names if name in unverified))
-    if result.current.address.scope != "global":
+    if claims.report:
+        if claims.ignored:
+            lines.append("Ignored claims entries (expected a list of strings): " + ", ".join(claims.ignored))
+        names = dict.fromkeys(claims.written)
+        if unmatched := [repr(name) for name in names if name not in matching and name not in unverified]:
+            lines.append("Claims with no matching situation found: " + ", ".join(unmatched))
+        if unverified:
+            lines.append("Claims with unverified situations: " + ", ".join(repr(name) for name in names if name in unverified))
+    if note.address.scope != "global":
         lines.append("Claims on a project-shelf note hold nowhere.")
     else:
-        active = claims.active if result.current.state == "active" else []
+        active = claims.active if note.state == "active" else []
         held = [name for name in active if name in matching]
-        lines.append("Present situations holding this note: " + (", ".join(held) or
-                     ("unverified" if unverified.intersection(active) else "none")))
-    if claims.removed:
+        heads = standing_heads(root, held, written=note) if root is not None and held else {}
+        alike: dict[tuple[int, int], list[str]] = {}  # situations holding the same heads are named together
+        for name, total in heads.items():
+            alike.setdefault(total, []).append(name)
+        lines.append("Present situations holding this note: " + (
+            "; ".join(f"{', '.join(names)} {'each hold' if len(names) > 1 else 'holds'} {count} head{'s' * (count != 1)}, "
+                      f"{tokens:,} tokens" for (count, tokens), names in alike.items())
+            or ", ".join(held) or ("unverified" if unverified.intersection(active) else "none")))
+    if claims.report and claims.removed:
         lines.append("A removed name stops holding this head in works that start from now on; a work already running "
                      "keeps the heads it started with.")
+    if heads:  # a size is said only where a present situation holds the head
+        lines += [_head_line(note), "A held head takes its space ahead of the memory of other rooms and yields to the "
+                                    "window last."]
     return lines
 
 
-def _head_line(result: knowledge_store.KnowledgeWriteResult) -> str:
-    """How large a head this write leaves on a note that holds names: where a name is present the head stands whole,
-    and a note with no `## ` line is all head. "" for a note that holds none (its head stands nowhere)."""
-    note, claims = result.current, result.claims
-    if (note is None or claims is None or not claims.active or note.state != "active" or note.source is None
-            or note.address.topic == OVERVIEW_TOPIC):  # the overview stands in its own place, named there, not copied
-        return ""
+def _head_line(note: knowledge_store.KnowledgeNote) -> str:
+    """How large a head this write leaves where a present situation holds the note: there it stands whole, and a note
+    with no `## ` line is all head; in characters and in host tokens (``memory_floor.view_tokens``)."""
     from ouroboros.held_notes import note_head
+    from ouroboros.memory_floor import view_tokens
 
     head, body = note_head(note.source), note.source.body_span
+    size = f"{len(head):,} characters, {view_tokens(head):,} tokens"
     if len(head.encode("utf-8")) < body.end_byte - body.start_byte:
-        return f"Held head: {len(head):,} characters, the body above the first `## ` line."
-    return f"Held head: {len(head):,} characters: this note has no `## ` line, so its whole body is the head."
+        return f"Held head: {size}, the body above the first `## ` line."
+    return f"Held head: {size}: this note has no `## ` line, so its whole body is the head."
 
 
 def _knowledge_write(
@@ -509,10 +531,11 @@ def _knowledge_write(
         published = _bound_delta_meta(meta)
         text = f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True)
         claim_lines = []
-        if result.claims is not None and result.claims.report:
+        held = _holds_names(result)
+        if result.claims is not None and (result.claims.report or held):
             evidence = situation or receipt_situation(ctx, root, claims_written=True)
-            claim_lines = _claim_lines(result, evidence)
-        text = _with_lines(text, situation_line, *claim_lines, _head_line(result))
+            claim_lines = _claim_lines(result, evidence, root if held else None)
+        text = _with_lines(text, situation_line, *claim_lines)
         if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
             # The bare appender's only look at the note: an outline the meta cannot hold follows
             # the JSON line whole; the meta keeps its pointer (size, sha256, the read).

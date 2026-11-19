@@ -290,8 +290,8 @@ def test_revert_reports_a_change_between_typed_nonstring_claim_entries(tmp_path)
     assert _write(registry, target, _markdown(["room:1", True])).startswith("✅")
     first = knowledge.read_knowledge_note(target)
     assert _write(registry, target, _markdown(["room:1", 1]), expected_revision=first.revision).startswith("✅")
-    append = _write(registry, target, "Unrelated body line.\n", mode="append")
-    assert append.startswith("✅") and "Ignored claims" not in append and "holding this note" not in append
+    append = _write(registry, target, "Unrelated body line.\n", mode="append")  # the head's cost, no claim diagnostics
+    assert append.startswith("✅") and "Ignored claims" not in append and "room:1 holds 1 head" in append
     current = knowledge.read_knowledge_note(target)
     reverted = _write(registry, target, "", mode="revert", version=first.revision, expected_revision=current.revision)
     assert reverted.startswith("✅") and target.path.read_bytes() == first.raw
@@ -312,7 +312,8 @@ def test_claim_receipt_reports_unmatched_names_and_nonstrings_and_project_claims
     unmatched = ["room:12345679", "place:unconnected", "place:team/room", " room:1", "Room:1", "thread:chat/T/C/missing"]
     receipt = _write(registry, target, _markdown([*matching, *unmatched, 19, False, None]))
     assert receipt.startswith("✅") and place.place_id == "team/room"
-    assert f"Present situations holding this note: {', '.join(matching)}" in receipt
+    # Situations that hold the same heads are named together: here each holds this one ("Project notes.\n", 5 tokens).
+    assert f"Present situations holding this note: {', '.join(matching)} each hold 1 head, 5 tokens\n" in receipt
     assert "Ignored claims entries (expected a list of strings): 19, False, None" in receipt
     line = next(line for line in receipt.splitlines() if line.startswith("Claims with no matching"))
     assert line == "Claims with no matching situation found: " + ", ".join(repr(name) for name in unmatched)
@@ -449,14 +450,20 @@ def test_a_yaml_only_edit_is_revision_checked_keeps_the_archive_field_and_takes_
     assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
 
 
-def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
-    """Where a name is present the note's head stands whole in every start, and a note with no `## ` line is all
-    head. So each completed write of a note that holds names states the head's size and what ends it; a write of a
-    note that holds none says nothing."""
+HELD_HEAD = "A held head takes its space ahead of the memory of other rooms and yields to the window last."
+
+
+def test_a_write_of_a_held_note_says_what_its_head_costs(tmp_path):
+    """Where a present situation holds a note, its head stands whole in every start, ahead of the memory of other
+    rooms; a note with no `## ` line is all head. So each completed write of a note that holds names states, per
+    present situation holding it, the heads that situation holds and their host tokens, then the head's characters
+    and tokens and what ends it. A note no present situation holds says so and gives no size; a note that holds no
+    name says nothing of a head."""
     registry = _registry(tmp_path)
 
     def said(receipt):
-        return [line for line in receipt.splitlines() if line.startswith("Held head:")]
+        return [line for line in receipt.splitlines()
+                if line.startswith(("Present situations holding this note:", "Held head:")) or line == HELD_HEAD]
 
     def write(address, content=None, **kwargs):
         revision = knowledge.read_knowledge_note(address).revision
@@ -465,23 +472,31 @@ def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
 
     # A head that a `## ` line ends: its size, and a later write below that line leaves it as it was.
     target = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
-    head = "Fact. " * 250 + "\n\n"
+    head = "Fact. " * 250 + "\n\n"  # 1,504 characters inside a request: 377 host tokens
     saved = _write(registry, target, _markdown(["room:1"], head + "## History\n\nOlder facts.\n"))
-    ended = [f"Held head: {len(head):,} characters, the body above the first `## ` line."]
+    ended = ["Present situations holding this note: room:1 holds 1 head, 377 tokens",
+             "Held head: 1,502 characters, 377 tokens, the body above the first `## ` line.", HELD_HEAD]
     assert saved.startswith("✅") and len(head) == 1_502 and said(saved) == ended
     assert said(write(target, "A later fact.\n", mode="append")) == ended
 
-    # No `## ` line, a fenced one included: the whole body is the head, and an append grows it.
+    # No `## ` line, a fenced one included: the whole body is the head; room:1 now holds both heads, and an append grows it.
     whole = knowledge.resolve_knowledge_address(tmp_path, "tools", "global")
     body = "Whole. " * 200 + "\n\n```\n## not a heading\n```\n"
     created = _write(registry, whole, _markdown(["room:1"], body))
-    assert said(created) == [f"Held head: {len(body):,} characters: this note has no `## ` line, "
-                             "so its whole body is the head."]
+    all_head = "this note has no `## ` line, so its whole body is the head."
+    assert said(created) == ["Present situations holding this note: room:1 holds 2 heads, 736 tokens",
+                             f"Held head: 1,427 characters, 359 tokens: {all_head}", HELD_HEAD]
     grown = write(whole, "More.\n", mode="append")
-    assert said(grown) == [f"Held head: {len(body) + len('More.') + 1:,} characters: this note has no `## ` line, "
-                           "so its whole body is the head."]
+    assert said(grown) == ["Present situations holding this note: room:1 holds 2 heads, 738 tokens",
+                           f"Held head: 1,433 characters, 361 tokens: {all_head}", HELD_HEAD]
 
-    # A note that holds no name says nothing: never adopted, on a project shelf, archived, cleared, or refused.
+    # A note whose names no present situation matches: it says so, and no size as if its head stood somewhere.
+    far = knowledge.resolve_knowledge_address(tmp_path, "far", "global")
+    unheld = _write(registry, far, _markdown(["room:99999"], body))
+    assert unheld.startswith("✅") and said(unheld) == ["Present situations holding this note: none"]
+    assert knowledge.active_claims(tmp_path)["room:99999"] == [far]
+
+    # A note that holds no name says nothing of a head: never adopted, on a project shelf, archived, cleared, or refused.
     plain = knowledge.resolve_knowledge_address(tmp_path, "plain", "global")
     assert _write(registry, plain, "---\ntype: note\n---\nA body.\n").startswith("✅")
     plain.path.write_bytes(_markdown(["room:1"], "A body.\n").encode("utf-8"))  # a field the writer never took
@@ -497,7 +512,7 @@ def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
     refused = write(whole, "---\nclaims: ['room:2']\n---", mode="overwrite")
     assert refused.startswith("⚠️") and not said(refused)
     cleared = write(whole, _markdown([], body), mode="overwrite")
-    assert cleared.startswith("✅") and REMOVED in cleared and not said(cleared)
+    assert cleared.startswith("✅") and REMOVED in cleared and said(cleared) == ["Present situations holding this note: none"]
 
 
 def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
