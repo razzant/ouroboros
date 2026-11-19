@@ -436,10 +436,11 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
     return found
 
 
-def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *,
-                  unread: Optional[list] = None) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *, unread: Optional[list] = None,
+                  whole: bool = False) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
     """This task's packed checkpoint handles (``rel_path``: that one), read as an addressed fact; ``unread`` collects
-    the task's unreadable sidecars behind a listing they may have left partial.
+    the task's unreadable sidecars behind a listing they may have left partial, and with ``whole`` the validated
+    index answers only when it recorded no unreadable sidecar (its rows may lack that generation).
 
     A handle is named by its task and the task's own sidecars are its authority, so no other
     task's pack is read: the index answers while this process has validated its current bytes and
@@ -449,7 +450,7 @@ def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "", *,
     never rebuilt). The ordinary read never lists the directory or waits for, re-validates or
     rebuilds the shared cache: those whole-pack passes stay with the readers that need every pack
     (``blob_bytes``) and with the packer."""
-    rows = _indexed_handles(root, task_id, rel_path, validated=True)
+    rows = _indexed_handles(root, task_id, rel_path, validated=True, whole=whole)
     if rows is not None:
         return rows
     errors, found = [], []
@@ -866,7 +867,7 @@ def packed_handle_packs(root: Any, task_id: str, *, complete: bool = False) -> O
     if not packs_dir(root).is_dir():
         return {}
     unread: list = []
-    handles = _task_handles(pathlib.Path(root), str(task_id), unread=unread)
+    handles = _task_handles(pathlib.Path(root), str(task_id), unread=unread, whole=complete)
     if complete and unread and (handles := _indexed_handles(pathlib.Path(root), str(task_id), "",
                                                              validated=False, whole=True)) is None:
         return None

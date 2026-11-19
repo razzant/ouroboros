@@ -821,6 +821,43 @@ def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the
     assert evidence_packs.handle_bytes(root, "partial", rel) == b"first generation"
 
 
+def test_an_index_this_process_validated_answers_a_whole_listing_only_without_unreadable_sidecars(root, monkeypatch):
+    """A long-lived maintenance child has validated the index (``_VALIDATED``); one rebuilt while generation 1's
+    sidecar was unreadable holds only generation 2's rows, so its answer is not the whole listing."""
+    import hashlib
+
+    from ouroboros import evidence_packs, saved_state_retirement
+
+    handles = _task(root, "validated")
+    text = "packed by an older body"
+    first = handles / "context_checkpoints" / f"owner-wait-{'8' * 32}-{hashlib.sha256(text.encode()).hexdigest()}.json"
+    with monkeypatch.context() as older_body:  # a body before #3789 packed every handle
+        older_body.setattr(saved_state_retirement, "worked_copy", lambda folder, name: None)
+        _file(first, text)
+        evidence_packs.pack_task(root, "validated", keep_shas=set())
+    notes = hashlib.sha256(b"notes").hexdigest()
+    _file(handles / "context_checkpoints" / f"working-notes-{notes}.json", "notes")  # a source: generation 2
+    evidence_packs.pack_task(root, "validated", keep_shas=set())
+    assert evidence_packs.materialize_handle(root, "validated", f"source_handles/context_checkpoints/{first.name}")
+    sidecar = evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("validated", 1)
+    intact = sidecar.read_bytes()
+
+    def rebuilt_and_validated():
+        (evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME).unlink()
+        for _ in range(2):  # the rebuild, then a reader that validates it in this process
+            with evidence_packs.open_index(root):
+                pass
+
+    sidecar.write_text("{", encoding="utf-8")
+    rebuilt_and_validated()
+    report = _prune(root)
+    assert report["held"] == {"packs_unknown": 1} and first.exists() and not _ledger(handles), report
+    sidecar.write_bytes(intact)
+    rebuilt_and_validated()
+    assert _prune(root)["removed"] == 1 and not first.exists()
+    assert _ledger(handles)[0]["packed"] == ["observability/packs/validated.xz"]
+
+
 
 def test_a_recovered_crash_with_no_recorded_end_goes_its_days_after_it_was_written_settled(root):
     from ouroboros.saved_state_retirement import prune_worked_copies
