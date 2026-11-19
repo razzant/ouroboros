@@ -217,6 +217,9 @@ def _wallet(currency: str, total: str = "0", granted: str = "0", topped: str = "
 @pytest.mark.parametrize("infos, currency, reason", [
     # A key whose USD wallet reports nothing while its CNY wallet holds the credit bills in CNY.
     ([_wallet("USD"), _wallet("CNY", "1200.00", topped="900.00")], "CNY", None),
+    # The mirror, in the same order but reversed: credit in the USD wallet beside an empty CNY one. The
+    # currency resolves to USD, which is what lets _pinned_price use the existing dollar tariff at all.
+    ([_wallet("CNY"), _wallet("USD", "1200.00", topped="900.00")], "USD", None),
     # Two funded wallets stay ambiguous: a charge could land in either.
     ([_wallet("USD", "1.00", topped="1.00"), _wallet("CNY", "2.00", topped="2.00")], None,
      "currency_not_single"),
