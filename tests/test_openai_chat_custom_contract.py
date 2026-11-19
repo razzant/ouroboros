@@ -864,7 +864,7 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
     assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
     words = (["view='outline'", "view='history'", "version="] if name == "knowledge_read" else
              ["mode is required and has no default", "overwrite", "append", "edit", "edits", "{old_str, new_str}",
-              "revert", "archive", "restore", "reason",
+              "YAML-only content sets only its fields", "or a YAML-only edit sets it", "revert", "archive", "restore", "reason",
               "summary", "expected_revision", "names the note's enduring scope and when to open it",
               "not a dated log of the latest edit", "Text a write removes stays in the note's history",
               "view='history' or version=", "put back (mode='revert')"])

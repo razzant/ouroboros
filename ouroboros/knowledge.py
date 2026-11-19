@@ -26,9 +26,7 @@ import yaml
 
 from ouroboros import knowledge_rows, knowledge_versions, text_change, utils
 # The edit compiler lives beside its one caller's module; ``compile_anchored_edits`` stays importable here.
-from ouroboros.knowledge_edits import (
-    EditRefused, HostClaimPending, compile_anchored_edits, compile_edit_items, edit_items, with_host_claim, yaml_form,
-)
+from ouroboros.knowledge_edits import EditRefused, compile_anchored_edits, compile_edit_items, edit_items, yaml_form
 from ouroboros.knowledge_versions import body_chars as body_chars
 from ouroboros.markdown_source import MarkdownSource, parse_markdown_navigation, parse_markdown_source
 from ouroboros.platform_layer import file_lock_exclusive, file_unlock
@@ -695,9 +693,18 @@ def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ..
     return tuple(rows)
 
 
+def yaml_fields(content: str) -> dict[str, Any] | None:
+    """The fields of a content that is only a YAML block (whitespace may follow it), else ``None``; a block that
+    does not parse is a ``ValueError`` naming it. As an edit's content it sets those fields and keeps the body."""
+    source = parse_markdown_source(content.encode("utf-8"), "content")
+    if source.frontmatter is None or source.text_at(source.body_span).strip():
+        return None
+    return dict(source.frontmatter)
+
+
 def _write_content(current: KnowledgeNote | None, content: str, mode: str,
                    old_str: str | None = None, summary: str | None = None,
-                   items: list | None = None) -> tuple[bytes, bool]:
+                   items: list | None = None, fields: dict[str, Any] | None = None) -> tuple[bytes, bool]:
     """Prepare the bytes and say whether the supplied frontmatter set claims."""
     proposed = content.encode("utf-8")
     if mode == "edit":
@@ -707,14 +714,15 @@ def _write_content(current: KnowledgeNote | None, content: str, mode: str,
         body = current.raw[body_start:].decode("utf-8")
         if items is not None:
             body = compile_edit_items(current.raw, body_start, items).decode("utf-8")
-        elif old_str is not None or summary is None:  # a summary-only revision keeps every body byte
+        elif old_str is not None or (summary is None and fields is None):  # a field revision keeps every body byte
             body = compile_anchored_edits(body, [(old_str, content)])
-        if summary is None or current.metadata.get("summary") == summary:
-            return current.raw[:body_start] + body.encode("utf-8"), False
-        # A revised summary takes the ordinary overwrite merge below: it replaces
-        # its own field, every other field (unknown ones too) survives, and the
-        # YAML preamble is re-rendered; the edited body bytes are kept as-is.
-        front = yaml.safe_dump({"summary": summary}, allow_unicode=True)
+        revised = {**(fields or {}), **({"summary": summary} if summary is not None else {})}
+        if yaml_form({**current.metadata, **revised}) == yaml_form(current.metadata):
+            return current.raw[:body_start] + body.encode("utf-8"), "claims" in revised
+        # Revised fields (a YAML-only edit's, a summary) take the ordinary overwrite
+        # merge below: each replaces its own field, every other field (unknown ones
+        # too) survives, and the YAML preamble is re-rendered; the body bytes are kept as-is.
+        front = yaml.safe_dump(revised, allow_unicode=True, sort_keys=False)
         proposed = f"---\n{front}---\n{body}".encode("utf-8")
     elif mode == "append" and current is not None:
         separator = b"\n" if current.raw and not current.raw.endswith(b"\n") else b""
@@ -787,7 +795,7 @@ def write_knowledge_note(
     *, writer: str = "", route: Any = None, writer_input_ref: Any = None,
     summary: str | None = None, focus: Any = None,
     reason: str = "", capture_previous: Callable[[KnowledgeNote], dict[str, Any]] | None = None,
-    edits: Any = None, version: str | None = None, _host_claim: str | None = None,
+    edits: Any = None, version: str | None = None,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock.
 
@@ -803,7 +811,10 @@ def write_knowledge_note(
 
     ``mode=edit`` replaces one ``old_str`` by ``content``, or applies ``edits``
     (``knowledge_edits.compile_edit_items``: exact ``{old_str, new_str}`` items in the
-    original body, all or nothing; a refused item is ``edit_refused``, named).
+    original body, all or nothing; a refused item is ``edit_refused``, named). A
+    ``content`` alone that is only a YAML block (``yaml_fields``) sets its fields
+    through the overwrite's merge and keeps every body byte; its ``claims`` field is
+    the turn's explicit write, adopted as an overwrite's.
     ``mode=revert`` publishes the stored bytes of an earlier ``version`` of this
     note exactly (``knowledge_versions.find_version``: verified by sha256), so the
     new revision is that version; a version with other archive metadata is
@@ -847,8 +858,9 @@ def write_knowledge_note(
         raise ValueError("summary is used only with mode=overwrite, append or edit")
     if summary is not None and (not isinstance(summary, str) or not summary.strip()):
         raise ValueError("summary must be non-empty text")
-    if mode == "edit" and summary is not None and old_str is None and edits is None and content:
-        raise ValueError("content replaces old_str; a summary-only edit passes neither")
+    fields = yaml_fields(content) if mode == "edit" and old_str is None and edits is None and content else None
+    if fields is None and mode == "edit" and old_str is None and edits is None and content:
+        raise ValueError("content replaces old_str; an edit's content alone is a YAML block, which sets its fields")
     if (mode == "revert") != (version is not None):
         raise ValueError("version is used with mode=revert, which requires it")
     items = edit_items(edits) if edits is not None else None
@@ -892,27 +904,22 @@ def write_knowledge_note(
                 raw = current.raw if version == revision else target.encode("utf-8")
             elif lifecycle:
                 raw = _lifecycle_content(current, mode, reason)
-            elif _host_claim is not None and current is not None:
-                raw = current.raw
             else:
-                raw, explicit_claims = _write_content(current, content, mode, old_str, summary, items)
+                raw, explicit_claims = _write_content(current, content, mode, old_str, summary, items, fields)
             if mode in {"append", "overwrite"} and summary is not None:  # the written note's summary-only edit
                 raw, _ = _write_content(_note(address, raw), "", "edit", None, summary)
-            if _host_claim is not None:
-                raw = with_host_claim(_note(address, raw), _host_claim)
         except EditRefused as exc:
             return KnowledgeWriteResult(False, f"edit_refused: {exc}", current, revision, show_source=False)
-        except HostClaimPending as exc:
-            return KnowledgeWriteResult(False, f"host_claim_pending: {exc}", current, revision, show_source=False)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
         if (mode == "overwrite" and writer == "turn" and explicit_claims and current is not None
                 and _body_text(current).strip() and not _body_text(updated).strip()):
-            # Adding a name is an overwrite, and an overwrite replaces the whole note: claims sent alone would erase it.
+            # An overwrite replaces the whole note: claims sent alone would erase it; a YAML-only edit keeps the body.
             return KnowledgeWriteResult(False, "invalid_note: this overwrite sets claims and carries no body, so it would "
                                         f"erase the note's body ({body_chars(current)} characters); an overwrite replaces the "
-                                        "whole note: send its whole text with the claims list in its YAML", current, revision)
+                                        "whole note: send its whole text with the claims list in its YAML, or the YAML alone "
+                                        "with mode=edit, which keeps the body", current, revision)
         old_archive = {"archive": current.metadata["archive"]} if current and "archive" in current.metadata else {}
         new_archive = {"archive": updated.metadata["archive"]} if "archive" in updated.metadata else {}
         if not lifecycle and yaml_form(old_archive) != yaml_form(new_archive):
@@ -924,8 +931,7 @@ def write_knowledge_note(
                       "archive and restore own that field")
             return KnowledgeWriteResult(False, f"revert_changes_archive_state: version {version} {states}", current,
                                         revision, show_source=False)
-        claims = knowledge_versions.prepare_claim_write(address, current, updated,
-                                               explicit=writer == "turn" and explicit_claims, host_claim=_host_claim)
+        claims = knowledge_versions.prepare_claim_write(address, current, updated, explicit=writer == "turn" and explicit_claims)
         unchanged = current is not None and raw == current.raw
         if unchanged and not (claims and claims.changed):
             try:
@@ -942,16 +948,16 @@ def write_knowledge_note(
                                          "change_chars": 0, "removed_chars": 0, "added_chars": 0, "removed_headings": [],
                                          "added_headings": [], "removed_sections": [], "body_changed": False,
                                          "summary_changed": False}, claims=claims)
-        # A body edit keeps the preamble bytes; a revised summary (edit or append)
-        # may re-render them only if every other field keeps its value (``type``
-        # defaults, in the merge's key order), compared by exact YAML spelling.
+        # A body edit keeps the preamble bytes; revised fields (a YAML-only edit's,
+        # a summary beside an edit or append) may re-render them only if every other
+        # field keeps its value (``type`` defaults, as the merge does), compared by exact YAML spelling.
+        revised = {**(fields or {}), **({"summary": summary} if summary is not None else {})}
         if current is not None and (mode == "edit" or (mode == "append" and summary is not None)) and (
                 updated.parse_error or (
                 bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
                 updated.raw[:current.source.body_span.start_byte] !=
                 current.raw[:current.source.body_span.start_byte]) and (
-                summary is None or yaml_form(updated.metadata) != yaml_form(
-                    {**current.metadata, "summary": summary, "type": current.metadata.get("type", "note")}))):
+                not revised or yaml_form(updated.metadata) != yaml_form({"type": "note", **current.metadata, **revised}))):
             return KnowledgeWriteResult(False, f"invalid_note: {mode} cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
         change = text_change.exact_change(old_text, updated.text)
@@ -1005,13 +1011,3 @@ def write_knowledge_note(
             return KnowledgeWriteResult(False, "publication_incomplete", observed, revision,
                                         delta if observed is not None and observed.raw == raw else None, history_ref)
         return KnowledgeWriteResult(True, "saved", updated, revision, delta, history_ref, previous, claims=claims)
-
-
-def write_host_claim(address: KnowledgeAddress, claim: str, *, expected_revision: str, reason: str,
-                     content: str = "") -> KnowledgeWriteResult:
-    """Add a one-time host claim or create its seed against the caller's observed revision."""
-    if (address.scope != "global" or not isinstance(expected_revision, str)
-            or not isinstance(claim, str) or not claim or not isinstance(reason, str) or not reason.strip()):
-        raise ValueError("a host claim needs a global note, a name, an expected revision and a reason")
-    return write_knowledge_note(address, content, expected_revision=expected_revision,
-                                reason=reason, writer="host", _host_claim=claim)
