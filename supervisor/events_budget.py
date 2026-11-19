@@ -185,10 +185,10 @@ def _parking_lock():
         with q._queue_lock:
             yield revoked
     finally:
-        for member, copy_row, marker, handoff in revoked:
+        for member, copy_row, marker in revoked:
             revoke_exact_budget_resume(copy_row, "new_root_budget_fence")
             with q._queue_lock:
-                if member.get("_budget_pause") is marker and member.get("_budget_pause_resume") is handoff:
+                if member.get("_budget_pause") is marker and not member.get("_budget_pause_resume"):
                     for key in ("_budget_pause_resume", "_budget_pause", BUDGET_HOLD_KEY, SELECTION_KEY):
                         if key in copy_row:
                             member[key] = copy_row[key]
@@ -198,53 +198,47 @@ def _parking_lock():
 
 def _set_root_budget_pause_locked(root_task_id: str, pause: Dict[str, Any], *,
                                   prior_root: Optional[Dict[str, Any]] = None, revoked=None) -> Dict[str, Any]:
-    """Install the root latch against its current selection. Restore supplies the pre-park root."""
+    """Install the sole root-budget latch under Q. Restore supplies the root before parking
+    changed its carriers. Its selection must match the current latch to start a new generation."""
     from supervisor import queue as queue_mod
 
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id:
         raise ValueError("root budget pause requires root_task_id")
-    existing = queue_mod.BUDGET_ROOT_FENCES.get(root_task_id)
+    existing = queue_mod.BUDGET_ROOT_FENCES.get(root_task_id) or {}
     root_rows = ([prior_root] if prior_root is not None else
                  list(queue_mod.PENDING) + [m.get("task", {}) for m in queue_mod.RUNNING.values()])
     resumed = any(str(t.get("id") or "") == root_task_id and budget_fence_selected(t, existing)
                   for t in root_rows)
+    previous_id = existing.get("fence_id")
+    standing_id = None if resumed else previous_id
+    fence_id = str(pause.get("fence_id") or standing_id or uuid.uuid4().hex)
     row = {
         "status": "paused",
         "scope": "root",
         "root_task_id": root_task_id,
-        "fence_id": str(
-            pause.get("fence_id")
-            or (None if resumed else (existing or {}).get("fence_id"))
-            or uuid.uuid4().hex
-        ),
+        "fence_id": fence_id,
         "auto_resume": False,
-        "paused_at": str(
-            pause.get("paused_at")
-            or (existing or {}).get("paused_at")
-            or utc_now_iso()
-        ),
+        "paused_at": str(pause.get("paused_at") or existing.get("paused_at") or utc_now_iso()),
     }
-    # An owner Pause's latch keeps its cause while its members park under it:
-    # it is never rewritten into a monetary latch (owner_pause.py).
-    if (pause.get("reason") == "owner" or "owner_pause" in {
-            pause.get("cause"),
-            (existing or {}).get("cause") if not resumed or row["fence_id"] == (existing or {}).get("fence_id") else None}):
+    # A member parking under the owner's latch keeps the cause the owner selected.
+    inherits_owner = existing.get("cause") == "owner_pause" and (not resumed or fence_id == previous_id)
+    if pause.get("reason") == "owner" or pause.get("cause") == "owner_pause" or inherits_owner:
         row["cause"] = "owner_pause"
     queue_mod.BUDGET_ROOT_FENCES[root_task_id] = row
-    if not existing or existing.get("fence_id") != row["fence_id"]:
+    if previous_id != fence_id:
         from supervisor.budget_resume import revoke_exact_budget_resume
 
         for member in queue_mod.PENDING:
             if str(member.get("root_task_id") or "") != root_task_id or member.get("id") == root_task_id:
                 continue
-            if isinstance(member.get("_budget_pause_resume"), dict):
+            if isinstance(handoff := member.get("_budget_pause_resume"), dict):
                 if revoked is None:
                     revoke_exact_budget_resume(member, "new_root_budget_fence")
                 else:
-                    handoff = member["_budget_pause_resume"]
                     marker = dict(handoff.get("pause") or {})
-                    revoked.append((member, dict(member), marker, handoff))
+                    revoked.append((member, dict(member), marker))
+                    del member["_budget_pause_resume"]
                     member["_budget_pause"] = marker
             if isinstance(member.get(SELECTION_KEY), dict) and budget_hold_fact(member) is None:
                 hold_budget_row(member, reason=HOLD_ROOT_FENCE_LIFTED,
@@ -313,7 +307,8 @@ def fold_consumed_resume(meta: Any, drive_root: Any, evt: Optional[Dict[str, Any
 
 
 def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
-    """Park a replay-safe unstarted task or validate its exact continuation against the durable row."""
+    """An unstarted task can replay. An exact pause has already run and its worker saved
+    the continuation before unwinding. The durable row supplies its identity and source."""
     if evt.get("phase") == "consumed":
         from ouroboros.store import acquisition_budget, StoreBusy
         from supervisor.queue import _queue_lock
@@ -433,7 +428,9 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _owner_park_fence_id(result_root: pathlib.Path, root_task_id: str) -> Optional[str]:
-    """Read the current closed owner fence before Q. Released gives an empty id, unreadable gives None."""
+    """Read the current owner fence before Q. A superseded pause carries an old id.
+    A released fence returns the empty id for the generation rule. An unreadable fence
+    returns None so parking can preserve the current latch or the reaper can retry."""
     from ouroboros.owner_pause import fence_closed, read_fence
     from ouroboros.store import acquisition_budget
 
@@ -455,7 +452,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                                source: str = "worker_event",
                                defer_unknown_owner_fence: bool = False) -> Dict[str, Any]:
     """Park the saved attempt under Q, including direct turns. Publish after releasing Q.
-    The pause/state/grant CAS confirms custody. The assignment pass retries a failed publication."""
+    The event can arrive after Resume. Match the pause, state and grant again when the queue
+    publication lands. A failed publication leaves the exact work pausing for assignment to retry.
+    An unreadable owner fence defers reaping. A live park preserves the existing root latch."""
     from ouroboros.budget_pause import (
         BudgetPauseSuperseded, STATE_PAUSED, STATE_PAUSING, budget_pause_row, exact_pause_marker, set_budget_pause,
     )
@@ -516,6 +515,8 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         owner = fence.get("pooled_owner")
         inline = worker is not None and getattr(worker, "executor", "worker") in INLINE_EXECUTORS
         lane_turn = bool(task.get("_is_direct_chat")) or bool(evt.get("_is_direct_chat"))
+        # Only the physical owner of this attempt can carry its paused continuation. The inline
+        # conversation executor owns its fence in this process, like a direct chat turn.
         parked = ({"direct_owner": {"task_attempt": attempt}}
                   if (direct_turn or inline) and "pooled_owner" not in fence else None)
         if (not direct_turn and worker is not None and isinstance(owner, dict) and worker.busy_task_id == task_id
@@ -525,16 +526,18 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         if parked and fence.get("status") == "active" and fence.get("task_id") == task_id:
             fence["paused_continuation"] = {**parked,
                 **{key: row[key] for key in ("pause_id", "pause_generation", "source_ref")}}
-        if marker["scope"] == "root" and owner_fence is None:
-            standing = queue_mod.BUDGET_ROOT_FENCES.get(marker["root_task_id"])
-            marker = {**marker, **({"fence_id": standing["fence_id"]} if standing else {})}
-        elif marker["scope"] == "root":
-            fence = _set_root_budget_pause_locked(
-                marker["root_task_id"], {**marker, **({"fence_id": owner_fence} if owner_fence else {})}, revoked=revoked)
-            marker = {**marker, "fence_id": fence["fence_id"]}
+        if marker["scope"] == "root":
+            latch = queue_mod.BUDGET_ROOT_FENCES.get(marker["root_task_id"])
+            if owner_fence is not None:
+                if owner_fence:
+                    marker["fence_id"] = owner_fence
+                latch = _set_root_budget_pause_locked(marker["root_task_id"], marker, revoked=revoked)
+            if latch:
+                marker["fence_id"] = latch["fence_id"]
         ctx.RUNNING.pop(task_id, None)
         paused_task["_budget_pause"] = marker
         paused_task["_park_confirmation"] = source
+        # The worker recorded detachment on the durable pause, after it received its task.
         paused_task.update(detached_fields(paused_task, row))
         if direct_turn or lane_turn:
             counter = getattr(queue_mod, "QUEUE_SEQ_COUNTER_REF", None)
@@ -542,11 +545,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                 counter["value"] = int(counter.get("value") or 0) + 1
                 paused_task["_queue_seq"] = counter["value"]
             if "priority" not in paused_task:
-                try:
-                    paused_task["priority"] = queue_mod.coerce_queue_order(
-                        None, queue_mod._task_priority(str(paused_task.get("type") or "task")))
-                except Exception:
-                    paused_task["priority"] = 1
+                paused_task["priority"] = queue_mod._task_priority(str(paused_task.get("type") or "task"))
             paused_task.setdefault("queued_at", utc_now_iso())
             paused_task["_attempt"] = attempt  # the attempt this pause row was just checked against
             paused_task["_is_direct_chat"] = True

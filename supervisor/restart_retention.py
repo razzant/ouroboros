@@ -234,7 +234,7 @@ def unseen_pause(task: Dict[str, Any], before: tuple) -> bool:
                 and (pause_id != granted or str(task.get("root_task_id") or task_id) == task_id))
 
 
-def _latch_unseen_pause(task: Dict[str, Any]) -> None:
+def _latch_unseen_pause(task: Dict[str, Any], revoked=None) -> None:
     """A stop's half of the park event it pre-empted: the tree's monetary latch is
     raised now under the normal generation rule, so the final snapshot carries what
     restore trusts. An owner marker is left to its durable owner fence. Queue lock held."""
@@ -247,7 +247,7 @@ def _latch_unseen_pause(task: Dict[str, Any]) -> None:
     if marker.get("scope") == "root" and root_id and marker.get("reason") != REASON_OWNER:
         # An unused grant's old marker never replaces a newer current latch.
         pause = {**marker, "fence_id": None} if q.BUDGET_ROOT_FENCES.get(root_id) else marker
-        marker["fence_id"] = _set_root_budget_pause_locked(root_id, pause)["fence_id"]
+        marker["fence_id"] = _set_root_budget_pause_locked(root_id, pause, revoked=revoked)["fence_id"]
 
 
 def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
@@ -443,7 +443,7 @@ def hold_after_stop(task: Dict[str, Any], drive_root: Any, reason: str) -> Dict[
 
 def park_saved_running_rows(running: Dict[str, Any], pending: List[Dict[str, Any]],
                             preserve: Iterable[str], drive_root: Any, *,
-                            sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY) -> List[str]:
+                            sleep_hold_reason: str = HOLD_SAVED_SLEEP_RECOVERY, revoked=None) -> List[str]:
     """Move every RUNNING row whose pause is saved into PENDING under its marker.
 
     A checkpoint stored before its park event was handled leaves the row
@@ -463,7 +463,7 @@ def park_saved_running_rows(running: Dict[str, Any], pending: List[Dict[str, Any
         if parked is None:
             continue
         if unseen_pause(parked, before):
-            _latch_unseen_pause(parked)
+            _latch_unseen_pause(parked, revoked)
         running.pop(task_id, None)
         if not any(isinstance(row, dict) and str(row.get("id") or "") == str(task_id) for row in pending):
             pending.append(parked)
@@ -471,7 +471,7 @@ def park_saved_running_rows(running: Dict[str, Any], pending: List[Dict[str, Any
     return parked_ids
 
 
-def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "") -> bool:
+def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "", revoked=None) -> bool:
     """A queued saved pause (an unused grant is first returned to it) or an
     earlier owner-Restart hold: kept as the same queued task on every door.
     A stop cause also holds cold sleeps and marker-less failed conversions;
@@ -482,7 +482,7 @@ def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "") -> bo
         before = pause_ids(task)
         revoke_exact_budget_resume(task, "restart_before_dispatch")
         if unseen_pause(task, before):
-            _latch_unseen_pause(task)
+            _latch_unseen_pause(task, revoked)
     pause = task.get("_budget_pause")
     saved = isinstance(pause, dict) and pause.get("exact_continuation") is True
     from supervisor.events_budget import budget_hold_fact
