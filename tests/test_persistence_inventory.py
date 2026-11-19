@@ -1010,8 +1010,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
 # 476 -> 478: the retirer of saved states writes ``source_handles/retired_copies.jsonl`` (its own row) and its
 # scheduling looks at ``source_handles/working`` (``ouroboros/maintenance_retirement.py``).
-# 478 -> 479: the evidence index's damage mark ``observability/packs/.index.sqlite.damaged``, left where the
-# live index met damage its O(1) facts miss and removed by its rebuild (``ouroboros/evidence_packs.py``,
+# 478 -> 479: the evidence index's damage mark ``observability/packs/.index.sqlite.damaged``, left by a read
+# that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
 # ``DAMAGED_MARK``); the existing evidence-pack row names it.
 EXPECTED_SCAN_PATHS = 479
 
