@@ -626,6 +626,56 @@ def test_a_place_that_cannot_answer_now_leaves_the_read_unknown_before_a_copy_s_
         packs.blob_bytes(tmp_path, alone)
 
 
+def test_a_digest_many_packs_hold_is_read_from_one_copy_and_a_bad_copy_yields_the_next(tmp_path, monkeypatch):
+    """Equal bytes are packed once per task that references them, so a common digest lies in many packs: a read
+    by its sha takes the index's first copy, one row however many packs hold it, and asks for the next copy only
+    when that one fails (its pack gone or damaged); every copy bad is that copy's error, as before."""
+    import pathlib
+    import sqlite3
+
+    from ouroboros import evidence_packs as packs, store
+    from tests.test_evidence_packs import _blob
+
+    raw, copies, roots, refs, connect = json.dumps({"result": "common"}).encode(), [], {}, {}, store.connect
+
+    def counted(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        if pathlib.Path(path).name == packs.INDEX_NAME:
+            def row(cursor, values):
+                copies[-1] += cursor.description[0][0] == "pack"  # a placement the index handed to Python
+                return sqlite3.Row(cursor, values)
+            conn.row_factory = row
+        return conn
+
+    monkeypatch.setattr(store, "connect", counted)
+    for k in (K_SMALL, K_LARGE):
+        root = roots[k] = tmp_path / f"k{k:03d}"
+        ref = refs[k] = _blob(root, raw)
+        for n in range(k):
+            packs.write_pack(root, f"task-{n:02d}", 1, [{key: ref[key] for key in ("sha256", "kind", "size")}])
+        packs.ensure_index(root)
+        pathlib.Path(ref["path"]).unlink()  # only the packs hold it now
+        copies.append(0)
+        assert packs.blob_bytes(root, ref) == raw
+    assert copies == [1, 1], copies
+    (packs.packs_dir(roots[K_LARGE]) / "task-00.xz").unlink()  # the first copy's pack gone
+    (packs.packs_dir(roots[K_LARGE]) / "task-01.xz").write_bytes(b"damaged")  # the second copy's damaged
+    assert packs.blob_bytes(roots[K_LARGE], refs[K_LARGE]) == raw  # the third answers
+    (packs.packs_dir(roots[K_SMALL]) / "task-00.xz").write_bytes(b"damaged")  # the only copy damaged
+    with pytest.raises(packs.EvidenceCorrupt, match="unreadable"):
+        packs.blob_bytes(roots[K_SMALL], refs[K_SMALL])
+    real = packs._indexed_placements
+
+    def held_past_the_first(*args, first=True):  # the packer takes the lock between two questions
+        if not first:
+            raise packs.EvidenceUnavailable("evidence_unavailable: held", reason="busy")
+        return real(*args, first=first)
+
+    monkeypatch.setattr(packs, "_indexed_placements", held_past_the_first)
+    with pytest.raises(packs.EvidenceUnavailable):  # where a sound copy may lie is unknown: never the first's damage
+        packs.blob_bytes(roots[K_LARGE], refs[K_LARGE])
+
+
 def test_a_task_s_own_sidecars_are_parsed_once_per_file_and_only_a_few_are_kept(tmp_path, monkeypatch):
     """Reassembling one view reads hundreds of its parts from one owner, whose sidecar can hold tens of
     thousands of members: each sidecar is parsed once per file, never once per lookup; a new generation is

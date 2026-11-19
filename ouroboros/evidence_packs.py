@@ -450,22 +450,25 @@ def _own_placements(root: pathlib.Path, task_id: str, *, key: Optional[tuple] = 
     return found, errors
 
 
-_MEMBER_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
-               "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
-               "WHERE m.sha256=? AND m.kind=? ORDER BY p.task_id, p.generation")
+_MEMBER_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind, m.task_id, m.generation FROM members m "
+               "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation WHERE m.sha256=? AND m.kind=? "
+               "AND (m.task_id, m.generation) > (?, ?) ORDER BY m.task_id, m.generation LIMIT 1")  # one copy, by key
 _HANDLES_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind, h.rel_path AS path FROM handles h "
                 "JOIN members m ON m.sha256=h.sha256 AND m.task_id=h.task_id AND m.generation=h.generation "
                 "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation WHERE h.task_id=? AND m.kind=?")
 
 
-def _indexed_placements(root: pathlib.Path, query: str, params: tuple) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+def _indexed_placements(root: pathlib.Path, query: str, params: tuple,
+                        first: bool = True) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
     """The shared index's rows for one lookup, read under its lock within the caller's wait. An index that
     cannot answer now (held, missing or damaged: never rebuilt or walked around here) is ``EvidenceUnavailable``;
-    no row beside a sidecar it recorded as unreadable is that sidecar's ``SidecarCorrupt``."""
+    no row on a lookup's ``first`` question (past a copy, the copies only end) beside a sidecar it recorded as
+    unreadable is that sidecar's ``SidecarCorrupt``."""
     try:
         with open_index(root) as conn:
             rows = conn.execute(query, params).fetchall()
-            recorded = None if rows else conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
+            recorded = None if rows or not first else conn.execute(
+                "SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
             unreadable = json.loads(recorded[0]) if recorded else []
     except (store.StoreError, sqlite3.Error, OSError, ValueError) as exc:
         reason = "busy" if isinstance(exc, store.StoreBusy) or store.busy(exc) else "damaged"
@@ -477,14 +480,14 @@ def _indexed_placements(root: pathlib.Path, query: str, params: tuple) -> List[T
 
 
 def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id: str = "", rel_path: str = "",
-                handles: bool = False) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+                handles: bool = False, after: tuple = ("", 0)) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
     """Where one lookup's bytes lie in ``root``'s packs, in one order for a task's checkpoint handles
     (``handles``; ``rel_path``: that one) and its blobs: the task's own sidecars, then the shared index.
     A handle lives only in its task's packs, so those sidecars answer it whole, the index only when one
     of them is unreadable (a valid index keeps its placement; a listing joins its rows, as the index may
     lack a generation just published); a blob may lie in any task's pack, so a miss there (or no task)
-    asks the index. Nothing lists the packs or rebuilds the cache, and a task's own unreadable sidecar
-    is never answered as an absence."""
+    asks the index for its first copy by key ``after`` that ``(task_id, generation)``. Nothing lists the
+    packs or rebuilds the cache, and a task's own unreadable sidecar is never answered as an absence."""
     if not packs_dir(root).is_dir():
         return []  # a root without packs is left untouched (no cache, no lock file)
     handles = handles or bool(rel_path)
@@ -492,11 +495,11 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
                                     rel_path=rel_path) if task_id else ([], [])
     if (found and not (errors and handles and not rel_path)) or (handles and not errors):
         return found
-    query, params = (_MEMBER_SQL, (sha256, kind)) if not handles else (
+    query, params = (_MEMBER_SQL, (sha256, kind, *after)) if not handles else (
         (_HANDLES_SQL + " AND h.rel_path=?", (task_id, CHECKPOINT, rel_path)) if rel_path
         else (_HANDLES_SQL, (task_id, CHECKPOINT)))
     try:
-        indexed = _indexed_placements(root, query, params)
+        indexed = _indexed_placements(root, query, params, first=not after[0])
     except (EvidenceUnavailable, SidecarCorrupt):
         if not errors:
             raise
@@ -662,7 +665,8 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     """Verified bytes, cheapest place first, in two phases over every admissible root (``_blob_roots``):
     first the loose file, a view's skeleton placement spliced with its parts and, when the caller names
     the owning task (a cost hint, never a proof of absence), that task's own sidecars, in each root;
-    only then each root's shared index. Any copy found is right: its size and sha256 are checked. Without
+    only then each root's shared index, one copy per question (the next only once that one fails: a common
+    digest lies in every pack that references it). Any copy found is right: its size and sha256 are checked. Without
     bytes, the first place that could not answer now (an index, a view's part) makes the read
     ``EvidenceUnavailable``, before any copy's damage and any absence: a sound copy may lie there.
 
@@ -703,34 +707,37 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                         failure = exc  # a part gone or damaged names itself; the whole may still be packed below
                 if not task_id:
                     continue
-            try:
-                if indexed:
-                    placements = _placements(candidate, sha256=sha256, kind=kind)
-                else:
-                    placements, unreadable = _own_placements(candidate, task_id, key=(sha256, kind))
-                    failure = unreadable[0] if unreadable else failure  # the task's own damage is never an absence
-            except EvidenceUnavailable as exc:
-                unknown = unknown or exc  # neither absence nor a copy's damage is proven: the address stays good
-                continue
-            except (OSError, EvidenceCorrupt) as exc:
-                failure = exc
-                continue
-            for located in placements:
-                if admit is not None:
-                    admit(located[0])
+            after: tuple = ("", 0)  # the index answers one copy per question; the next one once this one failed
+            while after:
                 try:
-                    if max_bytes is not None and int(located[1]["size"]) > max_bytes:
-                        raise ValueError("blob exceeds byte limit")
-                    raw = member_bytes(*located)
-                    if size not in (-1, len(raw)):
-                        raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
-                    return raw
-                except FileNotFoundError as exc:
-                    failure = failure or exc
-                except ValueError as exc:
+                    if indexed:
+                        placements = _placements(candidate, sha256=sha256, kind=kind, after=after)
+                    else:
+                        placements, unreadable = _own_placements(candidate, task_id, key=(sha256, kind))
+                        failure = unreadable[0] if unreadable else failure  # the task's own damage is never an absence
+                except EvidenceUnavailable as exc:
+                    unknown = unknown or exc  # neither absence nor a copy's damage is proven: the address stays good
+                    break
+                except (OSError, EvidenceCorrupt) as exc:
                     failure = exc
-                except OSError:
-                    failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
+                    break
+                for located in placements:
+                    if admit is not None:
+                        admit(located[0])
+                    try:
+                        if max_bytes is not None and int(located[1]["size"]) > max_bytes:
+                            raise ValueError("blob exceeds byte limit")
+                        raw = member_bytes(*located)
+                        if size not in (-1, len(raw)):
+                            raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
+                        return raw
+                    except FileNotFoundError as exc:
+                        failure = failure or exc
+                    except ValueError as exc:
+                        failure = exc
+                    except OSError:
+                        failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
+                after = (placements[-1][1]["task_id"], placements[-1][1]["generation"]) if indexed and placements else ()
         raise unknown or failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
     finally:
         # The kept error's traceback holds this frame: kept past an exit, it is a cycle retaining the callers'
