@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import errno
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -262,6 +263,18 @@ def test_window_steps_heads_one_at_a_time_after_maps_and_leaves_a_head_without_a
     assert all(_blocks(emergency)[-1]["text"].count(f"Authored telling of {topic}.") == 1 for topic in ("a", "c"))
     assert "Head b. " * 5_000 not in _held(emergency)
     assert "knowledge_read(topic='b', scope='global', version=" in _held(emergency)
+
+
+def test_a_heads_label_is_its_title_or_an_h1_of_the_head_and_never_a_heading_below_it(world):
+    _write(world, "below", "A head without a title.\n\n## History\n\nOlder facts.\n")
+    _write(world, "inside", "A head with a smaller heading.\n\n### Detail\n\nStill the head.\n\n## Past\n\n# Deep\n")
+    _write(world, "own", "# Nina Petrova\n\nWorks on Nova.\n\n## Contacts\n\nBelow.\n")
+    _write(world, "titled", "A titled head.\n\n## History\n\nOlder facts.\n", title="The Nova room")
+    _write(world, "blank", "A head whose title is blank.\n\n## History\n", title="  ")
+    held = _held(_plan(world))
+    labels = dict(reversed(pair) for pair in re.findall(r"^### (.+)\n\nGlobal note: memory/knowledge/(.+)\.md$", held, re.M))
+    assert labels == {"below": "below", "inside": "inside", "blank": "blank", "own": "Nina Petrova", "titled": "The Nova room"}
+    assert "### History" not in held and held.count("### Detail") == 1  # only the head's own line
 
 
 def test_a_stepped_head_supplies_its_summary_only_when_the_resident_index_does_not(world):

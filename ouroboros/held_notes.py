@@ -194,11 +194,22 @@ def _reader_line(reader: str, restriction: str) -> str:
     return f"Exact reader unavailable: {restriction}" if restriction else f"Exact reader: {reader}"
 
 
+def _label_title(note: knowledge.KnowledgeNote, head: str) -> str:
+    """The YAML title, else an H1 the head itself carries, else the topic: never a heading below the head."""
+    value = note.metadata.get("title")
+    if isinstance(value, str) and value.strip():
+        return value
+    start = note.source.body_span.start_byte
+    end = start + len(head.encode("utf-8"))
+    return next((heading.title for heading in note.source.headings
+                 if heading.level == 1 and start <= heading.span.start_byte < end), note.address.topic)
+
+
 def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ctx: Any) -> HeldNoteSection:
-    topic, revision = note.address.topic, note.revision
+    topic, revision, head = note.address.topic, note.revision, note_head(note.source)
     names = ", ".join(repr(name) for name in matched)
     label = (f"{_HEADING}\n\n" if first else "") + (
-        f"### {note.title}\n\nGlobal note: memory/knowledge/{topic}.md\n"
+        f"### {_label_title(note, head)}\n\nGlobal note: memory/knowledge/{topic}.md\n"
         f"Matched claims: {names}\nRevision: {revision}\n")
     reader = f"knowledge_read(topic={topic!r}, scope='global', version={revision!r})"
     length = len(note.text)
@@ -217,7 +228,7 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
     if topic == knowledge.OVERVIEW_TOPIC:
         full = label + "\nShared understanding reference."
     else:
-        full = label + "\n\n" + note_head(note.source)
+        full = label + "\n\n" + head
         if reader:
             window_label = label
     return HeldNoteSection("held_note:" + topic, full, reader=reader, topic=topic, revision=revision,
