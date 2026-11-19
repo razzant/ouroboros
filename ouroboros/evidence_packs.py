@@ -429,9 +429,10 @@ def _own_members(path: pathlib.Path, task_id: str) -> tuple:
         info = path.stat()
     except OSError:
         return _brief(path)  # never kept: ``read_sidecar`` names the fault
-    if _KEPT[0] != task_id:
-        _KEPT = (task_id, {})
-    briefs, state = _KEPT[1], (info.st_size, info.st_mtime_ns, info.st_ino)
+    kept = _KEPT  # read once: another thread may replace it, never this read's dictionary
+    if kept[0] != task_id:
+        kept = _KEPT = (task_id, {})
+    briefs, state = kept[1], (info.st_size, info.st_mtime_ns, info.st_ino)
     if briefs.get(str(path), (None,))[0] != state:
         brief = _brief(path)
         briefs[str(path)] = (state, brief if brief[0] == task_id else (brief[0], brief[1], {}, {}))
