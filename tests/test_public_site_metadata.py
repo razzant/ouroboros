@@ -154,8 +154,9 @@ def test_readme_install_page_and_deployment_guide_name_the_factory_values():
     total, task, daily = (int(defaults[key]) for key in (
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "OUROBOROS_CONSCIOUSNESS_DAILY_USD"))
     paragraph = (f"out of the box, new paid work stops once known spend reaches ${total} in total, or ${task} for one "
-                 "task and its helpers; charges already in flight can pass a limit. Background consciousness stays off "
-                 f"until you start it, and then has ${daily} for each 24 hours. Settings changes all three.")
+                 "task and its helpers; charges already in flight can pass a limit. Background consciousness starts with "
+                 "the setup wizard's switch, which is on unless you turn it off (without the wizard it stays off until "
+                 f"you start it), and then has ${daily} for each 24 hours. Settings changes all three.")
     for path in (REPO / "README.md", SITE / "install" / "index.html", DOCS / "install" / "index.html"):
         assert paragraph in path.read_text(encoding="utf-8"), path.relative_to(REPO)
     table = (DOCS / "DEPLOYMENT.md").read_text(encoding="utf-8")
