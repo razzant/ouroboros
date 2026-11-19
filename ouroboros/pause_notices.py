@@ -183,7 +183,7 @@ def reconcile_pause_notices(drive_root: Any, *, stop_requested=None) -> None:
                             system_type="task_pause_notice", narration=False, require_write=True,
                             ensure_record_boundary=True,
                             progress_meta={**{k: event[k] for k in ("root_task_id", "parent_task_id") if k in event},
-                                           "card_row": "timeline", "card_row_id": identity},
+                                           "pause_reason": notice.get("reason"), "card_row": "timeline", "card_row_id": identity},
                         )
                     if stop_requested is not None and stop_requested():
                         return
