@@ -136,6 +136,45 @@ def test_concurrent_winner_and_its_later_write_survive(root, monkeypatch):
         assert conn.execute("SELECT value FROM meta WHERE key='concurrent_receipt'").fetchone()[0] == "kept"
 
 
+@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME], ids=["enforced", "name"])
+def test_a_rebuild_never_publishes_beside_the_replaced_file_s_journal(tmp_path, monkeypatch, tier):
+    """A writer stopped between a generation's rows and COMMIT leaves the index's hot journal; the main file then
+    gone, the pass rebuilds from the sidecars, and the replaced file's journal must never roll back into the new
+    one: it goes under the index lock before the new file takes the name, so both generations stay indexed and the
+    blob reads by its sha alone. The ordinary rebuild and the competing winner keep their own tests above."""
+    import pathlib
+
+    from tests.test_evidence_packs import _blob
+
+    use_journal(monkeypatch, "PERSIST")
+    monkeypatch.setattr(packs, "index_tier", lambda _root: tier)
+    _publish(tmp_path, "a")
+    packs.ensure_index(tmp_path)
+    raw = b'"the second generation"'
+    ref = _blob(tmp_path, raw)
+    pack, sidecar = packs.write_pack(tmp_path, "b", 1, [{key: ref[key] for key in ("sha256", "kind", "size")}])
+    pathlib.Path(ref["path"]).unlink()  # only its pack holds it now
+    index = packs.packs_dir(tmp_path) / packs.INDEX_NAME
+    journal, hot, rows = index.with_name(index.name + "-journal"), tmp_path / "hot-journal", packs._index_rows
+
+    def stopped(conn, *args):  # its pages reach the file (a small cache), then it stops before COMMIT
+        conn.execute("PRAGMA cache_size = 1")
+        rows(conn, *args)
+        conn.execute("INSERT INTO meta VALUES ('padding', ?)", ("x" * 400_000,))
+        hot.write_bytes(journal.read_bytes())  # the journal a crash right here leaves
+        raise RuntimeError("stopped before COMMIT")
+
+    monkeypatch.setattr(packs, "_index_rows", stopped)
+    with pytest.raises(RuntimeError):
+        packs.index_upsert(tmp_path, pack, sidecar)
+    monkeypatch.setattr(packs, "_index_rows", rows)
+    assert hot.read_bytes()[:8] == bytes.fromhex("d9d505f920a163d7")  # a hot journal: its pages reached the file
+    index.unlink()
+    journal.write_bytes(hot.read_bytes())
+    assert packs.index_owed(tmp_path) and packs.ensure_index(tmp_path)["sidecars"] == 2
+    assert _tasks(tmp_path) == {"a", "b"} and packs.blob_bytes(tmp_path, ref) == raw
+
+
 @pytest.mark.parametrize("budget", [0.25, None, 10.0], ids=["slice", "ordinary", "larger-budget"])
 def test_name_lock_wait_respects_budget_and_ordinary_wait_still_succeeds(root, monkeypatch, budget):
     _publish(root, "first")
