@@ -203,12 +203,17 @@ def test_busy_upsert_keeps_existing_index_and_retries_successfully(root):
     assert _tasks(root) == {"first", "late"}
 
 
-def test_sidecar_publication_obeys_index_lock_and_retries_a_new_generation(root):
+def test_pack_publication_obeys_index_lock_and_leaves_its_generation_free(root):
+    """A pack and its sidecar publish under one hold of the index lock: a lock held past the wait
+    publishes neither (never a pack without its sidecar, no scratch left), so the retry takes the same
+    generation; a free lock publishes the pair as before."""
+    directory = packs.packs_dir(root)
     with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
         with pytest.raises(store.StoreBusy):
             _publish(root, "first")
-        assert not (packs.packs_dir(root) / packs.sidecar_name("first", 1)).exists()
-    path, sidecar = _publish(root, "first", generation=2)
+    assert list(directory.iterdir()) == [] and packs._task_sidecar_names(root, "first") == set()
+    path, sidecar = _publish(root, "first")
+    assert sidecar["generation"] == 1 and sorted(p.name for p in directory.iterdir()) == ["first.members.json", "first.xz"]
     packs.verify_pack(path, sidecar)
     assert _tasks(root) == {"first"}
 

@@ -1065,9 +1065,10 @@ def _member_source_bytes(root: pathlib.Path, task_id: str, member: Dict[str, Any
 
 
 def write_pack(root: Any, task_id: str, generation: int, members: List[Dict[str, Any]]) -> Tuple[pathlib.Path, Dict[str, Any]]:
-    """Pack + sidecar to temp names, fsync both, publish the pack, then the sidecar LAST. Checkpoints lead
-    (the sidecar's prefix rule), then blobs smallest first by ``(size, sha256)``: in one stream a small
-    response or error decodes from a short prefix; the sidecar's offsets stay the readers' only map."""
+    """Pack + sidecar to temp names, fsync both, then under one hold of the index lock publish the pack,
+    then the sidecar LAST: a lock held past the wait publishes neither, so the generation stays free.
+    Checkpoints lead (the sidecar's prefix rule), then blobs smallest first by ``(size, sha256)``: in one
+    stream a small response or error decodes from a short prefix; the sidecar's offsets stay the readers' only map."""
     members = sorted(members, key=lambda m: (0, 0, "", "") if m["kind"] == CHECKPOINT
                      else (1, int(m["size"]), m["sha256"], m["kind"]))
     root, directory = pathlib.Path(root), packs_dir(root)
@@ -1106,10 +1107,10 @@ def write_pack(root: Any, task_id: str, generation: int, members: List[Dict[str,
             json.dump(sidecar, handle, ensure_ascii=False, indent=1)
             handle.flush()
             os.fsync(handle.fileno())
-        replace_atomic(tmp_pack, pack_path)
-        store.fsync_directory(directory)
-        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):
-            replace_atomic(tmp_sidecar, sidecar_path)  # serialize publication with index revalidation
+        with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):  # the pair, or nothing
+            replace_atomic(tmp_pack, pack_path)
+            store.fsync_directory(directory)
+            replace_atomic(tmp_sidecar, sidecar_path)
             store.fsync_directory(directory)
     finally:
         for tmp in (tmp_pack, tmp_sidecar):
