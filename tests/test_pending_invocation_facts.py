@@ -50,9 +50,9 @@ def test_legacy_backfill_reads_only_open_requests_once_and_preserves_an_unreadab
     assert {row["invocation_id"] for row in custody.pending_invocations(tmp_path)} == {"open", "unknown"}
     read.clear()  # a legacy reader may project the same typed identity, without a body read
     bodies = []
-    def resolve_once(root, row):
+    def resolve_once(root, row, **options):
         bodies.append(row["invocation_id"])
-        return resolve(root, row)
+        return resolve(root, row, **options)
     monkeypatch.setattr(delegate_pending, "request_body", resolve_once)
     assert maintenance.run_job(tmp_path, "pending_invocations")["items"] == 2
     assert sorted(read) == ["open", "unknown"]
