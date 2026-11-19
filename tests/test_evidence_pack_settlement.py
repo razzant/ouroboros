@@ -232,10 +232,10 @@ def test_missing_records_are_reported_and_the_rest_packs(root):
     assert packer.changed_tasks(root) == []  # a recorded gap is not re-examined until its folder moves
 
 
-@pytest.mark.parametrize("change", ["row_elsewhere", "duty", "own_review"])
+@pytest.mark.parametrize("change", ["row_elsewhere", "duty", "own_review", "own_manifest"])
 def test_only_this_tasks_own_evidence_defers_its_unlink(root, monkeypatch, change):
-    """P6: a store write elsewhere, money, a delivery or a duty between the census and the section no
-    longer defer the candidate; a new manifest of THIS task during the section still does, and so does a
+    """P6: a store write elsewhere, money, a delivery or a duty between the census and the candidate's check no
+    longer defer the candidate; a new manifest of THIS task then still does (its stamp moved), and so does a
     review of THIS task opening then (its reader may hold a loose path): the pack is kept, nothing unlinked."""
     refs, handle = _task(root, "packing", blobs=1)
     _task(root, "other", status="running", blobs=1)

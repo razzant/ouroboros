@@ -24,13 +24,8 @@ from ouroboros.utils import _atomic_overwrite, atomic_write_json, replace_atomic
 PACKS_REL = pathlib.Path("observability/packs")
 INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
-PUBLICATION_LOCK_NAME = "packs_publication.lock"  # manifest publication vs reference census + unlink
-PUBLICATIONS_NAME = ".publications"  # pass-local refs appended before manifest publication, under the same lock
 DAMAGED_MARK = ".index.sqlite.damaged"  # left by a read that met the live index unusable or damaged; its rebuild removes it
 INDEX_WAIT_SEC = 5.0
-UNLINK_SECTION_SEC = 0.5  # one deletion section's budget under the store write lock, publication lock included
-UNLINK_SECTION_GAP_SEC = 0.15  # between sections: longer than a waiting writer's SQLite busy poll (100 ms)
-PUBLICATION_WAIT_SEC = 90.0  # a manifest's contention budget for the publication lock (not a stale-owner bound)
 FORMAT_VERSION = 1
 INDEX_SCHEMA_VERSION = 2
 CODEC, PRESET = "xz", 1
@@ -693,7 +688,10 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     index, a view's part) makes the read ``EvidenceUnavailable``, before any copy's damage or any absence.
 
     ``admit`` (optional) sees each loose, placement or pack file before it is opened; what it
-    raises propagates, so a refusal never becomes a miss, corruption or fallback."""
+    raises propagates, so a refusal never becomes a miss, corruption or fallback. A read a pack answered
+    counts once as the measured window's ``packed_reads`` (``context_timing.counted``)."""
+    from ouroboros.context_timing import counted
+
     root = pathlib.Path(root)
     sha256, kind, size = blob_ref_fields(ref)
     if expected_kind is not None and kind != expected_kind:
@@ -753,6 +751,7 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
                         if size not in (-1, len(raw)):
                             failure, located = EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref"), None
                             break
+                        counted("packed_reads")
                         return raw
                     except FileNotFoundError as exc:
                         failure = failure or exc
@@ -1098,19 +1097,6 @@ def _walk_blob_refs(value: Any, out: List[Tuple[str, str, int]], seen: set) -> N
             _walk_blob_refs(item, out, seen)
 
 
-def note_manifest_publication(root: Any, manifest: dict) -> None:
-    """Called under the publication lock BEFORE the manifest write. Track new refs only
-    while a sweep owns the scratch file; a stale file is reset at the next sweep."""
-    try:
-        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
-    except FileNotFoundError:
-        return
-    with os.fdopen(fd, "ab") as journal:
-        refs: list = []
-        _walk_blob_refs(manifest, refs, set())
-        journal.write("".join(sha + "\n" for _, sha, _ in refs).encode("ascii"))
-
-
 def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
     """``(kind, sha256, size)`` of every blob the task's call manifests reference, first appearance first."""
     from ouroboros.deadline_utils import parse_deadline_ts
@@ -1267,10 +1253,16 @@ def _unlink_phase(root: Any) -> Iterator[tuple]:
     yield False, None
 
 
-def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,
-                 sweep, members: list) -> Dict[str, int]:
-    """Remove loose files whose bytes a VERIFIED pack (``sidecars``) holds; a blob a live task's
-    manifests still reference (``keep_shas`` and the sweep's keep-set) stays loose. A busy file is
+def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, revision: str, sweep,
+                 members: list) -> Dict[str, int]:
+    """Remove loose files whose bytes a VERIFIED pack (``sidecars``) holds, under the task's custody lock; a blob
+    a live task's manifests referenced at the pass's census (the sweep's keep-set) stays loose. One check of the
+    candidate under a store barrier comes first (``_unlink_phase``: the phase allows deletion, the stamp is the
+    census's and the row is still packable, ``task_packable``), and a failed check defers everything. The blobs
+    then go under no store lock (their readers go through ``blob_bytes``), then each checkpoint handle, which a
+    reader may hold by its path, under a barrier of its own that reads the phase and the row again: an export, a
+    review or a resumption that began defers the rest. After each handle's barrier but the last the pass leaves the
+    store's write lock free as long as it held it, so a waiting writer gets in at any disk speed. A busy file is
     retried next pass."""
     from ouroboros.evidence_packer import task_stamps
     from ouroboros.task_custody import task_custody_lock
@@ -1278,61 +1270,45 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     root = pathlib.Path(root)
     packed = {_member_key(m) for s in sidecars for m in s["members"]}
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
+    todo = [m for m in members if _member_key(m) in packed]
 
-    def remove(txn, todo: list, until: float) -> Optional[list]:
-        """One section under both locks: this task's own recheck (its row is still terminal and its
-        evidence directories are as the census saw them: the stamp carries both) and the journal
-        suffix, then unlinks until ``until``; the members left, or ``None`` when the candidate went stale."""
-        nonlocal revision
-        if task_stamps(root, task_id, txn=txn) != revision:
-            return None
-        keep = sweep.refresh_keep()
-        for index, member in enumerate(todo):
-            if index and time.monotonic() >= until:
-                # Still under the locks: this section's own unlinks are the only change to the stamps.
-                revision = task_stamps(root, task_id, txn=txn)
-                return todo[index:]
-            if not member["source"].is_file():
-                continue
-            if member["kind"] != CHECKPOINT and (member["sha256"] in keep or member["sha256"] in keep_shas):
-                report["kept"] += 1
-                continue
-            try:
-                os.unlink(member["source"])
-                report["unlinked"] += 1
-            except FileNotFoundError:
-                pass
-            except PermissionError:
-                report["busy"] += 1
-        return []
+    def unlink(member: Dict[str, Any]) -> None:
+        try:
+            os.unlink(member["source"])
+            report["unlinked"] += 1
+        except FileNotFoundError:
+            pass
+        except PermissionError:
+            report["busy"] += 1
 
-    # Compression precedes custody -> store write -> manifest publication locks. A section holds
-    # the store write lock (a rollback barrier) and the publication lock for one UNLINK_SECTION_SEC
-    # budget; model calls and every store writer wait on them. Inside, only this task's recheck;
-    # between sections a waiting writer gets a poll-length gap. A stale check defers the candidate.
-    todo: Optional[list] = [m for m in members if _member_key(m) in packed]
     with task_custody_lock(root, task_id) as acquired:
-        while acquired and todo:
-            left: Optional[list] = None
+        if not acquired:
+            return report
+        with _unlink_phase(root) as (allowed, txn):
+            if not (allowed and task_stamps(root, task_id, txn=txn) == revision
+                    and (txn is None or task_packable(txn, task_id))):
+                return report
+        for member in todo:
+            if member["kind"] != CHECKPOINT and member["source"].is_file():
+                if member["sha256"] in sweep.keep:
+                    report["kept"] += 1
+                else:
+                    unlink(member)
+        handles = [m for m in todo if m["kind"] == CHECKPOINT and m["source"].is_file()]
+        for index, member in enumerate(handles):
             with _unlink_phase(root) as (allowed, txn):
-                until = time.monotonic() + UNLINK_SECTION_SEC
-                if allowed:
-                    with contextlib.ExitStack() as held:
-                        try:
-                            held.enter_context(store.name_lock(root, PUBLICATION_LOCK_NAME,
-                                                               timeout_sec=max(0.0, until - time.monotonic())))
-                        except store.StoreBusy:
-                            pass  # busy for the whole section budget: the next pass retries the candidate
-                        else:
-                            left = remove(txn, todo, until)
-            todo = left
-            if todo:
-                time.sleep(UNLINK_SECTION_GAP_SEC)
-    report["deferred"] = int(todo != [])
+                started = time.monotonic()
+                if not allowed or (txn is not None and not task_packable(txn, task_id)):
+                    return report
+                unlink(member)
+                held = time.monotonic() - started
+            if index + 1 < len(handles):
+                time.sleep(held)
+        report["deferred"] = 0
     return report
 
 
-def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str] = None, sweep=None) -> Dict[str, Any]:
+def pack_task(root: Any, task_id: str, *, revision: Optional[str] = None, sweep=None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs. Only the
     generations an unlink relies on are re-read: the new one, and an older one while it still holds a
@@ -1344,7 +1320,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str
     if sweep is None:
         with pack_sweep(root) as sweep:
             sweep.collect_keep(keep_rows(root))
-            return pack_task(root, task_id, keep_shas=keep_shas, revision=revision, sweep=sweep)
+            return pack_task(root, task_id, revision=revision, sweep=sweep)
     if revision is None:
         revision = task_stamps(root, task_id)
     generations = published_generations(root, task_id)
@@ -1377,8 +1353,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, revision: Optional[str
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
         report["verified_bytes"] += int(sidecar["raw_total"])
     write_unpacker(root)
-    report.update(unlink_loose(root, task_id, relied, keep_shas=keep_shas, revision=revision,
-                               sweep=sweep, members=members))
+    report.update(unlink_loose(root, task_id, relied, revision=revision, sweep=sweep, members=members))
     if report["members"] or report["unlinked"] or missing:  # a row records production or a gap, never a re-visit
         record_storage_pack(root, phase="packed", **report)
     return report

@@ -6,8 +6,9 @@ A task is packed once its row is terminal and no review or council is open (``ev
 including after the author finishes): no duty, money or delivery
 fact is consulted, because packing moves verified bytes, never content, and anything written for the
 task later becomes its next generation. Loose blobs stay for the tasks whose row is live or under an
-open review or council (the keep-set, read through their indexes) and for the manifests published
-during a pass (the publication journal). A pass's census is the tasks whose rows were written terminal
+open review or council when the pass takes its keep-set (read once through their indexes, before the
+first unlink: ``PackSweep``); a blob a manifest names after that may leave with a task the pass packs and
+is then read from that task's verified pack. A pass's census is the tasks whose rows were written terminal
 since the position its last pass recorded (``tasks.terminal_seq``) plus the candidates that pass left
 unfinished; a position holds only under the store's body fact it was recorded with (``store_body``: an
 older body's writes stamp no ``terminal_seq``), else the pass lists the evidence folders whole (``census_since``).
@@ -29,7 +30,8 @@ log = logging.getLogger(__name__)
 # ``packed`` = new generations written; ``examined`` = candidates processed; ``verified_bytes`` = raw bytes re-read;
 # ``missing`` = referenced records neither loose nor packed; ``live``/``reading``/``storeless`` = folders still
 # holding loose evidence because their task runs / is terminal under an open review / has no store row;
-# ``deferred`` = candidates whose unlink waited for a held custody lock or a moved stamp (retried next pass).
+# ``deferred`` = candidates whose unlink waited for a held custody lock, a moved stamp, a row no longer packable or
+# a store phase that refuses deletion (retried next pass).
 COUNTERS = ("packed", "examined", "swept", "candidates", "raw", "compressed", "verified_bytes",
             "unlinked", "kept", "busy", "faults", "archived", "missing", "live", "reading", "storeless", "deferred")
 
@@ -83,6 +85,13 @@ def _stamp(root: pathlib.Path, task_id: str, row: Optional[tuple]) -> str:
         except OSError:
             stamps.append((str(path.relative_to(root)), 0))
     return json.dumps(stamps, sort_keys=True, separators=(",", ":"))
+
+
+def _calls_entry(root: pathlib.Path, task_id: str, stamp: str) -> Optional[list]:
+    """The task's calls folder as ``stamp`` saw it (``_stamp``): a manifest written there moves it, while the
+    packer's own unlinks (blobs, checkpoint handles) never touch that folder."""
+    key = str((root / "observability" / "calls" / task_id).relative_to(root))
+    return next((entry for entry in json.loads(stamp) if entry[0] == key), None)
 
 
 def _loose_task_ids(root: pathlib.Path, stop: Optional[Callable[[], bool]] = None) -> set:
@@ -303,49 +312,32 @@ def keep_rows(root: pathlib.Path) -> Dict[str, tuple]:
 
 
 class PackSweep:
-    """The keep-set of one pass: blobs referenced by tasks whose row is live or under an open review/council
-    (``keep_rows``), read once outside the deletion locks (``collect_keep``), plus the refs of manifests
-    published during the pass, read from the journal suffix under the publication lock (``refresh_keep``).
-    Store-less folders are neither packed nor kept. A blob such a task shares with a packed one stays loose
-    until the sharer's own pass; a terminal task resumed after the census reads its packed blobs from the pack."""
+    """The keep-set of one pass: blobs the manifests of tasks whose row is live or under an open review/council
+    (``keep_rows``) reference, read once, outside the deletion locks and before the pass's first unlink
+    (``collect_keep``). A blob such a task shares with a packed one stays loose until the sharer's own pass. The
+    census is never refreshed: a blob a manifest names after it may leave with a task this pass packs and is then
+    read from that task's verified pack, as a terminal task resumed after the census reads its packed blobs from
+    the pack. Store-less folders are neither packed nor kept."""
     def __init__(self, root: pathlib.Path) -> None:
         self.root = root
         self.keep: set = set()
-        self.journal = None
 
     def collect_keep(self, rows: Dict[str, Optional[tuple]]) -> None:
         for task, row in rows.items():
             if row is not None and not _packable(row):
                 self.keep.update(sha for _, sha, _ in packs.manifest_blob_refs(self.root, task))
 
-    def refresh_keep(self) -> set:
-        # The caller holds the publication lock: only the appended suffix is read.
-        for line in self.journal:
-            sha = line.decode("ascii").strip()
-            if len(sha) != 64 or sha.strip("0123456789abcdef"):
-                raise OSError("incomplete evidence publication journal")
-            self.keep.add(sha)
-        return self.keep
-
 
 @contextlib.contextmanager
 def pack_sweep(root: pathlib.Path):
     """Serialize packer passes: first the index's one builder (``packs.ensure_index``: every sidecar a
-    pass publishes waits behind it), then publications are tracked from before the census to the last
-    unlink. A crashed pass's scratch journal is replaced by the next pass."""
+    pass publishes waits behind it). A manifest's publication takes no lock the pass holds: the keep-set
+    is the pass's census alone."""
     with store.name_lock(root, "packs_sweep.lock", timeout_sec=packs.INDEX_WAIT_SEC):
         packs.ensure_index(root)
-        sweep = PackSweep(root)
-        path = packs.packs_dir(root) / packs.PUBLICATIONS_NAME
-        with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=packs.INDEX_WAIT_SEC):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            sweep.journal = path.open("w+b")
-        try:
-            yield sweep
-        finally:
-            with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=packs.INDEX_WAIT_SEC):
-                sweep.journal.close()
-                path.unlink()
+        with contextlib.suppress(OSError):
+            (packs.packs_dir(root) / ".publications").unlink()  # the journal of a pass by an earlier body
+        yield PackSweep(root)
 
 
 def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owed=()) -> Dict[str, Any]:
@@ -353,7 +345,7 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
     unpacker. The census is the rows written terminal after the counter stood at ``since`` and the
     ``owed`` candidates (``loose_task_ids_since``); without a position (``None``: the first run, a
     repair, a recorded position that cannot be read) every loose folder. ``unfinished`` names the
-    candidates this pass leaves owed (deferred, busy, faulted)."""
+    candidates this pass leaves owed (deferred, busy, faulted, or written a manifest after the census)."""
     root = pathlib.Path(root)
     if sweep is None:
         with pack_sweep(root) as sweep:
@@ -380,7 +372,7 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
         sweep.collect_keep(keep_rows(root))
     for task, raw in candidates:  # each reads its own sidecars by name (``published_generations``), never all
         try:
-            outcome = packs.pack_task(root, task, keep_shas=set(), revision=revisions[task], sweep=sweep)
+            outcome = packs.pack_task(root, task, revision=revisions[task], sweep=sweep)
         except Exception as exc:
             report["faults"] += 1
             report["unfinished"].append(task)
@@ -395,9 +387,13 @@ def run_pass(root: pathlib.Path, *, sweep=None, since: Optional[int] = None, owe
             report[key] += int(outcome.get(key) or 0)
         # A blob kept for a live sharer does not re-queue this task: the sharer's own pass unlinks it
         # once it closes (its stamp moves then); busy files and deferred candidates retry. A finished
-        # candidate is recorded as its unlinks left its directories, outside every lock.
-        if not any(outcome.get(key) for key in ("busy", "deferred")):
-            record_swept(root, task, _stamp(root, task, rows.get(task)))
+        # candidate is recorded as its unlinks left its directories, outside every lock, unless a manifest
+        # it wrote after the census (late evidence, even during its unlink) moved its calls folder: what that
+        # manifest names is not in this pass's pack, so the task stays owed to the next pass.
+        finished = not any(outcome.get(key) for key in ("busy", "deferred"))
+        stamp = _stamp(root, task, rows.get(task)) if finished else ""
+        if finished and _calls_entry(root, task, stamp) == _calls_entry(root, task, revisions[task]):
+            record_swept(root, task, stamp)
             report["swept"] += 1
         else:
             report["unfinished"].append(task)
