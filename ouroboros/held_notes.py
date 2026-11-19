@@ -189,30 +189,34 @@ def linked_heads(note: knowledge.KnowledgeNote) -> tuple[dict[str, knowledge.Kno
     return carried, list(unheld)
 
 
-def standing_heads(root: Path, names, *, written: knowledge.KnowledgeNote | None = None) -> dict[str, tuple[int, int]]:
+def standing_heads(root: Path, names, *, written: knowledge.KnowledgeNote | None = None,
+                   holding: dict[str, dict[str, list[str]]] | None = None) -> dict[str, tuple[int, int]]:
     """``(heads, host tokens)`` standing whole wherever each name is present: the head of every active global note
-    whose recorded claims hold that name (``knowledge.active_claims``, the selection ``turn_sections`` makes); the
-    overview, which stands in its own place, aside. ``written``, a note just written, counts from its own bytes. A
-    write receipt's measure (``memory_floor.view_tokens``, as the held heads fact counts); no start reads it."""
+    whose own recorded claims hold that name, and of every one a held head links where that head's claims hold it
+    (``standing``, the selection ``turn_sections`` makes), each note once; the overview, which stands in its own
+    place, aside. ``written``, a note just written, counts from its own bytes; ``holding`` is ``standing(root)``
+    when the caller already read it. A write receipt's measure (``memory_floor.view_tokens``, as the held heads fact
+    counts); no start reads it."""
     from ouroboros.memory_floor import view_tokens
 
-    claims, sizes = knowledge.active_claims(root), {}
+    shelf, sizes = knowledge.resolve_knowledge_address(root, knowledge.OVERVIEW_TOPIC, "global"), {}
+    holding = standing(root) if holding is None else holding
 
-    def size(address: knowledge.KnowledgeAddress) -> int | None:
-        if address.topic not in sizes:
+    def size(topic: str) -> int | None:
+        if topic not in sizes:
             try:
-                note = (written if written is not None and written.address.topic == address.topic
-                        else knowledge.read_knowledge_note(address))
+                note = (written if written is not None and written.address.topic == topic
+                        else knowledge.read_knowledge_note(replace(shelf, topic=topic)))
             except (ValueError, OSError):
-                note = None  # the source changed or disappeared since the inventory read
-            sizes[address.topic] = (view_tokens(note_head(note.source))
-                                    if note is not None and note.source is not None and note.state == "active" else None)
-        return sizes[address.topic]
+                note = None  # the source changed or disappeared since the shelf was read
+            sizes[topic] = (view_tokens(note_head(note.source))
+                            if note is not None and note.source is not None and note.state == "active" else None)
+        return sizes[topic]
 
     found = {}
     for name in names:
-        held = [tokens for address in claims.get(name, ())
-                if address.topic != knowledge.OVERVIEW_TOPIC and (tokens := size(address)) is not None]
+        held = [tokens for topic, holders in holding.items() if topic != knowledge.OVERVIEW_TOPIC
+                and any(name in held_by for held_by in holders.values()) and (tokens := size(topic)) is not None]
         found[name] = (len(held), sum(held))
     return found
 
