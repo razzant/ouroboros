@@ -15,6 +15,7 @@ from ouroboros import (context, context_budget, context_fit, context_view_facts,
                        memory_floor, memory_view)
 from ouroboros.agent import Env, _restore_saved_clocks
 from ouroboros.memory import Memory
+from ouroboros.memory_view_events import CARRIED_NAMES
 from ouroboros.owner_wait import checkpoint_owner_wait, continuation_state, load_owner_wait, set_owner_wait
 from ouroboros.projects_registry import create_project
 from ouroboros.realtime_setup import input_from_context_plan
@@ -133,7 +134,7 @@ def test_default_request_is_byte_identical_and_only_recorded_claims_add_a_sectio
     assert "Adopted head." in _held(_plan(world))
 
 
-def test_claimed_room_reaches_parent_under_low_and_nano_and_skips_delegated_roles(world, monkeypatch):
+def test_claimed_room_reaches_parent_under_low_and_nano_and_its_helpers_by_their_carried_names(world, monkeypatch):
     project = create_project(world[0].drive_root, "nova", name="Nova")
     room = project["chat_id"]
     head = "Working Nova fact. " * 2_000
@@ -158,12 +159,163 @@ def test_claimed_room_reaches_parent_under_low_and_nano_and_skips_delegated_role
     assert "Nano's target (" not in _blocks(fits)[-1]["text"]
     assert not _held(_plan(world, 300_000, mode="low"))  # Main is not the claimed room
 
+    # A helper holds the entries its room's integrating work holds now, then the one host sentence; a helper that
+    # carries no names (scheduled before the install recorded a claim) holds none.
     for role, dispatch in (("child", {}), ("nanny", {"configured_subagent": {"route": {"kind": "agent_session"}}})):
         delegated = {**project_task, "delegation_role": "subagent", **dispatch}
-        helper = _plan(world, 300_000, mode="low", task=delegated)
-        assert helper.low_projection.memory_facts["role"] == role
-        assert helper.low_projection.memory_facts["room_id"] == str(room)
-        assert not _held(helper)
+        for carried, held in (({}, ""), ({CARRIED_NAMES: [f"room:{room}"]}, _held(parent) + "\n\n" + held_notes.HELPER_NOTE)):
+            helper = _plan(world, 300_000, mode="low", task={**delegated, "metadata": carried})
+            assert helper.low_projection.memory_facts["role"] == role
+            assert helper.low_projection.memory_facts["room_id"] == str(room)
+            assert _held(helper) == held and not _cuts(helper)
+
+
+@pytest.fixture
+def actors(monkeypatch):
+    from ouroboros.tools import control
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    monkeypatch.setenv("OUROBOROS_MAX_SUBAGENT_DEPTH", "4")
+
+
+def _scheduler(world, task_id, metadata, *, drive=None, contract=None, depth=0):
+    import queue
+
+    from ouroboros.contracts.task_contract import build_task_contract
+
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=Path(drive or world[0].drive_root),
+                      budget_drive_root=str(world[0].drive_root), current_task_type="task")
+    ctx.task_id, ctx.task_depth, ctx.event_queue, ctx.task_metadata = task_id, depth, queue.Queue(), dict(metadata)
+    ctx.task_contract = contract or build_task_contract({"id": task_id, "type": "task", "text": "Collect the figures"})
+    return ctx
+
+
+def _scheduled(ctx, subagent_id="api-builder", **extra):
+    """One real schedule_subagent: its result and the child's record as the supervisor builds it."""
+    from ouroboros.tools.control_scheduling import _schedule_task
+    from supervisor.task_dispatch import build_scheduled_task_payload
+
+    result = _schedule_task(ctx, subagent_id=subagent_id, objective="Collect the figures", expected_output="figures",
+                            memory_mode="empty", **extra)
+    assert not result.startswith("⚠️"), result
+    event = ctx.event_queue.get_nowait()
+    return result, build_scheduled_task_payload({**event, "tid": event["task_id"], "parent_id": ctx.task_id,
+                                                 "text": event["objective"], "desc": event["objective"]})
+
+
+def _child_scheduler(world, payload):
+    return _scheduler(world, payload["id"], payload["metadata"], drive=payload["drive_root"],
+                      contract=payload["task_contract"], depth=payload["depth"])
+
+
+def test_a_place_turns_helpers_hold_the_place_page_read_its_room_and_pass_its_names_down(world, actors):
+    """A place turn's child holds the page that claims the place's room and not Main's, reads that room's marks
+    and page, keeps its owner words, and its own child carries the same names; the parent is told the names."""
+    from ouroboros import owner_words
+    from ouroboros.chronicle_store import ChronicleStore
+    from tests._memory_inventory_shared import MIND
+
+    route = {"provider": "chat", "account_id": "team", "conversation_id": "nova", "thread_id": ""}
+    names = ["room:789", "place:team-place", "conversation:chat/team/nova"]
+    _write(world, "place-page", "The place's working fact.", claims=(names[0],), title="Place page")
+    _write(world, "main-page", "Main's working fact.", claims=("room:1",), title="Main page")
+    store = ChronicleStore(world[0].drive_root)
+    assert store.ensure_activated()["kind"] == "activation"
+    store.mark({"kind": "task", "task_id": "x"}, "Mark of the place room", MIND, room_id="789")
+    store.mark({"kind": "task", "task_id": "y"}, "Mark of Main", MIND, room_id="1")
+    said = {"text": "Find the release figures", "source": "initial_user", "carrier": "ctx", "task_id": "place-turn",
+            "ts": "2026-11-19T10:00:00+00:00", "ref": "chat 1 / msg-1"}
+    turn = _scheduler(world, "place-turn", {"root_task_id": "place-turn", "presence": {"place_id": "team-place", "event": route},
+                                            "focus": {"place_id": "team-place", "room_chat_id": 789, "transport": route},
+                                            owner_words.FIELD: [said]})
+
+    result, child = _scheduled(turn)
+    assert child["metadata"][CARRIED_NAMES] == names
+    assert result.endswith(f"\nheld notes: the child carries my situation names ({', '.join(names)}); it holds the heads "
+                           "of the notes that claim them, read at its start (claiming now: place-page).")
+    without = {**child, "metadata": {key: value for key, value in child["metadata"].items() if key != CARRIED_NAMES}}
+    plans = {"carried": _plan(world, task=child), "own facts": _plan(world, task=without)}
+    facts = {kind: plan.projection(plan.initial_mode).memory_facts for kind, plan in plans.items()}
+    texts = {kind: _blocks(plan)[-1]["text"] for kind, plan in plans.items()}
+    assert facts["carried"]["role"] == facts["own facts"]["role"] == "child"
+    assert (facts["carried"]["room_id"], facts["own facts"]["room_id"]) == ("789", "1")
+    assert "The place's working fact." in _held(plans["carried"]) and "Main's working fact." not in texts["carried"]
+    assert not _held(plans["own facts"])
+    assert "Mark of the place room" in texts["carried"] and "Mark of Main" not in texts["carried"]
+    assert "Mark of Main" in texts["own facts"] and "Mark of the place room" not in texts["own facts"]
+    views = {kind: json.loads(plan.core.memory_view_json) for kind, plan in plans.items()}
+    assert views["carried"]["owner_words"] == views["own facts"]["owner_words"]  # my human's words: unchanged
+    assert owner_words._HEADINGS["child"] in views["carried"]["owner_words"]
+    assert "Find the release figures" in views["carried"]["owner_words"]
+
+    _result, grandchild = _scheduled(_child_scheduler(world, child))
+    assert grandchild["metadata"][CARRIED_NAMES] == names
+    assert "The place's working fact." in _held(_plan(world, task=grandchild))
+
+
+def test_a_declared_child_holds_no_head_and_its_receipt_names_the_omission_only_where_a_note_claims_its_room(world):
+    from ouroboros.subagent_work_order import input_source_selection_receipt, work_order_fingerprint
+
+    project = create_project(world[0].drive_root, "nova", name="Nova")
+    room = project["chat_id"]
+    declared = {**TASK, "id": "declared-child", "project_id": project["id"], "chat_id": room, "delegation_role": "subagent",
+                "configured_subagent": {"route": {"kind": "api_model"}}, "metadata": {CARRIED_NAMES: [f"room:{room}"]},
+                "task_contract": {"objective": "Judge the release", "input_sources": "declared"}}
+
+    def receipt(plan):
+        return json.loads(_blocks(plan)[-1]["text"].split("## Input source selection\n\n", 1)[1].split("\n\n", 1)[0])
+
+    fingerprint = work_order_fingerprint(declared)
+    quiet = receipt(_plan(world, task=declared))  # no note claims the room: the receipt as it was
+    assert quiet == input_source_selection_receipt(declared, native=True)
+    _write(world, "nova", "Nova working head.", claims=(f"room:{room}",))
+    plan = _plan(world, task=declared)
+    claimed = receipt(plan)
+    assert claimed["omitted_automatic"] == [*quiet["omitted_automatic"], "the heads of the knowledge notes that claim "
+                                            "this work's room, which a shared child holds: nova"]
+    assert {**claimed, "omitted_automatic": quiet["omitted_automatic"]} == quiet
+    assert not _held(plan) and "Nova working head." not in json.dumps(plan.messages_for(plan.initial_mode))
+    assert work_order_fingerprint(declared) == fingerprint  # the omission is named outside the work order
+    shared = {**declared, "task_contract": {"objective": "Judge the release"}}
+    assert "Nova working head." in _held(_plan(world, task=shared))
+
+
+def test_with_no_recorded_claim_helpers_start_and_are_scheduled_as_before(world, actors, monkeypatch):
+    """No claim on the install: nothing is carried, said or held, and a helper's start is byte-equal to one built
+    without held heads at all, for a child and a nanny, in a Project room and in a place turn's room."""
+    project = create_project(world[0].drive_root, "nova", name="Nova")
+    for number in range(3):
+        _write(world, f"ordinary-{number}", "Ordinary durable understanding.", claims=())
+    route = {"provider": "chat", "account_id": "team", "conversation_id": "nova", "thread_id": ""}
+    parents = (_scheduler(world, "project-root", {"root_task_id": "project-root"}),
+               _scheduler(world, "place-turn", {"root_task_id": "place-turn", "presence": {"place_id": "p", "event": route},
+                                                "focus": {"place_id": "p", "room_chat_id": 789, "transport": route}}))
+    parents[0].project_id = project["id"]
+    for parent in parents:
+        for subagent_id in ("api-builder", "session-builder"):
+            result, child = _scheduled(parent, subagent_id=subagent_id)
+            assert "held notes:" not in result and CARRIED_NAMES not in child["metadata"]
+            with monkeypatch.context() as patch:
+                patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
+                baseline = _plan(world, task=child)
+            plan = _plan(world, task=child)
+            assert json.dumps(plan.messages_for(plan.initial_mode)) == json.dumps(baseline.messages_for(baseline.initial_mode))
+
+
+def test_reviewers_councils_safety_and_writers_never_reach_the_held_heads():
+    """Held heads enter a request at two seams only: the worker's context builder (the agent imports it, nothing
+    else does) and a session's memory delivery (delegate_start). Reviewers, plan councils, Safety, the chooser, the
+    Light fallback and the fold and story writers build their own requests, so a note's head never reaches them."""
+    repo = Path(held_notes.__file__).resolve().parents[1]
+    sources = {path.relative_to(repo).as_posix(): path.read_text(encoding="utf-8")
+               for folder in ("ouroboros", "supervisor") for path in (repo / folder).rglob("*.py")}
+    seams = {"import build_llm_messages": {"ouroboros/agent.py"},
+             "held_notes.turn_sections(": {"ouroboros/context.py", "ouroboros/subagent_work_order.py"},
+             "session_memory_references(": {"ouroboros/subagent_work_order.py"},
+             "session_host_references(": {"ouroboros/subagent_work_order.py", "ouroboros/tools/delegate.py"}}
+    for needle, owners in seams.items():
+        assert {path for path, text in sources.items() if needle in text} == owners, needle
 
 
 def test_place_matches_are_exact_and_the_note_keeps_fenced_lines_and_crlf(world, monkeypatch):

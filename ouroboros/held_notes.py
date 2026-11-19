@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from ouroboros import knowledge, knowledge_versions
-from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
+from ouroboros.contracts.task_contract import task_input_sources
 from ouroboros.markdown_source import MarkdownSource
 from ouroboros.memory_view_events import situation_names
 from ouroboros.section_floor import HostSection
@@ -149,6 +149,48 @@ def continuation_capture(plan: Any, mode: str | None) -> dict:
     }}
 
 
+# Stands after the heads a helper holds, native or external; the reader line of a head an external session receives.
+HELPER_NOTE = ("[Host: the held notes above are my working notes, my account and not evidence: apply their facts, but "
+               "do not quote or copy them into code, commits, files or messages, and report any contradiction.]")
+EXTERNAL_READER = "an external session cannot call knowledge_read."
+
+
+def claimed_topics(root: Path, names: tuple[str, ...], inventory: tuple | None = None,
+                   claims: Mapping | None = None) -> list[str]:
+    """The topics of the active global notes whose recorded claims (``knowledge.active_claims``) name one of ``names``."""
+    if names and claims is None:
+        claims = knowledge.active_claims(root, inventory=inventory)
+    return sorted({address.topic for name in names for address in (claims or {}).get(name, ())})
+
+
+def carried_situation(ctx: Any, root: Path, *, declared: bool) -> tuple[dict, str]:
+    """``({CARRIED_NAMES: names}, the parent's line)`` for a helper this work schedules; ``({}, "")`` on an install
+    that records no claim, where the helper's record stays as it was. The line names the notes that claim the names
+    now: a queued helper reads their heads, at their revisions then, in its own start."""
+    from ouroboros.memory_view_events import CARRIED_NAMES, helper_names
+
+    try:
+        claims = knowledge.active_claims(root)
+        names = helper_names(ctx, root) if claims else ()
+    except (OSError, ValueError):  # an unreadable shelf or registry schedules the helper as before, without names
+        log.warning("Could not read the situation names a scheduled helper would carry", exc_info=True)
+        return {}, ""
+    if not names:
+        return {}, ""
+    holds = ("its input is declared, so it holds no head" if declared else
+             "it holds the heads of the notes that claim them, read at its start")
+    topics = ", ".join(claimed_topics(root, names, claims=claims)) or "none"
+    return {CARRIED_NAMES: list(names)}, (f"\nheld notes: the child carries my situation names ({', '.join(names)}); "
+                                          f"{holds} (claiming now: {topics}).")
+
+
+def sent_heads(entries: list[HeldNoteSection]) -> list[dict]:
+    """Each head an external session receives whole (its reader ``EXTERNAL_READER``), by address and revision."""
+    line = _reader_line("", EXTERNAL_READER) + "\n\n"
+    return [{"topic": part.topic, "revision": part.revision, "chars": len(head), "text": head}
+            for part in entries if (head := part.full_text.partition(line)[2])]
+
+
 def note_head(source: MarkdownSource) -> str:
     """Read physical lines of the body, using the Markdown parser's fenced ranges."""
     start = cursor = source.body_span.start_byte
@@ -167,6 +209,8 @@ def _reader_restriction(ctx: Any, root: Path, topic: str, revision: str, length:
     from ouroboros.tools.registry_core import _presence_bound_args
     from ouroboros.tools.registry_guards import _capability_resource_guard_result
 
+    if unavailable := getattr(ctx, "held_reader_unavailable", ""):  # an actor without the tool (``EXTERNAL_READER``)
+        return unavailable
     args = {"topic": topic, "scope": "global", "version": revision}
     bound, refusal = _presence_bound_args(ctx, "knowledge_read", args)
     if refusal:
@@ -237,8 +281,8 @@ def _entry(note: knowledge.KnowledgeNote, matched: list[str], *, first: bool, ct
 
 def turn_sections(root: Path, task: Mapping[str, Any], spec: Any, navigation: Mapping,
                   *, ctx: Any = None) -> list[HeldNoteSection]:
-    """Select recorded global claims from the same inventory the knowledge index used."""
-    if spec.role in DELEGATED_FOCUS_ROLES:
+    """Select recorded global claims from the same inventory the knowledge index used; a declared input holds none."""
+    if task_input_sources(task) == "declared":
         return []
     inventory = navigation.get("inventory", ())
     if (captured := getattr(ctx, "_held_note_capture", None)) is not None:

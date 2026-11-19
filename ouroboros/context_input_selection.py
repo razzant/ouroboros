@@ -482,9 +482,13 @@ def _declared_omissions(task: Dict[str, Any], spec: Any) -> Any:
                                other_conversations=False, owner_words=declared_inputs_carry_owner_words(task))
 
 
-def declared_receipt_section(task: Dict[str, Any]) -> str:
-    """``## Input source selection``: the native request's receipt, the one builder's view named in it."""
+def declared_receipt_section(task: Dict[str, Any], held_omitted: Any = ()) -> str:
+    """``## Input source selection``: the native request's receipt, the one builder's view named in it, and the notes
+    whose heads a shared child of this situation would hold (``held_omitted``, topics; none named when none claim it)."""
     from ouroboros.subagent_work_order import input_source_selection_receipt  # D03->D07 is lazy-only
 
     receipt = input_source_selection_receipt(task, native=True)
+    if held_omitted:  # outside the receipt the work order carries, whose fingerprint stays
+        receipt["omitted_automatic"].append("the heads of the knowledge notes that claim this work's room, which a "
+                                            "shared child holds: " + ", ".join(held_omitted))
     return "## Input source selection\n\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True)
