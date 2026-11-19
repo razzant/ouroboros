@@ -26,6 +26,7 @@ INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
 PUBLICATION_LOCK_NAME = "packs_publication.lock"  # manifest publication vs reference census + unlink
 PUBLICATIONS_NAME = ".publications"  # pass-local refs appended before manifest publication, under the same lock
+DAMAGED_MARK = ".index.sqlite.damaged"  # left where the live index met damage its O(1) facts miss; its rebuild removes it
 INDEX_WAIT_SEC = 5.0
 UNLINK_SECTION_SEC = 0.5  # one deletion section's budget under the store write lock, publication lock included
 UNLINK_SECTION_GAP_SEC = 0.15  # between sections: longer than a waiting writer's SQLite busy poll (100 ms)
@@ -317,11 +318,13 @@ def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
     time, into a private file outside the index lock; that file must pass a whole-file check before it
     replaces the old one under the lock, where a usable index another builder published meanwhile wins (with
     its later writes); a failure keeps the old file. ``None`` when the cache is usable; else the rebuild's
-    facts, also recorded as one ``storage_pack`` row (``phase: index_rebuilt``)."""
+    facts, also recorded as one ``storage_pack`` row (``phase: index_rebuilt``). A cache a read found damaged
+    (``DAMAGED_MARK``) counts as failing; its rebuild removes the mark."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
+    mark = path.parent / DAMAGED_MARK
     with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):
-        if _index_valid(path, tier):
+        if _index_valid(path, tier) and not mark.exists():
             return None
     started, faults, count = time.monotonic(), [], 0
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,12 +343,14 @@ def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
             if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise sqlite3.DatabaseError("the rebuilt evidence index failed its whole-file check")
         with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=_index_wait()):
-            if _index_valid(path, tier):
+            if _index_valid(path, tier) and not mark.exists():
                 return None  # another builder published; keep its subsequent writes too
             with contextlib.suppress(FileNotFoundError):
                 tmp.chmod(path.stat().st_mode)
             replace_atomic(tmp, path)
             store.fsync_directory(path.parent)
+            with contextlib.suppress(FileNotFoundError):
+                mark.unlink()
     finally:
         for leftover in (tmp, *(tmp.with_name(tmp.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
             with contextlib.suppress(FileNotFoundError):
@@ -356,11 +361,13 @@ def ensure_index(root: Any) -> Optional[Dict[str, Any]]:
 
 
 def index_owed(root: Any) -> bool:
-    """Whether the packing pass owes ``root`` a rebuild: packs exist and the cache's O(1) facts fail
-    (missing, foreign, another schema). No lock is taken; a held lock or file is no such fact."""
+    """Whether the packing pass owes ``root`` a rebuild: packs exist and the cache's O(1) facts fail (missing,
+    foreign, another schema) or a read met damage behind them (``DAMAGED_MARK``). No lock is taken; a held
+    lock or file is no such fact."""
     root = pathlib.Path(root)
     try:
-        return packs_dir(root).is_dir() and not _index_valid(packs_dir(root) / INDEX_NAME, index_tier(root), wait_sec=0)
+        return packs_dir(root).is_dir() and ((packs_dir(root) / DAMAGED_MARK).exists() or not _index_valid(
+            packs_dir(root) / INDEX_NAME, index_tier(root), wait_sec=0))
     except store.StoreBusy:
         return False
 
@@ -369,7 +376,8 @@ def index_owed(root: Any) -> bool:
 def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC) -> Iterator[sqlite3.Connection]:
     """One transaction under the name lock, narrowed by the caller's acquisition budget. A cache whose O(1)
     facts fail (``_index_valid``) is ``EvidenceUnavailable``: it awaits the packing pass's rebuild
-    (``ensure_index``), never its reader's. ``store.StoreBusy`` on contention."""
+    (``ensure_index``), never its reader's; a non-busy SQLite error from the live file (damage behind those
+    facts) leaves ``DAMAGED_MARK`` for that pass, best effort. ``store.StoreBusy`` on contention."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
     wait_sec = _index_wait(wait_sec)
@@ -377,9 +385,15 @@ def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_S
         if not _index_valid(path, tier, wait_sec=wait_sec):
             raise EvidenceUnavailable("evidence_unavailable: the evidence index awaits the packing pass's rebuild",
                                       reason="damaged")
-        with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
-            with store.transaction(conn, write=write):
-                yield conn
+        try:
+            with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
+                with store.transaction(conn, write=write):
+                    yield conn
+        except sqlite3.DatabaseError as exc:
+            if not store.busy(exc):
+                with contextlib.suppress(OSError):  # a root may be read-only: the read's answer stands either way
+                    (path.parent / DAMAGED_MARK).touch()
+            raise
 
 
 def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:

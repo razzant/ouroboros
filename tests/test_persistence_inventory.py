@@ -1008,7 +1008,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
 # (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
 # The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
-EXPECTED_SCAN_PATHS = 476
+# 476 -> 477: the evidence index's damage mark ``observability/packs/.index.sqlite.damaged``, left where the
+# live index met damage its O(1) facts miss and removed by its rebuild (``ouroboros/evidence_packs.py``,
+# ``DAMAGED_MARK``); the existing evidence-pack row names it.
+EXPECTED_SCAN_PATHS = 477
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

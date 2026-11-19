@@ -3,8 +3,10 @@ child slot (no stamp walk on a server thread) while the child keeps its lifetime
 packing authority."""
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
+import sqlite3
 import threading
 import time
 import weakref
@@ -170,6 +172,42 @@ def test_a_resting_install_owes_its_pass_the_index_rebuild_and_the_pass_streams_
     peak[0] = 0
     assert packs.pending_restore_bytes(root) > 0 and packs.restore_checkpoint_handles(root)["handles"] == 4
     assert peak[0] <= 2, peak
+
+
+def test_page_damage_behind_a_sound_header_is_marked_where_it_is_met_and_healed_by_the_pass(root, monkeypatch):
+    """Damage no O(1) fact sees surfaces as the SQLite error of the read that meets it: a read by sha alone
+    answers ``evidence_unavailable`` (damaged) and leaves the damage mark beside the index, which makes the
+    packing job owe a rebuild; the pass rebuilds the cache, checks its own file, publishes it and removes the
+    mark, and the same read answers again. A read naming its task answers from that task's sidecars
+    throughout; a sound index and a merely held lock leave no mark."""
+    from tests._store_journal_shared import use_journal
+
+    use_journal(monkeypatch, "PERSIST")  # the damaged page lies in the file itself, not in a WAL
+    refs = {task: _task(root, task, blobs=1)[0][0] for task in ("a", "b", "c")}
+    for _ in range(2):  # packs, then the one more look that records the moved stamps
+        maintenance.run_job(root, "evidence_packing")
+    index, mark = packs.packs_dir(root) / packs.INDEX_NAME, packs.packs_dir(root) / ".index.sqlite.damaged"
+    whole = packs.blob_bytes(root, refs["a"], task_id="a")
+    assert packs.blob_bytes(root, refs["a"]) == whole
+    with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0):
+        with pytest.raises(packs.EvidenceUnavailable) as held:
+            packs.blob_bytes(root, refs["a"])
+    assert held.value.reason == "busy" and not mark.exists() and "evidence_packing" not in maintenance.due(root)
+    with contextlib.closing(sqlite3.connect(index)) as conn:  # the members' key, behind a sound header and meta row
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='sqlite_autoindex_members_1'").fetchone()[0]
+        size = conn.execute("PRAGMA page_size").fetchone()[0]
+    with open(index, "r+b") as handle:
+        handle.seek((page - 1) * size)
+        handle.write(b"\0" * size)
+    assert "evidence_packing" not in maintenance.due(root)  # no O(1) fact sees it
+    with pytest.raises(packs.EvidenceUnavailable) as damaged:
+        packs.blob_bytes(root, refs["a"])
+    assert damaged.value.reason == "damaged" and mark.exists()
+    assert packs.blob_bytes(root, refs["a"], task_id="a") == whole  # its own sidecars still answer
+    assert "evidence_packing" in maintenance.due(root)
+    assert maintenance.run_job(root, "evidence_packing")["state"] == "done"
+    assert not mark.exists() and packs.blob_bytes(root, refs["a"]) == whole
+    assert "evidence_packing" not in maintenance.due(root)
 
 
 @pytest.mark.parametrize("busy", ["facts", "packs", "packs_sql"])
