@@ -27,11 +27,12 @@ ownership belong to their stores.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from ouroboros import places, conversation_lease
+from ouroboros.presence_bindings import conversation_key, direct_user_route, is_direct_id
 from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, ToolEffect, argument_value, bound_declaration,
-                                    connector_of, effect_of, target_values, thread_pairs, touched_addresses)
+                                    connector_of, direct_send_selectors, effect_of, target_values, thread_pairs, touched_addresses)
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
 PLACE_BINDING_VERSION = 1
@@ -96,6 +97,7 @@ class _CallReach:
     siblings: list = field(default_factory=list)
     attributable: bool = True
     problem: str = ""
+    direct_route: tuple[str, str, str] | None = None
 
     def reach(self, place: Any, effect: str, via: str, account: str, keys: list) -> None:
         found = self.reaches.setdefault((place.place_id, account), _Reach(place, account))
@@ -129,6 +131,29 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
         if call.problem:
             return call
     routing = {key: targets[key] for key in ("account_id", effect.conversation, effect.thread) if key in targets}
+    selectors = direct_send_selectors(name, ext_tool)
+    user_dialog = False
+    if selectors:
+        provider, pin, chat = selectors
+        if provider == "telegram" and effect.thread and telegram_topic(argument_value(args, effect.thread)) is None:
+            call.problem = "a Telegram topic needs one canonical positive decimal string ID"
+            return call
+        users = targets.get(chat, [])
+        raw_chat = argument_value(args, chat)
+        if (provider == "telegram" and len(users) == 1 and users[0].isascii() and users[0].isdecimal()
+                and not is_direct_id(raw_chat, provider)):
+            call.problem = "a Telegram user chat needs one canonical decimal string ID"
+            return call
+        user_dialog = len(users) == 1 and is_direct_id(users[0], provider)
+        if user_dialog:
+            call.siblings = [place for place in call.siblings if place.provider == provider]
+            call.direct_route = direct_user_route(provider, args.get(pin), argument_value(args, chat))
+            if call.direct_route:
+                routing["account_id"] = [call.direct_route[1]]
+            elif (_owner_direct_accounts(call.siblings, users[0])
+                  or _direct_place_accounts(call.siblings, users[0], effect, targets)):
+                call.problem = "this account-specific dialog needs an exact account pin"
+                return call
     same = bool(effect.thread) and effect.thread == effect.conversation
     if effect.touches:
         destinations = _grouped_destinations(effect, targets, routing, args)
@@ -140,12 +165,17 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
         # One argument naming both conversation and thread pairs each id with itself; beside another key its
         # list is no thread, so no id is matched with another's thread.
         thread = "" if same and key != effect.conversation else effect.thread
-        place, known = places.place_for_target(root, connector=connector, targets=destination,
-                                             conversation=effect.conversation, thread=thread)
+        if user_dialog:
+            place, known = places.target_place(call.siblings, targets=destination, conversation=effect.conversation, thread=thread)
+        else:
+            place, known = places.place_for_target(root, connector=connector, targets=destination,
+                                                  conversation=effect.conversation, thread=thread)
         call.attributable = call.attributable and known
         if place is not None:
-            account = _call_account(ctx, place, next(iter((destination if via == "account" else targets).get(
-                "account_id", [])), ""))
+            addressed = destination if call.direct_route or via == "account" else targets
+            account = next(iter(addressed.get("account_id", [])), "")
+            if not user_dialog:
+                account = _call_account(ctx, place, account)
             call.reach(place, effect.effect, via, account, _conversation_keys(
                 place, effect, destination if effect.touches else targets, account_id=account))
     _reach_addresses(call, root, connector, ctx)
@@ -225,6 +255,210 @@ def _reply_route(place: Any, destination: Any) -> tuple[str, str]:
     return str(route.get("transport") or "") or place.provider, "" if account == "*" else account
 
 
+def direct_reply_route(presence: Any, place: places.Place, destination: Mapping) -> tuple[str, str, str] | None:
+    """The connector's promised reply to this very private user, if it uses the retained route.
+
+    The authenticated event's conversation (never its author) names the user. The connector promises
+    to pin its own event's account, chat and thread on delivery. A redirected or legacy reply lacks this proof.
+    """
+    if (not isinstance(presence, Mapping) or presence.get("transport_skill") != place.connector
+            or presence.get("place_id") != place.place_id):
+        return None
+    event = presence.get("event")
+    if not isinstance(event, Mapping) or not presence.get("direct_reply_key"):
+        return None
+    account, user, thread = event.get("account_id"), event.get("conversation_id"), event.get("thread_id")
+    key = conversation_key(place.provider, account, user, thread)
+    if (presence["direct_reply_key"] != key or event.get("conversation_key") != key or not isinstance(thread, str)
+            or (place.provider == "telegram" and telegram_topic(thread) != thread)
+            or event.get("provider") != place.provider or event.get("destination") != destination
+            or destination != {"transport": place.provider, "account_id": account, "conversation_id": user, "thread_id": thread}):
+        return None
+    return direct_user_route(place.provider, account, user)
+
+
+def _direct_place_accounts(records: list[places.Place], user: str, effect: ToolEffect, targets: dict) -> set[str]:
+    """Accounts naming this dialog. An account-wide fallback counts only if the ordinary matcher would select it."""
+    fallback, _ = places.target_place(records, targets=targets, conversation=effect.conversation, thread=effect.thread)
+    threads = targets.get(effect.thread, [])
+    named, account_wide = set(), set()
+    for place in records:
+        scopes = [(place.account_id, place.conversation_id, place.thread_id)]
+        if place.destination:
+            scopes.append(tuple(place.destination.get(key, "") for key in ("account_id", "conversation_id", "thread_id")))
+        for account, room, topic in scopes:
+            if not topic or topic in threads:
+                if room == user:
+                    named.add(account)
+                elif not room and place is fallback:
+                    account_wide.add(account)
+    return (named or account_wide) - {"", "*"}
+
+
+def _owner_direct_accounts(records: Iterable[places.Place], user: str) -> set[str]:
+    """Only current explicit owner associations in these connector/provider places count as evidence."""
+    accounts = set()
+    for place in records:
+        for entry in place.owner_accounts:
+            account = entry.account_id or place.account_id
+            if entry.platform_actor_id == user and is_direct_id(account, place.provider):
+                accounts.add(account)
+    return accounts
+
+
+def telegram_topic(value: Any) -> str | None:
+    """Empty or an exact positive decimal topic; None means invalid."""
+    if value is None or value == "":
+        return ""
+    return value if is_direct_id(value, "telegram") else None
+
+
+def owner_dm_binding(records, connector, route, thread, *, tool="place_reply", expected=None):
+    """The exact confirmation of this recipient, not the Place that governs delivery.
+
+    Requiring the recorded entry distinguishes a later reconfirmation or reconnection.
+    Another place of this bot may have supplied the confirmation.
+    """
+    if not route or route[0] != "telegram" or telegram_topic(thread) != thread:
+        return None
+    provider, account, user = route
+    for place in records:
+        if (place.connector, place.provider) != (connector, provider):
+            continue
+        for entry in place.owner_accounts:
+            if not entry.confirmed_at or (entry.account_id or place.account_id, entry.platform_actor_id) != (account, user):
+                continue
+            binding = {"connector": connector, "tool": tool, "provider": provider, "account_id": account,
+                       "conversation_id": user, "thread_id": thread, "place_id": place.place_id,
+                       "connected_revision": place.connected_revision, "confirmed_at": entry.confirmed_at}
+            if expected is None or binding == expected:
+                return binding
+    return None
+
+
+def capture_owner_dm(root, snapshot, connector, route, thread, *, tool="place_reply"):
+    """Capture the proof of audience and the selected outbound policy from one host snapshot."""
+    identity = owner_dm_binding(snapshot.places.values(), connector, route, thread, tool=tool)
+    if identity is None:
+        return None
+    target = {key: identity[key] for key in _DELIVERY_TARGET_FIELDS}
+    decision = outbox_binding_facts(root, connector, target, require_place=True, snapshot=snapshot)
+    if not decision["binding"]:
+        return None
+    condition = {**identity, "observed_revision": snapshot.revision, "delivery_place": decision["binding"]}
+    return condition if valid_owner_dm(condition, connector, target) else None
+
+
+def valid_owner_dm(condition, connector, target) -> bool:
+    """Validate the opaque condition's shape and target; the current owner proof still has to be read."""
+    if not isinstance(condition, dict) or condition.keys() != {
+        *_DELIVERY_TARGET_FIELDS, "connector", "tool", "place_id", "connected_revision", "confirmed_at",
+        "observed_revision", "delivery_place",
+    }:
+        return False
+    if (not isinstance(target, Mapping) or target.keys() != set(_DELIVERY_TARGET_FIELDS)
+            or any(not isinstance(value, str) for value in target.values())):
+        return False
+    provider, account, user, thread = (target[key] for key in _DELIVERY_TARGET_FIELDS)
+    outbound = condition["delivery_place"]
+    return (condition["connector"] == connector and isinstance(connector, str) and bool(connector)
+            and provider == "telegram" and direct_user_route(provider, account, user) is not None
+            and telegram_topic(thread) == thread
+            and all(condition[key] == target[key] for key in _DELIVERY_TARGET_FIELDS)
+            and all(isinstance(condition[key], str) and condition[key] for key in ("tool", "place_id", "confirmed_at"))
+            and type(condition["connected_revision"]) is int and condition["connected_revision"] >= 0
+            and isinstance(outbound, dict) and outbound.keys() == {
+                *_DELIVERY_TARGET_FIELDS, "connector", "version", "place_id", "connected_revision"}
+            and outbound["connector"] == connector
+            and type(outbound["version"]) is int and outbound["version"] == PLACE_BINDING_VERSION
+            and all(outbound[key] == target[key] for key in _DELIVERY_TARGET_FIELDS)
+            and isinstance(outbound["place_id"], str) and bool(outbound["place_id"])
+            and type(outbound["connected_revision"]) is int and outbound["connected_revision"] >= 0
+            and type(condition["observed_revision"]) is int
+            and condition["observed_revision"] >= max(condition["connected_revision"], outbound["connected_revision"]))
+
+
+def check_owner_dm(root, connector, target, condition, *, snapshot=None):
+    """None means the original owner confirmation is gone; otherwise return the outbound Place decision."""
+    if not valid_owner_dm(condition, connector, target):
+        raise ValueError("The owner confirmation does not match this delivery address.")
+    floor = condition["observed_revision"]
+    if snapshot is None:
+        snapshot = places.place_records(root, minimum_revision=floor)
+    if snapshot.revision < floor:
+        raise places.PlaceError("places_unreadable", "revision", "The Places snapshot predates the recorded check.")
+    route = direct_user_route("telegram", target["account_id"], target["conversation_id"])
+    identity = {key: value for key, value in condition.items() if key not in {"observed_revision", "delivery_place"}}
+    if owner_dm_binding(snapshot.places.values(), connector, route, target["thread_id"],
+                        tool=condition["tool"], expected=identity) is None:
+        return None
+    outbound = condition["delivery_place"]
+    decision = outbox_binding_facts(root, connector, target, binding=outbound, require_place=True, snapshot=snapshot)
+    if decision["place_id"] != outbound["place_id"]:
+        return {**decision, "allowed": False, "state": "changed", "code": "place_scope_changed"}
+    if not decision["allowed"]:
+        return decision
+    # An outbound declaration can strengthen the check, but cannot open an address the ordinary
+    # named lookup holds. This check uses the same snapshot and never substitutes its Place for the binding.
+    try:
+        prior = places.resolve_place(root, connector=connector, places=snapshot.places.values(), **target)
+    except places.PlaceError as exc:
+        if exc.code != "place_ambiguous":
+            raise
+        return {**decision, "allowed": False, "state": "changed", "code": exc.code}
+    if prior is None or prior.state != places.STATE_ACTIVE:
+        code = "place_not_connected" if prior is None else f"place_{prior.state}"
+        return {**decision, "allowed": False, "state": "changed", "code": code}
+    return decision
+
+
+def bind_direct_send(ctx: Any, name: str, ext_tool: Mapping, args: dict) -> bool:
+    """Bind the host's private copy of this call before place policy, Safety and dispatch.
+    A pin constrains a delivery. Only the connector can establish which account it actually has.
+    Return whether these are a direct-recipient tool's effective arguments, for its later readers.
+    """
+    selectors = direct_send_selectors(name, ext_tool)
+    if selectors is None:
+        return False
+    provider, pin, chat = selectors
+    root = _drive_root(ctx)
+    user = argument_value(args, chat)
+    conditional = bound_declaration(ext_tool)["tool"]["direct_recipient"].get("confirmation") == "owner_confirmation"
+    if conditional:
+        args.pop("owner_confirmation", None)  # only this host can attach the delivery condition
+    if root and (conditional or pin not in args) and is_direct_id(user, provider):
+        try:
+            skill = ext_tool["skill"]
+            snapshot = places.place_records(root)
+            records = [p for p in snapshot.places.values() if (p.connector, p.provider) == (skill, provider)]
+            effect = effect_of(name, ext_tool=ext_tool, ctx=ctx, args=args)
+            if pin not in args:
+                presence = _metadata(ctx).get("presence") or {}
+                event = presence.get("event") or {}
+                focus = next((p for p in records if p.place_id == presence.get("place_id")), None)
+                source = (direct_reply_route(presence, focus, event.get("destination") or {})
+                          if focus and provider == "telegram" else None)
+                if source and source[2] == user:
+                    args[pin] = source[1]
+                else:
+                    accounts = (_owner_direct_accounts(records, user)
+                                or _direct_place_accounts(records, user, effect, target_values(effect, args)))
+                    if len(accounts) == 1:
+                        account, = accounts
+                        if is_direct_id(account, provider):
+                            args[pin] = account
+            if conditional:
+                route = direct_user_route(provider, args.get(pin), user)
+                topic = telegram_topic(argument_value(args, effect.thread)) if effect.thread else ""
+                if topic is not None:
+                    binding = capture_owner_dm(root, snapshot, skill, route, topic, tool=name)
+                    if binding:
+                        args["owner_confirmation"] = binding
+        except places.PlaceError:
+            pass  # dispatch_refusal reports the unreadable store; it cannot supply a pin.
+    return True
+
+
 def _reply_touches(entries: Any, account: str) -> tuple:
     from ouroboros.tool_effects import TouchAddress
 
@@ -253,8 +487,6 @@ def reply_address_hold(root: Any, place: Any, destination: Any, addresses: Mappi
 
 
 def _key(place: Any, account: str, conversation: str, thread: str) -> str:
-    from ouroboros.presence_bindings import conversation_key
-
     return conversation_key(place.provider, account or place.account_id, conversation, thread)
 
 
@@ -316,7 +548,9 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         if reach.effects - {EFFECT_READ} and place.state in (places.STATE_SILENT, places.STATE_PAUSED):
             return (_PREFIX + f"{place.label or place.place_id} is {place.state.title()}; {name!r} cannot write there. "
                     "Change its state in Circles or with configure_presence before writing there.")
-    blocked = [place for place in call.siblings if place.state in (places.STATE_SILENT, places.STATE_PAUSED)]
+    blocked = [place for place in call.siblings if place.state in (places.STATE_SILENT, places.STATE_PAUSED)
+               and (not call.direct_route or (place.provider == call.direct_route[0]
+                                              and places.account_in_place_scope(place, call.direct_route[1])))]
     if not call.attributable and blocked:
         labels = ", ".join(place.label or place.place_id for place in blocked)
         return (_PREFIX + f"The destination of {name!r} cannot be attributed while {labels} is Silent or Paused. "
@@ -491,6 +725,18 @@ def place_evidence(ctx: Any, place: dict[str, Any], place_ids: set[str], tool: s
     return notes
 
 
+def _current_owner_dm(root, connector, route, thread, tool, binding):
+    if not root or not route or not isinstance(binding, dict) or binding.get("tool") != tool:
+        return None
+    provider, account, user = route
+    target = {"provider": provider, "account_id": account, "conversation_id": user, "thread_id": thread}
+    try:
+        decision = check_owner_dm(root, connector, target, binding)
+    except ValueError:  # PlaceError is a ValueError: an unread store supplies no positive audience fact.
+        return None
+    return binding if decision and decision["allowed"] else None
+
+
 def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: Any = None,
                      is_mcp: bool = False) -> dict[str, Any]:
     """Host facts about where a call lands, for the Supervisor's bundle.
@@ -504,6 +750,7 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     remain its own. Calls without a destination keep the legacy scope inference. The automatic final's further addresses
     (its anchor's ``message.reply_targets``, carried in the reply's subject) are such ``write`` groups. A call whose
     addresses cannot be read carries ``problem`` and no place.
+    ``confirmed_owner_dm``, when present, names the sole external recipient if the connector sends.
     A place's notes are standing delegation: the bundle carries them once, beside the owner's rules.
     """
     try:
@@ -517,6 +764,8 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                 "problem": call.problem}
     destination = args.get("destination") if name == "place_reply" else None
     routed_reply = isinstance(destination, Mapping)
+    binding = args.get("owner_confirmation")
+    owner_dm = None
     if name == "place_reply":
         effect = ToolEffect(EFFECT_MESSAGE, targets=("account_id", "conversation_id"),
                             conversation="conversation_id", thread="thread_id", declared=True, source="builtin")
@@ -524,10 +773,10 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         targets = target_values(effect, destination if routed_reply else args)
         root = _drive_root(ctx)
         call.reaches = {}
-        for place in places.load_places(root) if root else []:
+        records = places.load_places(root) if root else []
+        for place in records:
             if place.place_id == args.get("place_id"):
                 if routed_reply:
-                    from ouroboros.presence_bindings import conversation_key
                     provider, account = _reply_route(place, destination)
                     keys = [conversation_key(provider, account, conversation, thread)
                             for conversation, thread in _target_pairs(effect, targets, None)[0]]
@@ -538,14 +787,29 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                 if problem := _reply_addresses(call, ctx, args, root, place):
                     return {"effect": EFFECT_MESSAGE, "declared": False, "targets": {}, "attributable": False,
                             "places": [], "problem": problem}
+                anchor = args.get("reply_anchor")
+                presence = _metadata(ctx).get("presence") or {}
+                if (isinstance(binding, dict) and presence.get("direct_reply_version") == 2 and routed_reply
+                        and isinstance(anchor, Mapping) and anchor.get("reply_targets") == []):
+                    route = direct_reply_route(presence, place, destination)
+                    owner_dm = _current_owner_dm(root, place.connector, route, destination.get("thread_id"), name, binding)
+    elif (isinstance(binding, dict) and call.direct_route and effect.declared
+          and effect.effect == EFFECT_MESSAGE and not call.touches
+          and bound_declaration(ext_tool)["tool"]["direct_recipient"].get("confirmation") == "owner_confirmation"):
+        topic = telegram_topic(argument_value(args, effect.thread)) if effect.thread else ""
+        owner_dm = _current_owner_dm(_drive_root(ctx), connector_of(name, ext_tool), call.direct_route, topic, name, binding)
     if not call.reaches and not call.siblings and not call.touches:
         return {}
     rows = []
+    conditional_sender = (direct_send_selectors(name, ext_tool) is not None
+                          or (routed_reply and (_metadata(ctx).get("presence") or {}).get("direct_reply_key")))
     for reach in call.reaches.values():
         from ouroboros.place_arrivals import recent_identity
         place, account, keys = reach.place, reach.account, reach.keys
         focus = _metadata(ctx).get("focus") or {}
-        known_sender = not routed_reply or (bool(account) and _reply_route(place, destination)[0] == place.provider)
+        # A proposed pin specifies the only possible account. A prior identity is no observation of this client.
+        known_sender = not conditional_sender and (
+            not routed_reply or (bool(account) and _reply_route(place, destination)[0] == place.provider))
         same_focus = known_sender and focus.get("place_id") == place.place_id and account == _call_account(ctx, place)
         identity = (focus.get("identity") if same_focus else recent_identity(_drive_root(ctx), place.place_id, account)
                     if known_sender else None)
@@ -563,6 +827,9 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                         if call.touches or call.effect.touches else {})})
     facts = {"effect": effect.effect, "declared": effect.declared, "targets": targets,
              "attributable": call.attributable, "places": rows}
+    if owner_dm:
+        facts["confirmed_owner_dm"] = {"connector": owner_dm["connector"], "provider": owner_dm["provider"],
+                                       "account_id": owner_dm["account_id"], "user_id": owner_dm["conversation_id"]}
     if call.touches:
         facts["touches"] = [{"effect": address.effect, "argument": address.argument, "conversation": address.conversation,
                              **({"thread": address.thread} if address.thread else {}),
@@ -579,10 +846,13 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
 
 def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[str, str], *,
                          binding: Mapping[str, Any] | None = None, require_place: bool = False,
-                         match: str = places.MATCH_SCOPE) -> dict[str, Any]:
-    """Capture or recheck one connector's enqueue-time place binding, without writes.
+                         match: str = places.MATCH_SCOPE,
+                         snapshot: places.PlaceRecords | None = None) -> dict[str, Any]:
+    """Capture or recheck one connector's enqueue-time place binding.
 
-    The snapshot records provenance, not a grant: delivery still checks current
+    For a named destination a caller's Places snapshot supplies both the original
+    and the currently selected Place without rereading policy between them.
+    The binding records provenance, not a grant: delivery still checks current
     scopes. A removed bound place never turns into an unbound operation. Callers
     retain this snapshot with the queued effect, and never synthesize it for old
     rows or infer it from ``origin.kind=tool``. ``match`` is how the destination meets
@@ -599,6 +869,8 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
     exact = match != places.MATCH_SCOPE  # ``exact`` or ``exact_casefold``
     if exact and not target["conversation_id"]:
         raise ValueError("An exact place binding needs its conversation_id.")
+    if snapshot is not None and not target["conversation_id"]:
+        raise ValueError("A snapshot-based place check needs its conversation_id.")
     declared_targets = {key: [value] for key, value in target.items() if key != "provider" and value}
     if binding is not None:
         if (not isinstance(binding, Mapping) or type(binding.get("version")) is not int
@@ -608,11 +880,16 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
                 or type(binding.get("connected_revision")) is not int or binding["connected_revision"] < 0):
             raise ValueError("The retained outbox binding does not match this connector and destination.")
         if binding["place_id"]:
-            try:
-                original = places.get_place(drive_root, binding["place_id"])
-            except places.PlaceError as exc:
-                if exc.code != "place_not_found":
-                    raise
+            if snapshot is not None:
+                original = snapshot.places.get(binding["place_id"])
+            else:
+                try:
+                    original = places.get_place(drive_root, binding["place_id"])
+                except places.PlaceError as exc:
+                    if exc.code != "place_not_found":
+                        raise
+                    original = None
+            if original is None:
                 return {"allowed": False, "binding": dict(binding), "state": "disconnected",
                         "code": "place_disconnected", "label": "", "place_id": binding["place_id"]}
             if original.connector != connector or original.provider != target["provider"]:
@@ -626,7 +903,7 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
                                                         thread="thread_id", match=match)
             else:
                 primary_scope = places.resolve_place(drive_root, connector=connector, binding_id=original.place_id,
-                                                     **target)
+                                                     places=(original,) if snapshot is not None else None, **target)
                 declared_scope, _ = places.target_place([original], targets=declared_targets,
                                                         conversation="conversation_id", thread="thread_id")
             if primary_scope is None and declared_scope is None:
@@ -637,9 +914,15 @@ def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[s
         elif require_place:
             raise ValueError("Place-bound delivery cannot use an unbound snapshot.")
 
-    current, attributable = places.place_for_target(
-        drive_root, connector=connector, provider=target["provider"], targets=declared_targets,
-        conversation="conversation_id", thread="thread_id", match=match)
+    if snapshot is None:
+        current, attributable = places.place_for_target(
+            drive_root, connector=connector, provider=target["provider"], targets=declared_targets,
+            conversation="conversation_id", thread="thread_id", match=match)
+    else:
+        siblings = [place for place in snapshot.places.values()
+                    if (place.connector, place.provider) == (connector, target["provider"])]
+        current, attributable = places.target_place(
+            siblings, targets=declared_targets, conversation="conversation_id", thread="thread_id", match=match)
     if not exact and not target["conversation_id"] and (current is None or current.state == places.STATE_ACTIVE):
         # Opaque account holds supplement the outgoing matcher. A primary
         # Active place cannot erase a hold found through a declared destination.

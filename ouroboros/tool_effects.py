@@ -159,9 +159,39 @@ def bound_declaration(ext_tool: Any) -> Mapping[str, Any] | None:
     return None
 
 
+def direct_send_selectors(name: str, ext_tool: Any) -> tuple[str, str, str] | None:
+    """The provider and the argument names for the sending account and user dialog of a bound message tool.
+
+    A reviewed message tool declaring ``direct_recipient: {provider, account}`` promises that a
+    pinned send to a user dialog delivers only there, through that account, including queued retries.
+    The contract covers only a single conversation target, never a mixed operation or further addresses.
+    Place policy and Safety use the effective arguments that will reach this handler.
+    """
+    from ouroboros.extension_surface_names import extension_name_prefix
+
+    bound = bound_declaration(ext_tool)
+    if not bound or not bound.get("provides_place") or not ext_tool.get("skill"):
+        return None
+    tool = bound["tool"]
+    route = tool.get("direct_recipient")
+    conversation = tool.get("conversation")
+    if (name != extension_name_prefix(ext_tool["skill"]) + str(tool.get("name") or "")
+            or tool.get("effect") != EFFECT_MESSAGE or "sends" in tool or tool.get("touches")
+            or not isinstance(conversation, str) or not conversation or tool.get("target") != conversation
+            or not isinstance(route, Mapping) or set(route) - {"provider", "account", "confirmation"}
+            or not {"provider", "account"} <= route.keys()
+            or ("confirmation" in route and
+                (route["provider"] != "telegram" or route["confirmation"] != "owner_confirmation"))
+            or not all(isinstance(value, str) and value.strip() == value and value for value in route.values())
+            or not route["account"].isidentifier() or route["account"] in (conversation, tool.get("thread"))
+            or ("confirmation" in route and route["confirmation"] in (route["account"], conversation, tool.get("thread")))):
+        return None
+    return route["provider"], route["account"], conversation
+
+
 # A dispatched call's declaration rides in its result facts (``result_meta``, so its trace row) under this key.
 RETAINED_DECLARATION = "bound_declaration"
-_DECLARATION_KEYS = ("name", "effect", "target", "conversation", "thread", "message", "text", "sends", "touches")
+_DECLARATION_KEYS = ("name", "effect", "target", "conversation", "thread", "message", "text", "sends", "touches", "direct_recipient")
 
 
 def retained_declaration(ext_tool: Any) -> dict[str, Any] | None:

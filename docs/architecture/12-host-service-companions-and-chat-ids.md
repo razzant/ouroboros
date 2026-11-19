@@ -81,8 +81,7 @@ Heard-only events make no task/context copy; room rows keep identity/reason. Lat
 
 `places.place_room_index` indexes latest arrivals/nonterminal focus counts without history walks or per-arrival task loads; unknown stays null. Only the rooms endpoint decodes details. Legacy/outgoing-only rooms may be missing; import/gap flags describe the store, not the provider; indexes build once from rows. `ouroboros/gateway/place_history.py` projects a row's recorded facts and current owner confirmation (`places.owner_confirmed_row`; CLIENT_CONTRACT “Places”). `account_candidates` suggests recent nonbot senders, confirming no identity. Migration imports valid bindings, records `migration.problems` for `/api/places` and publishes one marker.
 
-`place_guard.outbox_binding_facts` captures/rechecks queued bindings through dispatch's `places.target_place`.
-Current scopes apply; disconnected bound work never becomes unbound.
-`places.outbox_place` keeps legacy lookups and opaque operations' Silent/Paused account holds, wildcards included.
-Account/conversation/thread stay distinct; each recipient, group address and reply target is checked alone; only words take an author. Wire: CREATING_SKILLS.
-Retained-work GET/POST may omit `binding_id`; authentication checks the stored connector. POST accepts `transport_queue` and optional checked legacy `binding_id`.
+`place_guard.outbox_binding_facts` checks queued targets with `places.target_place`. Disconnect holds.
+`places.outbox_place` keeps legacy, opaque and wildcard account holds. Each target has its own account/chat/thread. Only words take an author.
+Telegram owner-DM evidence binds Safety, result release and each send to the same confirmation and capable connector (CREATING_SKILLS).
+Retained-work GET/POST authenticates the stored connector. POST accepts `transport_queue` and optional checked `binding_id`.

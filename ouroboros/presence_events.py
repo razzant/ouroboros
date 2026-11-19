@@ -62,6 +62,8 @@ class PresenceTurnEvent:
     continuation_version: int = 0
     facts: tuple[str, ...] | None = None
     identity: Mapping[str, Any] | None = None
+    direct_reply_key: str = ""  # admitted by the authenticated Host, never a wire field
+    direct_reply_version: int = 0
 
     def __post_init__(self) -> None:
         # The dialogue store keeps a provider thread by reference; an event rebuilt from its row reaches the model
@@ -118,7 +120,8 @@ def reply_targets(message: Any) -> tuple[dict[str, str], ...] | None:
 
 
 def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files: Any = None,
-                         reporting_version: int = 0, continuing: int = 0) -> PresenceTurnEvent:
+                         reporting_version: int = 0, continuing: int = 0,
+                         authenticated_publication: tuple[str, str] | None = None) -> PresenceTurnEvent:
     """A connector's live event, checked whole before any admission; malformed is ``PresenceEventInvalid``.
 
     ``vouched_facts``: the declared connector signals admissible beside ``WAKE_FACTS``. A door takes them from
@@ -130,7 +133,7 @@ def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files:
     """
     from ouroboros.place_intake import reaction_refusal
     from ouroboros.places import WAKE_FACTS, validate_presence_identity
-    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_bindings import conversation_key, direct_user_route
     from ouroboros.presence_history import source_order
 
     if not isinstance(payload, dict) or set(payload) - {"facts", "identity"} != _EVENT_KEYS:
@@ -159,12 +162,23 @@ def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files:
     except ValueError as exc:
         raise PresenceEventInvalid("presence_payload_invalid", "event.message.reply_targets", message=str(exc)) from None
     provider, account_id, conversation_id, thread_id = presence_event_origin(payload).values()
+    key = conversation_key(provider, account_id, conversation_id, thread_id)
+    conversation = dict(payload["conversation"]) if isinstance(payload["conversation"], dict) else {}
+    direct_reply_key = ""
+    version = 0
+    if authenticated_publication and conversation.get("direct_reply_user_id") == conversation_id:
+        from ouroboros.extension_registry_state import direct_reply_version
+        exact = (provider != "telegram" or
+                 (payload["account_id"] == account_id and payload["conversation_id"] == conversation_id))
+        if exact and direct_user_route(provider, account_id, conversation_id):
+            version = direct_reply_version(*authenticated_publication, provider)
+            if version:
+                direct_reply_key = key
     event = PresenceTurnEvent(
         source_event_id=str(payload["source_event_id"] or "").strip(),
         provider=provider, account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
-        conversation_key=conversation_key(provider, account_id, conversation_id, thread_id),
-        actor=dict(actor),
-        conversation=dict(payload["conversation"]) if isinstance(payload["conversation"], dict) else {},
+        conversation_key=key, direct_reply_key=direct_reply_key, direct_reply_version=version,
+        actor=dict(actor), conversation=conversation,
         message=dict(payload["message"]) if isinstance(payload["message"], dict) else {},
         text=str(payload["text"] or ""), delivery_reporting_version=reporting_version,
         continuation_version=continuing, facts=tuple(facts) if facts is not None else None, identity=identity)

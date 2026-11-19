@@ -1058,18 +1058,22 @@ contributes:
 - `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
   door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
   finish is still posted, so a reaction alone finishes `silent=true`.
-- `target`/`conversation`/`thread` attribute each destination; dotted names select nested arguments. Where Places
-  apply, independent lists of several conversations and several threads refuse non-read calls, even without `touches`.
-  `text` (default: the argument named `text`) names the words: your human's
-  answer on a card holding those exact words as whole lines and every place and address the call reaches (each
-  place's label, and its exact address where another it reaches shares that label; each recipient outside a place's
-  own conversation; each group address with its effect, as `write: Drafts · account A`) sends the message in every
-  mode, held, flagged or before any check (a call declaring neither, such as an MCP tool, uses its exact call for
-  that card); the host checks the card was answered, not the answer.
-  Declare `account_id` for multi-account writes:
-  an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
-  Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
-  in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.
+- `target`, `conversation` and `thread` select destinations. Dotted paths select nested arguments.
+  In Places, separate lists of multiple conversations and threads hold a non-read even without `touches`.
+  `text` names the words (default `text`). In every mode, before or after a flag or hold, an answered owner
+  card can authorize delivery. It must contain the exact words as whole lines and every destination: each
+  place label, its address when labels coincide, recipients outside its conversation and each group address
+  with effect (e.g. `write: Drafts · account A`). A call declaring neither words nor destination requires its
+  exact call on the card. The host verifies the card was answered.
+  Use the same canonical `account_id` in multi-account writes, credentials and Places. Sender aliases have
+  their own meaning. Exact accounts outside all scopes remain ordinary targets even in Acts. Unresolved
+  targets inside a scope retain its Silent/Paused hold. Keep the selected account through delivery.
+- A single-chat tool's `direct_recipient: {provider, account}` pins the supplied bot, the same private focus's bot,
+  or a sole confirmed or Place account. Each attempt verifies bot and private chat. For `place_reply.direct_recipient`,
+  `provider`, authenticated `conversation.direct_reply_user_id` and selected `reply_targets: []` bind one reply route.
+  With Telegram’s `confirmation: owner_confirmation`, keep the host’s condition with the words, including across
+  restarts. Before each send, verify the same bot, chat, topic, owner confirmation and original outbound Place.
+  An older reader must see no deliverable text it cannot check. This evidence never authorizes a send.
 - `touches` lists further addresses one call reaches. Each group names arguments: `conversation` (one id or a flat
   list), `account` (one id; default: the call's `account_id`) and `thread` (one id, or the conversation argument
   itself to pair each id with itself; never a second list), and its `effect`, which says what applies there, not how
@@ -1359,16 +1363,16 @@ Use the connector's ordinary content-hash-bound skill token for:
   applied/already_present/already_absent) is later turns' action evidence, never speech; a missing effect reads
   as not reported, never as done. Its `target` is the requested address, never proof of which message changed.
   Words a receipt sends beside its reaction stay that part's speech.
-- `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=` (`places_version: 1`) returns `{place_id,label,state}`;
-  missing means 404 `place_not_connected`, never permission. With empty conversation, matching account/broad
-  Silent/Paused scopes restrict the opaque operation; a thread selects its topic.
-  Hosts advertising `presence_place_binding_version: 1` additionally accept `operation=bind` at enqueue,
-  returning `{ok,allowed,binding,state,code,label,place_id}`. The snapshot is
-  `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id,connected_revision}`; empty `place_id` means confirmed
-  unbound, null binding means unresolved. Retain it with the effect. Delivery uses `operation=check`, JSON-encoded
-  `binding` and identical targets. Current scopes apply; disconnected work stays held even after reconnect with the same ID.
-  The stamp survives ordinary edits and repeated Connect. An older body can read/write Places, but its changed row
-  cannot prove connection continuity: prior bindings stay held; a fresh operation captures the newly observed revision.
+- `GET /presence/place?provider=&account_id=&conversation_id=&thread_id=` (`places_version: 1`) returns `{place_id,label,state}`
+  or 404 `place_not_connected`. Threads select topics. Empty chats honor account/broad Silent/Paused holds.
+  Before each conditional send require Active and an exact echo of the JSON `owner_confirmation`.
+  409 `place_owner_confirmation_changed` with `disposition: rejected` ends that row. Other refusals hold it.
+  Reply release also checks confirmation and authenticated publication.
+  With `presence_place_binding_version: 1`, enqueue uses `operation=bind` and returns `{ok,allowed,binding,state,code,label,place_id}`.
+  Keep `{version:1,connector,provider,account_id,conversation_id,thread_id,place_id,connected_revision}` with the effect.
+  Empty `place_id` means confirmed unbound, null binding means unresolved. Use `operation=check` with JSON `binding` and identical
+  targets. Current scopes apply. Edits and repeated Connect preserve the stamp. Reconnection, even with the same ID, holds prior work.
+  An older body's changed row holds prior bindings. New work captures its revision.
   `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
   `match=exact|exact_casefold` (default `scope`; another value is 400 `place_binding_invalid`) binds an extra
   address constraint as a group's exact match does: it needs the `conversation_id`, has no opaque or unknown
@@ -1427,21 +1431,19 @@ arrivals alone never do, though a message from the owner's confirmed account in 
 (provenance; an order only by a verified cite, and it owes no reply by itself). An author's own explicit `action="stop"` stands: an arrival drained at
 its close is acknowledged in its transcript, never read by its model, and starts no round.
 
-A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
-`silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
-message tool (above) a focus's finish, a `finish_task` answer or a tool-less final alike, is its record: a send
-may ride in the same response, a finish with words that sent nothing there returns once with the facts, the
-next is accepted (a Main message pending from the owner is owed first, as for a silent finish); a Silent or
-Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
-any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
-Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
-(receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
-Silent/Paused/disconnected destinations and Advises autonomy hold the reply
-with a System fact. Cached replies, continuation envelopes and work polls apply the
-current place state without another generation or paid check. A held projection keeps
-the durable answer and its output identity; repeated holds record one fact per subject.
-Late receipts still record what happened, with a visible warning. Proactive speech uses the connector's own tools; `presence_finish` and
-`initiate_presence` are no longer public tools.
+A focus and its promoted or scheduled roots use `finish_task`, including `silent=true`. Receipts never
+choose the outcome. In a focus with an in-conversation send tool, a finish or tool-less final records the
+answer. A send may ride in that response. Unsent prose returns once with the facts, then is accepted.
+A pending owner message in Main is owed first, even at a silent finish. Silent/Paused and Advises hold
+the draft. Elsewhere, including promoted roots, an answer is new speech even after a send, file or reaction.
+Started work stays `deferred`, empty after silence.
+
+Automatic speech passes `place_reply` Safety with this turn's sends, including calls without receipts.
+A flag returns the destination, sends and option of silence. Silent/Paused/disconnected places and Advises
+hold the reply with a System fact. Cached replies, continuation envelopes and work polls recheck state
+without generating or paying again. A hold preserves the answer and output identity, recording one fact
+per subject. Late receipts record delivery with a warning. Proactive speech uses connector tools.
+`presence_finish` and `initiate_presence` are retired.
 
 Private Main contact uses the mind's existing tools: a Presence root can call
 `send_user_message(text=..., destination="main", request_id=...)` for a substantive

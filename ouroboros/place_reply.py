@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from ouroboros.places import PlaceError, conversation_chat_id, get_place, resolve_place
+from ouroboros.places import PlaceError, conversation_chat_id, get_place, place_records, resolve_place
 
 
 def record_notice(root, *, place_id: str, conversation_key: str, task_id: str, text: str, identity: str,
@@ -63,11 +63,49 @@ def reply_addresses(metadata, anchor=None) -> tuple:
     return {"source_event_id": str(anchor.get("source_event_id") or ""), "reply_targets": [dict(row) for row in found]}, ""
 
 
-def reply_hold(root, metadata, task_id, text: str, *, anchor=None) -> str:
+def _reply_confirmation(root, snapshot, presence, carrier, addresses):
+    from ouroboros.place_guard import capture_owner_dm, direct_reply_route
+
+    if presence.get("direct_reply_version") != 2 or not addresses or addresses["reply_targets"] != []:
+        return None
+    place = snapshot.places.get(carrier["place_id"])
+    if place:
+        destination = carrier["destination"]
+        route = direct_reply_route(presence, place, destination)
+        return capture_owner_dm(root, snapshot, place.connector, route, destination.get("thread_id"))
+
+
+_PRIVATE_DESTINATION_UNAVAILABLE = "Reply held: its confirmed private destination is unavailable."
+
+
+def _record_reply_hold(root, carrier, task_id, text, digest, message):
+    record_notice(root, place_id=carrier["place_id"], conversation_key=carrier["conversation_key"],
+                  task_id=task_id, text=message, identity=f"{task_id}:{digest}:held", held_text=text)
+
+
+def reply_hold(root, metadata, task_id, text: str, *, anchor=None, owner_confirmation=None, snapshot=None) -> str:
     """Current host facts only: never generate or buy another safety check on replay. The reply's further addresses
     (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them."""
+    if not text:
+        return ""
+    if root is None:
+        return _PRIVATE_DESTINATION_UNAVAILABLE if owner_confirmation is not None else ""
+    from ouroboros.consciousness_authority import is_observe_origin
+    from ouroboros.place_guard import check_owner_dm, direct_reply_route, reply_address_hold, valid_owner_dm
+
     carrier = reply_carrier(metadata)
-    if not carrier and text:
+    if owner_confirmation is not None:
+        destination = carrier.get("destination")
+        if not (isinstance(destination, dict) and isinstance(owner_confirmation, dict)
+                and owner_confirmation.get("tool") == "place_reply"):
+            return _PRIVATE_DESTINATION_UNAVAILABLE
+        target = {"provider": destination.get("transport"), **{key: destination.get(key) for key in (
+            "account_id", "conversation_id", "thread_id")}}
+        if not valid_owner_dm(owner_confirmation, owner_confirmation.get("connector"), target):
+            return _PRIVATE_DESTINATION_UNAVAILABLE
+        if snapshot is None:
+            snapshot = place_records(root, minimum_revision=owner_confirmation["observed_revision"])
+    if not carrier:
         from pathlib import Path
         from ouroboros.places import load_places, places_path
         from ouroboros.presence_bindings import PRESENCE_BINDINGS_FILENAME
@@ -81,27 +119,40 @@ def reply_hold(root, metadata, task_id, text: str, *, anchor=None) -> str:
             place = next((p for p in load_places(root) if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
             carrier = {"place_id": place.place_id if place else binding_id,
                        "conversation_key": event["conversation_key"], "destination": event.get("destination") or {}}
-    if not carrier or not text:
+    if not carrier:
         return ""
-    from ouroboros.consciousness_authority import is_observe_origin
-    from ouroboros.place_guard import reply_address_hold
     try:
-        place = get_place(root, carrier["place_id"])
-        state, label = place.state, place.label
+        place = (get_place(root, carrier["place_id"]) if snapshot is None
+                 else snapshot.places.get(carrier["place_id"]))
     except PlaceError as exc:
         if exc.code != "place_not_found":
             raise
-        place, state, label = None, "disconnected", carrier["place_id"]
+        place = None
+    state, label = (place.state, place.label) if place else ("disconnected", carrier["place_id"])
     message = (f"Reply held: {label} is {state.title()}" if state in {"silent", "paused", "disconnected"}
                else "Reply held: autonomy is Advises" if is_observe_origin(metadata) else "")
     addresses, problem = reply_addresses(metadata, anchor)
+    presence = metadata.get("presence") or {}
+    if not message and owner_confirmation is not None:
+        route = direct_reply_route(presence, place, carrier["destination"])
+        if (presence.get("direct_reply_version") != 2 or not addresses or addresses["reply_targets"] != []
+                or route != (target["provider"], target["account_id"], target["conversation_id"])
+                or place.connector != owner_confirmation["connector"]):
+            message = _PRIVATE_DESTINATION_UNAVAILABLE
+        else:
+            decision = check_owner_dm(root, place.connector, target, owner_confirmation, snapshot=snapshot)
+            if decision is None:
+                message = "Reply held: its private destination no longer has the same owner confirmation."
+            elif not decision["allowed"]:
+                message = "Reply held: its original outbound Place no longer permits the send."
+    if (not message and place is not None and presence.get("direct_reply_key")
+            and not direct_reply_route(presence, place, carrier["destination"])):
+        message = "Reply held: its destination differs from the private conversation the connector will answer."
     if not message and place is not None:
         message = (f"Reply held: the addresses it reaches cannot be read ({problem})" if problem
                    else reply_address_hold(root, place, carrier["destination"], addresses))
     if message:
-        digest = _reply_digest(carrier, text, addresses)
-        record_notice(root, place_id=carrier["place_id"], conversation_key=carrier["conversation_key"],
-                      task_id=task_id, text=message, identity=f"{task_id}:{digest}:held", held_text=text)
+        _record_reply_hold(root, carrier, task_id, text, _reply_digest(carrier, text, addresses), message)
     return message
 
 
@@ -124,17 +175,62 @@ def project_reply(root, metadata, result):
     result meets the place state of its own poll.
     """
     from dataclasses import replace
-    if (root is not None and result.outcome in {"message", "deferred"}
-            and reply_hold(root, metadata, result.task_id, result.text)):
+    if result.outcome in {"message", "deferred"} and reply_hold(
+            root, metadata, result.task_id, result.text, anchor=getattr(result, "reply_anchor", None),
+            owner_confirmation=getattr(result, "owner_confirmation", None)):
         return replace(result, outcome="deferred" if result.outcome == "deferred" and result.work_ref else "silent", text="")
     return result
 
 
+def _quiet_reply_outcome(outcome):
+    return "deferred" if outcome == "deferred" else "silent"
+
+
+def freeze_reply(outcome, text, confirmation):
+    """Keep conditional speech by value; the legacy text key must be present and empty."""
+    if not text or confirmation is None:
+        return {"outcome": outcome, "text": text}
+    return {"outcome": _quiet_reply_outcome(outcome), "text": "",
+            "conditional_reply": {"outcome": outcome, "text": text, "owner_confirmation": confirmation}}
+
+
+def has_reply_condition(row):
+    return "conditional_reply" in row or row.get("owner_confirmation") is not None
+
+
+def read_frozen_reply(row, *, default="message"):
+    """Read the selected pair, never upgrading a draft split or malformed envelope to ordinary speech."""
+    outcome = str(row.get("outcome") or default)
+    if not has_reply_condition(row):
+        return outcome, str(row.get("text") or ""), None
+    selected = row.get("conditional_reply")
+    if (isinstance(selected, dict) and set(selected) == {"outcome", "text", "owner_confirmation"}
+            and selected["outcome"] in ("message", "deferred") and isinstance(selected["text"], str)
+            and selected["text"] and isinstance(selected["owner_confirmation"], dict)
+            and row.get("outcome") == _quiet_reply_outcome(selected["outcome"]) and row.get("text") == ""
+            and row.get("owner_confirmation") is None):
+        return selected["outcome"], selected["text"], selected["owner_confirmation"]
+    return _quiet_reply_outcome(outcome), "", None
+
+
+def last_ordinary_reply(outputs):
+    """An authored pointer is not a provider receipt or a destination-conditioned release."""
+    return next((row for row in reversed(outputs) if isinstance(row, dict) and row.get("text")
+                 and not has_reply_condition(row)), {})
+
+
 def project_output(root, metadata, task_id, output):
-    if (root is not None and output.get("outcome", "message") in {"message", "deferred"}
-            and reply_hold(root, metadata, task_id, str(output.get("text") or ""))):
-        return {**output, "outcome": "silent", "text": ""}
-    return dict(output)
+    outcome, text, confirmation = read_frozen_reply(output)
+    held = outcome in {"message", "deferred"} and reply_hold(
+        root, metadata, task_id, text, anchor=output.get("reply_anchor"), owner_confirmation=confirmation)
+    view = {key: value for key, value in output.items() if key not in {"conditional_reply", "owner_confirmation"}}
+    if held:
+        view.update(outcome="silent", text="")
+    elif has_reply_condition(output):
+        view.update(outcome=outcome, text=text)
+        if confirmation is not None and text:
+            view["owner_confirmation"] = confirmation
+    return view
 
 
 def _door_effect(name: str, tool, effect_name: str):
@@ -392,7 +488,9 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         ctx._focus_record_only = True  # the loop's wake_silent usage follows the transport (R7)
     quiet = quiet or records
     root = canonical_data_root(ctx)
-    held = ""
+    old = getattr(ctx, "_presence_completion", {}) or {}
+    held, digest = "", ""
+    confirmation = None
     if not quiet and text:
         # The selected input this reply answers names its further addresses: the hold, Safety and the digest read
         # the same anchor and full set.
@@ -400,11 +498,40 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         addresses, _problem = reply_addresses(metadata, anchor)
         subject = _reply_subject(carrier, text, addresses)
         digest = _reply_digest(carrier, text, addresses)
-        held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor)
+        presence = metadata.get("presence") or {}
+        previous = getattr(ctx, "_focus_checked_reply", None)
+        check_key, snapshot = digest, None
+        try:
+            if presence.get("direct_reply_key"):
+                # A resumed selection keeps its binding, not its process-local Safety cache.
+                if isinstance(previous, tuple) and previous[0] == digest and isinstance(previous[1], dict):
+                    confirmation = previous[1]
+                elif old.get("reply_digest") == digest:
+                    confirmation = old.get("owner_confirmation")
+                if confirmation is None:
+                    snapshot = place_records(root)
+                    confirmation = _reply_confirmation(root, snapshot, presence, carrier, addresses)
+                elif (isinstance(confirmation, dict) and type(confirmation.get("observed_revision")) is int
+                      and confirmation["observed_revision"] >= 0):
+                    snapshot = place_records(root, minimum_revision=confirmation["observed_revision"])
+                else:
+                    held = _PRIVATE_DESTINATION_UNAVAILABLE
+                if snapshot is not None:
+                    check_key = (digest, confirmation, snapshot.revision)
+            if not held:
+                held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor,
+                                  owner_confirmation=confirmation, snapshot=snapshot)
+        except PlaceError as exc:
+            if exc.code != "places_unreadable":
+                raise
+            held = "Reply held: current Place records are unavailable."
+            _record_reply_hold(root, carrier, ctx.task_id, text, digest, held)
         if held:
             ctx._focus_reply_hold = held
-        elif getattr(ctx, "_focus_checked_reply", None) != digest:
+        elif previous != check_key:
             from ouroboros.safety import check_safety
+            if confirmation is not None:
+                subject["owner_confirmation"] = confirmation
             allowed, message = check_safety("place_reply", subject, ctx=ctx)
             if not allowed:
                 return False, message
@@ -412,11 +539,12 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
                 record_notice(root, place_id=carrier["place_id"], conversation_key=carrier["conversation_key"],
                               task_id=ctx.task_id, text="Safety note on this turn's reply: " + message,
                               identity=f"{ctx.task_id}:{digest}:safety-note")
-            ctx._focus_checked_reply = digest
+            ctx._focus_checked_reply = check_key
     outcome = "deferred" if _handoff_ref(ctx) else "silent" if quiet or held else "message"
-    old = getattr(ctx, "_presence_completion", {}) or {}
     selection = old.get("selection") if old.get("message") == text else None
     ctx._presence_completion = {"outcome": outcome, "message": text,
+                                **({"owner_confirmation": confirmation, "reply_digest": digest}
+                                   if confirmation is not None else {}),
                                 "selection": selection or selection_for(ctx, hashlib.sha256(text.encode()).hexdigest()),
                                 **({"quiet": True} if quiet or held else {})}
     ctx._presence_completion_accepted = True
@@ -496,7 +624,7 @@ def may_speak(ctx, call, *, ext_tool=None) -> bool:
         PURE_READ_TOOLS,
         completion_control_call,
     )
-    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, EFFECT_READ, effect_of
+    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, EFFECT_READ, direct_send_selectors, effect_of
     from ouroboros.tools.tool_discovery import resolve_gateway_call
 
     function = resolve_gateway_call(call).get("function") or {}
@@ -512,6 +640,9 @@ def may_speak(ctx, call, *, ext_tool=None) -> bool:
         return False
     if effect.effect != EFFECT_MESSAGE or not isinstance(args, dict):
         return True
+    selectors = direct_send_selectors(name, ext_tool)
+    if selectors and selectors[1] not in args:
+        return True  # A pre-dispatch observation cannot exclude this conversation before the account is bound.
     own = reply_carrier(getattr(ctx, "task_metadata", {}) or {}).get("conversation_key")
     facts = call_place_facts(ctx, name, args, ext_tool=ext_tool)
     rows = facts.get("places") or []

@@ -1,4 +1,4 @@
-"""Read frozen transport bindings for migration and retained-work authentication."""
+"""Provider endpoint identities and frozen transport bindings for migration and retained-work authentication."""
 
 from __future__ import annotations
 
@@ -76,6 +76,19 @@ class PresenceBinding:
             )
         if not isinstance(self.enabled, bool):
             raise PresenceBindingError("presence_binding_invalid_enabled", "binding.enabled")
+
+
+def is_direct_id(value: Any, provider: str = "") -> bool:
+    """Canonical account or user key for the direct-recipient contract."""
+    if provider == "telegram":
+        return (isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,12}", value) is not None
+                and int(value) < (1 << 40))
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value) is not None
+
+
+def direct_user_route(provider: str, account: Any, user: Any) -> tuple[str, str, str] | None:
+    """A proposed provider/account/user address. Its shape establishes no audience."""
+    return (provider, account, user) if is_direct_id(account, provider) and is_direct_id(user, provider) else None
 
 
 def conversation_key(provider: str, account_id: str, conversation_id: str, thread_id: str = "") -> str:

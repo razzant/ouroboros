@@ -139,6 +139,18 @@ def bind_review_wait(agent: Any, *, lease: Any, event: Any, task_id: str, identi
     return binding
 
 
+def initial_result(initial, task_id, reporting, version):
+    from ouroboros.place_reply import read_frozen_reply
+    from ouroboros.presence_runner import PresenceTurnResult
+
+    outcome, text, confirmation = read_frozen_reply(initial, default="deferred")
+    return PresenceTurnResult(
+        outcome=outcome, text=text, task_id=task_id, work_ref=str(initial.get("work_ref") or ""),
+        delivery_reporting_version=reporting, status="continuing", continuation_ref=task_id,
+        output_ref=str(initial.get("output_ref") or ""), continuation_version=version,
+        reply_anchor=initial.get("reply_anchor"), owner_confirmation=confirmation)
+
+
 def answer_early(binding: ReviewWaitBinding, _task: Any = None) -> bool:
     """Publish the write-once initial envelope once this author's loop reads conversation mail.
 
@@ -153,18 +165,14 @@ def answer_early(binding: ReviewWaitBinding, _task: Any = None) -> bool:
     execution = getattr(binding.lease, "execution", None)
     if execution is None or execution.initial.done():
         return False
-    from ouroboros.presence_runner import PresenceTurnResult
-
     try:
         initial = _persist(binding, "", "", utc_now_iso(), lend=False)["initial"]
     except Exception:
         log.warning("Presence %s could not record its early answer; its event waits", binding.task_id, exc_info=True)
         return False
-    return execution.publish_initial(PresenceTurnResult(
-        outcome=initial["outcome"], text=initial["text"], task_id=binding.task_id, work_ref=initial["work_ref"],
-        delivery_reporting_version=binding.event.delivery_reporting_version, status="continuing",
-        continuation_ref=binding.task_id, output_ref=initial["output_ref"],
-        continuation_version=EARLY_CONTINUATION_VERSION), return_capacity=False)
+    return execution.publish_initial(initial_result(
+        initial, binding.task_id, binding.event.delivery_reporting_version, EARLY_CONTINUATION_VERSION),
+        return_capacity=False)
 
 
 def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> None:
@@ -361,9 +369,11 @@ def _yield_conversation(binding: ReviewWaitBinding, ctx: Any, checkpoint: dict) 
     work_ref = _handoff_ref(ctx)
     cursor = binding.cursor if binding.restored else _chat_cursor(binding.drive_root)
     lent_at = utc_now_iso()
-    # The projection names this author's latest released speech (a pre-fold continuation's), else nothing yet.
-    spoken = next((row for row in reversed(_released(ctx)) if row.get("text")), {})
-    from ouroboros.presence_runner import PresenceTurnResult, record_continuing_turn
+    from ouroboros.place_reply import last_ordinary_reply
+    from ouroboros.presence_runner import record_continuing_turn
+
+    # The projection names this author's latest ordinary released speech, not a conditioned delivery.
+    spoken = last_ordinary_reply(_released(ctx))
 
     try:
         record_continuing_turn(binding.drive_root, str(binding.event.conversation_key), binding.task_id,
@@ -377,11 +387,7 @@ def _yield_conversation(binding: ReviewWaitBinding, ctx: Any, checkpoint: dict) 
     initial = record["initial"]
     execution = getattr(lease, "execution", None)
     if execution is not None:
-        execution.publish_initial(PresenceTurnResult(
-            outcome=initial["outcome"], text=initial["text"], task_id=binding.task_id,
-            work_ref=initial["work_ref"], delivery_reporting_version=binding.event.delivery_reporting_version,
-            status="continuing", continuation_ref=binding.task_id, output_ref=initial["output_ref"],
-            continuation_version=version))
+        execution.publish_initial(initial_result(initial, binding.task_id, binding.event.delivery_reporting_version, version))
     binding.cursor, binding.lent = cursor, lease.lend()
     return binding.lent
 
@@ -878,7 +884,7 @@ def reentry_source_projection(root: Path, task_id: str, digest: str,
 
 def replay_envelope(drive_root: Path, task_id: str, identity: str) -> Any:
     """The stored initial envelope of this event, or None; never reruns or resends work."""
-    from ouroboros.presence_runner import PresenceTurnResult, _retry_target, _stored_turn
+    from ouroboros.presence_runner import _retry_target, _stored_turn
 
     physical = _retry_target(Path(drive_root), task_id, identity) if identity else task_id
     stored = _stored_turn(Path(drive_root), physical, identity)
@@ -888,12 +894,8 @@ def replay_envelope(drive_root: Path, task_id: str, identity: str) -> Any:
         return None
     presence = (stored.get("metadata") or {}).get("presence") or {}
     from ouroboros.place_reply import project_reply
-    return project_reply(drive_root, stored.get("metadata") or {}, PresenceTurnResult(
-        outcome=str(initial.get("outcome") or "deferred"), text=str(initial.get("text") or ""),
-        task_id=physical, work_ref=str(initial.get("work_ref") or ""),
-        delivery_reporting_version=int(presence.get("delivery_reporting_version") == 1),
-        status="continuing", continuation_ref=physical, output_ref=str(initial.get("output_ref") or ""),
-        continuation_version=CONTINUATION_VERSION))
+    return project_reply(drive_root, stored.get("metadata") or {}, initial_result(
+        initial, physical, int(presence.get("delivery_reporting_version") == 1), CONTINUATION_VERSION))
 
 
 def turn_response(result: Any, version: int, drive_root=None) -> dict:
@@ -906,6 +908,8 @@ def turn_response(result: Any, version: int, drive_root=None) -> dict:
     body = {"ok": True, "status": "completed", "outcome": result.outcome, "text": result.text,
             "turn_ref": result.task_id, "work_ref": result.work_ref,
             "delivery_reporting_version": getattr(result, "delivery_reporting_version", 0)}
+    if result.text and getattr(result, "owner_confirmation", None) is not None:
+        body["owner_confirmation"] = result.owner_confirmation
     if version:
         body.update(status=getattr(result, "status", "completed"), continuation_version=version,
                     continuation_ref=getattr(result, "continuation_ref", ""),
@@ -966,7 +970,8 @@ def work_view(stored: Mapping[str, Any], ref: str, drive_root=None) -> tuple[int
     result = presence_result_from_stored(stored, ref, drive_root)
     anchor = {"reply_anchor": dict(result.reply_anchor)} if version == EARLY_CONTINUATION_VERSION and result.reply_anchor else {}
     return 200, {**common, "status": status, "outcome": result.outcome, "text": result.text,
-                 "output_ref": result.output_ref, "child_work_ref": result.work_ref or common["child_work_ref"], **anchor}
+                 "output_ref": result.output_ref, "child_work_ref": result.work_ref or common["child_work_ref"],
+                 **result.delivery_condition(), **anchor}
 
 
 __all__ = [

@@ -148,7 +148,7 @@ def timeout_dispatch_candidate(
 
 
 def bound_dispatch_candidate(
-    ctx: ToolContext, name: str, *, consume: bool = True,
+    ctx: ToolContext, name: str, *, consume: bool = True, args: Optional[Dict[str, Any]] = None,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
     """Read this call's timeout-time resolution; the dispatcher resolves fresh without one.
 
@@ -156,7 +156,7 @@ def bound_dispatch_candidate(
     uses ``consume=False`` without spending it or resolving an absent binding. Both require the same context and name. The
     physical dispatcher still observes liveness itself, so a revocation that
     lands after the timeout was chosen refuses before the handler runs. The descriptor the dispatcher takes stays
-    in the call's slot for the facts written after it (``dispatched_descriptor``).
+    in the call's slot with any prepared direct-send arguments for its destination notes and trace.
     """
     slot = _CALL_RESOLUTION.get()
     bound = (slot.pop("bound", None) if consume else slot.get("bound")) if slot is not None else None
@@ -166,17 +166,23 @@ def bound_dispatch_candidate(
         resolution = _extension_dispatch_candidate(ctx, name)
     else:
         return None, False
+    prepared = None
+    if consume and args is not None and resolution[0] is not None:
+        from ouroboros.place_guard import bind_direct_send
+        if bind_direct_send(ctx, name, resolution[0], args):
+            prepared = args
     if consume and slot is not None:
-        slot["dispatched"] = (ctx, name, resolution[0])
+        slot["dispatched"] = (ctx, name, resolution[0], prepared)
     return resolution
 
 
-def dispatched_descriptor(ctx: Any, name: str) -> Optional[Dict[str, Any]]:
-    """The extension descriptor this call was dispatched with, read after it ran; None outside a call's scope or
-    for another context or name. Its bound declaration, not a later publication, describes the act."""
+def dispatched_call(ctx: Any, name: str, proposed: dict) -> tuple[Optional[dict], dict]:
+    """The descriptor and effective direct-send arguments used for this call, including its place check."""
     slot = _CALL_RESOLUTION.get()
     found = slot.get("dispatched") if slot is not None else None
-    return found[2] if found is not None and found[0] is ctx and found[1] == name else None
+    if found is not None and found[0] is ctx and found[1] == name:
+        return found[2], found[3] if found[3] is not None else proposed
+    return None, proposed
 
 
 def _dispatch_mcp_tool_result(
@@ -608,5 +614,12 @@ def dispatch_extension_tool(
     args: Optional[Dict[str, Any]],
 ) -> str:
     """Compatibility facade returning the exact model-facing text."""
+    from ouroboros.place_guard import bind_direct_send, dispatch_refusal
+
+    prepared = dict(args or {})
+    if bind_direct_send(ctx, name, ext_tool, prepared):
+        if refusal := dispatch_refusal(ctx, name, prepared, ext_tool=ext_tool):
+            return refusal
+        args = prepared
     result = _dispatch_extension_tool_result(ctx, name, ext_tool, args)
     return result.text if isinstance(result, ToolResult) else result

@@ -14,7 +14,7 @@ from tests.test_tool_effects import published_tool as published_tool
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     async def authenticated(*_):
-        return "connector", {}
+        return "connector", {"content_hash": "fixture-publication"}
     monkeypatch.setattr(host_service, "_authenticated", authenticated)
     with TestClient(host_service.create_host_service_app(tmp_path)) as value:
         yield value
@@ -29,6 +29,111 @@ def bind(client, **values):
 
 def check(client, binding, **values):
     return client.get("/presence/place", params={**TARGET, "operation": "check", "binding": json.dumps(binding), **values})
+
+
+def test_owner_confirmation_requires_an_existing_place_snapshot(client, tmp_path):
+    target = {"provider": "telegram", "account_id": "9", "conversation_id": "55"}
+    place = places.connect_place(tmp_path, connector="connector", **target)
+    path = places.places_path(tmp_path)
+    earlier = path.read_bytes()
+    places.edit_place(tmp_path, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="55")
+    binding = place_guard.capture_owner_dm(tmp_path, places.place_records(tmp_path), "connector", ("telegram", "9", "55"), "")
+    assert binding is not None and binding["observed_revision"] > place.connected_revision
+    params = {**target, "owner_confirmation": json.dumps(binding)}
+    snapshot = path.rename(path.with_suffix(".saved"))
+    unread = client.get("/presence/place", params=params)
+    assert (unread.status_code, unread.json()["code"], unread.json()["disposition"]) == (503, "places_unavailable", "retry")
+    assert not path.exists()
+
+    path.write_bytes(earlier)
+    stale = client.get("/presence/place", params=params)
+    assert (stale.status_code, stale.json()["code"], stale.json()["disposition"]) == (503, "places_unavailable", "retry")
+    assert path.read_bytes() == earlier
+
+    snapshot.replace(path)
+    places.edit_place(tmp_path, place.place_id, "revoke_owner_account", author="owner", platform_actor_id="55")
+    invalid = client.get("/presence/place", params={**params, "thread_id": "3"})
+    assert (invalid.status_code, invalid.json()["code"]) == (400, "place_binding_invalid")
+    revoked = client.get("/presence/place", params=params)
+    assert (revoked.status_code, revoked.json()["code"], revoked.json()["disposition"]) == (
+        409, "place_owner_confirmation_changed", "rejected")
+
+
+def test_private_audience_and_outbound_place_are_independent(client, tmp_path, monkeypatch):
+    from ouroboros import extension_registry_state as registry
+
+    source = places.connect_place(tmp_path, connector="connector", provider="telegram",
+                                  account_id="9", conversation_id="80", state="silent")
+    places.edit_place(tmp_path, source.place_id, "confirm_owner_account", author="owner", platform_actor_id="55")
+    outbound = places.connect_place(tmp_path, connector="connector", provider="telegram",
+                                    account_id="9", conversation_id="55")
+    target = {"provider": "telegram", "account_id": "9", "conversation_id": "55", "thread_id": "42"}
+    snapshot = places.place_records(tmp_path)
+    condition = place_guard.capture_owner_dm(tmp_path, snapshot, "connector", ("telegram", "9", "55"), "42")
+    assert condition["place_id"] == source.place_id
+    assert condition["delivery_place"]["place_id"] == outbound.place_id
+    assert condition["observed_revision"] == snapshot.revision
+    params = {**target, "owner_confirmation": json.dumps(condition)}
+    capability = []
+
+    def supports(skill, digest, expected):
+        capability.append((skill, digest, expected))
+        return digest == "fixture-publication"
+
+    monkeypatch.setattr(registry, "supports_owner_confirmation", supports)
+    reads = []
+    read = places.place_records
+
+    def read_snapshot(root, **options):
+        reads.append((root, options))
+        return read(root, **options)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(places, "place_records", read_snapshot)
+        active = client.get("/presence/place", params=params)
+    assert reads == [(tmp_path, {"minimum_revision": snapshot.revision})]
+    assert capability == [("connector", "fixture-publication", condition)]
+    assert active.status_code == 200 and active.json() == {
+        "place_id": outbound.place_id, "label": outbound.label, "state": "active", "owner_confirmation": condition}
+    assert client.get("/presence/place", params=target).json() == {
+        "place_id": outbound.place_id, "label": outbound.label, "state": "active"}
+
+    mixed = client.get("/presence/place", params={**params, "operation": "bind"})
+    assert (mixed.status_code, mixed.json()["code"]) == (400, "place_binding_invalid")
+    places.edit_place(tmp_path, outbound.place_id, "set_state", author="owner", state="paused")
+    paused = client.get("/presence/place", params=params)
+    assert paused.status_code == 200 and paused.json() == {**active.json(), "state": "paused"}
+    places.edit_place(tmp_path, outbound.place_id, "disconnect", author="owner")
+    replacement = places.connect_place(tmp_path, connector="connector", provider="telegram", conversation_id="55")
+    assert replacement.place_id != outbound.place_id
+    assert client.get("/presence/place", params=target).json()["place_id"] == replacement.place_id
+    held = client.get("/presence/place", params=params)
+    assert (held.status_code, held.json()["code"], held.json()["disposition"]) == (409, "place_disconnected", "blocked")
+    assert "owner_confirmation" not in held.json()
+
+
+def test_telegram_does_not_open_legacy_unmatched_destinations(client, tmp_path, monkeypatch):
+    from ouroboros import extension_registry_state as registry
+
+    source = places.connect_place(tmp_path, connector="connector", provider="telegram",
+                                  account_id="9", conversation_id="80")
+    places.edit_place(tmp_path, source.place_id, "confirm_owner_account", author="owner", platform_actor_id="55")
+    target = {"provider": "telegram", "account_id": "9", "conversation_id": "55", "thread_id": "42"}
+    foreign = {**target, "account_id": "10"}
+    unbound = bind(client, **foreign).json()
+    assert unbound["allowed"] and unbound["state"] == "unbound" and unbound["binding"]["place_id"] == ""
+    assert client.get("/presence/place", params=foreign).status_code == 404
+
+    places._write(tmp_path, source.place_id, lambda row: replace(row, destination={
+        "transport": "telegram", "account_id": "9", "conversation_id": "55", "thread_id": "42"}))
+    assert bind(client, **target).json()["binding"]["place_id"] == source.place_id
+    assert client.get("/presence/place", params=target).status_code == 404
+    condition = place_guard.capture_owner_dm(tmp_path, places.place_records(tmp_path), "connector", ("telegram", "9", "55"), "42")
+    assert condition["delivery_place"]["place_id"] == source.place_id
+    monkeypatch.setattr(registry, "supports_owner_confirmation", lambda *_: True)
+    held = client.get("/presence/place", params={**target, "owner_confirmation": json.dumps(condition)})
+    assert (held.status_code, held.json()["code"], held.json()["disposition"]) == (409, "place_not_connected", "blocked")
+    assert "owner_confirmation" not in held.json()
 
 
 def test_unbound_capture_current_scope_and_legacy_lookup(client, tmp_path):
@@ -202,10 +307,11 @@ def test_missing_binding_auth_failure_and_unreadable_store_are_not_unbound(clien
     assert bind(client).status_code == 403
 
 
-def test_existing_bound_scope_change_is_not_a_new_unbound_account(client, tmp_path, monkeypatch):
+def test_existing_bound_scope_change_is_not_a_new_unbound_account(client, tmp_path):
     original = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
     captured = bind(client).json()["binding"]
-    monkeypatch.setattr(places, "load_places", lambda _: [replace(original, account_id="other")])
+    edited = places._write(tmp_path, original.place_id, lambda row: replace(row, account_id="other"))
+    assert edited.connected_revision == original.connected_revision
     assert check(client, captured).json()["code"] == "place_scope_changed"
 
 
