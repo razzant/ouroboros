@@ -1426,7 +1426,7 @@ class Txn:
         self.sync_handoffs(task_id, document)
         store_task_cards.merge(self, task_id, document)  # the same monotonic rule: a stale document regresses no card
         from ouroboros.obligations import task_written
-        task_written(self, task_id, columns)
+        task_written(self, task_id, columns, current=current, document=document)
 
     def touch(self, task_id: str) -> None:
         """A row-only write still moves the task's signature (the memos re-read)."""
