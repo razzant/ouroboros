@@ -186,7 +186,7 @@ def retained_call_source(ctx, root, data, task_id, call_id, digest, start, end):
     if not isinstance(projection, dict) or not projection:
         raise FileNotFoundError("retained call has no redacted projection")
     raw = read_blob_ref(root, projection, expected_kind=str(projection.get("kind") or "json"),
-                        max_bytes=16 * 1024 * 1024, raw_bytes=True, admit=admit)
+                        max_bytes=16 * 1024 * 1024, raw_bytes=True, admit=admit, task_id=task_id)
     source, reason = text_source_range_projection(
         raw.decode("utf-8"), kind="redacted_dispatch_projection" if dispatch else "redacted_call_projection",
         start_char=start, end_char=end,

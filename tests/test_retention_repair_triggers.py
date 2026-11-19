@@ -494,3 +494,98 @@ def test_a_transient_failure_of_the_same_source_stays_retryable(tmp_path, monkey
     # Transient I/O is walked again; the real refusal behind it is then remembered.
     assert observability.retry_pending_child_ref_promotions(parent)["retried"] == [task]
     assert observability.retry_pending_child_ref_promotions(parent)["unchanged"] == [task]
+
+
+def test_a_source_whose_place_cannot_be_learned_now_stays_owed_and_is_retried(tmp_path, monkeypatch):
+    """``EvidenceUnavailable`` (where the bytes lie cannot be learned now: the packs catalog is busy or awaits its
+    rebuild) is neither a missing nor a damaged source. The walk keeps the reference owed at its address
+    (``pending_refs`` with its child path, the child drive retained), records no unavailable source and remembers
+    nothing, so the next retry reads it again and promotes the exact bytes once they can be located. A source truly
+    missing keeps its own remembered gap (``test_unchanged_missing_inventory_waits_for_real_repair...``)."""
+    from ouroboros import evidence_packs as packs
+
+    parent, task = tmp_path / "canonical", "unknown-place"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    call = observability.persist_call(child, task_id=task, call_id="call", call_type="tool_call",
+                                      payload={"tool": "read_file", "result": "exact bytes behind a busy catalog"})
+    payload = json.loads(Path(call["manifest_ref"]["path"]).read_text(encoding="utf-8"))["full_payload_ref"]
+    exact, real = packs.read_loose_gzip(Path(payload["path"])), packs.blob_bytes
+
+    def unlocatable(root, ref, **kwargs):
+        if ref.get("sha256") == payload["sha256"]:
+            raise packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(packs, "blob_bytes", unlocatable)
+        write_task_result(child, task, "completed", result="answer", artifact_status="ready")
+        headless.copy_child_task_result(parent, {"id": task, "drive_root": str(child)})
+        assert observability.retry_pending_child_ref_promotions(parent)["pending"] == [task]  # the deferred walk
+        state = load_task_result(parent, task)["child_ref_promotion"]
+        assert state["status"] == "incomplete" and not state["unavailable_refs"], json.dumps(state)
+        owed = [row for row in state["pending_refs"] if row.get("sha256") == payload["sha256"]]
+        assert owed and owed[0]["path"] == payload["path"] and "EvidenceUnavailable" in owed[0]["reason"], json.dumps(state)
+        assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "retained"
+        report = observability.retry_pending_child_ref_promotions(parent)
+        assert report["retried"] == [task] and not report["unchanged"], report  # nothing remembered: read again
+        assert task not in (maintenance_jobs.job(parent, source_retention.MEMO_JOB) or {}).get("observed", {})
+    assert observability.retry_pending_child_ref_promotions(parent)["completed"] == [task]
+    assert packs.blob_bytes(parent, {**payload, "path": ""}) == exact
+    assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "removed"
+
+
+@pytest.mark.parametrize("catalog", ["busy", "damaged"])
+def test_a_source_only_the_catalog_can_place_stays_owed_until_it_answers(tmp_path, catalog):
+    """The real reader: a blob whose one copy lies in another task's pack on the child drive is placed by the
+    child's packs catalog alone (the walked task's own sidecars do not hold it). While that catalog cannot answer
+    (``busy``: the packer holds its lock past the read's wait; ``damaged``: the file awaits the packing pass's
+    rebuild) the walk keeps the reference owed at its address, never unavailable, and remembers nothing; once the
+    catalog answers, the next retry promotes the exact bytes."""
+    import threading
+
+    from ouroboros import evidence_packer, store
+    from ouroboros import evidence_packs as packs
+
+    parent, task = tmp_path / "canonical", "owed-place"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    neighbour = observability.persist_call(child, task_id="neighbour", call_id="call", call_type="tool_call",
+                                           payload={"tool": "read_file", "result": "bytes only a neighbour's pack holds"})
+    payload = json.loads(Path(neighbour["manifest_ref"]["path"]).read_text(encoding="utf-8"))["full_payload_ref"]
+    exact = packs.read_loose_gzip(Path(payload["path"]))
+    write_task_result(child, "neighbour", "completed", result="answer", artifact_status="ready")
+    assert evidence_packer.run_pass(child)["packed"] == 1 and not Path(payload["path"]).exists()
+    observability.persist_call(child, task_id=task, call_id="call", call_type="tool_call",
+                               payload={"response_ref": payload})
+    write_task_result(child, task, "completed", result="answer", artifact_status="ready")
+    headless.copy_child_task_result(parent, {"id": task, "drive_root": str(child)})
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(child, packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    if catalog == "busy":
+        holder.start()
+        assert held.wait(5)
+    else:
+        (packs.packs_dir(child) / packs.INDEX_NAME).write_bytes(b"not a database")
+    try:
+        assert observability.retry_pending_child_ref_promotions(parent)["pending"] == [task]
+        state = load_task_result(parent, task)["child_ref_promotion"]
+        assert state["status"] == "incomplete" and not state["unavailable_refs"], json.dumps(state)
+        owed = [row for row in state["pending_refs"] if row.get("sha256") == payload["sha256"]]
+        assert owed and owed[0]["path"] == payload["path"] and "EvidenceUnavailable" in owed[0]["reason"], state
+        assert task_custody.settle_child_drive(parent, task, child, live=lambda _: False)["status"] == "retained"
+        assert task not in (maintenance_jobs.job(parent, source_retention.MEMO_JOB) or {}).get("observed", {})
+    finally:
+        release.set()
+        if holder.is_alive():
+            holder.join(10)
+    if catalog == "damaged":
+        # The one builder, called here by hand: no packing pass runs over a child root today, so in the product
+        # this source stays owed (and the child's drive retained) until that root's index answers.
+        packs.ensure_index(child)
+    assert observability.retry_pending_child_ref_promotions(parent)["completed"] == [task]
+    assert packs.blob_bytes(parent, {**payload, "path": ""}) == exact

@@ -279,8 +279,9 @@ def _reconstruct_blob_bytes(candidate: Dict[str, Any]) -> bytes:
 
 
 def _read_blob_bytes(manifest: Any) -> Tuple[Optional[bytes], bool]:
-    """(raw CAS bytes, cas_digest_intact) read back from the durable record."""
-    from ouroboros.evidence_packs import blob_bytes, read_loose_gzip
+    """(raw CAS bytes, cas_digest_intact) read back from the durable record. ``EvidenceUnavailable``
+    propagates: bytes that cannot be located now are left to a later pass, never judged unreadable."""
+    from ouroboros.evidence_packs import EvidenceUnavailable, blob_bytes, read_loose_gzip
 
     ref = manifest.get("full_payload_ref") if isinstance(manifest, dict) else None
     path = pathlib.Path(str((ref or {}).get("path") or ""))
@@ -290,7 +291,9 @@ def _read_blob_bytes(manifest: Any) -> Tuple[Optional[bytes], bool]:
     if raw is not None and hashlib.sha256(raw).hexdigest() == str((ref or {}).get("sha256") or ""):
         return raw, True
     try:  # a missing or damaged loose blob: the pack of the root the ref names
-        return blob_bytes(path.parents[2], ref), True
+        return blob_bytes(path.parents[2], ref, task_id=str(manifest.get("task_id") or "") or None), True
+    except EvidenceUnavailable:
+        raise
     except Exception:
         return raw, False
 
@@ -364,8 +367,11 @@ def verify_sealed_candidate(
     else ``None``. Without an original candidate, compare attempt digest and CAS
     integrity only: excluded secret/native bytes cannot be reconstructed. Never raises: this invariant is
     observability — the in-memory identity refusal above the call keeps being
-    the only blocking authority.
+    the only blocking authority. The one exception is ``EvidenceUnavailable``: a record whose
+    bytes cannot be located now is judged by a later pass, so its caller names this one unknown.
     """
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     try:
         observed = {
             "basis": CANONICAL_BASIS,
@@ -438,6 +444,8 @@ def verify_sealed_candidate(
             fact["first_divergent_offset"] = int(first_offset)
         (record(fact) if record is not None else record_model_send_violation(drive_root, fact))
         return fact
+    except EvidenceUnavailable:
+        raise
     except Exception:
         # Fail-soft by contract: the observability invariant must never take
         # down the call it observes; the failure is still visible here.
@@ -534,6 +542,8 @@ def _reconcile_seal_directions(
     report: Dict[str, Any],
     manifest_paths: List[pathlib.Path],
 ) -> None:
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     live_ids = set(finals)
     seals: List[Tuple[Dict[str, Any], Dict[str, Any], str]] = []
     for manifest_path in manifest_paths:
@@ -552,10 +562,13 @@ def _reconcile_seal_directions(
         aid = str(seal.get("attempt_id") or manifest.get("call_id") or "")
         attempt = finals.get(aid, {})
         if attempt.get("candidate_raw_sha256"):
-            fact = verify_sealed_candidate(root, task_id=str(manifest.get("task_id") or ""),
-                attempt_id=aid, candidate=None, manifest_ref={"path": str(manifest_path)},
-                raw_sha256=attempt["candidate_raw_sha256"],
-                raw_size_bytes=int(attempt.get("candidate_raw_size_bytes") or 0), record=_write)
+            try:
+                fact = verify_sealed_candidate(root, task_id=str(manifest.get("task_id") or ""),
+                    attempt_id=aid, candidate=None, manifest_ref={"path": str(manifest_path)},
+                    raw_sha256=attempt["candidate_raw_sha256"],
+                    raw_size_bytes=int(attempt.get("candidate_raw_size_bytes") or 0), record=_write)
+            except EvidenceUnavailable:  # its bytes cannot be located now: unknown, never a verdict
+                report["status"], fact = "unknown", None
             if fact:
                 report["forward_divergences"] = report.get("forward_divergences", 0) + 1
         seals.append((manifest, seal, str(seal.get("attempt_id") or manifest.get("call_id") or "")))
@@ -594,6 +607,9 @@ def _reconcile_seal_directions(
             manifest = read_call_manifest_ref(root, ref, task_id=str(row.get("task_id") or ""))
             if isinstance(manifest, dict):
                 seal = manifest.get("model_send_seal")
+        except EvidenceUnavailable:  # the seal's version cannot be located now: unknown, never unlogged
+            report["status"] = "unknown"
+            continue
         except Exception:
             seal = None
         if not isinstance(seal, dict):

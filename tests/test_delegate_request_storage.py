@@ -273,6 +273,95 @@ def test_missing_pending_body_keeps_snapshot_and_orphan_recovery_without_a_post(
     assert custody.pending_invocations(tmp_path) == [] and custody.open_snapshot_ids(tmp_path) == set()
 
 
+
+def test_a_pending_body_whose_place_cannot_be_learned_now_is_retained_never_unrecorded(tmp_path, monkeypatch):
+    """A stored request body whose bytes cannot be located now (``EvidenceUnavailable``: the packs catalog
+    cannot answer) is neither missing nor unrecorded: recovery keeps the invocation pending with its address,
+    posts nothing and records no ``invocation_request_unrecorded`` reconciliation; once readable the same
+    address gives the exact body. The read names the invocation's task."""
+    from types import SimpleNamespace
+
+    from ouroboros import evidence_packs
+    from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
+
+    assert custody.record_start_requested(
+        tmp_path, invocation_id="pending", task_id="owner", snapshot_id="snapshot",
+        request={"prompt": "Preserve this pending invocation"})
+    ref = _start_rows(tmp_path)[0]["request_ref"]
+    real, tasks = evidence_packs.blob_bytes, []
+
+    def unlocatable(root, blob, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if blob.get("sha256") == ref["sha256"]:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, blob, **kwargs)
+
+    gateway = SimpleNamespace(start_run=lambda *args, **kwargs: pytest.fail("an unread body must not POST"))
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        pending = custody.pending_invocations(tmp_path)
+        assert len(pending) == 1 and pending[0]["request"] is None and pending[0]["request_ref"] == ref
+        result = _recover_pending_invocation(tmp_path, gateway, pending[0])
+    assert result["action"] == "invocation_retained" and result["reason"] == "evidence_unavailable", result
+    assert "owner" in tasks, tasks
+    reconciled = [row for row in custody._iter_rows(custody.event_log_path(tmp_path))
+                  if row["type"] == custody.RECONCILED and row.get("invocation_id") == "pending"]
+    assert reconciled == [], reconciled
+    assert custody.invocation_record(tmp_path, "pending")["state"] == "pending"
+    assert request_body(tmp_path, pending[0]) == {"prompt": "Preserve this pending invocation"}
+
+
+def test_a_legacy_request_whose_body_cannot_be_located_now_keeps_its_shape_owed(tmp_path):
+    """The one-time shape backfill reads an older open request's body for its access and mode. While that body,
+    held only by another task's pack, cannot be located (the packs catalog is held), the request keeps no shape and
+    the job stays pending, never an empty shape recorded as done; the next run records the real one."""
+    import threading
+
+    from ouroboros import delegate_pending, evidence_packs, maintenance_jobs, store
+
+    body = {"prompt": "keep", "mode": "ask", "access": "readonly"}
+    assert custody.record_start_requested(tmp_path, invocation_id="legacy", task_id="owner", snapshot_id="snapshot",
+                                          source="review_substrate", request=body)
+    key = "invocation:legacy"
+    with store.open_store(tmp_path, write=True) as txn:  # the shape a row written before request shapes has
+        row = txn.get_row("custody_open", key)
+        row.pop("pending", None)
+        row["request"].pop("request_shape", None)
+        txn.put_row("custody_open", key, row)
+    ref = row["request"]["request_ref"]
+    evidence_packs.write_pack(tmp_path, "other", 1, [ref])
+    evidence_packs.ensure_index(tmp_path)
+    Path(ref["path"]).unlink()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(tmp_path, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    def state():
+        job = maintenance_jobs.job(tmp_path, delegate_pending.JOB) or {}
+        with store.open_store(tmp_path, write=False) as txn:
+            return job, txn.get_row("custody_open", key)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with store.acquisition_budget(0):
+            assert delegate_pending.backfill(tmp_path, lambda: False) == {"state": "pending", "items": 0}
+    finally:
+        release.set()
+        holder.join(10)
+    job, facts = state()
+    assert "pending" not in facts and delegate_pending.backfill_due(tmp_path, job, {}, True), (job, facts)
+    assert delegate_pending.backfill(tmp_path, lambda: False) == {"state": "done", "items": 1}
+    job, facts = state()
+    assert facts["pending"][0]["request_shape"] == {"access": "readonly", "mode": "ask", "execution": False}
+    assert not delegate_pending.backfill_due(tmp_path, job, {}, True)
+
+
 @pytest.mark.parametrize("prior", ["absent", "refused", "fenced", "corrupt"])
 def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior,
                                                                               monkeypatch):

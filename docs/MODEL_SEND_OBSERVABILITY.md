@@ -246,8 +246,9 @@ only; nothing decides by them.
   `lock_wait` and `manifest_write`; `context_facts`;
   `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window);
   `prologue` and `prologue.*`: host work measured before the window opened and
-  carried once, a start's restore, route rebind and tools and a retained
-  answer's post-batch `delivery_evidence` read, in one receipt.
+  carried once, a start's restore, route rebind and tools, a retained answer's
+  post-batch `delivery_evidence` read and an authored view's receipt transfer
+  (`source_retention`), in one receipt.
 - `host_steps.rusage`: the process's voluntary and involuntary context
   switches, major faults and block writes since the batch's end; absent on
   Windows.

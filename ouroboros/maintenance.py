@@ -235,16 +235,19 @@ def _analyze_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[st
 def _packing_inputs(root: pathlib.Path) -> Dict[str, Any]:
     """The facts the packing rule reads, cheaply: the store's terminal-write counter (a task closing
     or a closed task written again moves it; a live task's writes do not; one meta row, never a read
-    over the rows), whether archived usage segments wait, and whether any loose evidence exists."""
-    from ouroboros import evidence_packer
+    over the rows), whether archived usage segments wait, whether the evidence index awaits its rebuild
+    (``evidence_packs.index_owed``: stats, nothing of the packs opened) and whether any loose evidence exists."""
+    from ouroboros import evidence_packer, evidence_packs
 
     return {"terminal": _plain(evidence_packer.terminal_revision(root)),
-            "archive_pending": evidence_packer.archive_pending(root),
+            "archive_pending": evidence_packer.archive_pending(root), "index_owed": evidence_packs.index_owed(root),
             "loose": any(_any_entry(root / rel) for rel in ("observability/calls", "task_results/artifacts"))}
 
 
 def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
-    """Evidence may wait when archived usage segments wait, or when loose evidence exists and the
+    """Evidence may wait when archived usage segments wait or the evidence index awaits its rebuild
+    (only the pass rebuilds it, so even a quiet install is due once its file is gone or a reader marked
+    it unusable), or when loose evidence exists and the
     terminal rows moved since the last pass, or the last pass unlinked (one more look is owed: it
     records the moved directories' stamps), or it left candidates unfinished (``pending``: deferred
     by a held custody lock, busy files, faults) and the store has been written since that pass began
@@ -253,13 +256,13 @@ def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any],
     tight loop); in the child the unfinished work runs whenever the child runs for another reason."""
     inputs = _packing_inputs(root)
     unfinished = bool(row.get("pending")) and (child or facts["revision"] != row.get("revision"))
-    return inputs["archive_pending"] or (inputs["loose"] and (
+    return inputs["archive_pending"] or inputs["index_owed"] or (inputs["loose"] and (
         row.get("terminal") != inputs["terminal"] or not row.get("quiet") or unfinished))
 
 
 def _packing_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """Discovery (archive first, then the first changed task stamp) and, when it finds work, one
-    packing pass, both over the census the job row addresses: the rows written terminal since the
+    """Discovery (archives and an owed index rebuild first, then the first changed task stamp) and, when
+    it finds work, one packing pass, both over the census the job row addresses: the rows written terminal since the
     position the last pass recorded (``census``, the counter it read before its pass, under the store's
     body fact ``body``) and the candidates it left (``pending``); every loose folder only without a
     readable position (``evidence_packer.census_since``: the first run, an older body's pass, another

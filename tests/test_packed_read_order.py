@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import pathlib
 from collections import deque
 
 import pytest
@@ -262,3 +263,128 @@ def test_a_response_two_carriers_read_apart_is_counted_once_by_the_part_cache(ro
     monkeypatch.setattr(packs._PartCache, "put", accounted)
     _proven(_walk(root, child, task))
     assert True in offers, offers  # the second carrier's read offered the cached response again
+
+
+def test_a_held_catalog_neither_stalls_nor_disorders_a_walk_over_its_own_packed_members(root, tmp_path, monkeypatch):
+    """The packer may hold the packs catalog's lock while a walk runs. The ordering hint never waits for it, and it
+    and the reads of a task's own packed members name that task, so its own sidecars answer them: the walk keeps its
+    one forward pass over the pack, verifies and retains every member, and no request for the lock asks to wait."""
+    import threading
+
+    from ouroboros import store
+
+    task, child, calls = _packed_task(root)
+    held, release, waits, walker = threading.Event(), threading.Event(), [], threading.get_ident()
+
+    def hold():
+        with store.name_lock(child, packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    real_lock = store.name_lock
+
+    def name_lock(where, name, *args, **kwargs):
+        if name == packs.INDEX_LOCK_NAME and threading.get_ident() == walker:
+            waits.append(kwargs.get("timeout_sec"))
+        return real_lock(where, name, *args, **kwargs)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        monkeypatch.setattr(store, "name_lock", name_lock)
+        decoding = count_decoding(monkeypatch)
+        state = _walk(root, child, task)
+    finally:
+        release.set()
+        holder.join(10)
+    _proven(state)
+    assert decoding["starts"] <= 2 and decoding["decoded"] <= 2 * _raw_total(child, task), decoding
+    assert max(waits, default=0) == 0, waits
+    for call in calls:
+        manifest = obs.read_call_manifest_ref(root, call["manifest_ref"], task_id=task)
+        assert obs.read_blob_ref(root, manifest["full_payload_ref"])
+
+
+def test_bytes_beside_their_producer_are_read_there_before_the_canonical_catalog(root, tmp_path, monkeypatch):
+    """A carrier may name the canonical address of bytes that still lie only beside their producer (a promoted
+    manifest's projection does). The read takes that loose copy before any root's packs: the canonical catalog is
+    asked by the ordering hint and the destination's proof (``_blob``: only the parent's own bytes prove it holds
+    them), neither of which waits for it, never by the read."""
+    obs.persist_call(root, task_id="settled", call_id="call_00", call_type="tool_call", payload={"answer": "packed"})
+    write_task_result(root, "settled", "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(root)["packed"] == 1  # the canonical root has packs and a catalog
+    task = "beside"
+    child = headless.prepare_task_drive(root, task, "empty")
+    loose = _blob(child, json.dumps({"result": "only beside the producer " + "z" * 600}).encode())
+    canonical = {**loose, "path": str(root / "observability" / "blobs" / pathlib.Path(loose["path"]).name)}
+    obs.persist_call(child, task_id=task, call_id="call_00", call_type="tool_call", payload={"response_ref": canonical})
+    opened, reads, phase, real = [], [], [""], packs.open_index
+
+    def counted(where, *args, **kwargs):
+        opened.append((phase[0], str(where)))
+        return real(where, *args, **kwargs)
+
+    def during(name, method):
+        def step(walk, node):
+            phase[0] = name
+            try:
+                answer = method(walk, node)
+            finally:
+                phase[0] = ""
+            if name == "read" and node["kind"] == "blob":
+                reads.append((node["ref"]["sha256"], str(answer[0][1])))
+            return answer
+        return step
+
+    monkeypatch.setattr(packs, "open_index", counted)
+    monkeypatch.setattr(source_retention.RetentionWalk, "_position",
+                        during("hint", source_retention.RetentionWalk._position))
+    monkeypatch.setattr(source_retention.RetentionWalk, "_read_source",
+                        during("read", source_retention.RetentionWalk._read_source))
+    _proven(_walk(root, child, task))
+    assert (loose["sha256"], loose["path"]) in reads, reads
+    assert [where for when, where in opened if when == "read"] == [], opened  # the read asked no catalog
+    assert ("", str(root)) in opened, opened  # the destination proofs still ask the canonical one
+    assert packs.blob_bytes(root, {**loose, "path": ""}) == packs.read_loose_gzip(pathlib.Path(loose["path"]))
+
+
+def test_a_root_that_cannot_answer_now_leaves_the_order_hint_to_the_next_root(root, tmp_path):
+    """The ordering hint asks the parent, then the child. A parent whose catalog cannot answer now passes the
+    question on, and the child's own sidecar names where its packed member lies; when both roots answer, the
+    parent's answer still comes first."""
+    import threading
+
+    from ouroboros import store
+
+    obs.persist_call(root, task_id="settled", call_id="call_00", call_type="tool_call", payload={"answer": "packed"})
+    write_task_result(root, "settled", "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(root)["packed"] == 1  # the parent has packs and a catalog
+    task, child, _calls = _packed_task(root)
+    _path, sidecar = next(iter(packs.list_sidecars(child)))
+    member = next(item for item in sidecar["members"] if item["kind"] == "json")
+    ref = {"sha256": member["sha256"], "kind": "json", "size": int(member["size"])}
+    node = {"kind": "blob", "task_id": task, "ref": ref}
+    walk = source_retention.RetentionWalk(root, child, {})
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(root, packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="parent-catalog-held")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with pytest.raises(packs.EvidenceUnavailable):
+            packs.read_position(root, sha256=ref["sha256"], kind="json", task_id=task)
+        assert walk._position(node) == (str(packs.packs_dir(child) / packs.pack_name(task, 1)), int(member["offset"]))
+    finally:
+        release.set()
+        holder.join(10)
+    copy = obs.write_blob_bytes(root, packs.blob_bytes(child, {**ref, "encoding": "gzip"}, task_id=task))
+    pack, copied = packs.write_pack(root, "parent-copy", 1, [{**ref, "source": pathlib.Path(copy["path"])}])
+    packs.index_upsert(root, pack, copied)
+    pathlib.Path(copy["path"]).unlink()
+    assert walk._position(node) == (str(pack), int(copied["members"][0]["offset"]))
