@@ -1,7 +1,9 @@
 """Claim adoption and its receipts through the ordinary knowledge tools."""
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -174,30 +176,41 @@ def test_body_only_append_keeps_recorded_names_without_adopting_names_from_yaml(
     raw = _markdown(["room:1", "place:unrecorded"])
     target.path.parent.mkdir(parents=True)
     target.path.write_bytes(raw.encode())
+    plain = knowledge.resolve_knowledge_address(tmp_path, "plain", "global")
+    plain.path.write_bytes(b"---\ntype: note\n---\nProject notes.\n")
+
+    def newest(address=target):
+        return next(iter(knowledge_versions.NoteHistory(address)))[1]
+
     assert _write(registry, target, "First body append.", mode="append").startswith("✅")
+    assert _write(registry, plain, "First body append.", mode="append").startswith("✅")
     assert knowledge.active_claims(tmp_path) == {}
+    # A YAML field nobody adopted adds nothing to the write's row: the fields of a note that never had one.
+    assert "active_claims" not in newest() and set(newest()) == set(newest(plain))
 
     before = knowledge.read_knowledge_note(target)
     assert _write(registry, target, "Body edit.", mode="edit", old_str="Project notes.",
                   expected_revision=before.revision).startswith("✅")
-    assert knowledge.active_claims(tmp_path) == {}
+    assert knowledge.active_claims(tmp_path) == {} and "active_claims" not in newest()
 
     earlier = knowledge.read_knowledge_note(target)
     assert _write(registry, target, _markdown(["room:1"]), expected_revision=earlier.revision).startswith("✅")
+    assert newest()["active_claims"] == ["room:1"]
     target.path.write_bytes(raw.encode())  # a second name arrives outside the writer
     receipt = _write(registry, target, "Second body append.", mode="append")
     assert receipt.startswith("✅") and "Claims with no matching" not in receipt
     assert knowledge.active_claims(tmp_path) == {"room:1": [target]}
-    assert next(iter(knowledge_versions.NoteHistory(target)))[1]["active_claims"] == ["room:1"]
+    assert newest()["active_claims"] == ["room:1"]
     assert knowledge.read_knowledge_note(target).metadata["claims"] == ["room:1", "place:unrecorded"]
 
     target.path.write_bytes(_markdown(["place:unrecorded"]).encode())
     assert knowledge.active_claims(tmp_path) == {}
     removed = _write(registry, target, "Third body append.", mode="append")
-    assert REMOVED in removed
-    assert next(iter(knowledge_versions.NoteHistory(target)))[1]["active_claims"] == []
+    assert REMOVED in removed and newest()["active_claims"] == []  # the removal is the row's fact
     target.path.write_bytes(raw.encode())
     assert knowledge.active_claims(tmp_path) == {}
+    later = _write(registry, target, "Fourth body append.", mode="append")
+    assert later.startswith("✅") and REMOVED not in later and "active_claims" not in newest()
 
 
 def test_a_failed_claim_capture_cannot_be_rebuilt_as_a_publication(tmp_path, monkeypatch):
@@ -399,7 +412,7 @@ def test_claim_receipt_reports_unmatched_names_and_nonstrings_and_project_claims
     assert "Claims with no matching" not in cleared and knowledge.active_claims(tmp_path) == {}
 
 
-def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, monkeypatch):
+def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
     from ouroboros import return_facts
     from ouroboros.projects_registry import create_project
 
@@ -418,11 +431,13 @@ def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, m
                                                 "client_message_id": identity, "ingress_accepted": True})
         return dialogue_store.accepted_row(tmp_path, 1, identity)
 
-    def counts(index, expected):
+    def pages(index):
+        """Each page written since my human's previous word, to its count of writes."""
         facts = return_facts.facts(tmp_path, owner_word(index), return_facts.Own(room=1))
-        full = return_facts.render(facts)[0]
-        [page] = [line for line in full.splitlines() if line.startswith("- knowledge ")]
-        assert page.startswith(f"- knowledge global/nova: {expected} {'write' if expected == 1 else 'writes'} by")
+        lines = [line for line in return_facts.render(facts)[0].splitlines() if line.startswith("- knowledge ")]
+        found = {match[1]: int(match[2]) for line in lines if (match := re.match(r"- knowledge (\S+): (\d+) writes? by ", line))}
+        assert len(found) == len(lines)
+        return found
 
     def edit(index, content, **kwargs):
         monkeypatch.setattr(knowledge, "utc_now_iso", lambda: stamp(index))
@@ -436,27 +451,33 @@ def test_authored_history_and_return_facts_count_claimed_writes_once(tmp_path, m
     owner_word(0)
     target.shelf.mkdir(parents=True)
     legacy = {"ts": stamp(1), "topic": target.topic, "mode": "overwrite", "reason": "Legacy write"}
-    journal.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
-    counts(2, 1)
+    journal.write_bytes((json.dumps(legacy) + "\n").encode("utf-8"))
+    assert pages(2) == {"global/nova": 1}
     assert history(tail=1) == [legacy]
 
     legacy_index = "# Authored index before upgrading\n"
-    (target.shelf / knowledge.INDEX_FILE).write_text(legacy_index, encoding="utf-8")
+    (target.shelf / knowledge.INDEX_FILE).write_bytes(legacy_index.encode("utf-8"))
     edit(3, _markdown(["room:1"]), reason="Adopt the claim")
-    counts(4, 1)
-    [first] = history(tail=1)
-    assert first["reason"] == "Adopt the claim" and first["delta"]["body_changed"] is True
+    # The claim's commit is no write: the note counts once. The one backup of a hand-written index is a row of the
+    # journal as before claims existed: both readers return it, its text left out.
+    assert pages(4) == {"global/nova": 1, "global/index-full": 1}
+    adopted, backup = history(tail=2)
+    assert adopted["reason"] == "Adopt the claim" and adopted["delta"]["body_changed"] is True
+    assert backup == {"ts": stamp(3), "type": "knowledge_index_source", "topic": "index-full", "scope": "global",
+                      "old_sha256": hashlib.sha256(legacy_index.encode("utf-8")).hexdigest()}
     edit(5, "Second.\n", mode="append", reason="Second write")
     edit(6, "Third.\n", mode="append", reason="Third write")
-    counts(7, 2)
+    assert pages(7) == {"global/nova": 2}
     assert [row["reason"] for row in history(tail=2)] == ["Second write", "Third write"]
     edit(8, _markdown([]), expected_revision=knowledge.read_knowledge_note(target).revision, reason="Remove the claim")
-    counts(9, 1)
-    assert [row["reason"] for row in history()] == [
-        "Legacy write", "Adopt the claim", "Second write", "Third write", "Remove the claim",
+    assert pages(9) == {"global/nova": 1}
+    assert [row.get("reason") for row in history()] == [
+        "Legacy write", "Adopt the claim", None, "Second write", "Third write", "Remove the claim",
     ]
     assert history(filter={"field": "publication", "op": "eq", "value": "claims_published"}) == []
+    assert history(filter={"field": "type", "op": "eq", "value": "knowledge_index_source"}) == [backup]
     raw = [json.loads(line) for line in journal.read_bytes().splitlines()]
-    [backup] = [row for row in raw if row.get("type") == "knowledge_index_source"]
-    assert backup["old_content"] == legacy_index and "publication" not in backup
+    assert [row.get("publication") for row in raw].count("claims_published") == 4  # one beside each claimed write
+    [stored] = [row for row in raw if row.get("type") == "knowledge_index_source"]
+    assert stored["old_content"] == legacy_index and "publication" not in stored
     assert raw[-1]["publication"] == "claims_published"

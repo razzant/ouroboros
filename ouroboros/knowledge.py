@@ -962,7 +962,9 @@ def write_knowledge_note(
                    **({"old_content": old_text, "new_content": updated.text} if lifecycle
                       else knowledge_rows.encode(old_text, updated.text, base, change)),
                    "source_ref": updated.source_ref(), "delta": delta,
-                   **({"active_claims": claims.active} if claims is not None and claims.path is not None else {}),
+                   # Only a write that carries or removes recorded names: a YAML field nobody adopted adds nothing.
+                   **({"active_claims": claims.active} if claims is not None and claims.path is not None
+                      and (claims.active or claims.recorded) else {}),
                    **({"summary": summary} if summary is not None else {}),
                    **({"reason": reason} if reason.strip() else {}),
                    **({"reverted_from": version} if mode == "revert" else {})}

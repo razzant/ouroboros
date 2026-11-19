@@ -74,18 +74,18 @@ def _needle(address: Any) -> bytes:
     return json.dumps(topic, ensure_ascii=False).encode("utf-8") if isinstance(topic, str) else b"{"
 
 
-def is_authored_write(row: Any) -> bool:
-    """A source write, including unstamped writes. Index backups and claim commits have their own roles."""
-    return (isinstance(row, dict) and row.get("type") != INDEX_SOURCE_TYPE
-            and row.get("publication", "source_capture") == "source_capture")
+def is_claim_commit(row: Any) -> bool:
+    """A ``claims_published`` row: the commit of a note's recorded names beside its write, never a write itself.
+    The readers of the journal's writes skip these rows and no others."""
+    return isinstance(row, dict) and row.get("publication") == _CLAIMS_PUBLICATION
 
 
 def _belongs(row: Any, address: Any) -> bool:
     """A version row of this text: its topic (none for a journal of one text), a version field, a capture (or an
     older unstamped row) of its scope."""
-    if not is_authored_write(row) or row.get("topic") != getattr(address, "topic", None):
+    if not isinstance(row, dict) or row.get("topic") != getattr(address, "topic", None):
         return False
-    if "new_content" not in row and "new_sha256" not in row:
+    if ("new_content" not in row and "new_sha256" not in row) or row.get("publication", "source_capture") != "source_capture":
         return False
     where, scope = row.get("address"), getattr(address, "scope", None)
     return not isinstance(where, dict) or where.get("scope", scope) == scope
