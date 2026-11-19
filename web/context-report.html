@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qFYFtNaywMLxFv/MFWklin3oxCjNgG44/qq/FpEBEJg='; style-src 'sha256-BndEYCQrWUMNsWyi3ZU8ZNr8mOJYwh9t/JpxBXYn2J0='; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beautiful Context</title><style>
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+body { margin: 0; padding: 1rem; background: Canvas; color: CanvasText; overflow-wrap: anywhere; }
+h1 { font-size: 1.25rem; margin: 0; }
+p { margin: .4rem 0 1rem; }
+input { max-width: 100%; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem .8rem; }
+dt { font-weight: 600; } dd { margin: 0; min-width: 0; }
+summary { cursor: pointer; padding: .5rem 0; font-weight: 600; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; border-inline-start: 2px solid GrayText; padding-inline-start: .75rem; }
+</style></head>
+<body><main><h1>Beautiful Context</h1>
+<p>Open a report produced by the local request reader. The file stays in this frame.</p>
+<label for="report-file">Open local report</label>
+<input type="file" id="report-file" accept=".json,application/json">
+<p id="report-status" role="status"></p>
+<section id="report-result" hidden><dl id="attempt-facts"></dl>
+<details><summary>Stored JSON</summary><pre id="stored-body"></pre></details>
+<details><summary>Recorded source versions</summary><pre id="source-versions"></pre></details>
+</section></main><script>
+'use strict';
+const byId = (id) => document.getElementById(id);
+const input = byId('report-file');
+const status = byId('report-status');
+const result = byId('report-result');
+const fields = byId('attempt-facts');
+const stored = byId('stored-body');
+const sources = byId('source-versions');
+const bodyDisclosure = stored.closest('details');
+const sourceDisclosure = sources.closest('details');
+const maxBytes = 48 * 1024 * 1024;
+const text = (value) => typeof value === 'string' && value ? value : 'Not recorded';
+const words = new Map([
+  ['not_started', 'Not started at the last recorded state'],
+  ['ledger_released', 'Released in the host ledger; transport receipt not confirmed'],
+  ['ledger_dispatch_mark', 'Marked dispatched in the host ledger; transport receipt not confirmed'],
+  ['error_reply_recorded', 'Transport returned an error reply'],
+]);
+let generation = 0;
+function clear() {
+  result.hidden = true;
+  fields.replaceChildren();
+  sources.textContent = '';
+  stored.textContent = '';
+  bodyDisclosure.open = sourceDisclosure.open = false;
+}
+function add(label, value) {
+  const term = document.createElement('dt');
+  term.textContent = label;
+  const definition = document.createElement('dd');
+  definition.textContent = value;
+  fields.append(term, definition);
+}
+input.addEventListener('change', async () => {
+  const epoch = ++generation;
+  const file = input.files[0];
+  input.value = '';
+  clear();
+  if (!file) { status.textContent = 'No report selected.'; return; }
+  if (file.size > maxBytes) { status.textContent = 'This report exceeds the 48 MiB display limit.'; return; }
+  status.textContent = 'Reading the selected file…';
+  let report;
+  try {
+    report = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()));
+    const { facts, stored_json: body } = report;
+    if (report.format !== 'ouroboros.context-report/1' || !facts || typeof facts !== 'object'
+        || typeof facts.task_id !== 'string' || typeof facts.attempt_id !== 'string'
+        || (body !== null && typeof body !== 'string')) throw new Error('Invalid context report');
+    if (body !== null) JSON.parse(body);
+  } catch {
+    if (epoch === generation) status.textContent = 'Cannot read this Beautiful Context JSON report. Choose another file.';
+    return;
+  }
+  if (epoch !== generation) return;
+  const { facts, stored_json: body } = report;
+  add('Task', text(facts.task_id));
+  add('Attempt', text(facts.attempt_id));
+  add('Requested model', text(facts.model));
+  add('Ledger state', text(facts.ledger_state));
+  add('Transport', words.get(facts.transport_observation) || 'Transport receipt not confirmed');
+  const trace = Array.isArray(facts.file_trace) ? facts.file_trace.filter((row) => row && typeof row === 'object'
+    && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
+  sources.textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
+    'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
+    : 'No supported source versions were recorded. Other files and offsets remain unknown.';
+  stored.textContent = body ?? ('Request body unavailable: ' + text(facts.body));
+  status.textContent = 'Showing ' + file.name + '. Redacted host record; the provider’s copy was not observed.';
+  result.hidden = false;
+});
+window.addEventListener('pagehide', () => { ++generation; input.value = ''; clear(); }, { once: true });
+</script></body></html>

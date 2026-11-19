@@ -207,6 +207,24 @@ from "our two copies agree" to "the durable record agrees with the wire".
 
 ## 6. Non-goals
 
+Beautiful Context on Widgets opens a locally selected report in an isolated
+frame, not from a server archive route. Generate one with the retained request
+reader in a separate source checkout containing it, from a private local shell:
+
+```sh
+python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --attempt ATTEMPT_ID --report > PRIVATE_REPORT.json
+```
+
+Use binary-safe stdout redirection (e.g. a POSIX shell or `cmd.exe`), a new
+private non-synced path outside Files, and discard failed exports. Reports can
+contain private text even after redaction. Open the JSON with **Beautiful Context
+→ Open local report**; the frame neither uploads nor persists its selection, and
+closing it clears the view. The report shows the retained redacted host JSON,
+recorded file versions, and what the host knows about transport. It is not a
+receipt of provider input; a gap stays a gap. The ordinary CLI without
+`--report` still writes the exact stored JSON bytes.
+
+
 - No byte claim for response objects, UI rendering, events/chat/progress
   narration planes (they remain projections; reverse-⟺ is `model_send` only).
 - No logical-call identity across retry rungs (§5.3).

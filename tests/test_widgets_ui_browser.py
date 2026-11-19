@@ -975,6 +975,31 @@ def test_ui_smoke_widgets_page_has_a_typed_address_and_one_nav_landmark(
                 page.wait_for_selector("nav#primary-sidebar", timeout=15_000)
                 page.wait_for_selector("#page-widgets.active", timeout=15_000)
                 assert page.locator('[data-nav-page="widgets"].active').count() == 1
+                assert page.locator("iframe[title='Beautiful Context']").count() == 0
+                page.get_by_role("button", name="Beautiful Context").click()
+                report = page.locator("iframe[title='Beautiful Context']")
+                assert report.get_attribute("sandbox") == "allow-scripts"
+                frame = page.frame_locator("iframe[title='Beautiful Context']")
+                import json
+
+                body = '{ "input": "<b>captured verbatim</b>" }\n'
+                frame.locator("#report-file").set_input_files({
+                    "name": "report.json", "mimeType": "application/json", "buffer": json.dumps({
+                        "format": "ouroboros.context-report/1", "facts": {"task_id": "demo-task",
+                            "attempt_id": "demo-attempt", "transport_observation": "ledger_dispatch_mark",
+                            "file_trace": [{"source_path": "prompts/SYSTEM.md", "source_sha256": "b" * 64}]},
+                        "stored_json": body,
+                    }).encode("utf-8"),
+                })
+                frame.locator("#attempt-facts").get_by_text("demo-attempt").wait_for()
+                assert "receipt not confirmed" in frame.locator("#attempt-facts").inner_text()
+                frame.get_by_text("Stored JSON", exact=True).click()
+                assert frame.locator("#stored-body").text_content() == body
+                assert frame.locator("#stored-body b").count() == 0
+                frame.get_by_text("Recorded source versions", exact=True).click()
+                assert "prompts/SYSTEM.md" in frame.locator("#source-versions").inner_text()
+                page.locator("nav#primary-sidebar [data-nav-page]:not([data-nav-page='widgets'])").first.click()
+                report.wait_for(state="detached")
             finally:
                 browser.close()
     except PlaywrightError as exc:

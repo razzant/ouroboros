@@ -14,6 +14,22 @@ _PAGE_SIZE = 40
 _BODY_LIMIT = 16 * 1024 * 1024
 
 
+def _transport_observation(row: dict) -> str:
+    """Historical host facts, not a claim about the provider's copy."""
+    state = row.get("state")
+    if state == "reserved":
+        return "not_started"
+    if state == "released":
+        return "ledger_released"
+    failure = row.get("physical_failure")
+    if isinstance(failure, dict) and failure.get("stage") == "response_body_error":
+        return "error_reply_recorded"
+    if state == "dispatched":
+        return "ledger_dispatch_mark"
+    # An unresolved or financially settled attempt does not by itself prove receipt.
+    return "not_confirmed"
+
+
 def list_attempts(root: Path, task_id: str, *, after: str = "") -> dict:
     """A bounded task-local selection; a cursor from another task never advances it."""
     with usage_store.hold(root, write=False, migrate=False, timeout_sec=1, inspect_only=True) as txn:
@@ -24,7 +40,8 @@ def list_attempts(root: Path, task_id: str, *, after: str = "") -> dict:
     return {"attempts": rows, "next_after": rows[-1]["attempt_id"] if len(page) > _PAGE_SIZE else None}
 
 
-def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int = _BODY_LIMIT) -> tuple[dict, bytes | None]:
+def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int = _BODY_LIMIT,
+                 report_facts: bool = False) -> tuple[dict, bytes | None]:
     """Read the exact attempt's redacted host projection, not raw bytes or provider receipt."""
     with usage_store.hold(root, write=False, migrate=False, timeout_sec=1, inspect_only=True) as txn:
         row = txn.attempt(attempt_id)
@@ -33,6 +50,10 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int = 
     state = row.get("state")
     facts = {"task_id": task_id, "attempt_id": attempt_id, "ledger_state": state,
              "provider_body": "not_observed", "file_trace": "not_recorded"}
+    if report_facts:
+        facts["transport_observation"] = _transport_observation(row)
+        if isinstance(row.get("model"), str) and row["model"]:
+            facts["model"] = row["model"]
     ref = row.get("candidate_manifest_ref")
     if not isinstance(ref, dict) or not ref:
         return {**facts, "body": "not_linked"}, None  # a producer may fail after sealing but before linking
@@ -79,8 +100,11 @@ def main(argv: list[str] | None = None) -> int:
     select = parser.add_mutually_exclusive_group()
     select.add_argument("--after", default="", help="Continue the list after this attempt id")
     select.add_argument("--attempt", help="Write the selected redacted body to stdout and facts to stderr")
+    parser.add_argument("--report", action="store_true", help="Write a local Beautiful Context JSON report instead of the raw body")
     parser.add_argument("--max-bytes", type=int, help="Override the read bound for the selected attempt only")
     args = parser.parse_args(argv)
+    if args.report and args.attempt is None:
+        parser.error("--report needs --attempt")
     if args.max_bytes is not None and (args.attempt is None or args.max_bytes <= 0):
         parser.error("--max-bytes needs --attempt and a positive byte count")
     root = args.data_root.resolve()
@@ -88,7 +112,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.attempt is None:
             print(json.dumps(list_attempts(root, args.task_id, after=args.after)))
             return 0
-        facts, raw = read_attempt(root, args.task_id, args.attempt, max_bytes=args.max_bytes or _BODY_LIMIT)
+        facts, raw = read_attempt(root, args.task_id, args.attempt, max_bytes=args.max_bytes or _BODY_LIMIT,
+                                  report_facts=args.report)
+        if args.report:
+            document = {"format": "ouroboros.context-report/1", "facts": facts,
+                        "stored_json": raw.decode("utf-8") if raw is not None else None}
+            sys.stdout.buffer.write(json.dumps(document, ensure_ascii=False).encode("utf-8"))
+            return 0
     except (usage_store.UsageAccountingError, OSError, ValueError, EOFError, zlib.error) as exc:
         print(f"Request unavailable ({type(exc).__name__})", file=sys.stderr)
         return 2

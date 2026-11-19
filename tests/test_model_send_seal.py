@@ -114,6 +114,12 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     assert 'sk-secret-model-send-seal' not in selected.out and 'summarize this' in selected.out
     assert 'Different request' not in selected.out
     assert json.loads(selected.err)['provider_body'] == 'not_observed'
+    assert main([*args, '--attempt', first['attempt_id'], '--report']) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['format'] == 'ouroboros.context-report/1'
+    assert report['stored_json'] == selected.out
+    assert report['facts']['attempt_id'] == first['attempt_id']
+    assert report['facts']['transport_observation'] == 'not_confirmed'
     for flag in ('--attempt', '--after'):
         assert main([*args, flag, foreign['attempt_id']]) == 2
         assert not capsys.readouterr().out

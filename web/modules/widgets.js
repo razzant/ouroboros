@@ -64,6 +64,10 @@ function pageTemplate() {
             <div class="widgets-scroll">
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
+                <div class="widgets-context-tools">
+                    <button type="button" class="btn btn-default" data-context-report aria-expanded="false" aria-controls="widgets-context-report">Beautiful Context</button>
+                    <section id="widgets-context-report" class="ui-card widgets-context-report" data-context-report-mount hidden></section>
+                </div>
                 <div class="widgets-arrange-status ui-status" data-tone="neutral" data-widget-arrange-status role="status" aria-live="polite"></div>
             </div>
         </section>
@@ -882,6 +886,24 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
+    const reportMount = document.querySelector('[data-context-report-mount]');
+    const reportButton = document.querySelector('[data-context-report]');
+    const closeReport = () => {
+        reportMount.replaceChildren();
+        reportMount.hidden = true;
+        reportButton.setAttribute('aria-expanded', 'false');
+    };
+    reportButton.addEventListener('click', () => {
+        if (!reportMount.hidden) return closeReport();
+        const frame = document.createElement('iframe');
+        frame.title = 'Beautiful Context';
+        frame.setAttribute('sandbox', 'allow-scripts');
+        frame.referrerPolicy = 'no-referrer';
+        frame.src = '/static/context-report.html';
+        reportMount.append(frame);
+        reportMount.hidden = false;
+        reportButton.setAttribute('aria-expanded', 'true');
+    });
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
@@ -1361,6 +1383,7 @@ export function initWidgets(ctx = {}) {
         });
     });
     window.addEventListener('pagehide', (event) => {
+        closeReport();
         listRequests.abortAll();
         if (event.persisted) return;
         cardMenus.destroy();
@@ -1387,6 +1410,7 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
+            closeReport();
             // A card carried or an edge dragged when the owner left goes back: the release saves nothing.
             cardMenus.close();
             cancelWidgetCardCarry(list);
