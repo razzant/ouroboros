@@ -866,35 +866,13 @@ def _transfer_history(root, k):
     return facts
 
 
-def _catalog_contract(monkeypatch):
-    """The packs reader's answer when no cheap copy holds a sha: its catalog within the caller's acquisition budget,
-    else ``EvidenceUnavailable``, never a pass over every sidecar; its ordering hint never waits. Emulated at the two
-    points an older reader differs (its whole-directory ``list_sidecars`` and ``read_position``'s own wait), so this
-    section measures the transfer itself."""
-    from ouroboros import evidence_packs, store
-
-    real_list, real_position = evidence_packs.list_sidecars, evidence_packs.read_position
-
-    def list_sidecars(root, *, errors=None, names=None):
-        if names is None:
-            raise evidence_packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now",
-                                                     reason="busy")
-        return real_list(root, errors=errors, names=names)
-
-    def read_position(root, **identity):
-        with store.acquisition_budget(0):
-            return real_position(root, **identity)
-
-    monkeypatch.setattr(evidence_packs, "list_sidecars", list_sidecars)
-    monkeypatch.setattr(evidence_packs, "read_position", read_position)
-
-
-@pytest.mark.parametrize("index", ["valid", "contended"])
+@pytest.mark.parametrize("index", ["valid", "contended", "damaged"])
 def test_a_fold_receipt_transfer_is_flat_across_evidence_packs(tmp_path, monkeypatch, request, index):
     """After an applied fold the round's prologue promotes the receipt and everything it names into the canonical
     root (``promote_task_source_ref``, ``source_retention.retain_tree``) before the next model call. The bytes lie
     loose beside their producer; the canonical root only has to prove or receive them. However its packs catalog
-    stands (``valid``; ``contended``: the packer holds its lock past any wait), the transfer lists no packs directory,
+    stands (``valid``; ``contended``: the packer holds its lock past any wait; ``damaged``: the file awaits the
+    packing pass's rebuild), the transfer lists no packs directory,
     costs the same beside 1 or 30 units of packed history and never waits for the catalog: a destination it cannot
     prove now is carried and read back from the parent. The receipt and its sources are retained on both sizes and
     nothing is marked unavailable (a pending address would also do; an unavailable one never)."""
@@ -902,9 +880,8 @@ def test_a_fold_receipt_transfer_is_flat_across_evidence_packs(tmp_path, monkeyp
     from ouroboros.artifacts import read_actor_source_bytes
 
     def boundary(root, facts):
-        patches = pytest.MonkeyPatch()  # the next size's build runs the real packer: undone after the counted call
+        patches = pytest.MonkeyPatch()  # the lock spy is this size's alone: undone after the counted call
         request.addfinalizer(patches.undo)
-        _catalog_contract(patches)
 
         def promote(task):
             try:
@@ -928,6 +905,8 @@ def test_a_fold_receipt_transfer_is_flat_across_evidence_packs(tmp_path, monkeyp
             holder = threading.Thread(target=hold, name="packer-holds-index")
             holder.start()
             assert held.wait(5)
+        elif index == "damaged":
+            (evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME).write_bytes(b"not a database")
         real_lock = store.name_lock
 
         def name_lock(where, name, *args, **kwargs):

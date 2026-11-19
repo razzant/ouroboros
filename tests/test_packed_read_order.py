@@ -265,20 +265,42 @@ def test_a_response_two_carriers_read_apart_is_counted_once_by_the_part_cache(ro
     assert True in offers, offers  # the second carrier's read offered the cached response again
 
 
-def test_an_unanswered_catalog_leaves_the_queue_order_and_the_walk_whole(root, tmp_path, monkeypatch):
-    """A catalog that cannot answer now (``read_position`` raises ``EvidenceUnavailable``, never waiting) only takes
-    the order away: the members are read in queue order (one rewind each, as the control above shows) and every one
-    is still read, verified and retained; nothing is marked unavailable."""
+def test_a_held_catalog_neither_stalls_nor_disorders_a_walk_over_its_own_packed_members(root, tmp_path, monkeypatch):
+    """The packer may hold the packs catalog's lock while a walk runs. The ordering hint never waits for it, and it
+    and the reads of a task's own packed members name that task, so its own sidecars answer them: the walk keeps its
+    one forward pass over the pack, verifies and retains every member, and no request for the lock asks to wait."""
+    import threading
+
+    from ouroboros import store
+
     task, child, calls = _packed_task(root)
+    held, release, waits, walker = threading.Event(), threading.Event(), [], threading.get_ident()
 
-    def unanswered(_where, **_identity):
-        raise packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+    def hold():
+        with store.name_lock(child, packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
 
-    monkeypatch.setattr(packs, "read_position", unanswered)
-    decoding = count_decoding(monkeypatch)
-    state = _walk(root, child, task)
+    real_lock = store.name_lock
+
+    def name_lock(where, name, *args, **kwargs):
+        if name == packs.INDEX_LOCK_NAME and threading.get_ident() == walker:
+            waits.append(kwargs.get("timeout_sec"))
+        return real_lock(where, name, *args, **kwargs)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        monkeypatch.setattr(store, "name_lock", name_lock)
+        decoding = count_decoding(monkeypatch)
+        state = _walk(root, child, task)
+    finally:
+        release.set()
+        holder.join(10)
     _proven(state)
-    assert decoding["starts"] >= MEMBERS / 2, decoding
+    assert decoding["starts"] <= 2 and decoding["decoded"] <= 2 * _raw_total(child, task), decoding
+    assert max(waits, default=0) == 0, waits
     for call in calls:
         manifest = obs.read_call_manifest_ref(root, call["manifest_ref"], task_id=task)
         assert obs.read_blob_ref(root, manifest["full_payload_ref"])
