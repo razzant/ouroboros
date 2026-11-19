@@ -258,6 +258,151 @@ test('Sources arrival and Refresh use one authoritative list for both the rail a
     }
 });
 
+// Browse through the real page: the place's shared reads answered by the test, the board's layout inert (its
+// observers and inline styles are absent from this fixture and nothing here measures).
+function browsePage(t) {
+    const page = world(t);
+    class Observer { observe() {} disconnect() {} }
+    const absent = Object.entries({ ResizeObserver: Observer, MutationObserver: Observer, CSS: { escape: String } })
+        .filter(([name]) => globalThis[name] === undefined);
+    for (const [name, value] of absent) globalThis[name] = value;
+    const inert = { removeProperty() {}, setProperty() {}, getPropertyValue: () => '' };
+    const styled = 'style' in Stub.prototype;
+    if (!styled) Object.defineProperty(Stub.prototype, 'style', { configurable: true, get: () => inert });
+    t.after(() => {
+        for (const [name] of absent) delete globalThis[name];
+        if (!styled) delete Stub.prototype.style;
+    });
+    const { document } = page.env;
+    const reply = (body, status = 200) => ({ ok: status === 200, status, json: async () => body });
+    page.env.routes.set('/api/state', reply({ github_token_configured: false }));
+    page.env.routes.set('/api/skills/lifecycle-queue', reply({ events: [] }));
+    const pane = () => document.getElementById('skills-pane-browse');
+    const card = (id) => pane().querySelectorAll('.marketplace-card').find((node) => node.dataset.item === id);
+    return { ...page, document, reply, card,
+        says: (id) => card(id).querySelector('.skills-status-text').textContent,
+        // A press as the page hears it: every listener from the pressed node up, the document's last.
+        async press(node) {
+            for (let at = node; at; at = at.parentElement) await at.fire('click', { target: node, preventDefault() {} });
+            await settle();
+        },
+        // An entry as the host's catalog gives it: its source's id, name, address and trust ride on the entry itself.
+        entry: (source, name, extra = {}) => ({ id: `${source.id}/${name}`, name, description: `About ${name}.`, version: '1.0.0',
+            source_id: source.id, source_name: source.name, trust: source.trust, repo_url: source.url, ...extra }) };
+}
+
+test('Browse says how an entry installs only while its source’s setting holds: a later source list changes no card or open detail, a saved choice re-reads the catalog', async (t) => {
+    const { env, state, layers, showPage, document, reply, card, says, press, entry } = browsePage(t);
+    // A new install: the hub's settings are suggested, not confirmed. The host installs by them all the same.
+    const hub = { id: 'hub', name: 'Example hub', kind: 'hub', part: 'official', url: 'https://example.test/hub', trust: 'trusted', confirmed: false };
+    const shared = { id: 'shared', name: 'Example shared', kind: 'git', url: 'https://example.test/shared', trust: 'review', confirmed: true };
+    const catalogOf = (...sources) => ({ categories: [], sources: sources.map((source) => ({ ...source, state: 'ready' })),
+        items: [entry(sources[0], 'tiles', { official: true }), entry(sources[1], 'labels')] });
+    let catalog = catalogOf(hub, shared);
+    const sourceReads = [];
+    const posts = [];
+    env.routes.set('/api/extensions', reply({ skills: [] }));
+    env.routes.set('/api/skill-sources', () => new Promise((resolve) => sourceReads.push(resolve)));
+    env.routes.set('/api/skill-catalog', async () => reply(catalog));
+    env.routes.set('/api/skill-catalog/item/shared/labels', () => new Promise(() => {}));
+    env.routes.set('/api/skill-sources/hub', async (_url, init) => { posts.push(JSON.parse(init.body)); return reply({ ok: true }); });
+    const controls = initSkills({ state, layers, showPage });
+    const settleSources = async (...rows) => { sourceReads.at(-1)(reply({ sources: rows })); await settle(); };
+    const firstStart = () => document.body.querySelector('.skills-dialog');
+    const reviewOf = (sheet) => sheet.querySelectorAll('.skills-sheet-section')
+        .find((section) => section.querySelector('h3')?.textContent === 'Review').querySelector('p');
+    try {
+        document.getElementById('skills-installed-search').value = '';
+        await controls.open('browse');
+        await settle();
+        await settleSources(hub, shared);
+        assert.equal(says('hub/tiles'), 'Installs without review while that is the suggested setting for Example hub',
+            'the effective default, labelled as suggested');
+        assert.equal(says('shared/labels'), 'Reviewed before it runs while that is the setting for Example shared');
+        // Arriving on a new install asks once how the hub installs. The owner chooses to review its skills: the
+        // write is followed by one read of the sources and one of the catalog under Browse, whose cards then say so.
+        assert.ok(firstStart(), 'the first-start question opened over Browse');
+        const chosen = { ...hub, trust: 'review', confirmed: true };
+        catalog = catalogOf(chosen, shared);
+        const row = firstStart().querySelectorAll('[data-row]').find((node) => node.dataset.row === 'hub');
+        await press(row.querySelectorAll('[data-trust]').find((node) => node.dataset.trust === 'review'));
+        await press(firstStart().querySelector('[data-first-ok]'));
+        assert.deepEqual(posts, [{ trust: 'review', confirmed: true }]);
+        assert.equal(sourceReads.length, 2, 'the saved choice read the sources again');
+        await settleSources(chosen, shared);
+        assert.equal(firstStart(), null);
+        assert.equal(says('hub/tiles'), 'Reviewed before it runs while that is the setting for Example hub');
+
+        // The place is shown again: its fresh source list is still on its way when a detail is opened.
+        await showPage('chat');
+        await controls.open('browse');
+        await settle();
+        assert.equal(sourceReads.length, 3, 'the return started one fresh read of the sources');
+        const tiles = card('hub/tiles');
+        await press(card('shared/labels').querySelector('.skills-card-name'));
+        const sheet = document.body.querySelector('.skills-detail-sheet');
+        const review = reviewOf(sheet);
+        const shown = 'Ouroboros reviews it on this computer before it runs while that is the setting for the Example shared source. You can skip the review.';
+        assert.equal(review.textContent, shown);
+        const install = sheet.querySelector('[data-sheet-action="install"]');
+        install.focus();
+        // That list answers: Example shared was set to install without review somewhere else, same id and address.
+        // An Install pressed now would go without review, since the host reads the source at the press. Nothing on
+        // screen says otherwise: each sentence holds only while the setting it names does, and none is repainted
+        // from a list that is no fact of the shown entries.
+        await settleSources(chosen, { ...shared, trust: 'trusted' });
+        assert.equal(card('hub/tiles'), tiles, 'no card was rebuilt');
+        assert.equal(says('shared/labels'), 'Reviewed before it runs while that is the setting for Example shared');
+        assert.equal(reviewOf(sheet), review);
+        assert.equal(review.textContent, shown);
+        assert.equal(sheet.querySelector('[data-sheet-action="install"]'), install, 'the open detail keeps its action');
+        assert.equal(document.activeElement, install, 'and the keyboard its place');
+        // The Official mark of a card is explained from that entry too, under the same condition.
+        await press(tiles.querySelector('[data-official-mark]'));
+        const popup = document.body.querySelector('.skills-mark-popup');
+        assert.equal(popup.querySelector('p').textContent, 'Official — the maintainer of Ouroboros vouches for this exact version. '
+            + 'It comes from the Example hub source (example.test/hub). A new install is still reviewed while that is the setting for the Example hub source.');
+        await press(popup.querySelector('[data-popup-close]'));
+        await press(sheet.querySelector('[data-sheet-close]'));
+        assert.deepEqual(posts, [{ trust: 'review', confirmed: true }], 'nothing else was written');
+    } finally {
+        controls.destroy();
+    }
+});
+
+test('Compare… promises no review and no absence of one: the replacement installs as its source is set at that moment', async (t) => {
+    const { env, state, layers, showPage, document, reply, card, says, press, entry } = browsePage(t);
+    const shared = { id: 'shared', name: 'Example shared', kind: 'git', url: 'https://example.test/shared', trust: 'review', confirmed: true };
+    // The name is taken by a copy from a source that is not connected now: the listing names no id for it.
+    const mine = { name: 'notes', version: '0.9.0', enabled: true, description: 'Mine.', install: { source: { name: 'Elsewhere', kind: 'git' } } };
+    let finishListing, finishSources;
+    env.routes.set('/api/extensions', () => new Promise((resolve) => { finishListing = resolve; }));
+    env.routes.set('/api/skill-sources', () => new Promise((resolve) => { finishSources = resolve; }));
+    env.routes.set('/api/skill-catalog', reply({ categories: [], sources: [{ ...shared, state: 'ready' }], items: [entry(shared, 'notes')] }));
+    const controls = initSkills({ state, layers, showPage });
+    try {
+        document.getElementById('skills-installed-search').value = '';
+        await controls.open('browse');
+        await settle();  // the optional facts first: this fixture draws the installed list once and patches no card
+        finishListing(reply({ skills: [mine] }));
+        await settle();
+        finishSources(reply({ sources: [shared] }));  // then the board is drawn, with the installed listing known
+        await settle();
+        assert.equal(says('shared/notes'), 'You have another “notes” (from Elsewhere)');
+        await press(card('shared/notes').querySelector('[data-browse-action="compare"]'));
+        const dialog = document.body.querySelector('.skills-dialog');
+        assert.match(dialog.querySelector('h3').textContent, /Two skills are called “notes”/);
+        const note = dialog.querySelector('.skills-dialog-note').textContent;
+        assert.equal(note, 'Keeping yours changes nothing. Using the other one replaces yours and keeps a backup of it; '
+            + 'its source’s setting in Sources decides whether it is reviewed first.');
+        assert.doesNotMatch(dialog.textContent, /reviewed before it runs|without review/, 'the entry’s setting as read is no promise of the install');
+        await press(dialog.querySelector('[data-dialog-cancel]'));
+        assert.equal(document.body.querySelector('.skills-dialog'), null);
+    } finally {
+        controls.destroy();
+    }
+});
+
 test('Needs you counts an enabled, permitted skill whose declared secret is not set, and nothing else for that secret', () => {
     const secret = (state) => ({ secret_config: { fields: [{ id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state }] } });
     const withTelegram = (overrides) => rows().map((skill) => (skill.name === 'telegram' ? { ...skill, ...overrides } : skill));

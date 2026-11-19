@@ -100,6 +100,7 @@ test('the official hub row carries the Official glyph; the folder row says Folde
     t.mock.timers.enable({ apis: ['Date'], now: FIXTURE_NOW });
     const official = renderSourceRow(source('ouroboros'), { items: items('ouroboros'), health: health('ouroboros') });
     assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark ui-hit-area"/);
+    assert.match(official, /data-official-mark data-official-source="ouroboros"/, 'the row\'s mark is bound to the row itself');
     assert.match(text(official), /github\.com\/razzant\/OuroborosHub at main · 4 skills · read 12 min ago/);
     assert.match(text(official), /The Ouroboros project’s own skills, marked Official by its maintainer\./);
     const community = renderSourceRow(source('ouroboros-community'), { items: items('ouroboros-community'), health: health('ouroboros-community') });

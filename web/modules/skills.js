@@ -322,6 +322,9 @@ export function initSkills(ctx = {}) {
 
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
     const cache = { sources: null, sourcesValue: null, sourcesError: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
+    const sourceSnapshot = () => ({ rows: cache.sourcesValue, error: cache.sourcesError, problem: cache.sourcesProblem });
+    // Browse says how an entry installs from its catalog entry, conditionally, never from this list: a read that
+    // settles after its cards, a sheet or a dialog opened changes none of their words.
     function paintSourceFacts() {
         if (visible && activeTab === 'sources') sourcesView.repaint();
         section.paintAnswers();
@@ -365,7 +368,6 @@ export function initSkills(ctx = {}) {
     const projected = () => (snapshot?.rawSkills
         ? sortSkillsForDisplay(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue))) : []);
     const installedByName = () => (snapshot?.rawSkills ? new Map(projected().map((skill) => [skill.name, skill])) : null);
-    const officialSource = () => (cache.sourcesValue || []).find((source) => source.kind === 'hub' && source.part === 'official') || null;
     // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
     const catalogEntry = (skill) => (cache.catalogValue?.items || [])
         .find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
@@ -853,7 +855,6 @@ export function initSkills(ctx = {}) {
     function openInstalledSheet(name, opener) {
         const skill = installedByName()?.get(name);
         if (!skill) return;
-        const source = (cache.sourcesValue || []).find((row) => row.id === skill.install?.source?.id) || null;
         const catalogItem = catalogEntry(skill);
         const item = catalogItem || {
             id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
@@ -865,7 +866,7 @@ export function initSkills(ctx = {}) {
         // The source's entry has the full text; a registry install has no entry to read back.
         const origin = skill.install?.source;
         sheet = openSkillDetailSheet({
-            item, installed: skill, source, returnFocus: opener,
+            item, installed: skill, returnFocus: opener,
             readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
         });
     }
@@ -990,8 +991,13 @@ export function initSkills(ctx = {}) {
         if (event.target.closest('.skills-menu-item')) closeMenus({ restoreFocus: true });
         const mark = event.target.closest('[data-official-mark]');
         if (mark) {
-            await store.sources().catch(() => null);
-            openOfficialExplanation(mark, (cache.sourcesValue || []).find((source) => source.id === mark.dataset.officialSource) || officialSource());
+            // A Browse card's mark is explained from its own entry. Elsewhere only a mark bound to a source says how
+            // that source installs, from its row as read now; an unbound mark borrows no other source's setting.
+            const entry = mark.closest('.marketplace-card');  // only Browse draws these
+            const bound = entry ? '' : mark.dataset.officialSource;
+            if (bound) await store.sources().catch(() => null);
+            openOfficialExplanation(mark, entry ? browse.officialSource(entry.dataset.item)
+                : (bound && !cache.sourcesError && cache.sourcesValue?.find((row) => row.id === bound)) || null);
             return;
         }
         const goto = event.target.closest('[data-skills-goto]');
@@ -1091,11 +1097,15 @@ export function initSkills(ctx = {}) {
         live: () => snapshot?.live,
         refreshInstalled: () => readInstalled({ quiet: true }),
         sources: store.sources,
-        sourceSnapshot: () => ({ rows: cache.sourcesValue, error: cache.sourcesError, problem: cache.sourcesProblem }),
+        sourceSnapshot,
         sourceSuggestions: () => cache.sourceSuggestions,
         catalog: (options) => store.catalog(options),
-        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again.
-        reloadAll: async () => { await Promise.all([store.sources({ replace: true }).catch(() => null), readInstalled({ quiet: true })]); },
+        // A source change moves the listing's source facts too (a re-added name's id, updates): read both again, and
+        // the catalog under Browse when it is the page on screen (the first-start choice is made over it).
+        reloadAll: async () => {
+            await Promise.all([store.sources({ replace: true }).catch(() => null), readInstalled({ quiet: true })]);
+            if (visible && activeTab === 'browse') await browse.show();
+        },
         runInstalledAction: async (name, action, options) => {
             try {
                 const changed = await runInstalledAction(name, action, options);
@@ -1119,8 +1129,7 @@ export function initSkills(ctx = {}) {
             mine: { name: installed?.name, official: installed?.install?.official, source: installedSourceLabel(installed || {}),
                 version: installed?.version, state: installed?.enabled ? 'On' : 'Off', description: installed?.description },
             other: { name: item.name, official: item.official, source: item.source_name, owner: item.owner, version: item.version,
-                popularity: popularityText(item), description: item.description,
-                reviewed: (cache.sourcesValue || []).find((row) => row.id === item.source_id)?.trust !== 'trusted' },
+                popularity: popularityText(item), description: item.description },
         }),
         toast: (message, tone) => showToast(message, tone),
         pageModuleFacts,

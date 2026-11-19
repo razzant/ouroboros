@@ -11,7 +11,7 @@ import { mountConnectorPlaces } from './connector_places.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
     catalogWhoHtml, connectsServices, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
-    relativeAge, repoLabel, routeExternalLink, skillTitle, versionText,
+    relativeAge, repoLabel, routeExternalLink, skillTitle, trustSentence, versionText,
 } from './skill_presentation.js';
 
 function section(title, html) {
@@ -19,14 +19,6 @@ function section(title, html) {
 }
 
 const note = (html) => (html ? `<p class="skills-sheet-note">${html}</p>` : '');
-
-/** The one review sentence for a skill seen from the sheet (installed facts win). */
-function sheetReviewSentence(item, installed, source) {
-    if (installed) return reviewSentence(installed);
-    if (source?.kind === 'builtin') return 'Comes with the app and updates with Ouroboros.';
-    if (source?.trust === 'trusted') return `Installs without review: you trust ${source.name}.`;
-    return 'Ouroboros will review it on this computer before it runs. You can skip the review.';
-}
 
 function versionsHtml(detail, item, installed) {
     const rows = Array.isArray(detail?.versions) && detail.versions.length
@@ -93,9 +85,10 @@ function detailsHtml(item, installed) {
  * Open the sheet. `item` is the catalog entry (or the installed skill seen as
  * one); `actionsHtml` mirrors the card's action row; `onAction(action, node)`
  * receives presses on `[data-sheet-action]`. `readDetail()` fetches the full
- * entry; without it the sheet shows what the card had.
+ * entry; without it the sheet shows what the card had. Review says one thing, as the sheet opened: an installed
+ * copy's own recorded review, else how a new install goes while its source's setting holds (`policy`).
  */
-export function openSkillDetailSheet({ item, installed = null, source = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement }) {
+export function openSkillDetailSheet({ item, installed = null, policy = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement }) {
     const dialog = document.createElement('dialog');
     dialog.className = 'document-reader skills-detail-sheet';
     dialog.setAttribute('aria-labelledby', 'skills-sheet-title');
@@ -142,7 +135,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
             error ? `<div class="skills-sheet-status is-error" role="alert"><p>Couldn’t read the full description from ${escapeHtml(item.source_name || 'its source')}: ${escapeHtml(error)}.</p><button type="button" class="btn btn-default btn-sm" data-sheet-retry>Try again</button></div>` : '',
             `<section class="skills-sheet-section"><h3>About</h3><div class="skills-sheet-about" data-i18n-authored></div>${aboutError}</section>`,
             section('What it can use', usesHtml(detail, item)),
-            section('Review', `<p>${escapeHtml(sheetReviewSentence(item, installed, source))}</p>`),
+            section('Review', `<p>${escapeHtml(installed ? reviewSentence(installed) : trustSentence(policy, { detail: true }))}</p>`),
             section('Author’s repository', authorRepoHtml(item)),
             section('Versions', versionsHtml(detail, item, installed)),
             section('Links', linksHtml(detail, item)),
@@ -185,6 +178,10 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         close,
         get closed() { return closed; },
         /** Repaint the head's action row from the card's current state. */
-        setActions(html) { const host = dialog.querySelector('[data-sheet-actions]'); if (host) host.innerHTML = html; },
+        setActions(html) {
+            if (closed || html === actionsHtml) return;  // the same action keeps its button, and the keyboard its place
+            actionsHtml = html;
+            dialog.querySelector('[data-sheet-actions]').innerHTML = html;
+        },
     };
 }

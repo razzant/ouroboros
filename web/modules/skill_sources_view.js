@@ -44,7 +44,7 @@ export const unconfirmedHubRows = (sources = []) => sources.filter((source) => s
 export function renderSourceRow(source, { items = [], health = null } = {}) {
     const id = escapeHtml(source.id);
     const marks = [
-        source.kind === 'hub' && source.part === 'official' ? officialMarkHtml() : '',
+        source.kind === 'hub' && source.part === 'official' ? officialMarkHtml({ sourceId: source.id }) : '',  // this row's own mark
         source.kind === 'local' ? chipHtml('Folder', 'neutral') : '',
         // A row a build's settings supply (B9) — only when the host marks it so.
         source.managed ? chipHtml('Set by your organization', 'neutral') : '',
