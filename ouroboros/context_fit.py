@@ -214,7 +214,7 @@ class ContextFitPlan:
                 refit = restoring_held and (held_cost != shown.memory_facts.get("held_note_request_tokens")
                                             or ratio != shown.calibration_ratio)
             if walk or refit:
-                snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json else None
+                snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json and not refit else None
                 contents, start = _view_projections(
                     self.core, {form: _governance_blocks(None, self.core, mode=form) for form in ("max", "low")},
                     self.user_content_json, preferred=self.preferred_mode, start=start_mode, select=select_mode,
@@ -1137,7 +1137,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         # The running request keeps Low when the fully priced alternative leaves no more room.
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances, receipts, shown, _ = low
-    if kept is None and not admitted and overflows(shown):  # a start's refusal names its last view, never work-room slack
+    if kept is None and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
         core_alone = overflows()
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
@@ -1154,7 +1154,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         room, facts = "\n\n".join(filter(None, (room, note))), {**facts, BOOK_NOTE_KEY: floor.view_tokens("\n\n" + note)}
     receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact and (
         {**room_fact, "book_required": True} if book else room_fact), mode, required_book=math.ceil(book * ratio))) if snapshot else {}
-    if book and kept is None and known_window and not admitted:
+    if book and kept is None and known_window and current_messages is None:
         reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano", owner_nano=False,
                                                       input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary, window_tokens=window)
         memory = floor.view_tokens(story) + floor.view_tokens(room)

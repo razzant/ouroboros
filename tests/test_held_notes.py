@@ -864,10 +864,15 @@ def test_cold_replay_prices_the_restored_tail_and_resident_schemas(world, monkey
     ctx._actor_loaded_tool_names = set()
     ctx.active_model, ctx.active_use_local = "fixture", False
     updated = [{"type": "function", "function": {"name": "read_loaded_source", "description": "Read source."}}]
-    for schemas in (resident, updated):
+    oversized = [{"type": "function", "function": {"name": "read_loaded_source", "description": "Frozen schema. " * 15_000}}]
+    for frozen, schemas in ((resident, resident), (resident, updated), (oversized, updated)):
         restored = json.loads(json.dumps(state))
+        restored["tool_schemas"] = list(frozen)
+        ctx.active_context_mode = "low"
         ctx.context_fit_plan = replay(restored, 48_000)
-        registry = SimpleNamespace(_ctx=ctx, schemas=lambda: schemas)
+        if frozen == oversized:
+            assert ctx.context_fit_plan.initial_mode == "nano"
+        registry = SimpleNamespace(_ctx=ctx, schemas=lambda: schemas, get_schema_by_name=lambda _name: schemas[0])
         rebuilt = list(restored["messages"])
         plan, mode = rebind_restored_route(registry, restored, rebuilt)
         assert mode == "low" and rebuilt[-2 if schemas == updated else -1] == messages[-1]

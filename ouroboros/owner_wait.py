@@ -1333,6 +1333,7 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
     selected, effort = _continuation_fit_route(ctx, state, messages)
     owner, ran = get_context_mode(), getattr(ctx, "active_context_mode", None)
+    restore_mode = ran if owner in MODES and ran in MODES[MODES.index(owner):] else None
     restoring_held = bool((state.get(CAPTURE_KEY) or {}).get("entries"))
     route = dict(model=selected["model"],
         use_local=selected["use_local_model"], preferred_mode=owner, reasoning_effort=effort,
@@ -1340,12 +1341,11 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         model_role=selected["model_role"], model_route=selected["model_route"], credential_profile_id=selected["credential_profile_id"],
         route_is_preference=True,
     )
-    plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,
-        start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
+    plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, start_mode=restore_mode, **route)
     before = len(messages)
     schemas_changed = timed("restore.tools", reconcile_restored_tools, tools, state, messages, mode)
     if schemas_changed or (restoring_held and len(messages) != before):
-        plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=mode,  # the first answer, never a second question
+        plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=restore_mode if restoring_held else mode,
                                               **{**route, "model_route": getattr(plan, "model_route", {})})
     if schemas_changed:
         sanction_rewrite(ctx, "continuation_restored", scope="tools")
