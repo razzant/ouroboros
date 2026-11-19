@@ -391,3 +391,15 @@ def test_a_creation_time_is_no_end(root):
     held = _prune(root)["held"]
     assert held in ({"finish_time_unknown": len(copies)}, {"younger_than_retention": len(copies)})
     assert all(path.exists() for path in copies)
+
+
+def test_the_maintenance_child_waits_the_owners_days_not_the_default(root, monkeypatch):
+    from ouroboros import startup_historical_audit
+
+    seen = {}
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised", lambda argv, **kwargs: seen.update(kwargs["env"]))
+    startup_historical_audit.spawn_maintenance_job(root, root, "maintenance")
+    assert seen["OUROBOROS_GC_RETENTION_DAYS"] == str(DAYS)
+    monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "11")
+    startup_historical_audit.spawn_maintenance_job(root, root, "maintenance")
+    assert seen["OUROBOROS_GC_RETENTION_DAYS"] == "11"
