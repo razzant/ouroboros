@@ -623,13 +623,10 @@ def test_repo_batch_tool_explicit_system_binding_mutates_only_system_and_invalid
 def test_repo_batch_tool_protected_name_depends_on_physical_target(
     tmp_path, monkeypatch, tool,
 ):
-    from ouroboros import config
-
     registry, _ctx, system, project = _workspace_guard_registry(tmp_path, monkeypatch)
     (system / "BIBLE.md").write_text("SYSTEM = 1\n", encoding="utf-8")
     (project / "BIBLE.md").write_text("PROJECT = 1\n", encoding="utf-8")
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
-    monkeypatch.setattr(edit_ops, "get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     project_args = {
         "apply_patch": {
             "patch": "*** Update File: BIBLE.md\n-PROJECT = 1\n+PROJECT = 2\n",
@@ -833,9 +830,7 @@ def test_pro_mode_protected_edit_announces_itself(tmp_path, monkeypatch, tool):
     that stays silent makes a protected edit look like an ordinary one.
     """
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    from ouroboros import config
 
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "pro")
     reg, repo = _guard_registry(tmp_path)
     (repo / "BIBLE.md").write_text("P1 honest\n", encoding="utf-8")
     args = {

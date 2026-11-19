@@ -65,11 +65,11 @@ def _attempt(n, phase, fingerprint):
 
 
 def _continuation_ctx(tmp_path, monkeypatch, attempts):
-    from ouroboros import config, review_state
+    from ouroboros import review_state
 
     monkeypatch.setattr(review_state, "_load_state_unlocked", lambda *_a, **_kw: SimpleNamespace(
         filter_attempts=lambda **_kw: list(attempts)))
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     return SimpleNamespace(repo_dir=str(tmp_path), drive_root=str(tmp_path), task_id="t1", _commit_call_notes=[])
 
 

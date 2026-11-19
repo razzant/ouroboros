@@ -62,8 +62,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if _photo_chat_id is None or _photo_chat_id == "":  # 0 is a real hidden session
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="LEGACY_UNAVAILABLE", text="⚠️ No active chat — cannot send photo."))
 
-    actual_b64 = ""
-    mime = "image/png"
+    actual_b64, mime, name = "", "image/png", "image"  # name: what the receipt's show line calls it
 
     if file_path:
         fp, refusal = _delivery_path(ctx, file_path)
@@ -75,7 +74,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
             return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_PHOTO_FILE_BYTES} bytes."))
         try:
             raw = fp.read_bytes()
-            mime = _detect_image_mime(raw)
+            mime, name = _detect_image_mime(raw), fp.name
             actual_b64 = base64.b64encode(raw).decode()
         except Exception as e:
             return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to read image file: {e}"))
@@ -83,7 +82,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
         if image_base64 == "__last_screenshot__":
             if not ctx.browser_state.last_screenshot_b64:
                 return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ No screenshot stored. Take one first with browse_page(output='screenshot')."))
-            actual_b64 = ctx.browser_state.last_screenshot_b64
+            actual_b64, name = ctx.browser_state.last_screenshot_b64, "last browser screenshot"
         else:
             actual_b64 = image_base64
     else:
@@ -92,7 +91,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if not actual_b64 or len(actual_b64) < 100:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Image data is empty or too short."))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, shown_material
     event = {
         "type": "send_photo",
         "chat_id": _photo_chat_id,
@@ -100,7 +99,8 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
         "mime": mime,
         "caption": caption or "",
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "photo")
+    shown = [shown_material(name, b64=actual_b64)]
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "photo", shown)
 
 
 _MAX_VIDEO_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -141,7 +141,7 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     except Exception as e:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to read video file: {e}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, shown_material
     event = {
         "type": "send_video",
         "chat_id": chat_id,
@@ -149,7 +149,7 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
         "mime": mime,
         "caption": caption or "",
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "video")
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "video", [shown_material(fp.name, raw)])
 
 
 _MAX_DOCUMENT_FILE_BYTES = 50 * 1024 * 1024  # 50 MB (Telegram bot sendDocument limit)
@@ -222,7 +222,9 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to capture file: {exc}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, shown_material
+    shown = [{"name": fp.name, "sha256": file_ref["sha256"], "size": file_ref["size"]} if file_ref
+             else shown_material(fp.name, b64=actual_b64)]  # captured bytes, else the inline copy the frame carries
     event = {
         "type": "send_document",
         "chat_id": chat_id,
@@ -234,7 +236,7 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         "download_url_compat": compat_url,
         "file_ref": file_ref,
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{fp.name}'")
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{fp.name}'", shown)
 
 
 _MAX_LINK_ACTIONS = 12
@@ -859,7 +861,7 @@ def _escalate(
         return ("⚠️ ESCALATE_UNAVAILABLE: this task already has the maximum "
                 "number of unanswered owner questions open; proceed under your "
                 f"stated assumption: {payload['assumption']}")
-    from ouroboros.tools.owner_delivery import deliver_owner_event
+    from ouroboros.tools.owner_delivery import deliver_owner_event, show_record
 
     if asked.get("state") != "open":
         return f"OK: quiz {quiz_id} already {asked.get('state')}; no new question or wait was selected."
@@ -880,6 +882,8 @@ def _escalate(
         **({"wait_for_answer": True} if wait_for_answer else {}),
     })
     delivered = "accepted for delivery" if mode == "live" else "queued for delivery"
+    show = show_record(ctx, mode, [{**item, "name": item["label"]} for item in material_refs])  # as a send of them
+    show = f"\n{show}" if show else ""
     if wait_for_answer:
         bound = payload.get("max_wait_minutes")
         ctx._owner_wait_requested = quiz_id
@@ -900,11 +904,11 @@ def _escalate(
         return (f"OK: quiz {quiz_id} {delivered}; {limit}, "
                 "preserving its live browser and releasing active execution capacity. "
                 "Any incoming mail or an owner hurry request ends the wait; only an owner answer "
-                "answers the question. Other mail leaves the card open. Stop and task deadlines still apply.")
+                "answers the question. Other mail leaves the card open. Stop and task deadlines still apply." + show)
     return (f"OK: quiz {quiz_id} {delivered}; continuing under assumption: "
             f"{payload['assumption']}. The answer (if any) arrives as an owner "
             "quiz answer in a later round; the card stays answerable after this "
-            f"task ends — a later answer reaches this chat as an ordinary owner message.{ignored_bound}")
+            f"task ends — a later answer reaches this chat as an ordinary owner message.{ignored_bound}{show}")
 
 
 def _close_owner_question(ctx: ToolContext, quiz_id: str, reason: str, question_task_id: str) -> str:

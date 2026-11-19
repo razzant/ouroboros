@@ -42,14 +42,16 @@ window.chat=createChatInstance({ws,state:{activePage:'chat',projectChatIds:new S
     apply(request,data){window.chat?.hydrateStateSnapshot(data);}}});
 </script>"""
 
-# A quiet feed in synthetic words with a real feed's geometry (Europe/Moscow clock). Its clock times are read on the
-# day the test runs, so a clock never reads `Yesterday`.
+# The feed's timestamps and the page's clock must not drift a day apart when collection and execution span midnight.
+# set_fixed_time leaves browser timers running. The next-day case checks both the longer clock label and its layout.
 MSK = ZoneInfo("Europe/Moscow")
-DAY = datetime.now(MSK).date()
+NOW = datetime(2026, 1, 15, 23, 30, tzinfo=MSK)
+NOW_NEXT_DAY = datetime(2026, 1, 16, 0, 20, tzinfo=MSK)
+DAY = NOW.date()
 
 
 def _at(clock):
-    """`HH:MM[:SS]` today in Moscow, as the host's UTC ISO stamp."""
+    """`HH:MM[:SS]` on the pinned DAY in Moscow, as the host's UTC ISO stamp."""
     parts = [int(part) for part in clock.split(":")] + [0]
     local = datetime(DAY.year, DAY.month, DAY.day, parts[0], parts[1], parts[2], tzinfo=MSK)
     return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -208,10 +210,12 @@ def _respond(chat):
 
 
 @contextmanager
-def card_room(pw, engine, theme, width, height, *, coarse=False, web=WEB, rows=None, state=None, details=None, chat_id=1):
+def card_room(pw, engine, theme, width, height, *, coarse=False, web=WEB, rows=None, state=None, details=None,
+              now=NOW, timezone="Europe/Moscow", chat_id=1):
     """A real chat instance in the real shell (`web`'s index.html and stylesheets), Main or the Project room `chat_id`:
     `rows` is the history it reads, `state` the census its `/api/state` answers, `details` its task reads; all three
-    stay mutable. A read of a task in `hold` waits in `held` until the test answers it."""
+    stay mutable. A read of a task in `hold` waits in `held` until the test answers it. The page's clock is pinned to
+    `now` for dated feeds; pass None for a producer emitting real timestamps."""
     chat = {"rows": list(rows or []), "details": dict(details or {}), "hold": set(), "held": [],
             "state": state or {"supervisor_ready": True, "active_chat_activities_complete": True, "active_chat_activities": []}}
     boot = BOOT.replace("chatId:1,", f"chatId:{chat_id},asPanel:{str(chat_id != 1).lower()},")
@@ -237,7 +241,10 @@ def card_room(pw, engine, theme, width, height, *, coarse=False, web=WEB, rows=N
     browser = getattr(pw, engine).launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": width, "height": height}, has_touch=coarse,
-                                timezone_id="Europe/Moscow", device_scale_factor=2)
+                                timezone_id=timezone, device_scale_factor=2)
+        # Before any script runs: the page reads the fixtures' day, whichever day (and hour) the run itself falls on.
+        if now is not None:
+            page.clock.set_fixed_time(now)
         page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)});")
         page.route("**/api/**", _respond(chat))
         errors = PageErrors(page, engine)
@@ -321,29 +328,41 @@ def _assert_b_root(facts, *, clock=None, reviews="", buttons=()):
     assert not facts["hscroll"], facts
 
 
-@pytest.mark.parametrize("engine,theme,width,height,coarse", [
-    ("webkit", "light", 1100, 750, False), ("webkit", "dark", 1100, 750, False),
-    ("webkit", "dark", 390, 844, True), ("webkit", "light", 390, 844, True),
-    ("chromium", "dark", 1100, 750, False), ("chromium", "light", 390, 844, True),
+# One leg's day: the page's pinned clock, its timezone, and the three clocks the cards then read (q1 updated, q3
+# started, w-root updated). `NEXT_DAY` is the flake's own scene, pinned: across Moscow midnight every fixture clock
+# reads `Yesterday, HH:MM` and the head keeps its composition with the longer word (#3535).
+SAME_DAY = (NOW, "Europe/Moscow", ("updated 22:42", "started 22:43", "updated 22:47"))
+NEXT_DAY = (NOW_NEXT_DAY, "Europe/Moscow",
+            ("updated Yesterday, 22:42", "started Yesterday, 22:43", "updated Yesterday, 22:47"))
+
+
+@pytest.mark.parametrize("engine,theme,width,height,coarse,day", [
+    ("webkit", "light", 1100, 750, False, SAME_DAY), ("webkit", "dark", 1100, 750, False, SAME_DAY),
+    ("webkit", "dark", 390, 844, True, SAME_DAY), ("webkit", "light", 390, 844, True, SAME_DAY),
+    ("chromium", "dark", 1100, 750, False, SAME_DAY), ("chromium", "light", 390, 844, True, SAME_DAY),
+    ("webkit", "light", 1100, 750, False, NEXT_DAY),
 ], ids=["webkit-light-1100", "webkit-dark-1100", "webkit-dark-390", "webkit-light-390", "chromium-dark-1100",
-        "chromium-light-390"])
-def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, width, height, coarse):
+        "chromium-light-390", "webkit-light-1100-next-day"])
+def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, width, height, coarse, day):
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1 to run the browser flow")
     playwright = pytest.importorskip("playwright.sync_api")
+    now, timezone, (q1_clock, q3_clock, work_clock) = day
+    scene = f"{engine}-{theme}-{width}" + ("-next-day" if day == NEXT_DAY else "")
     state = {"supervisor_ready": True, "active_chat_activities_complete": True, "active_chat_activities": CENSUS}
-    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, coarse=coarse, state=state) as room:
+    with playwright.sync_playwright() as pw, card_room(pw, engine, theme, width, height, coarse=coarse, state=state,
+                                                      now=now, timezone=timezone) as room:
         page = room["page"]
         room["emit"](QUIET)
         page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields(state))
         _settle(page)
-        shot = _evidence(f"quiet-{engine}-{theme}-{width}.png")
+        shot = _evidence(f"quiet-{scene}.png")
         if shot:
             page.screenshot(path=shot)
         q1, q2, q3 = (room["facts"](task_id) for task_id in ("q1", "q2", "q3"))
-        _assert_b_root(q1, clock="updated 22:42", buttons=("Turn into project", "Stop…"))
+        _assert_b_root(q1, clock=q1_clock, buttons=("Turn into project", "Stop…"))
         _assert_b_root(q2, clock="", buttons=("Turn into project",))
-        _assert_b_root(q3, clock="started 22:43", buttons=("Turn into project",))
+        _assert_b_root(q3, clock=q3_clock, buttons=("Turn into project",))
         # The words stand whole as the card's text; the facts keep their meta line.
         assert (q1["title"], q2["title"], q3["title"]) == (Q1, Q2, Q3)
         for facts, duration in ((q1, "3m 3s"), (q2, "2m 48s"), (q3, "2m 49s")):
@@ -354,7 +373,7 @@ def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, wid
         page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"]').scroll_into_view_if_needed()
         _settle(page)
         work = room["facts"]("w-root")
-        _assert_b_root(work, clock="updated 22:47", reviews="Reviews 2", buttons=("Turn into project", "Stop…"))
+        _assert_b_root(work, clock=work_clock, reviews="Reviews 2", buttons=("Turn into project", "Stop…"))
         assert work["title"] == WORK_TITLE and work["line"] == WORK_LINE, work
         assert work["meta"] == "model-bravo-5.5 · 12m 0s · 18 tool calls · Tracked: $0.42", work
         # Children keep their identity row and carry no root control and no clock of a root.
@@ -365,7 +384,7 @@ def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, wid
         if coarse:  # before any screenshot: Chromium's element capture resets the touch emulation
             hits = page.evaluate(FINGER_TARGETS, "w-root")
             assert hits["coarse"] and hits["overlaps"] == [], hits
-        shot = _evidence(f"work-{engine}-{theme}-{width}.png")
+        shot = _evidence(f"work-{scene}.png")
         if shot:
             page.locator('#chat-messages > .chat-live-card[data-task-id="w-root"]').screenshot(path=shot)
 
@@ -387,7 +406,7 @@ def test_root_cards_compose_head_whole_text_and_one_foot_band(engine, theme, wid
         assert opened["kids"] >= opened["notesBottom"] - 1 and opened["kept"], opened
         assert card.locator(":scope > .chat-live-summary-button [data-live-review-summary]").get_attribute("aria-expanded") == "true"
         assert card.get_attribute("data-expanded") == "1"
-        shot = _evidence(f"work-open-{engine}-{theme}-{width}.png")
+        shot = _evidence(f"work-open-{scene}.png")
         if shot:
             card.screenshot(path=shot)
 

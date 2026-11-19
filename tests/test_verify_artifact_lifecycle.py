@@ -15,6 +15,39 @@ def _ctx(tmp_path):
     return ToolContext(repo_dir=work, drive_root=drive, task_id="t"), work
 
 
+def test_observation_reconciles_on_all_paths_before_the_review_display_limit(tmp_path):
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.review_evidence import _accept_verification_summary
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, work = _ctx(tmp_path)
+    prefix = [f"part-{index:02}.txt" for index in range(20)]
+    paths = [*prefix, "tail.txt"]
+    for name in [*prefix, "sibling.txt"]:
+        (work / name).touch()
+
+    def observe(names):
+        return _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=names)
+
+    assert "FAIL" in observe(paths)
+    assert "OBSERVED" in observe(prefix)
+    assert "OBSERVED" in observe([*prefix, "sibling.txt"])
+    receipts = read_verification_receipts(ctx.drive_root, ctx.task_id)
+    assert receipts[0]["paths"] == paths
+    summary = _accept_verification_summary(receipts)
+    assert summary["unreconciled_red_count"] == 1
+    red, sibling = summary["unreconciled_red_identity"], summary["latest_identity"]
+    assert red["paths"] == sibling["paths"] == prefix
+    assert red["paths_omitted"] == sibling["paths_omitted"] == 1
+    assert red["paths_identity_sha256"] != sibling["paths_identity_sha256"]
+
+    (work / "tail.txt").touch()
+    assert "OBSERVED" in observe([*reversed(paths), prefix[0]])
+    summary = _accept_verification_summary(read_verification_receipts(ctx.drive_root, ctx.task_id))
+    assert summary["unreconciled_red_count"] == 0
+    assert summary["latest_identity"]["paths_identity_sha256"] == red["paths_identity_sha256"]
+
+
 def test_probe_flags_deleted_artifact_host(tmp_path):
     ctx, work = _ctx(tmp_path)
     (work / "kept.txt").write_text("x")  # present after the check

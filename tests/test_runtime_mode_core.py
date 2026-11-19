@@ -306,7 +306,7 @@ def test_the_protected_path_messages_name_the_review_panel_and_the_review_gate(m
     refusal = policy.protected_write_block_message(path="BIBLE.md", runtime_mode="advanced", action="run tool 'write_file' against")
     assert refusal.endswith("Switch to runtime_mode='pro' and let the normal review panel "
                             "cover the protected core/contract/release change before commit.")
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     notice = policy.core_patch_notice(["BIBLE.md"])
     assert notice.endswith("These changes can be committed only through the normal review gate.")
     for text in (policy.__doc__ or "", refusal, notice):

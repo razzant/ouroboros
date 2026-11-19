@@ -165,9 +165,9 @@ def test_archive_uncertainty_does_not_create_reviews_on_an_unreviewed_task(tmp_p
     archived, _ = saved_review(tmp_path, "actually-reviewed")
     rl.index_path(tmp_path).rename(rl.ledger_dir(tmp_path) / "index.20261020T000000.jsonl")
     real_iter, opened = rl.iter_jsonl_objects, []
-    def read(path):
+    def read(path, **kwargs):  # the index reader also collects parse gaps (gap_reasons)
         opened.append(path.name)
-        return real_iter(path)
+        return real_iter(path, **kwargs)
     monkeypatch.setattr(rl, "iter_jsonl_objects", read)
     stored, event, history = _terminal(tmp_path, "never-reviewed")
     assert not stored.get("review_projection") and not event and not history.get("review_projection")
@@ -187,9 +187,9 @@ def test_history_page_stops_after_exact_task_rows_and_one_lookahead(tmp_path, mo
     child = _gate_record("child", root_task_id="page-owner")
     rl.write_record(tmp_path, child)
     real_iter = rl.iter_jsonl_objects
-    def read(path):
+    def read(path, **kwargs):  # the index reader also collects parse gaps (gap_reasons)
         assert path != archive, "page scanned history beyond the required lookahead"
-        return real_iter(path)
+        return real_iter(path, **kwargs)
     monkeypatch.setattr(rl, "iter_jsonl_objects", read)
     with client_for(tmp_path) as client:
         response = client.get("/api/tasks/page-owner/reviews?offset=1&limit=2")

@@ -484,9 +484,9 @@ def _rotate_index_if_needed(drive_root: Any) -> None:
     write_text_atomic(hot, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in keep))
 
 
-def _newest_rows(paths: Iterable[pathlib.Path]) -> Iterator[Dict[str, Any]]:
+def _newest_rows(paths: Iterable[pathlib.Path], gap_reasons: set[str] | None) -> Iterator[Dict[str, Any]]:
     for path in paths:
-        yield from reversed([row for row in iter_jsonl_objects(path) if isinstance(row, dict)])
+        yield from reversed(list(iter_jsonl_objects(path, gap_reasons=gap_reasons)))
 
 
 def archived_segments_exist(drive_root: Any) -> bool:
@@ -521,11 +521,11 @@ def newest_rotation_ts(drive_root: Any) -> str:
 
 
 def _index_rows(drive_root: Any, *, task_id: str = "", surface: str = "", limit: Optional[int] = None,
-                hot_only: bool = False, exact_task: bool = False) -> List[Dict[str, Any]]:
+                hot_only: bool = False, exact_task: bool = False, gap_reasons: set[str] | None = None) -> List[Dict[str, Any]]:
     seen: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
     paths = [index_path(drive_root)] + ([] if hot_only else [*reversed(_index_segments(drive_root))])
-    for row in _newest_rows(paths):
+    for row in _newest_rows(paths, gap_reasons):
         record_id = str(row.get("record_id") or "")
         if not record_id or (task_id and task_id not in (row.get("task_id"), row.get("root_task_id"))):
             continue
@@ -553,15 +553,15 @@ def task_record_page(drive_root: Any, task_id: str, *, offset: int = 0, limit: i
 
 
 def recent_records(drive_root: Any, task_id: str = "", limit: int = 20, *, hot_only: bool = False,
-                   surface: str = "") -> List[Dict[str, Any]]:
+                   surface: str = "", gap_reasons: set[str] | None = None) -> List[Dict[str, Any]]:
     """Newest-first index rows (junction for context assembly): the hot index, then
     archived segments newest-first, one row per record at its highest revision.
     ``task_id`` matches the record's task OR root task; empty matches all; ``surface``
     keeps one surface's records. ``hot_only`` reads the bounded hot index alone
-    (``INDEX_MAX_BYTES``) and never opens an archived segment: the read a per-task
-    context capture can afford."""
-    wanted = max(1, int(limit))
-    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=wanted, hot_only=hot_only)[:wanted]
+    (``INDEX_MAX_BYTES``) and leaves archived segments unopened. If supplied,
+    ``gap_reasons`` collects parse gaps from the segments actually read."""
+    return _index_rows(drive_root, task_id=task_id, surface=surface, limit=max(1, int(limit)),
+                       hot_only=hot_only, gap_reasons=gap_reasons)
 
 
 def surface_records(drive_root: Any, surface: str) -> List[Dict[str, Any]]:

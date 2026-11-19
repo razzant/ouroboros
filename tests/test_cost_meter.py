@@ -20,6 +20,27 @@ import pytest
 from tests._cost_meter import CostMeter, tagged
 
 
+@pytest.mark.parametrize("age_sec,orphan", [(1.0, False), (31.0, True)])
+def test_duty_heartbeat_age_reaches_the_real_orphan_check(tmp_path, age_sec, orphan):
+    from datetime import datetime, timezone
+    from ouroboros import task_status
+    from ouroboros.task_results import load_task_result
+    from ouroboros.utils import append_jsonl
+    from tests._cost_driver import _duty_heartbeats
+    from tests._scale_root import CURRENT
+
+    task_id = CURRENT["running"][0]
+    with _duty_heartbeats(tmp_path, age_sec) as observed:
+        stamp = datetime.fromtimestamp(observed, timezone.utc).isoformat()
+        append_jsonl(tmp_path / "logs/events.jsonl", {"type": "worker_boot", "ts": stamp})
+        snapshot = {"generation": "boot", "_queue_alive": {"generation": "boot", "ts": stamp},
+                    "running": [], "pending": []}
+        row = load_task_result(tmp_path, task_id, strict=True)
+        events = task_status._EventsTailIndex(tmp_path)
+        assert task_status._is_stale_orphan_running_task(tmp_path, task_id, row, events, snapshot) is orphan
+        assert (events._latest_by_task is not None) is orphan
+
+
 @pytest.mark.parametrize("contended", [False, True])
 def test_the_meter_counts_one_lock_acquisition_however_contended(tmp_path, contended):
     """A lock taken after its holder let go is one acquisition: the waiter's refused creates and its

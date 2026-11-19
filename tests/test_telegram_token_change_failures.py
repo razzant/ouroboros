@@ -442,25 +442,29 @@ def test_a_replaced_tokens_late_success_keeps_the_replacements_backoff(tmp_path,
 
     async def handler(token):
         if token == OLD:
+            gate["entered"].set()
             await gate["release"].wait()
             return _ok(True)
         return _failure("server_error", None) if gate["failing"] else _ok(True)
 
     world = _typing_world(tmp_path, monkeypatch, handler)
-    world.cue._read_state = lambda: world.reads.append(1) or {"complete": True, "chats": []}
     cue = world.cue
+    cue._read_state = lambda: {"complete": True, "chats": []}
 
     async def scenario():
-        gate.update(release=asyncio.Event(), failing=True)
+        gate.update(entered=asyncio.Event(), release=asyncio.Event(), failing=True)
         task = asyncio.ensure_future(cue.run())
+        old = None
         try:
-            await _until(lambda: world.reads)  # its first read takes the token in force
+            initial = world.binding.snapshot()[1]
+            await _until(lambda: cue._scope == initial)
             old = asyncio.ensure_future(cue._send(42))
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(gate["entered"].wait(), 2)
             _save(world.api, world.binding, new)
-            reads = len(world.reads)
+            replacement = world.binding.snapshot()[1]
+            assert replacement != initial
             cue.wake()
-            await _until(lambda: len(world.reads) > reads)
+            await _until(lambda: cue._scope == replacement)
             await cue._send(42)  # the replacement's own transient failure
             backoff = (cue._delay.get(42), cue._retry_at.get(42))
             assert backoff[0] is not None and backoff[1] is not None
@@ -471,6 +475,9 @@ def test_a_replaced_tokens_late_success_keeps_the_replacements_backoff(tmp_path,
             await cue._send(42)
             assert 42 not in cue._delay and 42 not in cue._retry_at, "its own success clears it"
         finally:
+            gate["release"].set()
+            if old is not None:
+                await asyncio.gather(old, return_exceptions=True)
             await _stopped(task)
 
     asyncio.run(scenario())

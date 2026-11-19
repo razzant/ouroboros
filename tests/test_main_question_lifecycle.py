@@ -301,7 +301,7 @@ def test_late_answer_accepted_metadata_rebuilds_full_frame_after_canonical_gc(tm
     ref = late_answer_ref(queued["task_metadata"]["late_answer"])
     frame = late_answer_model_text(tmp_path, ref, queued["text"])
     assert "Question was: Which approach?" in frame
-    assert "The owner chose option 2: Second" in frame
+    assert "The owner pressed option 2 and wrote no words. The label «Second» is the text of task t" in frame
     assert "Research meanwhile" in frame and "could not be read" not in frame
     # Snapshot identity cannot silently point at another question or task.
     mismatched = {**ref, "task_id": "other"}
@@ -321,6 +321,21 @@ def test_materials_capture_explicit_registered_bytes_before_ask(tmp_path):
     assert material["sha256"] == stored["sha256"] and material["label"] == "choice.txt"
     assert material["download_url"].startswith("/api/tasks/root-1/artifacts/")
     assert ctx.pending_events[0]["materials"] == block["materials"]
+
+
+def test_a_question_with_materials_records_the_bytes_it_puts_up_and_one_without_none(tmp_path):
+    """Both directions: the card's decision materials are named by their bytes, as any send of them would be; a
+    question without materials adds no line."""
+    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.tools.core_artifacts import _escalate
+
+    ctx = _tool_ctx(tmp_path)
+    stored = store_task_artifact_bytes(tmp_path, "root-1", name="choice.txt", data=b"Exact decision evidence")
+    receipt = _escalate(ctx, question="Choose?", options=["A"], assumption="Research", materials=[{"name": "choice.txt"}])
+    assert receipt.startswith("OK:") and receipt.splitlines()[-1] == (
+        f"Host fact: queued for delivery: choice.txt, sha256 {stored['sha256'][:12]}, 23 B. "
+        "Reviews on record naming these bytes: none in this task's recent records.")
+    assert "Host fact" not in _escalate(ctx, question="Choose again?", options=["B"], assumption="Research")
 
 
 def test_material_reference_uses_descendant_inventory_and_rejects_forged_path(tmp_path):

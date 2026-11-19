@@ -350,6 +350,8 @@ class LocalChatBridge:
         record that copies the fact carries it. Panic uses the server's independent
         emergency owner; ordinary ingress is a dict put, no lock or I/O."""
         clean_text = str(text or "").strip()
+        if isinstance(accepted_source_row, dict) and (accepted_source_row.get("late_answer") or accepted_source_row.get("card_press")):
+            clean_text = accepted_source_row["text"]  # an accepted card submission retains the edges of entered values
         caption_text = str(image_caption or "").strip()
         image_b64 = str(image_base64 or "").strip()
         if not clean_text and caption_text:

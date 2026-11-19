@@ -10,29 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import context_compaction as cc
-from ouroboros.context_budget import ContextReclaimRequest
-
-
-def _unit(call_id: str, *, argument: str = "a", result: str = "r") -> list[dict]:
-    return [
-        {
-            "role": "assistant",
-            "content": f"reasoning-{call_id}",
-            "tool_calls": [{
-                "id": call_id,
-                "function": {"name": "read_file", "arguments": argument},
-            }],
-        },
-        {"role": "tool", "tool_call_id": call_id, "content": result},
-    ]
-
-
-def _large_unit(call_id: str, marker: str = "x") -> list[dict]:
-    return _unit(
-        call_id,
-        argument=json.dumps({"content": marker * 4_000 + f"-arg-tail-{call_id}"}),
-        result=marker * 4_000 + f"-result-tail-{call_id}",
-    )
+from tests._working_notes import (  # noqa: F401 - the fixtures this suite and its neighbours share
+    _authored, _fold, _large_unit, _note, _request, _unattributed, _undated, _unit,
+)
 
 
 def _stamp_trace(messages, ref):
@@ -40,30 +20,6 @@ def _stamp_trace(messages, ref):
     row = messages[-1]
     row[TOOL_RESULT_RECORD_KEY] = make_tool_result_record(
         {"tool_call_id": row["tool_call_id"], "invocation_id": "fixture-invocation", "trace_ref": ref}, row["content"])
-
-
-def _request(messages: list[dict], *, goal: int = 1_000_000) -> ContextReclaimRequest:
-    return ContextReclaimRequest(
-        route_fp="main-route",
-        round_id="round-7",
-        transcript_sha256=cc.context_reclaim_transcript_sha256(messages),
-        measurement_basis="fresh_route_usage",
-        measurement_density=1.0,
-        reclaim_goal_tokens=goal,
-        allow_partial_shrink=True,
-    )
-
-
-def _authored(messages: list[dict], *, note: str = "I read the evidence; the conclusion holds.", keep=()) -> ContextReclaimRequest:
-    """The mind's own fold of the observed view: a note, the units it keeps raw."""
-    return replace(_request(messages), working_note=note,
-                   expected_view_revision=cc.context_reclaim_transcript_sha256(messages), keep_unit_ids=keep)
-
-
-def _fold(messages: list[dict], request: ContextReclaimRequest, tmp_path):
-    return cc.compact_tool_history_llm(
-        messages, request=request, observed_messages=messages, tool_schemas=[],
-        fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="compaction")
 
 
 def test_atomic_units_require_all_and_only_contiguous_matching_results():
@@ -159,7 +115,8 @@ def test_an_authored_fold_checkpoints_the_exact_source_before_its_capsule(monkey
     assert receipt.status == "applied"
     assert len(rebuilt) == 1 and rebuilt[0]["role"] == "assistant"
     capsule = rebuilt[0]["content"][0]["_context_capsule"]
-    assert rebuilt[0]["content"][0]["text"].startswith("[Actor-authored working view; exact source retained by checkpoint]\n")
+    assert rebuilt[0]["content"][0]["text"].startswith(
+        f"[Actor-authored working view, written {cc.note_written(capsule)}; exact source retained by checkpoint]\n")
     assert capsule["authorship"] == "actor" and capsule["generation"] == 1
     assert capsule["retention"] == "summarized"
     assert capsule["checkpoint_ref"]["sha256"] == "c" * 64
@@ -223,22 +180,32 @@ def test_count_only_compact_context_answers_authored_note_required_and_advertise
     assert isinstance(ctx._pending_compaction, dict) and ctx._pending_compaction["working_note"] == "Four units stay raw."
 
 
-def _note(tmp_path, text: str, call_id: str = "noted") -> dict:
-    """One earlier note of the mind: the capsule an applied fold left in place of its source."""
-    source = _large_unit(call_id)
-    folded, receipt = _fold(source, _authored(source, note=text), tmp_path)
-    assert receipt.status == "applied" and len(folded) == 1
-    return folded[0]
+def test_a_new_note_is_dated_when_the_mind_wrote_it_and_an_older_note_keeps_its_bytes(tmp_path):
+    """Both directions: a fold dates its new note by the write time its request carries, in the one label written with
+    the note and in ``written_at``; a note written before notes carried their time keeps every byte through the fold,
+    its label undated, and reads "not recorded"."""
+    older = _undated(_note(tmp_path, "An earlier finding.", "older"))
+    view = [older, *_large_unit("read", "r")]
+    before = copy.deepcopy(view)
 
+    folded, receipt = cc.compact_tool_history_llm(
+        view, request=_authored(view, note="The read agrees with the finding."), observed_messages=view,
+        tool_schemas=[], fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path, task_id="compaction",
+        written_at="2026-11-13T19:48:59+00:00")
 
-def _unattributed(capsule: dict) -> dict:
-    """The same capsule as a release before authorship metadata wrote it: still a valid note, attributed to no one."""
-    legacy = copy.deepcopy(capsule)
-    meta = legacy["content"][0]["_context_capsule"]
-    del meta["authorship"]
-    meta["summary_contract_digest"] = cc._LEGACY_CAPSULE_CONTRACT_DIGEST
-    assert cc._capsule_metadata(legacy)[1] is not None
-    return legacy
+    assert receipt.status == "applied" and folded[0] == before[0]
+    assert cc.note_written(folded[0]["content"][0]["_context_capsule"]) == "not recorded"
+    new = folded[1]["content"][0]
+    assert new["text"] == ("[Actor-authored working view, written 2026-11-13 19:48 UTC; exact source retained by "
+                           "checkpoint]\nThe read agrees with the finding.")
+    assert new["_context_capsule"]["written_at"] == "2026-11-13T19:48:59+00:00"
+    assert cc.note_written(new["_context_capsule"]) == "2026-11-13 19:48 UTC"
+    merged, again = cc.compact_tool_history_llm(
+        folded, request=replace(_authored(folded, note="Merged."), replace_note_ids=(cc.context_units(folded)[0].unit_id,)),
+        observed_messages=folded, tool_schemas=[], fit_candidate=lambda *_: {"accepted": True}, drive_root=tmp_path,
+        task_id="compaction", written_at="2026-11-14T08:00:00Z")
+    assert again.status == "applied" and merged[0]["content"][0]["text"].startswith(
+        "[Actor-authored working view, written 2026-11-14 08:00 UTC; exact source retained by checkpoint; replaced notes: ")
 
 
 def test_an_empty_keep_selection_folds_tool_units_but_keeps_every_earlier_note(tmp_path):
@@ -257,7 +224,8 @@ def test_an_empty_keep_selection_folds_tool_units_but_keeps_every_earlier_note(t
     assert set(receipt.retained_unit_ids) == {units[0].unit_id, units[1].unit_id}
     assert len(folded) == 3 and "-result-tail-read" not in json.dumps(folded)
     assert folded[2]["content"][0]["text"] == (
-        "[Actor-authored working view; exact source retained by checkpoint]\nThe read confirms the goal.")
+        f"[Actor-authored working view, written {cc.note_written(folded[2]['content'][0]['_context_capsule'])}; "
+        "exact source retained by checkpoint]\nThe read confirms the goal.")
 
 
 @pytest.mark.parametrize("source_kind", ["restored", "emergency_body", "emergency_host_rows"])

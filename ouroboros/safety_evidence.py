@@ -25,6 +25,9 @@ SOURCE_AUTHORS = {
     "direct_incoming": "the owner: a later message to this work",
     "owner_quiz_answer": "the owner: the owner's answer to the card quoted in reply_to (the card's text was written "
                          "by Ouroboros)",
+    "owner_press": "the owner's answer by a press of an offered option on the card in reply_to, with no words of their "
+                   "own (the option's label is the card's text, written by Ouroboros)",
+    "owner_card_input": "the owner submitted a living card. The original submission is unavailable",
     "place_confirmed": "the owner: the owner's own message in this chat, from a confirmed owner account",
     "place_owner": "the owner: the owner's own message in this chat, from a confirmed owner account",
     "owner_corpus": "the owner",

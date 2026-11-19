@@ -44,6 +44,7 @@ const BASIS_WORDS = Object.freeze({
     room: ['model.basis.room', 'this room\'s model'],
     owner: ['model.basis.owner', 'you chose it'],
     owner_words: ['model.basis.owner_words', 'you asked for it'],
+    owner_press: ['model.basis.owner_press', 'you pressed this option'],
     mind: ['model.basis.mind', 'Ouroboros switched to it'],
     place: ['model.basis.place', 'its place\'s model'],
     circle: ['model.basis.circle', 'its circle\'s model'],
@@ -449,7 +450,7 @@ export function openCardModel(record) {
                     : said.name, said.cause].filter(Boolean).join(' · ')
             : [tr('model.popover.title', 'Model for this work'), said.why || basisWords(said.basis),
                 said.pending].filter(Boolean).join(' · ');
-        if (said.cited && said.primary) heading += ` · ${basisWords('owner_words')}`;
+        if (said.cited && said.primary) heading += ` · ${basisWords(now.lead.primary.basis)}`;
         const nextHead = JSON.stringify([heading, said.cited]);
         if (nextHead !== headKey) {
             headKey = nextHead;

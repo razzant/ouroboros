@@ -344,6 +344,26 @@ def test_direct_turn_mailbox_message_wakes_the_sleep_and_reaches_the_round_top(t
     from ouroboros.owner_mailbox import write_owner_message
 
     seen = []
+    waits = []
+    pending = []
+    interruptible_wait = loop_transport.interruptible_wait_sleep
+
+    def observe_wait(seconds, wake_check):
+        def check_mailbox():
+            result = wake_check()
+            pending.append(result)
+            return result
+
+        woke = interruptible_wait(seconds, check_mailbox)
+        waits.append((seconds, woke))
+        return woke
+
+    def unexpected_sleep(seconds):
+        pytest.fail(f"mail was pending before the transport tried to sleep for {seconds} s")
+
+    monkeypatch.setattr(loop_transport, "time",
+                        SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=unexpected_sleep))
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", observe_wait)
 
     def fake_call(_llm, messages, _model, _tools, _effort, _max_retries, _drive_logs,
                   _task_id, _round_idx, _event_queue, accumulated_usage, *_a, **_k):
@@ -360,13 +380,12 @@ def test_direct_turn_mailbox_message_wakes_the_sleep_and_reaches_the_round_top(t
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.is_direct_chat = True
-    start = time.monotonic()
     result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
-    elapsed = time.monotonic() - start
 
     assert result == "done"
     assert usage.get("reason_code") is None
-    assert elapsed < 3.5  # the wake check saw the message before the 4 s backoff: no sleep ran
+    assert waits == [(loop_transport.NETWORK_WAIT_BACKOFF_START_SEC, True)]
+    assert any(pending)
     assert len(seen) == 2
     assert "also check the brakes" not in seen[0]
     assert "also check the brakes" in seen[1]

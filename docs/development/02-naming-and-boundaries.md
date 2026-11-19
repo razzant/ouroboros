@@ -7,10 +7,8 @@ external facts and provider independence. Each rule names what enforces it or sa
 that only review does, and points to ARCHITECTURE for mechanism.
 
 - Code, comments, docstrings, commit messages and product UI strings are English source
-  copy; a non-English owner reads the install's translation memory
-  (`state/i18n/<tag>.json`; ARCHITECTURE §1 `i18n_memory.py`), never a repository
-  locale file: no language is enumerated in code, durable rows keep English plus typed
-  codes, surfaces translate at render.
+  copy; a non-English owner reads the install's translation memory, never a repository
+  locale file (ARCHITECTURE §10 invariant 29).
 - PEP 8 names (`snake_case`, `PascalCase`, `UPPER_SNAKE_CASE`) that say the observable
   responsibility and authority, not the implementation fashion; a function module over
   a class with no lifecycle.
@@ -18,8 +16,7 @@ that only review does, and points to ARCHITECTURE for mechanism.
   state. Tools stay thin `{verb}_{noun}` functions (validate input, call the owner,
   format a result); no universal `{Domain}Service`, `{Platform}Gateway` or class layer.
 - Dependency direction: UI/CLI → inbound gateway → domain owner; runtime policy →
-  host-owned contract → outbound adapter (`ouroboros/gateway/` in,
-  `ouroboros/gateways/` out; ARCHITECTURE §1 "Gateway Boundary v1"). Provider- and
+  host-owned contract → outbound adapter (ARCHITECTURE §1 "Gateway Boundary v1"). Provider- and
   transport-specific decisions never flow back into core policy.
 - Chat authorship is stamped by the producer and survives persistence and replay; never
   infer it from text or promote host-selected intermediate output to a model final
@@ -40,7 +37,7 @@ review-only.
   relative path is never sanitized before an outside address is refused.
 - Project focus changes the default target, not the tool surface: advisory, reviewed
   commit, rollback, promotion, restart and runtime control keep their
-  system-repository contracts; `executor_ref` selects a process backend, not a sandbox;
+  system-repository contracts;
   GitHub tools default to the focused folder's repository over ambient `GH_REPO`
   (`ouroboros/tools/github.py`).
 - A process cwd decides relative paths, not the root task's write authority; semantic
@@ -49,8 +46,8 @@ review-only.
 - Credential authority is never inferred from a directory name, nor owner input refused
   on a suffix or word inside a file name (dotenv spellings are the one tail rule):
   owner credential locations are the physical list
-  `credential_shapes.owner_credential_locations`, so an unlisted store keeps ordinary
-  access (ARCHITECTURE §6 "Credential mutation and diagnostic redaction").
+  `credential_shapes.owner_credential_locations` (ARCHITECTURE §6 "Credential mutation
+  and diagnostic redaction").
 
 Enforcement: `tests/test_headless_cli.py`, `tests/test_external_workspace_access.py`;
 the no-second-scheduler rule is review-only. Mechanics: ARCHITECTURE §6 "Tool
@@ -60,10 +57,9 @@ capability and execution".
 
 Never lower model quality, reasoning effort, output budget or context breadth as an
 incidental latency or cost optimization (BIBLE P1). An intentional narrowing is a
-recorded decision carried in plan, docs, tests and evidence; outside Cyber Pro it
-belongs to the owner, and Cyber's own configuration authority follows BIBLE P0/P3
-without rewriting earlier call facts. Review-only: CHECKLISTS items 10 and 7, whose
-named failure class is an accidental narrowing.
+recorded decision carried in plan, docs, tests and evidence, under the authority BIBLE
+P1 assigns. Review-only: CHECKLISTS items 10 and 7, whose named failure class is an
+accidental narrowing.
 
 ### LLM-first affordances
 
@@ -176,10 +172,7 @@ per-change base and skip this comparison. Local qualification supplies
 contribution. The owner's `book-growth` label can exempt it. Local surfaces
 never block: the edit tools, `plan_task`, the free
 `preflight_review(deterministic_only=True)` diagnostic and `codebase_health`
-report the balance as a fact. Contribution is measured from the displayed
-merge-base of the cached official development ref; an unknown base stays
-unknown and nothing is fetched. Free diagnostics label book
-bytes as worktree separately from the selected release-metadata source.
+report the balance as a fact.
 
 ### Generality and emergence (P13)
 
@@ -255,13 +248,19 @@ never as `KIND_OWNER_TEXT`; the value lands at three seams in one change
 ask), because it would let a task author its own request
 (`tests/test_task_authored_messages.py`; ARCHITECTURE §6 "Owner routing verbs"). The converse holds: a host-held owner row stays my human's wherever the host carries it in a tree, by possession of its ingress row, never because a task's text says so; to a receiver it is not addressed to, it is context and precedence, never acceptance criteria or a reply debt; an addressed live task that cannot receive the exact row at its next input boundary is an incomplete implementation (`tests/test_helper_owner_words_flow.py`).
 
+A card's question, option labels and details are the asking task's text; a press without
+words is my human's act, never their words, while words typed beside it stay theirs
+verbatim (`tests/test_press_is_an_act.py`; ARCHITECTURE §6 "Owner routing verbs"). Every
+account (a working-view note, plan, brief, card label) carries its author and
+write time, or "not recorded", and never reaches a reader as a person's words (notes:
+`context_compaction.note_written`). A host frame states who, when and by what route, never
+how to read: what a person meant is theirs to settle. The rest is review-only.
+
 ### The owner corpus archives inputs; the owner door's stamp is the only authority
 
 A task-authored objective copies only its retained owner corpus, never the draft. Other
 runs record their first user turn for the corpus and Safety, labelled by what the host
-knows: `initial_user` when owner routing stamped the run (`metadata.origin_message_ref`
-or `origin_suppressed`, by value in a promoted root) and no control (`ui_control`) wrote
-it, else `initial_text`; schedule text is `schedule_text`. `dialogue_provenance.run_origin`
+knows (`loop_messages._initialize_owner_directives` names each label). `dialogue_provenance.run_origin`
 mints the stamp once from typed fields (`owner_ingress`): a turn the door stamped, never
 a lane, a client id or an inherited stamp; it is reserved on `/api/tasks` and schedule
 templates. No label decides what work was accepted; the contract and the owner's answers do.

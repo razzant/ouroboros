@@ -377,7 +377,7 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     item.get("content"),
                     str(item.get("msg_id") or ""),
                     {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                    "client_message_id", "chat_id",
+                                                    "client_message_id", "chat_id", "relay_source_root",
                                                     # a schedule's text keeps its schedule, field and supplier
                                                     "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")},
                     item.get("reply_to"), {key: item[key] for key in ("words",) if key in item},
@@ -404,11 +404,14 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
 
     if drive_root is not None and task_id:
         try:
-            from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries
+            from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, drain_owner_entries
+            from ouroboros.owner_words import mailbox_owner_input
 
             for entry in drain_owner_entries(pathlib.Path(drive_root), task_id, seen_ids=set()):
-                if str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_OWNER_TEXT:
-                    add("owner_mailbox", entry.get("text"), str(entry.get("msg_id") or ""))
+                if (entry.get("kind") or KIND_OWNER_TEXT) in (KIND_OWNER_TEXT, KIND_CARD_INPUT):
+                    item = mailbox_owner_input(drive_root, entry)
+                    add(item["source"], item["content"], str(entry.get("msg_id") or ""),
+                        {key: item.get(key) for key in ("source_task_id", "quiz_id")}, item.get("reply_to"))
         except Exception:
             log.debug("Failed to collect owner mailbox for the owner corpus", exc_info=True)
     return rows

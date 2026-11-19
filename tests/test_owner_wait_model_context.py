@@ -298,7 +298,7 @@ def test_a_cold_continuation_fits_its_start_in_the_effort_it_resumes_on(tmp_path
     before.active_model, before.active_effort, before.active_use_local = sol, acting, False
     if pending:
         from ouroboros.tools.control_runtime import _switch_model
-        monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
         monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda _self: [sol])
         answer = _switch_model(before, effort=pending)
         assert before.active_effort == acting and before.active_effort_override == pending, answer
@@ -439,7 +439,7 @@ def test_saved_model_first_fit_and_real_send(tmp_path, monkeypatch, decision):
     calls = []
 
     monkeypatch.setattr('ouroboros.llm.LLMClient.available_models', lambda _: [small, wide, latest])
-    monkeypatch.setattr('ouroboros.config.get_runtime_mode', lambda: 'cyber_pro')
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'cyber_pro')
     monkeypatch.setenv('OUROBOROS_MODEL', small)
     monkeypatch.setenv('OUROBOROS_CONTEXT_MODE', 'max')
     monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'off')

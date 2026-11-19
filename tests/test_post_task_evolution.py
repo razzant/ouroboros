@@ -711,7 +711,7 @@ def test_project_global_promotion_uses_real_maybe_promote_without_project_scope(
     import ouroboros.agent_task_pipeline as pipeline
 
     monkeypatch.setattr("ouroboros.config.get_post_task_evolution_enabled", lambda: True)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setattr("ouroboros.config.get_post_task_evolution_cadence", lambda: "every_n:1")
     decided = []
     monkeypatch.setattr(pte, "_decide_promotion", lambda _env, task, sealed, *_args, **_kwargs: decided.append(

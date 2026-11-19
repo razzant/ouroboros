@@ -170,8 +170,7 @@ def test_flat_schema_keeps_action_requirements_enforced_before_engine(tmp_path, 
 
 @pytest.mark.parametrize("profile", ["local_readonly_subagent", "acting_subagent"])
 def test_limited_child_inspection_works_but_mutation_never_reaches_engine(tmp_path, monkeypatch, owned, profile):
-    from ouroboros import config
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     ctx = context(tmp_path, profile=profile)
     assert json.loads(tools._inspect_harness(ctx)) == owned.inventory
     refused = json.loads(tools._maintain_harness(ctx, "update", harness="agy", request_id="child-one"))
@@ -181,8 +180,8 @@ def test_limited_child_inspection_works_but_mutation_never_reaches_engine(tmp_pa
 
 
 def test_cyber_acting_profile_uses_existing_full_matrix(tmp_path, monkeypatch, owned):
-    from ouroboros import config, owner_pause
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    from ouroboros import owner_pause
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     monkeypatch.setattr(owner_pause, "run_operation", lambda ctx, fn, *a, **kw: fn(*a, **kw))
     ctx = context(tmp_path, profile="acting_subagent")
     assert json.loads(tools._maintain_harness(ctx, "update", harness="agy", request_id="cyber-one")) == OPERATION
