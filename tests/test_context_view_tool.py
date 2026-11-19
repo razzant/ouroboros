@@ -514,3 +514,33 @@ def test_a_later_inspect_page_names_the_checkpoint_its_units_restore_from(tmp_pa
 
     assert restore(first["restore_checkpoint"]) == "source_unavailable"
     assert restore(page["restore_checkpoint"]) == "applied"
+
+
+def test_a_receipt_whose_sources_stay_owed_keeps_the_round_and_names_the_transfer(tmp_path, monkeypatch):
+    """The prologue's transfer of an applied fold's receipt may leave its sources owed (where some bytes lie cannot
+    be learned now): the round goes on with the local receipt, the view says the canonical copy is still pending,
+    nothing is marked absent, and the transfer's time rides the next round's receipt (``prologue.source_retention``
+    beside the round's other sections)."""
+    from ouroboros import loop, observability
+    from ouroboros.loop_round_limits import _run_authored_context_view
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    messages, schemas, events = _source(), [], []
+    record_context_view(ctx, messages, schemas)
+    _compact_context(ctx, working_note="I retain the conclusion.")
+    frame = _context(tmp_path, ctx, schemas, monkeypatch)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda q, t, logs, event: events.append(copy.deepcopy(event)))
+    reason = "EvidenceUnavailable: evidence_unavailable: the packs catalog cannot answer now"
+
+    def owed(*_args, **_kwargs):  # the walk's answer when a source it names cannot be located now
+        raise OSError(reason)
+
+    monkeypatch.setattr(observability, "promote_task_source_ref", owed)
+    candidate = _run_authored_context_view(messages, frame, ctx._pending_compaction, None)
+    event, = events
+    assert ctx._context_view_receipt["status"] == event["status"] == "applied"
+    assert "receipt_source" not in event  # the event keeps every structure itself
+    notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
+    assert notice["receipt_source"]["read"]["tool"] == "read_file"  # the local receipt stays readable
+    assert notice["receipt_retention"] == {"status": "pending", "reason": reason}
+    assert "source_retention" in ctx._round_prologue["sections_ms"], ctx._round_prologue
