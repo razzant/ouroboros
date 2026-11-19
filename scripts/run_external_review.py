@@ -706,7 +706,7 @@ def _record_actors(record: dict | None) -> list[tuple[str, dict]]:
 
 
 def _contributor_execution_receipts(
-    actors: list[tuple[str, dict]], resolved_config: dict, review_drive_root: pathlib.Path,
+    actors: list[tuple[str, dict]], resolved_config: dict, review_drive_root: pathlib.Path, task_id: str = "",
 ) -> tuple[list[dict], list[str], list[dict]]:
     """Bind configured slots to the dispatched and observed execution receipts."""
     from scripts.contributor_review_evidence import bind_execution_receipts
@@ -722,7 +722,7 @@ def _contributor_execution_receipts(
             live_plan_sha = f"unreadable:{type(exc).__name__}"
     return bind_execution_receipts(
         actors=actors, resolved_config=resolved_config,
-        drive_root=review_drive_root, live_plan_sha256=live_plan_sha,
+        drive_root=review_drive_root, live_plan_sha256=live_plan_sha, task_id=task_id,
     )
 
 
@@ -1341,7 +1341,8 @@ def _contributor_lane(args, host_ctx, proposal: dict, *, resolved_config: dict, 
     # A typed refusal before the operation dispatched anything has no receipts
     # to bind; the refusal itself is the outcome, not a receipt mismatch.
     execution_receipts, execution_mismatches, session_transcripts = ([], [], []) if refusal else (
-        _contributor_execution_receipts(actors, resolved_config, review_drive_root))
+        _contributor_execution_receipts(actors, resolved_config, review_drive_root,
+                                        str((record or {}).get("task_id") or "")))
     exit_code, outcome = finalize_contributor_outcome(
         outcome=outcome, exit_code=exit_code, mismatches=execution_mismatches,
     )
