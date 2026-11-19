@@ -84,7 +84,7 @@ export const ROWS = [
         aliases: ['Task Result Review', 'Review of task results', 'acceptance'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: false,
-        name: 'Max review cycles', meta: 'Paid review rounds per task.',
+        name: 'Max review cycles', meta: 'Paid cycles per task, for each kind of review.',
         more: 'After the last one it may still correct its work. Counts paid review waves, a failed one included: result review and '
             + 'commit review per task, skill review per task or snapshot. '
             + 'Collecting and replaying a review is free. ∞ removes the count; deadlines and budgets still apply.',

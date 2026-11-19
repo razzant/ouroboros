@@ -264,7 +264,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     // The cap is changed where it stands: one press writes its one key, and the pressed option is the chosen one.
     const CAP = 'OUROBOROS_REVIEW_MAX_CYCLES';
     const offered = (shown) => shown.row(CAP).querySelectorAll('[data-setting-value]').map((button) => button.dataset.settingValue);
-    assert.deepEqual([page.row(CAP).querySelector('.ui-row-title').textContent, page.meta(CAP)], ['Max review cycles', 'Paid review rounds per task.']);
+    assert.deepEqual([page.row(CAP).querySelector('.ui-row-title').textContent, page.meta(CAP)], ['Max review cycles', 'Paid cycles per task, for each kind of review.']);
     assert.deepEqual(offered(page), ['1', '2', '3', '5', 'unlimited']);
     assert.equal(page.option(CAP, '2').getAttribute('aria-pressed'), 'true');
     await page.press(page.option(CAP, 'unlimited'));
@@ -287,6 +287,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
     await kept.press(kept.option(CAP, '5'));
     assert.deepEqual(offered(kept), ['1', '2', '3', '4', '5', 'unlimited'], 'the way back stays');
     assert.equal(kept.option(CAP, '5').getAttribute('aria-pressed'), 'true');
+    assert.match(kept.line(CAP), /^Saved.*was 4/, 'and the row still says what the press did: the page was not drawn again');
     await kept.press(kept.option(CAP, '4'));
     assert.deepEqual(kept.server.writes('/api/settings'), [{ [CAP]: '5' }, { [CAP]: '4' }]);
 });
@@ -294,7 +295,7 @@ test('Permissions and checks: three questions and what it is trusted with, doors
 const settingsPageSource = () => fs.readFileSync(new URL('../modules/settings_ui.js', import.meta.url), 'utf8')
     + fs.readFileSync(new URL('../modules/settings_safety.js', import.meta.url), 'utf8');
 
-test('what a managed deployment locks is said in its row, and an unmanaged one leaves the rows as described', () => {
+test('what a managed deployment locks is said in its row, an unmanaged one leaves the rows as described, and the review cap keeps a stored number', () => {
     const rows = () => rowsOf('permissions').map((row) => structuredClone(row));
     const row = (list, id) => list.find((each) => each.id === id);
     const managed = tunePermissionRows(rows(), { OUROBOROS_MODEL_SAFETY: '', _meta: { policy_state: {
@@ -315,20 +316,27 @@ test('what a managed deployment locks is said in its row, and an unmanaged one l
     assert.deepEqual(row(plain, 'OUROBOROS_TASK_REVIEW_MODE').control, rowById('OUROBOROS_TASK_REVIEW_MODE').control);
     assert.deepEqual(row(plain, 'OUROBOROS_RUNTIME_MODE').control, rowById('OUROBOROS_RUNTIME_MODE').control);
     // The review cap: a stored positive number its strip does not offer is one more option in its numeric place; a value
-    // the strip offers, no value and a value the server would refuse leave the strip as described.
+    // the strip offers, no value and text the settings endpoint never stores leave the strip as described.
     const CAP = 'OUROBOROS_REVIEW_MAX_CYCLES';
     const caps = (list) => row(list, CAP).control.options.map((option) => option.value);
     assert.deepEqual(row(plain, CAP).control, rowById(CAP).control);
-    for (const stored of ['2', 'unlimited', '', '0', '-3', '04', '2.5', 'abc']) {
+    for (const stored of ['2', 'unlimited', '', '0', '04', ' 4 ', 'abc']) {
         assert.deepEqual(row(tunePermissionRows(rows(), { [CAP]: stored }), CAP).control, rowById(CAP).control, `stored "${stored}"`);
     }
     assert.deepEqual(caps(tunePermissionRows(rows(), { [CAP]: '4' })), ['1', '2', '3', '4', '5', 'unlimited']);
     assert.deepEqual(caps(tunePermissionRows(rows(), { [CAP]: 10 })), ['1', '2', '3', '5', '10', 'unlimited']);
     // While the page is open it stays offered after another choice; a newer such number takes its place.
-    const open = tunePermissionRows(rows(), { [CAP]: '4' });
-    assert.deepEqual(caps(tunePermissionRows(open, { [CAP]: '5' })), ['1', '2', '3', '4', '5', 'unlimited']);
-    assert.deepEqual(caps(tunePermissionRows(open, { [CAP]: '7' })), ['1', '2', '3', '5', '7', 'unlimited']);
-    assert.deepEqual(rowById(CAP).control.options.map((option) => option.value), ['1', '2', '3', '5', 'unlimited'], 'the described row is not changed');
+    const shown = tunePermissionRows(rows(), { [CAP]: '4' });
+    assert.deepEqual(caps(tunePermissionRows(shown, { [CAP]: '5' })), ['1', '2', '3', '4', '5', 'unlimited']);
+    assert.deepEqual(caps(tunePermissionRows(shown, { [CAP]: '7' })), ['1', '2', '3', '5', '7', 'unlimited']);
+    // The page's options are its own: writing to them never reaches the described row.
+    for (const stored of ['2', '4']) {
+        const mine = row(tunePermissionRows(rows(), { [CAP]: stored }), CAP).control.options;
+        mine.forEach((option) => { option.label = 'changed'; });
+        mine.length = 0;
+    }
+    assert.deepEqual(rowById(CAP).control.options.map((option) => [option.value, option.label]),
+        [['1', '1'], ['2', '2'], ['3', '3'], ['5', '5'], ['unlimited', '∞']], 'the described row is not changed');
 });
 
 test('Permissions and checks: under an organization\'s Supervisor the spare-model line is hidden; the ordinary page shows it', async (t) => {
