@@ -183,6 +183,8 @@ def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_u
                 "row => [row.closest('.settings-card').querySelector('.settings-card-title').textContent,"
                 " Boolean(row.closest('details'))]") == ["Who checks its results", False]
             assert _cap_options(page) == ["1", "2", "3", "5", "unlimited"]
+            level.evaluate("level => { level.scrollTop = level.scrollHeight; }")
+            setup_browser.capture(page, f"c2-permissions-end-{width}x{height}-{theme}")
             # A stored cap its strip does not offer is one more option, chosen: six options, the strip's widest form,
             # still fit the row when the page is opened again.
             server.values[_CAP] = "40"
@@ -194,7 +196,7 @@ def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_u
             fits = level.evaluate(_FITS)
             assert fits == {"page": 0, "doc": 0, "out": []}, f"permissions with a stored 40 at {width}x{height} {theme}: {fits}"
             level.evaluate("level => { level.scrollTop = level.scrollHeight; }")
-            setup_browser.capture(page, f"c2-permissions-end-{width}x{height}-{theme}")
+            setup_browser.capture(page, f"c2-permissions-end-stored-40-{width}x{height}-{theme}")
 
 
 def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
