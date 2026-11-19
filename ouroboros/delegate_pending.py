@@ -144,13 +144,15 @@ def backfill_due(root, row, facts, child):
 
 
 def backfill(root, should_stop):
-    """One addressed pass over already-open requests, CAS against start/refusal races."""
+    """One addressed pass over already-open requests, CAS against start/refusal races. A request whose body
+    cannot be located now keeps no shape and leaves the job pending, so a later run reads it."""
     from ouroboros import maintenance_jobs, store
+    from ouroboros.evidence_packs import EvidenceUnavailable
 
     with store.open_store(root, write=False) as txn:
         request = txn.meta("job:" + JOB)
         rows = txn.set_rows("custody_open")
-    done = 0
+    done, owed = 0, False
     for key, facts in rows.items():
         if should_stop():
             return {"state": "pending", "items": done}
@@ -160,12 +162,18 @@ def backfill(root, should_stop):
         source = facts["request"]
         shape = source.get("request_shape")
         if shape is None:
-            shape = request_shape(request_body(root, source))
+            try:
+                shape = request_shape(request_body(root, source, raise_unavailable=True))
+            except EvidenceUnavailable:
+                owed = True
+                continue
         projected = pending_invocations(root, [{**source, "request_shape": shape}], materialize=False)
         with store.open_store(root, write=True) as txn:
             if txn.get_row("custody_open", key) == facts:
                 txn.put_row("custody_open", key, {**facts, "pending": projected})
         done += 1
+    if owed:
+        return {"state": "pending", "items": done}
     with store.open_store(root, write=True) as txn:
         if txn.meta("job:" + JOB) != request:
             return {"state": "pending", "items": done}  # an import/repair added open rows meanwhile

@@ -311,6 +311,57 @@ def test_a_pending_body_whose_place_cannot_be_learned_now_is_retained_never_unre
     assert custody.invocation_record(tmp_path, "pending")["state"] == "pending"
     assert request_body(tmp_path, pending[0]) == {"prompt": "Preserve this pending invocation"}
 
+
+def test_a_legacy_request_whose_body_cannot_be_located_now_keeps_its_shape_owed(tmp_path):
+    """The one-time shape backfill reads an older open request's body for its access and mode. While that body,
+    held only by another task's pack, cannot be located (the packs catalog is held), the request keeps no shape and
+    the job stays pending, never an empty shape recorded as done; the next run records the real one."""
+    import threading
+
+    from ouroboros import delegate_pending, evidence_packs, maintenance_jobs, store
+
+    body = {"prompt": "keep", "mode": "ask", "access": "readonly"}
+    assert custody.record_start_requested(tmp_path, invocation_id="legacy", task_id="owner", snapshot_id="snapshot",
+                                          source="review_substrate", request=body)
+    key = "invocation:legacy"
+    with store.open_store(tmp_path, write=True) as txn:  # the shape a row written before request shapes has
+        row = txn.get_row("custody_open", key)
+        row.pop("pending", None)
+        row["request"].pop("request_shape", None)
+        txn.put_row("custody_open", key, row)
+    ref = row["request"]["request_ref"]
+    evidence_packs.write_pack(tmp_path, "other", 1, [ref])
+    evidence_packs.ensure_index(tmp_path)
+    Path(ref["path"]).unlink()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(tmp_path, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    def state():
+        job = maintenance_jobs.job(tmp_path, delegate_pending.JOB) or {}
+        with store.open_store(tmp_path, write=False) as txn:
+            return job, txn.get_row("custody_open", key)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with store.acquisition_budget(0):
+            assert delegate_pending.backfill(tmp_path, lambda: False) == {"state": "pending", "items": 0}
+    finally:
+        release.set()
+        holder.join(10)
+    job, facts = state()
+    assert "pending" not in facts and delegate_pending.backfill_due(tmp_path, job, {}, True), (job, facts)
+    assert delegate_pending.backfill(tmp_path, lambda: False) == {"state": "done", "items": 1}
+    job, facts = state()
+    assert facts["pending"][0]["request_shape"] == {"access": "readonly", "mode": "ask", "execution": False}
+    assert not delegate_pending.backfill_due(tmp_path, job, {}, True)
+
+
 @pytest.mark.parametrize("prior", ["absent", "refused", "fenced", "corrupt"])
 def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior,
                                                                               monkeypatch):
