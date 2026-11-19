@@ -21,6 +21,7 @@ from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SC
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
 from ouroboros.task_results import validate_task_id
+from ouroboros.tool_access_paths import is_private_service_log_path
 
 log = logging.getLogger(__name__)
 
@@ -252,6 +253,9 @@ def stage_task_attachments(
             continue
         try:
             source = pathlib.Path(raw_path).expanduser().resolve(strict=False)
+            if is_private_service_log_path(source, pathlib.Path(drive_root)):
+                manifest.append(_rejected(ordinal, f"attachment {ordinal + 1}", "private_service_log"))
+                continue
             if not source.exists():
                 manifest.append(_rejected(ordinal, label, "source_missing"))
                 continue
@@ -1385,7 +1389,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         return None
     task_id = task_id_for_artifacts(ctx)
     drive_root = pathlib.Path(getattr(ctx, "drive_root"))
-    if is_verification_receipts_path(drive_root, task_id, source):
+    if is_private_service_log_path(source, drive_root) or is_verification_receipts_path(drive_root, task_id, source):
         return None
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}

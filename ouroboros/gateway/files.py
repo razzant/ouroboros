@@ -22,6 +22,7 @@ from starlette.routing import Route
 from ouroboros import chat_uploads, store
 from ouroboros.gateway._helpers import json_error, run_sync_to_completion
 from ouroboros.server_auth import is_loopback_host
+from ouroboros.tool_access_paths import is_private_service_log_path
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
@@ -101,7 +102,10 @@ def download_url_for_local_file(abs_path: pathlib.Path | str) -> str:
     raw = _configured_root_text()
     root = _normalize_root(raw) if raw and _normalize_root(raw).is_dir() else pathlib.Path.home().resolve()
     try:
-        rel = pathlib.Path(abs_path).expanduser().resolve(strict=False).relative_to(root)
+        resolved = pathlib.Path(abs_path).expanduser().resolve(strict=False)
+        if is_private_service_log_path(resolved):
+            return ""
+        rel = resolved.relative_to(root)
     except (ValueError, OSError):
         return ""
     return "/api/files/download?path=" + quote(rel.as_posix())
@@ -134,6 +138,8 @@ def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, path
     except ValueError as exc:
         raise ValueError("Path escapes file browser root.") from exc
     resolved = requested.resolve(strict=False)
+    if is_private_service_log_path(resolved):
+        raise ValueError("Private service diagnostics are available only on the local filesystem.")
     # Symlink containment: the lexical check above cannot see where a link
     # POINTS. Every endpoint operates within the configured root, so a path
     # whose resolution leaves the root (e.g. root/link -> /etc) is rejected
@@ -166,15 +172,13 @@ def _is_owner_only_settings_file(target: pathlib.Path) -> bool:
 
 
 def _is_owner_only_file(target: pathlib.Path) -> bool:
-    if _is_owner_only_settings_file(target):
+    if is_private_service_log_path(target.resolve(strict=False)) or _is_owner_only_settings_file(target):
         return True
     if _is_skill_owner_state_target(target):
         return True
     from ouroboros import config as _cfg
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
-    if is_skill_owner_state_alias(target, data_root):
-        return True
-    return False
+    return is_skill_owner_state_alias(target, data_root)
 
 
 def _contains_owner_only_file(target: pathlib.Path) -> bool:
@@ -314,7 +318,7 @@ def _guess_media_type(path: pathlib.Path) -> str:
 def _entry_within_root(entry: pathlib.Path, root_dir: pathlib.Path) -> bool:
     try:
         entry.relative_to(root_dir)
-        return True
+        return not is_private_service_log_path(entry.resolve(strict=False) if entry.is_symlink() else entry)
     except Exception:
         return False
 
@@ -362,14 +366,14 @@ def _file_preview_payload(
 async def api_files_list(request: Request) -> JSONResponse:
     rel_path = request.query_params.get("path") or "."
     try:
-        root_dir, target, _ = _resolve_target(request, rel_path)
-        if not target.exists():
+        root_dir, target, resolved = _resolve_target(request, rel_path)
+        if not resolved.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
-        if not target.is_dir():
+        if not resolved.is_dir():
             return JSONResponse({"error": f"Not a directory: {rel_path}"}, status_code=400)
 
         entries: list[dict[str, Any]] = []
-        visible_entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        visible_entries = sorted(resolved.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
         for entry in visible_entries:
             if len(entries) >= _FILE_BROWSER_MAX_DIR_ENTRIES:
                 break
@@ -377,7 +381,7 @@ async def api_files_list(request: Request) -> JSONResponse:
                 continue
             item: dict[str, Any] = {
                 "name": entry.name,
-                "path": _relative_path(root_dir, entry),
+                "path": _relative_path(root_dir, target / entry.name),
                 "type": "dir" if entry.is_dir() else "file",
                 "is_symlink": entry.is_symlink(),
             }

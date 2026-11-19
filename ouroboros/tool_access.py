@@ -45,9 +45,11 @@ from ouroboros.tool_access_paths import (  # noqa: F401 — re-exported moved su
     _path_is_relative_to_casefold,
     _user_files_root,
     canonical_data_root, docker_process_alias_target,
+    is_private_service_log_path,
     normalize_root, normalize_root_relative, normalize_runtime_data_path,
     path_is_relative_to,
     paths_overlap_casefold,
+    runtime_data_roots,
     workspace_mode_block_reason,
 )
 from ouroboros.tool_access_roots import (  # noqa: F401 — re-exported moved surface
@@ -744,6 +746,15 @@ def _settle(path: Any) -> pathlib.Path:
     return settle(path)
 
 
+def _check_file_mutation_target(ctx: Any, target: pathlib.Path, operation: Operation) -> None:
+    # Editors may inspect the old bytes to render a diff or a mismatch. Refuse at binding,
+    # before the handler receives the target, rather than only before the final write.
+    if operation in {"write", "edit"} and any(
+        is_private_service_log_path(target, data_root) for data_root in runtime_data_roots(ctx)
+    ):
+        raise ValueError("private service diagnostics are not writable through file tools.")
+
+
 def build_resolved_resource_binding(
     ctx: Any,
     *,
@@ -829,6 +840,7 @@ def build_resolved_resource_binding(
                 path=legacy.rel_path,
                 operation=operation,
             )
+            _check_file_mutation_target(ctx, target, operation)
             return ResolvedResourceBinding(
                 profile=profile,
                 root=normalized,
@@ -886,6 +898,7 @@ def build_resolved_resource_binding(
         path=path,
         operation=operation,
     )
+    _check_file_mutation_target(ctx, target, operation)
     asked = (_resolve_target_in_selected_base(ctx, root=normalized, base_path=base, path=path, operation=operation,
                                               alias=False)
              if operation in _READ_OPS and normalized in {"artifact_store", "runtime_data"} else target)

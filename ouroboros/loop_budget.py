@@ -1,12 +1,10 @@
 """Budget rails of the main loop: the per-round budget check, cost ceilings and
 tree accounting, the soft landing, the loop-exit context, the budget-exceeded
-handler, resource cleanup, service finalization and the post-tool budget
-context. Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
+handler, resource cleanup with its service-finalization call and the post-tool
+budget context. Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import pathlib
 import queue
@@ -14,13 +12,13 @@ import queue
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from ouroboros import budget_pause
+from ouroboros import service_finalization
 from ouroboros import task_pacing
 from ouroboros.context_timing import measured_sections, section_spans, timed
 from ouroboros.loop_transport import TransportWaitEpisode, end_episode_budget as _end_episode_budget
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context_fit import messages_carry_native_images
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable
-from ouroboros.utils import truncate_within_limit
 
 
 from typing import TYPE_CHECKING
@@ -435,27 +433,6 @@ def _soft_land_exhausted_ceiling(
     )
 
 
-def _service_finalization_evidence(llm_trace: Dict[str, Any]) -> list[Dict[str, Any]]:
-    """Return the stable, answer-relevant part of service finalization events."""
-
-    rows: list[Dict[str, Any]] = []
-    for event in llm_trace.get("verification_events") or []:
-        if not isinstance(event, dict) or str(event.get("kind") or "") not in {
-            "services_stopped",
-            "services_kept",
-            "service_finalization_error",
-        }:
-            continue
-        services = [_service_identity_projection(service)
-                    for service in event.get("services") or [] if isinstance(service, dict)]
-        rows.append({
-            "kind": str(event.get("kind") or ""),
-            "services": services,
-            "error": truncate_within_limit(str(event.get("error") or ""), 2000),
-        })
-    return rows
-
-
 @dataclass
 class _LoopExitContext:
     tools: ToolRegistry
@@ -573,7 +550,7 @@ def _handle_budget_exceeded(
         limit_ctx.llm_trace = ctx.llm_trace
         _loop()._finalize_forced_services(limit_ctx, ctx.llm_trace)
     else:
-        _loop()._finalize_task_services(ctx)
+        service_finalization.finalize(ctx, ctx.llm_trace)
     candidate_seen: Optional[DeliveryCandidate] = None
     if limit_ctx is not None:
         # The exception can arrive after a substantive answer entered a service
@@ -688,7 +665,7 @@ def _handle_authority_unavailable(
         f"and its exact pause could not be saved ({fact['exact_pause_unavailable'] or 'no actor context'}). "
         "This is not a budget limit. Work already saved stays retained; nothing unsaved is promised back.")
     if limit_ctx is None:
-        _loop()._finalize_task_services(ctx)
+        service_finalization.finalize(ctx, ctx.llm_trace)
         return message, usage, ctx.llm_trace
     limit_ctx.tools, limit_ctx.llm_trace = ctx.tools, ctx.llm_trace
     _loop()._finalize_forced_services(limit_ctx, ctx.llm_trace)
@@ -724,7 +701,7 @@ def _cleanup_loop_resources(
     # early return below); a warm owner wait never leaves the loop. Never raises.
     from ouroboros.mcp_task_session import close_context_sessions
     close_context_sessions(ctx.tools._ctx)
-    _loop()._finalize_task_services(ctx)
+    service_finalization.finalize(ctx, ctx.llm_trace)
     # The full DeliveryCandidate is loop-local: only its compact
     # hash/revision projection remains in llm_trace after this cleanup. Clear
     # it after the idempotent teardown safety net so cleanup cannot erase the
@@ -755,114 +732,6 @@ def _cleanup_loop_resources(
         release_task_runs(custody_root(ctx.tools._ctx), ctx.task_id, gateway_factory=attach_only_gateway)
     except Exception:
         log.debug("Failed to release delegated runs for task %s", ctx.task_id, exc_info=True)
-
-
-def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
-    """Bounded identity used to deduplicate idempotent teardown observations."""
-
-    fields = (
-        "service_id",
-        "name",
-        "task_id",
-        "lifecycle",
-        "backend",
-        "pid",
-        "port",
-        "artifact_outputs",
-        "artifact_output_failed",
-        "artifact_audit_gap",
-        "log_finalization",
-        "state",
-        "stop_failed",
-        "cleanup_dispatched",
-        "stop_error",
-    )
-    projected = {}
-    for key in fields:
-        value = service.get(key)
-        if key == "stop_error" and value not in (None, ""):
-            value = truncate_within_limit(str(value), 2000)
-        if value not in (None, "", [], {}):
-            projected[key] = value
-    cleanup = service.get("process_cleanup")
-    if isinstance(cleanup, dict):  # what stayed unconfirmed (pid, birth, reason) and why a rest is unknown, whole
-        projected["process_cleanup"] = {key: cleanup[key] for key in (
-            "exit_confirmed", "census_failed", "residual", "survivors", "unverified", "custody") if key in cleanup}
-    return projected
-
-
-def _finalize_task_services(ctx: _LoopExitContext) -> bool:
-    """Finalize newly observed task services and record answer-bound evidence.
-
-    Returns True only when a new stopped/kept/error observation was added.  The
-    same helper is safe both immediately before acceptance and from ``finally``.
-    """
-
-    if ctx.drive_root is None or not ctx.task_id:
-        return False
-    try:
-        from ouroboros.tools.services import stop_task_services
-
-        finalized = stop_task_services(ctx.tools._ctx)
-        seen = getattr(ctx.tools._ctx, "_service_finalization_signatures", None)
-        if not isinstance(seen, set):
-            seen = set()
-            ctx.tools._ctx._service_finalization_signatures = seen
-        fresh = []
-        for service in finalized:
-            if not isinstance(service, dict):
-                continue
-            signature = hashlib.sha256(json.dumps(
-                _service_identity_projection(service),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")).hexdigest()
-            if signature in seen:
-                continue
-            seen.add(signature)
-            fresh.append(service)
-        stopped, kept, pending = [], [], []
-        for service in fresh:
-            if (service.get("lifecycle") == "cleanup_pending" or service.get("stop_failed")
-                    or service.get("cleanup_dispatched") is False or service.get("state") == "cleanup_pending"):
-                pending.append(_service_identity_projection(service))
-            elif service.get("lifecycle") == "kept":
-                kept.append(service)
-            else:
-                stopped.append(service)
-        for kind, services in (("services_stopped", stopped),
-                               ("service_finalization_error", pending), ("services_kept", kept)):
-            if not services:
-                continue
-            details = {"services": services}
-            if kind == "service_finalization_error":
-                details["error"] = "service cleanup was not confirmed"
-            _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-                "checkpoint_kind": kind, **details,
-            })
-            ctx.llm_trace.setdefault("verification_events", []).append({"kind": kind, **details})
-        return bool(fresh)
-    except Exception as exc:
-        log.debug("Failed to stop task services", exc_info=True)
-        event = {
-            "kind": "service_finalization_error",
-            "services": [],
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-        signature = hashlib.sha256(json.dumps(
-            event, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")).hexdigest()
-        seen = getattr(ctx.tools._ctx, "_service_finalization_signatures", None)
-        if not isinstance(seen, set):
-            seen = set()
-            ctx.tools._ctx._service_finalization_signatures = seen
-        if signature in seen:
-            return False
-        seen.add(signature)
-        ctx.llm_trace.setdefault("verification_events", []).append(event)
-        return True
 
 
 def _finish_tool_round_budget(

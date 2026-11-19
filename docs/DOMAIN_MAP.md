@@ -8,11 +8,11 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 68 | 0 |
+| D01 | Agent core & main loop | 69 | 0 |
 | D02 | LLM client, routing & providers | 52 | 0 |
 | D03 | Context assembly, fit & compaction | 44 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 58 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 59 | 0 |
 | D06 | Review stack | 101 | 0 |
 | D07 | Delegation, subagents & Claudexor | 113 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 80 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1063** | **0** |
+| **total** | | **1065** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -264,6 +264,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/realtime_setup.py`
 - `ouroboros/realtime_turn.py`
 - `ouroboros/schedule_continuation.py`
+- `ouroboros/service_finalization.py`
 - `ouroboros/sleep_custody.py`
 - `ouroboros/synthesis_cost_text.py`
 - `ouroboros/task_activity_facts.py`
@@ -435,6 +436,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/mcp_task_session.py`
 - `ouroboros/process_interpreters.py`
 - `ouroboros/query_data_sql.py`
+- `ouroboros/service_outcomes.py`
 - `ouroboros/tools/browser.py`
 - `ouroboros/tools/browser_session.py`
 - `ouroboros/tools/cards.py`

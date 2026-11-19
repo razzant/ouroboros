@@ -18,6 +18,7 @@ import time
 import pytest
 
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._launch_stop_shared import _force_advanced_runtime, _force_light_runtime, _wait_for_service_log
 
 
 def _code(text):
@@ -437,13 +438,6 @@ def test_registration_keeps_reading_an_unreadable_output_as_not_fingerprinted(tm
         locked.chmod(0o644)
 
 
-# #1797 on start_service. Services spawn real processes and share
-# tools.services._SERVICES, hence serial; the helpers are that suite's own.
-from tests.test_services_tool_v2 import (  # noqa: E402
-    _force_advanced_runtime, _force_light_runtime, _wait_for_service_log,
-)
-
-
 def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spelling(tmp_path, monkeypatch):
     _force_light_runtime(monkeypatch)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
@@ -466,9 +460,9 @@ def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spell
         "name": "early", "cmd": [sys.executable, "-c", body], "cwd": str(task_drive / "site"),
         "outputs": ["../qualification.html"], "readiness": {"log_contains": "READY", "timeout_sec": 5}}))
     assert "output_baseline_unavailable" not in started
-    _wait_for_service_log(drive, "task-early-output", "early.log", lambda b: b"READY" in b)
+    _wait_for_service_log(started["log_path"], lambda b: b"READY" in b)
     stopped = json.loads(registry.execute("stop_service", {"name": "early"}))
-    assert stopped["artifact_output_failed"] is False and "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"]
+    assert stopped["artifact_output_failed"] is False and stopped["output_outcomes"][0]["status"] == "saved"
     artifact = drive / "task_results" / "artifacts" / "task-early-output" / "qualification.html"
     assert artifact.read_text(encoding="utf-8") == "<p>ok</p>"
 
@@ -497,7 +491,8 @@ def test_a_local_executor_service_refuses_an_escape_before_launch_and_exports_it
     finally:
         stopped = json.loads(registry.execute("stop_service", {"name": "local-early"}))
     assert stopped["artifact_output_failed"] is False, stopped.get("artifact_outputs")
-    assert _registered(registry, stopped["artifact_outputs"]) == {(active / "qualification.html").resolve(): b"<p>local</p>"}
+    assert stopped["output_outcomes"][0]["artifacts"][0]["name"] == "qualification.html"
+    assert "<p>local</p>" in registry.execute("read_file", {"root": "artifact_store", "path": "qualification.html"})
 
 
 def test_a_baseline_that_could_not_be_taken_is_disclosed_at_start(tmp_path, monkeypatch):
@@ -528,8 +523,8 @@ def test_a_baseline_that_could_not_be_taken_is_disclosed_at_start(tmp_path, monk
         assert "store offline" not in warned[0][0]
     finally:
         stopped = json.loads(registry.execute("stop_service", {"name": "baseline"}))
-    assert "output baseline was unavailable at start" in stopped["artifact_outputs"]
-    assert "registered output" in stopped["artifact_outputs"] and stopped["artifact_output_failed"] is False
+    assert stopped["output_baseline_unavailable"] is True
+    assert stopped["output_outcomes"][0]["status"] == "saved" and stopped["artifact_output_failed"] is False
 
 
 def test_a_service_output_generated_in_the_system_repo_is_exported_at_stop(tmp_path, monkeypatch):
@@ -555,7 +550,7 @@ def test_a_service_output_generated_in_the_system_repo_is_exported_at_stop(tmp_p
         time.sleep(0.05)
     stopped = json.loads(_stop_service(ctx, name="generator"))
     assert stopped["artifact_output_failed"] is False, stopped.get("artifact_outputs")
-    assert "registered output" in stopped["artifact_outputs"]
+    assert stopped["output_outcomes"][0]["status"] == "saved"
 
 
 @posix_permissions
@@ -589,8 +584,8 @@ def test_a_service_output_the_baseline_cannot_read_is_disclosed_at_start_and_sto
             stopped = json.loads(registry.execute("stop_service", {"name": "locked"}))
     finally:
         kept.chmod(0o644)
-    assert "output baseline was unavailable at start" in stopped["artifact_outputs"]
-    assert "registered output" in stopped["artifact_outputs"] and stopped["artifact_output_failed"] is False
+    assert stopped["output_baseline_unavailable"] is True
+    assert stopped["output_outcomes"][0]["status"] == "saved" and stopped["artifact_output_failed"] is False
 
 
 @pytest.mark.parametrize("tool", ["run_command", "run_script"])

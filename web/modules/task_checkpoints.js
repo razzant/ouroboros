@@ -25,9 +25,14 @@ export const CHECKPOINT_LABELS = {
     budget_scope_paused: 'Budget scope paused',
     services_stopped: 'Background services stopped',
     services_kept: 'Background services kept',
+    service_outputs_updated: 'Background service outputs updated',
     service_finalization_error: 'Background service cleanup unconfirmed',
     forced_candidate_drift: 'Forced candidate drifted',
 };
+// A service row says its producer's sentence (`service_finalization.checkpoints`: the services' end and any log or
+// declared output left unsaved, by name), the same `text` live, in Logs and reloaded; its tone stays its kind's. A row
+// of an older producer, without one, keeps its kind's label.
+const SERVICE_KINDS = new Set(['services_stopped', 'services_kept', 'service_outputs_updated', 'service_finalization_error']);
 
 const WAIT_LABELS = {
     usage_lock_wait: ['Waiting for accounting access', 'Accounting wait ended', 'Accounting waits'],
@@ -159,6 +164,7 @@ function budgetCrossingLabel(kind, evt) {
 export function taskCheckpointLabel(evt = {}) {
     const kind = String(evt.checkpoint_kind || '');
     if (Object.hasOwn(WAIT_LABELS, kind)) return WAIT_LABELS[kind][evt.phase === 'ended' ? 1 : 0];
+    if (SERVICE_KINDS.has(kind) && typeof evt.text === 'string' && evt.text.trim()) return evt.text;
     if (!kind && Number(evt.checkpoint_number) > 0) {
         return `Checkpoint ${evt.checkpoint_number} — periodic self-check`;
     }
@@ -189,13 +195,14 @@ export function taskCheckpointLabel(evt = {}) {
         : kind ? `Checkpoint · ${kind}` : 'Task checkpoint');
 }
 
-/** What tells one checkpoint row from another of its kind. A threshold crossing is the bound
- *  it measured and the threshold it crossed (its payload carries no round, so a round could
- *  not tell 50% from 25%); a wait is its episode and phase; any other is its number or round. */
-export function taskCheckpointIdentity(evt = {}) {
-    if (Object.hasOwn(WAIT_LABELS, evt.checkpoint_kind)) return `${evt.episode_id || evt.ts || ''}:${evt.phase}`;
-    if (evt.milestone || evt.budget_axis) return `${evt.budget_axis || ''}:${evt.milestone || ''}`;
-    return evt.checkpoint_number || evt.round || '';
+/** A service observation keeps the same card row through live delivery and history adoption. Older
+ *  producers already stamped the same event time on both copies. Other checkpoints keep their own keys. */
+export function taskCheckpointIdentity(evt = {}, key = (_kind, occurrence) => occurrence) {
+    const kind = evt.checkpoint_kind || '';
+    if (SERVICE_KINDS.has(kind)) return `cardrow|${evt.card_row_id || key(kind, evt.ts || evt.checkpoint_number || evt.round || '')}`;
+    if (Object.hasOwn(WAIT_LABELS, kind)) return key(kind, `${evt.episode_id || evt.ts || ''}:${evt.phase}`);
+    if (evt.milestone || evt.budget_axis) return key(kind, `${evt.budget_axis || ''}:${evt.milestone || ''}`);
+    return key(kind, evt.checkpoint_number || evt.round || '');
 }
 
 export function checkpointHasProgressRow(evt = {}) {

@@ -19,9 +19,11 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
+from ouroboros import service_outcomes
 from ouroboros.docker_process_observer import proc_observer_function as _docker_proc_observer_function
 from ouroboros.execution_domain import managed_executor_ref
 from ouroboros.observability import redact_projection
@@ -84,7 +86,10 @@ class _ExecutorService:
     leader_birth: str = ""  # local: measured while the Popen held its pid
     scope_marker: str = ""  # local: this launch's own scope marker (process_scope.end_held_processes)
     known_members: list[dict[str, Any]] = field(default_factory=list)  # owed by an unconfirmed stop
+    unwritten_outputs: Any = field(default=None, repr=False)
+    stopped_outputs: dict[str, Any] | None = field(default=None, repr=False)
     finalizing: bool = False  # a confirmed stop won this object: it holds the name until its log and outputs are done
+    record_id: str = ""  # minted before spawn, available even if durable registration failed
 
 
 _SERVICES: dict[str, _ExecutorService] = {}
@@ -505,7 +510,7 @@ def _services_snapshot() -> list[_ExecutorService]:
         return list(_SERVICES.values())
 
 
-def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) -> pathlib.Path | None:
+def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any], record_id: str = "") -> pathlib.Path | None:
     from ouroboros.tool_custody import retain_unconfirmed_host_operation
 
     binding = invocation_binding()
@@ -515,7 +520,7 @@ def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) 
         if binding.get("task_id"):
             retain_unconfirmed_host_operation("executor_custody_unavailable")
         return None
-    record_id = _safe_record_id(str(payload.get("record_type") or "process"))
+    record_id = record_id or _safe_record_id(str(payload.get("record_type") or "process"))
     host_command_sha256 = ""
     try:
         host_pid = int(payload.get("host_pid") or 0)
@@ -545,7 +550,7 @@ def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) 
     return path
 
 
-def _register_service_process(drive_root: pathlib.Path | None, record: _ExecutorService) -> pathlib.Path | None:
+def _register_service_process(drive_root: pathlib.Path | None, record: _ExecutorService, record_id: str = "") -> pathlib.Path | None:
     return _register_process(
         drive_root,
         {
@@ -569,7 +574,7 @@ def _register_service_process(drive_root: pathlib.Path | None, record: _Executor
             "keep_alive": bool(record.keep_alive),
             **({"scope_marker": record.scope_marker} if record.scope_marker else {}),
             **({"host_birth": record.leader_birth} if record.scope_marker and record.leader_birth else {}),
-        },
+        }, record_id,
     )
 
 
@@ -585,11 +590,13 @@ def _forget_process(record_path: pathlib.Path | None) -> None:
     forget_executor_process(record_path)
 
 
-def _load_process_record(path: pathlib.Path) -> dict[str, Any] | None:
+def _load_process_record(path: pathlib.Path, *, strict: bool = False) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except Exception:
+        if strict:
+            raise
         return None
 
 
@@ -836,50 +843,85 @@ def service_key(ctx: Any, name: str) -> str:
     return f"{task_id}:{name}"
 
 
+def named_service(ctx, name):
+    with _STATE_LOCK:
+        return _SERVICES.get(service_key(ctx, name))
+
+
+def replacement_state(record):
+    """Read before an implicit stop. Neither a failed durable read nor an unknown group admits a signal."""
+    state = _safe_service_state(record)
+    if state == "exited" and getattr(getattr(record, "executor", None), "kind", "") == "docker_exec":
+        group = _docker_pid_state(record.executor.container_name, record.backend_pid)
+        if group == "unknown":
+            return "unknown"
+        if path := record.durable_record_path:
+            try:
+                stored = _load_process_record(path, strict=True)
+            except FileNotFoundError:  # an outside stop may have retired this launch
+                return "exited" if group == "exited" else "unknown"
+            except (OSError, ValueError):
+                return "unknown"
+            if (not stored or not _valid_process_record(path, stored, check_identity=False)
+                    or stored.get("record_type") != "service" or stored.get("task_id") != record.task_id
+                    or stored.get("container_name") != record.executor.container_name or stored.get("backend_pid") != record.backend_pid):
+                return "unknown"
+    return state
+
+
 def start_service(
-    ctx: Any,
-    *,
-    name: str,
-    cmd: list[str],
-    host_cwd: pathlib.Path,
-    cwd_root: str,
-    readiness: dict[str, Any],
-    outputs: list[str],
-    before_outputs: dict[str, tuple[bool, int, str]],
-    cwd_base: str = "",
-    cwd_source: str = "",
-    skill_name: str = "",
-    keep_alive: bool = False,
-    env_overlay: "dict[str, str] | None" = None,
-    env: dict[str, str] | None = None,
-    secret_values: tuple[str, ...] = (),
-    output_context: Any = None,
+    ctx: Any, *, name: str, cmd: list[str], host_cwd: pathlib.Path, cwd_root: str,
+    readiness: dict[str, Any], outputs: list[str], before_outputs: dict[str, tuple[bool, int, str]],
+    cwd_base: str = "", cwd_source: str = "", skill_name: str = "", keep_alive: bool = False,
+    env_overlay: "dict[str, str] | None" = None, env: dict[str, str] | None = None,
+    secret_values: tuple[str, ...] = (), output_context: Any = None,
 ) -> dict[str, Any]:
+    from ouroboros.tools.kept_service_outputs import KeptNamesake
+    from ouroboros.tools.services import _admit_named_start
+
+    if _panic_requested:
+        raise RuntimeError("Emergency Stop has retired executor admission")
+    validate_process_env(env)
+    drive = _custody_drive_root(getattr(ctx, "drive_root", None))
+    try:
+        with ExitStack() as admission:
+            previous, writer = _admit_named_start(ctx, name, drive, admission, kept_writer=bool(outputs))
+            payload = _launch_service(ctx, name=name, cmd=cmd, host_cwd=host_cwd, cwd_root=cwd_root,
+                readiness=readiness, outputs=outputs, before_outputs=before_outputs, cwd_base=cwd_base, cwd_source=cwd_source,
+                skill_name=skill_name, keep_alive=keep_alive, env_overlay=env_overlay, env=env, secret_values=secret_values,
+                output_context=output_context, admitted=admission.close, writer=writer)
+            return {**payload, **(previous or {})}
+    except KeptNamesake as held:
+        if held.state == "running" and held.launch.get("executor"):
+            return held.launch
+        raise
+
+
+def _launch_service(ctx, *, name, cmd, host_cwd, cwd_root, readiness, outputs, before_outputs, cwd_base,
+                    cwd_source, skill_name, keep_alive, env_overlay, env, secret_values, output_context, admitted, writer):
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
     drive_root = _custody_drive_root(getattr(ctx, "drive_root", None))
     env = validate_process_env(env)
+    if output_context is None and outputs:
+        from ouroboros.workspace_executor_paths import prepare_docker_outputs
+        output_context = prepare_docker_outputs(executor_ref_from_ctx(ctx), host_cwd, outputs)
     executor = output_context.executor if output_context else executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
     bootstrap_process_path()
-    key = service_key(ctx, name)
-    with _STATE_LOCK:
-        existing = _SERVICES.get(key)
-    if existing is not None:
-        if _service_state(existing) == "running":
-            return _service_payload(existing, state="running", note="already_running")
-        stopped = _stop_service_record(existing)
-        if stopped is not None and stopped.get("stop_failed"):
-            raise RuntimeError("previous service termination is not confirmed: " + str(stopped.get("stop_error") or "unknown"))
-        with _STATE_LOCK:
-            if _SERVICES.get(key) is not None:  # a stop finishing its log and outputs, or a newer start
-                raise RuntimeError("another call still holds this service name")
     backend_cwd = map_host_path(executor, host_cwd)
     from ouroboros.body_candidate import executor_environment
     candidate_env = executor_environment(ctx, host_cwd, executor=executor, map_path=map_host_path)
+    if output_context is None and executor.kind == "docker_exec":
+        # No declared outputs pinned this container. After every refusal that needs no backend (an unmapped
+        # path, a candidate's environment) and before any effect, its immutable id becomes the launch's own.
+        from ouroboros.workspace_executor_paths import pinned_container
+
+        executor = pinned_container(executor)
     record = _ExecutorService(
-        service_id=key,
+        record_id=_safe_record_id("service"),
+        service_id=service_key(ctx, name),
         task_id=str(getattr(ctx, "task_id", "") or "manual"),
         name=name,
         executor=executor,
@@ -900,34 +942,31 @@ def start_service(
         drive_root=drive_root,
     )
     if executor.kind == "local":
-        from ouroboros.maintenance_retirement import artifact_changed
+        from ouroboros.launch_custody import open_service_log
         from ouroboros.process_custody import spawn_supervised
-        # A service inside the bound body candidate runs isolated; a refusal precedes any log.
-        base_env = candidate_env if candidate_env is not None else _executor_service_env()
-        log_path = drive_root / "services" / record.task_id / f"{name}.executor.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = log_path.open("ab")
-        artifact_changed(drive_root)
-
         from ouroboros.owner_pause import _member_coordinates
         from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
+        from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, birth_text, mint_marker
 
-        # A task-scoped service is the task's: its launch carries the task marker and its
-        # group is recorded; a keep/session service is handed to the installation and sheds
-        # every task marker (inheritance is not a lifetime transfer).
+        base_env = candidate_env if candidate_env is not None else _executor_service_env()
+        # A kept service sheds the task marker. Both lifetimes have their own launch scope.
         scope_root, _, scope_task = _member_coordinates(ctx)
         scope_target = None if record.keep_alive else task_launch_target(
             invocation_binding(), drive_root=scope_root, task_id=scope_task)
-        from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, birth_text, mint_marker
-
         record.scope_marker = mint_marker(LAUNCH_SCOPE_PREFIX)  # this launch's own: its stop's reach, never a task's
+        try:
+            log_path, log_fh = open_service_log(drive_root, record.task_id, f"{name}.executor",
+                                                record.scope_marker, needs_value_masking=bool(secret_values))
+        except OSError as exc:
+            exc.process_not_started = True
+            raise
 
         def publish_process(proc):
             record.local_proc = proc
             record.backend_pid = str(proc.pid)
             record.backend_log_path = str(log_path)
             with _STATE_LOCK:
-                _SERVICES[key] = record
+                _SERVICES[record.service_id] = record
             if scope_target is not None:
                 record.leader_birth = str((record_task_group(*scope_target, proc.pid) or {}).get("leader_birth") or "")
             if _panic_requested:
@@ -939,6 +978,7 @@ def start_service(
                 purpose=f"workspace_service:{name}", scope="session" if record.keep_alive else "task",
                 owner_task_id=record.task_id, on_spawn=publish_process, cwd=str(host_cwd),
                 stdout=log_fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, scope_marker=record.scope_marker,
+                service_log_name=log_path.name,
                 # Host interpreter overlay applies only to the local executor; the scope
                 # marker (or its shedding) is the last word, after every overlay.
                 env={**scoped_child_env(overlay_env(overlay_env(base_env, env_overlay), env), scope_target),
@@ -951,8 +991,8 @@ def start_service(
     else:
         if executor.network == "none":
             _assert_docker_network_none(executor.container_name)
-        log_path = f"/tmp/ouroboros-service-{record.task_id}-{name}.log"
-        prefix = f"OUROBOROS_SERVICE_ENV_{uuid.uuid4().hex}_"
+        log_path = f"/tmp/ouroboros-service-{record.task_id}-{name}@{record.record_id}.log"
+        prefix = f"OUROBOROS_SERVICE_ENV_{record.record_id.removeprefix('service-')}_"
         target_env = overlay_env(candidate_env or {}, env)
         aliases = {key: f"{prefix}{index}" for index, key in enumerate(target_env)}
         shell = _docker_service_start_shell(record, log_path, aliases, replace_env=candidate_env is not None)
@@ -980,12 +1020,15 @@ def start_service(
             raise RuntimeError("backend service identity was not confirmed")
         record.backend_log_path = log_path
         with _STATE_LOCK:
-            _SERVICES[key] = record
-    record.durable_record_path = _register_service_process(drive_root, record)
+            _SERVICES[record.service_id] = record
+    record.durable_record_path = _register_service_process(drive_root, record, record.record_id)
     if executor.kind != "local" and record.durable_record_path is not None:
         proc._invocation_confirm()
+    from ouroboros.tools.kept_service_outputs import declare_kept
+    declared = declare_kept(ctx, record, writer)
+    admitted()
     _wait_readiness(record, readiness)
-    return _service_payload(record)
+    return {**_service_payload(record), **declared}
 
 
 def _submit_service_command(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -1007,25 +1050,22 @@ def _submit_service_command(cmd: list[str], **kwargs) -> subprocess.CompletedPro
 
 
 def service_status(ctx: Any, name: str) -> dict[str, Any] | None:
-    with _STATE_LOCK:
-        record = _SERVICES.get(service_key(ctx, name))
+    record = named_service(ctx, name)
     if record is None:
         return None
-    return _service_payload(record)
+    return service_outcomes.public(record.stopped_outputs) if record.stopped_outputs else _service_payload(record)
 
 
 def service_execution_facts(service_id: str) -> dict[str, Any] | None:
-    """One executor service's start identity and execution state, without readiness work.
-
-    The local backend's Popen gives the real return code. Docker gives state only:
-    its leader probe's own exit status is not the service's, so ``returncode``
-    stays ``None`` and an inconclusive probe reads ``unknown``. ``None`` = no record.
-    """
+    """Start identity and liveness without readiness work, or None if absent. Local Popen owns its return code;
+    a Docker probe reports only leader state (unknown if inconclusive), never the service's return code."""
     with _STATE_LOCK:
         record = _SERVICES.get(service_id)
     if record is None:
         return None
-    if record.executor.kind == "local" and record.local_proc is not None:
+    if record.stopped_outputs:
+        rc, state = record.stopped_outputs.get("returncode"), "exited"
+    elif record.executor.kind == "local" and record.local_proc is not None:
         rc = record.local_proc.poll()
         state = "running" if rc is None else "exited"
     else:
@@ -1035,8 +1075,7 @@ def service_execution_facts(service_id: str) -> dict[str, Any] | None:
 
 
 def service_logs(ctx: Any, name: str, tail: int) -> dict[str, Any] | None:
-    with _STATE_LOCK:
-        record = _SERVICES.get(service_key(ctx, name))
+    record = named_service(ctx, name)
     if record is None:
         return None
     return {
@@ -1055,11 +1094,13 @@ def _stop_service_record(record: _ExecutorService, *, wait: bool = True, gracefu
     identities are kept here and on the launch's ledger row); Docker cleanup confirms group
     quiescence. ``ended``: that answer from a combined pass. Of stops that overlap, the first to
     confirm this object finalizes it, with ``finish(payload)`` (its outputs), and only then frees the
-    name, since a new start reuses the log path; any other returns ``None`` and touches nothing."""
-    cleanup: dict[str, Any] = {}
+    name for a new writer of the declared files; any other returns ``None`` and touches nothing."""
+    from ouroboros.tools.kept_service_outputs import release_after_stop
+
+    cleanup, rc = {}, None
 
     def failed(message: str, **facts: Any) -> dict[str, Any]:
-        payload = _service_payload(record)
+        payload = service_outcomes.process_facts(record, _safe_service_state(record), returncode=rc)
         payload.update(stop_failed=True, cleanup_dispatched=False,
                        stop_error=_service_diagnostic(message, record.secret_values),
                        **({"process_cleanup": cleanup} if cleanup else {}), **facts)
@@ -1085,6 +1126,7 @@ def _stop_service_record(record: _ExecutorService, *, wait: bool = True, gracefu
                 kill_process_tree(record.local_proc)
             if _safe_service_state(record) != "exited":
                 return failed("local service termination is not confirmed")
+            rc = getattr(record.local_proc, "returncode", None)
         else:
             proc = subprocess.run(
                 ["docker", "exec", record.executor.container_name, "sh", "-lc", _docker_service_stop_shell(record.backend_pid)],
@@ -1107,68 +1149,43 @@ def _stop_service_record(record: _ExecutorService, *, wait: bool = True, gracefu
         if lost():
             return None  # a parallel stop won it first: that one finalizes its log and outputs
         record.finalizing = True
+    payload = service_outcomes.process_facts(record, "stopped", returncode=rc)
+    if cleanup:
+        payload["process_cleanup"] = cleanup
     try:
-        payload = _service_payload(record, state="stopped")
-        if cleanup:
-            payload["process_cleanup"] = cleanup
         if record.executor.kind == "docker_exec":
-            payload["cleanup_dispatched"] = True
+            payload.update(cleanup_dispatched=True, log_outcome="backend_only")
         elif record.drive_root is not None:
-            from ouroboros.tools.services import _finalize_service_log_for_drive
+            from ouroboros.tools.services import _finalize_service_log
 
-            payload["log_finalization"] = _finalize_service_log_for_drive(
+            payload["log_finalization"] = _finalize_service_log(
                 record.drive_root, record, log_path=pathlib.Path(record.backend_log_path),
             )
+    except Exception as exc:
+        payload.update(log_outcome="unconfirmed", finalization_error=type(exc).__name__)
+    try:
         if finish is not None:
             finish(payload)
-        return payload
     finally:
-        _forget_process(record.durable_record_path)
-        with _STATE_LOCK:
-            if _SERVICES.get(record.service_id) is record:
-                _SERVICES.pop(record.service_id)
+        try:
+            _forget_process(record.durable_record_path)
+        except Exception as exc:
+            payload["finalization_error"] = type(exc).__name__
+        release_after_stop(record, payload if finish is not None else None, _SERVICES, _STATE_LOCK)
+    return payload
 
 
-def stop_service(ctx: Any, name: str, finish: Any = None) -> dict[str, Any] | None:
-    """``finish(payload)``: what a confirmed stop still does with the name held (its declared outputs). ``None``: no
-    such service, or another stop of it is the one finishing."""
-    with _STATE_LOCK:
-        record = _SERVICES.get(service_key(ctx, name))
+def stop_service(ctx: Any, name: str, *, record: _ExecutorService | None = None) -> dict[str, Any] | None:
+    """Settle this selected launch, or only its declared files if its processes already ended."""
+    from ouroboros.tools.kept_service_outputs import finish_own_outputs, pending_output_stop, retry_own_outputs
+    from ouroboros.tools.services import _capture_record_outputs
+
+    record = record if record is not None else named_service(ctx, name)
     if record is None:
         return None
-
-    def outputs(payload: dict[str, Any]) -> None:
-        payload["_before_outputs"] = record.before_outputs
-        payload["_output_context"] = record.output_context
-        if finish is not None:
-            finish(payload)
-
-    return _stop_service_record(record, finish=outputs)
-
-
-def stop_task_services(ctx: Any) -> list[dict[str, Any]]:
-    task_id = str(getattr(ctx, "task_id", "") or "manual")
-    kept, stopped = [], []
-    for record in _services_snapshot():
-        if record.task_id != task_id:
-            continue
-        if record.keep_alive:
-            kept.append({**_service_payload(record, note="keep_alive"), "lifecycle": "kept"})
-            continue
-        try:
-            from ouroboros.tools.services import _finalize_executor_service_outputs
-
-            payload = stop_service(ctx, record.name, lambda done: _finalize_executor_service_outputs(ctx, done))
-            if payload is not None:
-                payload["lifecycle"] = (
-                    "cleanup_pending"
-                    if payload.get("stop_failed") or payload.get("cleanup_dispatched") is False
-                    else "stopped"
-                )
-                stopped.append(payload)
-        except Exception:
-            pass
-    return [*kept, *stopped]
+    if pending_output_stop(record) is not None:
+        return retry_own_outputs(ctx, record, _capture_record_outputs, _SERVICES, _STATE_LOCK)[0]
+    return _stop_service_record(record, finish=lambda row: finish_own_outputs(ctx, record, row, _capture_record_outputs))
 
 
 def kill_all_services(
@@ -1202,7 +1219,7 @@ def kill_all_services(
     leftover = [(path, record) for path, record in _owned_process_records(drive_root, "service", launches=True)
                 if path not in memory_paths] if durable else []
     held = [held_item(record, record.local_proc) for record in records
-            if record.executor.kind == "local" and record.local_proc]
+            if record.executor.kind == "local" and record.local_proc and not record.finalizing]
     others = _record_targets([(path, record) for path, record in leftover if _recorded_launch(record)])
     together = end_held_processes(held, others=others, others_spared=spared_daemon_roots(drive_root) if others else (),
                                   graceful=False) if held or others else {}  # every local service: one census, one wait
@@ -1261,47 +1278,36 @@ def resolve_process_env(
 
 def service_env() -> dict[str, str]:
     """Compatible minimal host environment; redaction belongs to diagnostics."""
-    allowed_exact = {
-        "PATH",
-        "HOME",
-        "USERPROFILE",
+    allowed = {
+        "path",
+        "home",
+        "userprofile",
         # Login name, not a secret: keychain/identity lookups need it (a CLI
         # whose credentials are keyed by account name finds nothing without it).
-        "USER",
-        "LOGNAME",
-        "USERNAME",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "LANG",
-        "LC_ALL",
-        "VIRTUAL_ENV",
-        "PYTHONPATH",
-        "NODE_PATH",
-        "SystemRoot",
-        "SYSTEMROOT",
-        "WINDIR",
+        "user",
+        "logname",
+        "username",
+        "appdata",
+        "localappdata",
+        "tmpdir",
+        "tmp",
+        "temp",
+        "lang",
+        "lc_all",
+        "virtual_env",
+        "pythonpath",
+        "node_path",
+        "systemroot",
         "windir",
-        "COMSPEC",
-        "ComSpec",
-        "PATHEXT",
-        "PROCESSOR_ARCHITECTURE",
-        "NUMBER_OF_PROCESSORS",
-        "PROGRAMDATA",
-        "ProgramData",
-        "ProgramFiles",
-        "PROGRAMFILES",
-        "ProgramFiles(x86)",
-        "PROGRAMFILES(X86)",
+        "comspec",
+        "pathext",
+        "processor_architecture",
+        "number_of_processors",
+        "programdata",
+        "programfiles",
+        "programfiles(x86)",
     }
-    allowed_casefold = {key.casefold() for key in allowed_exact}
-    env: dict[str, str] = {}
-    for key, value in os.environ.items():
-        if key.casefold() not in allowed_casefold and not key.startswith("LC_"):
-            continue
-        env[key] = str(value)
+    env = {key: str(value) for key, value in os.environ.items() if key.casefold() in allowed or key.startswith("LC_")}
     from ouroboros.process_scope import installation_scope_entries
     from ouroboros.node_runtime import forward_playwright_node
 
@@ -1387,14 +1393,10 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         # process can settle during the scan, so re-poll before serializing a
         # running+ready claim (for both local and Docker backends).
         actual_state = _safe_service_state(record)
-    else:
-        record.ready = False
     if actual_state != "running":
         record.ready = False
     payload = {
-        "service_id": record.service_id,
-        "name": record.name,
-        "task_id": record.task_id,
+        **service_outcomes.launch_facts(record),
         "state": actual_state,
         "ready": bool(record.ready),
         "ready_observed_at": getattr(record, "ready_observed_at", "") or None,
@@ -1427,11 +1429,8 @@ def _service_state(record: _ExecutorService) -> str:
     if record.executor.kind == "local":
         proc = record.local_proc
         if proc is None:
-            return "exited"
-        try:
-            return "running" if proc.poll() is None else "exited"
-        except Exception:
             return "unknown"
+        return "running" if proc.poll() is None else "exited"
     return _docker_observe_state(record.executor.container_name, record.backend_pid,
                                  scope="leader", timeout=10)
 
@@ -1449,12 +1448,9 @@ def _safe_service_state(record: _ExecutorService) -> str:
 def _read_service_tail(record: _ExecutorService, chars: int) -> str:
     limit = max(1, min(int(chars or 8000), _MAX_SERVICE_LOG_TAIL_CHARS))
     if record.executor.kind == "local":
-        path = pathlib.Path(record.backend_log_path)
-        if not path.exists():
-            return ""
-        with path.open("rb") as fh:
-            fh.seek(max(0, path.stat().st_size - limit))
-            return fh.read(limit).decode("utf-8", errors="replace")
+        from ouroboros.tools.services import _tail
+
+        return _tail(record.drive_root, pathlib.Path(record.backend_log_path), limit)
     proc = subprocess.run(
         ["docker", "exec", record.executor.container_name, "sh", "-lc", f"tail -c {limit} {shlex.quote(record.backend_log_path)} 2>/dev/null || true"],
         stdout=subprocess.PIPE,

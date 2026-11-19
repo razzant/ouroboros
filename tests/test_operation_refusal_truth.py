@@ -188,6 +188,7 @@ def test_close_and_start_share_one_atomic_phase_boundary(tmp_path, monkeypatch, 
 def test_retired_service_is_not_whole_call_no_effect(tmp_path, monkeypatch, failure):
     from types import SimpleNamespace
 
+    from ouroboros import workspace_executor
     from ouroboros.tools import services
     registry, _, _ = _registry(tmp_path, monkeypatch)
     ctx = registry._ctx
@@ -198,8 +199,8 @@ def test_retired_service_is_not_whole_call_no_effect(tmp_path, monkeypatch, fail
     def retire(*_args, **_kwargs):
         marker.write_text("retired previous record")
         services._SERVICES.pop(key)  # a stop that returned frees the name
-        return "stopped"
-    monkeypatch.setattr(services, "_stop_service", retire)
+        return {"state": "exited"}, False
+    monkeypatch.setattr(services, "_stop_host_service", retire)
     monkeypatch.setattr(services, "_executor_can_run_cwd", lambda *_args: True)
 
     def refused(*_args, **_kwargs):
@@ -211,7 +212,7 @@ def test_retired_service_is_not_whole_call_no_effect(tmp_path, monkeypatch, fail
         error = OSError("before new process")
         error.process_not_started = True
         raise error
-    monkeypatch.setattr(services, "executor_start_service", refused)
+    monkeypatch.setattr(workspace_executor, "_launch_service", refused)
     result = registry.execute_result("start_service", {"cmd": ["ignored"], "name": "replace"})
     assert marker.exists()
     assert result.meta.get("operation_outcome") != "completed_no_effect"
@@ -220,6 +221,38 @@ def test_retired_service_is_not_whole_call_no_effect(tmp_path, monkeypatch, fail
     if failure == "pre_popen_error":
         assert result.meta["process_not_started"] is True
         assert result.meta["previous_service_retired"] is True
+
+
+def test_host_log_refusal_after_admission_discloses_the_replaced_launch(tmp_path, monkeypatch):
+    """The host door's own late refusal (the private log): admission already retired the exited
+    same-named record, so the answer keeps the new launch's not-started fact and discloses the real
+    predecessor effect in text and meta — never the pre-admission ``completed_no_effect`` claim."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools import services
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    ctx = registry._ctx
+    marker = tmp_path / "retired"
+    key = services._service_key(ctx, "replace")
+    monkeypatch.setitem(services._SERVICES, key, SimpleNamespace(proc=SimpleNamespace(poll=lambda: 0)))
+
+    def retire(*_args, **_kwargs):
+        marker.write_text("retired previous record")
+        services._SERVICES.pop(key)  # a stop that returned frees the name
+        return {"state": "exited"}, False
+    monkeypatch.setattr(services, "_stop_host_service", retire)
+    monkeypatch.setattr(services, "_executor_can_run_cwd", lambda *_args: False)
+
+    def no_log(*_args, **_kwargs):
+        raise OSError("log directory unavailable")
+
+    monkeypatch.setattr(services, "open_service_log", no_log)
+    result = registry.execute_result("start_service", {"cmd": ["ignored"], "name": "replace"})
+    assert marker.exists()
+    assert result.meta["process_not_started"] is True
+    assert result.meta["previous_service_retired"] is True
+    assert result.meta.get("operation_outcome") != "completed_no_effect"
+    assert "finalized the previous same-named launch or its outputs" in result.text
 
 
 def test_executor_retirement_is_not_denied_by_missing_host_record(tmp_path, monkeypatch):
@@ -237,7 +270,7 @@ def test_executor_retirement_is_not_denied_by_missing_host_record(tmp_path, monk
     monkeypatch.setitem(workspace_executor._SERVICES, key, old)
     monkeypatch.setattr(workspace_executor, "_service_state", lambda _record: "exited")
 
-    def retire(record):
+    def retire(record, *, finish):
         retired.append(record)
         workspace_executor._SERVICES.pop(key)
         return {"state": "exited"}
@@ -252,7 +285,7 @@ def test_executor_retirement_is_not_denied_by_missing_host_record(tmp_path, monk
     result = registry.execute_result("start_service", {"cmd": ["ignored"], "name": "replace"})
     assert retired == [old]
     assert result.meta["process_not_started"] is True
-    assert result.meta.get("previous_service_retired") is not False
+    assert result.meta["previous_service_retired"] is True
     assert result.meta.get("operation_outcome") != "completed_no_effect"
 
 

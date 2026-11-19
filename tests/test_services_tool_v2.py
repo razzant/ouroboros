@@ -6,52 +6,15 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 from types import SimpleNamespace
 
+from ouroboros.launch_custody import service_log_launch_id
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.services import archive_task_service_logs, prune_service_logs
-
-
-def _wait_for_service_log(drive, task_id, name, predicate, timeout_sec=15.0):
-    """Wait until the service's live log satisfies ``predicate``.
-
-    The start_service readiness contract without a stdout marker is "process
-    alive == ready" — it never waits for output. These suites assert on log
-    CONTENT, so they must wait for the observable condition themselves: on a
-    slow CI runner the child's first write can land well after start_service
-    returns (a latent race exposed when the guard path got faster), and the
-    assertions below are about redaction/finalization, never about timing.
-    """
-    log_path = drive / "services" / task_id / name
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        try:
-            if predicate(log_path.read_bytes() if log_path.exists() else b""):
-                return
-        except OSError:
-            pass
-        time.sleep(0.1)
-    raise AssertionError(
-        f"service log {log_path} did not satisfy the wait predicate within {timeout_sec}s"
-    )
-
-
-def _force_advanced_runtime(monkeypatch):
-    from ouroboros import config as cfg
-
-    cfg.reset_runtime_mode_baseline_for_tests()
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
-
-
-def _force_light_runtime(monkeypatch):
-    from ouroboros import config as cfg
-
-    cfg.reset_runtime_mode_baseline_for_tests()
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
-    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+from tests._launch_stop_shared import _force_advanced_runtime, _force_light_runtime, _launch_log, _wait_for_service_log
 
 
 def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
@@ -84,7 +47,7 @@ def test_task_scoped_service_lifecycle(tmp_path, monkeypatch):
     stopped = json.loads(registry.execute("stop_service", {"name": "demo"}))
     assert stopped["state"] == "exited"
     assert stopped["log_finalization"]["deleted_live_log"] is True
-    assert not (drive / "services" / "task-1" / "demo.log").exists()
+    assert not pathlib.Path(start_payload["log_path"]).exists()
     assert registry.execute("service_status", {"name": "demo"}).startswith("⚠️ SERVICE_NOT_FOUND")
 
 
@@ -107,7 +70,7 @@ def test_service_logs_redact_secret_assignments(tmp_path, monkeypatch):
         "readiness": {"timeout_sec": 1},
     })
     assert json.loads(start)["state"] in {"running", "exited"}
-    _wait_for_service_log(drive, "task-1", "secretlog.log", lambda b: b"OPENAI_API_KEY=" in b)
+    _wait_for_service_log(json.loads(start)["log_path"], lambda b: b"OPENAI_API_KEY=" in b)
     logs = json.loads(registry.execute("service_logs", {"name": "secretlog", "tail": 500}))
     registry.execute("stop_service", {"name": "secretlog"})
 
@@ -486,9 +449,7 @@ def test_service_readiness_is_independent_of_bounded_log_tail(tmp_path, monkeypa
 def test_service_log_retention_prunes_stale_directories(tmp_path):
     drive = tmp_path / "data"
     stale = drive / "services" / "task-old"
-    stale.mkdir(parents=True)
-    log = stale / "demo.log"
-    log.write_text("old", encoding="utf-8")
+    log = _launch_log(stale, "demo", b"old")
     now = 1_000_000.0
     old = now - 30 * 86400
     os.utime(stale, (old, old))
@@ -510,12 +471,338 @@ def test_service_log_retention_prunes_stale_directories(tmp_path):
     assert event["full_log_ref"]["sha256"]
 
 
-def test_archive_task_service_logs_finalizes_forced_worker_leftovers(tmp_path):
+def test_ordinary_stop_uses_its_launch_values_for_both_diagnostics(tmp_path):
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.tools import services
+
+    path = _launch_log(tmp_path / "services/task", "paper", b"sample public label\n", needs_value_masking=True)
+    record = SimpleNamespace(log_path=path, secret_values=("public label",))
+    captured = services._finalize_service_log_for_drive(tmp_path, record)
+    assert captured["deleted_live_log"] and not path.exists()
+    [event] = map(json.loads, (tmp_path / "logs/events.jsonl").read_bytes().splitlines())
+    assert captured["source_scope"] == "full"
+    assert read_actor_source_bytes(tmp_path, "task", captured["source_ref"]) == b"sample ***\n"
+    assert read_blob_ref(tmp_path, event["full_log_ref"], expected_kind="txt") == "sample ***\n"
+
+
+@pytest.fixture
+def retired_service_drive(tmp_path, monkeypatch):
+    from ouroboros import body_candidate, config, task_custody
+    from ouroboros.launch_custody import open_service_log
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, mint_marker
+    from ouroboros.task_results import write_task_result
+
+    data = tmp_path.resolve() / "data"
+    task = "paper-task"
+    drive = data / "task_drives" / task
+    drive.mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda *_: [])
+    marker = mint_marker(LAUNCH_SCOPE_PREFIX)
+    path, handle = open_service_log(drive, task, "paper", marker, needs_value_masking=True)
+    with handle:
+        handle.write(b"field notes\n")
+    write_task_result(data, "parent", "running", root_task_id="parent")
+    write_task_result(data, task, "completed", result="Paper is ready.", parent_task_id="parent",
+                      root_task_id="parent", child_drive_root=str(drive))
+    return SimpleNamespace(data=data, drive=drive, task=task, path=path, marker=marker,
+                           settle=lambda **kw: task_custody.settle_child_drive(
+                               data, task, drive, live=lambda _: False, **kw))
+
+
+@pytest.mark.parametrize("failure", ["size", "write"])
+def test_only_the_ended_service_log_survives_drive_release(retired_service_drive, monkeypatch, failure):
+    from ouroboros import task_custody
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.launch_custody import open_service_log_source, service_log_launch_id
+    from ouroboros.outcomes import public_task_result
+    from ouroboros.tool_access_paths import is_private_service_log_path
+    from ouroboros.tools import services
+
+    w = retired_service_drive
+    (w.drive / "scratch.txt").write_text("working note", encoding="utf-8")
+    store = w.data / "private_service_logs" / w.task
+    assert w.path.parent == store and is_private_service_log_path(w.path, w.drive)
+    assert not is_private_service_log_path(w.data / "projects/paper" / store.name / w.path.name, w.data)
+    if os.name == "posix":
+        assert not (store.parent.stat().st_mode | store.stat().st_mode | w.path.stat().st_mode) & 0o077
+
+    if failure == "size":
+        monkeypatch.setattr(services, "_MAX_SERVICE_LOG_BLOB_BYTES", 5)
+    else:
+        def no_archive(*_args):
+            raise OSError(f"sample archive write failure for {w.path}")
+        monkeypatch.setattr(services, "_store_service_log", no_archive)
+    prior_log = services._finalize_service_log_for_drive(w.drive, SimpleNamespace(log_path=w.path, secret_values=("field",)))
+    assert prior_log["live_log"] == "retained" and not prior_log["deleted_live_log"]
+    if failure == "size":
+        assert prior_log["source_unavailable"] == "tail_masking_unverified" and "source_ref" not in prior_log
+    else:
+        assert prior_log["source_scope"] == "full" and prior_log["error_count"] == 1
+        assert read_actor_source_bytes(w.data, w.task, prior_log["source_ref"], retained=False) == b"*** notes\n"
+    prior = {"launch_id": service_log_launch_id(w.path.name), "log_path": str(w.path), "log_finalization": prior_log}
+    shown = public_task_result({"services": [prior], "outcome_axes": {"execution": {"services": [prior]}}})
+    assert shown["services"] == shown["outcome_axes"]["execution"]["services"]
+    assert shown["services"][0]["log_finalization"]["live_log"] == "retained"
+    assert shown["services"][0]["log_outcome"] == ("retained" if failure == "size" else "not_saved")
+    assert str(w.path) not in json.dumps(shown) and "field notes" not in json.dumps(shown)
+
+    assert w.settle()["status"] == "removed" and not w.drive.exists()
+    assert task_custody.remove_custody_trash(w.data)["removed"] == 1
+    assert list(store.iterdir()) == [w.path]
+    with open_service_log_source(w.drive, w.path, closed=True)[0] as source:
+        assert source.read() == b"field notes\n"
+
+
+def test_stop_releases_original_only_after_a_canonical_launch_receipt(retired_service_drive, monkeypatch):
+    from ouroboros import service_outcomes, task_custody
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.tools import services
+
+    w = retired_service_drive
+    record = SimpleNamespace(log_path=w.path, secret_values=("field",))
+    events = w.data / "logs" / "events.jsonl"
+    with monkeypatch.context() as patch:
+        def refuse(path, row, **kw):
+            assert path == events and row["launch_id"] == service_log_launch_id(w.path.name)
+            assert kw == {"ensure_record_boundary": True, "require_lock": True, "fsync": True}
+            assert w.path.is_file()  # the only original stays while publishing the receipt
+            return False
+
+        patch.setattr(services, "append_jsonl", refuse)
+        kept = services._finalize_service_log_for_drive(w.drive, record)
+    assert kept["archive_outcome"] == "not_saved" and kept["source_scope"] == "full" and kept["error_count"] == 1
+    assert read_actor_source_bytes(w.data, w.task, kept["source_ref"], retained=False) == b"*** notes\n"
+    assert not kept["deleted_live_log"] and w.path.read_bytes() == b"field notes\n"
+
+    done = services._finalize_service_log_for_drive(w.drive, record)
+    assert done["deleted_live_log"] and not w.path.exists()
+    [receipt] = [row for row in map(json.loads, events.read_bytes().splitlines())
+                 if row.get("type") == "service_log_archived"]
+    assert receipt["task_id"] == w.task and receipt["launch_id"] == service_log_launch_id(w.path.name)
+    assert set(receipt) == {"ts", "type", "task_id", "launch_id", "name", "full_log_ref", "tail_chars"}
+    shown = service_outcomes.display({"log_finalization": done})
+    assert shown["log_finalization"] == done and done["source_scope"] == "full"
+    assert done["source_ref"]["sha256"] == receipt["full_log_ref"]["sha256"]
+    assert w.settle()["status"] == "removed" and not w.drive.exists()
+    assert task_custody.remove_custody_trash(w.data)["removed"] == 1
+    assert read_blob_ref(w.data, receipt["full_log_ref"], expected_kind="txt") == "*** notes\n"
+
+
+@pytest.mark.parametrize("indexed", [True, False])
+def test_kept_docker_writer_without_a_host_log_holds_only_its_drive(retired_service_drive, monkeypatch, indexed):
+    from ouroboros import owned_shutdown, task_custody, workspace_executor
+    from ouroboros.task_results import write_task_result
+
+    w = retired_service_drive
+    w.path.unlink()  # Docker log storage is backend-only; no host log or output declaration witnesses it.
+    path = w.drive / "state" / workspace_executor._PROCESS_STATE_DIR / "service-note.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"id": path.stem, "owner": workspace_executor._PROCESS_RECORD_OWNER,
+              "schema_version": workspace_executor._PROCESS_RECORD_SCHEMA_VERSION, "record_type": "service",
+              "executor_type": "docker_exec", "task_id": w.task, "host_pid": 0,
+              "container_name": "paper-preview", "backend_pid": "101", "keep_alive": True}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    if indexed:
+        assert owned_shutdown.record_executor_process(path, record)
+
+    under_guard = False
+
+    @contextmanager
+    def guard():
+        nonlocal under_guard
+        under_guard = True
+        try:
+            yield True
+        finally:
+            under_guard = False
+
+    def probe(container, pid):
+        assert not under_guard and (container, pid) == ("paper-preview", "101")
+        return state
+
+    monkeypatch.setattr(workspace_executor, "_docker_pid_state", probe)
+    for state in ("running", "unknown"):
+        assert w.settle()["reason"] == "service_writer_unsettled" and w.drive.is_dir()
+    other = w.drive.with_name("other")
+    other.mkdir()
+    write_task_result(w.data, "other", "completed", result="No background work.", child_drive_root=str(other))
+    assert task_custody.settle_child_drive(w.data, "other", other, live=lambda _: False, guard=guard)["status"] == "removed"
+    state = "exited"
+    assert w.settle(guard=guard)["status"] == "removed" and not w.drive.exists()
+
+
+def test_owner_keep_and_legacy_log_hold_precede_release(retired_service_drive):
+    from ouroboros.task_results import write_task_result
+
+    w = retired_service_drive
+    legacy = _launch_log(w.drive / "services" / w.task, "earlier", b"previous note", needs_value_masking=True)
+    assert w.settle()["reason"] == "service_log_uncustodied"
+    write_task_result(w.data, w.task, "completed", owner_keep={"basis": "owner"})
+    assert w.settle()["reason"] == "owner_keep"
+    assert legacy.read_bytes() == b"previous note" and w.path.is_file()
+
+
+def test_private_open_does_not_replace_an_existing_launch(retired_service_drive):
+    from ouroboros.launch_custody import open_service_log, open_service_log_source
+
+    w = retired_service_drive
+    with pytest.raises(FileExistsError):
+        open_service_log(w.drive, w.task, "paper", w.marker, needs_value_masking=True)
+    with open_service_log_source(w.drive, w.path, closed=True)[0] as source:
+        assert source.read() == b"field notes\n"
+
+
+def test_private_open_refuses_an_unverified_existing_store(tmp_path, monkeypatch):
+    from ouroboros import config
+    from ouroboros.launch_custody import open_service_log
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, mint_marker
+
+    data = tmp_path.resolve() / "data"
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    unverified = data / "private_service_logs"
+    unverified.mkdir(parents=True)  # ordinary inheritance on Windows, not an explicit protected DACL
+    if os.name == "posix":
+        unverified.chmod(0o755)
+    with pytest.raises(OSError):
+        open_service_log(data, "paper-task", "paper", mint_marker(LAUNCH_SCOPE_PREFIX), needs_value_masking=True)
+    assert not list(unverified.iterdir())
+
+
+def test_deferred_masked_archive_uses_the_existing_private_file(retired_service_drive):
+    from ouroboros.launch_custody import open_service_log
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, mint_marker
+
+    w = retired_service_drive
+    marker = mint_marker(LAUNCH_SCOPE_PREFIX)
+    neighbor, handle = open_service_log(w.drive, w.task, "indexer", marker, needs_value_masking=False)
+    with handle:
+        handle.write(b"Index ready.\n")
+    report = archive_task_service_logs(w.drive, w.task)
+    assert report["archived_files"] == report["deleted_files"] == report["retained_files"] == 1
+    events = (json.loads(line) for line in (w.data / "logs/events.jsonl").read_bytes().splitlines())
+    archived, = (event for event in events if event.get("type") == "service_log_archived")
+    assert read_blob_ref(w.data, archived["full_log_ref"], expected_kind="txt") == "Index ready.\n"
+    assert not neighbor.exists() and w.path.is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows data-writer sharing")
+def test_windows_closed_read_waits_for_the_log_handle(retired_service_drive):
+    from ouroboros.launch_custody import open_service_log, open_service_log_source
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, mint_marker
+
+    w = retired_service_drive
+    marker = mint_marker(LAUNCH_SCOPE_PREFIX)
+    path, handle = open_service_log(w.drive, w.task, "drawing", marker, needs_value_masking=False)
+    with handle:
+        handle.write(b"Drawing complete\n")
+        with pytest.raises(OSError):
+            open_service_log_source(w.drive, path, closed=True)
+    with open_service_log_source(w.drive, path, closed=True)[0] as source:
+        assert source.read() == b"Drawing complete\n"
+
+
+@pytest.mark.parametrize("retire", ["terminal", "prune"])
+def test_deferred_log_capture_requires_this_launch_to_allow_standard_masking(tmp_path, monkeypatch, retire):
+    from ouroboros import body_candidate
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.tools import services
+
+    directory = tmp_path / "services" / "task"
+    private = _launch_log(directory, "paper", b"ordinary sample", needs_value_masking=True)
+    legacy = directory / "old.log"
+    legacy.write_bytes(b"historical sample")
+    first = _launch_log(directory, "one", b"first sample")
+    second = _launch_log(directory, "two", b"second sample")
+    projected, checked = [], []
+
+    def standard_mask(text):
+        projected.append(text)
+        return SimpleNamespace(value="standard projection")
+
+    monkeypatch.setattr(services, "redact_projection", standard_mask)
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda _, task: checked.append(task) or [])
+    monkeypatch.setattr(services, "service_execution_facts", lambda _: None)
+    if retire == "terminal":
+        report = archive_task_service_logs(tmp_path, "task")
+    else:
+        report = prune_service_logs(tmp_path, retention_days=0, now=time.time() + 60)
+
+    assert report["archived_files"] == report["deleted_files"] == report["retained_files"] == 2
+    assert sorted(projected) == ["first sample", "second sample"] and checked == ["task"]
+    assert private.read_bytes() == b"ordinary sample" and legacy.read_bytes() == b"historical sample"
+    assert not first.exists() and not second.exists()
+    rows = [json.loads(line) for line in (tmp_path / "logs/events.jsonl").read_bytes().splitlines()]
+    assert {row["launch_id"] for row in rows} == {service_log_launch_id(path.name) for path in (first, second)}
+    assert all(read_blob_ref(tmp_path, row["full_log_ref"], expected_kind="txt") == "standard projection" for row in rows)
+
+
+def test_retirement_keeps_the_launch_log_until_its_own_archive_receipt_exists(tmp_path, monkeypatch):
+    from ouroboros import body_candidate
+    from ouroboros.observability import read_blob_ref
+    from ouroboros.tools import services
+
+    directory = tmp_path / "services" / "task"
+    first = _launch_log(directory, "demo", b"FIRST\n")
+    second = _launch_log(directory, "demo", b"SECOND\n")
+    events = tmp_path / "logs" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_bytes(b'{"unfinished"')
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda *_: [])
+    append = services.append_jsonl
+    with monkeypatch.context() as patch:
+        def record(path, row, **kwargs):
+            assert kwargs == {"ensure_record_boundary": True, "require_lock": True, "fsync": True}
+            return row["launch_id"] != service_log_launch_id(first.name) and append(path, row, **kwargs)
+        patch.setattr(services, "append_jsonl", record)
+        report = archive_task_service_logs(tmp_path, "task")
+    assert report["archived_files"] == report["deleted_files"] == report["retained_files"] == 1 and report["errors"]
+    assert first.read_bytes() == b"FIRST\n" and not second.exists()
+    assert archive_task_service_logs(tmp_path, "task")["archived_files"] == 1
+    original, *lines = events.read_bytes().splitlines()
+    assert original == b'{"unfinished"'
+    rows = [json.loads(line) for line in lines]
+    assert [(row["name"], row["launch_id"], read_blob_ref(tmp_path, row["full_log_ref"], expected_kind="txt"))
+            for row in rows if row.get("type") == "service_log_archived"] == [
+                ("demo", service_log_launch_id(second.name), "SECOND\n"),
+                ("demo", service_log_launch_id(first.name), "FIRST\n")]
+
+
+def test_service_log_remains_when_the_event_cannot_be_synced(tmp_path, monkeypatch):
+    from ouroboros import body_candidate, utils
+
+    path = _launch_log(tmp_path / "services/task", "paper", b"sample output")
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda *_: [])
+    sync = utils.fsync_folder
+    attempted = []
+
+    def refuse_sync(directory):
+        if directory == tmp_path / "logs":
+            attempted.append(directory)
+            raise OSError("sample sync failure")
+        sync(directory)
+
+    monkeypatch.setattr(utils, "fsync_folder", refuse_sync)
+    report = archive_task_service_logs(tmp_path, "task")
+    assert attempted == [tmp_path / "logs"]
+    assert report["archived_files"] == report["deleted_files"] == 0
+    assert report["retained_files"] == 1 and report["errors"]
+    assert path.read_bytes() == b"sample output"
+
+
+def test_archive_task_service_logs_finalizes_forced_worker_leftovers(tmp_path, monkeypatch):
+    from ouroboros import body_candidate
+    from ouroboros.observability import read_blob_ref
+
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda *_: [])
     drive = tmp_path / "data"
     task_dir = drive / "services" / "task-forced"
-    task_dir.mkdir(parents=True)
-    log = task_dir / "devserver.log"
-    log.write_text("READY\n", encoding="utf-8")
+    _launch_log(task_dir, "devserver", b"READY\n")
 
     report = archive_task_service_logs(drive, "task-forced")
 
@@ -532,20 +819,25 @@ def test_archive_task_service_logs_finalizes_forced_worker_leftovers(tmp_path):
     assert event["name"] == "devserver"
     assert event["full_log_ref"]["sha256"]
 
-    child_drive = tmp_path / "child-data"
+    child_drive = drive / "state" / "headless_tasks" / "task-child" / "data"
     child_task_dir = child_drive / "services" / "task-child"
-    child_task_dir.mkdir(parents=True)
-    (child_task_dir / "devserver.log").write_text("READY\n", encoding="utf-8")
+    child_log = _launch_log(child_task_dir, "devserver", b"CHILD READY\n")
+    elsewhere = tmp_path / "other-installation"
+    other_log = _launch_log(elsewhere / "services" / "task-child", "devserver", b"OTHER READY\n")
 
     child_report = archive_task_service_logs(
         drive,
         "task-child",
-        {"child_drive_root": str(child_drive)},
+        {"child_drive_root": str(child_drive), "drive_root": str(elsewhere)},
     )
 
     assert child_report["archived_files"] == 1
     assert child_report["deleted_dirs"] == 1
     assert not child_task_dir.exists()
+    assert other_log.read_bytes() == b"OTHER READY\n" and not (elsewhere / "logs").exists()
+    events = map(json.loads, (drive / "logs/events.jsonl").read_bytes().splitlines())
+    [row] = [row for row in events if row.get("launch_id") == service_log_launch_id(child_log.name)]
+    assert read_blob_ref(drive, row["full_log_ref"], expected_kind="txt") == "CHILD READY\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="kept-service custody is read by the POSIX launch census")
@@ -564,13 +856,13 @@ def test_archive_task_service_logs_keeps_a_kept_services_live_log_until_it_is_st
     started = json.loads(registry.execute("start_service", {
         "name": "writer", "cmd": [sys.executable, "-c", script], "keep_alive": True,
         "readiness": {"log_contains": "first", "timeout_sec": 20}}))
-    log = drive / "services" / "task-kept" / "writer.log"
+    log = pathlib.Path(started["log_path"])
     try:
         assert started["state"] == "running", started
         report = archive_task_service_logs(drive, "task-kept", {"id": "task-kept"})
         assert report["retained_files"] == 1 and report["archived_files"] == 0 and report["deleted_files"] == 0
         size = log.stat().st_size
-        _wait_for_service_log(drive, "task-kept", "writer.log", lambda data: len(data) > size)
+        _wait_for_service_log(log, lambda data: len(data) > size)
         assert log.read_text(encoding="utf-8").startswith("first\n"), "the same live file keeps growing"
 
         launch_id = kept_services(drive)["services"][0]["launch_id"]
@@ -596,18 +888,20 @@ def test_stop_service_retains_live_log_when_full_blob_omitted(tmp_path, monkeypa
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
     registry._ctx.task_id = "task-oversize"
 
-    registry.execute("start_service", {
+    started = json.loads(registry.execute("start_service", {
         "name": "oversize",
         "cmd": [sys.executable, "-c", "print('x' * 100, flush=True)"],
         "readiness": {"timeout_sec": 1},
-    })
-    _wait_for_service_log(drive, "task-oversize", "oversize.log", lambda b: len(b) > 100)
+    }))
+    log = pathlib.Path(started["log_path"])
+    _wait_for_service_log(log, lambda b: len(b) > 100)
     stopped = json.loads(registry.execute("stop_service", {"name": "oversize"}))
 
     finalization = stopped["log_finalization"]
     assert finalization["deleted_live_log"] is False
-    assert finalization["retained_live_log_path"].endswith("oversize.log")
-    assert (drive / "services" / "task-oversize" / "oversize.log").exists()
+    assert finalization["live_log"] == "retained" and str(log) not in json.dumps(stopped)
+    assert finalization["source_unavailable"] == "tail_masking_unverified" and "source_ref" not in finalization
+    assert log.exists()
 
 
 def test_service_log_finalization_checks_size_before_full_read(tmp_path, monkeypatch):
@@ -618,20 +912,14 @@ def test_service_log_finalization_checks_size_before_full_read(tmp_path, monkeyp
     log_path.parent.mkdir(parents=True)
     log_path.write_text("x" * 100, encoding="utf-8")
     monkeypatch.setattr(services_mod, "_MAX_SERVICE_LOG_BLOB_BYTES", 10)
-    original_read_text = pathlib.Path.read_text
-
-    def guarded_read_text(self, *args, **kwargs):
-        if self == log_path:
-            raise AssertionError("oversized service log should not be fully read")
-        return original_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(pathlib.Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(services_mod, "_full_log_text", lambda *_: pytest.fail("oversized log read in full"))
+    monkeypatch.setattr(services_mod, "_read_tail", lambda *_: pytest.fail("raw tail read at the stop boundary"))
 
     result = services_mod._finalize_service_log_for_drive(drive, SimpleNamespace(log_path=log_path))
 
     assert result["deleted_live_log"] is False
-    assert result["tail"]
-    assert "full_log_omitted" in result
+    assert result["archive_outcome"] == "retained" and result["source_unavailable"] == "tail_masking_unverified"
+    assert "source_ref" not in result and "tail" not in result
     assert log_path.exists()
 
 
@@ -663,8 +951,8 @@ def test_kill_all_services_records_shutdown_cleanup_event(tmp_path, monkeypatch)
     service = cleanup[-1]["services"][0]
     assert service["name"] == "shutdown"
     assert service["task_id"] == "task-shutdown"
-    assert service["log_finalization"]["full_log_ref"]["sha256"]
-    assert "tail" not in service["log_finalization"]
+    assert service["log_finalization"]["source_scope"] == "full"
+    assert service["log_finalization"] == stopped[0]["log_finalization"] and "tail" not in service["log_finalization"]
 
 
 def test_service_log_retention_uses_log_mtime_and_skips_symlinks(tmp_path):
@@ -674,8 +962,7 @@ def test_service_log_retention_uses_log_mtime_and_skips_symlinks(tmp_path):
     stale_dir.mkdir(parents=True)
     fresh_log = stale_dir / "fresh.log"
     fresh_log.write_text("fresh", encoding="utf-8")
-    stale_log = stale_dir / "stale.log"
-    stale_log.write_text("old", encoding="utf-8")
+    stale_log = _launch_log(stale_dir, "stale", b"old")
     other_file = stale_dir / "notes.txt"
     other_file.write_text("keep", encoding="utf-8")
     now = 1_000_000.0
@@ -712,9 +999,7 @@ def test_service_log_retention_retains_oversized_stale_logs(tmp_path, monkeypatc
 
     drive = tmp_path / "data"
     stale = drive / "services" / "task-big"
-    stale.mkdir(parents=True)
-    log = stale / "big.log"
-    log.write_text("x" * 100, encoding="utf-8")
+    log = _launch_log(stale, "big", b"x" * 100)
     monkeypatch.setattr(services_mod, "_MAX_SERVICE_LOG_BLOB_BYTES", 10)
     now = 1_000_000.0
     old = now - 30 * 86400
@@ -894,11 +1179,11 @@ def test_service_outputs_register_artifacts_on_stop(tmp_path, monkeypatch):
         "readiness": {"timeout_sec": 1},
     })
     assert "LIGHT_MODE_BLOCKED" not in start
-    _wait_for_service_log(drive, "task-service-output", "artifact_service.log", lambda b: b"READY" in b)
+    _wait_for_service_log(json.loads(start)["log_path"], lambda b: b"READY" in b)
 
     stopped = json.loads(registry.execute("stop_service", {"name": "artifact_service"}))
 
-    assert "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"]
+    assert stopped["output_outcomes"][0]["status"] == "saved"
     artifact_path = drive / "task_results" / "artifacts" / "task-service-output" / "service.html"
     assert artifact_path.read_text(encoding="utf-8") == "<h1>ok</h1>"
 
@@ -926,13 +1211,13 @@ def test_service_output_left_unchanged_is_captured_at_stop_then_reused(tmp_path,
             "readiness": {"timeout_sec": 1},
         })
         assert "BLOCKED" not in started, started
-        _wait_for_service_log(drive, "task-service-unchanged", f"{name}.log", lambda b: b"READY" in b)
+        _wait_for_service_log(json.loads(started)["log_path"], lambda b: b"READY" in b)
 
     start("verifier")
     stopped = registry.execute_result("stop_service", {"name": "verifier"})
     # Declared and left unchanged by the service, the existing report is still its deliverable.
     assert stopped.code == "OK" and stopped.meta.get("artifact_registered") is True, stopped.text
-    assert "ARTIFACT_OUTPUTS" in json.loads(stopped.text)["artifact_outputs"]
+    assert json.loads(stopped.text)["output_outcomes"][0]["status"] == "saved"
     assert registry.execute("read_file", {"root": "artifact_store", "path": "report.md"}).count("# service report") == 1
     start("again")
     finalized = stop_task_services(registry._ctx)  # the ordinary task-end stop finds that capture current

@@ -885,6 +885,8 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
 
     if not isinstance(result, dict):
         return {}
+    from ouroboros.service_outcomes import project_history_row
+
     public: Any = {}
     stack: List[tuple[Any, Any, Any]] = [(result, None, None)]
     while stack:
@@ -896,6 +898,7 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
                 if item_key not in {"result_status", "compat_result_status"}
                 and (parent is not None or item_key not in {"swarm_fanouts", "swarm_fanout_basis", "swarm_fanout_rollup"})
             }
+            project_history_row(clone)
             if parent is None:
                 public = clone
             else:
@@ -939,7 +942,8 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
     if isinstance(plan_state, dict) and plan_state.get("schema_version") == 1:
         plan_state["legacy_v1_projection"] = legacy_plan_review_projection(plan_state)
     if include_outcome_axes:
-        public["outcome_axes"] = normalize_outcome_axes(result)
+        axes_input = {**result, "outcome_axes": public.get("outcome_axes")}
+        public["outcome_axes"] = normalize_outcome_axes(axes_input)
         if isinstance(public.get("artifact_bundle"), dict) and public["artifact_bundle"].get("status"):
             public["artifact_status"] = public["outcome_axes"]["artifacts"]["status"]
     return public
@@ -1043,21 +1047,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # deferred-child objective below.
         and (degraded_reason in BEST_EFFORT_REASON_CODES or degraded_reason == "provider_unavailable")
     )
-    verification_failures: List[Dict[str, Any]] = []
-    for event in llm_trace.get("verification_events") or []:
-        if not isinstance(event, dict):
-            continue
-        for service in event.get("services") or []:
-            if not isinstance(service, dict):
-                continue
-            artifact_text = str(service.get("artifact_outputs") or "")
-            if bool(service.get("artifact_output_failed")) or artifact_text.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"):
-                verification_failures.append({
-                    "kind": str(event.get("kind") or "runtime_event"),
-                    "service": service.get("name"),
-                    "status": "artifact_output_error",
-                    "reason": artifact_text[:500],
-                })
+    from ouroboros.service_outcomes import output_evidence
+
+    verification_failures, _ = output_evidence(llm_trace)
     if usage_status == RESULT_INFRA_FAILED:
         execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_PROVIDER_FAILURE
@@ -1427,6 +1419,7 @@ def build_verification_ledger(
             "objective": str(contract.get("objective") or ""),
             "expected_output": str(contract.get("expected_output") or ""),
         })
+    from ouroboros.service_finalization import public_event
     from ouroboros.tool_call_log import has_refused_step
 
     for idx, call in enumerate(llm_trace.get("tool_calls") or [], start=1):
@@ -1465,7 +1458,7 @@ def build_verification_ledger(
             })
     for event in llm_trace.get("verification_events") or []:
         if isinstance(event, dict):
-            entries.append({"kind": "runtime_event", **event})
+            entries.append({"kind": "runtime_event", **public_event(event)})
     # FR3: host-attested verify_and_record receipts (injected into the trace by
     # _store_task_result before this build) become first-class ledger entries.
     # The row shape is the FIXED projection in `_outcome_receipts` (a new receipt key

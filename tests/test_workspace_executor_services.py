@@ -142,8 +142,10 @@ time.sleep(30)
     finally:
         stopped = json.loads(services._stop_service(ctx, "selected"))
     finalization = stopped["log_finalization"]
-    assert finalization["deleted_live_log"] and not finalization["errors"]
-    final = gzip.decompress(Path(finalization["full_log_ref"]["path"]).read_bytes()).decode()
+    assert finalization["deleted_live_log"] and finalization["source_scope"] == "full" and not finalization.get("error_count")
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    final = read_actor_source_bytes(ctx.drive_root, ctx.task_id, finalization["source_ref"]).decode()
     assert "private-fragment-660" not in final and "READY" in final
     assert services.prune_service_logs(ctx.drive_root, retention_days=0)["archived_files"] == 0
 
@@ -348,46 +350,143 @@ def test_start_service_with_executor_ref_uses_local_for_unmapped_task_drive_cwd(
     assert stopped["state"] == "exited"
 
 
-def test_executor_local_service_can_restart_after_exit(tmp_path, monkeypatch):
-    import ouroboros.safety as safety_mod
+@pytest.mark.parametrize(("first_backend", "next_backend", "explicit_stop"), [
+    ("host", "host", False), ("local", "local", False),
+    ("host", "host", True), ("local", "local", True),
+    ("host", "local", False), ("local", "host", False),
+])
+def test_same_name_restarts_preserve_each_log_and_its_declared_output(
+        project, monkeypatch, first_backend, next_backend, explicit_stop):
+    from ouroboros.artifacts import read_actor_source_bytes, registered_task_artifact
+    from ouroboros.tools import services
+    from tests._launch_stop_shared import _refuse_metadata_of, _wait_exited, _wait_for_service_log
 
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
-    system_repo = tmp_path / "system"
-    workspace = tmp_path / "workspace"
-    data = tmp_path / "data"
-    _init_repo(system_repo)
-    _init_repo(workspace)
-    data.mkdir()
-    ctx = ToolContext(
-        repo_dir=system_repo,
-        drive_root=data,
-        workspace_root=workspace,
-        workspace_mode="external",
-        task_id="svc-restart",
-        executor_ref={
-            "type": "local",
-            "id": "local-service",
-            "workspace_host_path": str(workspace),
-            "workspace_backend_path": "/workspace",
-        },
-    )
-    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
-    registry.set_context(ctx)
+    registry, workspace, _ = project
+    ctx = registry._ctx
+    local = {"type": "local", "workspace_host_path": str(workspace), "workspace_backend_path": "/workspace"}
+    first_bytes = b"FIRST_READY\xff\n"
 
-    first = json.loads(registry.execute("start_service", {"name": "short", "cmd": [sys.executable, "-c", "print('one')"]}))
-    import time
+    def start(backend, script):
+        ctx.executor_ref = local if backend == "local" else {}
+        result = registry.execute_result("start_service", {
+            "name": "reporter", "cwd": str(workspace), "outputs": ["report.txt"],
+            "cmd": [sys.executable, "-c", script], "readiness": {"log_contains": "FIRST_READY", "timeout_sec": 0.1}})
+        assert result.status == "ok", result.text
+        payload = json.loads(result.text)
+        return payload, Path(payload["backend_log_path" if backend == "local" else "log_path"])
 
-    time.sleep(0.5)
-    second = json.loads(registry.execute("start_service", {"name": "short", "cmd": [sys.executable, "-c", "print('two')"]}))
+    first, old_log = start(first_backend,
+        "import sys; from pathlib import Path; Path('report.txt').write_bytes(b'first report'); "
+        f"sys.stdout.buffer.write({first_bytes!r})")
+    try:
+        _wait_exited(registry, "reporter")
+        assert old_log.read_bytes() == first_bytes
+        with monkeypatch.context() as patch:
+            if explicit_stop:
+                patch.setattr(services, "_MAX_SERVICE_LOG_BLOB_BYTES", 3)
+                stopped = json.loads(registry.execute("stop_service", {"name": "reporter"}))
+                assert stopped["log_finalization"]["live_log"] == "retained" and str(old_log) not in json.dumps(stopped)
+            else:
+                _refuse_metadata_of(patch, old_log)
+            second, new_log = start(next_backend,
+                "import time; from pathlib import Path; Path('report.txt').write_bytes(b'second report'); "
+                "print('SECOND_ONLY', flush=True); time.sleep(60)")
+            assert second["service_id"] == first["service_id"] and new_log != old_log
+            if not explicit_stop:
+                assert second["previous_service"] == {"state": "stopped", "log_not_saved": True}
+            _wait_for_service_log(new_log, lambda data: b"SECOND_ONLY" in data)
+            status = json.loads(registry.execute("service_status", {"name": "reporter"}))
+            assert status["state"] == "running" and not status["ready"] and not status["ready_observed_at"]
+            assert json.loads(registry.execute("service_logs", {"name": "reporter"}))["tail"].splitlines() == ["SECOND_ONLY"]
+            assert old_log.read_bytes() == first_bytes
+            artifact = registered_task_artifact(ctx.drive_root, ctx.task_id, "report.txt")
+            assert Path(artifact["path"]).read_bytes() == b"first report"
+            assert (workspace / "report.txt").read_bytes() == b"second report"
+            if next_backend == "local":
+                [record] = (ctx.drive_root / "state" / "workspace_executor_processes").glob("*.json")
+                durable = json.loads(record.read_text(encoding="utf-8"))
+                assert str(durable["host_pid"]) == second["backend_pid"] and durable["backend_log_path"] == str(new_log)
+        stopped = json.loads(registry.execute("stop_service", {"name": "reporter"}))
+        assert not stopped["artifact_output_failed"] and not new_log.exists() and old_log.read_bytes() == first_bytes
+        final = stopped["log_finalization"]
+        assert final["source_scope"] == "full"
+        assert read_actor_source_bytes(ctx.drive_root, ctx.task_id, final["source_ref"]).splitlines() == [b"SECOND_ONLY"]
+        artifact = registered_task_artifact(ctx.drive_root, ctx.task_id, "report.txt")
+        assert Path(artifact["path"]).read_bytes() == b"second report"
+        versions = ctx.drive_root / "task_results" / "artifact_versions" / ctx.task_id / "report.txt"
+        assert [version.read_bytes() for version in versions.iterdir()] == [b"first report"]
+    finally:
+        registry.execute("stop_service", {"name": "reporter"})
 
-    assert first["backend_pid"] != second["backend_pid"]
-    assert second.get("note") != "already_running"
-    records = list((data / "state" / "workspace_executor_processes").glob("*.json"))
-    assert len(records) == 1
-    durable = json.loads(records[0].read_text(encoding="utf-8"))
-    assert str(durable["host_pid"]) == str(second["backend_pid"])
-    assert str(durable["host_pid"]) != str(first["backend_pid"])
+
+@pytest.mark.parametrize("backend", ["host", "local"])
+@pytest.mark.parametrize("gap", ["log", "output", "stop"])
+def test_failed_replacement_carries_previous_launch_to_completion(project, monkeypatch, backend, gap):
+    import queue
+
+    from ouroboros import loop_forced_finalization, service_finalization
+    from ouroboros.outcomes import derive_loop_outcome
+    from tests._launch_stop_shared import _wait_exited
+    from tests._launch_stop_shared import _author_evidence, _exit_context, _refuse_metadata_of
+
+    registry, work, _outside = project
+    tool_ctx = registry._ctx
+    if backend == "local":
+        tool_ctx.executor_ref = {"type": "local", "workspace_host_path": str(work), "workspace_backend_path": "/workspace"}
+    completion = _exit_context(tool_ctx.drive_root, tool_ctx, event_queue=queue.Queue())
+    tool_ctx._execution_trace = completion.llm_trace  # run_llm_loop binds this before dispatching tools
+    args = {"name": "paper", "cwd": str(work), "cmd": [sys.executable, "-c", "print('PRIVATE-DIAGNOSTIC')"],
+            "readiness": {"timeout_sec": 0}}
+    first = registry.execute_result("start_service", {**args, "outputs": ["missing.txt"] if gap == "output" else []})
+    assert first.status == "ok", first.text
+    launch = json.loads(first.text)
+    assert launch["launch_id"]
+    _wait_exited(registry, "paper")
+    spawn_attempts = []
+
+    def refuse_spawn(*args, **kwargs):
+        spawn_attempts.append(True)
+        raise OSError("replacement spawn refused")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("ouroboros.process_custody.spawn_supervised", refuse_spawn)
+        if gap == "log":
+            _refuse_metadata_of(patch, Path(launch.get("log_path") or launch["backend_log_path"]))
+        elif gap == "stop":
+            patch.setattr("ouroboros.process_scope.end_held_processes", lambda items, **kw: {
+                item["key"]: {"facts": {"exit_confirmed": False, "census_failed": True},
+                              "birth": "", "known": []} for item in items})
+        replacement = registry.execute_result("start_service", args)
+    assert replacement.status != "ok", replacement.text
+    assert len(spawn_attempts) == (0 if gap == "stop" else 1)
+
+    trace = completion.llm_trace
+    assert service_finalization.finalize(completion, trace)
+    assert not service_finalization.finalize(completion, trace), "the next completion observes no new fact"
+    completion.messages, completion.forced_service_evidence_fingerprint = [], ""
+    loop_forced_finalization._disclose_service_finalization(completion, trace)
+    shown, _ = _author_evidence(completion.messages)
+    rows = [row for event in shown for row in event["services"]]
+    assert all(row["launch_id"] == launch["launch_id"] for row in rows)
+    frames = [completion.event_queue.get_nowait()["data"] for _ in shown]
+    assert completion.event_queue.empty()
+    execution = derive_loop_outcome("The preview was checked.", {}, trace)["outcome_axes"]["execution"]
+    failures = (execution.get("failure") or {}).get("verification_failures", [])
+    assert [item["status"] for item in failures] == (["artifact_output_error"] if gap == "output" else [])
+    label = launch["launch_id"].removeprefix("launch-").removeprefix("service-")[:10]
+    if gap == "stop":
+        assert [row["lifecycle"] for row in rows] == ["cleanup_pending", "stopped"]
+        assert rows[0]["stop_failed"] and rows[0]["process_cleanup"]["census_failed"]
+        assert [frame["text"] for frame in frames] == [
+            f"Background service cleanup unconfirmed: paper ({label}) · for replacement · log capture not attempted",
+            f"Background service stopped: paper ({label}) · at task end · log saved"]
+    else:
+        [row], [frame] = rows, frames
+        assert row["lifecycle"] == "stopped" and row["process_cleanup"]["exit_confirmed"]
+        assert row["artifact_output_failed"] == (gap == "output") and not row.get("artifact_output_unknown")
+        tail = "log capture unconfirmed" if gap == "log" else "log saved · output 1 absent"
+        assert frame["text"] == f"Background service stopped: paper ({label}) · for replacement · {tail}"
+    assert all("PRIVATE-DIAGNOSTIC" not in frame["text"] and str(work) not in frame["text"] for frame in frames)
 
 
 def test_executor_local_service_sanitizes_env_and_redacts_logs(tmp_path, monkeypatch):
@@ -530,7 +629,7 @@ def test_executor_services_participate_in_task_and_global_cleanup(tmp_path, monk
 
 @pytest.mark.parametrize("missing", [False, True])
 def test_automatic_local_executor_stop_finalizes_declared_outputs(project, missing):
-    from ouroboros import artifacts, loop_budget, workspace_executor
+    from ouroboros import artifacts, service_finalization, workspace_executor
     from ouroboros.tools import services
     registry, workspace, _ = project
     ctx = registry._ctx
@@ -548,7 +647,7 @@ def test_automatic_local_executor_stop_finalizes_declared_outputs(project, missi
             (workspace / "answer.txt").unlink()
         completion = SimpleNamespace(drive_root=ctx.drive_root, task_id=ctx.task_id, tools=registry,
                                      drive_logs=ctx.drive_logs(), event_queue=None, llm_trace={})
-        assert loop_budget._finalize_task_services(completion)
+        assert service_finalization.finalize(completion, completion.llm_trace)
         [event] = completion.llm_trace["verification_events"]
         assert event["kind"] == "services_stopped"
         stopped = event["services"]
@@ -557,12 +656,13 @@ def test_automatic_local_executor_stop_finalizes_declared_outputs(project, missi
         assert stopped[0]["artifact_output_failed"] is missing
         assert not any(key.startswith("_") for key in stopped[0])
         assert workspace_executor.service_status(ctx, "automatic-output") is None
-        assert not loop_budget._finalize_task_services(completion)
+        assert not service_finalization.finalize(completion, completion.llm_trace)
         records = artifacts.collect_task_artifact_records(ctx.drive_root, ctx.task_id, require_registered=True)
         if missing:
             assert "missing output" in stopped[0]["artifact_outputs"] and not records
         else:
-            assert len(records) == 1 and Path(records[0]["path"]).read_text() == "service-bytes"
+            assert len(records) == 2 and Path(records[0]["path"]).read_text() == "service-bytes"
+            assert sum(row.get("immutable") is True for row in records) == 1
     finally:
         services._stop_service(ctx, "automatic-output")
 
@@ -777,10 +877,9 @@ def test_executor_terminal_payload_clears_readiness(tmp_path):
 def test_service_log_waits_for_unknown_writer_custody(tmp_path, monkeypatch, unknown_from):
     from ouroboros import body_candidate
     from ouroboros.tools import services
+    from tests._launch_stop_shared import _launch_log
 
-    path = tmp_path / "services" / "unknown-task" / "quiet.log"
-    path.parent.mkdir(parents=True)
-    path.write_text("kept until proven stopped\n")
+    path = _launch_log(tmp_path / "services" / "unknown-task", "quiet", b"kept until proven stopped\n")
     os.utime(path, (1, 1))
     monkeypatch.setattr(services, "service_execution_facts",
                         lambda _key: {"state": "unknown"} if unknown_from == "service" else None)

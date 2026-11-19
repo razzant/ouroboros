@@ -561,19 +561,20 @@ def assert_test_data_path(path: pathlib.Path) -> None:
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
     require_lock: bool = False, lock_timeout_sec: float = 2.0, live: bool = True, lock_held: bool = False,
+    fsync: bool = False,
 ) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
     ``ensure_record_boundary`` repairs a missing final newline before this
     append; it is opt-in so high-volume event logs keep their established path.
-    ``require_lock`` is reserved for authority streams that also have atomic
-    whole-file reconciliation: unlike high-volume observational logs, they may
-    not fall back to an unlocked append after lock timeout. Both lanes take the
-    shared owner-aware lock primitive, so a live holder is never displaced.
+    ``require_lock`` covers authority streams with whole-file reconciliation
+    and receipts that release original bytes. On timeout their append fails.
+    Both lanes use the same owner-aware lock, which protects a live holder.
     ``lock_timeout_sec=0`` takes one attempt without a contention wait, for
     shutdown callers whose grace has expired; unlocked fallback is unchanged.
     ``lock_held``: the caller already holds this file's append lock (a read of
     the stream and this append under one hold), so none is taken again.
+    ``fsync`` requires the complete line and directory entry to be synced before success.
     Runtime ``logs/*.jsonl`` rows are streamed to the ``set_log_sink`` sink, minus
     types with a dedicated live owner (``WORKER_LOG_SINK_SUPPRESSED_TYPES``, server
     superset ``SERVER_LOG_SINK_SUPPRESSED_TYPES``): one event, one live frame, so a
@@ -656,6 +657,10 @@ def append_jsonl(
                 # published a TORN line as a successful append (the class the
                 # atomic writers already fixed). Share their full-write loop.
                 _write_fd_fully(fd, append_data, path)
+                if fsync:
+                    os.fsync(fd)
+                    fsync_folder(path.parent)
+                    fsync_folder(path.parent.parent)  # the directory holding the stream may itself be new
                 _written = True
                 return True
             except Exception:
@@ -664,11 +669,13 @@ def append_jsonl(
                 # (the caller owns the fallback) and let the next append's
                 # ``ensure_record_boundary`` start a clean record — a partially
                 # landed record is never retried whole.
-                log.warning("append_jsonl: torn write to %s", path, exc_info=True)
+                log.warning("append_jsonl: write or sync failed for %s", path, exc_info=True)
                 return False
             finally:
                 os.close(fd)
 
+        if fsync:  # The checked file-descriptor opens failed; no buffered fallback for a durable receipt.
+            return False
         for attempt in range(write_retries):
             try:
                 with path.open("ab") as f:

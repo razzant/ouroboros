@@ -1,16 +1,25 @@
-"""A kept service's declared outputs, for a stop that is not its own task's.
+"""A service launch's declared outputs, while a capture is still owed.
 
 A kept service (``start_service(keep_alive=True)``) outlives the task that started it, and that task's
 in-memory service record is the only place its declared outputs, their start baseline and its capture context
 lived. So its start also writes them under its own launch id (``declare_kept``): a declaration naming outputs in
 the installation's one directory of outstanding declarations (``services/kept_outputs/<task>/<launch>.kept.json``,
 which the hot readers enumerate, so they cost what is owed and never task history), one naming none beside its log.
+An ordinary launch uses the same directory only when its stop confirmed exit but left an output unsettled.
 A stop of that launch by the owner or another task (``launch_custody.stop_kept_service``) replays the ordinary capture
 (``shell._register_process_outputs``) in the starting task's context, into ITS artifact store, never the
-stopper's (``capture_kept_service_outputs``). It is OWED while it names outputs no complete capture consumed:
-its own task's successful stop by name consumes it as well (``consume_own_declaration``). After an incomplete or
-unattempted capture, or once the launch ended by itself or with its server, a stop of the same launch id finds it
-(``unconsumed_declaration``) and captures again. No timer ends that: until a complete capture, retirement keeps the
+stopper's (``capture_kept_service_outputs``); a Docker launch's outputs are read only through the container it ran in.
+It is OWED while it names outputs that may still hold bytes no capture took: its own task's stop by name settles it as
+well (``finish_own_outputs``), and so does a capture that finds what it lacks proven absent (``missing``: a failed
+output, not a debt). After an incomplete or unattempted capture, or once the launch ended by itself or with its
+server, a stop of the same launch id finds it (``unconsumed_declaration``) and captures again, as does a same-name
+start of its task before it writes anything (``capture_before_reuse``); reading a declaration, capturing and consuming
+it hold the same producer/name lock wherever they run. A capture that speaks a launch's first confirmed end (no stop
+snapshot in the declaration; its own complete custody read observed the end and a Docker group answered its probe:
+asking to verify, or an inspection that could not be made, proves none) publishes it as a stop row
+(``services_stopped``) into the producer's room; every later capture of that launch publishes only changed file
+results (``service_outputs_updated``), never a second stop — the declaration's ``stop`` snapshot is the durable memory
+of what was already spoken. No timer ends a debt: until it is settled, retirement keeps the
 declaration and the drive, copy or session scratch holding its working directory or outputs (``owed_output_hold``,
 read by the retirement gates, each operation's candidates sharing one read of ``owed_declarations``). A declaration
 that cannot say what it holds, or a directory of them that cannot be listed, stops the retirement operation reading it
@@ -21,10 +30,16 @@ at that operation's own error boundary, deleting nothing: it could name anything
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import pathlib
+import re
 import stat
+import threading
+import weakref
+from dataclasses import dataclass
 from typing import Any, Dict
 
 from ouroboros.tool_access import active_tool_profile, canonical_data_root
@@ -34,6 +49,7 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 
 KEPT_DECLARATION = ".kept.json"
 KEPT_DIRECTORY = "kept_outputs"
+_CAPTURE_LOCK_SEC = 10.0  # how long one capture waits for another process's capture of the same task's launches
 
 
 class KeptDeclarationUnreadable(OSError):
@@ -41,16 +57,115 @@ class KeptDeclarationUnreadable(OSError):
     are not known whole, so a retirement reading them stops at its own error boundary, deleting nothing."""
 
 
+class KeptCaptureBusy(OSError):
+    """The producer's capture lock could not be taken: nothing was read or consumed, and a retry captures."""
+
+
+class KeptNamesake(RuntimeError):
+    """A kept launch of the name a start would reuse still holds it (``capture_before_reuse``): ``state`` ``running``,
+    ``unknown`` (it may run, or what says so cannot be read: nothing was signalled) or ``owed`` (it ended and its
+    declared outputs may still hold uncaptured bytes: a retried start captures them first); ``launch``: its kept row."""
+
+    def __init__(self, state: str, launch: Dict[str, Any], cause: str):
+        super().__init__(cause)
+        self.state, self.launch = state, launch
+
+
+@dataclass
+class _UnwrittenDeclaration:
+    context: ToolContext
+    release: weakref.finalize
+
+
+def output_producer(ctx, record):
+    reservation = getattr(record, "unwritten_outputs", None)
+    return reservation.context if reservation is not None else ctx
+
+
+def pending_output_stop(record):
+    return getattr(record, "stopped_outputs", None)
+
+
+_name_holds = threading.local()
+
+
+def _name_lock_path(root, task_id, name):
+    from ouroboros.owned_shutdown import installation_root
+
+    key = hashlib.sha256(f"{task_id}\0{name}".encode()).hexdigest()
+    return installation_root(root) / "state" / "service_name_locks" / key
+
+
+@contextlib.contextmanager
+def writer_reservation(root, task_id, name, needs_declaration):
+    """Under the name lock, exclude a new writer if a live producer alone holds the old capture inputs.
+
+    Only a writer with outputs needs a reservation of its own. Reserve before spawn so even a full
+    disk after launch cannot erase it. Activity Stop takes the ordinary name lock independently.
+    """
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    with contextlib.ExitStack() as reservation:
+        if root is not None:
+            path = _name_lock_path(root, task_id, name).with_suffix(".writer")
+            if not needs_declaration:
+                try:
+                    path.stat()
+                except FileNotFoundError:
+                    yield reservation
+                    return
+            fd = acquire_exclusive_file_lock(path, timeout_sec=0, owner_aware_stale=True)
+            if fd is None:
+                raise KeptCaptureBusy("the producer may still hold unwritten output declarations for this name")
+            pid = os.getpid()
+
+            def release():
+                if os.getpid() == pid:  # a fork inherited the descriptor, not the producer's name
+                    release_exclusive_file_lock(path, fd)
+
+            reservation.callback(release)
+        yield reservation
+
+
+@contextlib.contextmanager
+def service_name_hold(root, task_id: str, name: str):
+    """Serialize one producer/name across workers. Its replacement can itself finish the old capture."""
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    if root is None:
+        yield
+        return
+    path = _name_lock_path(root, task_id, name)
+    held = getattr(_name_holds, "paths", ())
+    owner = (os.getpid(), path)
+    if owner in held:
+        yield
+        return
+    fd = acquire_exclusive_file_lock(path, timeout_sec=_CAPTURE_LOCK_SEC, owner_aware_stale=True)
+    if fd is None:
+        raise KeptCaptureBusy("could not acquire the service name for capture or replacement")
+    _name_holds.paths = (*held, owner)
+    try:
+        yield
+    finally:
+        _name_holds.paths = held
+        release_exclusive_file_lock(path, fd)
+
+
+def _owed_directory(drive_root: Any) -> pathlib.Path:
+    from ouroboros.owned_shutdown import installation_root
+
+    return installation_root(drive_root) / "services" / KEPT_DIRECTORY
+
+
 def declaration_path(drive_root: Any, task_id: str, launch_id: str, *, owed: bool = True) -> pathlib.Path:
     """Where this launch's declaration lives: ``owed`` (it names outputs) in the installation's one directory of
     outstanding declarations, whatever drive started it (its producer's capture context travels inside, so placement
     never changes whose artifact store it lands in); else beside its log, where only retention visits it."""
-    from ouroboros.owned_shutdown import installation_root
-
     name = f"{launch_id}{KEPT_DECLARATION}"
     if not owed:
         return pathlib.Path(drive_root) / "services" / str(task_id) / name
-    return installation_root(drive_root) / "services" / KEPT_DIRECTORY / str(task_id) / name
+    return _owed_directory(drive_root) / str(task_id) / name
 
 
 def _owes(path: pathlib.Path, declaration: Any) -> bool:
@@ -89,9 +204,7 @@ def _entries(directory: pathlib.Path) -> list:
 
 def _outstanding_files(root: Any) -> list:
     """Every declaration file of the one outstanding directory, each producer's folder listed strictly (``_entries``)."""
-    from ouroboros.owned_shutdown import installation_root
-
-    return [pathlib.Path(file.path) for producer in _entries(installation_root(root) / "services" / KEPT_DIRECTORY)
+    return [pathlib.Path(file.path) for producer in _entries(_owed_directory(root))
             if producer.is_dir() for file in _entries(pathlib.Path(producer.path)) if file.name.endswith(KEPT_DECLARATION)]
 
 
@@ -148,26 +261,86 @@ def owed_output_hold(root: Any, location: Any, *, owed: Any = None) -> str:
     return ""
 
 
-def executor_launch(executor_key: str) -> tuple:
-    """``(drive, task_id, launch_id)`` of the executor service ``executor_key`` as its start declared it."""
-    from ouroboros.process_custody import custody_record_id
-    from ouroboros.workspace_executor import _services_snapshot
+def _declaration_address(ctx: ToolContext, record: Any) -> tuple:
+    """The selected launch's declaration address, independent of the current holder of its name."""
+    from ouroboros.service_outcomes import launch_facts
 
-    record = next(item for item in _services_snapshot() if item.service_id == executor_key)
-    return record.drive_root, record.task_id, (
-        custody_record_id({"pid": int(record.backend_pid), "scope_marker": record.scope_marker})
-        if record.scope_marker else pathlib.Path(record.durable_record_path).stem)
+    launch_id = launch_facts(record).get("launch_id")
+    if not launch_id:
+        from ouroboros.process_custody import custody_record_id
+
+        proc = getattr(record, "proc", None) or getattr(record, "local_proc", None)
+        launch_id = custody_record_id({"pid": getattr(proc, "pid", None), "scope_marker": getattr(record, "scope_marker", "")})
+    return getattr(record, "drive_root", None) or ctx.drive_root, record.task_id, launch_id
 
 
-def consume_own_declaration(launch: tuple) -> None:
-    """``launch`` = ``(drive, task_id, launch_id)``: its own task's stop by name captured this kept launch's outputs
-    completely, so its declaration owes nothing. A failed unlink leaves it owed: an outside stop of this launch id
-    captures again, and an unchanged output is not duplicated."""
-    for owed in (True, False):  # it is in exactly one of the two places
-        try:
-            _consume(declaration_path(*launch, owed=owed))
-        except OSError:
-            pass
+def finish_own_outputs(ctx, record, payload, finish):
+    """A confirmed stop: capture and settle the same declaration, or leave it with the producer's frozen inputs."""
+    from ouroboros.service_outcomes import after_stop_error, output_stop_snapshot
+
+    producer = output_producer(ctx, record)
+    if not record.outputs and not record.keep_alive:
+        return finish(producer, record, payload)
+    registered = False
+    try:
+        drive, task, launch = _declaration_address(ctx, record)
+        path = declaration_path(drive, task, launch, owed=bool(record.outputs))
+        with service_name_hold(drive, task, record.name):
+            if getattr(record, "kept_declared", False):
+                try:
+                    path.stat()
+                except FileNotFoundError:  # an outside capture consumed it; do not read a future writer's files
+                    payload["output_settled_elsewhere"] = True
+                    return False
+            try:
+                registered = finish(producer, record, payload)
+            except Exception as exc:
+                after_stop_error(payload, record.outputs, exc)
+            if payload.get("artifact_output_owed"):
+                problem = declare_kept(producer, record, stop={**output_stop_snapshot(payload, record), "launch_id": launch})
+                if problem:
+                    payload.update(problem)
+                    return registered
+            elif getattr(record, "kept_declared", False):
+                _consume(path)
+            if getattr(record, "unwritten_outputs", None) is not None:
+                record.unwritten_outputs.release()
+                record.unwritten_outputs = None
+    except (OSError, ValueError) as exc:
+        after_stop_error(payload, record.outputs, exc)
+        if getattr(record, "kept_declared", False):
+            payload["artifact_output_owed"] = bool(record.outputs)  # the outstanding declaration was not retired
+    return registered
+
+
+def release_after_stop(record, payload, records, lock):
+    """Leave a by-name handle for a retry; the same declaration lets another worker recover the stopped launch."""
+    with lock:
+        if records.get(record.service_id) is record:
+            if payload is not None and payload.get("artifact_output_owed"):
+                record.stopped_outputs = payload.copy()
+            else:
+                records.pop(record.service_id)
+
+
+def retry_own_outputs(ctx, record, finish, records, lock):
+    with service_name_hold(record.drive_root or ctx.drive_root, record.task_id, record.name):
+        with lock:
+            stopped = pending_output_stop(record)
+            if records.get(record.service_id) is not record or stopped is None:
+                return None, False
+            payload = stopped.copy()
+        if getattr(record, "kept_declared", False):
+            saved = confirmed_output_stop(*_declaration_address(ctx, record))
+            if saved:
+                payload["output_outcomes"] = saved.get("output_outcomes")
+        payload["output_retry"] = True
+        for field in ("artifact_output_owed", "artifact_output_failed", "artifact_output_unknown",
+                      "artifact_outputs", "kept_declaration_problem"):
+            payload.pop(field, None)
+        registered = finish_own_outputs(ctx, record, payload, finish)
+        release_after_stop(record, payload, records, lock)
+        return (None, False) if payload.get("output_settled_elsewhere") else (payload, registered)
 
 
 def _consume(path: pathlib.Path) -> None:
@@ -185,49 +358,134 @@ def unconsumed_declaration(root: Any, launch_id: str) -> tuple | None:
     from ouroboros.owned_shutdown import installation_root
 
     name = f"{launch_id}{KEPT_DECLARATION}"
-    for path in _outstanding_files(root):
-        if path.name == name:
-            return installation_root(root), path.parent.name
+    for producer in _entries(_owed_directory(root)):
+        if producer.is_dir():
+            try:
+                (pathlib.Path(producer.path) / name).stat()
+            except FileNotFoundError:
+                continue
+            return installation_root(root), producer.name
     return None
 
 
-def declare_kept(ctx: ToolContext, kept: Dict[str, Any] | None, *, launch: tuple = (), executor_key: str = "") -> Dict[str, str]:
-    """A kept service's start writes, beside its log under its own launch id, what a stop by the owner or another
-    task needs to capture its declared outputs as this task's own stop would (``capture_kept_service_outputs``):
-    the declarations, their start baseline and this task's capture context. Never the command or its environment.
-    ``{}``, or the problem, disclosed in the start result: the service runs either way."""
-    if kept is None:
+def capture_before_reuse(drive_root: Any, task_id: str, name: str) -> dict | None:
+    """Settle outstanding files before letting a namesake write them. Return its gaps (possibly empty),
+    or None when this call did not finalize any previous declaration."""
+    if drive_root is None:
+        return
+    from ouroboros.service_outcomes import restart_gaps
+
+    gap = None
+    try:
+        for entry in _entries(_owed_directory(drive_root) / task_id):
+            if not entry.name.endswith(KEPT_DECLARATION):
+                continue
+            path = pathlib.Path(entry.path)
+            try:
+                declaration = _read(path)
+            except FileNotFoundError:
+                continue
+            if not isinstance(declaration, dict) or not declaration.get("name"):
+                raise KeptDeclarationUnreadable("an outstanding declaration cannot identify its service")
+            if declaration["name"] != name:
+                continue
+            launch_id = entry.name[:-len(KEPT_DECLARATION)]
+            answer = capture_kept_service_outputs(drive_root, task_id, launch_id, actor=f"agent:{task_id}",
+                                                  reason="capture before same-name restart", verify_exit=True)
+            if answer["state"] == "not_attempted":
+                raise KeptNamesake(answer.get("launch", {}).get("state", "unknown"), answer.get("launch", {}), answer["detail"])
+            try:
+                path.stat()
+            except FileNotFoundError:
+                if answer["state"] == "missing":
+                    gap = restart_gaps({"artifact_output_failed": True})
+                elif answer["state"] in ("captured", "none_declared") and gap is None:
+                    gap = {}
+                continue
+            raise KeptNamesake("owed", {}, f"{launch_id} still owes declared outputs ({answer['state']})")
+    except OSError as exc:
+        raise KeptNamesake("unknown", {}, f"previous output declarations could not be checked ({type(exc).__name__})") from exc
+    return gap
+
+
+def retry_named_outputs(ctx: ToolContext, name: str) -> dict | None:
+    """Recover a confirmed exit by name. An unreadable declaration neither identifies that name
+    nor rules out a readable match later in the same producer's directory."""
+    drive, task = ctx.drive_root, str(ctx.task_id or "manual")
+    with service_name_hold(drive, task, name):
+        unreadable = None
+        for entry in _entries(_owed_directory(drive) / task):
+            if not entry.name.endswith(KEPT_DECLARATION):
+                continue
+            launch = entry.name[:-len(KEPT_DECLARATION)]
+            try:
+                saved = confirmed_output_stop(drive, task, launch)
+            except (OSError, ValueError) as exc:
+                unreadable = exc
+                continue
+            if saved and saved.get("name") == name:
+                result = capture_kept_service_outputs(drive, task, launch, actor=f"agent:{task}",
+                    reason="capture after confirmed exit", verify_exit=True, checkpoint=False)
+                return {**saved, **(result.get("observation") or {"artifact_output_failed": True,
+                        "artifact_output_unknown": True, "artifact_output_owed": True}), "output_retry": True}
+        if unreadable is not None:
+            raise unreadable
+    return None
+
+
+def _executor_facts(record):
+    executor = getattr(record, "executor", None)
+    if executor is None:
         return {}
-    from ouroboros.process_custody import custody_record_id
+    return {"type": executor.kind, "id": executor.executor_id, "network": executor.network,
+            "container_name": getattr(executor, "container_name", ""), "path_mappings": [
+                {"host_path": str(mapping.host_path), "backend_path": mapping.backend_path}
+                for mapping in getattr(executor, "mappings", ())]}
+
+
+def declare_kept(ctx: ToolContext, record: Any, reservation=None, *, stop=None) -> Dict[str, str]:
+    """Pin the producer's capture inputs. Publish at a kept start, or when a confirmed stop owes outputs."""
+    if not (record.keep_alive or record.outputs):
+        return {}
     from ouroboros.utils import atomic_write_json
 
+    context = None
     try:
-        if executor_key:
-            drive, task_id, launch_id = executor_launch(executor_key)
-        else:
-            drive, task_id, pid, marker = launch
-            launch_id = custody_record_id({"pid": pid, "scope_marker": marker})
+        drive, task_id, launch_id = _declaration_address(ctx, record)
         metadata = getattr(ctx, "task_metadata", None) if isinstance(getattr(ctx, "task_metadata", None), dict) else {}
         contract = getattr(ctx, "task_contract", None) or metadata.get("task_contract")
         ceiling = contract.get("capability_ceiling") if isinstance(contract, dict) else None
-        executor_ref = getattr(ctx, "workspace_executor_ref", None)
         context = {"repo_dir": str(ctx.repo_dir), "system_repo_dir": str(getattr(ctx, "system_repo_dir", "") or ""),
                    "drive_root": str(ctx.drive_root), "budget_drive_root": str(canonical_data_root(ctx)),
                    "workspace_root": str(getattr(ctx, "workspace_root", "") or ""),
                    "workspace_mode": str(getattr(ctx, "workspace_mode", "") or ""),
                    "tool_profile": str(active_tool_profile(ctx)),
-                   "executor_ref": executor_ref() if callable(executor_ref) else {},
+                   "executor_ref": _executor_facts(record),
                    **({"capability_ceiling": ceiling} if ceiling is not None else {})}
-        path = declaration_path(drive, task_id, launch_id, owed=bool(kept["outputs"]))
+        if not record.keep_alive and stop is None:  # no stopped debt while an ordinary process still writes
+            if reservation is not None:
+                producer = _producer_context({"context": context, "task_id": task_id})
+                record.unwritten_outputs = _UnwrittenDeclaration(producer, weakref.finalize(record, reservation.pop_all().close))
+            return {}
+        path = declaration_path(drive, task_id, launch_id, owed=bool(record.outputs))
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, {"schema": 1, "launch_id": launch_id, "task_id": task_id, "declared_at": utc_now_iso(),
-                                 **{**kept, "before_outputs": {key: list(value) for key, value in
-                                                               kept["before_outputs"].items()}},
+        atomic_write_json(path, {"schema": 2, "launch_id": launch_id, "task_id": task_id, "declared_at": utc_now_iso(),
+                                 "name": record.name, "cwd": str(getattr(record, "host_cwd", None) or record.cwd),
+                                 "cwd_root": record.cwd_root, "cwd_base": record.cwd_base, "cwd_source": record.cwd_source,
+                                 "skill_name": record.skill_name, "outputs": record.outputs,
+                                 "before_outputs": {key: list(value) for key, value in record.before_outputs.items()},
+                                 "keep_alive": bool(record.keep_alive), **({"stop": stop} if stop else {}),
+                                 **({"backend_pid": record.backend_pid, "custody_drive": str(drive)}
+                                    if context["executor_ref"].get("type") == "docker_exec" else {}),
                                  "context": context}, trailing_newline=True)
+        record.kept_declared = True
         return {}
-    except Exception as exc:  # noqa: BLE001 — disclosed: a later outside stop then says it captured nothing
-        return {"kept_declaration_problem": (f"{type(exc).__name__}: {exc}"[:300] + "; a stop by the owner or "
-                                             "another task cannot capture this service's declared outputs")}
+    except Exception as exc:  # noqa: BLE001 — the producer still owns the unwritten declaration, if held
+        if record.outputs and reservation is not None:
+            # A shutdown can also discard this record. Its writer descriptor lives at most as long as the owner.
+            producer = _producer_context({"context": context, "task_id": record.task_id}) if context else ctx
+            record.unwritten_outputs = _UnwrittenDeclaration(producer, weakref.finalize(record, reservation.pop_all().close))
+        return {"kept_declaration_problem": str(type(exc).__name__)}
 
 
 def _producer_context(declaration: Dict[str, Any]) -> ToolContext:
@@ -244,66 +502,224 @@ def _producer_context(declaration: Dict[str, Any]) -> ToolContext:
                        executor_ref=dict(metadata["executor_ref"]), task_id=str(declaration["task_id"]), **optional)
 
 
-def capture_kept_service_outputs(drive_root: Any, task_id: str, launch_id: str, *, actor: str,
-                                 reason: str) -> Dict[str, Any]:
-    """After a CONFIRMED stop of a kept launch by the owner or another task: its declared outputs, captured as the
-    task that started it would have (``_register_process_outputs`` in ITS context, into ITS artifact store), never
-    as the stopper's. One ``kept_service_outputs`` row on that drive names the launch, who stopped it and why, and
-    then holds the declaration's facts. ``state``: ``captured``, ``incomplete`` (its notes name what was not; the
-    declaration stays, so a later stop of this launch id captures again: an unchanged capture is not duplicated),
-    ``none_declared``, or ``unavailable``: no declaration was recorded (a start before kept services recorded one,
-    or a failed write), so nothing is captured and its working directory and log stay as they are."""
-    from ouroboros.tools.services import _baseline_gap_note, _service_output_binding, _working_tree_changes
-    from ouroboros.tools.shell import _register_process_outputs
-    from ouroboros.tools.shell_outputs import _prepare_declared_output_context
+def _capture_executor(path, declaration, legacy_target, verify_exit):
+    """``(executor, ended Docker record, probed)`` of the launch's original capture target. ``probed``: nothing
+    of this target is left unproven by the caller's custody read: a host or local launch needs no more, and a
+    Docker group answered ``exited`` on its recorded identity (anything else raises). False: a Docker target
+    this call did not or could not probe, which proves no end."""
+    from dataclasses import replace
+    from ouroboros import workspace_executor as backend
+    from ouroboros.workspace_executor_paths import normalize_executor_ref
 
-    places = [declaration_path(drive_root, task_id, launch_id, owed=owed) for owed in (True, False)]
-    path = next((place for place in places if place.exists()), places[0])
+    executor = normalize_executor_ref(declaration["context"].get("executor_ref") or {})
+    if declaration["launch_id"].startswith(("launch-", "pid-")):
+        # A host fallback can carry its task's Docker configuration in a legacy declaration.
+        if declaration.get("schema") == 2 and executor and executor.kind == "docker_exec":
+            raise ValueError("a host launch cannot identify this Docker output target")
+        return (executor if executor and executor.kind == "local" else None), None, True
+    if declaration.get("schema") == 2 and executor and executor.kind == "local":
+        return executor, None, True
+    if not executor or executor.kind != "docker_exec":
+        raise ValueError("the original Docker output target is unknown")
+    pid = declaration.get("backend_pid")
+    drive = pathlib.Path(declaration.get("custody_drive") or declaration["context"]["drive_root"])
+    if declaration_path(drive, declaration["task_id"], declaration["launch_id"]) != path:
+        raise ValueError("the process record belongs to another installation")
+    record_path = drive / "state" / backend._PROCESS_STATE_DIR / f"{declaration['launch_id']}.json"
     try:
-        declaration = json.loads(path.read_text(encoding="utf-8"))
-        if declaration.get("launch_id") != launch_id or declaration.get("task_id") != task_id:
-            raise ValueError("it names another launch")
-        if _owes(path, declaration) and not _names_places(declaration):
-            raise ValueError("it does not name its working directory and outputs")
+        stored = backend._load_process_record(record_path, strict=True)
     except FileNotFoundError:
-        return {"task_id": task_id, "state": "unavailable", "detail": (
-            "this launch recorded no output declaration (it started before kept services recorded one, or its "
-            "record was not written); its working directory and log stay as they are")}
-    except Exception as exc:  # noqa: BLE001 — kept for a reader; nothing is guessed from it
-        return {"task_id": task_id, "state": "unavailable",
-                "detail": f"its output declaration cannot be read ({type(exc).__name__}: {exc}); it is kept"}
+        stored = None
+    else:
+        if (not stored or not backend._valid_process_record(record_path, stored, check_identity=False)
+                or bool(stored.get("keep_alive")) != declaration.get("keep_alive", True) or stored.get("record_type") != "service"
+                or stored.get("executor_type") != "docker_exec" or stored.get("task_id") != declaration["task_id"]
+                or stored.get("name") != declaration["name"] or (pid and stored.get("backend_pid") != pid)):
+            raise ValueError("the durable record cannot identify this Docker service")
+        pid = stored["backend_pid"]
+    if declaration.get("schema") != 2:
+        target = stored["container_name"] if stored else legacy_target
+        if not re.fullmatch(r"[0-9a-f]{64}", target or ""):
+            raise ValueError("the original container identity of this legacy service is unknown")
+        from ouroboros.utils import atomic_write_json
+
+        executor = replace(executor, container_name=target)
+        declaration["context"]["executor_ref"]["container_name"] = target
+        declaration.update(schema=2, backend_pid=pid)
+        atomic_write_json(path, declaration, trailing_newline=True)
+    if stored and stored["container_name"] != executor.container_name:
+        raise ValueError("the output declaration and durable Docker target disagree")
+    if verify_exit and pid:
+        # Publishing the process record or its ownership copy may have failed.
+        state = backend._docker_pid_state(executor.container_name, pid)
+        if state != "exited":
+            raise KeptNamesake(state, {"launch_id": declaration["launch_id"], "state": state},
+                               "the original Docker group is not confirmed ended")
+        return executor, record_path if stored else None, True
+    return executor, None, False
+
+
+def _load_declaration(drive_root, task_id, launch_id):
+    path = declaration_path(drive_root, task_id, launch_id)
+    try:
+        declaration = _read(path)
+    except FileNotFoundError:
+        path = declaration_path(drive_root, task_id, launch_id, owed=False)
+        declaration = _read(path)
+    if (not isinstance(declaration, dict) or declaration.get("task_id") != task_id
+            or declaration.get("launch_id") != launch_id or not isinstance(declaration.get("name"), str)
+            or not declaration["name"] or not isinstance(declaration.get("context"), dict)
+            or not declaration["context"].get("drive_root")
+            or (_owes(path, declaration) and not _names_places(declaration))):
+        raise KeptDeclarationUnreadable("the declaration cannot identify its service and outputs")
+    return path, declaration
+
+
+def _confirmed_stop(declaration):
+    stop = declaration.get("stop")
+    if not isinstance(stop, dict) or any(stop.get(key) != declaration.get(key) for key in ("task_id", "launch_id", "name")):
+        return None
+    cleanup = stop.get("process_cleanup") if isinstance(stop.get("process_cleanup"), dict) else {}
+    if (stop.get("state") in ("exited", "stopped") and not stop.get("stop_failed") and (
+            cleanup.get("exit_confirmed") is True or stop.get("backend") == "docker" and stop.get("cleanup_dispatched") is True)):
+        return stop
+    return None
+
+
+def confirmed_output_stop(drive, task, launch):
+    try:
+        return _confirmed_stop(_load_declaration(drive, task, launch)[1])
+    except FileNotFoundError:
+        return None
+
+
+def capture_kept_service_outputs(drive_root: Any, task_id: str, launch_id: str, *, actor: str,
+                                 reason: str, legacy_target: str = "", verify_exit: bool = False,
+                                 checkpoint: bool = True) -> Dict[str, Any]:
+    """A confirmed exit: capture into its producer's store. A competing capture may already have consumed it."""
+    try:
+        _, selected = _load_declaration(drive_root, task_id, launch_id)
+        with service_name_hold(drive_root, task_id, selected["name"]):
+            path, declaration = _load_declaration(drive_root, task_id, launch_id)
+            if selected["name"] != declaration["name"]:
+                raise KeptDeclarationUnreadable("the saved service name changed")
+            confirmed = _confirmed_stop(declaration)
+            if not confirmed and not declaration.get("keep_alive", True):
+                return {"task_id": task_id, "state": "not_attempted", "detail": "the launch's exit is not confirmed"}
+            ended = False  # asking to verify observes nothing: only the read below, made whole, does
+            if verify_exit and not confirmed:
+                from ouroboros.launch_custody import _kept_selection
+
+                found, complete, note = _kept_selection(drive_root, launch_id=launch_id, task_id=task_id)
+                if found or not complete:
+                    launch = found[0][0] if found else {}
+                    return {"task_id": task_id, "state": "not_attempted", "launch": launch,
+                            "detail": f"the previous service is {launch.get('state', 'unknown')}; {note}"}
+                ended = True
+            return _capture(path, declaration, actor, legacy_target, ended, checkpoint)
+    except FileNotFoundError:
+        return {"task_id": task_id, "state": "unavailable", "detail": "this launch recorded no output declaration"}
+    except (OSError, ValueError) as exc:
+        return {"task_id": task_id, "state": "unavailable", "detail": f"its output declaration cannot be read ({type(exc).__name__}); it is kept"}
+
+
+def _file_facts(rows):
+    """What a capture says of the files; which call registered a file is no news of the file."""
+    return [{key: value for key, value in row.items() if key != "registered"} for row in rows or ()]
+
+
+def _capture(path, declaration, actor, legacy_target, ended, checkpoint):
+    """``ended``: this call's own complete custody read found no process of the launch (never the request to verify)."""
+    from ouroboros.service_outcomes import declared_output_outcomes, public, public_outputs
+    from ouroboros.tools.services import _capture_service_outputs
+    from ouroboros.utils import atomic_write_json
+    from ouroboros.workspace_executor_paths import prepare_docker_outputs
+
+    task_id, launch_id = declaration["task_id"], declaration["launch_id"]
     outputs = [str(item) for item in declaration.get("outputs") or []]
-    notes, registered, state = "", False, "none_declared"
+    notes, registered, state, payload = "", False, "none_declared", dict(declaration)
+    stop = _confirmed_stop(declaration)
+    payload["output_outcomes"] = (stop or {}).get("output_outcomes")
+    ended_record = None
+    probed = not outputs  # nothing to capture resolves no backend target: the custody read is the whole proof
     if outputs:
         try:
             ctx, cwd = _producer_context(declaration), str(declaration.get("cwd") or "")
-            binding = _service_output_binding(
-                ctx, cwd_root=str(declaration.get("cwd_root") or ""), cwd_base=str(declaration.get("cwd_base") or ""),
-                cwd=cwd, cwd_source=str(declaration.get("cwd_source") or ""),
-                skill_name=str(declaration.get("skill_name") or ""))
-            output_context, refused = _prepare_declared_output_context(ctx, outputs, pathlib.Path(cwd))
-            if refused is not None:
-                raise RuntimeError(refused.text)
+            executor, ended_record, probed = _capture_executor(path, declaration, legacy_target, ended)
+            settled = {row["index"] for row in payload["output_outcomes"] or ()
+                       if row["status"] in {"saved", "partial", "absent"}}
+            context = prepare_docker_outputs(executor, pathlib.Path(cwd),
+                [item for i, item in enumerate(outputs, 1) if i not in settled], pinned=True)
             before = {key: tuple(value) for key, value in (declaration.get("before_outputs") or {}).items()}
-            notes, failed, registered = _register_process_outputs(
-                ctx, outputs, pathlib.Path(cwd), cwd_root=str(declaration.get("cwd_root") or ""),
-                changed_paths=_working_tree_changes(cwd), before_outputs=before, binding=binding,
-                output_context=output_context)
-            notes += _baseline_gap_note(outputs, before)
-            state = "incomplete" if failed else "captured"
+            registered = _capture_service_outputs(ctx, payload, before, context, executor=executor)
+            notes = payload.get("artifact_outputs", "")
+            state = ("incomplete" if payload.get("artifact_output_owed") else
+                     "missing" if payload.get("artifact_output_failed") else "captured")
+        except KeptNamesake as exc:
+            return {"task_id": task_id, "state": "not_attempted", "launch": exc.launch, "detail": str(exc)}
         except Exception as exc:  # noqa: BLE001 — said, never a clean capture
-            notes, state = f"output capture failed: {type(exc).__name__}: {exc}", "incomplete"
+            notes, state = f"Declared output capture could not be confirmed ({type(exc).__name__}).", "incomplete"
+    # The first confirmed end no stop snapshot attests, and this capture its only speaker: the custody read
+    # above observed it and the capture target's own inspection agreed (a Docker group answered its probe).
+    # An inspection that was not made, or failed before it answered, creates no exit: only file facts speak.
+    first_end = stop is None and ended and probed
+    outcomes = public_outputs(declared_output_outcomes(outputs, payload.get("output_outcomes")))
+    observation = public({**(stop or {}),
+        **({"state": "exited", "process_cleanup": {"exit_confirmed": True}} if first_end else {}),
+        "task_id": task_id, "launch_id": launch_id, "name": declaration["name"],
+        "lifecycle": "stopped" if first_end else "outputs_updated", "output_retry": not first_end,
+        "stop_source": "retained",
+        "log_outcome": (stop or {}).get("log_outcome", "not_attempted"), "output_outcomes": outcomes,
+        "artifact_output_failed": state in ("incomplete", "missing"),
+        "artifact_output_owed": state == "incomplete", "artifact_output_unknown": state == "incomplete"})
     row = {"ts": utc_now_iso(), "type": "kept_service_outputs", "task_id": task_id, "launch_id": launch_id,
-           "name": declaration.get("name"), "actor": actor, "reason": reason, "state": state,
-           "notes": notes.strip(), "declaration": declaration}
+           "name": observation.get("name"), "actor": actor, "state": state, "output_outcomes": outcomes}
     facts = declaration.get("context") if isinstance(declaration.get("context"), dict) else {}
-    recorded = append_jsonl(pathlib.Path(str(facts.get("drive_root") or drive_root)) / "logs" / "events.jsonl", row)
-    if recorded and state in ("captured", "none_declared"):
-        _consume(path)  # consumed: its facts now live in that row
-    elif state == "incomplete":
+    recorded = append_jsonl(pathlib.Path(str(facts["drive_root"])) / "logs" / "events.jsonl", row)
+    if recorded and state in ("captured", "none_declared", "missing"):
+        if ended_record is not None:
+            # Natural Docker exit leaves its record behind. A successor can reuse that group's PID.
+            from ouroboros.workspace_executor import _forget_process
+
+            _forget_process(ended_record)
+            try:
+                ended_record.stat()
+            except FileNotFoundError:
+                pass
+            else:
+                return {"task_id": task_id, "state": "incomplete", "registered": registered,
+                        "detail": "Captured outputs, but the old Docker service record still holds its name.",
+                        "output_outcomes": outcomes}
+        try:
+            _consume(path)  # consumed: its facts now live in that row
+        except OSError:
+            state, notes = "incomplete", f"{notes}\nThe declaration could not be retired."
+    elif not recorded:
+        state, notes = "incomplete", f"{notes}\nThe capture receipt could not be recorded."
+    if state == "incomplete":
         notes = (f"{notes.strip()}\nIts output declaration and the files it names are kept: once the cause is fixed, "
                  f"stop_service(service_id={launch_id}, reason=...) captures them again.")
-    return {"task_id": task_id, "state": state, "registered": bool(registered), "detail": notes.strip()}
+        observation.update(artifact_output_failed=True, artifact_output_owed=True, artifact_output_unknown=True)
+    # Spoken: the first confirmed end; file results that differ from the ones the declaration's stop snapshot
+    # already spoke; or, with no end proven and no snapshot to remember a partial result, the files of a settled
+    # capture, once (its declaration is consumed). Equal facts are no news; the receipt row above is their record.
+    spoken = first_end or (_file_facts(outcomes) != _file_facts(stop.get("output_outcomes")) if stop is not None
+                           else bool(outputs) and state != "incomplete")
+    if recorded and spoken and state == "incomplete":
+        # The declaration survives: it must remember the end and the file facts already spoken, so
+        # a later capture speaks only new file results and never a second stop.
+        try:
+            atomic_write_json(path, {**declaration, "stop": dict(observation) if first_end
+                                     else {**stop, "output_outcomes": outcomes}}, trailing_newline=True)
+        except OSError:
+            spoken = False  # what is not remembered is not spoken: a later capture says it, once
+            notes += "\nThe updated declaration could not be written; the earlier one remains."
+    if recorded and checkpoint and spoken:
+        from ouroboros.service_finalization import publish_retained_outputs
+
+        publish_retained_outputs(pathlib.Path(str(facts["drive_root"])), observation)
+    return {"task_id": task_id, "state": state, "registered": bool(registered), "detail": notes.strip(),
+            "output_outcomes": outcomes, "observation": observation}
 
 
 def retire_kept_declaration(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, cutoff: float,
@@ -329,7 +745,7 @@ def retire_kept_declaration(drive_root: pathlib.Path, task_id: str, path: pathli
             return
         if append_jsonl(drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "kept_service_declaration_retired", "task_id": task_id,
-                "launch_id": declaration.get("launch_id"), "name": declaration.get("name"), "declaration": declaration}):
+                "launch_id": declaration.get("launch_id"), "name": declaration.get("name")}):
             _consume(path)
             report["deleted_files"] += 1
     except FileNotFoundError:

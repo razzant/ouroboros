@@ -45,7 +45,7 @@ def test_a_carried_owner_turn_keeps_the_interactive_outage_wait(tmp_path):
 def test_the_loops_budget_rail_answers_a_carried_owner_turn_and_pauses_a_pooled_task(tmp_path, monkeypatch):
     from ouroboros import loop
 
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda _ctx: None)
+    monkeypatch.setattr("ouroboros.service_finalization.finalize", lambda *_args: None)
 
     def rail(owner, direct):
         ctx = loop._LoopExitContext(tools=SimpleNamespace(_ctx=_tool_ctx(tmp_path, owner, direct=direct)),

@@ -458,7 +458,7 @@ def test_system_service_record_discloses_target_and_stays_task_scoped(
         assert started["cwd"] == str(system.resolve())
         assert started["cwd_base"] == str(system.resolve())
         assert started["cwd_source"] == "system_repo"
-        assert pathlib.Path(started["log_path"]).is_relative_to(task / "services")
+        assert pathlib.Path(started["log_path"]).is_relative_to(task / "private_service_logs")
         assert not pathlib.Path(started["log_path"]).is_relative_to(canonical)
         assert pathlib.Path(invalidations[-1]["mutation_root"]) == system.resolve()
     finally:

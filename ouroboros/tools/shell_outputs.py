@@ -55,7 +55,7 @@ from ouroboros.workspace_executor import map_backend_path as executor_map_backen
 from ouroboros.workspace_executor import map_backend_path_lexical as executor_map_backend_path_lexical
 from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 from ouroboros.workspace_executor_paths import (
-    DockerOutputContext, DockerOutputPath, OutputResolutionUnavailable,
+    DockerOutputAbsent, DockerOutputContext, DockerOutputPath, OutputResolutionUnavailable,
     prepare_docker_outputs, resolve_docker_output,
 )
 
@@ -80,7 +80,10 @@ def _protected_output_source_reason(
 
     from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
+    from ouroboros.tool_access_paths import is_private_service_log_path
 
+    if is_private_service_log_path(source, ctx.drive_root):
+        return "private service diagnostics are not deliverable artifacts"
     if mode_has_unrestricted_agency(get_runtime_mode()):
         return ""
 
@@ -160,6 +163,7 @@ def _resolve_declared_output(
     *,
     judge_changes: bool = True,
     resolved_output: DockerOutputPath | None = None,
+    executor=...,
 ) -> tuple[pathlib.Path | None, str]:
     text = str(raw_item or "").strip()
     if not text:
@@ -168,7 +172,7 @@ def _resolve_declared_output(
         relative = normalized_path_text(text)
     except ValueError as exc:
         return None, f"declared output is not a usable path: {exc}"
-    executor_ref = executor_ref_from_ctx(ctx)
+    executor_ref = executor_ref_from_ctx(ctx) if executor is ... else executor
     if executor_ref is not None and executor_ref.kind == "docker_exec" and not _backend_cwd(executor_ref, work_dir):
         executor_ref = None
     if not (is_absolute_path_text(text) or text.startswith("~")):
@@ -334,7 +338,7 @@ def _declared_output_refusal(
             for rel, host in resolved.mounts if resolved else ():
                 _source, mount_reason = _resolve_declared_output(
                     ctx, str(host), work_dir, cwd_root=cwd_root, binding=binding, judge_changes=False,
-                    resolved_output=DockerOutputPath("", "", host, resolved.lexical_source / rel),
+                    resolved_output=DockerOutputPath("", "", host, resolved.lexical_source / rel), executor=output_context.executor,
                 )
                 if mount_reason:
                     reason = mount_reason
@@ -494,10 +498,11 @@ def _scan_directory_output_members(
     dir_size = 0
     try:
         for rel, child in iter_artifact_entries(root, resolved_output.mounts if resolved_output else ()):
-            if child.is_symlink():
+            mode = child.lstat().st_mode
+            if stat.S_ISLNK(mode):
                 skipped.append(f"{child}: symlink members are not followed")
                 continue
-            if not child.is_file():
+            if not stat.S_ISREG(mode):
                 continue
             rel_parts = pathlib.PurePosixPath(rel).parts
             component_reason = _sensitive_output_component_reason(rel_parts)
@@ -538,6 +543,21 @@ def _current_file_capture(ctx: ToolContext, source: pathlib.Path, fingerprint: t
     return row if measured == {"size": fingerprint[1], "sha256": fingerprint[2]} else None
 
 
+def _with_immutable_version(ctx: ToolContext, record: dict, *, required: bool) -> dict:
+    """Keep a service output's logical current artifact and its receipt's immutable byte address apart."""
+    if not required:  # Ordinary command capture has no service-receipt version contract.
+        return record
+    if record.get("immutable"):
+        version = record
+    else:
+        version = copy_file_to_task_artifacts(
+            ctx, pathlib.Path(record["path"]), kind=str(record.get("kind") or "process_output"), immutable=True)
+    if not version or not version.get("immutable") or version.get("sha256") != record.get("sha256"):
+        raise OSError("immutable output version could not be confirmed for these bytes")
+    return {**record, "version_ref": {
+        "root": "artifact_store", "path": version["name"], "sha256": version["sha256"]}}
+
+
 def _record_skipped_members(ctx: ToolContext, output: str, members: List[str]) -> None:
     """The COMPLETE skip list as one durable row in the task's ``events.jsonl`` (the rendered
     note is bounded); a context without a log root falls back to the process log."""
@@ -554,6 +574,12 @@ def _record_skipped_members(ctx: ToolContext, output: str, members: List[str]) -
                  row["task_id"] or "?", output, len(members), "; ".join(members))
 
 
+def outputs_owed(failed: bool, failures: list) -> bool:
+    """Whether a capture that ``failed`` (``_register_process_outputs``) may still find bytes to take: owed unless each
+    failure it recorded in ``failures`` is a declared output proven absent. No record is no such proof."""
+    return bool(failed) and not (failures and all(kind == "absent" for _output, kind in failures))
+
+
 def _register_process_outputs(
     ctx: ToolContext,
     outputs: List[str] | None,
@@ -564,55 +590,98 @@ def _register_process_outputs(
     binding: ResolvedResourceBinding | None = None,
     output_context: DockerOutputContext | None = None,
     changed_only: bool = False,
+    failures: list | None = None,
+    executor=...,
+    output_outcomes: list[dict] | None = None,
 ) -> tuple[str, bool, bool]:
     """Capture declared command outputs in the task artifact store; the third value is True only
     when this call created or repaired a canonical record (``artifact_registered``). ``changed_only``
     is a failed command's view: only an output this run demonstrably created or changed (against its
-    pre-run baseline) is its partial result; a missing, unchanged or unbaselined one is only noted."""
+    pre-run baseline) is its partial result; a missing, unchanged or unbaselined one is only noted.
+    ``failures`` receives ``(output, kind)`` per failed output: ``absent`` when nothing is at its resolved
+    address (a missing file, or a directory without one file in it), else ``owed``: it may still hold
+    bytes a later capture could take (unresolved, refused, unreadable or not copied); ``outputs_owed``.
+    ``output_outcomes`` records the observation at each declaration, in order, with only canonical
+    artifact names and digests on success. It is filled as the branches settle, even if a later one raises."""
 
     if not outputs:
         return "", False, False
     notes: list[str] = []
     failed = False
     registered = False  # at least one canonical artifact record was actually created or repaired
-    for raw_item in outputs:
+    failures = [] if failures is None else failures
+
+    def observe(status, artifacts=(), *, created=False) -> None:
+        if output_outcomes is not None:
+            row = {"index": index, "status": status}
+            if artifacts:
+                row["artifacts"] = [{**{key: item[key] for key in ("name", "sha256")},
+                                     **({"version_ref": item["version_ref"]} if "version_ref" in item else {})}
+                                    for item in artifacts]
+                row["registered"] = created
+            output_outcomes.append(row)
+
+    def fail(note: str, kind: str = "owed", *, status: str = "unconfirmed") -> None:
+        nonlocal failed
+        notes.append(note)
+        failed = True
+        failures.append((text, kind))
+        observe("absent" if kind == "absent" else status)
+
+    def missing() -> None:
+        if changed_only:  # a failed command's absent output is no failure
+            notes.append(f"not created by the failed command: {text}")
+            observe("absent")
+        else:
+            fail(f"missing output: {text}", "absent")
+
+    for index, raw_item in enumerate(outputs, 1):
         text = str(raw_item or "").strip()
+        previous = output_context.paths.get(text) if output_context else None
+        resolved = None
         try:
-            previous = output_context.paths.get(text) if output_context else None
             resolved = resolve_docker_output(output_context.executor, previous.requested, must_exist=True) if previous else None
             source, block_reason = _resolve_declared_output(
                 ctx, text, work_dir, cwd_root=cwd_root, changed_paths=changed_paths, binding=binding,
-                resolved_output=resolved,
+                resolved_output=resolved, executor=output_context.executor if output_context else executor,
             )
             for rel, host in resolved.mounts if resolved else ():
                 _, reason = _resolve_declared_output(
                     ctx, str(host), work_dir, cwd_root=cwd_root, binding=binding, judge_changes=False,
-                    resolved_output=DockerOutputPath("", "", host, resolved.lexical_source / rel),
+                    resolved_output=DockerOutputPath("", "", host, resolved.lexical_source / rel), executor=output_context.executor,
                 )
                 if reason:
                     block_reason = reason
                     break
+        except DockerOutputAbsent:
+            missing()
+            continue
         except Exception as exc:  # noqa: BLE001 — output failure must not replace the completed process result
-            notes.append(sanitize_tool_result_for_log(f"output could not be resolved: {text}: {type(exc).__name__}: {exc}"))
-            failed = True
+            fail(sanitize_tool_result_for_log(f"output could not be resolved: {text}: {type(exc).__name__}: {exc}"))
             continue
         if block_reason:
-            notes.append(block_reason)
-            failed = True
+            fail(block_reason, status="not_saved")
             continue
         if source is None:
-            notes.append(f"invalid output: {text}")
-            failed = True
+            fail(f"invalid output: {text}", status="not_saved")
             continue
-        if not source.exists():
-            notes.append(f"not created by the failed command: {text}" if changed_only else f"missing output: {text}")
-            failed = failed or not changed_only
+        try:
+            mode = source.stat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            if resolved is not None:
+                fail(f"Docker output disappeared from the confirmed host bind: {text}")
+            else:
+                missing()
+            continue
+        except OSError as exc:
+            fail(f"declared output could not be inspected ({type(exc).__name__})")
             continue
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
         after = _fingerprint_output(source, resolved_output=resolved)
         if changed_only and (str(source) not in (before_outputs or {}) or before == after):
             notes.append(f"{'unchanged by' if str(source) in (before_outputs or {}) else 'no pre-run state for'} "
                          f"the failed command, not registered: {text}")
+            observe("not_saved")
             continue
         # Present-but-unchanged is NOT a failure (a deterministic re-run, or a command that re-verifies
         # an existing artifact), and it is still a declared deliverable: only a proven current canonical
@@ -621,29 +690,36 @@ def _register_process_outputs(
         # axis, not the tool-execution axis (Bible P5). A genuinely MISSING declared output above stays
         # a blocking failure.
         unchanged = before[0] and before == after
-        if source.is_file():
+        if stat.S_ISREG(mode):
             capture = _current_file_capture(ctx, source, after) if unchanged else None
             if capture:
+                try:
+                    versioned = _with_immutable_version(ctx, capture, required=output_outcomes is not None)
+                except OSError as exc:
+                    fail(f"failed immutable output version {text}: {type(exc).__name__}: {exc}")
+                    continue
+                observe("saved", [versioned])
                 notes.append(f"unchanged output (cosmetic): {text}; current capture artifact_store:{capture['name']} "
                              f"sha256={capture['sha256'][:12]}")
                 continue
             since = " (existing output, captured as found)" if unchanged else ""  # equal digests before and after
             try:
                 record = copy_file_to_task_artifacts(ctx, source, kind="process_output")
+                registered = registered or bool(record)
+                record = _with_immutable_version(ctx, record, required=output_outcomes is not None) if record else None
             except OSError as exc:
-                notes.append(f"failed output copy {text}: {type(exc).__name__}: {exc}")
-                failed = True
+                label = "immutable output version" if output_outcomes is not None else "output copy"
+                fail(f"failed {label} {text}: {type(exc).__name__}: {exc}")
                 continue
             if record:
-                registered = True
+                observe("saved", [record], created=True)
                 notes.append(
                     f"registered output {source} -> artifact_store:{record.get('name')} "
                     f"sha256={str(record.get('sha256') or '')[:12]}{since}"
                 )
             else:
-                notes.append(f"failed output copy {text}: source is not a regular file")
-                failed = True
-        elif source.is_dir():
+                fail(f"failed output copy {text}: source is not a regular file", status="not_saved")
+        elif stat.S_ISDIR(mode):
             dir_members, _dir_size, blocked_member, skipped_members = _scan_directory_output_members(
                 ctx,
                 source,
@@ -657,51 +733,56 @@ def _register_process_outputs(
                 # so. The rendered note is bounded; the COMPLETE list goes to
                 # the task log so the omission stays resolvable (#447 P1).
                 shown = "; ".join(skipped_members[:5])
-                more = (
-                    f" (+{len(skipped_members) - 5} more; full list: directory_output_members_skipped"
-                    f" in the task's events.jsonl)"
-                    if len(skipped_members) > 5 else ""
-                )
+                more = f" (+{len(skipped_members) - 5} more)" if len(skipped_members) > 5 else ""
                 if len(skipped_members) > 5:
-                    _record_skipped_members(ctx, text, skipped_members)
+                    if output_outcomes is None:  # command diagnostics; service rows publish only typed facts
+                        _record_skipped_members(ctx, text, skipped_members)
+                        more = more[:-1] + "; full list: directory_output_members_skipped in the task's events.jsonl)"
                 notes.append(
                     f"skipped {len(skipped_members)} member(s) of directory output {text}: {shown}{more}"
                 )
             if blocked_member:
-                notes.append(f"blocked directory output: {blocked_member}")
-                failed = True
+                fail(f"blocked directory output: {blocked_member}")
                 continue
             if not dir_members and unchanged:  # nothing to capture, and nothing this run changed
                 notes.append(f"unchanged output (cosmetic): {text}; no exportable members")
+                observe("not_saved" if skipped_members else "absent")
                 continue
-            if not dir_members:
-                notes.append(f"failed directory output copy {text}: no exportable members")
-                failed = True
+            if not dir_members:  # without one file in it, nothing is left to capture later either
+                fail(f"failed directory output copy {text}: no exportable members",
+                     "owed" if skipped_members else "absent", status="not_saved")
                 continue
             members = {"member_sources": dir_members} if resolved else {"member_paths": dir_members}
             # The stat baseline is no byte identity: the admitted members' digests decide reuse, and the
             # registration note claims no pre-run content.
             capture = current_directory_capture(ctx, source, kind="process_output_directory", **members) if unchanged else []
             if capture:
+                try:
+                    versioned = [_with_immutable_version(ctx, record, required=output_outcomes is not None)
+                                 for record in capture]
+                except OSError as exc:
+                    fail(f"failed immutable directory output version {text}: {type(exc).__name__}: {exc}")
+                    continue
+                observe("partial" if skipped_members else "saved", versioned)
                 notes.append(f"unchanged output (cosmetic): {text}; current capture artifact_store:"
                              + ", ".join(str(record.get("name") or "") for record in capture))
                 continue
             try:
                 records = copy_directory_to_task_artifacts(ctx, source, kind="process_output_directory", **members)
+                registered = registered or bool(records)
+                records = [_with_immutable_version(ctx, record, required=output_outcomes is not None)
+                           for record in records]
             except OSError as exc:
-                notes.append(f"failed directory output copy {text}: {type(exc).__name__}: {exc}")
-                failed = True
+                fail(f"failed directory output copy {text}: {type(exc).__name__}: {exc}")
                 continue
             if records:
-                registered = True
+                observe("partial" if skipped_members else "saved", records, created=True)
                 names = ", ".join(str(record.get("name") or "") for record in records)
                 notes.append(f"registered directory output {source} -> artifact_store:{names}")
             else:
-                notes.append(f"failed directory output copy {text}: no artifact records")
-                failed = True
+                fail(f"failed directory output copy {text}: no artifact records")
         else:
-            notes.append(f"skipped non-file output: {text}")
-            failed = True
+            fail(f"skipped non-file output: {text}", status="not_saved")
     if not notes:
         return "", False, False
     # Only canonical registration gets ARTIFACT_OUTPUTS; cosmetic unchanged-output

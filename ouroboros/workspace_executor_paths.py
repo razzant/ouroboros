@@ -164,6 +164,10 @@ class OutputResolutionUnavailable(RuntimeError):
     """Docker could not establish an output address; no host fallback is valid."""
 
 
+class DockerOutputAbsent(OutputResolutionUnavailable):
+    """The original address is absent in the container and at its confirmed host bind."""
+
+
 @dataclass(frozen=True)
 class DockerOutputPath:
     requested: str
@@ -189,9 +193,8 @@ class DockerOutputContext:
 _OUTPUT_PATH_PROBE = r'''
 set -f
 fail() { printf '%s\n' "$*" >&2; exit 73; }
-if [ "${2:-}" = existing ]; then
-    [ -e "$1" ] || fail 'missing output or unavailable original address'
-fi
+missing=
+if [ "${2:-}" = existing ] && [ ! -e "$1" ]; then missing=1; fi
 physical_dir() {
     resolved=$(CDPATH= cd -P "$1" && pwd -P && printf '.') || fail 'directory unavailable'
     resolved=${resolved%.}; resolved=${resolved%?}
@@ -217,6 +220,7 @@ while [ -n "$pending" ]; do
             fi
             continue ;;
     esac
+    [ ! -d "$resolved" ] || [ -x "$resolved" ] || fail 'directory not searchable'
     candidate=${resolved%/}/$part
     if [ -L "$candidate" ]; then
         links=$((links + 1)); [ "$links" -le 40 ] || fail 'too many symlinks'
@@ -234,6 +238,7 @@ while [ -n "$pending" ]; do
         resolved=$candidate
     fi
 done
+[ -z "$missing" ] || printf 'missing\000'
 printf '%s\000' "$resolved"
 '''
 
@@ -277,6 +282,19 @@ def _output_container(executor: ExecutorRef) -> tuple[ExecutorRef, list[dict[str
     return replace(executor, container_name=identity), mounts
 
 
+def pinned_container(executor: ExecutorRef) -> ExecutorRef:
+    """A launch without declared outputs has nothing else pin its container: the configured name resolved once,
+    before any backend effect, to the running container's immutable id. Every later probe of the launch (custody
+    census, replacement, retained capture) reads that id, so a name a successor container reuses cannot answer
+    for it. Facts that cannot be read start nothing (``process_not_started``)."""
+    try:
+        return _output_container(executor)[0]
+    except OutputResolutionUnavailable as exc:
+        refused = OutputResolutionUnavailable(f"Docker container identity unavailable: {exc}")
+        refused.process_not_started = True
+        raise refused from exc
+
+
 def _under_backend(path: str, base: str) -> bool:
     return path == base or path.startswith(base.rstrip("/") + "/")
 
@@ -313,10 +331,19 @@ def resolve_docker_output(executor: ExecutorRef, requested: str,
             raise OutputResolutionUnavailable("Docker output container identity changed")
     resolved = _docker_output_probe(["exec", executor.container_name, "sh", "-c", _OUTPUT_PATH_PROBE,
                                      "output-path", requested, "existing" if must_exist else "prospective"])
+    missing = must_exist and resolved.startswith("missing\0")
+    if missing:
+        resolved = resolved.removeprefix("missing\0")
     if not resolved.endswith("\0") or "\0" in resolved[:-1] or not resolved.startswith("/"):
         raise OutputResolutionUnavailable("Docker output path probe returned invalid framing")
     resolved = resolved[:-1]
     source = _confirmed_output_source(executor, resolved, mounts)
+    if missing:
+        try:
+            source.lstat()
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise DockerOutputAbsent("missing output") from exc
+        raise OutputResolutionUnavailable("missing output or unavailable original address")
     # Lexical provenance is only for policy, never for choosing exported bytes.
     try:
         lexical = map_backend_path_lexical(executor, posixpath.normpath(requested))
@@ -331,7 +358,7 @@ def resolve_docker_output(executor: ExecutorRef, requested: str,
 
 
 def prepare_docker_outputs(executor: ExecutorRef | None, work_dir: pathlib.Path,
-                           outputs: list[str] | None) -> DockerOutputContext | None:
+                           outputs: list[str] | None, *, pinned: bool = False) -> DockerOutputContext | None:
     """Select only the Docker execution route; pin its identity before any effect.
 
     An absolute address in a declared backend mapping is a backend address; other
@@ -343,8 +370,13 @@ def prepare_docker_outputs(executor: ExecutorRef | None, work_dir: pathlib.Path,
     try:
         cwd = map_host_path(executor, work_dir)
     except ValueError:
+        if pinned:
+            raise
         return None  # The process consumer selects its ordinary host route too.
-    executor, mounts = _output_container(executor)
+    observed, mounts = _output_container(executor)
+    if pinned and observed.container_name != executor.container_name:
+        raise OutputResolutionUnavailable("Docker output container identity changed")
+    executor = observed
     paths = {}
     for item in outputs:
         text = str(item or "").strip()

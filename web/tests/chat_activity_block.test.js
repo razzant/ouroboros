@@ -252,6 +252,52 @@ test('reload and reconnect keep a bounded card counted while a seen start stays 
     } finally { f.close(); }
 });
 
+// Two launches share a sentence and timestamp. The companion Python test supplies the real room history response.
+test('a finished task reads its service row after reload and reconnect', async () => {
+    const produced = process.env.OURO_TEST_SERVICE_HISTORY;
+    const task = 'svc-task';
+    const line = 'Background services stopped · log not saved: paper';
+    const history = produced ? JSON.parse(readFileSync(produced, 'utf8')).messages : [
+        { task_id: task, role: 'system', system_type: 'task_evidence', text: '', ts: '2026-11-18T07:00:00Z', chat_id: 1,
+            narration: false, task_terminal_status: 'completed', tool_evidence: { observations: [
+                { key: `tool:${task}:start-1`, tool: 'start_service', fact: 'settled', status: 'ok' }] } },
+        ...[1, 2].map(i => ({ task_id: task, role: 'system', is_progress: true, system_type: 'task_checkpoint',
+            checkpoint_kind: 'services_stopped', text: line, ts: '2026-11-18T07:00:05Z', chat_id: 1,
+            card_row_id: `service:launch-${i}`, history_id: `progress:${i}`, history_position: { source: 'progress', offset: i } })),
+        { task_id: task, role: 'assistant', text: 'The preview ran; its log could not be read.',
+            ts: '2026-11-18T07:00:09Z', chat_id: 1 },
+        { task_id: task, role: 'system', system_type: 'task_summary', text: 'Preview checked.', tool_calls: 1,
+            tool_errors: 0, ts: '2026-11-18T07:00:09Z', chat_id: 1 },
+    ];
+    const frames = history.filter(row => row.checkpoint_kind === 'services_stopped')
+        .map(({ ts, text, task_id, card_row_id, checkpoint_kind }) =>
+            ({ type: 'task_checkpoint', role: 'system', ts, text, task_id, card_row_id, checkpoint_kind }));
+    const said = f => f.rows(task).filter(row => row.innerHTML.includes(line));
+    const live = fixture(history);
+    try {
+        live.log({ task_id: task, type: 'tool_call_started', tool: 'start_service', tool_call_id: 'start-1' });
+        [...frames, ...frames].forEach(frame => live.log(frame));
+        assert.equal(said(live).length, 2, 'each live launch appears once before history arrives');
+        await live.instance.refreshHistory({ revision: 1 });
+        assert.equal(said(live).length, 2, 'the room history adopts both live rows');
+    } finally { live.close(); }
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        for (const reconnect of [false, true]) {
+            if (reconnect) { f.emit('open', { previouslyConnected: true }); await new Promise(setImmediate); }
+            frames.forEach(frame => f.log(frame));
+            assert.equal(said(f).length, 2, f.rows(task).map(row => row.innerHTML).join('\n'));
+            assert.ok(said(f).every(row => row.classList.contains('thinking') && !row.classList.contains('warn')));
+            assert.equal(f.card(task).dataset.finished, '1');
+            assert.equal(f.card(task).querySelector('[data-live-phase]').textContent, 'Done', 'no status of its own');
+            assert.doesNotMatch(f.card(task).querySelector('[data-live-title]').textContent, /log not saved/);
+            assert.doesNotMatch(f.meta(task), /log not saved/);
+        }
+        assert.ok(f.historyReads() >= 2, 'the real reconnect handler refetched history');
+    } finally { f.close(); }
+});
+
 for (const chatId of [1, 1234]) test(`canonical owner wait settles without a Project-pointer dependency in room ${chatId}`, async () => {
     const f = fixture([toolCarrier({ observations: [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }] },
         { chat_id: chatId })], { active_direct_turns: [] }, chatId);

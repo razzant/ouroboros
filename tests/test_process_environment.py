@@ -1,13 +1,11 @@
 """Selected process configuration keeps values, source secrecy and actor authority."""
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import os
 import sys
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -194,6 +192,8 @@ def test_service_replacement_keeps_uncertain_record_and_returns_start_error(proc
 
 @pytest.mark.parametrize('cleanup', ['stop', 'task', 'global_nowait'])
 def test_local_executor_finalizes_secret_log_before_forgetting_record(process_context, monkeypatch, cleanup):
+    from ouroboros.artifacts import read_actor_source_bytes
+
     registry, ctx, workspace, data = process_context
     ctx.executor_ref = {'type': 'local', 'workspace_host_path': str(workspace), 'workspace_backend_path': '/workspace'}
     secret = 'synthetic-finalization-canary'
@@ -225,8 +225,8 @@ def test_local_executor_finalizes_secret_log_before_forgetting_record(process_co
         payload = next(item for item in services.kill_all_services(data) if item.get('name') == 'service')
     assert payload['state'] == 'stopped' and not payload.get('stop_failed')
     final = payload['log_finalization']
-    assert final['deleted_live_log'] and not final['errors']
-    text = gzip.decompress(Path(final['full_log_ref']['path']).read_bytes()).decode()
+    assert final['deleted_live_log'] and final['source_scope'] == 'full' and not final.get('error_count')
+    text = read_actor_source_bytes(data, ctx.task_id, final['source_ref']).decode()
     assert secret not in text and 'port=8080' in text and '***' in text
     assert not list(durable.glob('*.json'))
     assert services.prune_service_logs(data, retention_days=0)['archived_files'] == 0
@@ -276,6 +276,7 @@ for line in sys.stdin:
 @pytest.mark.parametrize('local_executor', [False, True])
 def test_replacing_exited_service_finalizes_each_environment_revision(process_context, monkeypatch, local_executor):
     from ouroboros import config, workspace_executor
+    from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
 
     registry, ctx, workspace, _data = process_context
@@ -310,8 +311,8 @@ def test_replacing_exited_service_finalizes_each_environment_revision(process_co
     registry.execute('stop_service', {})
     assert len(finalized) == 2
     for result in finalized:
-        assert result['deleted_live_log'] and not result['errors']
-        text = gzip.decompress(Path(result['full_log_ref']['path']).read_bytes()).decode()
+        assert result['deleted_live_log'] and result['source_scope'] == 'full' and not result.get('error_count')
+        text = read_actor_source_bytes(ctx.drive_root, ctx.task_id, result['source_ref']).decode()
         assert 'synthetic-first-environment' not in text and 'synthetic-second-environment' not in text
         assert '***' in text
 

@@ -13,6 +13,7 @@ test's own drive root and the per-worker registries are restored by
 
 from __future__ import annotations
 
+import queue
 import subprocess
 from types import SimpleNamespace
 
@@ -24,8 +25,11 @@ from ouroboros.workspace_executor import execute, normalize_executor_ref
 from tests._workspace_executor_shared import _init_repo, fake_docker_cli
 
 
-def test_docker_executor_stop_failure_preserves_service_handle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("durable", [True, False])
+def test_docker_executor_stop_failure_preserves_service_handle(tmp_path, monkeypatch, durable):
     import ouroboros.workspace_executor as workspace_executor
+    from ouroboros import service_finalization
+    from tests._launch_stop_shared import _exit_context
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -48,6 +52,95 @@ def test_docker_executor_stop_failure_preserves_service_handle(tmp_path, monkeyp
     )
     workspace_executor._SERVICES.clear()
     calls: list[list[str]] = []
+    allow_stop, running = False, False
+
+    def fake_run(cmd, **kwargs):
+        nonlocal running
+        calls.append([str(part) for part in cmd])
+        if cmd[:3] == ["docker", "inspect", "-f"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="none\n", stderr="")
+        if cmd[:2] == ["docker", "exec"] and "nohup" in str(cmd[-1]):
+            running = True
+            return subprocess.CompletedProcess(cmd, 0, stdout="12345\n", stderr="")
+        if cmd[:2] == ["docker", "exec"] and "kill -TERM" in str(cmd[-1]):
+            if not allow_stop:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="permission denied")
+            running = False
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:2] == ["docker", "exec"] and "_ouroboros_proc_observe" in str(cmd[-1]):
+            return subprocess.CompletedProcess(cmd, 0, stdout="running\n" if running else "exited\n", stderr="")
+        if cmd[:2] == ["docker", "exec"] and str(cmd[-1]).startswith("tail -c"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="SECOND\n", stderr="")
+        raise AssertionError(cmd)
+
+    fake_docker_cli(monkeypatch, fake_run)
+    if not durable:
+        monkeypatch.setattr(workspace_executor, "_register_service_process", lambda *_: None)
+    completion = _exit_context(data, ctx, event_queue=queue.Queue())
+    params = dict(name="svc", cmd=["sleep", "30"], host_cwd=workspace, cwd_root="active_workspace",
+                  readiness={}, outputs=[], before_outputs={})
+    first = workspace_executor.start_service(ctx, **params)
+    path = workspace_executor._SERVICES[first["service_id"]].durable_record_path
+    if durable:
+        assert path.stem == first["launch_id"]
+    else:
+        assert path is None and first["launch_id"] in first["backend_log_path"]
+    failed = workspace_executor.stop_service(ctx, "svc")
+
+    assert failed and failed["stop_failed"] is True
+    assert "permission denied" in failed["stop_error"]
+    assert workspace_executor.service_status(ctx, "svc") is not None
+    allow_stop = True
+    assert service_finalization.finalize(completion, completion.llm_trace)
+    second = workspace_executor.start_service(ctx, **params)
+    assert first["backend_pid"] == second["backend_pid"] and first["service_id"] == second["service_id"]
+    assert first["launch_id"] != second["launch_id"]
+    old_log, new_log = first["backend_log_path"], second["backend_log_path"]
+    first_command, second_command = [cmd[-1] for cmd in calls if "nohup" in cmd[-1]]
+    assert old_log != new_log and old_log in first_command and new_log in second_command and old_log not in second_command
+    assert workspace_executor.service_logs(ctx, "svc", 20)["tail"] == "SECOND\n"
+    assert new_log in calls[-1][-1] and old_log not in calls[-1][-1]
+    assert service_finalization.finalize(completion, completion.llm_trace)
+    assert not service_finalization.finalize(completion, completion.llm_trace)
+    evidence = service_finalization.display(completion.llm_trace)
+    assert [(event["kind"], row["state"], row["launch_id"]) for event in evidence for row in event["services"]] == [
+        ("services_stopped", "stopped", first["launch_id"]), ("services_stopped", "stopped", second["launch_id"])]
+    left, right = [event["services"][0] for event in evidence]
+    assert {k: v for k, v in left.items() if k != "launch_id"} == {k: v for k, v in right.items() if k != "launch_id"}
+    frames = [completion.event_queue.get_nowait()["data"] for _ in evidence]
+    assert len({frame["card_row_id"] for frame in frames}) == 2
+    assert [row["log_outcome"] for row in (left, right)] == ["backend_only"] * 2
+    assert [frame["text"] for frame in frames] == [
+        f"Background service stopped: svc ({launch['launch_id'].removeprefix('service-')[:10]})"
+        " · at task end · log not archived (Docker)" for launch in (first, second)]
+
+
+@pytest.mark.parametrize("identity", ["answers", "unavailable"])
+def test_docker_service_without_outputs_runs_under_its_containers_immutable_id(tmp_path, monkeypatch, identity):
+    """Nothing else pins the container of a service that declares no outputs: its start resolves the configured
+    name once to the running container's immutable id, and its network check, backend start, state probe and
+    durable record all address that id (a name a successor container reuses cannot answer for the launch).
+    Identity facts that cannot be read start nothing. Synthetic: no Docker is contacted."""
+    import json
+
+    import ouroboros.workspace_executor as workspace_executor
+    from ouroboros import workspace_executor_paths as paths
+
+    pinned = paths.pinned_container  # the real pin; ``fake_docker_cli`` answers it by name for the other tests
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = tmp_path / "data"
+    data.mkdir()
+    ctx = ToolContext(
+        repo_dir=tmp_path / "repo", drive_root=data, workspace_root=workspace, workspace_mode="external",
+        task_id="docker-pin",
+        executor_ref={"type": "docker_exec", "id": "pb-container", "container_name": "pb-container", "network": "none",
+                      "workspace_host_path": str(workspace), "workspace_backend_path": "/workspace"},
+    )
+    workspace_executor._SERVICES.clear()
+    container = "e" * 64
+    calls: list[list[str]] = []
+    inspected: list[str] = []
 
     def fake_run(cmd, **kwargs):
         calls.append([str(part) for part in cmd])
@@ -55,28 +148,35 @@ def test_docker_executor_stop_failure_preserves_service_handle(tmp_path, monkeyp
             return subprocess.CompletedProcess(cmd, 0, stdout="none\n", stderr="")
         if cmd[:2] == ["docker", "exec"] and "nohup" in str(cmd[-1]):
             return subprocess.CompletedProcess(cmd, 0, stdout="12345\n", stderr="")
-        if cmd[:2] == ["docker", "exec"] and "kill -TERM" in str(cmd[-1]):
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="permission denied")
         if cmd[:2] == ["docker", "exec"] and "_ouroboros_proc_observe" in str(cmd[-1]):
             return subprocess.CompletedProcess(cmd, 0, stdout="running\n", stderr="")
         raise AssertionError(cmd)
 
-    fake_docker_cli(monkeypatch, fake_run)
-    workspace_executor.start_service(
-        ctx,
-        name="svc",
-        cmd=["sleep", "30"],
-        host_cwd=workspace,
-        cwd_root="active_workspace",
-        readiness={},
-        outputs=[],
-        before_outputs={},
-    )
-    failed = workspace_executor.stop_service(ctx, "svc")
+    def probe(argv):
+        inspected.append(argv[-1])
+        if identity == "unavailable":
+            raise paths.OutputResolutionUnavailable("no such container")
+        return json.dumps({"id": container, "running": True, "network": "none", "mounts": []})
 
-    assert failed and failed["stop_failed"] is True
-    assert "permission denied" in failed["stop_error"]
-    assert workspace_executor.service_status(ctx, "svc") is not None
+    fake_docker_cli(monkeypatch, fake_run)
+    monkeypatch.setattr(paths, "pinned_container", pinned)
+    monkeypatch.setattr(paths, "_docker_output_probe", probe)
+    params = dict(name="svc", cmd=["sleep", "30"], host_cwd=workspace, cwd_root="active_workspace",
+                  readiness={}, outputs=[], before_outputs={})
+    if identity == "unavailable":
+        with pytest.raises(paths.OutputResolutionUnavailable) as refused:
+            workspace_executor.start_service(ctx, **params)
+        assert refused.value.process_not_started is True
+        assert inspected == ["pb-container"] and calls == [], "refused before any backend call"
+        assert workspace_executor.service_status(ctx, "svc") is None
+        return
+    started = workspace_executor.start_service(ctx, **params)
+    assert inspected == ["pb-container"], "resolved once, by the configured name"
+    assert started["executor"]["container_name"] == container
+    assert calls[0] == ["docker", "inspect", "-f", "{{.HostConfig.NetworkMode}}", container]
+    assert len(calls) > 1 and all(call[call.index("sh") - 1] == container for call in calls[1:]), calls
+    record = workspace_executor._SERVICES[started["service_id"]]
+    assert json.loads(record.durable_record_path.read_text(encoding="utf-8"))["container_name"] == container
 
 
 def test_docker_executor_service_shell_uses_process_group_stop():

@@ -1008,7 +1008,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
 # (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
 # The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
-EXPECTED_SCAN_PATHS = 476
+# 474 -> 476: the private log directory and its files, ``private_service_logs`` and
+# ``private_service_logs/*`` (the storage boundary in ``tool_access_paths.py``), share one record row.
+EXPECTED_SCAN_PATHS = 478
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1019,6 +1021,8 @@ SENTINELS = frozenset({
     "state/state.json",
     "state/queue_snapshot.json",
     "state/process_ledger.jsonl",
+    "private_service_logs",
+    "private_service_logs/*",
     "state/consciousness_observations.jsonl",
     "state/skills/*/review_history.jsonl",
     "logs/events.jsonl",

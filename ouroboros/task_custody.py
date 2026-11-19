@@ -46,8 +46,9 @@ commit, and every write owner asks it right before each copy, placement or unlin
 (``publication_fence``): a close observed there starts no further effect. Phase B
 runs under the caller's ``guard`` - the supervisor's queue lock, which admission and
 assignment hold - and, under fresh custody and mail locks, re-takes the occupant
-census, re-asks the probe, re-checks every row and mailbox, and only then moves the
-drive out of its place. Nothing under the queue lock copies or hashes, so Phase A is
+census, re-asks the probe, re-checks each row, mailbox and legacy log hold, and only
+then moves the drive. Local service logs now start on the installation's private plane.
+Legacy drive-local logs retain their original until safely archived. Phase A is
 not atomic with queue admission: an owner admitted after its probe can meet the
 settled attempt's create-only canonical files, while the attempt basis refuses the
 row write and Phase B's probe keeps the drive. Lock order: supervisor queue lock ->
@@ -1045,14 +1046,8 @@ def _input_closure(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, c
     return {key: snapshot[key] for key in _INPUT_FIELDS if snapshot.get(key) != current.get(key)}, inputs
 
 
-def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, *, live: LiveProbe,
-                      staging: pathlib.Path, admission_rollback: bool, stop=None) -> Dict[str, Any]:
-    """Everything outside the locks: liveness, durable settledness, copy-back, pending refs and
-    private staging; nothing served is written. Raises ``_Retained``."""
-    from ouroboros.owner_mailbox import settled_mailbox_cleanup_allowed
-    from ouroboros.store import StoreError
-    from ouroboros.task_results import cancellation_blocks_child_result
-
+def _occupant_rows(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, live: LiveProbe) -> tuple[dict, dict]:
+    """Live owners and explicit Keep decisions take precedence over log retention."""
     alive = live(task_id)
     if alive is not False:
         raise _Retained("liveness_unknown" if alive is None else "task_live")
@@ -1061,9 +1056,19 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
         child = load_task_result(drive, task_id, strict=True) or {}
     except (OSError, ValueError, StoreError) as exc:
         raise _Retained("task_result_unreadable") from exc
-    status = str(current.get("status") or "")
     if isinstance(current.get("owner_keep"), dict):
         raise _Retained("owner_keep")
+    return current, child
+
+
+def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, rows: tuple[dict, dict], *,
+                      live: LiveProbe, staging: pathlib.Path, admission_rollback: bool, stop=None) -> Dict[str, Any]:
+    """Check durable settledness, copy-back and pending refs before staging. Raises ``_Retained``."""
+    from ouroboros.owner_mailbox import settled_mailbox_cleanup_allowed
+    from ouroboros.task_results import cancellation_blocks_child_result
+
+    current, child = rows
+    status = str(current.get("status") or "")
     if admission_rollback and not child and not current.get("started_at") \
             and status not in {"running", "interrupted"}:
         return {"task_id": task_id, "current": current, "plan": [], "rollback": True, "live": live,
@@ -1121,6 +1126,8 @@ def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dic
     current = load_task_result(canonical, task_id, strict=True) or {}
     if attempt_basis(current) != prepared["basis"] or custody_revision(current) != prepared["revision"]:
         raise _Retained("canonical_changed")
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")
     if prepared.get("rollback"):
         prepared["revision_after"] = prepared["revision"]
         return 0
@@ -1195,7 +1202,7 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
                                    "call_inventory_changed", "task_result_unreadable", "review_environment_held",
-                                   "kept_service_capture_owed"})
+                                   "kept_service_capture_owed", "service_log_uncustodied", "service_writer_unsettled"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1331,6 +1338,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     (``under_q_sec``, on the event of a pass that writes its ``headless_task_drive_prune`` event, never its job row). ``owed``: the pass's one
     read of the kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
+    from ouroboros.launch_custody import ServiceLogUncustodied, drive_service_writers_unsettled, require_no_legacy_service_logs
+
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
     drive = pathlib.Path(drive).resolve(strict=False)
@@ -1351,7 +1360,11 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
         if owed_output_hold(canonical, base, owed=owed):  # a kept service's declared outputs here still owe their capture
             raise _Retained("kept_service_capture_owed")
         occupants = _occupants(drive, tid)
-        prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
+        rows = {occupant: _occupant_rows(canonical, drive, occupant, live) for occupant in occupants}
+        require_no_legacy_service_logs(drive, occupants)
+        if drive_service_writers_unsettled(drive, occupants):
+            raise _Retained("service_writer_unsettled")
+        prepared = [_prepare_occupant(canonical, drive, occupant, rows.pop(occupant), live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
                     for occupant in occupants]
         if closed():
@@ -1412,9 +1425,12 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     close_connections_under(base)
                 except StoreBusy as exc:
                     raise _Retained("store_busy") from exc
+                require_no_legacy_service_logs(drive, occupants)
+                if closed():
+                    raise _Retained("generation_closed")
                 os.replace(base, trash)
         outcome.update(status="removed")  # the moved drive is deleted by the maintenance child (remove_custody_trash)
-    except _Retained as retained:
+    except (_Retained, ServiceLogUncustodied) as retained:
         # A fenced write surfaces as its caller's own failure reason: a closed generation names the close.
         outcome["reason"] = "generation_closed" if closed() else str(retained)
     except StoreBusy:

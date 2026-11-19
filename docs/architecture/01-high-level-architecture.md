@@ -135,7 +135,8 @@ ouroboros/ — agent core and shared runtime (§6)
   transcript_prefix.py — shared prefix digests/comparison, change counts by origin and signed-reasoning retirement; reporting/round facts cross the loop boundary only at call time (§6 Task lifecycle)
   loop_transport.py — transport-outage waits and provider-failure text (§6 Context fitting)
   loop_output_exhaustion.py — typed reply recovery (§6)
-  loop_delivery.py, delivery_facts.py, loop_budget.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — delivery candidates and the delivery-control protocol; leaves of `loop.py`, one rail each as named; `loop_forced_finalization` is the one forced model call (§6 Task lifecycle)
+  loop_delivery.py, delivery_facts.py, loop_budget.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — loop.py delivery candidates and control rails; loop_forced_finalization.py owns the single forced call (§6)
+  service_outcomes.py, service_finalization.py — launch outcomes and their delivery to answers and cards (§6)
   task_pacing.py — threshold facts, shared round-money reading, finalization reserve, `CostCeiling` and main-loop wire options (§6 Budget tracking)
   vision_routing.py, vision_image_limits.py, image_preparation.py — owner-mode image routing for Main, explicit VLM/caption sends, route limits and byte preparation (§6 Vision and local image evidence)
   fallback_cooldown.py — per-process 429-aware cooldown for the `OUROBOROS_MODEL_FALLBACKS` chain; advisory
@@ -750,7 +751,8 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   └── owner_mailbox/         ← per-task owner messages
 │   ├── projects/<id>/knowledge/   ← per-project facts with provenance sidecars
 │   ├── observability/             ← private forensic ledger: blobs/, calls/<task_id>/, packs/<task>.xz
-│   ├── services/<task_id>/        ← `<service>.log`, no-output declaration; owed: `kept_outputs/` (§9)
+│   ├── services/<task_id>/        ← legacy logs, empty declarations; owed: `kept_outputs/` (§9)
+│   ├── private_service_logs/      ← per-task launch logs, private from creation (PERSISTENCE)
 │   ├── logs/
 │   │   ├── chat.jsonl             ← frozen at the cutover
 │   │   ├── progress.jsonl         ← frozen at the cutover
