@@ -1,0 +1,214 @@
+name: Task service evidence (one-off)
+
+# Trusted, reviewed QA commit only. Do not add this workflow to the product branch.
+on:
+  push:
+    branches: [qa/task-service-evidence]
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    if: >-
+      ${{ github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/task-service-evidence' &&
+          !github.event.deleted && github.sha == github.event.after }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 185  # Leave time to project and upload after a failed step.
+    env:
+      QA_SERVICE_IMAGE: ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        timeout-minutes: 6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the reviewed QA wrapper, product and comparison base
+        id: subject
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          reject() { printf 'reason=%s\n' "$1" >> "$GITHUB_OUTPUT"; exit 1; }
+          test "$(id -u)" != 0 || reject root_runner
+          test "$(git rev-parse --is-shallow-repository)" = false || reject shallow_checkout
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA" \
+            || reject event_or_workflow_mismatch
+          read -ra parents <<< "$(git show -s --format=%P "$GITHUB_SHA")"
+          test "${#parents[@]}" = 1 || reject qa_parent_count
+          product=${parents[0]}
+          driver=.github/qa/task_service_evidence.py
+          workflow=.github/workflows/task-service-evidence.yml
+          test "$(git diff --name-status --no-renames "$product" "$GITHUB_SHA")" = "$(printf 'A\t%s\n' "$driver" "$workflow")" \
+            || reject qa_delta_mismatch
+          for path in "$driver" "$workflow"; do
+            test "$(git ls-tree "$GITHUB_SHA" -- "$path" | cut -d ' ' -f1,2)" = '100644 blob' \
+              || reject qa_blob_mode
+          done
+          target=$(git rev-parse --verify 'refs/remotes/origin/ouroboros^{commit}') || reject canonical_target_unavailable
+          base=$(git merge-base --all "$product" "$target") || reject no_common_base
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != "$product" ]] || reject ambiguous_or_empty_product_delta
+          tree=$(git rev-parse "$product^{tree}")
+          driver_blob=$(git rev-parse "$GITHUB_SHA:$driver")
+          workflow_blob=$(git rev-parse "$GITHUB_SHA:$workflow")
+          printf 'product=%s\ntree=%s\ntarget=%s\nbase=%s\ndriver_blob=%s\nworkflow_blob=%s\n' \
+            "$product" "$tree" "$target" "$base" "$driver_blob" "$workflow_blob" >> "$GITHUB_OUTPUT"
+          # The publisher records the reviewed commit and base in the QA commit's trailers.
+          # A branch advance that changes the common base does not silently redefine the comparison.
+          test "$(git show -s --format='%(trailers:key=QA-Product,valueonly)' "$GITHUB_SHA")" = "$product" \
+            || reject reviewed_product_mismatch
+          test "$(git show -s --format='%(trailers:key=QA-Size-Base,valueonly)' "$GITHUB_SHA")" = "$base" \
+            || reject reviewed_base_mismatch
+          mkdir -m 700 "$RUNNER_TEMP/service-wrapper"
+          git cat-file blob "$driver_blob" > "$RUNNER_TEMP/service-wrapper/task_service_evidence.py"
+          git -c advice.detachedHead=false switch --detach "$product" >/dev/null 2>&1 || reject product_checkout_failed
+          dirty=$(git status --porcelain=v1 --untracked-files=all) || reject product_checkout_unreadable
+          test "$(git rev-parse HEAD)" = "$product" && test "$(git rev-parse 'HEAD^{tree}')" = "$tree" \
+            && test -z "$dirty" || reject product_checkout_mismatch
+
+      - uses: ./.github/actions/setup-python-env
+        id: python
+        timeout-minutes: 15
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+
+      - name: Install the locked Node build
+        id: node
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        timeout-minutes: 8
+        run: .venv/bin/python -I -S scripts/download_node_standalone.py >/dev/null 2>&1
+
+      - name: Resolve the Noble image for the locked Playwright version
+        id: browsers
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(.venv/bin/python -I -c 'from importlib.metadata import version; print(version("playwright"))')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="mcr.microsoft.com/playwright/python:v${version}-noble"
+          docker pull "$tag" >/dev/null 2>&1
+          image=$(docker image inspect --format '{{index .RepoDigests 0}}' "$tag")
+          [[ "$image" =~ ^mcr\.microsoft\.com/playwright/python@sha256:[0-9a-f]{64}$ ]]
+          printf 'image=%s\nversion=%s\n' "$image" "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the dedicated service test image
+        id: service_image
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        timeout-minutes: 6
+        run: docker pull "$QA_SERVICE_IMAGE" >/dev/null 2>&1
+
+      - name: Run the independent service, structure, size, Node, Docker and browser lanes
+        id: checks
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' && steps.python.outcome == 'success' }}
+        timeout-minutes: 116
+        env:
+          QA_PRODUCT: ${{ steps.subject.outputs.product }}
+          QA_TREE: ${{ steps.subject.outputs.tree }}
+          QA_SIZE_BASE: ${{ steps.subject.outputs.base }}
+          QA_NODE_SETUP: ${{ steps.node.outcome }}
+          QA_BROWSER_SETUP: ${{ steps.browsers.outcome }}
+          QA_BROWSER_IMAGE: ${{ steps.browsers.outputs.image }}
+          QA_PLAYWRIGHT_VERSION: ${{ steps.browsers.outputs.version }}
+          QA_SERVICE_SETUP: ${{ steps.service_image.outcome }}
+        run: .venv/bin/python -I "$RUNNER_TEMP/service-wrapper/task_service_evidence.py"
+
+      - name: Record setup and all lane outcomes, including on failure
+        id: report
+        if: ${{ !cancelled() }}
+        timeout-minutes: 2
+        env:
+          QA_PRODUCT: ${{ steps.subject.outputs.product }}
+          QA_TREE: ${{ steps.subject.outputs.tree }}
+          QA_TARGET: ${{ steps.subject.outputs.target }}
+          QA_SIZE_BASE: ${{ steps.subject.outputs.base }}
+          QA_DRIVER_BLOB: ${{ steps.subject.outputs.driver_blob }}
+          QA_WORKFLOW_BLOB: ${{ steps.subject.outputs.workflow_blob }}
+          QA_SUBJECT_REASON: ${{ steps.subject.outputs.reason }}
+          QA_CHECKOUT: ${{ steps.checkout.outcome }}
+          QA_SUBJECT: ${{ steps.subject.outcome }}
+          QA_PYTHON: ${{ steps.python.outcome }}
+          QA_NODE_SETUP: ${{ steps.node.outcome }}
+          QA_BROWSER_SETUP: ${{ steps.browsers.outcome }}
+          QA_BROWSER_IMAGE: ${{ steps.browsers.outputs.image }}
+          QA_PLAYWRIGHT_VERSION: ${{ steps.browsers.outputs.version }}
+          QA_SERVICE_SETUP: ${{ steps.service_image.outcome }}
+          QA_CHECKS: ${{ steps.checks.outcome }}
+        run: |
+          /usr/bin/python3 -I -S - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          env = os.environ
+          dest = Path(env['RUNNER_TEMP']).resolve() / 'service-evidence'
+          dest.mkdir(mode=0o700, exist_ok=True)
+          setup = {k.lower(): env.get('QA_' + k, '') for k in (
+              'CHECKOUT', 'SUBJECT', 'PYTHON', 'NODE_SETUP', 'BROWSER_SETUP', 'SERVICE_SETUP', 'CHECKS')}
+          source = dest / 'results.json'  # Only the QA driver's bounded projection, never a test-owned file.
+          try:
+              checks = json.loads(source.read_text(encoding='utf-8'))
+          except (OSError, ValueError):
+              checks = {}
+          reason = next((k + '_unavailable' for k in ('checkout', 'subject', 'python')
+                         if setup[k] != 'success'), 'driver_report_unavailable')
+          lanes = {}
+          upload = [dest / 'run.json']
+          for lane in ('services', 'structure', 'size', 'node', 'docker', 'chromium', 'webkit'):
+              row = checks.get('lanes', {}).get(lane, {'state': 'not_run', 'reason': reason})
+              if row['state'] == 'running':
+                  row = {**row, 'state': 'incomplete', 'reason': 'driver_interrupted'}
+              elif row['state'] == 'not_run' and row['reason'] == 'pending':
+                  row = {**row, 'reason': 'driver_stopped_before_lane'}
+              elif row['state'] == 'passed' and lane in ('chromium', 'webkit'):
+                  names = [f'{lane}-light-1280-{stage}.png' for stage in ('live', 'reloaded', 'logs')]
+                  paths = [dest / lane / name for name in names]
+                  if set(row.get('exported_frames', {})) == set(names) and all(
+                          p.resolve() == p and p.is_file() for p in paths):
+                      upload.extend(paths)
+                  else:
+                      row = {**row, 'state': 'incomplete', 'reason': 'browser_export_unconfirmed'}
+              lanes[lane] = row
+          qualified = all(value == 'success' for value in setup.values()) and all(
+              row['state'] == 'passed' for row in lanes.values())
+          record = {
+              'schema': 1, 'scope': 'focused-service-qa', 'runner': 'ubuntu-24.04',
+              'qualified': qualified,
+              'event_sha': env['GITHUB_SHA'], 'workflow_sha': env.get('GITHUB_WORKFLOW_SHA', ''),
+              'run_id': env['GITHUB_RUN_ID'], 'attempt': env['GITHUB_RUN_ATTEMPT'],
+              **{k.lower(): env.get('QA_' + k, '') for k in (
+                  'PRODUCT', 'TREE', 'TARGET', 'SIZE_BASE', 'DRIVER_BLOB', 'WORKFLOW_BLOB', 'SUBJECT_REASON',
+                  'PLAYWRIGHT_VERSION', 'BROWSER_IMAGE', 'SERVICE_IMAGE')},
+              'setup': setup, 'driver': checks.get('driver'), 'lanes': lanes,
+          }
+          (dest / 'run.json').write_text(json.dumps(record, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          with open(env['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              print('## Focused service QA', file=out)
+              print(f"Product: `{record['product'] or 'unbound'}`; size base: `{record['size_base'] or 'unbound'}`.", file=out)
+              print('\n| Lane | State | Reason |\n| --- | --- | --- |', file=out)
+              for lane, row in lanes.items():
+                  print(f"| {lane} | {row['state']} | {row['reason']} |", file=out)
+              print('\nThe artifact contains the bounded lane details and completed synthetic PNG sets only.', file=out)
+          with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              print(f'qualified={str(qualified).lower()}', file=out)
+              print('paths<<QA_ARTIFACT_PATHS', *upload, 'QA_ARTIFACT_PATHS', sep='\n', file=out)
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && steps.report.outcome == 'success' }}
+        timeout-minutes: 3
+        with:
+          name: task-services-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ steps.report.outputs.paths }}
+
+      - name: Require complete evidence after publication of the report
+        if: ${{ !cancelled() && steps.report.outputs.qualified != 'true' }}
+        run: exit 1
