@@ -516,11 +516,15 @@ def test_a_later_inspect_page_names_the_checkpoint_its_units_restore_from(tmp_pa
     assert restore(page["restore_checkpoint"]) == "applied"
 
 
-def test_a_receipt_whose_sources_stay_owed_keeps_the_round_and_names_the_transfer(tmp_path, monkeypatch):
-    """The prologue's transfer of an applied fold's receipt may leave its sources owed (where some bytes lie cannot
-    be learned now): the round goes on with the local receipt, the view says the canonical copy is still pending,
-    nothing is marked absent, and the transfer's time rides the next round's receipt (``prologue.source_retention``
-    beside the round's other sections)."""
+
+@pytest.mark.parametrize("transfer", ["owed", "missing", "retained"])
+def test_a_receipt_transfer_that_does_not_complete_keeps_the_round_and_names_its_error(tmp_path, monkeypatch, transfer):
+    """The prologue's transfer of an applied fold's receipt may not complete: its walk left sources owed (an
+    ``OSError`` naming the first, here one whose bytes cannot be located now) or found one unavailable (an
+    ``ObservabilityPromotionSourceError``). Neither raise says that every failure was temporary, so the view
+    names the error neutrally, its type and text, and the round goes on with the local receipt; a completed
+    transfer names none. Either way the transfer's time rides the next round's receipt
+    (``prologue.source_retention``)."""
     from ouroboros import loop, observability
     from ouroboros.loop_round_limits import _run_authored_context_view
 
@@ -530,17 +534,23 @@ def test_a_receipt_whose_sources_stay_owed_keeps_the_round_and_names_the_transfe
     _compact_context(ctx, working_note="I retain the conclusion.")
     frame = _context(tmp_path, ctx, schemas, monkeypatch)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda q, t, logs, event: events.append(copy.deepcopy(event)))
-    reason = "EvidenceUnavailable: evidence_unavailable: the packs catalog cannot answer now"
+    error = {"owed": OSError("EvidenceUnavailable: evidence_unavailable: the packs catalog cannot answer now"),
+             "missing": observability.ObservabilityPromotionSourceError("source_missing", "source_missing")}.get(transfer)
 
-    def owed(*_args, **_kwargs):  # the walk's answer when a source it names cannot be located now
-        raise OSError(reason)
+    def transfer_receipt(_child, _canonical, ref, *, task_id):
+        if error is not None:
+            raise error
+        return ref
 
-    monkeypatch.setattr(observability, "promote_task_source_ref", owed)
+    monkeypatch.setattr(observability, "promote_task_source_ref", transfer_receipt)
     candidate = _run_authored_context_view(messages, frame, ctx._pending_compaction, None)
     event, = events
     assert ctx._context_view_receipt["status"] == event["status"] == "applied"
-    assert "receipt_source" not in event  # the event keeps every structure itself
     notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
     assert notice["receipt_source"]["read"]["tool"] == "read_file"  # the local receipt stays readable
-    assert notice["receipt_retention"] == {"status": "pending", "reason": reason}
+    if error is None:
+        assert "receipt_retention_error" not in notice and "receipt_source" in event
+    else:
+        assert notice["receipt_retention_error"] == f"{type(error).__name__}: {error}"
+        assert "receipt_source" not in event  # the event keeps every structure itself
     assert "source_retention" in ctx._round_prologue["sections_ms"], ctx._round_prologue

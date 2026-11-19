@@ -664,10 +664,10 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 retained_receipt = copy.deepcopy(receipt)
                 receipt_source = {**source, "task_id": ctx.task_id}
             except (OSError, ValueError) as exc:
-                # Local model receipt remains valid; the event keeps all structures. An owed source (one whose bytes
-                # cannot be located now) is moved by a later walk, never marked absent.
-                notice["receipt_retention"] = {"status": "pending" if isinstance(exc, OSError) else "unavailable",
-                                               "reason": str(exc) or type(exc).__name__}
+                # Local model receipt remains valid; the event keeps all structures. The raise does not tell a
+                # temporary failure from a lasting one (an owed walk raises OSError, an unavailable source a
+                # ValueError, each for both), so the view names the error itself.
+                notice["receipt_retention_error"] = f"{type(exc).__name__}: {exc}"
         except (OSError, ValueError):
             notice = {"status": receipt["status"], "receipt_source": "unavailable"}
         if memory_price:
