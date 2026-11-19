@@ -838,16 +838,14 @@ def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('sidecar_errors', ?)", (json.dumps(["unreadable sidecar"]),))
     assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists(), "its rows may miss that generation"
     index.unlink()
-    with evidence_packs.open_index(root):  # rebuilt while generation 1's sidecar is unreadable: generation 2's rows only
-        pass
+    evidence_packs.ensure_index(root)  # rebuilt while generation 1's sidecar is unreadable: generation 2's rows only
     sidecars[1].write_text("{", encoding="utf-8")  # then generation 2's sidecar fails too: no sidecar of it reads
     assert _prune(root)["held"] == {"packs_unknown": 1} and first.exists() and not _ledger(handles), \
         "a faulted index's rows are not the whole listing"
     for path, data in zip(sidecars, intact):
         path.write_bytes(data)
     index.unlink()
-    with evidence_packs.open_index(root):  # rebuilt from readable sidecars: every generation, no fault recorded
-        pass
+    evidence_packs.ensure_index(root)  # rebuilt from readable sidecars: every generation, no fault recorded
     sidecars[0].write_text("{", encoding="utf-8")
     again = _prune(root)  # an index that recorded no unreadable sidecar makes the listing whole
     assert again["removed"] == 1 and not first.exists(), again["held"]
@@ -856,9 +854,10 @@ def test_a_partial_pack_listing_holds_the_saved_states_and_a_whole_one_names_the
     assert evidence_packs.handle_bytes(root, "partial", rel) == b"first generation"
 
 
-def test_an_index_this_process_validated_answers_a_whole_listing_only_without_unreadable_sidecars(root, monkeypatch):
-    """A long-lived maintenance child has validated the index (``_VALIDATED``); one rebuilt while generation 1's
-    sidecar was unreadable holds only generation 2's rows, so its answer is not the whole listing."""
+def test_an_index_that_recorded_an_unreadable_sidecar_answers_no_whole_listing_though_it_holds_rows(root, monkeypatch):
+    """An index rebuilt while generation 1's sidecar was unreadable records that fault and holds only generation 2's
+    rows: while the sidecar stays unreadable those rows are not the whole listing (``whole``); once it reads, the
+    task's own sidecars are."""
     import hashlib
 
     from ouroboros import evidence_packs, saved_state_retirement
@@ -877,18 +876,16 @@ def test_an_index_this_process_validated_answers_a_whole_listing_only_without_un
     sidecar = evidence_packs.packs_dir(root) / evidence_packs.sidecar_name("validated", 1)
     intact = sidecar.read_bytes()
 
-    def rebuilt_and_validated():
+    def rebuilt():
         (evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME).unlink()
-        for _ in range(2):  # the rebuild, then a reader that validates it in this process
-            with evidence_packs.open_index(root):
-                pass
+        evidence_packs.ensure_index(root)  # the packing pass's rebuild, from the sidecars as they read now
 
     sidecar.write_text("{", encoding="utf-8")
-    rebuilt_and_validated()
+    rebuilt()
     report = _prune(root)
     assert report["held"] == {"packs_unknown": 1} and first.exists() and not _ledger(handles), report
     sidecar.write_bytes(intact)
-    rebuilt_and_validated()
+    rebuilt()
     assert _prune(root)["removed"] == 1 and not first.exists()
     assert _ledger(handles)[0]["packed"] == ["observability/packs/validated.xz"]
 

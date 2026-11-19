@@ -515,8 +515,7 @@ def test_a_tasks_only_unreadable_pack_sidecar_holds_its_states_and_the_pass_keep
     intact, index = sidecar.read_bytes(), evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME
     sidecar.write_text("{", encoding="utf-8")
     index.unlink()
-    with evidence_packs.open_index(root):  # rebuilt while that sidecar cannot be read: no row of this task
-        pass
+    evidence_packs.ensure_index(root)  # rebuilt while that sidecar cannot be read: no row of this task
     _pass(root)
     stale = _file(handles / "working" / "working_checkpoint-a1.json", "attempt 1")  # first proven by the next pass
     report = _later(root)
