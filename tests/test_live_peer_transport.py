@@ -120,6 +120,41 @@ def test_a_peers_control_stays_bounded_in_utf8_bytes_at_the_socket_door(over):
         assert events[1].message["text"] == words
 
 
+def test_a_quiet_joined_peer_wakes_the_door_only_for_its_messages_and_the_end_of_the_call(monkeypatch):
+    """Beside the sender's 10 ms poll a receive timeout held Windows' loop (a 15.6 ms monotonic clock) at a full
+    core for the whole call (#3796): after hello only the peer's message or the call's end may wake the door."""
+    real_wait, timeouts = asyncio.wait, []
+
+    async def observed_wait(fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, return_when=return_when)
+
+    async def next_control(hub):
+        while not isinstance(event := hub.next_event(0), cp.PeerControl):
+            await asyncio.sleep(.001)
+        return event
+
+    async def scenario():
+        hub = LiveCallHub(cp.CallSpec("synthetic-quiet-peer", 1, "synthetic", "synthetic"))
+        socket = PeerSocket(hello())
+        door = asyncio.create_task(serve_peer(socket, hub, role="owner"))
+        await asyncio.wait_for(_joined(hub), 5)
+        joined = len(timeouts)
+        await asyncio.sleep(.2)  # twenty receive timeouts before #3796
+        quiet = timeouts[joined:]
+        socket.incoming.put_nowait({"type": "websocket.receive", "text": json.dumps({"type": "mute", "muted": True})})
+        control = await asyncio.wait_for(next_control(hub), 5)
+        hub.close("finished")
+        await asyncio.wait_for(door, 5)
+        return quiet, control, socket
+
+    monkeypatch.setattr(asyncio, "wait", observed_wait)
+    quiet, control, socket = asyncio.run(scenario())
+    assert [timeout for timeout in quiet if timeout is not None] == [], "a quiet joined peer's door woke on a timer"
+    assert control.message == {"type": "mute", "muted": True}, "the door still reads a joined peer's messages"
+    assert socket.sent[-1]["type"] == "state" and socket.sent[-1]["state"] == cp.STATE_CLOSED, "and ends with the call"
+
+
 def test_bounded_codec_keeps_reading_server_controls(subtests):
     for kind in cp.SERVER_MESSAGE_TYPES:
         with subtests.test(kind=kind):

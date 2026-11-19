@@ -81,15 +81,22 @@ async def serve_peer(websocket: WebSocket, hub: LiveCallHub, *, role: str,
         except CallPeerError as exc:
             await websocket.close(code=1008, reason=exc.code)
 
-    # One receive stays pending across poll ticks: cancelling a receive on a timeout can
+    # One receive stays pending across waits: cancelling a receive on a timeout can
     # drop a message it has already taken off the socket (asyncio.wait_for on 3.10).
     receiving = None
     try:
         while True:
             if receiving is None:
                 receiving = asyncio.ensure_future(websocket.receive())
-            done, _ = await asyncio.wait({receiving}, timeout=SOCKET_POLL_SECONDS)
-            if not done:
+            if sender is None:
+                # Before hello only a poll notices a call that closed under a silent peer.
+                done, _ = await asyncio.wait({receiving}, timeout=SOCKET_POLL_SECONDS)
+            else:
+                # The receive sees the peer go and the sender ends with the call, so no timer wakes the door. A
+                # receive timeout beside the sender's poll held Windows' loop at a full core for the whole call:
+                # under its 15.6 ms monotonic clock two sub-tick timers keep each other due (#3796).
+                done, _ = await asyncio.wait({receiving, sender}, return_when=asyncio.FIRST_COMPLETED)
+            if receiving not in done:
                 if sender is None and hub.closed:
                     reason = "call_closed"
                     break
