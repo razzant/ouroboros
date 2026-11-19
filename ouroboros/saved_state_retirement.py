@@ -21,7 +21,6 @@ import stat
 from typing import Any
 
 from ouroboros import maintenance_jobs, store
-from ouroboros.maintenance_retirement import JOB, _plain_directory, schedule_in
 from ouroboros.retention import get_gc_retention_days, time
 from ouroboros.utils import fsync_folder
 
@@ -115,6 +114,16 @@ def worked_copies_in(folder: pathlib.Path) -> list:
             if info is not None and stat.S_ISREG(info.st_mode):
                 found.append((pathlib.Path(entry.path), kind, info))
     return found
+
+
+def _plain_directory(entry) -> bool:
+    """A task's own folder: a real directory, never followed through a link or a Windows junction (a reparse point).
+    The test ``maintenance_retirement`` applies to its folders, kept here so this module imports nothing of it at load."""
+    try:
+        return entry.is_dir(follow_symlinks=False) and not (
+            entry.is_symlink() or os.name == "nt" and bool(entry.stat(follow_symlinks=False).st_file_attributes & 0x400))
+    except OSError:
+        return False
 
 
 def _same_file(path: pathlib.Path, info) -> bool:
@@ -244,6 +253,7 @@ def owe_written_back(root: Any, task_id: str) -> None:
     """A saved state written back from its pack (``evidence_packs.materialize_handle``) is owed again: best effort,
     never a wait (a missed one waits for the next walk after another body boots). Only a settled task's row is dated
     as settled: a running work's first settled write dates its own."""
+    from ouroboros.maintenance_retirement import schedule_in
     from ouroboros.task_status import SETTLED_STATUSES
 
     try:
@@ -351,6 +361,7 @@ def _seed(root: pathlib.Path, body) -> None:
     record the walk under the store's body fact (``meta.last_store_body``). It runs again only when another HEAD booted
     on the store since: an older body puts no rows for the works it finishes or moves on, and a switch to it writes
     packed handles back loose (``evidence_packs.restore_checkpoint_handles``)."""
+    from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import SETTLED_STATUSES
 
     base = root / "task_results" / "artifacts"
@@ -393,6 +404,7 @@ def prune_worked_copies(root, retention_days=None, *, now=None) -> dict:
     its current points; an earlier saved state of it goes the owner's days after recorded facts proved it dead
     (``_prune_running``). A line in ``source_handles/retired_copies.jsonl`` says what it was first. A row goes, if
     unchanged since the pass read it, once its folder holds no saved state."""
+    from ouroboros.maintenance_retirement import JOB
     from ouroboros.owner_keep import gate
     from ouroboros.retention import age_cutoff, keep_until
     from ouroboros.subagent_worktrees import _task_proven_over
@@ -736,6 +748,7 @@ def task_written(txn, task_id, columns, current=None, document=None):
     A finished task whose folder holds a saved state is owed to ``prune_worked_copies``: its row (``settled_at``: when
     the host first wrote it settled, kept after; a running work's row has none, so its first settled write is a new
     obligation) and the pass at its window's end. An unfinished write is read for what it moved past (``_moved_on``)."""
+    from ouroboros.maintenance_retirement import schedule_in
     from ouroboros.task_status import SETTLED_STATUSES
     if txn.root is None:
         return
@@ -770,6 +783,8 @@ def _moved_on(txn, task_id, current, document) -> None:
     visit = _number(document.get("task_attempt")) > _number(current.get("task_attempt"))
     if not names and not (visit and holds_worked_copy(txn.root / "task_results" / "artifacts" / task_id)):
         return
+    from ouroboros.maintenance_retirement import schedule_in
+
     now, row = time.time(), txn.get_row(WORKED_COPIES, task_id) or {}
     superseded = {**{name: now for name in names}, **_facts(row, "superseded")}
     txn.put_row(WORKED_COPIES, task_id, {**row, **({"superseded": superseded} if superseded else {})})
