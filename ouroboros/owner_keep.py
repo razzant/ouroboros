@@ -57,7 +57,8 @@ class OwnerKeepResponse(TypedDict):
     status: Literal["kept", "released", "partly_retired", "already_retired", "release_unconfirmed", "inflight",
                     "refused"]
     reason: str  # why inflight or refused; else empty
-    retained: List[str]  # material found on disk now: paths, ``pins:<snapshot>`` for result pins, and
+    retained: List[str]  # material found on disk now: paths, ``pins:<snapshot>`` for result pins,
+    # ``saved_states:<folder>`` while that folder holds a saved state for exact return, and
     # ``review_thread:<id>`` for an engine reviewer thread no recorded release has let go
     retired: List[str]  # gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
     unknown: List[str]  # material classes that could not be read: nothing is claimed about them
@@ -126,6 +127,7 @@ def _pin_place(copy: Dict[str, Any]) -> str:
 
 
 THREAD_PLACE = "review_thread:"
+SAVED_STATES_PLACE = "saved_states:"  # a folder's saved states for exact return: there while it still holds one
 
 
 def _thread_places(row: Dict[str, Any]) -> List[str]:
@@ -195,7 +197,8 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     pins: Dict[str, str] = {}
     try:  # the folders whose saved states for exact return ``maintenance_retirement.prune_worked_copies`` would retire
         from ouroboros.maintenance_retirement import worked_copies_in
-        places += sorted({str(path.parent) for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
+        places += sorted({SAVED_STATES_PLACE + str(path.parent)
+                          for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
         unknown.append("saved_states")
     read = read_records(root)
@@ -280,6 +283,16 @@ def _present(root: pathlib.Path, task_id: str, place: str, pins: Dict[str, str])
     scratch for deletion). ``None`` when that record cannot be read: nothing is claimed about it."""
     from ouroboros.private_copy_read import record_at
 
+    if place.startswith(SAVED_STATES_PLACE):  # the folder stays with its sources: present while a saved state is left
+        from ouroboros.maintenance_retirement import worked_copy
+        folder = pathlib.Path(place[len(SAVED_STATES_PLACE):])
+        try:
+            with os.scandir(folder) as listing:
+                return any(worked_copy(folder.name, entry.name) for entry in listing)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
     if place not in pins:
         return os.path.lexists(place)
     if not place.startswith("pins:"):
@@ -350,6 +363,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
         retired = [place for place in present if present[place] is False]
         for place in [place for place in present if present[place] is None]:
             kind = ("managed_imports" if place.startswith("managed_import:") else
+                    "saved_states" if place.startswith(SAVED_STATES_PLACE) else
                     "private_copies" if place.startswith("pins:") else _THREADS_CLASS if place in releases
                     else "environments")
             if kind not in unknown:

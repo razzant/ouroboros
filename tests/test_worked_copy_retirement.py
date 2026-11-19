@@ -251,7 +251,7 @@ def test_keep_on_a_work_whose_only_material_left_is_its_saved_states_is_saved(ro
     copies = _copies(handles)
     answer = set_owner_keep(root, "lean", keep=True, source={"basis": "test"})
     assert answer["status"] in ("kept", "partly_retired") and answer["keep"] is True
-    assert {str(path.parent) for path in copies} <= set(answer["retained"]), "the folders, never a path per file"
+    assert {f"saved_states:{path.parent}" for path in copies} <= set(answer["retained"]), "the folders, never a path per file"
     assert not {str(path) for path in copies} & set(answer["retained"])
     assert _prune(root)["held"] == {"owner_keep": len(copies)}
 
@@ -621,3 +621,26 @@ def test_a_terminal_write_beside_an_unreadable_folder_lands_and_stays_owed(root)
             assert txn.get_row(WORKED_COPIES, "shut") is not None, "what cannot be read may hold saved states"
     finally:
         os.chmod(handles, 0o755)
+
+
+
+def test_keep_after_a_pass_took_the_saved_states_says_so_never_kept(root, monkeypatch):
+    from ouroboros import owner_keep
+
+    handles = _task(root, "raced")
+    write_task_result(root, "raced", "completed", child_drive_root=str(root / "task_drives" / "raced-settled"))
+    copies = _copies(handles)
+    _sources(handles)  # the folders stay with their sources after the pass
+    real = owner_keep.inventory
+
+    def pass_between_inventory_and_lock(*args, **kwargs):  # the pass holds the custody lock Keep then waits for
+        found = real(*args, **kwargs)
+        assert _prune(root)["removed"] == len(copies)
+        return found
+
+    monkeypatch.setattr(owner_keep, "inventory", pass_between_inventory_and_lock)
+    answer = owner_keep.set_owner_keep(root, "raced", keep=True, source={"basis": "test"})
+    assert not any(path.exists() for path in copies)
+    assert answer["status"] == "already_retired" and not answer["retained"], answer
+    assert {place for place in answer["retired"] if place.startswith("saved_states:")} == {
+        f"saved_states:{handles / 'context_checkpoints'}", f"saved_states:{handles / 'working'}"}
