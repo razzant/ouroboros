@@ -59,7 +59,9 @@ def _historical_state(ctx, roots, task_id):
 
 
 def _historical_anchor(ctx, observation, roots, task_id):
-    """One plain, redacted source, copied into the existing reader stores before publication."""
+    """One plain, redacted source, copied into the existing reader stores before publication. A physical input
+    whose bytes cannot be located now is recorded as ``evidence_unavailable`` with its address, from which a reader
+    gets the bytes later; the anchor itself never captures it again."""
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
     from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref, read_call_manifest_ref, redact_projection
