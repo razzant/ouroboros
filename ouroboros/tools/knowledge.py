@@ -414,6 +414,21 @@ def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: Situat
     return lines
 
 
+def _head_line(result: knowledge_store.KnowledgeWriteResult) -> str:
+    """How large a head this write leaves on a note that holds names: where a name is present the head stands whole,
+    and a note with no `## ` line is all head. "" for a note that holds none (its head stands nowhere)."""
+    note, claims = result.current, result.claims
+    if (note is None or claims is None or not claims.active or note.state != "active" or note.source is None
+            or note.address.topic == OVERVIEW_TOPIC):  # the overview stands in its own place, named there, not copied
+        return ""
+    from ouroboros.held_notes import note_head
+
+    head, body = note_head(note.source), note.source.body_span
+    if len(head.encode("utf-8")) < body.end_byte - body.start_byte:
+        return f"Held head: {len(head):,} characters, the body above the first `## ` line."
+    return f"Held head: {len(head):,} characters: this note has no `## ` line, so its whole body is the head."
+
+
 def _knowledge_write(
     ctx: ToolContext, topic: str, content: str | None = None, mode: str | None = None,
     scope: str = "", expected_revision: str | None = None, old_str: str | None = None,
@@ -495,7 +510,7 @@ def _knowledge_write(
         if result.claims is not None and result.claims.report:
             evidence = situation or receipt_situation(ctx, root, claims_written=True)
             claim_lines = _claim_lines(result, evidence)
-        text = _with_lines(text, situation_line, *claim_lines)
+        text = _with_lines(text, situation_line, *claim_lines, _head_line(result))
         if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
             # The bare appender's only look at the note: an outline the meta cannot hold follows
             # the JSON line whole; the meta keeps its pointer (size, sha256, the read).

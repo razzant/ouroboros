@@ -455,6 +455,57 @@ def test_a_claims_overwrite_that_carries_no_body_is_refused_and_writes_nothing(t
     assert knowledge.active_claims(tmp_path)["room:3"] == [fresh]
 
 
+def test_a_write_of_a_held_note_says_how_large_its_head_is(tmp_path):
+    """Where a name is present the note's head stands whole in every start, and a note with no `## ` line is all
+    head. So each completed write of a note that holds names states the head's size and what ends it; a write of a
+    note that holds none says nothing."""
+    registry = _registry(tmp_path)
+
+    def said(receipt):
+        return [line for line in receipt.splitlines() if line.startswith("Held head:")]
+
+    def write(address, content=None, **kwargs):
+        revision = knowledge.read_knowledge_note(address).revision
+        return registry.execute("knowledge_write", {"topic": address.topic, "scope": address.scope,
+                                                    "expected_revision": revision, "content": content, **kwargs})
+
+    # A head that a `## ` line ends: its size, and a later write below that line leaves it as it was.
+    target = knowledge.resolve_knowledge_address(tmp_path, "nova", "global")
+    head = "Fact. " * 250 + "\n\n"
+    saved = _write(registry, target, _markdown(["room:1"], head + "## History\n\nOlder facts.\n"))
+    ended = [f"Held head: {len(head):,} characters, the body above the first `## ` line."]
+    assert saved.startswith("✅") and len(head) == 1_502 and said(saved) == ended
+    assert said(write(target, "A later fact.\n", mode="append")) == ended
+
+    # No `## ` line, a fenced one included: the whole body is the head, and an append grows it.
+    whole = knowledge.resolve_knowledge_address(tmp_path, "tools", "global")
+    body = "Whole. " * 200 + "\n\n```\n## not a heading\n```\n"
+    created = _write(registry, whole, _markdown(["room:1"], body))
+    assert said(created) == [f"Held head: {len(body):,} characters: this note has no `## ` line, "
+                             "so its whole body is the head."]
+    grown = write(whole, "More.\n", mode="append")
+    assert said(grown) == [f"Held head: {len(body) + len('More.') + 1:,} characters: this note has no `## ` line, "
+                           "so its whole body is the head."]
+
+    # A note that holds no name says nothing: never adopted, on a project shelf, archived, cleared, or refused.
+    plain = knowledge.resolve_knowledge_address(tmp_path, "plain", "global")
+    assert _write(registry, plain, "---\ntype: note\n---\nA body.\n").startswith("✅")
+    plain.path.write_bytes(_markdown(["room:1"], "A body.\n").encode("utf-8"))  # a field the writer never took
+    unadopted = write(plain, "More.\n", mode="append")
+    assert unadopted.startswith("✅") and not said(unadopted)
+    project = knowledge.resolve_knowledge_address(tmp_path, "project-only", "project:nova")
+    local = _write(registry, project, _markdown(["room:1"], body))
+    assert local.startswith("✅") and not said(local)
+    archived = write(whole, mode="archive", reason="Out of use.")
+    assert archived.startswith("✅") and not said(archived)
+    restored = write(whole, mode="restore")
+    assert restored.startswith("✅") and said(restored) == said(grown)
+    refused = write(whole, "---\nclaims: ['room:2']\n---", mode="overwrite")
+    assert refused.startswith("⚠️") and not said(refused)
+    cleared = write(whole, _markdown([], body), mode="overwrite")
+    assert cleared.startswith("✅") and REMOVED in cleared and not said(cleared)
+
+
 def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
     from ouroboros import return_facts
     from ouroboros.projects_registry import create_project
