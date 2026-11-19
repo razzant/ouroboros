@@ -60,7 +60,7 @@ _PART_CACHE: contextvars.ContextVar = contextvars.ContextVar("evidence_part_cach
 _READERS: Dict[str, "_PackReader"] = {}
 _READERS_LOCK = threading.Lock()
 _READERS_MAX = 4
-_KEPT: Tuple[str, Dict[tuple, tuple]] = ("", {})  # the task read last: its sidecars' briefs by (path, file state)
+_KEPT: Tuple[str, Dict[str, tuple]] = ("", {})  # the task read last: per sidecar path, (file state, brief)
 
 
 class EvidenceCorrupt(ValueError):
@@ -151,18 +151,18 @@ def _own_sidecar(name: str, task_id: str) -> bool:
     return prefix == task_id or (prefix.startswith(task_id + ".") and prefix[len(task_id) + 1:].isdigit())
 
 
-def _task_sidecar_names(root: Any, task_id: str) -> set[str]:
-    """This task's sidecar names, found by their spelling instead of listing the directory. The
-    packer gives a task the first free generation after its newest and no published name is ever
-    removed, so the task's occupied generations run from 1 (a torn pack, or a homonym's sidecar
+def _task_sidecar_names(root: Any, task_id: str) -> Iterator[str]:
+    """This task's sidecar names, generation after generation, found by their spelling instead of listing
+    the directory. The packer gives a task the first free generation after its newest and no published name
+    is ever removed, so the task's occupied generations run from 1 (a torn pack, or a homonym's sidecar
     such as ``a.2`` generation 1 for ``a``, occupies one too) and the first free one ends them."""
-    directory, names, generation = packs_dir(root), set(), 1
+    directory, generation = packs_dir(root), 1
     while True:
         name = sidecar_name(task_id, generation)
         if (directory / name).exists():
-            names.add(name)
+            yield name
         elif not (directory / pack_name(task_id, generation)).exists():
-            return names
+            return
         generation += 1
 
 
@@ -413,9 +413,9 @@ def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) ->
 
 def _own_members(path: pathlib.Path, task_id: str) -> tuple:
     """One sidecar of ``task_id`` in brief (``_brief``), parsed once per file state (size, mtime, inode: a published
-    sidecar never changes, so another state is another file). A process keeps the briefs of the task it read last,
-    all its generations in every root, until it reads another task's; a look-alike's (``a.2`` beside ``a``) keeps
-    only whose it is. ``SidecarCorrupt`` as ``read_sidecar``."""
+    sidecar never changes, so another state is another file, which replaces its entry). A process keeps the briefs
+    of the task it read last, all its generations in every root, until it reads another task's; a look-alike's
+    (``a.2`` beside ``a``) keeps only whose it is. ``SidecarCorrupt`` as ``read_sidecar``."""
     global _KEPT
     try:
         info = path.stat()
@@ -423,11 +423,11 @@ def _own_members(path: pathlib.Path, task_id: str) -> tuple:
         return _brief(path)  # never kept: ``read_sidecar`` names the fault
     if _KEPT[0] != task_id:
         _KEPT = (task_id, {})
-    briefs, key = _KEPT[1], (str(path), info.st_size, info.st_mtime_ns, info.st_ino)
-    if key not in briefs:
+    briefs, state = _KEPT[1], (info.st_size, info.st_mtime_ns, info.st_ino)
+    if briefs.get(str(path), (None,))[0] != state:
         brief = _brief(path)
-        briefs[key] = brief if brief[0] == task_id else (brief[0], brief[1], {}, {})
-    return briefs[key]
+        briefs[str(path)] = (state, brief if brief[0] == task_id else (brief[0], brief[1], {}, {}))
+    return briefs[str(path)][1]
 
 
 def _brief(path: pathlib.Path) -> tuple:
@@ -441,11 +441,11 @@ def _brief(path: pathlib.Path) -> tuple:
 
 def _own_placements(root: pathlib.Path, task_id: str, *, key: Optional[tuple] = None,
                     rel_path: str = "") -> Tuple[list, list]:
-    """``(placements, errors)``: in this task's own sidecars, found by their names (``_task_sidecar_names``: no
-    listing, lock or index), the blob ``key`` (``(sha256, kind)``) or else its handles (``rel_path``: that one);
-    and the task's sidecars that are unreadable."""
+    """``(placements, errors)``: in this task's own sidecars, found by their names generation after generation
+    (``_task_sidecar_names``: no listing, lock or index), the blob ``key`` (``(sha256, kind)``: the first that holds
+    it ends the walk) or else its handles (``rel_path``: that one); and the task's sidecars found unreadable."""
     directory, found, errors = packs_dir(root), [], []
-    for name in sorted(_task_sidecar_names(root, task_id)):
+    for name in _task_sidecar_names(root, task_id):
         try:
             owner, generation, blobs, handles = _own_members(directory / name, task_id)
         except SidecarCorrupt as exc:
@@ -456,6 +456,7 @@ def _own_placements(root: pathlib.Path, task_id: str, *, key: Optional[tuple] = 
         pack = directory / pack_name(task_id, generation)
         if key is not None and key in blobs:
             found.append((pack, {"sha256": key[0], "kind": key[1], "offset": blobs[key][0], "size": blobs[key][1]}))
+            break  # later generations and look-alikes stay unopened
         elif key is None:
             found += [(pack, {"sha256": sha, "kind": CHECKPOINT, "offset": offset, "size": size, "path": path})
                       for path, (sha, offset, size) in handles.items() if rel_path in ("", path)]
@@ -1148,7 +1149,7 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None, sa
 def published_generations(root: Any, task_id: str) -> List[Dict[str, Any]]:
     """This task's published sidecars, oldest generation first: those its names spell (``_task_sidecar_names``);
     a homonym's (``a.2`` generation 1 beside ``a``) is told by its own ``task_id``."""
-    found = [sidecar for _, sidecar in list_sidecars(root, names=_task_sidecar_names(root, task_id))
+    found = [sidecar for _, sidecar in list_sidecars(root, names=set(_task_sidecar_names(root, task_id)))
              if sidecar["task_id"] == str(task_id)]
     return sorted(found, key=lambda sidecar: int(sidecar["generation"]))
 

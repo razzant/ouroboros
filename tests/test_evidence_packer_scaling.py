@@ -585,7 +585,7 @@ def test_a_candidate_beside_its_homonym_takes_the_next_free_generation_and_keeps
 
     handles = {task: _task(root, task, blobs=1, handle=f"# focus {task}\n".encode())[1] for task in ("a", "a.2")}
     assert packer.run_pass(root)["faults"] == 0
-    assert packs._task_sidecar_names(root, "a") == {"a.members.json", "a.2.members.json"}
+    assert list(packs._task_sidecar_names(root, "a")) == ["a.members.json", "a.2.members.json"]
     since = packer.terminal_revision(root)
     later = store_actor_source_bytes(root, "a", category="context_checkpoints", source_id="focus_source_later",
                                      data=b"# later focus\n", extension="md")

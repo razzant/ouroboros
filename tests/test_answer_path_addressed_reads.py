@@ -502,7 +502,7 @@ def test_a_torn_generation_does_not_hide_the_next_one(tmp_path, monkeypatch):
                                      data=b"# later focus\n", extension="md")
     assert evidence_packer.run_pass(tmp_path)["packed"] == 1
     assert not (task_artifact_dir_path(tmp_path, "torn") / later["path"]).exists()  # only its pack holds it now
-    assert packs._task_sidecar_names(tmp_path, "torn") == {"torn.members.json", "torn.3.members.json"}
+    assert list(packs._task_sidecar_names(tmp_path, "torn")) == ["torn.members.json", "torn.3.members.json"]
     assert packs.handle_bytes(tmp_path, "torn", later["path"]) == b"# later focus\n"
     assert packs.packed_handle_names(tmp_path, "torn") == sorted(ref["path"].rsplit("/", 1)[-1] for ref in (first, later))
 
@@ -726,9 +726,10 @@ def test_a_verdict_on_the_blob_itself_ends_its_copies_after_one_question(tmp_pat
 def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_read_last_is_kept(tmp_path, monkeypatch):
     """Reassembling one view reads hundreds of its parts from one owner, whose sidecars can hold tens of
     thousands of members: a process keeps the parsed sidecars of the task it read last, every generation of it
-    however many, each parsed once per file state; a look-alike's (task ``a.2`` beside ``a``) keeps only whose it
-    is; a replaced file is read again (never answered from the old one), a read of another task replaces them,
-    and a read naming a task without sidecars leaves them alone."""
+    however many, each parsed once per file state and kept once per file; a look-alike's (task ``a.2`` beside
+    ``a``) keeps only whose it is; a replaced file is read again (never answered from the old one), a read of
+    another task replaces them, and a read naming a task without sidecars leaves them alone."""
+    import os
     import pathlib
 
     from ouroboros import evidence_packer, evidence_packs as packs
@@ -744,27 +745,60 @@ def test_a_task_s_own_sidecars_are_parsed_once_per_file_state_and_only_the_task_
         _result(tmp_path, "a", "completed")
         assert evidence_packer.run_pass(tmp_path)["packed"] == 1
     names = sorted(packs._task_sidecar_names(tmp_path, "a"))
+    sidecar = packs.packs_dir(tmp_path) / "a.members.json"
     decoded = _spy_sidecars(monkeypatch)
     first = [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]]
     for _ in range(20):
         assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first
     assert len(names) == 6 and sorted(decoded) == names  # each generation once, whatever the number of reads
-    look_alike = [brief for key, brief in packs._KEPT[1].items() if pathlib.Path(key[0]).name == "a.2.members.json"]
+    look_alike = [brief for key, (_, brief) in packs._KEPT[1].items() if pathlib.Path(key).name == "a.2.members.json"]
     assert [(brief[0], brief[2], brief[3]) for brief in look_alike] == [("a.2", {}, {})]  # whose it is, no members
     decoded.clear()
     assert packs.blob_bytes(tmp_path, refs["b"][0], task_id="nobody")  # a task without sidecars: nothing parsed
     assert [packs.blob_bytes(tmp_path, ref, task_id="a") for ref in refs["a"]] == first and decoded == []
     assert packs.blob_bytes(tmp_path, refs["b"][0], task_id="b") and decoded == ["b.members.json"]
-    assert {pathlib.Path(key[0]).name for key in packs._KEPT[1]} == {"b.members.json"}  # a's are no longer held
+    assert {pathlib.Path(key).name for key in packs._KEPT[1]} == {"b.members.json"}  # a's are no longer held
     decoded.clear()
-    assert packs.blob_bytes(tmp_path, refs["a"][0], task_id="a") == first[0] and sorted(decoded) == names
+    for tick in range(1, 4):  # a's first generation answers its blob, alone; its file in three states, one entry
+        os.utime(sidecar, ns=(tick * 10**9, tick * 10**9))
+        assert packs.blob_bytes(tmp_path, refs["a"][0], task_id="a") == first[0]
+    assert decoded == ["a.members.json"] * 3 and [pathlib.Path(key).name for key in packs._KEPT[1]] == ["a.members.json"]
     (packs.packs_dir(tmp_path) / packs.INDEX_NAME).unlink()  # no cache could vouch for the replaced file
-    (packs.packs_dir(tmp_path) / "a.members.json").write_text("{", encoding="utf-8")
+    sidecar.write_text("{", encoding="utf-8")
     decoded.clear()
     with pytest.raises(packs.EvidenceUnavailable):  # its own sidecar unreadable and no cache to say more now
         packs.blob_bytes(tmp_path, refs["a"][0], task_id="a")
-    assert decoded == ["a.members.json"]  # read again, never answered from the old parse
+    assert decoded[0] == "a.members.json"  # read again (first, generation after generation), never the old parse
 
+
+
+def test_a_read_of_a_task_s_first_generation_opens_no_look_alike_sidecar(tmp_path, monkeypatch):
+    """A task's sidecars are probed generation after generation by spelling, so for task ``a`` the names of tasks
+    ``a.2`` ... (look-alikes) come up too: a blob its first generation holds is answered there, the walk ending at
+    that hit, so no look-alike is opened beside 1 or 30 of them; a blob of its second own generation, past the
+    look-alikes, is still read."""
+    from ouroboros import evidence_packer, evidence_packs as packs
+    from tests.test_evidence_packs import _blob, _result, _task
+
+    decoded, opened = _spy_sidecars(monkeypatch), {}
+    for k in (K_SMALL, K_LARGE):
+        root = tmp_path / f"k{k:03d}"
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+        first = _task(root, "a", blobs=1)[0][0]
+        for n in range(2, k + 2):
+            _task(root, f"a.{n}", blobs=1)
+        assert evidence_packer.run_pass(root)["faults"] == 0
+        later = _blob(root, json.dumps({"message": {"content": "a later answer"}}).encode())
+        (root / "observability" / "calls" / "a" / "llm_9_response.json").write_text(
+            json.dumps({"call_id": "llm_9", "full_payload_ref": later}), encoding="utf-8")
+        _result(root, "a", "completed")
+        assert evidence_packer.run_pass(root)["packed"] == 1  # its second own generation, past the look-alikes
+        monkeypatch.setattr(packs, "_KEPT", ("", {}))
+        decoded.clear()
+        assert packs.blob_bytes(root, first, task_id="a")
+        opened[k] = list(decoded)
+        assert json.loads(packs.blob_bytes(root, later, task_id="a")) == {"message": {"content": "a later answer"}}
+    assert opened == {K_SMALL: ["a.members.json"], K_LARGE: ["a.members.json"]}, opened
 
 # ---- the Host Service operation read: one accepted message over k-scaled room, routing and task history
 
