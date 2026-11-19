@@ -169,7 +169,7 @@ def test_old_reader_export(tmp_path, monkeypatch):
         finally:
             release.set()
         reply = forced.result()
-    doc = json.loads(q.QUEUE_SNAPSHOT_PATH.read_text())
+    doc = json.loads(q.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     assert reply is True and doc[FORMAT_KEY] == 1 and SHARED_KEY not in doc
     assert doc["pending"][0]["task"]["text"] == "newest input"
 
@@ -184,7 +184,7 @@ def test_repair_order(tmp_path, monkeypatch, bad):
     q, _, _ = _tree(tmp_path, monkeypatch, sibling=True)
     assert q.publish_queue_snapshot("before")
     path = tmp_path / "state/queue_dispatch.json"
-    doc = json.loads(path.read_text())
+    doc = json.loads(path.read_text(encoding="utf-8"))
     if bad == "generation":
         doc["generation"] = 7
     if bad == "members":

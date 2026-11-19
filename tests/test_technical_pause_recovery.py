@@ -94,7 +94,7 @@ def test_restore_busy(tmp_path, monkeypatch):
     initial_pending = [row["id"] for row in q.PENDING]
     q.PENDING.append({"id": "new-arrival", "type": "task", "chat_id": 0})
     published = q.publish_queue_snapshot("admit")
-    ids = [r["id"] for r in json.loads(q.QUEUE_SNAPSHOT_PATH.read_text())["pending"]]
+    ids = [r["id"] for r in json.loads(q.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))["pending"]]
     assert recovered == 1 and initial_pending == [task["id"]]
     assert published and set(ids) == {task["id"], hidden["id"], "new-arrival"}
 
@@ -151,7 +151,7 @@ def test_pause_during_shutdown(tmp_path, monkeypatch, presence):
             retain_saved_work=True,
             stop_source="server_shutdown",
         )
-    old = json.loads(q.QUEUE_SNAPSHOT_PATH.read_text())
+    old = json.loads(q.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     saved = bp.budget_pause_row(tmp_path, tid)
     workers.PENDING.clear()
     workers.RUNNING.clear()
@@ -374,7 +374,7 @@ def test_envelope_discovery_obeys_the_same_boot_decisions(tmp_path, monkeypatch,
 
     q.PENDING.append({"id": "other", "type": "task", "chat_id": 0})
     assert q.publish_queue_snapshot("other_work")
-    ids = {row["id"] for row in json.loads(q.QUEUE_SNAPSHOT_PATH.read_text())["pending"]}
+    ids = {row["id"] for row in json.loads(q.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))["pending"]}
     assert {"other", "technical"} <= ids
     assert (tid in ids) == (decision in {"ready", "acceptance"})
     if tid in ids:

@@ -141,7 +141,7 @@ def test_private_settings_do_not_enter_the_fallback_workspace_patch(tmp_path, mo
         copy, artifacts, task=task, retain_evidence_dir=tmp_path / "saved"
     )
     assert manifest["named_evidence"]["status"] == "capture_failed"
-    patch = (artifacts / "workspace.patch").read_text()
+    patch = (artifacts / "workspace.patch").read_text(encoding="utf-8")
     assert "fixture-public" in patch
     assert "fixture-private" not in patch
     assert manifest["named_evidence"]["gaps"] == 1
@@ -177,7 +177,7 @@ def test_product_patch_can_contain_owner_configured_values(tmp_path, monkeypatch
     monkeypatch.setattr(config, "load_settings", lambda **kw: {"OPENAI_API_KEY": key})
     (copy / "old.txt").write_text(key)
     _git(copy, "add", "old.txt")
-    _git(copy, "commit", "-m", "fixture with earlier value")
+    _git(copy, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "fixture with earlier value")
     task["metadata"]["workspace_preflight"]["git"]["head"] = _git(copy, "rev-parse", "HEAD")
     (copy / "old.txt").unlink()
     (copy / "copy.txt").write_bytes(b"x" * ((1 << 20) - 4) + key.encode())

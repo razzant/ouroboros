@@ -753,7 +753,7 @@ def test_public_patch_survives_benign_build_activity(tmp_path, monkeypatch, acti
         if activity == "touch":
             os.utime(public, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
         elif activity == "append":
-            with public.open("a") as stream:
+            with public.open("a", encoding="utf-8") as stream:
                 stream.write("# build complete\\n")
         return classify(*args, **kwargs)
 

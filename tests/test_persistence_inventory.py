@@ -1576,16 +1576,16 @@ def test_an_enclosing_binding_is_unknown_never_the_module_literal(tmp_path):
 
 def test_wait_and_pause_source_prefixes_have_lifetime_rows():
     for name in ("owner_wait", "budget_pause"):
-        tree = ast.parse((REPO / "ouroboros" / (name + ".py")).read_text())
+        tree = ast.parse((REPO / "ouroboros" / (name + ".py")).read_text(encoding="utf-8"))
         prefixes = [node.args[2].left.value for node in ast.walk(tree) if isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name) and node.func.id == "store_continuation_source"]
         assert prefixes
         for prefix in prefixes:
             assert any("/context_checkpoints/" + prefix in line.split("|")[1] and "[record]" in line
-                       for line in DOC.read_text().splitlines() if line.startswith("|"))
+                       for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("|"))
 
     for term in ("park_task", "cause", "auto_resume", "resume_policy", "authority_notice_registered", "selection_door"):
-        assert f"`{term}`" in next(line for line in DOC.read_text().splitlines() if line.startswith("| task documents:"))
-    for line in DOC.read_text().splitlines():
+        assert f"`{term}`" in next(line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("| task documents:"))
+    for line in DOC.read_text(encoding="utf-8").splitlines():
         if "/context_checkpoints/" in line and ("owner-wait-" in line or "budget-pause-" in line):
             assert "indefinite" in line and "no independent remover" in line
