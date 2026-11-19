@@ -354,6 +354,7 @@ _CONVERSATION_READERS = {
     "ouroboros/dialogue_provenance.py::RoomLabelResolver.label": "whether a row's facts carry their conversation's scalars",
     "ouroboros/dialogue_provenance.py::RoomLabelResolver._place_label": "tail facts or a row: the scalar name/audience only",
     "ouroboros/memory_view_conversations.py::_scalars": "tail facts or a row: the conversation's scalars only, for a label",
+    "ouroboros/memory_view_events.py::receipt_situation": "the task document's route conversation: a string title/name/full name/username only, for a label",
     "ouroboros/tools/chronicle.py::publish_covered_page": "a page's own covers.conversation flag, never a row's conversation",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).

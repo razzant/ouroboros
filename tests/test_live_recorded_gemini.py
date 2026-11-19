@@ -70,6 +70,15 @@ def test_recorded_unfinished_captions_release_share_and_named_look_at_quiet(gemi
         gateway = asyncio.create_task(serve_peer(page, host.hub, role='owner', video=True))
         running = asyncio.create_task(call.run())
         snapshots = []
+
+        async def caught_up():
+            # The replay moves its clock as fast as the loop allows, and the gateway takes the page's frames on its
+            # own turns. Unless the door has taken them before the clock moves, the clock outruns it wherever timers
+            # are coarse: on Windows the replay passed only while the door's 10 ms timeout spun the loop (#3796).
+            while not (page.incoming.empty() or gateway.done()):  # an ended door leaves its disconnect queued
+                await asyncio.sleep(0)
+            await asyncio.sleep(.001)
+
         try:
             await until(lambda: call.connected.is_set())
             pending = iter(timeline['timeline'])
@@ -98,7 +107,7 @@ def test_recorded_unfinished_captions_release_share_and_named_look_at_quiet(gemi
                         'unheard': call.unheard(), 'session': {k: bool(getattr(session, k)) for k in
                             ('input_pending', 'output_pending', 'turn_busy', 'calls', 'held_context')}})
                 if running.done(): await running
-                await asyncio.sleep(.001)
+                await caught_up()
             record_property('quiet_checkpoints', json.dumps(snapshots))
             record_property('offers', json.dumps(offered))
             offers = [v['clientContent'] for v in wire.sent if 'clientContent' in v][1:]

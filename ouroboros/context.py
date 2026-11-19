@@ -905,9 +905,16 @@ def _capture_context_core(
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole
     # only where the view holds it; a child or nanny starts with its outline (every note by address
     # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
+    from ouroboros.memory_view_events import situation_names
+
     project_id = resolve_project_id(task)
-    head_parts = (build_knowledge_sections(context_env, project_id=project_id) if view_spec.knowledge
-                  else helper_navigation_sections(canonical_root, project_id))
+    held_resume = getattr(ctx, "_held_note_capture", None)
+    global_knowledge = ({"bodies": {}, "names": situation_names(task, view_spec.room_id)}
+                        if held_resume is None and view_spec.knowledge else {})
+    head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge,
+                                           held_capture=held_resume)
+                  if view_spec.knowledge else
+                  helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge))
     if design_nav:
         head_parts.append(design_nav)
 
@@ -1036,6 +1043,9 @@ def _capture_context_core(
         from ouroboros.return_facts import turn_sections
 
         dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
+    from ouroboros.held_notes import turn_sections as held_note_sections
+
+    dynamic_parts.extend(held_note_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx))
 
     return _ContextCore(
         base_prompt=base_prompt,
@@ -1059,6 +1069,7 @@ def _capture_context_core(
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
         connections=connections,
+        held_note_resume=held_resume,
     )
 
 

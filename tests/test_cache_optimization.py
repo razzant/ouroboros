@@ -57,6 +57,72 @@ def test_build_llm_messages_marks_every_stable_block_before_the_changing_tail():
     assert system_msg[STABLE_PREFIX_BLOCKS_KEY] == len(stable)
 
 
+def test_a_held_head_changes_c_before_the_assignment_and_keeps_a_prime_d_and_b(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros import context, knowledge
+    from ouroboros.context_fit import seal_task_transcript
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_claudexor import _request
+
+    env, memory = _make_env_and_memory(tmp_path)
+    monkeypatch.setattr(context, "utc_now_iso", lambda: "2026-11-18T20:00:00Z")
+    monkeypatch.setattr(context, "build_health_invariants", lambda *_a, **_kw: "")
+    monkeypatch.setattr(context, "_record_memory_view", lambda *_a, **_kw: {})
+    monkeypatch.setattr("ouroboros.context_runtime_facts.disk_view", lambda *_a, **_kw: {})
+    # The queue's dated observation is process-wide: its age must not differ between the two builds compared here.
+    monkeypatch.setattr(context, "_queue_context_fact", lambda _task: {"note": "Queue observation unavailable."})
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    evidence = SimpleNamespace(route_fp="held-cache", status="asserted", stale=False, window_tokens=1_000_000)
+    task = {"id": "cache-held", "type": "task", "chat_id": 1, "text": "Newest owner words for the cache test."}
+    heading, head = "## Held knowledge notes", "One fact from the held head."
+    tools = [{"type": "function", "function": {"name": "read_fixture", "parameters": {"type": "object"}}}]
+
+    def build():
+        messages, _ = context.build_llm_messages(env, memory, task, tool_schemas=tools,
+            route_resolver=lambda *_a, **_kw: ({"model": "fixture", "provider": "test"}, evidence))
+        seal_task_transcript(messages)
+        return messages
+
+    address = knowledge.resolve_knowledge_address(env.drive_root, "work-note", "global")
+    held_source = "---\ntype: note\nclaims: ['room:1']\n---\n" + head
+    original = knowledge.write_knowledge_note(address, held_source)
+    assert original.ok
+    before = build()
+    adopted = knowledge.write_knowledge_note(address, held_source, writer="turn",
+                                             expected_revision=original.current.revision)
+    assert adopted.ok and adopted.current.revision == original.current.revision
+    after = build()
+    old_blocks, new_blocks = before[0]["content"], after[0]["content"]
+    assert len(old_blocks) == len(new_blocks) == 4
+    assert old_blocks[:3] == new_blocks[:3] and before[1:] == after[1:]
+    assert heading not in old_blocks[-1]["text"]
+    assert new_blocks[-1]["text"].count(head) == 1
+    assert new_blocks[-1]["text"].partition(heading)[0] == old_blocks[-1]["text"] + "\n\n"
+
+    client = LLMClient(api_key="unused")
+
+    def marked_wire(rows):
+        target = {"provider": "openrouter", "resolved_model": "anthropic/claude-fable-5",
+                  "supports_openrouter_extensions": True}
+        payload = client._build_remote_kwargs(target, rows, "high", 512, "auto", None, tools, skip_capability_fetch=True)
+        client._normalize_payload_cache_ttl(target, payload)
+        return payload
+
+    old_wire, new_wire = [marked_wire(rows) for rows in (before, after)]
+    old_system, new_system = [wire["messages"][0]["content"] for wire in (old_wire, new_wire)]
+    assert old_system[:3] == new_system[:3]
+    assert all("cache_control" in block for block in new_system[:3])
+    assert heading not in old_system[3]["text"] and head in new_system[3]["text"]
+    assert LLMClient._payload_cache_breakpoints(new_wire)[-1]["text"] == task["text"]
+
+    old_items, new_items = [_request({"source": "codex", "resolved_model": "gpt-6"}, rows, tools, {})["messages"]
+                            for rows in (before, after)]
+    assert old_items[:3] == new_items[:3] and all(row["role"] == "system" for row in new_items[:3])
+    assert heading not in str(old_items[3]) and head in str(new_items[3])
+    assert old_items[4:] == new_items[4:] and new_items[4]["content"] == task["text"]
+
+
 def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     from ouroboros.context import build_llm_messages
 
