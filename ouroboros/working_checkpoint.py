@@ -406,11 +406,13 @@ def discard(root: Any, task_id: str) -> None:
 
 # --- recovery: supervisor freezes, the next start restores ---------------------------
 
-def expand_working(root: Any, wrapper: Dict[str, Any]) -> Dict[str, Any]:
-    """The whole state of a ``working_shared_v1`` file: its parts read from the CAS below ``root``.
+def expand_working(root: Any, wrapper: Dict[str, Any], task_id: Optional[str] = None) -> Dict[str, Any]:
+    """The whole state of a ``working_shared_v1`` file: its parts read from the CAS below ``root``
+    (``task_id``, the checkpoint's task, is the packs reader's cost hint).
 
     A part nothing holds is ``SharedValueMissing`` (a ``ValueError``, like an identity mismatch):
-    the caller keeps its original-prompt or terminal path, never a narrower continuation.
+    the caller keeps its original-prompt or terminal path, never a narrower continuation. A part
+    whose bytes cannot be located now raises ``EvidenceUnavailable`` (an ``OSError``), never missing.
     """
     from ouroboros.evidence_packs import blob_bytes
     from ouroboros.shared_values import SharedValueMissing, expand
@@ -418,7 +420,7 @@ def expand_working(root: Any, wrapper: Dict[str, Any]) -> Dict[str, Any]:
     def part(digest: str) -> Any:
         try:
             return json.loads(blob_bytes(root, {"sha256": digest, "kind": "json", "encoding": "gzip"},
-                                         expected_kind="json"))
+                                         expected_kind="json", task_id=task_id))
         except FileNotFoundError:
             raise SharedValueMissing(digest, "working checkpoint") from None
 
@@ -437,7 +439,7 @@ def read_working(root: Any, task_id: str, attempt: int) -> tuple:
         return b"", {}
     state = json.loads(data.decode("utf-8"))
     if isinstance(state, dict) and state.get("format") == WORKING_SHARED_FORMAT:
-        state = expand_working(root, state)
+        state = expand_working(root, state, str(task_id))
         data = json.dumps(state, ensure_ascii=False).encode("utf-8")
     if (not isinstance(state, dict) or state.get("task_id") != str(task_id)
             or int(state.get("task_attempt") or 0) != int(attempt) or not isinstance(state.get("working"), dict)):

@@ -152,13 +152,13 @@ def release_sensitive_changes(
     }
 
 
-def _call_payload(call_ref: dict, drive_root: pathlib.Path) -> dict:
+def _call_payload(call_ref: dict, drive_root: pathlib.Path, task_id: str = "") -> dict:
     from ouroboros.observability import read_blob_ref
 
     projection = (call_ref or {}).get("redacted_projection_ref") or {}
     if not projection:
         return {}
-    payload = read_blob_ref(drive_root, projection)
+    payload = read_blob_ref(drive_root, projection, task_id=task_id or None)
     if not isinstance(payload, dict):
         raise ValueError("review call payload is not an object")
     return payload
@@ -177,11 +177,12 @@ def _receipt_payloads(
     surface: str,
     slot_id: str,
     mismatches: list[str],
+    task_id: str = "",
 ) -> tuple[dict, dict]:
     payloads: list[dict] = []
     for label in ("prompt", "response"):
         try:
-            payloads.append(_call_payload(dict(actor.get(f"{label}_ref") or {}), drive_root))
+            payloads.append(_call_payload(dict(actor.get(f"{label}_ref") or {}), drive_root, task_id))
         except Exception as exc:
             payloads.append({})
             mismatches.append(
@@ -348,8 +349,10 @@ def bind_execution_receipts(
     resolved_config: dict,
     drive_root: pathlib.Path,
     live_plan_sha256: str = "",
+    task_id: str = "",
 ) -> tuple[list[dict], list[str], list[dict]]:
-    """Bind configured, dispatched and observed facts for every reviewer slot."""
+    """Bind configured, dispatched and observed facts for every reviewer slot (``task_id``: the review's task,
+    whose call records hold every seat's receipts, the packs reader's cost hint)."""
     requested: dict[tuple[str, str], dict] = {}
     for row in resolved_config.get("pool_slots") or []:
         requested[("pool", str(row.get("slot_id") or ""))] = dict(row)
@@ -379,7 +382,7 @@ def bind_execution_receipts(
         status = str(actor.get("status") or "")
         prompt, response = _receipt_payloads(
             actor, drive_root=drive_root, surface=surface, slot_id=slot_id,
-            mismatches=mismatches,
+            mismatches=mismatches, task_id=task_id,
         )
         dispatched_slot = (
             dict(prompt.get("slot") or {}) if isinstance(prompt.get("slot"), dict) else {}

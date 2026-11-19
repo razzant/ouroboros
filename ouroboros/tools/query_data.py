@@ -223,6 +223,16 @@ def _plane_path(ctx, plane, root, relative, local):
     return path
 
 
+def _holds_a_sidecar(directory):
+    """Whether one evidence-pack sidecar is published in ``directory``: the listing stops at the first,
+    so a history-sized packs directory is never read whole (a glob would list it all first)."""
+    try:
+        with os.scandir(directory) as entries:
+            return any(entry.name.endswith(".members.json") and not entry.name.startswith(".") for entry in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _child_root(ctx, canonical, child):
     from ouroboros.task_custody import own_child_drives
     caller = _name(ctx.task_id)
@@ -516,6 +526,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 timeout_sec=1, save_as="", format="json", view_head_chars=None, view_tail_chars=None) -> str:
     from ouroboros.artifacts import store_task_artifact_bytes
     from ouroboros.tool_access import canonical_data_root
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref
 
     # ``plane`` names the plane a result was read from; ``requested_plane`` is the caller's selector.
@@ -592,7 +603,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             if db == "money" and not child_task_id and root != canonical:  # one ledger, the owner's (USAGE_STORE §4)
                 root, plane = canonical, owner
             path = _plane_path(ctx, plane, root, sql.database_path(root, db).relative_to(root), local)
-            absent = not any(path.parent.glob("*.members.json")) if db == "packs" else not path.is_file()
+            absent = not _holds_a_sidecar(path.parent) if db == "packs" else not path.is_file()
             if absent:
                 result = {"status": "unavailable", "code": "no_packs" if db == "packs" else "not_found", "source": {"db": db}}
             else:
@@ -609,8 +620,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             if not re.fullmatch(r"[0-9a-f]{64}", sha256) or blob_kind not in {"json", "txt", "bin"}:
                 raise ValueError("blob requires a lowercase sha256 and blob_kind=json|txt|bin")
             # Local (caller or selected child) bytes first; the owner plane only when they are proven
-            # absent there, never after a denied or corrupt read. Each loose or pack file opened stays
-            # in its plane; an owner-plane file is itself admitted, not the digest's logical name.
+            # absent there, never after a denied, corrupt or not-yet-locatable read. Each loose or pack file
+            # opened stays in its plane; an owner-plane file is itself admitted, not the digest's logical name.
             missed = []
             for plane, plane_root in [(plane, root), *([(owner, canonical)] if canonical != root else [])]:
                 try:
@@ -622,10 +633,15 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                     missed.append(plane)
                 except PermissionError as exc:
                     raise PermissionError("".join(f"blob not found in the {p} plane; " for p in missed) + str(exc)) from None
+                except EvidenceUnavailable as exc:  # where the bytes lie is unknown now; the address stays good
+                    result = {"status": "unavailable", "code": "evidence_unavailable", "reason": exc.reason,
+                              "message": f"{exc}; the same call may be asked again", "source": source}
+                    break
             else:
                 raise FileNotFoundError("blob not found in the " + " or ".join(missed) + " plane" + _BLOB_KIND_HINT)
-            value = json.loads(raw) if blob_kind == "json" else {"hex": raw.hex()} if blob_kind == "bin" else raw.decode("utf-8")
             source.update(sha256=sha256, blob_kind=blob_kind)
+            if not result:
+                value = json.loads(raw) if blob_kind == "json" else {"hex": raw.hex()} if blob_kind == "bin" else raw.decode("utf-8")
         else:
             if kind == "chat_log":  # the kind that advertised logs/chat.jsonl, frozen at the dialogue-store cutover
                 raise ValueError('kind="chat_log": logs/chat.jsonl is frozen since the dialogue store cutover and holds '

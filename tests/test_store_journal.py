@@ -599,8 +599,7 @@ def test_a_private_build_publishes_its_choice_with_nothing_beside_it(tmp_path, m
     store_import.ensure_current_store(tmp_path, with_children=False)
     usage_store.migrate_from_journal(tmp_path)
     dialogue_store.create(tmp_path, tier=store.TIER_ENFORCED)
-    with evidence_packs.open_index(tmp_path):
-        pass
+    evidence_packs.ensure_index(tmp_path)
     monkeypatch.setattr(os, "replace", replace)
     store.close_connections()
     assert sorted(published) == ["current.sqlite", "dialog.sqlite", "index.sqlite", "usage.sqlite"]
@@ -769,19 +768,23 @@ def test_a_retier_leaves_wal_under_the_old_tier_before_the_header_names_the_new_
 
 def test_a_wal_evidence_index_another_runtime_built_is_rebuilt_not_converted(tmp_path, monkeypatch):
     """The evidence index is a cache with its own private build: a WAL index that this runtime must not
-    share fails validation instead of being converted, and the rebuild publishes this runtime's choice
-    with the same rows (lazy child stores keep their creator's choice the same way)."""
+    share fails its builder's validation instead of being converted (a reader's open answers this runtime's
+    verdict and marks nothing: no fact of the file), and the rebuild publishes this runtime's choice with the
+    same rows (lazy child stores keep their creator's choice the same way)."""
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_index_rebuild import _publish, _tasks
 
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "WAL")
     _publish(tmp_path, "t1")
+    packs.ensure_index(tmp_path)
     assert _tasks(tmp_path) == {"t1"}
     index = packs.packs_dir(tmp_path) / packs.INDEX_NAME
     store.close_connections()
     assert store.wal_file(index)
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
-    monkeypatch.setattr(packs, "_VALIDATED", {})
+    with pytest.raises(sqlite3.OperationalError, match="journal"), packs.open_index(tmp_path):
+        pass
+    assert not packs.index_owed(tmp_path) and packs.ensure_index(tmp_path)["sidecars"] == 1  # rebuilt, never converted
     assert _tasks(tmp_path) == {"t1"}
     store.close_connections()
     assert not store.wal_file(index)

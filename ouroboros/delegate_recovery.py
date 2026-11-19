@@ -1189,7 +1189,11 @@ def _adopt_holder(ctx: Any, task: Mapping[str, Any], row: dict, holder: dict, *,
         if pending.get("work_order_source_request"):
             retry["work_order_source_request"] = pending["work_order_source_request"]
         from ouroboros.delegate_pending import request_body
-        prompt = (request_body(drive, pending) or {}).get("prompt")
+        from ouroboros.evidence_packs import EvidenceUnavailable
+        try:
+            prompt = (request_body(drive, pending, raise_unavailable=True) or {}).get("prompt")
+        except EvidenceUnavailable:  # where the body lies cannot be learned now: the next pass reads it again
+            return {**identity, "status": "deferred", "reason": "evidence_unavailable"}
         if not isinstance(prompt, str) or not prompt:
             return {**identity, "status": "refused", "reason": "pending_request_prompt_missing"}
         parsed = delegate_payload(exact_start(ctx, prompt, retry))
