@@ -2856,7 +2856,8 @@ instead, and let the status text carry the claim.
 Accounts is the common connection surface for subscriptions and API keys. An API key is a §6 row of its provider (the built-in Default, then keys added with Add key): name and status, a meta line naming its roles, Test, its on/off and Remove (on Default it clears the key); an OpenAI key's API strip (Chat Completions · Responses; new keys start on Responses) is what Test uses. A role names its key; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host, keeping the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
-Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
+Source / Model / Account row to change it. In the wizard each role says once, under its name,
+what work it serves (the setup contract's note, Fallback its order sentence); never a hover title. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
 Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
@@ -2885,14 +2886,28 @@ operation id. A changed receipt can offer Return to its prior version when suppo
 A nonzero installer exit can still mean Updated: retain the limitation sentence.
 A package-manager updater's advice remains advice, never an automatic command.
 
-Only an opened model list shows a non-option closing row per producer: “List from”
+An opened model list shows a non-option closing row per producer: “List from”
 when it supplies every suggestion, otherwise the supplied subset with its source label
 (e.g. “Claudexor entries supplied by Codex”), then the newest fact and Update when needed.
 Every editor built on the shared chooser follows this rule. Closed
-editors stay quiet; API-only lists have no such row. Mouse, touch and keyboard Update
+editors stay quiet; API-only lists have no such row. The wizard's Accounts step shows the
+same line under a family's status, led by its program's version (“Program 0.50.0 · 0.60.0
+available”, then Update), only when there is something to act on (an update, a refused update
+with the engine's reason, an operation under way or the error of one the owner started) and
+the newest-release read has answered; without a Details disclosure. Its silence otherwise is
+intentional: an up-to-date program, a family with no program (Connect installs it), an engine
+that is not running or a read the engine refused say nothing there, while Accounts keeps
+“Program X · Up to date”. The owner's own unresolved press or operation is the exception: its
+reason and its recovery (Retry same request, Check operation) stay through a failed read or one
+that finds no program, and an Update the engine never received (not submitted) keeps its reason,
+in warn ink, beside Update, a new press, while that update is still offered.
+After a failed Connect that line is the offer, with no claim about
+the cause (owner decision 2026-11-20). A line arriving for one family keeps focus on another's
+Connect. Mouse, touch and keyboard Update
 keep the list open through progress and result, then refresh its suggestions. Typed
 values/carets survive; “Custom ID · Not in this list” stays under an unlisted input.
-Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator.
+Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator; the
+version and the newest fact are one fact, joined by “ · ”, which never starts a line.
 
 Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
 dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of
@@ -2944,7 +2959,7 @@ preserve the edited value, caret, focus, selection and scroll position, assignin
 reviewer's previous source restores that source's model/account draft; a new
 source starts without another source's pin.
 
-The five wizard steps are Accounts, Models, Review and access, Budget, Summary. Codex is the
+The six wizard steps are Accounts, Models, Review and access, Consciousness, Budget, Summary. Codex is the
 recommended start without an API key; other connections name their capability.
 Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
 contextual Retry that keeps the fields. Connected accounts the engine names as agents only read
@@ -2969,19 +2984,18 @@ optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled. When a subscription serves a model, Summary says
 what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
-Before the first completion, Summary offers Consciousness as an unchecked choice. Its
-row names the autonomy, daily allowance and own-task limit consciousness runs under
-now, and where to change or stop it (owner decision 2026-11-04: a visible, unchecked
-offer in the wizard; a conversation can personalize it later). A consciousness already
-on reads On already, with nothing to tick; a completed setup shows no row. The choice
-is never saved. Only a tick and a confirmed save send one ordinary Start, and the
-screen after the save keeps saved, accepted and observed on apart. A Start that was
-not sent, was refused or is not confirmed says so and is never sent again, also when
-the page was left and shown again. Summary labels the model row Consciousness model,
-so it does not read as this offer.
+Consciousness is its own step only before a first state exists, on a new data root or after an owner Reset (owner
+decision 2026-11-20, replacing the unchecked Summary offer of 2026-11-04): one large switch of the wizard's two
+choices, its positions in Dashboard › Consciousness words, starting on. Where any state exists the step is absent,
+whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
+Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
+switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
+own-task limit it runs under now, and where to change it later. Review & start lands on it; its Continue goes to
+Summary, one row there. The choice rides the one save: no command, no row in Main. Summary labels the model row
+Consciousness model, so it does not read as this choice.
 
 The first-run wizard is compact; the step rail alone says which step this is. An
-ordinary Accounts state, blank or connected, fits a 980×752 client viewport
+ordinary Accounts state, blank or connected, and the Consciousness step fit a 980×752 client viewport
 with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,
 before any connection. A narrow or short window, expanded keys, a sign-in or a long

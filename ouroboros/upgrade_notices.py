@@ -29,6 +29,13 @@ chat is bound, and nothing is marked then but the Light rule's notice (judged at
 first start of its version: ``light_local_notice``); ``state.json`` records each notice only after
 it was handed to the owner-chat writer, so a failed write is retried at a later
 boot rather than claimed as published.
+
+A fresh install owes no news of an earlier release (owner decision 2026-11-20): every key is
+in exactly one of two tuples. ``BORN_SETTLED_NOTICE_KEYS`` are stamped on a created first state
+(``state_initialization.first_state``, a re-mint after loss and an owner Reset included); a birth
+stamp is not a delivery, and no chat receipt exists for it. ``JUDGED_BY_FACTS_NOTICE_KEYS`` are
+never stamped: they disclose what this install's document, environment or memory shows,
+whatever its age, so a wizard-less operator still hears them once.
 """
 
 from __future__ import annotations
@@ -46,6 +53,9 @@ COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
 REVIEW_ENFORCEMENT_NOTICE_KEY = "review_enforcement_notified"
 LIGHT_LOCAL_NOTICE_KEY = "light_local_box_notified"
 MODEL_CAP_NOTICE_KEY = "model_cap_notified"
+BORN_SETTLED_NOTICE_KEYS = (COMMAND_TIMEOUT_NOTICE_KEY, LIGHT_LOCAL_NOTICE_KEY)
+JUDGED_BY_FACTS_NOTICE_KEYS = (OPTIONAL_BOUNDS_NOTICE_KEY, REVIEW_ENFORCEMENT_NOTICE_KEY, MODEL_CAP_NOTICE_KEY,
+                               LEGACY_MEMORY_NOTICE_KEY)
 _CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
 _REVIEW_ENFORCEMENT_KEY = "OUROBOROS_REVIEW_ENFORCEMENT"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
@@ -120,10 +130,10 @@ def command_timeout_notice(document: Optional[Mapping[str, Any]], settings: Mapp
     Owed once to every install with a settings document, whatever the value or its origin: the
     owner retired the ceiling everywhere, a manually saved value included, and an install that
     ran under the implicit default need not have saved the key, so the document is the only fact.
-    A fresh install hears it once its first document exists, so the words claim no ceiling of
-    this install: they say what earlier versions did and name a value only where the document
-    carries one (the read seam no longer honors the key, ``RETIRED_SETTING_KEYS``). An install
-    without a settings document hears nothing.
+    A first state is born with it settled (``BORN_SETTLED_NOTICE_KEYS``): a fresh install hears
+    nothing. The words claim no ceiling of this install: they say what earlier versions did and
+    name a value only where the document carries one (the read seam no longer honors the key,
+    ``RETIRED_SETTING_KEYS``). An install without a settings document hears nothing.
     """
     if document is None:
         return ""
@@ -297,8 +307,8 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
         known, owner_chat = control_value(state, "owner_chat_id")
         if not known or not owner_chat:
             # Display-only backup values never authorize delivery. The Light rule is judged at the first start of
-            # this version: an install with no owner to tell yet (a fresh one, seeded or not) ran no work under the
-            # old rule, so it is marked now and a box it has or gets is never told as news of an update.
+            # this version: an upgraded install with no owner to tell yet (a first state is born with it marked) ran
+            # no work under the old rule, so it is marked now and a box it has or gets is never told as news.
             if known and not state.get(LIGHT_LOCAL_NOTICE_KEY):  # an unconfirmed state (a recovery, a stale read) leaves it owed
                 update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
             return

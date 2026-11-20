@@ -1400,6 +1400,7 @@ class OnboardingCompleteRequest(TypedDict, total=False):
     starter_skills: List[str]  # catalog ids installed once after completion; absent: the default starter list
     skill_source_trust: Dict[str, str]  # {hub row id: trusted|review}; marks those rows confirmed
     attempt_id: str  # client-made per save (16-128 of A-Z a-z 0-9 _ -); read back by GET with ?attempt=
+    consciousness: bool  # setup's Consciousness switch: true turns it on (owner's start); false and absent change nothing
 
 
 class OnboardingSubagentsPreviewResponse(TypedDict):

@@ -35,7 +35,7 @@ from ouroboros import maintenance_jobs, store
 PLACE_REMOVERS: Dict[str, tuple] = {
     "model_calls": ("evidence_packing",),
     "engine": ("engine",),
-    "task_results": ("evidence_packing", "record_compression", "runtime_retirement"),
+    "task_results": ("evidence_packing", "record_compression", "runtime_retirement", "saved_states"),
     "archives": ("evidence_packing", "record_compression"),
     "work_folders": ("drive_settlement", "custody_trash"),
     "working_copies": ("copy_retirement",),
@@ -62,7 +62,7 @@ _recent_lock = threading.Lock()
 class StorageRemover(TypedDict):
     """One remover of a place: a maintenance job's row, a server retirer pass's row or the engine's last retention pass."""
 
-    id: str  # engine | runtime_retirement | custody_trash | evidence_packing | record_compression | drive_settlement | copy_retirement | review_checkout_prune | session_scratch_release | engine_runtime_prune
+    id: str  # engine | runtime_retirement | saved_states | custody_trash | evidence_packing | record_compression | drive_settlement | copy_retirement | review_checkout_prune | session_scratch_release | engine_runtime_prune
     state: str  # a job: pending | running | done | failed | never | unsupported | unavailable; the engine: completed | held | truncated | failed | none | unavailable | unsupported
     at: Optional[str]  # the job row's last write; the engine pass's end
     last_error: NotRequired[Dict[str, str]]  # a job whose last run threw: {class, at}, until a run returns normally

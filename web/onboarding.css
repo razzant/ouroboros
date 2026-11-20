@@ -142,13 +142,13 @@ textarea::placeholder {
 .wizard-steps {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(min-content, 1fr); /* a one-word title (Consciousness) never runs into its neighbour */
   gap: 10px;
 }
 
 /* The step rail: trays, the current step a chosen card in the soft crimson, a done step's chip in green. */
 .wizard-step {
-  min-width: 0;
+  min-width: min-content;
   padding: 10px 12px;
   border-radius: var(--radius-inner);
   border: 1px solid transparent;
@@ -825,6 +825,14 @@ textarea::placeholder {
   top: -1px;
 }
 
+/* A family's program line (docs/DESIGN.md §7): the model chooser's compact line under the row's status, shown only
+   with something to act on. Its Update takes the in-row control size so the line stays compact. */
+.agent-family-identity .harness-model-program {
+  --control-h: var(--control-h-sm);
+  --control-pad-x: var(--space-3);
+  --button-font-size: var(--type-meta);
+}
+
 .agent-service-note,
 .agent-outcome {
   font-size: var(--type-meta);
@@ -1358,7 +1366,7 @@ textarea::placeholder {
   }
 }
 
-/* A short window: each pill as wide as its own title, so five titles stay on one line where they fit. */
+/* A short window: each pill as wide as its own title, so six titles stay on one line where they fit. */
 @media (max-height: 820px) {
   .wizard-steps {
     display: flex;
@@ -1420,7 +1428,7 @@ textarea::placeholder {
   }
 }
 
-/* A rail too narrow for five titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
+/* A rail too narrow for six titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
 @media (max-width: 720px) {
   .wizard-steps {
     display: flex;
@@ -1472,12 +1480,13 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
    depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
-/* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
-.skills-starter-summary, .consciousness-offer { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value, .consciousness-offer-value, .consciousness-offer-choice { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub, .consciousness-offer-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-offer-choice { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; cursor: pointer; }
-[data-consciousness-offer]:empty { display: none; } /* no row offered: no extra gap in the card */
+.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
+.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
+   subscription pays with, its limits and its door. */
+.consciousness-step { display: grid; gap: var(--space-2); }
+.consciousness-step .wizard-choice-grid { margin-bottom: var(--space-1); }
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;

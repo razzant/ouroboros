@@ -482,7 +482,12 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     if _custody().review_owned_source(record.get("source")):
         return _retain_panel_invocation(drive_root, record)
     from ouroboros.delegate_pending import request_body
-    body = request_body(drive_root, record)
+    from ouroboros.evidence_packs import EvidenceUnavailable
+    try:
+        body = request_body(drive_root, record, raise_unavailable=True)
+    except EvidenceUnavailable:  # stored, but where cannot be learned now: retained for a later pass, recorded never
+        return {"invocation_id": invocation_id, "task_id": task_id,
+                "action": "invocation_retained", "reason": "evidence_unavailable"}
     if not isinstance(body, dict) or not body:
         result = {"invocation_id": invocation_id, "task_id": task_id,
                   "action": "invocation_retained", "reason": "invocation_request_unrecorded"}

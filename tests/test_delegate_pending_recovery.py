@@ -253,6 +253,54 @@ def test_definite_retry_refusal_retires_handoff_without_false_pending_claim(
     custody._CUSTODY.clear()
 
 
+def test_a_pending_body_that_cannot_be_located_now_defers_the_holder(monkeypatch, tmp_path):
+    """The holder's replay reads its pending invocation's stored body. While that body, held only by another task's
+    pack, cannot be located (the packs catalog is held), the holder is deferred and kept for the next pass, never
+    refused as a missing prompt; once the body reads, the next pass replays exactly that body."""
+    import threading
+
+    import ouroboros.tools.delegate as delegate
+    from ouroboros import evidence_packs, store
+    from ouroboros.tools.registry import ToolContext
+
+    custody, recovery, task, _snapshot, invocation_id, _fingerprint, _authority = (
+        _pending_handoff(tmp_path, "recovery-unlocated")
+    )
+    [ref] = [row["request_ref"] for row in custody._iter_rows(custody.event_log_path(tmp_path))
+             if row["type"] == custody.START_REQUESTED]
+    evidence_packs.write_pack(tmp_path, "other", 1, [ref])
+    evidence_packs.ensure_index(tmp_path)
+    (tmp_path / "observability" / "blobs" / f"{ref['sha256']}.{ref['kind']}.gz").unlink()
+    starts = []
+    monkeypatch.setattr(delegate, "exact_start", lambda _ctx, prompt, retry: starts.append(
+        (prompt, retry["retry_of"])) or _fail("delegate_start", "subscription_window_exhausted", "spent"))
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"])
+    ctx.budget_drive_root = str(tmp_path)
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with store.name_lock(tmp_path, evidence_packs.INDEX_LOCK_NAME, timeout_sec=5):
+            held.set()
+            release.wait(600)
+
+    holder = threading.Thread(target=hold, name="packer-holds-index")
+    holder.start()
+    try:
+        assert held.wait(5)
+        with store.acquisition_budget(0):
+            result = recovery.adopt_handoff(ctx, task)
+    finally:
+        release.set()
+        holder.join(10)
+    assert result["status"] == "recovery_required" and result["reason"] == "evidence_unavailable", result
+    assert recovery._read(tmp_path, task["id"])["holders"][0]["status"] == "deferred"
+    assert starts == [] and task["id"] in recovery.recoverable_task_ids(tmp_path)
+    assert [row["invocation_id"] for row in custody.pending_invocations(tmp_path)] == [invocation_id]
+    assert recovery.adopt_handoff(ctx, task)["reason"] == "pending_recovery_deferred"
+    assert starts == [("stored canonical request", invocation_id)]
+    custody._CUSTODY.clear()
+
+
 def test_started_retry_race_adopts_same_durable_invocation(monkeypatch, tmp_path):
     import ouroboros.claudexor_daemon as daemon
     import ouroboros.tools.delegate as delegate
@@ -421,4 +469,53 @@ def test_review_substrate_work_does_not_hold_the_actors_zero_run_fence(tmp_path)
         row.get("contract_kind")
         for row in read_verification_receipts(drive, ctx.task_id)
     ] == ["delegation_zero_run"]
+    custody._CUSTODY.clear()
+
+
+def test_a_session_start_keeps_its_held_heads_by_address_and_revision_and_replays_their_exact_text(tmp_path):
+    """Both directions of a start's held heads in custody. Without heads the stored envelope is the request's own
+    bytes and its row names none. With heads the stored envelope names each head by address, revision and digest
+    instead of its text, the text is one blob any start sending it shares, the row and the run's terminal receipt
+    name the heads (topic, revision, characters) that reach the parent's outcome, and every replay reads the exact
+    request back; a head whose blob is gone leaves the request unknown, never a body with a token in it."""
+    import hashlib
+
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_invocation import invocation_record
+    from ouroboros.delegate_terminal import terminal_custody_disclosure
+    from ouroboros.observability import _json_bytes, read_blob_ref
+    from ouroboros.tools.control_task_results import _subtask_outcome_summary
+
+    custody._CUSTODY.clear()
+    head = "Nova's working head.\nA second line, kept whole.\n"
+    revision = "a" * 64
+    body = {"prompt": "Build", "instructions": "OWNER RULES\n\n## Held knowledge notes\n\n### Nova\n\n" + head + "\n\n[Host: ...]"}
+    heads = [{"topic": "circle/nova", "revision": revision, "chars": len(head), "text": head}]
+    facts = [{"topic": "circle/nova", "revision": revision, "chars": len(head)}]
+    for invocation, held in (("inv-plain", None), ("inv-held", heads), ("inv-again", heads)):
+        assert custody.record_start_requested(
+            tmp_path, run_id="", task_id="nanny", invocation_id=invocation, idempotency_key=invocation, max_seconds=60,
+            request=body, project_id="", project_owned=False, route="codex", **({"held_heads": held} if held else {}))
+        assert custody.record_started(tmp_path, custody.RunCustody(run_id=f"run-{invocation}", task_id="nanny",
+                                                                   route_id="codex", invocation_id=invocation))
+        assert custody.emit(tmp_path, custody.SETTLED, {"run_id": f"run-{invocation}", "task_id": "nanny", "state": "succeeded"})
+    rows = {row["invocation_id"]: row for row in custody.custody_rows(tmp_path) if row.get("type") == custody.START_REQUESTED}
+    stored = {key: read_blob_ref(tmp_path, row["request_ref"], expected_kind="json") for key, row in rows.items()}
+    assert rows["inv-plain"]["request_ref"]["sha256"] == hashlib.sha256(_json_bytes(body)).hexdigest()
+    assert stored["inv-plain"] == body and "held_heads" not in rows["inv-plain"]
+    for key in ("inv-held", "inv-again"):
+        assert head not in stored[key]["instructions"] and "\x00held head circle/nova@" + revision in stored[key]["instructions"]
+        assert rows[key]["held_heads"] == facts and invocation_record(tmp_path, key)["request"] == body
+    assert stored["inv-held"] == stored["inv-again"]  # one blob of the head's text, shared
+    assert invocation_record(tmp_path, "inv-plain")["request"] == body
+
+    disclosure = terminal_custody_disclosure(tmp_path, "nanny")
+    receipts = {row["run_id"]: row for row in disclosure["terminal_runs"]}
+    assert "held_heads" not in receipts["run-inv-plain"] and receipts["run-inv-held"]["held_heads"] == facts
+    outcome = json.loads(_subtask_outcome_summary({"task_id": "nanny", "delegate_terminal_reconciliation": disclosure}))
+    assert {row["run_id"]: row.get("held_heads") for row in outcome["delegated_custody"]["terminal_runs"]}["run-inv-held"] == facts
+
+    (blob,) = (tmp_path / "observability" / "blobs").glob("*.txt.gz")
+    blob.unlink()
+    assert invocation_record(tmp_path, "inv-held")["request"] is None
     custody._CUSTODY.clear()

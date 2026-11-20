@@ -1,6 +1,6 @@
 // Catalog provenance and maintenance inside the shared model chooser. No model
 // entitlement rule lives here: the catalog names its producer, inventory its actions.
-import { createHarnessMaintenanceController, maintenanceLatestLine, maintenanceOperationLine, maintenanceOperationPending } from './harness_maintenance.js';
+import { createHarnessMaintenanceController, maintenanceLatestLine, maintenanceOperationLine, maintenanceOperationPending, maintenanceVersionLine } from './harness_maintenance.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { refreshMaintenanceCatalogs } from './settings_catalog.js';
 import { harnessPresentation } from './harness_presentation.js';
@@ -50,7 +50,8 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
     }));
 }
 
-export function modelProgramMarkup(program, view = {}) {
+/** `lead` opens the line: the chooser names the list's producer; a family row names its program's own version. */
+export function modelProgramMarkup(program, view = {}, lead = '') {
     const entry = view.entry;
     const operation = view.operation || entry?.operation;
     const pending = Boolean(view.request) || maintenanceOperationPending(operation);
@@ -58,15 +59,18 @@ export function modelProgramMarkup(program, view = {}) {
     const needsUpdate = entry && entry.updateAvailable !== 'no';
     const disabled = Boolean(view.busy || view.inspectionPending || pending);
     const verb = entry?.selection?.path ? 'Update' : 'Install';
-    const error = view.operationError || view.inspectionError || view.inventoryError;
-    const versions = [...new Set(program.programs.map((item) => item.version || 'version unknown'))].join(', ');
+    const readError = view.inspectionError || view.inventoryError;
+    const error = view.operationError || readError;
+    const versions = () => [...new Set(program.programs.map((item) => item.version || 'version unknown'))].join(', ');
     const subset = program.entrySources?.length ? `${program.entrySources.join(', ')} entries` : 'Models';
+    lead ||= `${program.mixed ? `${subset} supplied by` : 'List from'} ${program.label} ${versions()}`;
     let button = '';
     if (view.request && !operation) button = `<button type="button" class="btn btn-default" data-program-action="rejoin"${view.busy ? ' disabled' : ''}>${view.busy ? 'Sending…' : 'Retry same request'}</button>`;
     else if (pending && (view.operationError || operation?.termination === 'unconfirmed')) button = '<button type="button" class="btn btn-default" data-program-action="rejoin">Check operation</button>';
-    else if ((needsUpdate && action?.available && !error) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
+    // A press the engine never received keeps its reason and offers Update again; only a failed read withholds it.
+    else if ((needsUpdate && action?.available && !readError) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
     return `<div class="harness-model-program ui-field-help" data-program="${escapeHtml(program.harness)}">
-        <span>${program.mixed ? `${escapeHtml(subset)} supplied by` : 'List from'} ${escapeHtml(program.label)} ${escapeHtml(versions)}</span>${needsUpdate ? `<span class="harness-model-latest">${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}${button}
+        <span>${escapeHtml(lead)}${needsUpdate ? `\u00a0· <span class="harness-model-latest">${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}</span>${button}
         ${needsUpdate && action && !action.available ? `<span>${escapeHtml(action.reason)}</span>` : ''}
         ${operation ? `<span role="status">${escapeHtml(maintenanceOperationLine(operation, {missing: !entry?.selection?.path && !operation.before?.path}))}</span>` : ''}
         ${error ? `<span data-tone="warn">${escapeHtml(error)}</span>` : ''}
@@ -148,5 +152,56 @@ export function bindModelProgramFooter(input, footer, changed) {
         },
         close,
         dispose() { close(); footer.removeEventListener('click', click); },
+    };
+}
+
+/** A setup family's line shows only with something to act on, once its newest-release read has answered; a failed
+ *  passive read shows nothing. The owner's unresolved press or operation keeps its reason and recovery through any
+ *  read, also one that finds no program; a press error stays while its program is selected and the update it was
+ *  about is still offered. Up to date or absent with nothing of the owner's pending stays silent. */
+export function familyProgramShown(view = {}) {
+    const entry = view.entry;
+    if (view.request || maintenanceOperationPending(view.operation || entry?.operation)) return true;
+    if (!entry?.selection?.path) return false;
+    if (view.operationError) return entry.updateAvailable !== 'no';
+    if (!entry.newest || entry.newest.status === 'not_read' || view.inspectionError || view.inventoryError) return false;
+    return entry.updateAvailable !== 'no';
+}
+
+/** The setup wizard's family rows: the engine is asked only while it runs (now, when it comes up, after a sign-in or
+ *  an operation settles), the newest release only for a family with a selected program; the step's tick polls. */
+export function bindFamilyPrograms({ harnesses = [], store = claudexorStatus, visible = () => true, onChange = () => {},
+    api, onSettled = refreshMaintenanceCatalogs } = {}) {
+    let up = false;
+    const running = () => store.snapshot?.daemon?.state === 'running';
+    const controller = createHarnessMaintenanceController({ ...(api ? { api } : {}), visible, onChange,
+        onSettled: (harness, operation) => { void onSettled(harness, operation); void read(); } });
+    async function read() {
+        if (!running()) return null;
+        const inventory = await controller.refresh({ fresh: true });
+        const selected = (inventory?.harnesses || []).filter((entry) => harnesses.includes(entry.harness) && entry.selection?.path);
+        return Promise.all(selected.map((entry) => controller.refresh({ harness: entry.harness, fresh: true, checkLatest: true })));
+    }
+    return {
+        read,
+        /** The step's status tick: a first sight of the engine running reads; a remount reads again. Rows out of
+         *  view (`visible`) observe nothing: their remount reads. */
+        observe({ remount = false } = {}) {
+            if (!visible()) return;
+            const now = running();
+            if (now && (!up || remount)) void read();
+            up = now;
+            controller.poll();
+        },
+        line(harness) {
+            const view = controller.view(harness);
+            return running() && familyProgramShown(view) ? modelProgramMarkup({ harness }, view,
+                maintenanceVersionLine(view.entry, { unknownCurrent: view.unknownCurrent })) : '';
+        },
+        bind(host) {
+            host.querySelectorAll?.('[data-program-action]').forEach((control) => control.addEventListener('click', () =>
+                controller.act(control.closest('[data-program]').dataset.program, control.dataset.programAction)));
+        },
+        dispose: () => controller.dispose(),
     };
 }

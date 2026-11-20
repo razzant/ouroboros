@@ -37,6 +37,11 @@ class HostSection(str):
     def __getnewargs__(self):
         return self.section_id, self.full_text, self.operative_view, self.reader
 
+    def view_for_receipt(self, row: Mapping, addressed: Mapping) -> Optional[str]:
+        if self.operative_view is None:
+            return None
+        return relocated_text(self, row["reader"], start_room=row.get("start_room", False))
+
 
 def capture_sections(parts: Iterable[str], *, prefix: str) -> tuple[HostSection, ...]:
     """Keep structural section boundaries without guessing an unknown producer's meaning."""
@@ -88,9 +93,8 @@ def _reader(ref: Mapping[str, Any]) -> str:
 
 def section_views(sections: Iterable[HostSection], receipts: Iterable[Mapping]) -> dict[str, str]:
     rows = {row["section_id"]: row for row in receipts}  # a receipt without the flag renders as recorded before it
-    return {part.section_id: relocated_text(part, rows[part.section_id]["reader"],
-                                            start_room=rows[part.section_id].get("start_room", False))
-            for part in sections if part.section_id in rows and part.operative_view is not None}
+    return {part.section_id: text for part in sections if part.section_id in rows
+            if (text := part.view_for_receipt(rows[part.section_id], rows)) is not None}
 
 
 def render_sections(sections: Iterable[HostSection], fallback: str, addressed: Mapping[str, str]) -> str:

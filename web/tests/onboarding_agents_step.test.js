@@ -848,6 +848,82 @@ test('Connect starts the login through the shared card controller', async (t) =>
     store.dispose();
 });
 
+test('each family row carries its program line, read only while the engine runs and again after a sign-in settles', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const asked = [];
+    const program = (harness) => ({ harness, selection: { path: `/vendor/${harness}`, version: '0.50.0' },
+        newest: { status: 'available', version: '0.60.0', observedAt: 'now', source: 'registry' }, updateAvailable: 'yes',
+        actions: { update: { available: true, reason: null } }, operation: null });
+    const maintenanceApi = { harnessMaintenanceInventory: async (query) => {
+        asked.push(query);
+        return { harnesses: [program('codex')].filter((row) => !query.harness || row.harness === query.harness) };
+    } };
+    let daemon = 'stale';
+    const fetchImpl = async (url, init) => {
+        if (String(url).startsWith('/api/claudexor/login')) {
+            return json(200, { job_id: 'j1', job: { state: 'failed', outcome: { reason: 'vendor_program_failed' } } });
+        }
+        return json(200, { ...snapshotWith([]), daemon: { state: daemon } });
+    };
+    const store = createClaudexorStatusStore({
+        fetchImpl, doc: { hidden: false, addEventListener() {}, removeEventListener() {} }, pollMs: 5000,
+    });
+    const dom = fakeDom();
+    const list = dom.nodes.get('agents-family-list');
+    const connect = [];
+    list.buttons = [{ getAttribute: () => 'codex', addEventListener: (_type, fn) => connect.push(fn) }];
+    const step = createAgentsStep({ doc: dom.doc, store, fetchImpl, maintenanceApi });
+    step.mount();
+    await flush();
+    assert.deepEqual(asked, [], 'a stopped engine is not asked, and nothing is said about it');
+    assert.doesNotMatch(list.innerHTML, /harness-model-program/);
+
+    daemon = 'running';
+    await store.refresh();
+    await flush();
+    assert.deepEqual(asked.map((query) => [query.harness, query.checkLatest]), [['', false], ['codex', true]]);
+    const codexRow = list.innerHTML.slice(list.innerHTML.indexOf('data-agent-family="codex"'),
+        list.innerHTML.indexOf('data-agent-family="claude"'));
+    assert.match(codexRow, /<span>Program 0\.50\.0\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
+    assert.match(codexRow, /data-program-action="latest"[^>]*>Update</);
+    assert.equal((list.innerHTML.match(/harness-model-program/g) || []).length, 1, 'only the family with something to act on');
+
+    connect.at(-1)();
+    for (let tick = 0; tick < 5; tick += 1) { t.mock.timers.tick(2000); await flush(); }
+    assert.ok(asked.length >= 4, 'a settled sign-in, failed here, asks the engine again');
+
+    const count = asked.length;
+    await step.dispose();
+    step.detach();
+    await store.refresh();
+    await flush();
+    assert.equal(asked.length, count, 'the disposed step reads nothing more');
+    store.dispose();
+});
+
+test('the Models step mounts the same step without family rows, and asks the engine nothing about programs', async () => {
+    const asked = [];
+    const maintenanceApi = { harnessMaintenanceInventory: async (query) => { asked.push(query); return { harnesses: [] }; } };
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, snapshotWith(['codex'])),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} }, pollMs: 5000,
+    });
+    const dom = fakeDom();
+    const rows = dom.nodes.get('agents-family-list');
+    dom.nodes.delete('agents-family-list');  // the Models step: the editor, no Accounts rows
+    const step = createAgentsStep({ doc: dom.doc, store, maintenanceApi });
+    try {
+        step.mount();
+        await store.refresh();
+        await flush();
+        assert.deepEqual(asked, [], 'no program line here, so no inventory or newest-release read');
+        dom.nodes.set('agents-family-list', rows);  // back on Accounts: the remount reads for its rows
+        step.mount();
+        await flush();
+        assert.deepEqual(asked.map((query) => [query.harness, query.checkLatest]), [['', false]]);
+    } finally { step.detach(); store.dispose(); }
+});
+
 test('unknown sign-in cleanup stays retryable until explicit local detach', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     let cancels = 0;

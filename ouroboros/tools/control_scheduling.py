@@ -339,6 +339,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
         f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{write_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
+        f"{emission.get('held_note') or ''}"
     )
 
 
@@ -990,6 +991,9 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "resource_intent": resource_intent,
     }
     owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
+    from ouroboros.held_notes import carried_situation  # my situation names, by value, where the install records claims
+
+    held_origin, held_note = carried_situation(ctx, canonical_data_root(ctx), declared=bool(declared_words_fact(child_contract)))
     child_facts = {
         **({"execution_timeout_sec": execution_left} if execution_left is not None else {}),
         "objective": objective,
@@ -1022,7 +1026,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "ts": utc_now_iso(),
         "write_surface": requested_surface,
         "resource_intent": resource_intent,
-        "origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}), **owner_origin,
+        "origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}), **owner_origin, **held_origin,
                             **({"evolution_root_task_id": metadata.get("evolution_root_task_id") or root_task_id}
                                if metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction") else {})},  # tree origin: consciousness label/level + owner words
         **presence_binding_authority_metadata(metadata, task_contract=getattr(ctx, "task_contract", None)),  # never speaker
@@ -1077,7 +1081,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent, "parent_cognitive_route": parent_cognitive_route,
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
-        "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"),
+        "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"), "held_note": held_note,
         "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
                        else "host-minted coop tree" if str(effective_write_root or "").strip() else "parent workspace"),
     })

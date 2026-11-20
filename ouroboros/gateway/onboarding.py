@@ -68,7 +68,7 @@ from ouroboros.gateway.onboarding_host import recorded_attempt
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 from ouroboros.skill_starter import after_onboarding, onboarding_skill_choices
 from ouroboros.settings_setup_contract import (
-    ONBOARDING_ATTEMPT_KEY, ONBOARDING_COMPLETED_KEY,
+    ONBOARDING_COMPLETED_KEY, completion_facts,
     parse_completion_attempt, parse_subscription_intent,
 )
 from ouroboros.subscription_install_presets import (
@@ -832,7 +832,7 @@ def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, 
 async def api_onboarding_complete(request: Request) -> JSONResponse:
     """POST /api/onboarding/complete — finish onboarding in ONE transaction."""
     from ouroboros.config import get_runtime_mode, normalize_runtime_mode
-    from ouroboros.utils import utc_now_iso
+    from supervisor.state_initialization import first_state_pending as first_state_due
 
     try:
         body = await request.json()
@@ -894,10 +894,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
         install_preset_applied = True
         # R8: provider normalization already ran over `current`; the preset keys land on top of it.
         current.update(preset.settings_keys())
-        # Only omitted fields (or an empty Main awaiting its first proposal) are authored here: a
-        # visible draft value, even one equal to a shipped default, is explicit owner intent.
-        current.update({key: value for key, value in preset.model_settings.items()
-                        if key not in body or (key == "OUROBOROS_MODEL" and not body[key])})
+        # Only omitted fields (or an empty Main, and Light beside it, awaiting proposals) are authored here:
+        # a visible draft value, even one equal to a shipped default, is explicit owner intent.
+        current.update({key: value for key, value in preset.model_settings.items() if key not in body or (
+            key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT") and not body[key] and not body.get("OUROBOROS_MODEL"))})
 
     if not has_startup_ready_provider(current):
         return unsaved_error("The connected accounts do not provide a Main model. Connect Codex, an API provider, or a local model.",
@@ -913,9 +913,9 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
     if current.get(SUBAGENTS_SETTING):
         current.pop(REVIEW_LANES_KEY, None)
 
-    # The durable completion fact, with the client's attempt id ("" for none), rides in the
-    # SAME write, whatever the preset did: a completion that connected nothing must still close the window.
-    current.update({ONBOARDING_COMPLETED_KEY: utc_now_iso(), ONBOARDING_ATTEMPT_KEY: attempt_id})
+    # The completion facts ride in the SAME write, whatever the preset did (a completion that connected nothing still
+    # closes the window); whether a first state is to come is read before this write and the supervisor it starts.
+    current.update(completion_facts(body, attempt_id, first_state_pending=first_state_due(request_drive_root(request))))
     pending_mode = normalize_runtime_mode(current.get("OUROBOROS_RUNTIME_MODE"))
     active_mode = get_runtime_mode()
     boundary = CommitBoundary()

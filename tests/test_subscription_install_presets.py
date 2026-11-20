@@ -818,3 +818,63 @@ def test_valid_owner_draft_is_validated_not_recompiled_from_missing_agy_default(
     assert json.loads(preset.available_subagents)["items"][0]["subagent_id"] == "owner"
     assert preset.source == "configured"
     assert preset.receipt["source"] == "configured"
+
+
+def _catalog_row(model_id, *, source="codex", default=False, availability=None):
+    row = {"value": f"claudexor::{source}={model_id}", "id": model_id, "source_id": source,
+           "is_default": default, "input_modalities": ["text"]}
+    return {**row, "availability": availability} if availability else row
+
+
+LIGHT_CASES = {
+    # A Codex account lists Luna 6: Light is that row, not the heavy default (owner decision 2026-11-20).
+    "luna-6": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-5.6-luna"), _catalog_row("gpt-6-luna")],
+               "claudexor::codex=gpt-6-luna"),
+    "luna-5.6-only": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-5.6-luna")],
+                      "claudexor::codex=gpt-5.6-luna"),
+    "neither": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-6.1-terra")],
+                "claudexor::codex=gpt-6.1-sol"),
+    # The account reports Luna 6 unavailable: the next candidate; another account that has it still counts.
+    "luna-6-unavailable": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-6-luna", availability="unavailable"),
+                            _catalog_row("gpt-5.6-luna", availability="available")], "claudexor::codex=gpt-5.6-luna"),
+    "luna-6-on-another-account": ([_catalog_row("gpt-6.1-sol", default=True),
+                                   _catalog_row("gpt-6-luna", availability="unavailable"),
+                                   _catalog_row("gpt-6-luna", availability="available")], "claudexor::codex=gpt-6-luna"),
+    # A row of another source with the same id is not the default source's model.
+    "other-source": ([_catalog_row("gpt-6.1-sol", default=True), _catalog_row("gpt-6-luna", source="cursor")],
+                     "claudexor::codex=gpt-6.1-sol"),
+}
+
+
+@pytest.mark.parametrize("case", LIGHT_CASES)
+def test_light_is_proposed_from_the_subscription_source_luna_then_the_default(case):
+    from ouroboros.subscription_install_presets import compile_model_settings
+
+    catalog, light = LIGHT_CASES[case]
+    proposed = compile_model_settings(catalog, {})
+    assert proposed["OUROBOROS_MODEL_LIGHT"] == light
+    # Only Light moves: Main and Consciousness keep the default, Safety stays blank to inherit Light.
+    assert proposed["OUROBOROS_MODEL"] == proposed["OUROBOROS_MODEL_CONSCIOUSNESS"] == "claudexor::codex=gpt-6.1-sol"
+    assert proposed["OUROBOROS_MODEL_SAFETY"] == "" and proposed["OUROBOROS_MODEL_FALLBACKS"] == ""
+
+
+def test_an_api_install_gets_no_light_proposal_from_a_subscription_catalog():
+    from ouroboros.subscription_install_presets import compile_model_settings
+
+    catalog = LIGHT_CASES["luna-6"][0]
+    assert compile_model_settings(catalog, {"OPENAI_API_KEY": "configured", "OUROBOROS_MODEL": "openai::gpt-6.1-terra"}) == {}
+
+
+@pytest.mark.parametrize("case, expected", [
+    # Light differs from Main: the fast scout runs on Luna and Main gains its own independent row.
+    ("luna-6", [("primary-builder", "codex=gpt-5.6-sol"), ("fast-scout", "claudexor::codex=gpt-6-luna"),
+                ("independent-perspective", "claudexor::codex=gpt-6.1-sol"), ("review-codex", "codex=gpt-5.6-sol")]),
+    # No Luna listed: Light is Main, and the twin route is one row, as before.
+    ("neither", [("primary-builder", "codex=gpt-5.6-sol"), ("fast-scout", "claudexor::codex=gpt-6.1-sol"),
+                 ("review-codex", "codex=gpt-5.6-sol")]),
+])
+def test_a_subscription_light_puts_the_fast_scout_on_light(case, expected):
+    preset = compile_install_preset(_discoveries("codex"), settings={}, model_catalog=LIGHT_CASES[case][0])
+    assert preset.ok, preset.refusal
+    items = json.loads(preset.available_subagents)["items"]
+    assert [(row["subagent_id"], row["route"]["target_id"]) for row in items] == expected

@@ -62,13 +62,13 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks and the knowledge outline but none of my other memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks, the knowledge outline and, unless declared, the heads of the notes that claim its room, but none of my other memory, so put recipes/details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
                 "Every child starts with my human's words for the work verbatim and dated, the marks in force "
                 "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
-                "with SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
+                "with the heads of the notes that claim its room, SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
                 "supervisors), the child's room page, full assignment and attachments. declared selects only "
                 "the authored objective/context/constraints and full governance/task authority for an independent "
                 "first position; it excludes the rest of shared memory (identity, life account, room page), "

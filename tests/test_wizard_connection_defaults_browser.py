@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from tests._wizard_walk import past_consciousness, walk
 
 from ouroboros.provider_models import CONNECTIONS_KEY, DIRECT_PROVIDER_DEFAULTS
 from tests import test_subscription_setup_browser as setup_browser
@@ -76,8 +77,7 @@ def _row(page, slot):
 
 
 def _finish(ui, page):
-    for _ in range(3):
-        page.click("#next-btn")
+    walk(page, "models", "summary")
     page.wait_for_selector(".summary-card")
     page.click("#next-btn")
     page.wait_for_url(ui["url"] + "/")
@@ -275,6 +275,7 @@ def _quick_finish(ui, page, label):
     page.wait_for_selector("#quick-start-btn:not([hidden])")
     page.wait_for_function("() => !document.querySelector('#onboarding-access-retry')?.disabled")
     page.click("#quick-start-btn")
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     page.wait_for_selector(".summary-card")
     return _quick_finish_from_summary(ui, page, label)
 
@@ -313,12 +314,10 @@ def test_a_connected_subscription_keeps_the_saved_catalog_through_preview_and_fi
         # Rows and no reviewer: the wizard asks the owner to confirm the empty pool, and posts nothing until then.
         assert body is None and error.startswith("No row is marked Reviewer."), error
         assert onboarding.saved()["OUROBOROS_SUBAGENTS"] == json.dumps(saved)
-        for _ in range(3):
-            page.click("#back-btn")
+        walk(page, "summary", "models")
         page.click('details[data-collapse="subagents"] > summary')
         page.check("[data-review-pool-allow-empty]")
-        for _ in range(3):
-            page.click("#next-btn")
+        walk(page, "models", "summary")
         page.wait_for_selector(".summary-card")
         body, error = _quick_finish_from_summary(ui, page, f"{label}-confirmed")
     assert not error and body is not None, error

@@ -242,7 +242,8 @@ def test_the_exemption_sets_are_exactly_the_declared_ones():
         "OUROBOROS_MODEL_SAFETY", "OUROBOROS_DESKTOP_KEEP_RUNNING")
     assert cfg.ENDPOINT_AUTHORED_SETTINGS == frozenset(
         {"OUROBOROS_SUBSCRIPTION_PRESET_VERSION", "OUROBOROS_SUBAGENT_PRESET_RECEIPT",
-         "OUROBOROS_ONBOARDING_COMPLETED_AT", "OUROBOROS_ONBOARDING_ATTEMPT_ID"})
+         "OUROBOROS_ONBOARDING_COMPLETED_AT", "OUROBOROS_ONBOARDING_ATTEMPT_ID",
+         "OUROBOROS_ONBOARDING_CONSCIOUSNESS"})
     # One writer, but an ordinary runtime setting otherwise: exported to the environment like the rest.
     assert cfg.ENDPOINT_WRITTEN_SETTINGS == frozenset({"OUROBOROS_UI_LANGUAGE"})
     assert "OUROBOROS_UI_LANGUAGE" not in cfg.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV

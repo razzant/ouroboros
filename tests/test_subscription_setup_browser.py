@@ -18,6 +18,7 @@ from tests.test_onboarding_complete_endpoint import (
 )
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
+from tests._wizard_walk import past_consciousness, rail_shows_its_steps, step_order, walk
 
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -327,9 +328,10 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     page = ui["page"]
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector('#quick-start-btn:not([hidden])')
-    assert page.locator('.wizard-step').count() == 5
+    assert rail_shows_its_steps(page)
     capture(page, "accounts-connected")
     page.click('#quick-start-btn')
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     page.wait_for_selector('.summary-card')
     assert "gpt-test" in page.locator('.summary-card').inner_text()
     reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
@@ -454,6 +456,10 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     assert page.locator('[data-reviewers-note]').inner_text().startswith('Reviewers: 1 — the rows marked Reviewer')
     capture(page, "review-editable")
     page.click('#next-btn')
+    if "consciousness" in step_order(page):
+        page.wait_for_selector('[data-consciousness-step]')
+        capture(page, "consciousness-subscription")
+        page.click('#next-btn')
     page.wait_for_selector('[data-collapse="api-budget"]')
     assert not page.locator('[data-collapse="api-budget"]').evaluate('(el) => el.open')
     capture(page, "budget-subscription")
@@ -532,8 +538,7 @@ def test_cursor_only_does_not_claim_model_access_and_api_only_finishes(subscript
     page.click('#next-btn')
     page.wait_for_selector('#main-model')
     assert page.locator('#main-model').input_value()
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     assert 'no API key' not in page.locator('.summary-card').inner_text()
     page.click('#next-btn')
@@ -622,8 +627,7 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     main.locator('[data-model-role-source]').select_option('subscription:codex')
     main.locator('[data-model-role-model]').fill('owner-main')
     main.locator('[data-model-role-account]').select_option('personal')
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     page.wait_for_selector('#skip-presets-btn:not([hidden])')
     page.click('#skip-presets-btn')
@@ -634,25 +638,21 @@ def test_failed_preview_allows_manual_main_and_visible_reviewer_recovery_before_
     assert 'claudexor::codex=owner-main · Account: personal' in reviewers.inner_text()
     capture(page, 'manual-main-reviewer-recovery')
     if edit_after_recovery == 'main':
-        for _ in range(3):
-            page.click('#back-btn')
+        walk(page, 'summary', 'models')
         page.locator('[data-model-role="main"] [data-model-role-model]').fill('new-main')
-        for _ in range(3):
-            page.click('#next-btn')
+        walk(page, 'models', 'summary')
         page.wait_for_selector('#skip-presets-btn:not([hidden])')
         assert page.locator('#next-btn').is_enabled()
         assert 'Main changed; reviewers keep the assignments shown above' in page.locator('.wizard-inline-note').inner_text()
         assert 'owner-main' in reviewers.inner_text() and 'new-main' not in reviewers.inner_text()
     elif edit_after_recovery:
         # The reviewers are rows of the Models step's catalog: edit one there.
-        for _ in range(3):
-            page.click('#back-btn')
+        walk(page, 'summary', 'models')
         page.locator('[data-collapse="subagents"] > summary').click()
         first = page.locator('[data-subagent-row]').filter(has=page.locator('[data-subagent-field="review_eligible"]:checked')).first
         assert first.count() == 1
         first.locator('[data-subagent-field="model"]').fill('owner-deep')
-        for _ in range(3):
-            page.click('#next-btn')
+        walk(page, 'models', 'summary')
         page.wait_for_function("() => !document.querySelector('.wizard-error').textContent")
         assert 'claudexor::codex=owner-deep' in reviewers.inner_text()
     page.click('#next-btn')
@@ -687,8 +687,7 @@ def test_failed_main_reviewer_recovery_does_not_latch_finish(subscription_ui):
     main = page.locator('[data-model-role="main"]')
     main.locator('[data-model-role-source]').select_option('subscription:codex')
     main.locator('[data-model-role-model]').fill('owner-main')
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('#skip-presets-btn:not([hidden])')
     page.click('#skip-presets-btn')
     page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('managed model source')")
@@ -803,8 +802,7 @@ def test_fresh_zai_setup_proposes_the_image_capable_vision_the_owner_may_change(
         page.click('#back-btn')
         page.click('#next-btn')
         assert vision.input_value() == owner_vision.rpartition('::')[2]   # the source picker holds "zai"
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     capture(page, f'zai-summary-{plan or "default"}-{"owner" if owner_vision is not None else "default"}')
     page.click('#next-btn')
@@ -873,8 +871,7 @@ def test_local_main_with_zai_defaults_only_untouched_vision(subscription_ui, mon
     page.click('#next-btn')
     capture(page, f'local-zai-models-{scenario}')
     assert vision.input_value() == expected_vision.rpartition('::')[2]
-    for _ in range(3):
-        page.click('#next-btn')
+    walk(page, 'models', 'summary')
     page.wait_for_selector('.summary-card')
     capture(page, f'local-zai-summary-{scenario}')
     page.click('#next-btn')
@@ -951,6 +948,7 @@ def test_review_shortcut_reconciles_local_vision_before_preview(
     page.locator('[data-local-mode="all"]').click()
     capture(page, f'shortcut-local-accounts-{choice}')
     page.click('#quick-start-btn')
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     page.wait_for_selector('.summary-card')
     summary = page.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True)).inner_text()
     capture(page, f'shortcut-summary-{choice}')
