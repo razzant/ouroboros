@@ -113,9 +113,9 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
             {"tool": "write_file", "arguments": {
                 "root": "active_workspace", "path": "room-result.txt", "content": "S27_ROOM_WRITE",
             }},
-            {"final": "S27_PROJECT_COMPLETE"},
+            {"final": "S27_PROJECT_DRAFT"},
             # The room write meets the finish door's one notice (#3280), which leaves the next answer fresh (#3659):
-            # the turn answers once more, and that prose is delivered as written.
+            # the turn answers once more, and that prose, not the draft before the notice, is delivered as written.
             {"final": "S27_PROJECT_COMPLETE"},
         ],
         "held": [{"final": "S27_HELD_COMPLETE"}],
@@ -152,7 +152,7 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                     }))
                     return message_id
 
-                def finish(message_id, marker):
+                def finish(message_id, marker, *, not_delivered=None):
                     task = wait_until(lambda: _received_turn(oracle, message_id), 60)
                     assert task and task.get("_is_direct_chat") is True, task
                     assert not task.get("_ephemeral_turn"), task
@@ -160,8 +160,12 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                     stored = wait_durable_result(oracle, task_id, timeout=180)
                     assert stored.get("status") == "completed", stored
                     assert marker in str(stored.get("result") or ""), stored
-                    assert wait_until(lambda: [f for f in frames.find(type="chat", task_id=task_id)
-                                             if not f.get("is_progress") and marker in str(f.get("content"))], 60)
+                    delivered = wait_until(lambda: [f for f in frames.find(type="chat", task_id=task_id)
+                                                    if not f.get("is_progress") and marker in str(f.get("content"))], 60)
+                    assert delivered
+                    if not_delivered:  # the answer a later one replaced is not what the task delivered
+                        assert not_delivered not in str(stored.get("result") or ""), stored
+                        assert not [f for f in delivered if not_delivered in str(f.get("content"))], delivered
                     assert not oracle.child_task_ids(task_id), "ordinary work was delegated/promoted"
                     return task_id
 
@@ -176,7 +180,7 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                 # Another Main message would join the held turn (#2996): the turn beside it is the Project room's.
                 project_id = finish(send("Read input.txt and write project.txt with the fixture; "
                                          "write room-result.txt in this Project and answer here.",
-                                         in_project=True), "S27_PROJECT_COMPLETE")
+                                         in_project=True), "S27_PROJECT_COMPLETE", not_delivered="S27_PROJECT_DRAFT")
                 assert (mcp_dir / "project.txt").read_text(encoding="utf-8") == "S27_PROJECT_WRITE"
                 assert (room / "room-result.txt").read_text(encoding="utf-8") == "S27_ROOM_WRITE"
                 assert not gate.release.is_set() and not gate.timed_out
