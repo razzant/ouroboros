@@ -626,6 +626,25 @@ def test_a_linked_head_without_a_summary_still_yields_before_the_claimed_head(wo
     assert floor.count("[Head omitted at the physical window's emergency floor.]") == len(claimed_first) - 1
 
 
+def test_a_linked_head_whose_summary_saves_no_room_keeps_only_its_reader_before_the_claimed_head(world):
+    """Two heads only a link holds: `y`, whose authored summary is short, steps to it; `z`, whose summary is as long
+    as its head, keeps only its exact reader, marked with why, before the claimed `a` steps."""
+    _write(world, "a", "Head a. " * 5_000 + "\n\nIt links [y](y.md) and [z](z.md).\n", summary="Authored telling of a.")
+    _write(world, "y", "Head y. " * 5_000, claims=(), summary="Authored telling of y.")
+    _write(world, "z", "Head z. " * 5_000, claims=(), summary="Telling of z, as long as its head. " * 1_150)
+    _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 8_000)
+    captured, seen = _core(world), {}
+    for window in range(196_000, 8_000, -4_000):
+        plan = _plan(world, window, core=captured)
+        seen.setdefault(tuple(_cuts(plan)), plan)
+    order = list(seen)
+    assert order[1:4] == [(("y", "summary"),), (("y", "summary"), ("z", "reader")),
+                          (("y", "summary"), ("z", "reader"), ("a", "summary"))], order
+    held = _held(seen[order[2]])
+    assert "Head a. " * 5_000 in held and "Head z. Head z." not in held and "Telling of z" not in held
+    assert "\n\n[Head omitted for the physical window: its authored summary is no shorter than the head.]" in held
+
+
 def _index(plan, mode=None):
     """The form of the global knowledge index in this request: ``whole``, or the ``outline`` the window chose."""
     text = _blocks(plan, mode)[-1]["text"]

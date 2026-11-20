@@ -94,10 +94,18 @@ class HeldNoteSection(HostSection):
             return f"{label}\n\n{marker} The summary is in the knowledge index."
         return f"{label}\n\n{self.summary}\n\n{marker}"
 
+    def summary_saves(self, addressed: Mapping) -> bool:
+        """Whether the summary form, as ``addressed`` places the summary, is shorter than the whole entry."""
+        from ouroboros.memory_floor import view_tokens
+
+        summary = self.view_for_receipt({}, addressed)
+        return summary is not None and view_tokens(summary) < view_tokens(self.full_text)
+
     def view_for_receipt(self, row: Mapping, addressed: Mapping) -> str | None:
-        if row.get("held_note_form") == "reader":  # a carried head with no summary takes it first (_held_note_steps)
-            why = ("for the physical window: this note has no authored summary" if self.carried_by
-                   and not self.summary.strip() else "at the physical window's emergency floor")
+        if row.get("held_note_form") == "reader":  # a carried head no summary shortens takes it first (_held_note_steps)
+            why = ("at the physical window's emergency floor" if not self.carried_by or self.summary_saves(addressed)
+                   else "for the physical window: " + ("its authored summary is no shorter than the head"
+                                                        if self.summary.strip() else "this note has no authored summary"))
             return f"{label}\n\n[Head omitted {why}.]" if (label := self.available_window_label) else None
         return self._summary_view(self.outline_has_summary) if "knowledge_index" in addressed else self.operative_view
 
