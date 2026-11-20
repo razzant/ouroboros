@@ -5,32 +5,50 @@ from __future__ import annotations
 import copy
 import pathlib
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # A held head an external session received, as its stored request names it (``stored_request``).
 _HELD_HEAD = re.compile("\x00held head [^\x00]* sha256=([0-9a-f]{64}) size=([0-9]+)\x00")
 
 
-def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """``(the envelope as custody stores it, the heads' facts)``: each held head the start sends
+def _splice(instructions: str, text: Callable[[str, int], str]) -> str:
+    """Stored instructions with each held head's reference replaced by ``text(sha256, size)``."""
+    return _HELD_HEAD.sub(lambda found: text(found[1], int(found[2])), instructions)
+
+
+def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """``(the envelope as custody stores it, the facts its start row adds)``: each held head the start sends
     (``held_notes.sent_heads``) is one content-addressed blob of its text, shared by every start that sends
-    it, and the stored instructions name it by address, revision and digest; ``request_body`` puts it back."""
+    it, and the stored instructions name it by address, revision and digest; ``request_body`` puts it back.
+    Where putting the references back would not give the original envelope (a head's text inside another head's
+    reference, prose shaped like one), the envelope is stored whole, as before held heads, and the row says
+    ``held_heads_inline``."""
     from ouroboros.observability import write_blob
 
-    instructions, facts = str(body.get("instructions") or ""), []
+    instructions, facts, texts = str(body.get("instructions") or ""), [], {}
     for head in heads or ():
         ref = write_blob(pathlib.Path(drive_root), head["text"], kind="txt")
+        texts[ref["sha256"], ref["size"]] = head["text"]
         token = f"\x00held head {head['topic']}@{head['revision']} sha256={ref['sha256']} size={ref['size']}\x00"
         instructions = instructions.replace(head["text"], token, 1)
         facts.append({key: head[key] for key in ("topic", "revision", "chars")})
-    return ({**body, "instructions": instructions} if facts else body), facts
+    if not facts:
+        return body, {}
+    try:
+        exact = {**body, "instructions": _splice(instructions, lambda sha, size: texts[sha, size])} == body
+    except KeyError:  # a reference-shaped text names no head this start sent
+        exact = False
+    if exact:
+        return {**body, "instructions": instructions}, {"held_heads": facts}
+    return body, {"held_heads": facts, "held_heads_inline": True}
 
 
 def head_references(row: Dict[str, Any]) -> Dict[str, Any]:
     """The held heads a start's stored envelope names by reference (``stored_request``), as its row lists them. The
-    envelope of a row that lists none (a start before held heads, or one that sent none) is opaque: ``request_body``
-    reads marker-shaped prose in it as written."""
-    return {"held_heads": copy.deepcopy(row["held_heads"])} if row.get("held_heads") else {}
+    envelope of any other row (a start before held heads, one that sent none, one stored whole) is opaque:
+    ``request_body`` reads marker-shaped prose in it as written."""
+    names = row.get("held_heads") and not row.get("held_heads_inline")
+    return {"held_heads": copy.deepcopy(row["held_heads"])} if names else {}
 
 
 def request_shape(body):
@@ -272,10 +290,10 @@ def request_body(drive_root: Any, row: Dict[str, Any], *,
     try:
         task_id = str(row.get("task_id") or "") or None
         body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json", task_id=task_id)
-        if isinstance(body, dict) and row.get("held_heads") and _HELD_HEAD.search(str(body.get("instructions") or "")):
-            body = {**body, "instructions": _HELD_HEAD.sub(lambda found: read_blob_ref(pathlib.Path(drive_root), {
-                "sha256": found[1], "kind": "txt", "encoding": "gzip", "size": int(found[2])}, expected_kind="txt",
-                task_id=task_id), body["instructions"])}
+        if isinstance(body, dict) and head_references(row) and _HELD_HEAD.search(str(body.get("instructions") or "")):
+            body = {**body, "instructions": _splice(body["instructions"], lambda sha, size: read_blob_ref(
+                pathlib.Path(drive_root), {"sha256": sha, "kind": "txt", "encoding": "gzip", "size": size},
+                expected_kind="txt", task_id=task_id))}
     except EvidenceUnavailable:
         if raise_unavailable:
             raise

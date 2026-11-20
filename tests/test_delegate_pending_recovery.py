@@ -521,6 +521,44 @@ def test_a_session_start_keeps_its_held_heads_by_address_and_revision_and_replay
     custody._CUSTODY.clear()
 
 
+def test_a_stored_session_request_always_splices_back_to_its_original_envelope(tmp_path):
+    """A start's stored envelope names its held heads by reference only where putting them back gives the original
+    envelope. A head whose text stands inside an earlier head's reference (``size=``), or prose shaped like a
+    reference, stores the envelope whole and the row says so; every replay reads the original request either way."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_invocation import invocation_record
+    from ouroboros.delegate_pending import pending_invocations, request_body
+    from ouroboros.observability import read_blob_ref
+
+    custody._CUSTODY.clear()
+
+    def start(*texts, prose=""):
+        notes = "".join(f"### Note {number}\n\n{text}\n\n" for number, text in enumerate(texts))
+        heads = [{"topic": f"note-{number}", "revision": "a" * 64, "chars": len(text), "text": text}
+                 for number, text in enumerate(texts)]
+        return {"prompt": "Build", "instructions": prose + "## Held knowledge notes\n\n" + notes + "[Host: ...]"}, heads
+
+    manifest, april = "Use the manifest for the current format.\n", "Keep the April figures.\n"
+    starts = {"inv-ordinary": start(manifest, april), "inv-inside": start(manifest, "size="),
+              "inv-prose": start(april, prose="A mark quotes \x00held head x@r sha256=" + "b" * 64 + " size=5\x00.\n\n")}
+    for invocation, (body, heads) in starts.items():
+        assert custody.record_start_requested(
+            tmp_path, run_id="", task_id="nanny", invocation_id=invocation, idempotency_key=invocation,
+            max_seconds=60, request=body, project_id="", project_owned=False, route="codex", held_heads=heads)
+    rows = {row["invocation_id"]: row for row in custody.custody_rows(tmp_path) if row.get("type") == custody.START_REQUESTED}
+    stored = {key: read_blob_ref(tmp_path, row["request_ref"], expected_kind="json") for key, row in rows.items()}
+    assert manifest not in stored["inv-ordinary"]["instructions"] and "held_heads_inline" not in rows["inv-ordinary"]
+    assert [(stored[key], rows[key]["held_heads_inline"]) for key in ("inv-inside", "inv-prose")] == [
+        (starts["inv-inside"][0], True), (starts["inv-prose"][0], True)]
+    assert {key: row["held_heads"] for key, row in rows.items()} == {key: [
+        {name: head[name] for name in ("topic", "revision", "chars")} for head in heads] for key, (_, heads) in starts.items()}
+    original = {key: body for key, (body, _heads) in starts.items()}
+    assert {row["invocation_id"]: request_body(tmp_path, row) for row in pending_invocations(tmp_path)} == original
+    assert {row["invocation_id"]: row["request"] for row in pending_invocations(tmp_path, custody.custody_rows(tmp_path))} == original
+    assert {key: invocation_record(tmp_path, key)["request"] for key in starts} == original
+    custody._CUSTODY.clear()
+
+
 def test_only_a_start_whose_row_lists_held_heads_reads_its_envelope_with_head_references(tmp_path):
     """A mark quoting the reference delimiter, in the envelope of a start that sent no held heads (or ran before
     them), replays as written; a start whose row lists its heads still reads them back, also through an open-request
