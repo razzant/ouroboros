@@ -535,6 +535,8 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     assert "write the orientation it lacks" in context and "none of my other memory" in context
     assert "why the work exists" in prompt and "the host supplies the canonical work order" in prompt
     assert "none of my other memory; the host appends those words verbatim" in prompt
+    assert "claim its room and of the notes their heads link, but none of my other memory" in context
+    assert "claim this work's room and of the notes their heads link, none of my other memory;" in prompt
     assert selection.startswith("Every child starts with my human's words for the work verbatim and dated, ")
     assert ("other knowledge stays one read away. Omit or shared: it also starts with the heads of the notes that "
             "claim its room, " in selection)
