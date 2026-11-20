@@ -277,13 +277,27 @@ test('a family line shows what there is to act on and stays silent otherwise', a
     assert.doesNotMatch(modelProgramMarkup({harness: 'f'}, {entry: refused}, 'Program 0.50.0'), /<button/);
     const running = familyEntry('f', {updateAvailable: 'no', operation: {id: 'op', state: 'running'}});
     assert.equal(shown(running), true, 'an operation under way stays in view');
-    assert.equal(shown(familyEntry('f', {updateAvailable: 'no'}), {operationError: 'Update not started: refused'}), true,
+    assert.equal(shown(familyEntry('f'), {operationError: 'Update not started: refused'}), true,
         'the error of an operation the owner started is the one failure the line keeps');
+    // Review r2 (Fable, Carbon R2-MINOR-2): a press error does not outlive the update it was about.
+    assert.equal(shown(familyEntry('f', {updateAvailable: 'no'}), {operationError: 'Update not started: refused'}), false,
+        'a program up to date by another road, with nothing pending, is silent again');
+    assert.equal(shown(familyEntry('f', {updateAvailable: 'no'}), {operationError: 'Update not started: refused', request: {key: 'k'}}), true,
+        'an unresolved press still keeps its line');
     // A failed passive read hides the line, except for what the owner left unresolved: its reason and recovery stay.
     const failed = {inventoryError: 'Program inspection unavailable: refused'};
     assert.equal(shown(familyEntry('f'), {...failed, request: {key: 'k'}}), true, 'an unconfirmed press keeps Retry same request');
     assert.equal(shown(familyEntry('f'), {...failed, operation: {id: 'op', state: 'running'}}), true, 'an operation under way');
     assert.equal(shown(familyEntry('f'), {...failed, operation: {id: 'op', state: 'succeeded'}}), false, 'a settled one is not the owner\'s pending');
+    // Review r2 (Astra R2-3): a successful read that finds no selected program (being replaced) keeps the owner's
+    // unresolved press and its recovery; a family with no program and nothing of the owner's pending stays silent.
+    const replaced = familyEntry('f', {selection: {path: null, version: null}});
+    assert.equal(shown(replaced, {request: {key: 'k'}}), true, 'Retry same request survives a read that finds no program');
+    assert.equal(shown(replaced, {operation: {id: 'op', state: 'running'}}), true, 'an operation under way, program absent');
+    assert.equal(shown(replaced), false, 'no program and nothing pending: silent');
+    const retry = modelProgramMarkup({harness: 'f'}, {entry: replaced, request: {key: 'k'}}, 'Not installed');
+    assert.match(retry, /<span>Not installed\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
+    assert.match(retry, /data-program-action="rejoin">Retry same request</);
 });
 
 // The engine could not be acquired for the press: the host answers that this attempt was not submitted.

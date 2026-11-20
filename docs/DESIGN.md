@@ -2898,8 +2898,9 @@ the newest-release read has answered; without a Details disclosure. Its silence 
 intentional: an up-to-date program, a family with no program (Connect installs it), an engine
 that is not running or a read the engine refused say nothing there, while Accounts keeps
 “Program X · Up to date”. The owner's own unresolved press or operation is the exception: its
-reason and its recovery (Retry same request, Check operation) stay through a failed read, and an
-Update the engine never received (not submitted) keeps its reason beside Update, a new press.
+reason and its recovery (Retry same request, Check operation) stay through a failed read or one
+that finds no program, and an Update the engine never received (not submitted) keeps its reason,
+in warn ink, beside Update, a new press, while that update is still offered.
 After a failed Connect that line is the offer, with no claim about
 the cause (owner decision 2026-11-20). A line arriving for one family keeps focus on another's
 Connect. Mouse, touch and keyboard Update

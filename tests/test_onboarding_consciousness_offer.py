@@ -25,13 +25,11 @@ from ouroboros.settings_setup_contract import (
 from tests.test_onboarding_complete_endpoint import WIZARD_PAYLOAD, onboarding as onboarding
 
 def _forget_state(root):
-    """Leave ``root`` with no state copy and no witness, as a new data root has none. The usage store this test's
-    server holds open stays where it is: Windows refuses to delete an open file, and that store is no evidence
-    of an earlier supervisor."""
-    shutil.rmtree(root / "state", ignore_errors=True)
+    """Remove exactly the two state copies and the witness, as a new data root has none. Everything else under
+    ``state/`` stays on every platform (the usage store this test's server holds open is no evidence of an earlier
+    supervisor); a case that must also discard a Panic flag removes it itself."""
     for name in ("state.json", "state.last_good.json", "state.initialized.json"):
-        assert not (root / "state" / name).exists(), name
-
+        (root / "state" / name).unlink(missing_ok=True)
 
 
 def _client(tmp_path: pathlib.Path) -> TestClient:
@@ -383,6 +381,7 @@ def test_a_panic_before_the_first_mint_leaves_it_off_and_a_later_stop_wins_acros
     assert _boot_control() == (False, None), "a pending Panic withholds the setup's choice"
     # Without the Panic the same root and document are born on; then the owner's Stop wins and survives a restart.
     _forget_state(tmp_path)
+    (tmp_path / "state" / "panic_stop.flag").unlink()
     assert _boot_control() == (True, None)
     assert _persist_stop(OWNER_STOP) == ""
     assert _boot_control() == (False, OWNER_STOP)
