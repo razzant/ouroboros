@@ -243,10 +243,10 @@ test('an unanswered native catalog releases the shared read at its bound; reopen
     assert.equal(raw, 2, 'a recovered list needs no further catalog read');
 });
 
- test('the catalog and available version wrap between the two clauses', () => {
+ test('the producer and the available version read as one fact, its separator never starting a line', () => {
     const html = modelProgramMarkup({ harness: 'codex', label: 'Codex', programs: [{version: '0.162.1'}] },
         { entry: { selection: { path: '/codex' }, updateAvailable: 'yes', newest: { status: 'available', version: '0.169.0' } } });
-    assert.match(html, /<span>List from Codex 0\.162\.1<\/span><span class="harness-model-latest">0\.169\.0 available<\/span>/);
+    assert.match(html, /<span>List from Codex 0\.162\.1\u00a0· <span class="harness-model-latest">0\.169\.0 available<\/span><\/span>/);
  });
 
 // The setup wizard's family line (docs/DESIGN.md §7): the same builder, led by the program's own version, shown only
@@ -262,7 +262,7 @@ test('a family line shows what there is to act on and stays silent otherwise', a
         const entry = familyEntry('f', {updateAvailable: verdict});
         assert.equal(shown(entry), true, verdict);
         const html = modelProgramMarkup({harness: 'f'}, {entry}, 'Program 0.50.0');
-        assert.match(html, /<span>Program 0\.50\.0<\/span>/);
+        assert.match(html, /<span>Program 0\.50\.0\u00a0· /);
         assert.match(html, />Update<\/button>/);
         assert.doesNotMatch(html, /List from|Details/);
     }
@@ -279,6 +279,71 @@ test('a family line shows what there is to act on and stays silent otherwise', a
     assert.equal(shown(running), true, 'an operation under way stays in view');
     assert.equal(shown(familyEntry('f', {updateAvailable: 'no'}), {operationError: 'Update not started: refused'}), true,
         'the error of an operation the owner started is the one failure the line keeps');
+    // A failed passive read hides the line, except for what the owner left unresolved: its reason and recovery stay.
+    const failed = {inventoryError: 'Program inspection unavailable: refused'};
+    assert.equal(shown(familyEntry('f'), {...failed, request: {key: 'k'}}), true, 'an unconfirmed press keeps Retry same request');
+    assert.equal(shown(familyEntry('f'), {...failed, operation: {id: 'op', state: 'running'}}), true, 'an operation under way');
+    assert.equal(shown(familyEntry('f'), {...failed, operation: {id: 'op', state: 'succeeded'}}), false, 'a settled one is not the owner\'s pending');
+});
+
+// The engine could not be acquired for the press: the host answers that this attempt was not submitted.
+const notSubmitted = () => Object.assign(new Error('Engine temporarily busy'), {status: 503,
+    body: {error: {code: 'engine_unavailable', context: {scope: 'this_attempt', acceptance: 'not_submitted'}}}});
+
+test('an Update the engine never received keeps its reason and offers Update again, also after a healthy read', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    const starts = [];
+    const api = {
+        harnessMaintenanceInventory: async () => ({harnesses: [familyEntry('wiz-refused')]}),
+        async startHarnessMaintenance(body, key) { starts.push(key); if (starts.length === 1) throw notSubmitted(); return {id: 'op', harness: body.harness, state: 'queued'}; },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-refused'], store, api, onSettled: () => {}});
+    programs.observe(); await flush();
+    const press = async () => {
+        let click;
+        programs.bind({querySelectorAll: () => [{dataset: {programAction: 'latest'}, closest: () => ({dataset: {program: 'wiz-refused'}}),
+            addEventListener: (_type, fn) => { click = fn; }}]});
+        click(); await flush();
+    };
+    await press();
+    for (const when of ['after the refusal', 'after a healthy read']) {
+        const line = programs.line('wiz-refused');
+        assert.match(line, /Update not started: Engine temporarily busy/, when);
+        assert.match(line, /data-program-action="latest">Update</, `${when}: a new press is offered`);
+        assert.doesNotMatch(line, /Retry same request/, when);
+        await programs.read(); await flush();
+    }
+    await press();
+    assert.equal(starts.length, 2, 'the second press is a new request');
+    assert.notEqual(starts[0], starts[1]);
+    assert.match(programs.line('wiz-refused'), /Update queued/);
+    programs.dispose();
+});
+
+test('an Update whose acceptance is unknown keeps Retry same request through a failed read', async () => {
+    const {bindFamilyPrograms} = await import('../modules/model_program.js');
+    const store = {snapshot: {daemon: {state: 'running'}}};
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    let fail = false;
+    const api = {
+        async harnessMaintenanceInventory() { if (fail) throw Object.assign(new Error('Service unavailable'), {status: 503}); return {harnesses: [familyEntry('wiz-unknown')]}; },
+        async startHarnessMaintenance() { throw Object.assign(new Error('Bad gateway'), {status: 503}); },
+    };
+    const programs = bindFamilyPrograms({harnesses: ['wiz-unknown'], store, api, onSettled: () => {}});
+    programs.observe(); await flush();
+    let click;
+    programs.bind({querySelectorAll: () => [{dataset: {programAction: 'latest'}, closest: () => ({dataset: {program: 'wiz-unknown'}}),
+        addEventListener: (_type, fn) => { click = fn; }}]});
+    click(); await flush();
+    assert.match(programs.line('wiz-unknown'), /data-program-action="rejoin"[^>]*>Retry same request</);
+    fail = true;
+    await programs.read(); await flush();
+    const line = programs.line('wiz-unknown');
+    assert.match(line, /data-program-action="rejoin"[^>]*>Retry same request</, 'the recovery stays through the failed read');
+    assert.match(line, /Update acceptance unconfirmed: Bad gateway/, 'and so does its reason');
+    programs.dispose();
 });
 
 test('the wizard asks the engine only while it runs, the newest release only for a selected program', async () => {
@@ -315,7 +380,7 @@ test('the wizard asks the engine only while it runs, the newest release only for
     assert.equal(programs.line('wiz-one'), '', 'nothing flashes before the newest read answers');
     latest.resolve(); await flush();
     const line = programs.line('wiz-one');
-    assert.match(line, /<span>Program 0\.50\.0<\/span><span class="harness-model-latest">0\.60\.0 available<\/span>/);
+    assert.match(line, /<span>Program 0\.50\.0\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
     assert.match(line, /data-program-action="latest"[^>]*>Update</);
     assert.equal(programs.line('wiz-none'), '');
     programs.observe(); await flush();

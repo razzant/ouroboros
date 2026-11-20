@@ -59,16 +59,18 @@ export function modelProgramMarkup(program, view = {}, lead = '') {
     const needsUpdate = entry && entry.updateAvailable !== 'no';
     const disabled = Boolean(view.busy || view.inspectionPending || pending);
     const verb = entry?.selection?.path ? 'Update' : 'Install';
-    const error = view.operationError || view.inspectionError || view.inventoryError;
+    const readError = view.inspectionError || view.inventoryError;
+    const error = view.operationError || readError;
     const versions = () => [...new Set(program.programs.map((item) => item.version || 'version unknown'))].join(', ');
     const subset = program.entrySources?.length ? `${program.entrySources.join(', ')} entries` : 'Models';
     lead ||= `${program.mixed ? `${subset} supplied by` : 'List from'} ${program.label} ${versions()}`;
     let button = '';
     if (view.request && !operation) button = `<button type="button" class="btn btn-default" data-program-action="rejoin"${view.busy ? ' disabled' : ''}>${view.busy ? 'Sending…' : 'Retry same request'}</button>`;
     else if (pending && (view.operationError || operation?.termination === 'unconfirmed')) button = '<button type="button" class="btn btn-default" data-program-action="rejoin">Check operation</button>';
-    else if ((needsUpdate && action?.available && !error) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
+    // A press the engine never received keeps its reason and offers Update again; only a failed read withholds it.
+    else if ((needsUpdate && action?.available && !readError) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
     return `<div class="harness-model-program ui-field-help" data-program="${escapeHtml(program.harness)}">
-        <span>${escapeHtml(lead)}</span>${needsUpdate ? `<span class="harness-model-latest">${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}${button}
+        <span>${escapeHtml(lead)}${needsUpdate ? `\u00a0· <span class="harness-model-latest">${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}</span>${button}
         ${needsUpdate && action && !action.available ? `<span>${escapeHtml(action.reason)}</span>` : ''}
         ${operation ? `<span role="status">${escapeHtml(maintenanceOperationLine(operation, {missing: !entry?.selection?.path && !operation.before?.path}))}</span>` : ''}
         ${error ? `<span data-tone="warn">${escapeHtml(error)}</span>` : ''}
@@ -154,11 +156,14 @@ export function bindModelProgramFooter(input, footer, changed) {
 }
 
 /** A setup family's line shows only with something to act on, once its newest-release read has answered; a failed
- *  read shows nothing (an operation the owner started keeps its own error). Up to date or absent stays silent. */
+ *  passive read shows nothing. The owner's unresolved press or operation keeps its reason and recovery through one.
+ *  Up to date or absent stays silent. */
 export function familyProgramShown(view = {}) {
     const entry = view.entry;
-    if (!entry?.selection?.path || !entry.newest || entry.newest.status === 'not_read' || view.inspectionError || view.inventoryError) return false;
-    return entry.updateAvailable !== 'no' || Boolean(view.request || view.operationError) || maintenanceOperationPending(view.operation || entry.operation);
+    if (!entry?.selection?.path) return false;
+    if (view.request || view.operationError || maintenanceOperationPending(view.operation || entry.operation)) return true;
+    if (!entry.newest || entry.newest.status === 'not_read' || view.inspectionError || view.inventoryError) return false;
+    return entry.updateAvailable !== 'no';
 }
 
 /** The setup wizard's family rows: the engine is asked only while it runs (now, when it comes up, after a sign-in or
@@ -177,8 +182,10 @@ export function bindFamilyPrograms({ harnesses = [], store = claudexorStatus, vi
     }
     return {
         read,
-        /** The step's status tick: a first sight of the engine running reads; a remount reads again. */
+        /** The step's status tick: a first sight of the engine running reads; a remount reads again. Rows out of
+         *  view (`visible`) observe nothing: their remount reads. */
         observe({ remount = false } = {}) {
+            if (!visible()) return;
             const now = running();
             if (now && (!up || remount)) void read();
             up = now;

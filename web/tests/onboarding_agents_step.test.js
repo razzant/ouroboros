@@ -884,7 +884,7 @@ test('each family row carries its program line, read only while the engine runs 
     assert.deepEqual(asked.map((query) => [query.harness, query.checkLatest]), [['', false], ['codex', true]]);
     const codexRow = list.innerHTML.slice(list.innerHTML.indexOf('data-agent-family="codex"'),
         list.innerHTML.indexOf('data-agent-family="claude"'));
-    assert.match(codexRow, /<span>Program 0\.50\.0<\/span><span class="harness-model-latest">0\.60\.0 available<\/span>/);
+    assert.match(codexRow, /<span>Program 0\.50\.0\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
     assert.match(codexRow, /data-program-action="latest"[^>]*>Update</);
     assert.equal((list.innerHTML.match(/harness-model-program/g) || []).length, 1, 'only the family with something to act on');
 
@@ -899,6 +899,29 @@ test('each family row carries its program line, read only while the engine runs 
     await flush();
     assert.equal(asked.length, count, 'the disposed step reads nothing more');
     store.dispose();
+});
+
+test('the Models step mounts the same step without family rows, and asks the engine nothing about programs', async () => {
+    const asked = [];
+    const maintenanceApi = { harnessMaintenanceInventory: async (query) => { asked.push(query); return { harnesses: [] }; } };
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, snapshotWith(['codex'])),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} }, pollMs: 5000,
+    });
+    const dom = fakeDom();
+    const rows = dom.nodes.get('agents-family-list');
+    dom.nodes.delete('agents-family-list');  // the Models step: the editor, no Accounts rows
+    const step = createAgentsStep({ doc: dom.doc, store, maintenanceApi });
+    try {
+        step.mount();
+        await store.refresh();
+        await flush();
+        assert.deepEqual(asked, [], 'no program line here, so no inventory or newest-release read');
+        dom.nodes.set('agents-family-list', rows);  // back on Accounts: the remount reads for its rows
+        step.mount();
+        await flush();
+        assert.deepEqual(asked.map((query) => [query.harness, query.checkLatest]), [['', false]]);
+    } finally { step.detach(); store.dispose(); }
 });
 
 test('unknown sign-in cleanup stays retryable until explicit local detach', async (t) => {

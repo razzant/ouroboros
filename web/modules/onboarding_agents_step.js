@@ -85,14 +85,6 @@ export function connectedHarnesses(snapshot) {
     return AGENT_FAMILIES.map((f) => f.harness).filter((harness) => passed.has(harness));
 }
 
-export function harnessAccountCount(snapshot, harness) {
-    return accountRows(snapshot).filter(
-        (row) => row.harness === harness
-            && row?.enabled !== false
-            && String(row?.status?.verification || '') === 'passed',
-    ).length;
-}
-
 export function familyLabels(harnesses, snapshot, { catalogKnown = false } = {}) {
     // ONE authority, shared with the Agents tab: prefer the engine's own
     // display_name, fall back to the bootstrap product names. Passing the
@@ -693,8 +685,8 @@ export function createAgentsStep({
 
     let login = createLogin();
     // Each family's program line (docs/DESIGN.md §7), the same one an opened model chooser shows.
-    const programs = bindFamilyPrograms({ harnesses: AGENT_FAMILIES.map((f) => f.harness), store, visible: isVisible,
-        api: maintenanceApi, onChange: () => paint() });
+    const programs = bindFamilyPrograms({ harnesses: AGENT_FAMILIES.map((f) => f.harness), store, api: maintenanceApi,
+        visible: () => isVisible() && Boolean(el('agents-family-list')), onChange: () => paint() });
     const subagents = createAvailableSubagentsEditor({
         hostId: 'onboarding-available-subagents',
         doc: getDoc,
@@ -788,9 +780,7 @@ export function createAgentsStep({
             });
             if (html !== state.listHtml) {
                 state.listHtml = html;
-                list.innerHTML = html;
-                bindConnectButtons(list);
-                programs.bind(list);
+                rebuildList(list, html);
             }
         }
         const note = el('agents-status-note');
@@ -813,13 +803,18 @@ export function createAgentsStep({
         login?.render();
     }
 
-    function bindConnectButtons(list) {
-        list.querySelectorAll('[data-agent-connect]').forEach((button) => {
-            button.addEventListener('click', () => {
-                if (state.disposed) return;
-                ensureLogin().start(button.getAttribute('data-agent-connect'), '');
-            });
-        });
+    // A rebuild keeps the focused Connect or Update: the same control of the same family takes it back (docs/DESIGN.md
+    // principle 6), so a line arriving for one family never drops a keyboard reader off another's button.
+    function rebuildList(list, html) {
+        const active = getDoc()?.activeElement;
+        const control = list.contains(active) && ['data-agent-connect', 'data-program-action'].find((name) => active.hasAttribute(name));
+        const family = control && active.closest('[data-agent-family]')?.dataset.agentFamily;
+        list.innerHTML = html;
+        list.querySelectorAll('[data-agent-connect]').forEach((button) => button.addEventListener('click', () => {
+            if (!state.disposed) ensureLogin().start(button.getAttribute('data-agent-connect'), '');
+        }));
+        programs.bind(list);
+        if (family) list.querySelector(`[data-agent-family="${family}"] [${control}]`)?.focus({ preventScroll: true });
     }
 
     function adopt(view) {

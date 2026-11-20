@@ -170,7 +170,8 @@ def test_one_update_line_keeps_the_accounts_step_in_the_setup_window(wizard, the
     assert facts["overflow"] == 0, facts
     assert all(row["inView"] and row["uncovered"] for row in facts["rows"] + facts["connects"])
     _assert_way_forward(facts)
-    assert page.locator(PROGRAM_LINE).inner_text().split() == ["Program", "0.50.0", "0.60.0", "available", "Update"]
+    # One fact, its separator kept off the start of a line (docs/DESIGN.md §7).
+    assert page.locator(PROGRAM_LINE).inner_text().split() == ["Program", "0.50.0", "·", "0.60.0", "available", "Update"]
     assert _in_view(page, f"{PROGRAM_LINE} [data-program-action]")
     assert page.locator(".harness-model-program").count() == 1, "only the family with something to act on"
     assert any("checkLatest=true" in url and "harness=codex" in url for url in asked), asked
@@ -206,6 +207,67 @@ def test_a_stopped_engine_shows_no_program_line_and_no_warning(wizard, tmp_path)
     assert page.locator(".harness-model-program").count() == 0
     assert "Program inspection" not in page.locator("#agents-accounts").inner_text()
     assert asked == [], "a stopped engine is never asked about its programs"
+
+
+@pytest.mark.parametrize("size", [SETUP_WINDOW, PHONE], ids=["setup-window", "phone"])
+def test_an_update_the_engine_never_received_keeps_its_reason_and_offers_update_again(wizard, size, tmp_path):
+    """The engine could not be acquired for the press (``acceptance=not_submitted``): the reason stays beside Update,
+    a new press, through a visit to Models and back; the second press is sent."""
+    evidence = diagnostic_directory(tmp_path / "frames", "program-line", publish=True)
+    page = wizard["page"]
+    _serve_programs(page, [])
+    posts = []
+
+    def create(route):
+        posts.append(route.request.headers.get("idempotency-key"))
+        if len(posts) == 1:
+            route.fulfill(status=503, json={"error": {"code": "engine_unavailable", "message": "Engine temporarily busy",
+                                                       "context": {"acceptance": "not_submitted", "scope": "this_attempt"}}})
+        else:
+            route.fulfill(json={"id": "fixture-op", "harness": "codex", "state": "queued"})
+    page.route("**/api/claudexor/maintenance/operations", create)
+    page = _open(wizard, size, connected=True)
+    page.click(f"{PROGRAM_LINE} [data-program-action]")
+    page.wait_for_function(f"() => document.querySelector('{PROGRAM_LINE}')?.textContent.includes('Update not started')")
+    page.click("#next-btn")
+    page.wait_for_selector('[data-model-role-group="light"]')
+    page.click("#back-btn")
+    page.wait_for_selector(PROGRAM_LINE)
+    page.screenshot(path=str(evidence / f"not-submitted-{size[0]}x{size[1]}.png"), animations="disabled")
+    line = page.locator(PROGRAM_LINE)
+    assert "Update not started: Engine temporarily busy" in line.inner_text()
+    button = line.locator('[data-program-action="latest"]')
+    assert button.is_enabled() and button.inner_text() == "Update"
+    assert line.locator('[data-program-action="rejoin"]').count() == 0
+    button.click()
+    page.wait_for_function(f"() => document.querySelector('{PROGRAM_LINE}')?.textContent.includes('Update queued')")
+    assert len(posts) == 2 and posts[0] != posts[1], posts
+
+
+def test_a_line_arriving_for_one_family_keeps_focus_on_another(wizard, tmp_path):
+    page = wizard["page"]
+    held = []
+    unread = {**OLD_PROGRAM, "newest": {"status": "not_read", "source": None}, "updateAvailable": "cannot_tell"}
+
+    def answer(route):
+        if "checkLatest=true" in route.request.url:
+            held.append(route)
+        else:
+            route.fulfill(json={"observedAt": "2026-11-20T00:00:00Z", "harnesses": [unread]})
+    page.route("**/api/claudexor/maintenance/harnesses**", answer)
+    _serve_login(page, "claude")
+    page = _open(wizard, SETUP_WINDOW, connected=True)
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held, "the newest-release read is outstanding"
+    page.focus('[data-agent-connect="claude"]')
+    held[0].fulfill(json={"observedAt": "2026-11-20T00:00:00Z", "harnesses": [OLD_PROGRAM]})
+    page.wait_for_selector(PROGRAM_LINE)
+    assert page.evaluate("() => document.activeElement?.dataset.agentConnect") == "claude"
+    page.keyboard.press("Enter")  # still Claude's Connect: its sign-in opens
+    page.wait_for_selector("[data-open-signin]")
 
 
 @pytest.mark.parametrize("scene, size, harness, keys", [
@@ -406,6 +468,8 @@ def test_every_step_keeps_the_way_forward_and_says_where_you_are(wizard, size, t
         assert abs(facts["footerVar"] - facts["measured"]) < 1, facts
         if step == "consciousness":
             _assert_consciousness_step_fits(page, size)
+        if step == "models":  # the Light caption is drawn text, not a hover title
+            assert "Memory consolidation" in page.locator('[data-model-role-group="light"]').inner_text()
         if index < 6:
             page.click("#next-btn")
     # Back walks the same footer, and the draft is still there.

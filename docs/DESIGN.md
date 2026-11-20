@@ -2891,17 +2891,22 @@ when it supplies every suggestion, otherwise the supplied subset with its source
 (e.g. “Claudexor entries supplied by Codex”), then the newest fact and Update when needed.
 Every editor built on the shared chooser follows this rule. Closed
 editors stay quiet; API-only lists have no such row. The wizard's Accounts step shows the
-same line under a family's status, led by its program's version (“Program 0.50.0”, then
-“0.60.0 available” and Update), only when there is something to act on (an update, a refused update
+same line under a family's status, led by its program's version (“Program 0.50.0 · 0.60.0
+available”, then Update), only when there is something to act on (an update, a refused update
 with the engine's reason, an operation under way or the error of one the owner started) and
 the newest-release read has answered; without a Details disclosure. Its silence otherwise is
 intentional: an up-to-date program, a family with no program (Connect installs it), an engine
 that is not running or a read the engine refused say nothing there, while Accounts keeps
-“Program X · Up to date”. After a failed Connect that line is the offer, with no claim about
-the cause (owner decision 2026-11-20). Mouse, touch and keyboard Update
+“Program X · Up to date”. The owner's own unresolved press or operation is the exception: its
+reason and its recovery (Retry same request, Check operation) stay through a failed read, and an
+Update the engine never received (not submitted) keeps its reason beside Update, a new press.
+After a failed Connect that line is the offer, with no claim about
+the cause (owner decision 2026-11-20). A line arriving for one family keeps focus on another's
+Connect. Mouse, touch and keyboard Update
 keep the list open through progress and result, then refresh its suggestions. Typed
 values/carets survive; “Custom ID · Not in this list” stays under an unlisted input.
-Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator.
+Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator; the
+version and the newest fact are one fact, joined by “ · ”, which never starts a line.
 
 Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
 dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of
