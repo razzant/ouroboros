@@ -440,8 +440,8 @@ def test_local_request_reader_gives_windows_a_command_cmd_exe_passes_on(tmp_path
 
 
 def test_local_request_reader_names_a_receipt_recorded_without_a_request(data_root, capsys):
-    """A live conversation records its sends as receipts that arrived already billed: each one attempt, with no
-    request prepared on this computer. Its report names that instead of a lost link."""
+    """A live conversation's responses and connected time enter the ledger from usage reported once the work is under
+    way: each row one attempt, with no saved request. Its report names that instead of a lost link."""
     from ouroboros.context_attempt_reader import list_attempts, main
 
     receipt = ua.record_received_attempt(ua.AttemptRequest(

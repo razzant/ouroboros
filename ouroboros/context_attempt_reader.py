@@ -126,8 +126,8 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
         facts.update(_recorded_life(row, dict(life)))
     ref = row.get("candidate_manifest_ref")
     if not isinstance(ref, dict) or not ref:
-        # A receipt recorded already billed (a live conversation's) had no request prepared here; any other row may
-        # have lost its producer after sealing but before linking.
+        # A row written from usage reported once the work was under way (a live conversation's) never had a request
+        # saved; any other row may have lost its producer after sealing but before linking.
         receipt = row.get("reservation_basis") == "receipt_already_received"
         return {**facts, "body": "receipt_only" if receipt else "not_linked"}, None
     if ref.get("model_send_seal_version") != SEAL_VERSION:

@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ssz/GB7TI0r4CuuR97oyM736SxeYY43YB2NM68VbYKg='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-+oBZ/0zowsG7U5CDuz9Um84Fc8Obp7QHxyRh8Vitzes='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -152,8 +152,8 @@ const ABSENT = new Map([
     'Its ledger row accounts for a delegated session, a dispatch outside Ouroboros’s metering or imported history, which may stand for many requests, so no saved request belongs to it. List the task’s attempts and choose one of them.']],
   ['evidence_unavailable', ['The saved request could not be located just now',
     'Its record lies in a packed archive, and the index that says where could not answer. Nothing is known to be lost: run the reader again later.']],
-  ['receipt_only', ['This attempt is a receipt with no saved request',
-    'The ledger recorded its usage as a receipt that arrived already billed, as a live conversation records its sends; this computer prepared and saved no request for it.']],
+  ['receipt_only', ['This attempt was recorded from a usage report and has no saved request',
+    'The ledger wrote its row from usage reported once the work was under way, as it does for a live conversation’s responses and connected time. No request was saved for it, so there is none to show.']],
 ]);
 // A ledger state is accounting. The report carries no money field, so these words name what the ledger
 // recorded about the attempt's record and never a price, a charge or a delivery.

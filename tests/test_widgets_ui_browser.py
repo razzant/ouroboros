@@ -1211,7 +1211,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                           "retry_max_bytes": 2258277}, "sealed record is larger", "--max-bytes 2258277 to include it"),
                         ({"body": "evidence_unavailable", "evidence_reason": "busy"}, "could not be located just now",
                          "run the reader again later"),
-                        ({"body": "receipt_only"}, "a receipt with no saved request", "prepared and saved no request"),
+                        ({"body": "receipt_only"}, "recorded from a usage report", "No request was saved for it"),
                         # The allowance admits the request and its sealed record: the larger of the two.
                         ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648,
                           "retry_max_bytes": 60000000}, "larger than this page opens",
