@@ -25,7 +25,7 @@ import pytest
 
 from tests.candidate_checkout import case_checkout, require_candidate_interpreter, verify_checkout
 from tests.fixtures_mock_llm import MockLLMServer
-from tests.test_onboarding_attempt_browser import _to_summary
+from tests.test_onboarding_attempt_browser import _start, _to_summary
 from tests.test_ui_smoke_playwright import (
     REPO_ROOT, _assert_served_candidate, _fixture_interpreter, _fixture_python, _free_port, _wait_health,
     _wait_supervisor_ready,
@@ -331,7 +331,7 @@ def test_an_older_install_with_a_state_shows_no_step_and_stays_as_its_state_says
             assert page.locator(".wizard-step").count() == 5 and page.locator(STEP).count() == 0
             assert page.locator(".summary-kv").filter(has=page.get_by_text("Consciousness", exact=True)).count() == 0
             seen["errors"].watch(page)
-            _finish(page)
+            _start(page, seen["completions"])  # a click while the preview updates sends nothing; it is pressed again
             page.wait_for_url(srv.url + "/", timeout=120_000)
             assert seen["commands"] == [], "nothing is sent"
             assert len(seen["completions"]) == 1 and "consciousness" not in seen["completions"][0]
