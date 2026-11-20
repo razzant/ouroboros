@@ -21,12 +21,15 @@ export function matchingModelOptions(items, query) {
         || value.toLocaleLowerCase().includes(search) || label.toLocaleLowerCase().includes(search)));
 }
 
+function optionLabel({ value, label, meta }) {
+    return meta ? `<span class="ui-model-option-name">${escapeHtml(label || value)}</span> <span class="ui-model-option-meta" data-i18n-skip>${escapeHtml(meta)}</span>`
+        : escapeHtml(label || value);
+}
+
 function optionsHtml(items, listId) {
-    return modelOptions(items).map(({ value, label, custom, meta }, index) =>
-        `<div class="ui-model-option${meta ? ' ui-model-option-priced' : ''}" role="option" id="${escapeHtml(listId)}-${index}"
-            data-model-value="${escapeHtml(value)}"${custom ? ' data-model-custom-option' : ''} aria-selected="false">${meta
-            ? `<span class="ui-model-option-name">${escapeHtml(label || value)}</span> <span class="ui-model-option-meta" data-i18n-skip>${escapeHtml(meta)}</span>`
-            : escapeHtml(label || value)}</div>`).join('');
+    return modelOptions(items).map((item, index) =>
+        `<div class="ui-model-option${item.meta ? ' ui-model-option-priced' : ''}" role="option" id="${escapeHtml(listId)}-${index}"
+            data-model-value="${escapeHtml(item.value)}"${item.custom ? ' data-model-custom-option' : ''} aria-selected="false">${optionLabel(item)}</div>`).join('');
 }
 
 export function modelChooserHtml(attrs, value, listId, items = [], { placeholder = 'Choose a model', labelUnlisted = true, programs = [] } = {}) {
@@ -63,6 +66,9 @@ export function bindModelChooser(input) {
     const footer = owner.querySelector('[data-model-footer]');
     list.setAttribute('aria-label', input.getAttribute('aria-label') || 'Models');
     let items = readOptions(list);
+    const rowNodes = new Map([...list.querySelectorAll('[data-model-value]')].map((node, i) =>
+        [node.dataset.modelValue, { node, item: items[i] }]));
+    let nextOption = rowNodes.size;
     let visible = [];
     let active = -1;
     let composing = false;
@@ -101,8 +107,40 @@ export function bindModelChooser(input) {
         customLabel();
         const selected = visible[active]?.value;
         visible = matchingModelOptions(items, input.value);
-        list.innerHTML = optionsHtml(visible, list.id)
-            || (owner.querySelector('[data-model-custom]') ? '<div class="ui-model-empty">Custom ID · Not in this list</div>' : '<div class="ui-model-empty">No matching suggestions. You can keep this model ID.</div>');
+        // Catalogs can answer between pointerdown and click. Patch surviving options by model value,
+        // keeping the pressed node and the ID referenced by the keyboard even if siblings are inserted.
+        const removed = new Set(rowNodes.keys());
+        if (visible.length) list.querySelector('.ui-model-empty')?.remove();
+        for (const [index, item] of visible.entries()) {
+            removed.delete(item.value);
+            let record = rowNodes.get(item.value);
+            if (!record) {
+                const node = doc.createElement('div');
+                node.id = `${list.id}-${nextOption++}`;
+                node.dataset.modelValue = item.value;
+                node.setAttribute('role', 'option');
+                record = { node };
+                rowNodes.set(item.value, record);
+            }
+            const { node } = record;
+            if (!record.item || record.item.label !== item.label || record.item.meta !== item.meta) {
+                node.className = item.meta ? 'ui-model-option ui-model-option-priced' : 'ui-model-option';
+                node.innerHTML = optionLabel(item);
+                record.item = item;
+            }
+            if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+        }
+        for (const value of removed) {
+            rowNodes.get(value).node.remove();
+            rowNodes.delete(value);
+        }
+        if (!visible.length && !list.querySelector('.ui-model-empty')) {
+            const empty = doc.createElement('div');
+            empty.className = 'ui-model-empty';
+            empty.textContent = owner.querySelector('[data-model-custom]') ? 'Custom ID · Not in this list'
+                : 'No matching suggestions. You can keep this model ID.';
+            list.appendChild(empty);
+        }
         highlight(selected === undefined ? -1 : visible.findIndex((item) => item.value === selected));
         position?.reposition();
     }

@@ -47,7 +47,7 @@ function fakeServer(routes, values = {}) {
     server.document = () => ({ ...structuredClone(server.values), _meta: {
         effects: Object.fromEntries(Object.keys(server.values).map((key) => [key, EFFECT_OF(key)])),
         tokens: Object.fromEntries(Object.keys(server.values).map((key) => [key, token(key)])),
-        setup_contract: { modelSlots: contract.modelSlots } } });
+        setup_contract: { scopedModelCatalogs: true, modelSlots: contract.modelSlots } } });
     const write = (settings, precondition = {}) => {
         const stale = Object.entries(precondition || {}).find(([key, held]) => held !== token(key));
         if (stale) return response({ saved: false, code: 'settings_changed_elsewhere', error: `${stale[0]} changed` }, 409);

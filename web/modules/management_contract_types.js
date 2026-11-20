@@ -1086,6 +1086,7 @@
  * @property {Object[]} errors
  * @property {Object[]} model_sources
  * @property {Object[]=} account_catalogs
+ * @property {Object=} session_catalog  // native harness row for a harness_id read
  * @property {boolean=} partial
  */
 

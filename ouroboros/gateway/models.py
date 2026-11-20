@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Awaitable, Callable
 
 import httpx
@@ -404,7 +406,108 @@ def account_catalog_models(envelope: dict):
                     yield account, catalog, model
 
 
-def _subscription_model_catalog(source_id: str = "", profile_id: str = "", *, sources_only: bool = False) -> dict:
+def _one_subscription_catalog(gateway, source: dict, account_view: bool, profile_id: str) -> dict:
+    identifier = source["id"]
+    result = {"items": [], "errors": []}
+    if account_view:
+        result.update(account_catalogs=[], partial=False)
+    catalog = gateway.list_source_models(identifier, credential_profile_id=profile_id or None,
+                                         **({"view": "accounts"} if account_view else {}))
+    if account_view:
+        result["account_catalogs"].append(catalog)
+        result["partial"] = catalog.get("partial", False)
+        for account in catalog.get("accounts", []):
+            # A readable account carrying a problem (spent window, cooldown) is account state,
+            # already on its items and account_catalogs; only a missing catalog is a read failure.
+            if account.get("catalog") is None:
+                problem = account.get("problem") or {}
+                result["errors"].append({"provider_id": "claudexor", "source_id": identifier,
+                    "credential_profile_id": account.get("credentialProfileId"),
+                    "code": problem.get("code", "catalog_unavailable"),
+                    "error": problem.get("message", "This account catalog could not be read."),
+                    "availability": account.get("availability"), "problem": account.get("problem")})
+        records = account_catalog_models(catalog)
+    else:
+        records = ((None, catalog, model) for model in catalog.get("models", []))
+    for account, catalog, model in records:
+        model_id = str(model.get("id") or "")
+        if not model_id:
+            continue
+        entry = _build_model_catalog_entry("claudexor", str(source.get("label") or identifier),
+            model_id, str(model.get("label") or model_id), source="Claudexor")
+        entry.update({
+            "source_id": identifier,
+            **({"sourceProgram": catalog.get("sourceProgram")} if not account_view else {}),
+            "value": f"claudexor::{identifier}={model_id}",
+            "credential_profile_id": catalog.get("credentialProfileId"),
+            "account_fingerprint": catalog.get("accountFingerprint"),
+            "context_window": model.get("contextWindow"),
+            "max_context_window": model.get("maxContextWindow"),
+            "max_output_tokens": model.get("maxOutputTokens"),
+            "is_default": model.get("isDefault", False),
+            "supported_options": model.get("supportedOptions", []),
+            "reasoning_efforts": model.get("reasoningEfforts", []),
+            "default_reasoning_effort": model.get("defaultReasoningEffort"),
+            "input_modalities": model.get("inputModalities", []),
+            "provenance": catalog.get("provenance"),
+            "observed_at": catalog.get("observedAt"),
+        })
+        if account is not None:
+            entry.update(availability=account.get("availability"), problem=account.get("problem"),
+                         processing=model.get("processing"))
+        result["items"].append(entry)
+    return result
+
+
+def _join_subscription_catalogs(discovery: dict, parts) -> dict:
+    result = {**discovery, "items": [], "errors": list(discovery["errors"])}
+    if "account_catalogs" in discovery:
+        result["account_catalogs"] = []
+    for part in parts:
+        result["items"].extend(part["items"])
+        result["errors"].extend(part["errors"])
+        if "account_catalogs" in result:
+            result["account_catalogs"].extend(part.get("account_catalogs", []))
+        if part.get("partial"):
+            result["partial"] = True
+    return result
+
+
+def _subscription_timeout(source=None):
+    error = {"provider_id": "claudexor", "stage": "timeout", "error": "Subscription catalogs did not answer in time."}
+    if source is not None:
+        error["source_id"] = source
+    return {"items": [], "errors": [error], "partial": True}
+
+
+class _SubscriptionBatch:
+    """A response samples finished sources at one deadline. The worker owns the gateway
+    until its last read finishes, including reads that outlive the HTTP response."""
+
+    def __init__(self):
+        self.deadline = time.monotonic() + _CATALOG_HTTP_TIMEOUT_SEC
+        self.started = Future()
+
+    def read(self, discovery, sources, read):
+        # Discovery itself may have outlived the batch. Do not start new catalog calls for it.
+        if not sources:
+            return discovery
+        if time.monotonic() >= self.deadline:
+            return _join_subscription_catalogs(discovery, (_subscription_timeout(s["id"]) for s in sources))
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            jobs = {source["id"]: pool.submit(copy_context().run, read, source) for source in sources}
+            self.started.set_result((discovery, jobs))
+        return self.snapshot()
+
+    def snapshot(self):
+        if not self.started.done():
+            return {"model_sources": [], **_subscription_timeout()}
+        discovery, jobs = self.started.result()
+        return _join_subscription_catalogs(discovery, (
+            job.result() if job.done() else _subscription_timeout(source) for source, job in jobs.items()))
+
+
+def _subscription_model_catalog(source_id: str = "", profile_id: str = "", batch: _SubscriptionBatch | None = None, *, sources_only: bool = False) -> dict:
     """Read raw transport catalogs from the owned engine, never CLI model inventory.
 
     Account-view engines enumerate every enabled account, retaining independent
@@ -430,65 +533,22 @@ def _subscription_model_catalog(source_id: str = "", profile_id: str = "", *, so
                 return result
             if account_view:
                 result.update(account_catalogs=[], partial=False)
-            for source in sources:
-                identifier = str(source.get("id") or "")
-                if source_id and identifier != source_id:
-                    continue
+
+            def read(source):
                 try:
-                    catalog = gateway.list_source_models(identifier, credential_profile_id=profile_id or None,
-                        **({"view": "accounts"} if account_view else {}))
+                    return _one_subscription_catalog(gateway, source, account_view, profile_id)
                 except Exception as exc:
-                    result["errors"].append({"provider_id": "claudexor", "source_id": identifier,
-                        "code": str(getattr(exc, "code", "catalog_unavailable")), "error": str(exc)})
-                    if account_view:
-                        result["partial"] = True
-                    continue
-                if account_view:
-                    result["account_catalogs"].append(catalog)
-                    result["partial"] = result["partial"] or catalog.get("partial", False)
-                    for account in catalog.get("accounts", []):
-                        # A readable account carrying a problem (spent window, cooldown) is account state,
-                        # already on its items and account_catalogs; only a missing catalog is a read failure.
-                        if account.get("catalog") is None:
-                            problem = account.get("problem") or {}
-                            result["errors"].append({"provider_id": "claudexor", "source_id": identifier,
-                                "credential_profile_id": account.get("credentialProfileId"),
-                                "code": problem.get("code", "catalog_unavailable"),
-                                "error": problem.get("message", "This account catalog could not be read."),
-                                "availability": account.get("availability"), "problem": account.get("problem")})
-                    records = account_catalog_models(catalog)
-                else:
-                    records = ((None, catalog, model) for model in catalog.get("models", []))
-                for account, catalog, model in records:
-                    model_id = str(model.get("id") or "")
-                    if not model_id:
-                        continue
-                    entry = _build_model_catalog_entry("claudexor", str(source.get("label") or identifier),
-                        model_id, str(model.get("label") or model_id), source="Claudexor")
-                    entry.update({
-                        "source_id": identifier,
-                        **({"sourceProgram": catalog.get("sourceProgram")} if not account_view else {}),
-                        "value": f"claudexor::{identifier}={model_id}",
-                        "credential_profile_id": catalog.get("credentialProfileId"),
-                        "account_fingerprint": catalog.get("accountFingerprint"),
-                        "context_window": model.get("contextWindow"),
-                        "max_context_window": model.get("maxContextWindow"),
-                        "max_output_tokens": model.get("maxOutputTokens"),
-                        "is_default": model.get("isDefault", False),
-                        "supported_options": model.get("supportedOptions", []),
-                        "reasoning_efforts": model.get("reasoningEfforts", []),
-                        "default_reasoning_effort": model.get("defaultReasoningEffort"),
-                        "input_modalities": model.get("inputModalities", []),
-                        "provenance": catalog.get("provenance"),
-                        "observed_at": catalog.get("observedAt"),
-                    })
-                    if account is not None:
-                        entry.update(availability=account.get("availability"), problem=account.get("problem"),
-                                     processing=model.get("processing"))
-                    result["items"].append(entry)
-            if source_id and not any(str(source.get("id") or "") == source_id for source in sources):
+                    return {"items": [], "partial": account_view, "errors": [{
+                        "provider_id": "claudexor", "source_id": source["id"],
+                        "code": str(getattr(exc, "code", "catalog_unavailable")), "error": str(exc)}]}
+
+            if batch is not None:
+                return batch.read(result, sources, read)
+            selected = [s for s in sources if s.get("id") == source_id] if source_id else sources
+            if source_id and not selected:
                 result["errors"].append({"provider_id": "claudexor", "source_id": source_id,
                     "code": "model_source_unavailable", "error": "This engine does not provide the selected model transport."})
+            return _join_subscription_catalogs(result, map(read, selected))
     except Exception as exc:
         result["errors"].append({"provider_id": "claudexor", "source_id": source_id,
             "code": str(getattr(exc, "code", "catalog_unavailable")), "error": str(exc)})
@@ -500,16 +560,23 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     source_id = str(query.get("source_id") or "").strip()
     profile_id = str(query.get("credential_profile_id") or "").strip()
     if query.get("view") == "sources":
-        if source_id or profile_id or "provider_id" in query:
+        if source_id or profile_id or "provider_id" in query or "harness_id" in query:
             return json_error("view=sources cannot be combined with a source, profile or provider selector", 400)
         return JSONResponse(await asyncio.to_thread(_subscription_model_catalog, sources_only=True))
     if "provider_id" in query:
         provider_id = query["provider_id"].strip()
-        if not provider_id or source_id or profile_id:
+        if not provider_id or source_id or profile_id or "harness_id" in query:
             return json_error("provider_id must name one connection without a subscription selector", 400)
         return JSONResponse(await catalog_payload(load_settings(), provider_id=provider_id))
+    if "harness_id" in query:
+        from ouroboros.gateway.claudexor_accounts import session_model_catalog
+
+        harness_id = query["harness_id"].strip()
+        if not harness_id or source_id:
+            return json_error("harness_id must name one agent session without a subscription source", 400)
+        return JSONResponse(await asyncio.to_thread(session_model_catalog, harness_id, profile_id))
     if profile_id and not source_id:
-        return json_error("credential_profile_id requires source_id", 400)
+        return json_error("credential_profile_id requires source_id or harness_id", 400)
     if source_id:
         return JSONResponse(await asyncio.to_thread(_subscription_model_catalog, source_id, profile_id))
     return JSONResponse(await catalog_payload(load_settings()))
@@ -557,11 +624,11 @@ async def catalog_payload(settings: dict, *, provider_id: str | None = None,
     # A whole-list client has one response budget. Slow subscription discovery must not consume
     # the API connections' time before they even start, or discard their already returned models.
     async def subscriptions():
+        batch = _SubscriptionBatch()
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_subscription_model_catalog), _CATALOG_HTTP_TIMEOUT_SEC)
+            return await asyncio.wait_for(asyncio.to_thread(_subscription_model_catalog, "", "", batch), _CATALOG_HTTP_TIMEOUT_SEC)
         except asyncio.TimeoutError:
-            return {"model_sources": [], "items": [], "errors": [{"provider_id": "claudexor", "stage": "timeout",
-                    "error": "Subscription catalogs did not answer in time."}]}
+            return batch.snapshot()
     engine, api = await asyncio.gather(subscriptions(), _api_catalog(settings, None, refused))
     items = sorted(engine["items"] + api["items"], key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
     return {**engine, "items": items, "errors": engine["errors"] + api["errors"]}

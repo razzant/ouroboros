@@ -338,6 +338,11 @@ test('nothing but Main to lead says so and offers the way to Settings; a read in
     const gap = mountList({ store: storeOf({ catalog: { ...SOURCES, errors: [{ provider_id: 'anthropic', error: 'HTTP 401' }] } }), main: ASTRA });
     gap.type('kimi');
     assert.equal(gap.outline().at(-1), 'note: Could not read every list: Anthropic.');
+    const engine = mountList({ store: storeOf({ catalog: { ...SOURCES,
+        errors: [{ provider_id: 'claudexor', error: 'Subscription catalogs did not answer in time.' }] } }), main: ASTRA });
+    assert.equal(engine.outline().at(-1), 'note: Subscription catalogs did not answer in time.');
+    engine.type('kimi');
+    assert.equal(engine.outline().at(-1), 'note: Subscription catalogs did not answer in time.');
 });
 
 test('every count agrees with its noun: one model, several models, and how many more', () => {

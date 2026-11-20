@@ -1,14 +1,13 @@
 """Modern per-account discovery in real editors, using controlled HTTP responses."""
 from __future__ import annotations
 
-import copy
 import json
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
 from tests.settings_browser_helpers import press_editor_save, settings_page
+from tests.test_subscription_setup_browser import scoped_catalog_answer
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -71,15 +70,7 @@ def account_catalog_ui(role_ui):
 
     def catalog_response(route):
         ui["reads"].append(route.request.url)
-        body = copy.deepcopy(ui["fixture"]["catalog"])
-        pin = parse_qs(urlparse(route.request.url).query).get("credential_profile_id", [""])[0]
-        if pin:
-            body["items"] = [item for item in body["items"] if item["credential_profile_id"] == pin]
-            envelope = body["account_catalogs"][0]
-            envelope["accounts"] = [account for account in envelope["accounts"] if account["credentialProfileId"] == pin]
-            body["errors"] = [error for error in body["errors"] if error["credential_profile_id"] == pin]
-            envelope["partial"] = body["partial"] = any(account["catalog"] is None for account in envelope["accounts"])
-        route.fulfill(content_type="application/json", body=json.dumps(body))
+        route.fulfill(json=scoped_catalog_answer(route.request.url, ui["fixture"]["catalog"], ui["fixture"]["status"]["harnesses"]))
 
     ui["page"].route("**/api/model-catalog*", catalog_response)
     return ui

@@ -102,9 +102,25 @@ export function modelSlotCatalogQuery(source, profile = '') {
 
 /** The catalogs read by one editor. Only an answer for the same source/account can replace its evidence.
  * A superseding refresh or a discarded draft retires its in-flight reads. Nothing here publishes a whole catalog. */
-export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = () => {} } = {}) {
+export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = () => {},
+    supportsScopes = () => true, legacyCatalog = () => null } = {}) {
     const snapshots = new Map();
     const requests = new Map();
+    // Older cores ignore unfamiliar query parameters. Only use their already read full catalog;
+    // a form selecting one provider never turns its lookup into a request to every configured key.
+    function fetchScope(key, signal) {
+        const params = new URLSearchParams(key);
+        if (supportsScopes() || params.has('source_id')) {
+            return fetchCatalog(`/api/model-catalog?${key}`, { cache: 'no-store', signal });
+        }
+        const previous = legacyCatalog();
+        if (!previous) return { items: [], model_sources: [], read_state: 'not_read', errors: [{
+            code: 'scoped_catalog_unsupported', error: 'This core lists all models together. Read the full model catalog.' }] };
+        if (params.has('view')) return { ...previous, items: [] };
+        const provider = params.get('provider_id');
+        return { ...previous, items: (previous.items || []).filter(item => provider === 'local' ? item.use_local
+            : !item.use_local && parseModelSource(item.value || item.id).source === provider) };
+    }
     function reset() {
         for (const { controller } of requests.values()) controller.abort();
         requests.clear();
@@ -119,8 +135,7 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
             if (!force && snapshots.has(key)) return Promise.resolve(snapshots.get(key));
             pending?.controller.abort();
             const controller = new AbortController();
-            const promise = Promise.resolve().then(() => fetchCatalog(`/api/model-catalog?${key}`,
-                { cache: 'no-store', signal: controller.signal })).then(data => {
+            const promise = Promise.resolve().then(() => fetchScope(key, controller.signal)).then(data => {
                 const field = key === 'view=sources' ? 'model_sources' : 'items';
                 if (!Array.isArray(data?.[field])) throw new Error(data?.error || 'Model catalog response is unreadable.');
                 return data;

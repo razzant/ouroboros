@@ -213,8 +213,9 @@ def test_chooser_popup_reachable_in_narrow_short_view(role_ui, width, height):
 def vendor_scene(ui, count=1):
     """The real consumer catalog, including an empty-independent API source and six editors."""
     import copy
-    from urllib.parse import parse_qs, urlparse
+    from urllib.parse import urlparse
     from tests.test_harness_maintenance_browser import _inventory_row
+    from tests.test_subscription_setup_browser import scoped_catalog_answer
 
     roles.configure_mixed(ui)
     roles.api_lane(ui, "openai")
@@ -268,11 +269,7 @@ def vendor_scene(ui, count=1):
         if world["catalog_revision"] != world["version"]:
             catalogs()
             world["catalog_revision"] = world["version"]
-        payload = copy.deepcopy(ui["fixture"]["catalog"])
-        source = parse_qs(urlparse(route.request.url).query).get("source_id", [""])[0]
-        if source:
-            payload["items"] = [item for item in payload["items"] if item.get("source_id") == source]
-        route.fulfill(json=payload)
+        route.fulfill(json=scoped_catalog_answer(route.request.url, ui["fixture"]["catalog"], ui["fixture"]["status"]["harnesses"]))
 
     def maintenance(route):
         path = urlparse(route.request.url).path
@@ -794,3 +791,54 @@ def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, wid
                        and parse_qs(urlparse(url).query).get("include") == ["models"]]
     assert len(full_catalogs) == len(native_catalogs) == 1
     assert not world["posts"] and page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize("during_press", [True, False])
+def test_refresh_preserves_pressed_model_suggestion(role_ui, during_press):
+    """A refresh preserves identical suggestions and the DOM identity of a survivor when another row arrives."""
+    from playwright.sync_api import expect
+
+    ui, page = role_ui, role_ui["page"]
+    roles.configure_mixed(ui)
+    roles.api_lane(ui, "openrouter")
+    roles.api_lane(ui, "openai")
+    ui["settings"]["OUROBOROS_MODEL"] = "vendor/old"
+    old_read = []
+    page.route("**/api/model-catalog?provider_id=openrouter", lambda route: old_read.append(route))
+    page.route("**/api/model-catalog?provider_id=openai", lambda route: route.fulfill(json={
+        "items": [{"id": "choice-01", "name": "choice-01", "value": "openai::choice-01"}], "errors": []}))
+    page.emulate_media(reduced_motion="reduce")
+    with page.expect_request(lambda request: "provider_id=openrouter" in request.url):
+        roles.open_models(ui)
+    page.get_by_role("combobox", name="Main Model source", exact=True).click()
+    page.get_by_role("option", name="OpenAI", exact=True).click()
+    field = page.locator('[data-model-role="main"] [data-model-role-model]')
+    field.fill("choice")
+    option = page.locator('[data-model-popup]:visible [data-model-value="choice-01"]')
+    original_id = option.get_attribute("id")
+    name = field.get_attribute("aria-controls")
+
+    def refresh():
+        for route in old_read:
+            route.fulfill(json={"items": [{"id": "other", "value": "other"}], "errors": []})
+        # An identical or longer list for the current source can also arrive during the press.
+        field.evaluate("""async input => {
+            const { updateModelChooser } = await import('/static/modules/model_chooser.js');
+            const items = [{value: 'choice-01', label: 'choice-01'}];
+            updateModelChooser(input, items);
+            updateModelChooser(input, [...items, {value: 'choice-new', label: 'choice-new'}]);
+        }""")
+
+    option.evaluate("el => { window.heldModelRow = el; }")
+    option.hover()
+    page.mouse.down()
+    if during_press:
+        refresh()
+        expect(page.locator(f'[id="{name}"] [data-model-value="choice-new"]')).to_be_visible()
+        assert option.evaluate("el => el === window.heldModelRow")
+    page.mouse.up()
+    if not during_press:
+        refresh()
+    expect(field).to_have_value("choice-01")
+    field.fill("choice")
+    expect(option).to_have_attribute("id", original_id)

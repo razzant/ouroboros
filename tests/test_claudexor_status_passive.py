@@ -157,6 +157,39 @@ def test_warm_owned_metadata_preserves_models_profiles_and_closes(metadata_engin
     assert len(clients) == 3 and all(client.is_closed for client in clients)
 
 
+@pytest.mark.parametrize("pin", ["", "account-b"])
+@pytest.mark.parametrize("account_view", [False, True])
+def test_selected_session_catalog_reads_just_its_harness_and_pin(metadata_engine, account_view, pin):
+    state, calls, clients, provision, _ = metadata_engine
+    provision()
+    state["accounts_view"] = account_view
+    route = "/v2/harnesses/other/models"
+    profiles = [pin] if pin else ["account-a", "account-b"]
+    envelope = {"harnessId": "other", "partial": False, "accounts": [
+        {"credentialProfileId": profile, "availability": "available", "catalog": {
+            "models": [{"id": profile + "-only"}], "sourceProgram": {"version": "2"}}} for profile in profiles]}
+    state["responses"] = {route: envelope if account_view else {"models": [{"id": "legacy"}]}}
+    app = Starlette(routes=[Route("/api/model-catalog", api_model_catalog)])
+    with TestClient(app) as client:
+        response = client.get("/api/model-catalog", params={"harness_id": "other",
+                              **({"credential_profile_id": pin} if pin else {})})
+    body = response.json()
+    row = body["session_catalog"]
+    assert response.status_code == 200 and row["id"] == "other" and body["items"] == [] and body["model_sources"] == []
+    reads = [call for call in calls if call[1] not in ("/v2/handshake", "/v2/operations")]
+    if pin and not account_view:
+        assert reads == [] and row["models"] == [] and body["errors"][0]["code"] == "profile_catalog_unsupported"
+    else:
+        query = {"view": "accounts", **({"credentialProfileId": pin} if pin else {})} if account_view else {}
+        assert reads == [("GET", route, query)] and not body["errors"]
+        if account_view:
+            assert row["model_catalog"] == envelope
+            assert [m["credential_profile_id"] for m in row["models"]] == profiles
+        else:
+            assert row["models"] == [{"id": "legacy"}]
+    assert all(client.is_closed for client in clients)
+
+
 def test_account_catalog_view_reaches_raw_http_without_affecting_execution_discovery(metadata_engine):
     from ouroboros.llm import LLMClient
 

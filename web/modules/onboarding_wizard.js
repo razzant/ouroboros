@@ -20,7 +20,7 @@ import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEd
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
     configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults, spendGapsWords } from './route_editor_primitives.js';
 import { mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
-import { createOnboardingCatalog } from './onboarding_catalog.js';
+import { bindCompatibleModelLoader, createOnboardingCatalog } from './onboarding_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
@@ -124,19 +124,24 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
     const consciousness = createConsciousnessStep(bootstrap.consciousnessOffer); // its position rides the one completion request
-    const discovery = createOnboardingCatalog({ draftSettings, providerFields: PROVIDER_FIELDS,
+    const supportsScopes = () => SETUP_CONTRACT.scopedModelCatalogs === true;
+    const discovery = createOnboardingCatalog({ draftSettings, providerFields: PROVIDER_FIELDS, supportsScopes,
         onSources(data) {
-            sourceRead = data;
-            if (data.sources_read_state === 'ok') modelCatalog = { ...modelCatalog, model_sources: data.model_sources };
-            adoptModelCatalog(); syncCurrentStepActionState();
+            sourceRead = mergeModelCatalog(sourceRead, data);
+            adoptSources(); syncCurrentStepActionState();
         },
-        onFull(data) { adoptModelCatalog(data); rereadRoleCatalogs = true; refreshSummary(); },
+        onFull(data) {
+            adoptModelCatalog(data);
+            if (state.currentStep === 'models') refreshShownCatalogs();
+            else rereadRoleCatalogs = true;
+            refreshSummary();
+        },
         onReset() {
             modelRoles.resetCatalogs(); agentsStep?.resetCatalogs(); compatibleCatalogs = {};
-            modelCatalog = { model_sources: modelSources, read_state: 'not_read' };
+            modelCatalog = {};
         }, changed: syncCurrentStepActionState });
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles',
-        readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed, onChange: (settings, { slot } = {}) => {
+        supportsScopes, legacyCatalog: () => modelCatalog, readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed, onChange: (settings, { slot } = {}) => {
         delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
         state.modelsDirty = true;
@@ -211,13 +216,24 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             modelSlots: MODEL_SLOTS.map((slot) => ({ ...slot, settingsToggleId: '' })) });
     }
 
-    function adoptModelCatalog(data) {
-        if (data) { modelCatalog = mergeModelCatalog(modelCatalog, data); sourceRead = modelCatalog; }
-        modelSources = (modelCatalog.model_sources || []).filter((source) => state.agentsConnected.includes(source.credentialHarness));
+    function adoptSources() {
+        modelSources = (sourceRead.model_sources || []).filter(source => state.agentsConnected.includes(source.credentialHarness));
         clearFreshSubscriptionDefaults();
-        modelRoles.adoptSources({ ...sourceRead, model_sources: modelSources });
+        const filtered = { ...sourceRead, model_sources: modelSources };
+        modelRoles.adoptSources(filtered);
+        agentsStep?.adoptSources(filtered);
+    }
+
+    function adoptModelCatalog(data) {
+        if (data) modelCatalog = mergeModelCatalog(modelCatalog, data);
+        adoptSources();
         modelRoles.adoptCatalog({ ...modelCatalog, model_sources: modelSources }, { connectionCatalogs: compatibleCatalogs });
-        agentsStep?.adoptCatalog({ ...modelCatalog, model_sources: modelSources, sources_read_state: sourceRead.sources_read_state });
+        if (modelCatalog.read_state) agentsStep?.adoptCatalog(modelCatalog);
+    }
+
+    function refreshShownCatalogs(options = {}) {
+        void modelRoles.refreshCatalogs({ descriptors: false, subscriptionsOnly: Boolean(options.accounts) });
+        agentsStep?.refreshCatalogs(options);
     }
 
     function trim(value) {
@@ -307,13 +323,13 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
         if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
-        const access = accessRowState({ connected: state.agentsConnected, sources: modelCatalog.model_sources,
+        const access = accessRowState({ connected: state.agentsConnected, sources: modelSources,
             read: catalogReadState(sourceRead), checking: discovery.pending, readErrors: summarizeReadErrors(sourceRead.errors),
             previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
         const note = document.getElementById('onboarding-access-note');
         if (note) Object.assign(note, { textContent: access.note, hidden: !access.note });
         const retry = document.getElementById('onboarding-access-retry');
-        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: Boolean(discovery.pending || agentsStep?.previewPending) });
+        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: false });
         const optional = root.querySelector('[data-collapse="api-access"] > summary .selection-badge');
         if (optional) Object.assign(optional, { textContent: access.badge, hidden: !access.badge });
         const accessRow = document.getElementById('onboarding-access-row');
@@ -409,7 +425,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
-                return mainSourceReason(state.agentsConnected, modelCatalog.model_sources,
+                return mainSourceReason(state.agentsConnected, modelSources,
                     { snapshot: agentsStep?.snapshot, catalogKnown: agentsStep?.catalogKnown });
             }
             if (trim(state.minimaxRegion) && !['global_en', 'cn_zh'].includes(trim(state.minimaxRegion).toLowerCase())) {
@@ -753,17 +769,20 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                 isVisible: () => ['accounts', 'models', 'budget'].includes(state.currentStep),
                 onChange: (connected) => {
                     state.agentsConnected = connected;
-                    adoptModelCatalog();
+                    adoptSources();
                     syncCurrentStepActionState();
                 },
                 previewPayload: previewDraft,
                 providerProfiles: PROVIDER_PROFILES,
-                readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed,
+                supportsScopes, readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed,
                 onSubagentsChange: (setting) => { state.availableSubagents = setting; },
                 onSetupPreview: applySetupPreview,
                 onPreviewStatus: syncCurrentStepActionState,
                 onStatus: ({ catalogChanged } = {}) => {
-                    if (catalogChanged && state.agentsConnected.length) void discovery.sources({ force: true });
+                    if (catalogChanged) {
+                        if (state.agentsConnected.length) void discovery.sources({ force: true });
+                        if (state.currentStep === 'models' && discovery.allowed()) refreshShownCatalogs({ accounts: true });
+                    }
                     const quota = document.getElementById('wizard-subscription-quota');
                     if (quota && state.currentStep === 'budget') quota.innerHTML = subscriptionQuotaHtml();
                 },
@@ -1247,51 +1266,19 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         syncCurrentStepActionState();
     }
 
-    function bindCompatibleModelLoader() {
-        const button = document.getElementById('load-compatible-models');
-        const select = document.getElementById('compatible-model-source');
-        const status = document.getElementById('compatible-load-status');
-        if (!button) return;
-        select.addEventListener('change', () => { status.textContent = 'Load this server’s models, or type a model ID below.'; });
-        button.addEventListener('click', async () => {
-            const source = select.value;
-            const name = source.split('@')[1] || '';
-            const row = name ? state.connections.find((entry) => entry.kind === 'openai-compatible' && entry.name === name) : null;
-            // The built-in source sends the one pair the draft reaches, naming whose key a kept one is.
-            const { baseUrl, apiKey, apiKeySetting } = name ? { baseUrl: row?.base_url, apiKey: row?.api_key || '' }
-                : compatibleEndpoint(draftSettings());
-            const payload = { baseUrl, apiKey, ...(name ? { connection: name } : { apiKeySetting }) };
-            const sent = JSON.stringify(payload);
-            status.textContent = 'Loading…';
-            button.disabled = true;
-            try {
-                const data = await fetchJson('/api/openai-compatible/models', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sent, cache: 'no-store',
-                });
-                if (disposed || !button.isConnected) return;
-                const models = (data.models || []).map(trim).filter(Boolean).sort();
-                compatibleCatalogs[source] = models.map((id) => ({ value: `${source}::${id}`, label: id }));
-                adoptModelCatalog();
-                if (select.value === source) status.textContent = models.length
-                    ? `${models.length} model${models.length === 1 ? '' : 's'} listed for this server. Choose one in its role below.`
-                    : 'No models listed. You can type a model ID below.';
-            } catch (error) {
-                if (!disposed && button.isConnected && select.value === source) status.textContent = `Could not load models: ${error.message}. You can type a model ID below.`;
-            } finally {
-                if (button.isConnected) button.disabled = false;
-            }
-        });
-    }
-
     function bindModelsStep() {
         discovery.accept();
-        bindCompatibleModelLoader();
+        if (!supportsScopes()) void discovery.full();
+        bindCompatibleModelLoader(draftSettings, (source, items) => {
+            compatibleCatalogs[source] = items;
+            adoptModelCatalog();
+        });
         loadModelRoles();
         modelRoles.mount();
         adoptModelCatalog();
         if (rereadRoleCatalogs) {
             rereadRoleCatalogs = false;
-            void modelRoles.refreshCatalogs({ descriptors: false });
+            refreshShownCatalogs();
         }
         if (state.agentsConnected.length) void discovery.sources();
         agentsStep?.mount();

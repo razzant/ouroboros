@@ -129,6 +129,7 @@
 
 /**
  * @typedef {Object} SetupContract
+ * @property {boolean=} scopedModelCatalogs
  * @property {number} version
  * @property {'web'|'desktop'} hostMode
  * @property {SetupStep[]} steps

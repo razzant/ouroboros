@@ -17,6 +17,7 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, modelPriceWords, withoutPrice, tierPriced,
     KEY_PROBLEM_WORDS, PRICE_UNKNOWN, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+import { modelCatalog } from './model_catalog_store.js';
 import { windowWords } from './chat_model_routes.js';
 import { fmt, translateString } from './i18n.js';
 import { revealNewRow } from './ui_helpers.js';
@@ -118,7 +119,7 @@ export const MAIN_FOLLOW_NOTE = 'Running work that follows Main switches at its 
  *  `only` (`{ slot, index }`) draws one role alone, as a form of labelled fields (a role's page in Settings): its
  *  source may always return to the role it follows, and a fallback past the saved ones is a new, unsaved one. */
 export function createModelRolesEditor({ hostId, store = claudexorStatus,
-    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, readApiCatalog = null, apiCatalogAllowed = () => true, showContext = true, mainNote = false, only = null } = {}) {
+    doc = () => document, onChange = () => {}, catalogFetch = fetchJson, supportsScopes, legacyCatalog = () => modelCatalog.catalog(), readApiCatalog = null, apiCatalogAllowed = () => true, showContext = true, mainNote = false, only = null } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     let slots = [];
     let offeredSlots = [];  // every slot in contract order; a `managed` one (a deployment's checker) is shown, never a row
@@ -139,11 +140,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     let connectionLists = {};
 
     const catalogs = createScopedModelCatalog({
+        supportsScopes: () => supportsScopes?.(settings) ?? true,
+        legacyCatalog,
         fetchCatalog: (url, init) => url.includes('?provider_id=') && readApiCatalog
             ? readApiCatalog(url, init) : catalogFetch(url, init),
         onUpdate(query, data) {
             if (destroyed) return;
             if (query === 'view=sources') sources = data;
+            else if (!visibleRows().some(row => catalogKey(row) === query || (query === 'provider_id=local' && row.local))) return;
             updateCatalogViews();
         },
     });
@@ -251,21 +255,25 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const keys = row.slot.slot === 'main' ? mainChoice.map((id) => connections.find((entry) => entry.id === id)?.label || id) : [];
         return keys.length > 1 ? `Main is not set yet. Choose the key it uses: ${keys.slice(0, -1).join(', ')} or ${keys.at(-1)}.` : '';
     }
-    function refreshCatalogs({ force = true, descriptors = true } = {}) {
+    function refreshCatalogs({ force = true, descriptors = true, subscriptionsOnly = false } = {}) {
         if (destroyed) return;
         const reads = descriptors ? [catalogs.read('view=sources', { force })] : [];
         const shown = new Map(visibleRows().map(row => [catalogKey(row), row]));
-        for (const row of shown.values()) reads.push(refreshRow(row, { force }));
+        for (const row of shown.values()) {
+            if (!subscriptionsOnly || sourceId(row)) reads.push(refreshRow(row, { force }));
+        }
         return Promise.all(reads);
     }
-    const onMaintenanceSettled = () => refreshCatalogs({ descriptors: Boolean(only) || !showContext });
+    const onMaintenanceSettled = () => refreshCatalogs({ descriptors: Boolean(only) || !showContext, subscriptionsOnly: true });
     function itemsFor(row) {
         const source = effectiveSource(row);
         const scoped = catalogs.get(catalogKey(row));
         if (!row.local && Object.hasOwn(connectionLists, source)) return connectionLists[source];
         if (row.source === 'inherit' && !sourceId(row)) return [];
         const items = scoped?.items ?? catalog.items;
-        return items.filter(item => !item.use_local && parseModelSource(item.value || item.id).source === source);
+        return items.filter(item => !item.use_local && parseModelSource(item.value || item.id).source === source
+            && (!sourceId(row) || !row.account || item.credential_profile_id === row.account
+                || (scoped && !item.credential_profile_id)));
     }
     // A fallback with no tier of its own keeps its caller's (model_slots.task_processing_preference): Main's or a lead's.
     const mainTier = () => (rows.find((entry) => entry.slot.slot === 'main')?.processing_preference
@@ -422,9 +430,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // sits under the section banner, so it keeps to the compact form. An
             // API row whose own catalog (OpenRouter's) states a price says it.
             const own = Boolean(rowCatalog);
-            const sourceIssue = sources && ['failed', 'transport'].includes(sources.read_state)
-                ? 'Subscription sources could not be read. ' : '';
-            const note = (sourceIssue + catalogReadNote(own ? rowCatalog : catalog, { compact: !sourceId(row) })).trim();
+            const sourceIssue = sources?.errors?.some(error => error.code === 'scoped_catalog_unsupported')
+                ? 'This core lists all models together. Press Read again in Models. '
+                : sources && ['failed', 'transport'].includes(sources.read_state) ? 'Subscription sources could not be read. ' : '';
+            const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !sourceId(row) });
             // A model stored with its ` (local)` label runs on the local lane, as the runtime reads it (slot_lane_label).
             const local = row.local || / \(local\)$/.test(String(row.model || ''));
             const choosing = !local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
@@ -446,8 +455,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const size = local || (routed && !(sourceId(row) && unlisted)) ? windowWords(row.windowPreview?.window?.tokens
                 || listed?.max_context_window || listed?.context_window) : '';
             const sized = size && fmt('{window} window', { window: size });
-            status.textContent = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
+            const modelFacts = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
                 : `${translateString(plain)} ${sized}.`;
+            status.textContent = (sourceIssue + modelFacts).trim();
             // A price or a window is composed through the translation seam: the overlay leaves such a line alone.
             if (price || sized) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
@@ -962,7 +972,7 @@ function mountRole(container, { path, ctx }, slot, index) {
         <section class="ui-card settings-card models-role">${modelRolesHost(hostId)}</section>`;
     let dirty = false;
     let readFallbacks = '';
-    const editor = createModelRolesEditor({ hostId, readApiCatalog: fetchJson, mainNote: true, only: { slot, index, actions: SAVE_ROW },
+    const editor = createModelRolesEditor({ hostId, supportsScopes: doc => doc._meta?.setup_contract?.scopedModelCatalogs === true, readApiCatalog: fetchJson, mainNote: true, only: { slot, index, actions: SAVE_ROW },
         onChange: () => { dirty = true; container.querySelector('[data-editor-discard]')?.removeAttribute('hidden'); setResult(container.querySelector('[data-editor-result]'), {}); } });
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
     // A typed form keeps its fields while the page around them follows the read (a key added in Accounts, a new Main);
@@ -1002,14 +1012,14 @@ function mountRole(container, { path, ctx }, slot, index) {
         if (hit('[data-editor-save]')) void save(hit('[data-editor-save]'));
         else if (hit('[data-editor-discard]')) { dirty = false; void read(); }
     };
-    const accountCatalog = watchAccountModelCatalog(() => editor.refreshCatalogs());
+    const accountCatalog = watchAccountModelCatalog(() => editor.refreshCatalogs({ subscriptionsOnly: true }));
     let catching = null;
     let seen = false;
     const catchUp = () => (catching ||= read().then(() => {
         accountCatalog.arm();
         const force = seen;
         seen = true;
-        void editor.refreshCatalogs({ force });
+        return editor.refreshCatalogs({ force });
     }).finally(() => { catching = null; }));
     const onShown = (event) => { if (event.detail?.path === path) void catchUp(); };
     container.addEventListener('click', onClick);

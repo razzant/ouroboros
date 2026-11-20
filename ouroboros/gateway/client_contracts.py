@@ -1,9 +1,7 @@
-"""Envelopes a replaceable client needs beside ``contracts.py``: their own module, one owner each.
+"""Replaceable-client envelopes beside ``contracts.py``, mirrored in ``web/modules/client_contract_types.js``.
 
-Descriptive TypedDicts, the twin of ``web/modules/client_contract_types.js``: the main
-interface a server generation serves (``StateResponse.served_ui``), the read-only setup
-bootstrap a client renders onboarding from (``GET /api/onboarding/bootstrap``, whose rows
-mirror ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
+These TypedDicts describe the generation's interface (``StateResponse.served_ui``), read-only setup
+(``GET /api/onboarding/bootstrap`` mirrors ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
 auth gate's JSON login, the derived ABI document ``GET /api/contract`` publishes, and the
 bodies of the everyday journey routes (projects, files, places, owner controls, schedules) whose
 handlers check their fields by hand.
@@ -111,6 +109,7 @@ class SetupSubscriptionField(TypedDict):
 
 
 class SetupContract(TypedDict):
+    scopedModelCatalogs: NotRequired[bool]
     version: int
     hostMode: Literal["web", "desktop"]
     steps: List[SetupStep]

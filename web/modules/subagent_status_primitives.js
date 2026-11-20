@@ -162,7 +162,7 @@ function sessionRouteAvailability(row, state, nowMs) {
         return verdict(NOT_CHECKED, 'Agent session · live availability not checked');
     }
     const pin = routePin(row?.route);
-    const harnessEntry = accountScopedModelCatalog(harnessMap(state.snapshot)[harness], pin);
+    const harnessEntry = accountScopedModelCatalog(state.sessionCatalog ? state.sessionCatalog(row) : harnessMap(state.snapshot)[harness], pin);
     if (!harnessEntry) return verdict(UNAVAILABLE, `${harness} · currently unavailable`);
     if (!harnessModelsKnown(harnessEntry, state.catalogKnown)) {
         return verdict(NOT_CHECKED, `${harness} · model availability not checked`);
@@ -226,7 +226,7 @@ function sessionCatalogQualifier(row, state) {
     if (!state?.catalogKnown || !state?.accountsKnown) return '';
     const { harness, model } = splitSessionTarget(row?.route?.target_id);
     const pin = routePin(row?.route);
-    const catalog = accountScopedModelCatalog(harnessMap(state.snapshot)[harness], pin);
+    const catalog = accountScopedModelCatalog(state.sessionCatalog ? state.sessionCatalog(row) : harnessMap(state.snapshot)[harness], pin);
     if (!catalog || !harnessModelsKnown(catalog, state.catalogKnown)) return '';
     const matches = sessionModelMatches(catalog, model, { snapshot: state.snapshot, pin });
     return matches.length && matches.every((match) => match.basis === 'claude_1m_base') ? CLAUDE_BASE_QUALIFIER : '';

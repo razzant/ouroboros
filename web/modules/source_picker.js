@@ -70,6 +70,7 @@ function bindSourcePicker(select) {
     select.tabIndex = -1;
     select.setAttribute('aria-hidden', 'true');
     select.before(button);
+    let keyboardActive = false;
     let position = null, active = null, press = null, prefix = '', typedAt = 0;
     const rows = new Map();
     const enabled = () => [...select.options].filter(option => !option.disabled && !option.parentElement.disabled);
@@ -82,9 +83,10 @@ function bindSourcePicker(select) {
             row.dataset.active = '';
             button.setAttribute('aria-activedescendant', row.id);
             if (reveal) {
-                const bounds = row.getBoundingClientRect(), viewport = list.getBoundingClientRect();
-                if (bounds.bottom > viewport.bottom) list.scrollTop += bounds.bottom - viewport.bottom;
-                else if (bounds.top < viewport.top) list.scrollTop += bounds.top - viewport.top;
+                const bounds = row.getBoundingClientRect(), top = list.getBoundingClientRect().top + list.clientTop;
+                const bottom = top + list.clientHeight;
+                if (bounds.bottom > bottom) list.scrollTop += Math.ceil(bounds.bottom - bottom);
+                else if (bounds.top < top) list.scrollTop -= Math.ceil(top - bounds.top);
             }
         } else button.removeAttribute('aria-activedescendant');
     }
@@ -99,8 +101,8 @@ function bindSourcePicker(select) {
         if (!list.isConnected) return;
         if (button.disabled || button.hidden) { close(); return; }
         updateSourceRows(select, list, rows);
-        highlight(active, false);
         position?.reposition();
+        highlight(active, keyboardActive);
     }
     function outside(event) {
         if (event.target !== button && !list.contains(event.target)) close();
@@ -115,7 +117,7 @@ function bindSourcePicker(select) {
         button.setAttribute('aria-expanded', 'false');
         button.removeAttribute('aria-controls');
         button.removeAttribute('aria-activedescendant');
-        active = null; press = null; prefix = '';
+        active = null; press = null; prefix = ''; keyboardActive = false;
     }
     function open() {
         if (list.isConnected) return;
@@ -158,6 +160,7 @@ function bindSourcePicker(select) {
         if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key)) {
             event.preventDefault();
             open();
+            keyboardActive = true;
             const index = values.findIndex(option => option.value === active);
             let at = key === 'Home' ? 0 : values.length - 1;
             if (key === 'ArrowDown') at = Math.min(index + 1, values.length - 1);
@@ -165,6 +168,7 @@ function bindSourcePicker(select) {
             highlight(values[at].value);
         } else if (key.length === 1 && !event.altKey) {
             open();
+            keyboardActive = true;
             const now = event.timeStamp, char = key.toLocaleLowerCase();
             prefix = now - typedAt < 650 && prefix !== char ? prefix + char : char;
             typedAt = now;
@@ -175,26 +179,39 @@ function bindSourcePicker(select) {
         }
     });
     list.addEventListener('mousedown', event => event.preventDefault()); // keep keyboard/AT focus; touch scroll remains native
+    list.addEventListener('wheel', () => { keyboardActive = false; }, { passive: true });
     list.addEventListener('pointerdown', event => {
+        keyboardActive = false;
         const row = event.target.closest('[data-source-value]');
-        press = { row, bounds: row?.getBoundingClientRect() };
+        press = { row, bounds: row?.getBoundingClientRect(), x: event.clientX, y: event.clientY };
         if (row) row.setPointerCapture(event.pointerId);
     });
-    list.addEventListener('pointerup', event => {
-        if (!press?.row) return;
-        const { clientX: x, clientY: y } = event;
+    function releasedRow(x, y) {
+        if (!press?.row || !list.contains(press.row)) return null;
         const under = doc.elementFromPoint(x, y);
         const atStart = x >= press.bounds.left && x <= press.bounds.right && y >= press.bounds.top && y <= press.bounds.bottom;
-        // Dragging away cancels. A stationary finger still owns the source pressed before discovery moved it.
-        if (!list.contains(under) || !(press.row.contains(under) || atStart)) press.row = null;
+        // Dragging away cancels. A stationary press still owns the original option if the list moved.
+        const stationary = x === press.x && y === press.y;
+        return stationary || atStart || press.row.contains(under) ? press.row : null;
+    }
+    list.addEventListener('pointerup', event => {
+        if (press) press.row = releasedRow(event.clientX, event.clientY);
     });
     list.addEventListener('pointercancel', () => { press = { row: null }; });
-    list.addEventListener('click', event => {
-        const row = event.target.closest('[data-source-value]');
-        // Pointer capture keeps a press attached to its row even when a new group moves that row.
-        // An accessibility click has no pointerdown and resolves straight from its addressed option.
-        if (row && (!press || press.row === row) && row.getAttribute('aria-disabled') === 'false') choose(row.dataset.sourceValue);
+    list.addEventListener('touchend', event => {
+        if (event.touches.length || !press?.row) return;
+        const touch = event.changedTouches[0], row = releasedRow(touch.clientX, touch.clientY);
+        // Touch's compatibility click can target the group or control now under the finger.
+        // Consume the completed touch here; pointercancel above leaves native scrolling alone.
+        event.preventDefault();
         press = null;
+        if (row) choose(row.dataset.sourceValue);
+    }, { passive: false });
+    list.addEventListener('click', event => {
+        const target = event.target.closest('[data-source-value]');
+        const row = event.detail && press ? press.row : target;
+        press = null;
+        if (row && list.contains(row) && row.getAttribute('aria-disabled') === 'false') choose(row.dataset.sourceValue);
     });
     const observe = new win.MutationObserver(redraw);
     observe.observe(select, { childList: true, subtree: true, characterData: true, attributes: true,

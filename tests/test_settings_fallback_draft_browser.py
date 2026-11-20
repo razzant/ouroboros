@@ -97,6 +97,8 @@ def test_open_fallback_source_menu_follows_discovery(role_ui, interaction):
     # Several new rows above the API keys move the pressed/highlighted row to a different index.
     sources = ui["fixture"]["catalog"]["model_sources"] + [
         {"id": "another", "label": "Another subscription"}, {"id": "third", "label": "Third subscription"}]
+    if interaction == "keyboard":
+        sources.extend({"id": str(i), "label": "Subscription " + str(i)} for i in range(35))
     for route in pending:
         route.fulfill(json={"items": [], "model_sources": sources, "errors": []})
     codex = popup.get_by_role("option", name="Codex (model)", exact=True)
@@ -109,6 +111,9 @@ def test_open_fallback_source_menu_follows_discovery(role_ui, interaction):
         page.mouse.up()
         expect(source).to_have_value("api:openai")
     elif interaction == "keyboard":
+        expect(earlier).to_be_in_viewport(ratio=1)
+        bounds, item = popup.bounding_box(), earlier.bounding_box()
+        assert bounds["y"] <= item["y"] and item["y"] + item["height"] <= bounds["y"] + bounds["height"] + 1
         expect(trigger).to_have_attribute("aria-activedescendant", earlier.get_attribute("id"))
         trigger.press("Escape")
         expect(trigger).to_be_focused()
@@ -132,3 +137,81 @@ def test_open_fallback_source_menu_follows_discovery(role_ui, interaction):
     if interaction == "keyboard":
         assert press_editor_save(page).startswith("Saved")
         assert ui["settings"]["OUROBOROS_MODEL_FALLBACKS"] == "owner/first, claudexor::opaque-source=gpt-test"
+
+
+def test_held_fallback_source_touch_keeps_original_and_scrolling_cancels(role_ui):
+    """Deliver the ready descriptor response at pointerdown, before even WebKit's atomic tap ends."""
+    from playwright.sync_api import expect
+    from tests.test_chat_row_gestures_browser import Finger
+
+    ui = role_ui
+    roles.configure_mixed(ui)
+    roles.api_lane(ui, "openai")
+    roles.api_lane(ui, "openrouter")
+    ui["settings"]["OUROBOROS_MODEL_FALLBACKS"] = "owner/first, owner/second"
+    ui["fixture"]["catalog"]["model_sources"].extend(
+        {"id": f"sub-{i}", "label": f"Subscription {i}"} for i in range(25))
+    page = ui["new_page"](has_touch=True, viewport={"width": 390, "height": 780})
+    page.emulate_media(reduced_motion="reduce")
+    page.add_init_script("""{
+        const original = window.fetch;
+        window.fetch = async (...args) => {
+            const response = await original(...args);
+            if (String(args[0]).includes('view=sources')) {
+                const data = await response.json();
+                response.json = () => new Promise(resolve => {
+                    window.sourceReady = true;
+                    document.addEventListener('pointerdown', function release(event) {
+                        if (!event.target.closest('[data-source-value]')) return;
+                        document.removeEventListener('pointerdown', release, true);
+                        resolve(data);
+                    }, true);
+                });
+            }
+            return response;
+        };
+        document.addEventListener('pointerup', () => {
+            window.arrivedAtRelease = Boolean(document.querySelector('.ui-source-options [data-source-value="subscription:opaque-source"]'));
+        }, true);
+    }""")
+    page.goto(ui["url"] + "/#settings")
+    level = open_settings(page, "models/role/fallback/2")
+    level.locator("[data-source-picker]").tap()
+    page.wait_for_function("window.sourceReady")
+    menu = page.get_by_role("listbox", name="Fallback Model source")
+    option = menu.get_by_role("option", name="OpenAI", exact=True)
+    source = level.locator("select[data-model-role-source]")
+    # CDP exposes separate touch start/end plus native scrolling. WebKit sends a trusted atomic tap.
+    finger = Finger(page) if page.context.browser.browser_type.name == "chromium" else None
+
+    def center(row):
+        box = row.bounding_box()
+        return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    try:
+        if finger:
+            finger.send("touchStart", *center(option))
+            expect(menu.get_by_role("option", name="Subscription 23 (model)")).to_have_count(1)
+            finger.send("touchEnd")
+        else:
+            option.tap()
+        assert page.evaluate("window.arrivedAtRelease"), "The new options arrived before this browser lifted the finger"
+        expect(source).to_have_value("api:openai")
+        expect(menu).to_have_count(0)
+
+        if finger:
+            level.locator("[data-source-picker]").tap()
+            entry = menu.get_by_role("option", name="Subscription 10 (model)", exact=True)
+            entry.scroll_into_view_if_needed()
+            x, y = center(entry)
+            finger.send("touchStart", x, y)
+            finger.path((x, y), (x, y - 110))
+            finger.send("touchEnd")
+            expect(menu).to_be_visible()
+            expect(source).to_have_value("api:openai")
+            # Assistive technology activates its addressed option after a cancelled gesture.
+            entry.evaluate("el => el.click()")
+            expect(source).to_have_value("subscription:sub-10")
+    finally:
+        if finger:
+            finger.close()

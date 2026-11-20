@@ -430,7 +430,7 @@ def test_model_catalog_reports_a_bad_extra_ca_bundle_instead_of_a_bare_500(monke
 
     monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENAI_API_KEY": "openai-key"})
     monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog",
-                        lambda: {"items": [{"value": "engine-model"}], "errors": []})
+                        lambda *_args: {"items": [{"value": "engine-model"}], "errors": []})
 
     def _boom():
         raise ExtraCaBundleError("OUROBOROS_EXTRA_CA_BUNDLE is not readable: /nope.pem")
@@ -659,7 +659,7 @@ def test_slow_connection_reaches_its_deadline_without_losing_healthy_catalogs(mo
 
     api_started = Event()
 
-    def engine():
+    def engine(*_args):
         # If discovery ran ahead of the HTTP loaders, this wait would expire before fast starts.
         assert api_started.wait(2)
         if engine_slow:
@@ -683,6 +683,54 @@ def test_slow_connection_reaches_its_deadline_without_losing_healthy_catalogs(mo
     assert {err["provider_id"] for err in payload["errors"]} == expected
     assert all(err["stage"] == "timeout" and err["error"] for err in payload["errors"])
     assert payload["model_sources"] == ([] if engine_slow else [{"id": "opaque"}])
+
+
+@pytest.mark.parametrize("source_ids", [("slow", "quick"), ("quick", "slow")])
+def test_batch_keeps_finished_subscription_and_closes_its_gateway_after_the_late_read(monkeypatch, source_ids):
+    from threading import Event
+    from ouroboros import claudexor_daemon
+
+    release, quick, closed = Event(), Event(), Event()
+    declarations = [{"id": source} for source in source_ids]
+
+    class Gateway:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            closed.set()
+
+        def operations(self):
+            return []
+
+        def list_model_sources(self):
+            return {"sources": declarations}
+
+        def list_source_models(self, source, **_kwargs):
+            if source == "slow":
+                assert release.wait(3)
+            else:
+                quick.set()
+            assert not closed.is_set()
+            return {"models": [{"id": "one"}]}
+
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", Gateway)
+    monkeypatch.setattr(model_catalog_api, "_CATALOG_HTTP_TIMEOUT_SEC", 0.35)
+
+    async def check():
+        try:
+            payload = await model_catalog_api.catalog_payload({"LOCAL_MODEL_SOURCE": "local/model"})
+            assert quick.is_set() and not closed.is_set()
+            assert payload["model_sources"] == declarations
+            assert {row["value"] for row in payload["items"]} == {"claudexor::quick=one", "local::model"}
+            assert [(row["source_id"], row["stage"]) for row in payload["errors"]] == [("slow", "timeout")]
+        finally:
+            release.set()
+        assert await asyncio.to_thread(closed.wait, 3)
+        assert not any(row["value"] == "claudexor::slow=one" for row in payload["items"])
+
+    asyncio.run(check())
 
 
 def test_a_setup_draft_reads_the_catalog_of_its_own_access_before_anything_is_saved(monkeypatch, tmp_path):

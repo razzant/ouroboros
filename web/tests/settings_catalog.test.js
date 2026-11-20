@@ -38,6 +38,21 @@ test('an editor coalesces identical reads and publishes only current evidence fo
     assert.equal(catalog.get(api), undefined);
 });
 
+test('a client on an older core uses only previously requested evidence for unsupported scopes', async () => {
+    const calls = [];
+    let previous;
+    const catalog = createScopedModelCatalog({ supportsScopes: () => false, legacyCatalog: () => previous,
+        fetchCatalog: async url => { calls.push(url); return first; } });
+    assert.equal((await catalog.read('view=sources')).errors[0].code, 'scoped_catalog_unsupported');
+    previous = { ...first, items: [...first.items, { value: 'vendor/default' }, { value: 'openrouter@work::owner/model' }] };
+    assert.deepEqual((await catalog.read('view=sources', { force: true })).model_sources, first.model_sources);
+    assert.deepEqual((await catalog.read('provider_id=openrouter%40work')).items, [{ value: 'openrouter@work::owner/model' }]);
+    assert.deepEqual(calls, []);
+    await catalog.read('source_id=opaque&credential_profile_id=personal');
+    assert.deepEqual(calls, ['/api/model-catalog?source_id=opaque&credential_profile_id=personal']);
+    catalog.dispose();
+});
+
 test('failed settlement reads stay retryable; successful receipts refresh once', async (t) => {
     const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
     t.after(() => { globalThis.document = previousDocument; globalThis.fetch = previousFetch; });

@@ -361,6 +361,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
             onDomWrite(() => {
                 view.sharedFallbackLocal = settings.USE_LOCAL_FALLBACK === true || settings.USE_LOCAL_FALLBACK === 'true';
                 view.editor = createModelRolesEditor({ hostId: id, store, doc: getDoc, catalogFetch: read, readApiCatalog: read, showContext: false,
+                    supportsScopes: () => settings._meta?.setup_contract?.scopedModelCatalogs === true,
                     onChange: () => onDomWrite(() => paint(taskId)) });
                 // The picker offers the same configured API providers as Models,
                 // so the wait panel needs this document's credential fields too.

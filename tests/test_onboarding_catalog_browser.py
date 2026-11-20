@@ -13,6 +13,78 @@ from tests.test_subscription_setup_browser import subscription_ui as subscriptio
 pytestmark = [pytest.mark.ui_browser]
 
 
+def test_old_core_subscription_only_setup_can_retry_without_implicitly_reading_providers(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    del ui["bootstrap"]["contract"]["scopedModelCatalogs"]
+    page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+    retry = page.locator("#onboarding-access-retry")
+    expect(retry).to_be_enabled()
+    expect(page.locator("#next-btn")).to_be_disabled()
+    assert not any("/model-catalog" in url for url in ui["reads"])
+    with page.expect_response("**/api/onboarding/model-catalog"):
+        retry.click()
+    expect(page.locator("#next-btn")).to_be_enabled()
+    assert not any("/api/model-catalog?view=" in url or "provider_id=" in url for url in ui["reads"])
+
+
+def test_wizard_uses_the_current_subscription_list_when_an_earlier_full_read_arrives(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    pending = []
+    full = copy.deepcopy(ui["fixture"]["catalog"])
+    page.route("**/api/onboarding/model-catalog", lambda route: pending.append(route))
+    page.goto(ui["url"] + "/onboarding", wait_until="networkidle")
+    next_step = page.locator("#next-btn")
+    expect(next_step).to_be_enabled()
+    with page.expect_request("**/api/onboarding/model-catalog"):
+        page.locator("#onboarding-access-retry").click()
+    ui["fixture"]["catalog"]["model_sources"] = []
+    ui["fixture"]["status"]["profiles"]["profiles"].pop()
+    with page.expect_response("**/api/model-catalog?view=sources"):
+        page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    expect(next_step).to_be_disabled()
+    with page.expect_response("**/api/onboarding/model-catalog"):
+        pending[0].fulfill(json=full)
+    expect(page.locator("#onboarding-access-note")).not_to_contain_text("Checking model sources")
+    expect(next_step).to_be_disabled()
+
+
+def test_wizard_waiting_on_a_pin_only_suggests_models_from_that_account(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    ui["bootstrap"]["initialState"].update(mainModel="claudexor::codex=saved", automaticModels=[])
+    ui["fixture"]["preview"]["model_settings"] = {}
+    catalog = ui["fixture"]["catalog"]
+    for item in catalog["items"]:
+        model = item["credential_profile_id"] + "-exclusive"
+        item.update(id=model, value="claudexor::codex=" + model, name=model, label=model)
+    pending = []
+    page.route("**/api/model-catalog?source_id=codex&credential_profile_id=work", lambda r: pending.append(r))
+    page.goto(ui["url"] + "/onboarding")
+    with page.expect_response("**/api/onboarding/model-catalog"):
+        page.locator("#onboarding-access-retry").click()
+    page.click("#next-btn")
+    main = page.locator('[data-model-role="main"]')
+    model = main.locator("[data-model-role-model]")
+    model.fill("exclusive")
+    choices = page.locator('#' + model.get_attribute("aria-controls"))
+    expect(choices.locator('[data-model-value="personal-exclusive"]')).to_be_visible()
+    expect(choices.locator('[data-model-value="work-exclusive"]')).to_be_visible()
+    model.press("Escape")
+    with page.expect_request("**/api/model-catalog?source_id=codex&credential_profile_id=work"):
+        main.locator("[data-model-role-account]").select_option("work")
+    model.fill("exclusive")
+    expect(choices.locator('[data-model-value="personal-exclusive"]')).to_have_count(0)
+    for route in pending:
+        route.fulfill(json={**catalog, "items": [row for row in catalog["items"] if row["credential_profile_id"] == "work"]})
+    expect(choices.locator('[data-model-value="work-exclusive"]')).to_be_visible()
+    expect(model).to_have_value("exclusive")
+
+
 def test_wizard_lists_a_subscription_while_the_selected_draft_provider_is_slow(subscription_ui):
     from playwright.sync_api import expect
 

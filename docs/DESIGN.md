@@ -2926,7 +2926,7 @@ keyboard focus and a tap keep their source by value as rows arrive. In order: Su
 API keys (one per enabled, credentialed connection, e.g. “OpenRouter” or “OpenRouter · Claude credits”,
 then a disabled pointer to Accounts; a saved “(no key)”, “(off)” or “(removed)” choice stays selectable),
 and Agents · sessions where supported. Each field reads suggestions from its selected source; any model id
-can be typed. The composer's Model capsule alone searches across sources and names each row's source. The
+can be typed. The composer's Model capsule searches across sources, naming each row's source; place and circle fields also use the whole list. The
 stored spellings (`provider::model`, `claudexor::source=model`,
 `harness=model`) are serialization authored by the editor: never required from
 the owner, never a field placeholder or help-text instruction, never the
