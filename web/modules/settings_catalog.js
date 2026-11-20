@@ -30,6 +30,7 @@ export function accountCatalogRefreshKey(view) {
 export function watchAccountModelCatalog(refresh = refreshModelCatalog) {
     let ready = false;
     let lastKey = null;
+    let confirmed = false;
     const dispose = claudexorStatus.subscribe((view) => {
         const next = accountCatalogRefreshKey(view);
         if (!ready || next === null) {
@@ -40,11 +41,14 @@ export function watchAccountModelCatalog(refresh = refreshModelCatalog) {
         }
         if (next === lastKey) return;
         lastKey = next;
-        void refresh();
+        const firstConfirmation = !confirmed;
+        confirmed = true;
+        void refresh({ firstConfirmation });
     });
     return {
         arm() {
             lastKey = accountCatalogRefreshKey(claudexorStatus);
+            confirmed ||= lastKey !== null;
             ready = true;
         },
         dispose,
@@ -128,10 +132,10 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
     }
     return {
         get(query) { return snapshots.get(String(query)); },
-        read(query, { force = false } = {}) {
+        read(query, { force = false, joinPending = false } = {}) {
             const key = String(query);
             const pending = requests.get(key);
-            if (!force && pending) return pending.promise;
+            if (pending && (!force || joinPending)) return pending.promise;
             if (!force && snapshots.has(key)) return Promise.resolve(snapshots.get(key));
             pending?.controller.abort();
             const controller = new AbortController();

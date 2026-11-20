@@ -1,7 +1,6 @@
 """Modern per-account discovery in real editors, using controlled HTTP responses."""
 from __future__ import annotations
 
-import json
 
 import pytest
 

@@ -732,12 +732,15 @@ export function createAvailableSubagentsEditor({
     state.rowCatalog = row => scoped.get(row);
     state.sessionCatalog = row => {
         const harness = harnessMap(state.snapshot)[routeModelFields(row.route).harness];
-        if (!hasScopes()) return harness;
+        if (!hasScopes() || !harness) return harness;
         const selected = scoped.session(row);
-        return selected ? { ...harness, ...selected, models_error: selected.models_error }
-            : harness && { ...harness, models: [], model_catalog: undefined, models_error: 'Session model catalog not read.' };
+        return selected ? { ...harness, ...selected, model_catalog: selected.model_catalog, models_error: selected.models_error }
+            : { ...harness, models: [], model_catalog: undefined, models_error: 'Session model catalog not read.' };
     };
-    const onMaintenance = event => scoped.refresh({ harness: event.detail?.harness });
+    const onMaintenance = event => {
+        const shown = page?.shown ? page.shown() : host()?.offsetParent != null;
+        if (shown) scoped.refresh({ harness: event.detail?.harness, sessionsOnly: listView });
+    };
     const current = () => state.setting.items.find((row) => row.subagent_id === state.entryId) || null;
     // In Settings a saved agent's on/off and marks write at once; an unsaved one keeps them as fields of its form.
     const live = (row) => Boolean(page) && row.subagent_id !== state.unsavedId;
@@ -966,7 +969,7 @@ export function createAvailableSubagentsEditor({
             const row = state.setting.items.find((item) => (item._uiKey || item.subagent_id) === rowElement.dataset.subagentRow);
             if (!row) return;
             const open = () => page.ctx.openSettings(`agents/${row.subagent_id}`);
-            rowElement.querySelector('[data-subagent-field="model"]')?.addEventListener('focus', () => scoped.read(row));
+            rowElement.querySelector('[data-subagent-field="model"]')?.addEventListener('model-chooser:opened', () => scoped.open(row));
             rowElement.querySelector('[data-subagent-field="open"]')?.addEventListener('click', open);
             if (listView) rowElement.addEventListener('click', (event) => { if (!event.target.closest?.('button, .ui-switch')) open(); });
             rowElement.querySelector('[data-subagent-field="recommended_use"]')?.addEventListener('input', (event) => {
@@ -1532,8 +1535,9 @@ function mountAgents(container, { path, view = '', ctx }) {
     };
     // One read at a time: opening a page and the shell's "shown" for it are one read.
     const reload = () => (reading ||= read().finally(() => { reading = null; }));
+    const shown = () => !ctx.state || (ctx.state.activePage === 'settings' && ctx.state.settingsPath === path);
     const editor = createAvailableSubagentsEditor({
-        hostId, page: { entry, ctx, reload, filter: view },
+        hostId, page: { entry, ctx, reload, shown, filter: view },
         previewGenerated: entry ? null : ({ subscriptionsConnected }) => apiClient.previewOnboardingSubagents({ subscriptionsConnected }),
     });
     delegation?.addEventListener('change', async () => {
@@ -1548,7 +1552,7 @@ function mountAgents(container, { path, view = '', ctx }) {
     const offRead = paintWithRow(KEY, follow);
     // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
     // armed by the form's first account read, so the answer the form opened with is not a change.
-    const accountCatalog = watchAccountModelCatalog(() => editor.refreshCatalogs({ descriptors: Boolean(entry), accounts: true }));
+    const accountCatalog = watchAccountModelCatalog(() => { if (shown()) editor.refreshCatalogs({ descriptors: Boolean(entry), accounts: true }); });
     void reload();
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);

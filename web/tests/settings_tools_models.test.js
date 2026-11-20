@@ -286,6 +286,16 @@ test('a role\'s page reads the catalogue when it opens and when it is shown agai
     shown(path);
     await settle();
     assert.equal(reads(), 2, 'shown again (a return, a reconnect), the page catches the catalogue up');
+    let release;
+    env.routes.set('/api/model-catalog?view=sources', () => new Promise(resolve => { release = resolve; }));
+    shown(path);
+    await settle();
+    const settingsReads = () => env.calls.filter(url => url === '/api/settings').length;
+    const before = settingsReads();
+    shown(path);
+    await settle();
+    assert.ok(settingsReads() > before, 'a pending descriptor cannot block the new settings document');
+    release(response({ items: [], model_sources: [], errors: [] }));
     assert.equal(handle.unsaved(), false, 'nothing is typed: the shell lets the page go when it is left');
 });
 

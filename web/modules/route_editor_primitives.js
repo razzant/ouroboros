@@ -751,7 +751,7 @@ export function accountScopedModelCatalog(harness, pin = '') {
     const error = gaps.map((account) => account.problem?.message || 'Account model list could not be read').join('; ')
         || ((!pin || !accounts.length) && envelope.partial ? 'Some account model lists could not be read' : '');
     return { ...harness, models: (harness.models || []).filter((item) => !pin || item.credential_profile_id === pin),
-        models_error: error };
+        models_error: harness.models_error || error };
 }
 
 export function harnessModelsKnown(harness, catalogKnown = true) {

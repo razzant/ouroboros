@@ -26,7 +26,7 @@ export function createAgentModelCatalog({ state, saved, rows, readApiCatalog, ap
                 const prior = sessions.get(query);
                 const next = data.session_catalog;
                 if (next && !['failed', 'transport'].includes(data.read_state)) sessions.set(query, mergeHarnessModelCatalog(prior, next));
-                else sessions.set(query, { models: prior?.models || [],
+                else sessions.set(query, { ...prior, models: prior?.models || [],
                     models_error: next?.models_error || data.errors?.[0]?.error || 'Session model catalog unavailable.' });
             }
             if (query === 'view=sources') adoptSources(data);
@@ -47,6 +47,10 @@ export function createAgentModelCatalog({ state, saved, rows, readApiCatalog, ap
     }
     return {
         read,
+        open(row) {
+            const prior = scoped.get(catalogQuery(row));
+            return read(row, ['failed', 'transport'].includes(prior?.read_state));
+        },
         get(row) { return scoped.get(catalogQuery(row)); },
         session(row) { return sessions.get(catalogQuery(row)); },
         refresh({ descriptors = false, accounts = false, sessionsOnly = false, harness = '', force = true } = {}) {

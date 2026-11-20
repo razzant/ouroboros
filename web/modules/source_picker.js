@@ -1,6 +1,6 @@
 // Engine/model source descriptors can arrive after a menu opens. The owner keeps its select/value/change
 // contract; the accessible face and the open, portalled list refer to exact source values throughout.
-import { bindPopoverPosition } from './ui_interactions.js';
+import { bindOptionPress, bindPopoverPosition } from './ui_interactions.js';
 
 let nextId = 0;
 
@@ -71,7 +71,7 @@ function bindSourcePicker(select) {
     select.setAttribute('aria-hidden', 'true');
     select.before(button);
     let keyboardActive = false;
-    let position = null, active = null, press = null, prefix = '', typedAt = 0;
+    let position = null, active = null, unbindPress = null, prefix = '', typedAt = 0;
     const rows = new Map();
     const enabled = () => [...select.options].filter(option => !option.disabled && !option.parentElement.disabled);
     const focus = () => button.focus({ preventScroll: true });
@@ -110,6 +110,8 @@ function bindSourcePicker(select) {
     function close() {
         position?.destroy();
         position = null;
+        unbindPress?.();
+        unbindPress = null;
         doc.removeEventListener('pointerdown', outside, true);
         win.removeEventListener('blur', close);
         rows.get(active)?.removeAttribute('data-active');
@@ -117,7 +119,7 @@ function bindSourcePicker(select) {
         button.setAttribute('aria-expanded', 'false');
         button.removeAttribute('aria-controls');
         button.removeAttribute('aria-activedescendant');
-        active = null; press = null; prefix = ''; keyboardActive = false;
+        active = null; prefix = ''; keyboardActive = false;
     }
     function open() {
         if (list.isConnected) return;
@@ -128,6 +130,7 @@ function bindSourcePicker(select) {
         redraw();
         position = bindPopoverPosition(list, { anchor: button, field: button.closest('.ui-field') || button });
         highlight(select.value);
+        unbindPress = bindOptionPress(list, '[data-source-value]', row => choose(row.dataset.sourceValue));
         doc.addEventListener('pointerdown', outside, true);
         win.addEventListener('blur', close);
     }
@@ -180,39 +183,7 @@ function bindSourcePicker(select) {
     });
     list.addEventListener('mousedown', event => event.preventDefault()); // keep keyboard/AT focus; touch scroll remains native
     list.addEventListener('wheel', () => { keyboardActive = false; }, { passive: true });
-    list.addEventListener('pointerdown', event => {
-        keyboardActive = false;
-        const row = event.target.closest('[data-source-value]');
-        press = { row, bounds: row?.getBoundingClientRect(), x: event.clientX, y: event.clientY };
-        if (row) row.setPointerCapture(event.pointerId);
-    });
-    function releasedRow(x, y) {
-        if (!press?.row || !list.contains(press.row)) return null;
-        const under = doc.elementFromPoint(x, y);
-        const atStart = x >= press.bounds.left && x <= press.bounds.right && y >= press.bounds.top && y <= press.bounds.bottom;
-        // Dragging away cancels. A stationary press still owns the original option if the list moved.
-        const stationary = x === press.x && y === press.y;
-        return stationary || atStart || press.row.contains(under) ? press.row : null;
-    }
-    list.addEventListener('pointerup', event => {
-        if (press) press.row = releasedRow(event.clientX, event.clientY);
-    });
-    list.addEventListener('pointercancel', () => { press = { row: null }; });
-    list.addEventListener('touchend', event => {
-        if (event.touches.length || !press?.row) return;
-        const touch = event.changedTouches[0], row = releasedRow(touch.clientX, touch.clientY);
-        // Touch's compatibility click can target the group or control now under the finger.
-        // Consume the completed touch here; pointercancel above leaves native scrolling alone.
-        event.preventDefault();
-        press = null;
-        if (row) choose(row.dataset.sourceValue);
-    }, { passive: false });
-    list.addEventListener('click', event => {
-        const target = event.target.closest('[data-source-value]');
-        const row = event.detail && press ? press.row : target;
-        press = null;
-        if (row && list.contains(row) && row.getAttribute('aria-disabled') === 'false') choose(row.dataset.sourceValue);
-    });
+    list.addEventListener('pointerdown', () => { keyboardActive = false; });
     const observe = new win.MutationObserver(redraw);
     observe.observe(select, { childList: true, subtree: true, characterData: true, attributes: true,
         attributeFilter: ['label', 'selected', 'disabled', 'hidden', 'aria-label'] });

@@ -323,7 +323,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
         if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
-        const access = accessRowState({ connected: state.agentsConnected, sources: modelSources,
+        const access = accessRowState({ connected: state.agentsConnected, sources: sourceRead.model_sources || [],
             read: catalogReadState(sourceRead), checking: discovery.pending, readErrors: summarizeReadErrors(sourceRead.errors),
             previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
         const note = document.getElementById('onboarding-access-note');
@@ -425,7 +425,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
-                return mainSourceReason(state.agentsConnected, modelSources,
+                return mainSourceReason(state.agentsConnected, sourceRead.model_sources || [],
                     { snapshot: agentsStep?.snapshot, catalogKnown: agentsStep?.catalogKnown });
             }
             if (trim(state.minimaxRegion) && !['global_en', 'cn_zh'].includes(trim(state.minimaxRegion).toLowerCase())) {

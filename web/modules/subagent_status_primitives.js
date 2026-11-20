@@ -164,6 +164,13 @@ function sessionRouteAvailability(row, state, nowMs) {
     const pin = routePin(row?.route);
     const harnessEntry = accountScopedModelCatalog(state.sessionCatalog ? state.sessionCatalog(row) : harnessMap(state.snapshot)[harness], pin);
     if (!harnessEntry) return verdict(UNAVAILABLE, `${harness} · currently unavailable`);
+    const rows = accountRows(state.snapshot).filter((account) => account.harness === harness);
+    if (pin) {
+        const account = rows.find((candidate) => String(candidate.profile_id || '') === pin);
+        if (!account || account.enabled === false || String(account?.status?.verification || '') !== 'passed') {
+            return verdict(UNAVAILABLE, `${harness} · pinned account ${pin} currently unavailable`, { specific: true });
+        }
+    }
     if (!harnessModelsKnown(harnessEntry, state.catalogKnown)) {
         return verdict(NOT_CHECKED, `${harness} · model availability not checked`);
     }
@@ -172,13 +179,7 @@ function sessionRouteAvailability(row, state, nowMs) {
         return verdict(UNAVAILABLE, `${harness} · selected model ${model} currently unavailable`, { specific: true });
     }
 
-    const rows = accountRows(state.snapshot).filter((account) => account.harness === harness);
     if (pin) {
-        const account = rows.find((candidate) => String(candidate.profile_id || '') === pin);
-        if (!account || account.enabled === false
-            || String(account?.status?.verification || '') !== 'passed') {
-            return verdict(UNAVAILABLE, `${harness} · pinned account ${pin} currently unavailable`, { specific: true });
-        }
         if (!state.quotaKnown) return verdict(NOT_CHECKED, `${harness} · pinned account ready; quota not checked`);
         const quota = routeQuotaFact(state.snapshot, harness, model, pin, nowMs);
         if (quota.exhausted) return verdict(LIMIT, `${harness} · pinned account ${pin} limit reached`, { specific: true });

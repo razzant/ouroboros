@@ -1,7 +1,7 @@
 // Editable suggestions shared by the product's model editors. The input is
 // the draft authority; catalogs enrich its list and never assign a value.
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { bindPopoverPosition } from './ui_interactions.js';
+import { bindOptionPress, bindPopoverPosition } from './ui_interactions.js';
 import { bindModelProgramFooter } from './model_program.js';
 
 const choosers = new WeakMap();
@@ -73,7 +73,7 @@ export function bindModelChooser(input) {
     let active = -1;
     let composing = false;
     let opened = false;
-    let position = null;
+    let position = null, unbindPress = null;
     let restoringFocus = false;
     const programs = bindModelProgramFooter(input, footer, (restoreFocus) => {
         if (opened && restoreFocus) focusInput();
@@ -153,6 +153,7 @@ export function bindModelChooser(input) {
         input.removeAttribute('aria-activedescendant');
         active = -1;
         position?.destroy(); position = null;
+        unbindPress?.(); unbindPress = null;
         if (popup.parentElement !== owner) owner.appendChild(popup);
         doc.removeEventListener('pointerdown', outside);
         doc.defaultView.removeEventListener('blur', close);
@@ -170,7 +171,11 @@ export function bindModelChooser(input) {
         if (!position) position = bindPopoverPosition(popup, { anchor: input, field: input.closest('.ui-field') || input });
         doc.addEventListener('pointerdown', outside);
         doc.defaultView.addEventListener('blur', close);
-        if (!wasOpen) programs.open();
+        if (!wasOpen) {
+            unbindPress = bindOptionPress(list, '[data-model-value]', option => choose(option.dataset.modelValue));
+            programs.open();
+            input.dispatchEvent(new Event('model-chooser:opened', { bubbles: true }));
+        }
     }
 
     function outside(event) {
@@ -248,10 +253,6 @@ export function bindModelChooser(input) {
             else if (event.shiftKey) { event.preventDefault(); focusInput(); }
             else tabPastPopup(event);
         }
-    });
-    listen(list, 'click', (event) => {
-        const option = event.target.closest('[data-model-value]');
-        if (option && list.contains(option)) choose(option.dataset.modelValue);
     });
     choosers.set(input, { footer, update(next, producers) {
         if (producers !== undefined) {

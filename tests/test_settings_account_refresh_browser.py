@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import Counter
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -84,7 +86,7 @@ def test_an_agents_form_renews_its_model_list_when_a_sign_in_settles(subscriptio
         }""")
 
     def catalogue_reads():
-        return sum("/api/model-catalog" in url for url in ui["reads"])
+        return Counter(urlsplit(url).query for url in ui["reads"] if urlsplit(url).path == "/api/model-catalog")
 
     refresh_accounts()  # the answer the form opened with is confirmed and is not a change
     words.fill("An unsaved description.")
@@ -99,7 +101,7 @@ def test_an_agents_form_renews_its_model_list_when_a_sign_in_settles(subscriptio
     assert words.evaluate("e => e === window.ownerDraftNode && e.value") == "An unsaved description."
     assert sum(url.endswith("/api/settings") for url in ui["reads"]) == settings_reads
     after = catalogue_reads()
-    assert after == quiet + 1, "one catalogue read for one changed answer"
+    assert after - quiet == {"view=sources": 1, "harness_id=codex": 1}, "only the visible form refreshes its source list and chosen program"
     refresh_accounts()
     assert catalogue_reads() == after
     # Shown again (a return from another page, a reconnect), the form reads its roster and catches the catalogue up;

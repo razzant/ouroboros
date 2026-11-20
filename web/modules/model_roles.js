@@ -255,12 +255,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const keys = row.slot.slot === 'main' ? mainChoice.map((id) => connections.find((entry) => entry.id === id)?.label || id) : [];
         return keys.length > 1 ? `Main is not set yet. Choose the key it uses: ${keys.slice(0, -1).join(', ')} or ${keys.at(-1)}.` : '';
     }
-    function refreshCatalogs({ force = true, descriptors = true, subscriptionsOnly = false } = {}) {
+    function refreshCatalogs({ force = true, descriptors = true, subscriptionsOnly = false, joinPending = false } = {}) {
         if (destroyed) return;
-        const reads = descriptors ? [catalogs.read('view=sources', { force })] : [];
+        const reads = descriptors ? [catalogs.read('view=sources', { force, joinPending })] : [];
         const shown = new Map(visibleRows().map(row => [catalogKey(row), row]));
         for (const row of shown.values()) {
-            if (!subscriptionsOnly || sourceId(row)) reads.push(refreshRow(row, { force }));
+            if (!subscriptionsOnly || sourceId(row)) reads.push(refreshRow(row, { force, joinPending }));
         }
         return Promise.all(reads);
     }
@@ -457,7 +457,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const sized = size && fmt('{window} window', { window: size });
             const modelFacts = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
                 : `${translateString(plain)} ${sized}.`;
-            status.textContent = (sourceIssue + modelFacts).trim();
+            status.textContent = (translateString(sourceIssue.trim()) + ' ' + modelFacts).trim();
             // A price or a window is composed through the translation seam: the overlay leaves such a line alone.
             if (price || sized) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
@@ -471,15 +471,15 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         }
     }
 
-    function refreshRow(row, { force = false } = {}) {
+    function refreshRow(row, { force = false, joinPending = false } = {}) {
         if (destroyed) return;
         const key = catalogKey(row);
         if (!key) return;
         if ((row.local || / \(local\)$/.test(row.model)) && readApiCatalog && apiCatalogAllowed())
-            void catalogs.read('provider_id=local', { force });
+            void catalogs.read('provider_id=local', { force, joinPending });
         if (!sourceId(row) && (!readApiCatalog || !apiCatalogAllowed()
             || !apiProviders.some(provider => provider.id === effectiveSource(row)))) return;
-        return catalogs.read(key, { force });
+        return catalogs.read(key, { force, joinPending });
     }
 
     async function responseLimit(row, node, apply = false) {
@@ -1012,16 +1012,20 @@ function mountRole(container, { path, ctx }, slot, index) {
         if (hit('[data-editor-save]')) void save(hit('[data-editor-save]'));
         else if (hit('[data-editor-discard]')) { dirty = false; void read(); }
     };
-    const accountCatalog = watchAccountModelCatalog(() => editor.refreshCatalogs({ subscriptionsOnly: true }));
-    let catching = null;
-    let seen = false;
-    const catchUp = () => (catching ||= read().then(() => {
+    const accountCatalog = watchAccountModelCatalog(({ firstConfirmation }) =>
+        editor.refreshCatalogs({ subscriptionsOnly: true, joinPending: firstConfirmation }));
+    let reading = null, shownOnce = false;
+    // The shell announces the first opening as it mounts. Join that read; on return or reconnect
+    // read settings again even if a catalog from the previous showing is still answering.
+    const catchUp = (force = false) => (reading ||= read().then(() => {
         accountCatalog.arm();
-        const force = seen;
-        seen = true;
-        return editor.refreshCatalogs({ force });
-    }).finally(() => { catching = null; }));
-    const onShown = (event) => { if (event.detail?.path === path) void catchUp(); };
+        void editor.refreshCatalogs({ force });
+    }).finally(() => { reading = null; }));
+    const onShown = (event) => {
+        if (event.detail?.path !== path) return;
+        void catchUp(shownOnce);
+        shownOnce = true;
+    };
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
