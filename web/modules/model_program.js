@@ -157,13 +157,13 @@ export function bindModelProgramFooter(input, footer, changed) {
 
 /** A setup family's line shows only with something to act on, once its newest-release read has answered; a failed
  *  passive read shows nothing. The owner's unresolved press or operation keeps its reason and recovery through any
- *  read, also one that finds no program; a press error stays while the update it was about is still offered.
- *  Up to date or absent with nothing of the owner's pending stays silent. */
+ *  read, also one that finds no program; a press error stays while its program is selected and the update it was
+ *  about is still offered. Up to date or absent with nothing of the owner's pending stays silent. */
 export function familyProgramShown(view = {}) {
     const entry = view.entry;
     if (view.request || maintenanceOperationPending(view.operation || entry?.operation)) return true;
-    if (view.operationError) return entry?.updateAvailable !== 'no';
     if (!entry?.selection?.path) return false;
+    if (view.operationError) return entry.updateAvailable !== 'no';
     if (!entry.newest || entry.newest.status === 'not_read' || view.inspectionError || view.inventoryError) return false;
     return entry.updateAvailable !== 'no';
 }

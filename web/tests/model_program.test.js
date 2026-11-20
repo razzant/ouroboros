@@ -295,6 +295,8 @@ test('a family line shows what there is to act on and stays silent otherwise', a
     assert.equal(shown(replaced, {request: {key: 'k'}}), true, 'Retry same request survives a read that finds no program');
     assert.equal(shown(replaced, {operation: {id: 'op', state: 'running'}}), true, 'an operation under way, program absent');
     assert.equal(shown(replaced), false, 'no program and nothing pending: silent');
+    // Review r3 (Astra R3-2): a refused press alone does not put Install on the row of a program that is gone.
+    assert.equal(shown(replaced, {operationError: 'Update not started: refused'}), false, 'a press error alone, program absent: silent');
     const retry = modelProgramMarkup({harness: 'f'}, {entry: replaced, request: {key: 'k'}}, 'Not installed');
     assert.match(retry, /<span>Not installed\u00a0· <span class="harness-model-latest">0\.60\.0 available<\/span><\/span>/);
     assert.match(retry, /data-program-action="rejoin">Retry same request</);

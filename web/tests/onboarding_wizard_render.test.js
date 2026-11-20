@@ -874,9 +874,10 @@ test('Summary says what an exhausted subscription quota does, with and without a
 // Review r1 (Astra M1): pressing Update on Accounts can bring a catalog row the first preview did not have (Luna). A
 // slot still holding what an earlier preview proposed is asked again, blank, so the next preview proposes from the new
 // catalog and Light moves to Luna; a Main the owner set is sent as set, and nothing is proposed beside it.
-// Review r2 (Carbon R2-MAJOR-1, Astra R2-4): slots are blanked only beside a Main that is itself asked again or blank
-// (the server proposes nothing beside the owner's Main, so the limits must be computed for the slots as held), and an
-// edit of another role keeps only that role: an untouched Light still takes the new proposal.
+// Review r2 (Carbon R2-MAJOR-1): slots are blanked only beside a Main that is itself asked again or blank (the server
+// proposes nothing beside the owner's Main, so the limits must be computed for the slots as held).
+// Review r3 (Astra R3-1): an adoption reloads the roles editor, so once the owner edits any role nothing is asked
+// again or adopted: the draft goes as held and an edit in progress is never reloaded away.
 test('a slot still holding a preview\'s proposal takes the proposal of a changed catalog; a Main the owner set is kept', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const [TEST, LUNA] = ['claudexor::codex=gpt-test', 'claudexor::codex=gpt-6-luna'];
@@ -933,9 +934,11 @@ test('a slot still holding a preview\'s proposal takes the proposal of a changed
     assert.ok(asked.every((draft) => draft.OUROBOROS_MODEL_LIGHT === TEST), 'beside the owner\'s Main, Light is asked as held');
     assert.deepEqual([mainEdited.body.OUROBOROS_MODEL, mainEdited.body.OUROBOROS_MODEL_LIGHT], [OWNER_MAIN, TEST]);
     const visionEdited = await finish('owner-vision-edited', {}, edit('vision-model', OWNER_VISION));
-    assert.equal(visionEdited.previews.at(-1).OUROBOROS_MODEL_VISION, OWNER_VISION, 'the edited role is asked as set');
+    const held = visionEdited.previews.filter((draft) => draft.OUROBOROS_MODEL_VISION === OWNER_VISION);
+    assert.ok(held.length > 0, 'a preview was asked after Vision was edited');
+    assert.ok(held.every((draft) => draft.OUROBOROS_MODEL === TEST && draft.OUROBOROS_MODEL_LIGHT === TEST), 'after an edit the draft is asked as held');
     assert.deepEqual([visionEdited.body.OUROBOROS_MODEL, visionEdited.body.OUROBOROS_MODEL_LIGHT, visionEdited.body.OUROBOROS_MODEL_VISION],
-        [TEST, LUNA, OWNER_VISION], 'an untouched Light takes the new proposal; the edited Vision keeps the owner\'s value');
+        [TEST, TEST, OWNER_VISION], 'nothing is adopted over an edited Models step: Light stays as shown, Vision is the owner\'s');
 });
 
 // A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
