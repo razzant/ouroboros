@@ -472,7 +472,7 @@ def _head_line(note: knowledge_store.KnowledgeNote) -> str:
     size = f"{len(head):,} characters, {view_tokens(head):,} tokens"
     if len(head.encode("utf-8")) < body.end_byte - body.start_byte:
         return f"Held head: {size}, the body above the first `## ` line."
-    return f"Held head: {size}: this note has no `## ` line, so its whole body is the head."
+    return f"Held head: {size}: this note has no `## ` line outside a fence, so its whole body is the head."
 
 
 def _link_lines(result: knowledge_store.KnowledgeWriteResult, holding: dict[str, dict[str, list[str]]],
@@ -497,7 +497,8 @@ def _link_lines(result: knowledge_store.KnowledgeWriteResult, holding: dict[str,
         parts, total = [], 0
         for name in names:
             head, body = note_head(targets[name].source), targets[name].source.body_span
-            whole = "; no `## ` line: the whole body" if len(head.encode("utf-8")) >= body.end_byte - body.start_byte else ""
+            whole = ("; no `## ` line outside a fence: the whole body"
+                     if len(head.encode("utf-8")) >= body.end_byte - body.start_byte else "")
             parts.append(f"{name} ({len(head):,} characters{whole}{where(name)})")
             total += len(head)
         return f"{', '.join(parts)}; {total:,} characters in all"
