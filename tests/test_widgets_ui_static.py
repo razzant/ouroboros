@@ -23,9 +23,10 @@ def _framed_widget_sources() -> str:
     out of it (widget_render.js), the framed mounts (widget_module.js), the
     in-frame bootstrap (widget_frame.js and its classic bridge,
     widget_frame_bridge.js), the framed-card chrome
-    (widget_card.js), the card reorder handles (widget_reorder.js) and the
-    declarative chart helpers (widget_chart.js). Negative pins run against this
-    union so the moved code never leaves their coverage."""
+    (widget_card.js), the card reorder handles (widget_reorder.js), the
+    declarative chart helpers (widget_chart.js) and Beautiful Context's frame
+    host (context_report_host.js). Negative pins run against this union so the
+    moved code never leaves their coverage."""
     return (
         _widgets_js()
         + _render_js()
@@ -35,6 +36,7 @@ def _framed_widget_sources() -> str:
         + _read("web/modules/widget_card.js")
         + _read("web/modules/widget_reorder.js")
         + _read("web/modules/widget_chart.js")
+        + _read("web/modules/context_report_host.js")
     )
 
 

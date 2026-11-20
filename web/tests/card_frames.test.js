@@ -199,7 +199,7 @@ test('an app reads the material its frame lies on: the connected host at mount a
         assert.equal(window.listeners('ouro:theme-changed'), 0);
         // Without a material the packet is the document root's, as before.
         assert.deepEqual(packetValues(cardThemeTokens().css), { '--ouro-text': '#efeff2', '--ouro-tray': 'rgba(255, 255, 255, 0.045)', '--ouro-error': '#fe9498' });
-        // The same palette as values, for a frame that applies them itself (Beautiful Context, widgets.js).
+        // The same palette as values, for a frame that applies them itself (Beautiful Context, context_report_host.js).
         assert.deepEqual(cardThemeValues(), { name: 'dark', tokens: { '--ouro-text': '#efeff2', '--ouro-tray': 'rgba(255, 255, 255, 0.045)', '--ouro-error': '#fe9498' } });
     } finally {
         if (prior) Object.defineProperty(globalThis, 'ouroTheme', prior); else delete globalThis.ouroTheme;

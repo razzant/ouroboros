@@ -95,7 +95,7 @@ export function cardThemeTokens(doc = globalThis.document, material = doc?.docum
 }
 
 /** The same theme as values, `{name, tokens}` (each present `--ouro-*` value of `material`), for a frame that is told
- * them by message and applies them itself (Beautiful Context, `widgets.js`). */
+ * them by message and applies them itself (Beautiful Context, `context_report_host.js`). */
 export function cardThemeValues(doc = globalThis.document, material = doc?.documentElement) {
     const candidate = globalThis.ouroTheme?.theme || doc?.documentElement?.dataset?.theme;
     const computed = material && globalThis.getComputedStyle ? globalThis.getComputedStyle(material) : null;

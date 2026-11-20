@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-s6NSl6qhwXf2HGWii+Hpood2U+Z9yBLn42aqKNsEEFE='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-t7/bvd7vjo/liMcC9iiC3VVFx+doKVal+d7EkxnR9x4='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -105,10 +105,10 @@ const theme = /^ouro-theme:(light|dark)$/.exec(window.name);
 if (theme) document.documentElement.dataset.theme = theme[1];
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-// The host tells the painted palette one way (web/modules/widgets.js): the theme and the colours of the card this frame
-// lies on, at load and at every change. Only the embedding window is heard, only this shape is applied, and nothing
-// is ever posted back, so what the frame reads stays in it. The colours go to a rule of this page's own stylesheet
-// (CSSOM), never to a style attribute, which its policy refuses.
+// The host tells the painted palette one way (web/modules/context_report_host.js): the theme and the colours of the
+// card this frame lies on, at load and at every change. Only the embedding window is heard, only this shape is applied,
+// and nothing is ever posted back, so what the frame reads stays in it. The colours go to a rule of this page's own
+// stylesheet (CSSOM), never to a style attribute, which its policy refuses.
 const PALETTE = ['--ouro-text', '--ouro-text-meta', '--ouro-tray', '--ouro-warn', '--ouro-error'];
 const sheet = document.querySelector('style')?.sheet;
 const palette = sheet ? sheet.cssRules[sheet.insertRule(':root {}', sheet.cssRules.length)].style : null;

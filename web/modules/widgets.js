@@ -8,7 +8,7 @@ import {
 } from './widget_job.js';
 import { getPath } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
-import { cardThemeValues } from './card_frames.js';
+import { bindContextReport } from './context_report_host.js';
 import { boardFrameGeometry, mountModuleWidget, mountRouteIframeWidget, setFrameHeight } from './widget_module.js';
 import { SHELL_ICONS } from './page_icons.js';
 import {
@@ -887,33 +887,8 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
-    const reportMount = document.querySelector('[data-context-report-mount]');
-    const reportButton = document.querySelector('[data-context-report]');
-    let stopReportTheme = () => {};
-    const closeReport = () => {
-        stopReportTheme();
-        reportMount.replaceChildren();
-        reportMount.hidden = true;
-        reportButton.setAttribute('aria-expanded', 'false');
-    };
-    reportButton.addEventListener('click', () => {
-        if (!reportMount.hidden) return closeReport();
-        const frame = document.createElement('iframe');
-        frame.title = 'Beautiful Context';
-        frame.setAttribute('sandbox', 'allow-scripts');
-        frame.referrerPolicy = 'no-referrer';
-        // An opaque frame reads no host token: told the palette one way, it answers nothing. Its name carries the theme
-        // for the first paint; a message, the theme and its card's colours at load and at each change while open.
-        const tell = () => frame.contentWindow?.postMessage(
-            { type: 'ouro-context-report-theme', ...cardThemeValues(document, reportMount) }, '*');
-        frame.name = `ouro-theme:${cardThemeValues(document, reportMount).name}`;
-        frame.src = '/static/context-report.html';
-        frame.addEventListener('load', tell);
-        stopReportTheme = onThemeChange(tell);
-        reportMount.append(frame);
-        reportMount.hidden = false;
-        reportButton.setAttribute('aria-expanded', 'true');
-    });
+    const closeReport = bindContextReport(document.querySelector('[data-context-report]'),
+        document.querySelector('[data-context-report-mount]'));
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
