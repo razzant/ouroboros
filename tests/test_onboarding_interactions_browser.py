@@ -214,12 +214,41 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     page.locator('[data-collapse="local-model"] > summary').click()
     page.locator('[data-collapse="more-providers"] > summary').click()
     # A choice strip's value travels in a hidden input that no reader reaches (it has no `labels`); the strip's
-    # named button group is what the owner reads and presses, so that is what must carry the name.
-    carriers = page.locator(".wizard-content [data-connection-choice] input[type=hidden]")
+    # button group, tied to that input by its help (`<id>-note`), is what the owner reads and presses, so that group
+    # must be shown, named, hold its named choices with the carried one pressed, and point to its help. A hidden
+    # input that belongs to no strip is reported, never skipped. The OpenAI key's API strip stands only under a key
+    # (settings_provider_cards.js `createFlatKeyChoices`), so a key is typed for the check and cleared after it.
+    key = page.locator("#openai-key")
+    strip_shown = "() => !document.querySelector('[data-flat-key-choice=\"OPENAI_API_SURFACE\"]').hidden"
+    assert not page.evaluate(strip_shown)
+    key.fill("sk-test-wizard-names")
+    assert page.evaluate(strip_shown)
+    carriers = page.locator(".wizard-content input[type=hidden]")
     assert carriers.count() > 0
     for carrier in carriers.all():
-        assert carrier.evaluate("el => Boolean(el.closest('[data-connection-choice]')"
-                                ".querySelector('[role=group][aria-label]')?.getAttribute('aria-label').trim())")
+        strip = carrier.evaluate("""el => {
+            const holder = el.closest('[data-connection-choice]');
+            if (!holder) return {stray: el.outerHTML};
+            const group = holder.querySelector(`[role=group][aria-describedby="${CSS.escape(el.id + '-note')}"]`);
+            const help = el.id && document.getElementById(el.id + '-note');
+            const choices = group ? [...group.querySelectorAll('button[aria-pressed]')] : [];
+            const box = group?.getBoundingClientRect();
+            return {
+                id: el.id, name: group?.getAttribute('aria-label')?.trim() || '',
+                shown: Boolean(group?.checkVisibility?.() ?? true) && box?.width > 0 && box?.height > 0,
+                labels: choices.map((button) => button.textContent.trim()),
+                pressed: choices.filter((button) => button.getAttribute('aria-pressed') === 'true')
+                    .map((button) => button.dataset.connectionChoiceValue),
+                value: el.value, help: help?.textContent.trim() || '',
+            };
+        }""")
+        assert 'stray' not in strip, f"a hidden input outside a choice strip: {strip.get('stray')}"
+        assert strip['name'] and strip['shown'], strip
+        assert len(strip['labels']) >= 2 and all(strip['labels']), strip
+        assert strip['pressed'] == [strip['value']], strip
+        assert strip['help'], strip
+    key.fill("")
+    assert not page.evaluate(strip_shown)
     for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
         assert field.evaluate("el => el.labels.length > 0 || Boolean(el.getAttribute('aria-label'))")
         assert field.evaluate("el => el.classList.contains('ui-control')")
