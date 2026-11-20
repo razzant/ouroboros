@@ -645,12 +645,13 @@ def test_a_link_in_another_case_backlinks_the_note_only_where_the_volume_folds_c
         if scope != "global":
             assert {topic.casefold() for topic in spelled} == {"hub"}, spelled
         if (hub.shelf / "HUB.md").exists():  # the generated index read under another spelling reads as the base read it
-            (hub.shelf / "index-full.md").write_text("The shelf's generated index.\n", encoding="utf-8")
+            (hub.shelf / "index-full.md").write_bytes(b"The shelf's generated index.\n")  # no newline translation
             (hub.shelf / "lower.md").write_text("[the index](index-full.md)\n", encoding="utf-8")
             (hub.shelf / "upper.md").write_text("[the index](INDEX-FULL.md)\n", encoding="utf-8")  # a third spelling
             reply = tools._knowledge_read(ctx, "Index-Full", scope=scope)
             assert reply.startswith("[Knowledge source]") and reply.endswith("The shelf's generated index.\n"), reply
-            if scope == "global":  # its links are spelled by knowledge_links, which drops a reserved name
+            written = (hub.shelf / "Index-Full.md").resolve().name == "Index-Full.md"  # Windows gives the entry's name
+            if scope == "global" or not written:  # a link that resolves to the reserved name carries no address
                 assert "[Knowledge backlinks" not in reply
             else:
                 assert _link_header(reply, "backlinks (readable shelves now)") == [indexed]

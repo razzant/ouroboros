@@ -685,7 +685,8 @@ def knowledge_links(note: KnowledgeNote, *, before_byte: int | None = None) -> t
 
 def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ...]) -> tuple[dict[str, Any], ...]:
     """Current sources on the readable shelves, joined by resolved scope and topic, both in the shelf's spelling
-    (``shelf_spelling``): ``Hub.md`` names ``hub.md`` only on a volume that folds case.
+    (``shelf_spelling``; a note whose shelf spelling is reserved keeps the caller's): ``Hub.md`` names ``hub.md``
+    only on a volume that folds case.
 
     File-name text in any case (also percent-encoded) only selects candidates to parse; the
     existing Markdown resolver decides identity. No graph or disk index is kept.
