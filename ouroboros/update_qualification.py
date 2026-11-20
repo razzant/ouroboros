@@ -8,14 +8,23 @@ a refreshed run never rewrites a description of the same range.
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from itertools import count
 
 TRAILER = "Ouroboros-Qualification: "
 CHECKS = ("full_battery", "cost_contract")
 STATES = ("passed", "failed", "not_run", "unknown")
 RED_LABEL = "post-merge-red"  # scripts/post_merge_routing.py labels each red it hands over with it
+POST_MERGE_RUNS = "actions/workflows/post-merge.yml/runs"
+RANGE_TITLE = "Post-merge range check"
+MEASURED_STEP = "Post-merge range measured"
+CONTINUOUS_STEP = "Post-merge continuous range measured"
+# A leg job's name: (system, the base it measured from). The one grammar of post-merge.yml's job name, for this
+# reader and scripts/post_merge_window.py's.
+_LEG = re.compile(r"post-merge \((linux|windows)\) from ([0-9a-f]{40})")
 REVIEW_STATES = ("settled", "pending", "unknown", "no_record")
 REVIEW_RELATIONS = ("covers_head", "changes_after_review", "unknown", "not_declared", "delta_only")
 
@@ -86,26 +95,163 @@ def _get_json(url: str):
         return json.load(response)
 
 
-def _missing_runs(commits: list[dict], runs: dict, absent: set[str]) -> list[str]:
-    """First-parent order is newest first; completed checks cover skipped pushes.
+def actions_pages(get, path: str, key: str):
+    """GitHub's named array inside a paginated Actions response. Stop fetching when the reader stops."""
+    seen, first_total, ids = 0, None, set()
+    for page in count(1):
+        data = get(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        rows, total = data[key], data["total_count"]
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows) or type(total) is not int:
+            raise ValueError(f"invalid {key} page")
+        seen += len(rows)
+        if first_total is None:
+            first_total = total
+        left = total - seen
+        page_ids = [row["id"] for row in rows if type(row.get("id")) is int]
+        unique = not ids.intersection(page_ids) and len(set(page_ids)) == len(page_ids)
+        ids.update(page_ids)
+        exact = unique and total == first_total and left >= 0 and len(rows) <= 100 and (not left or len(rows) == 100)
+        # Positive rows from an incomplete listing survive. Only an exhaustive page can prove absence.
+        yield rows, left if exact else None
+        if not exact:
+            raise ValueError(f"incomplete {key} listing")
+        if not left:
+            return
 
-    Match post_merge_check.choose_base: cancelled/skipped runs are not coverage.
-    Only proven absences or observed replaced runs receive coverage. Unread pages
-    prove nothing; direct observations, including earlier reds, stay visible.
+
+def range_candidate(run: dict, *, include_interrupted=False) -> bool:
+    return (run.get("display_title") == RANGE_TITLE and run.get("head_branch") == "ouroboros"
+            and run.get("event") in ("push", "workflow_dispatch") and run.get("status") == "completed"
+            and (run.get("conclusion") in ("success", "failure") or
+                 (include_interrupted and run.get("conclusion") in ("cancelled", "timed_out")))
+            and re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha") or "") is not None
+            and all(type(run.get(key)) is int and run[key] > 0 for key in ("id", "run_attempt")))
+
+
+def attempt_job_pages(run: dict, get):
+    """Pages of completed jobs belonging to this head, run and attempt."""
+    number, attempt = run["id"], run["run_attempt"]
+    for rows, left in actions_pages(get, f"actions/runs/{number}/attempts/{attempt}/jobs", "jobs"):
+        if left is None:
+            raise ValueError("incomplete jobs listing")
+        yield [job for job in rows if (job.get("run_id"), job.get("run_attempt", attempt), job.get("head_sha"),
+                                       job.get("status")) == (number, attempt, run["head_sha"], "completed")]
+
+
+def measured_window(run: dict, get) -> tuple[str, bool] | None:
+    """(measured base, eligible head) from both legs. The window job only chose their input."""
+    if not range_candidate(run):
+        return None
+    legs = {}
+    for jobs in attempt_job_pages(run, get):
+        for job in jobs:
+            match = _LEG.fullmatch(job.get("name") or "")
+            if not match:
+                continue
+            system, base = match.groups()
+            if system in legs or base in ("0" * 40, run["head_sha"]):
+                return None
+            markers = [step["name"] for step in job.get("steps") or [] if isinstance(step, dict)
+                       and step.get("name") in (CONTINUOUS_STEP, MEASURED_STEP) and step.get("status") == "completed"
+                       and step.get("conclusion") == "success"]
+            if len(markers) != 1:
+                return None
+            legs[system] = (base, markers[0] == CONTINUOUS_STEP)
+        if len(legs) == 2:
+            if legs["linux"][0] == legs["windows"][0]:
+                return legs["linux"][0], all(eligible for _, eligible in legs.values())
+            return None
+    return None
+
+
+def _interrupted(run: dict) -> bool:
+    return run.get("status") == "completed" and run.get("conclusion") in ("cancelled", "skipped")
+
+
+def _missing_runs(commits: list[dict], runs: list[dict], absent: set[str], base_sha="", lookup=None, *,
+                  full_line=False, complete_run_lists=(), incomplete_attempts=(), previous=None) -> list[str]:
+    """Cover proven absences or exclusively interrupted runs in a measured (base, head].
+
+    For a SHA with any direct rows, both its run listing and those runs' attempts must be read
+    before concluding that every run was interrupted. A completed success or failure needs no cover.
     """
-    for run in runs.values():
+    # Snapshot the old witness before clearing derived fields: on a passive read these are the same rows.
+    previous = previous or {}
+    edges = {_run_key(r): (r['measured_base'], tuple(r['covered_shas'])) for r in previous.get('runs', ())
+             if isinstance(r, dict) and _terminal_attempt(r) and r.get('measured_base') and r.get('covered_shas')}
+    own = {}
+    for run in runs:  # newest first, as read
         run.pop("covered_shas", None)
-    covering, missing = None, []
-    for commit in commits:
+        own.setdefault(run.get("sha"), []).append(run)
+    positions = {c["sha"]: i for i, c in enumerate(commits)}
+    if base_sha:
+        positions.setdefault(base_sha, len(commits))
+    pending = []
+    for commit in reversed(commits):
         sha = commit["sha"]
-        run = runs.get(sha)
-        if run and run.get("status") == "completed" and run.get("conclusion") in ("success", "failure"):
-            covering = run
-        elif covering is not None and (run is not None or sha in absent):
-            covering.setdefault("covered_shas", []).append(sha)
-        elif run is None:
-            missing.append(sha)
-    return sorted(missing)
+        done = [run for run in own.get(sha, ()) if run.get("status") == "completed"
+                and run.get("conclusion") in ("success", "failure")]
+        if sha in absent or (sha in complete_run_lists and sha in own and sha not in incomplete_attempts
+                             and all(_interrupted(run) for run in own[sha])):
+            pending.append(sha)
+        elif pending and done:
+            # Spend requests only on unresolved gaps. A later unmeasured run cannot disqualify an earlier one.
+            for run in sorted(done, key=lambda run: "measured_base" not in run):
+                if not pending:
+                    break
+                if lookup and "measured_base" not in run:
+                    lookup(run)
+                base = run.get("measured_base")
+                # Both endpoints are first parents. A base outside a complete local suffix must predate it.
+                end = positions.get(base, len(commits) if base and full_line else 0)
+                while pending and positions[pending[-1]] < end:
+                    run.setdefault("covered_shas", []).append(pending.pop())
+    # A short read may retain an actual edge, not issue a fresh verdict from an old SHA-level fact.
+    # A fresh exhaustive listing above owns its SHA, including a fresh empty result.
+    keep = set(previous.get('absent_shas') or ()).difference(own, complete_run_lists)
+    keep.update(sha for sha in previous.get('interrupted_shas') or () if sha in own
+                and sha not in complete_run_lists and sha not in incomplete_attempts
+                and all(_interrupted(row) for row in own[sha]))
+    if keep and edges:
+        for run in runs:
+            edge = edges.get(_run_key(run))
+            if (not edge or run.get('measured_base') != edge[0] or run.get('status') != 'completed'
+                    or run.get('conclusion') not in ('success', 'failure') or run['sha'] not in positions):
+                continue
+            end = positions.get(edge[0], len(commits) if full_line else 0)
+            kept = {sha for sha in edge[1] if sha in keep and sha in positions
+                    and positions[run['sha']] < positions[sha] < end}
+            if kept:
+                run['covered_shas'] = sorted(kept.union(run.get('covered_shas', ())), key=positions.__getitem__)
+    return sorted({c["sha"] for c in commits} - own.keys() - {
+        sha for run in runs for sha in run.get("covered_shas", ())})
+
+
+def discard_legacy_coverage(record) -> bool:
+    """Project a saved update letter as every Updates reader shows it (the panel, the preflight, query_data): coverage
+    saved before CI published measured bases leaves its qualification and its last good one, including during an
+    outage. True when that changed the record."""
+    changed = False
+    for stored in (record, record.get("last_good")) if isinstance(record, dict) else ():
+        qualification = stored.get("qualification") if isinstance(stored, dict) else None
+        github = qualification.get("github") if isinstance(qualification, dict) else None
+        runs = [r for r in github["runs"] if isinstance(r, dict) and "sha" in r] if isinstance(github, dict) and isinstance(
+            github.get("runs"), list) else []
+        if not any(r.get('covered_shas') for r in runs):
+            continue
+        interrupted = set(github.get('interrupted_shas') or ())
+        own = {r['sha'] for r in runs}
+        supported = set(github.get('absent_shas') or ()).difference(own)
+        supported.update(interrupted.intersection(own).difference(r['sha'] for r in runs if not _interrupted(r)))
+        if any(r.get('covered_shas') and (not r.get('measured_base') or not supported.issuperset(r['covered_shas']))
+               for r in runs):
+            github['missing_shas'] = _missing_runs(
+                qualification.get('commits') or [], runs, set(), qualification.get('base_sha'),
+                full_line=qualification.get('first_parent_complete') is True, previous=github)
+            if 'interrupted_shas' in github:
+                github['interrupted_shas'] = sorted({s for r in runs for s in r.get('covered_shas', ()) if s in own})
+            changed = True
+    return changed
 
 
 def _date(value) -> datetime | None:
@@ -116,46 +262,187 @@ def _date(value) -> datetime | None:
         return None
 
 
-def post_merge_checks(commits: list[dict], repo_url: str, *, get_json=None) -> dict:
+class _Budget(ValueError):
+    """The read's request budget ran out: what it left unread stays unknown, never absent."""
+
+
+_BUDGET = "GitHub response page budget reached."
+
+
+class _NoReader(ValueError):
+    """The update source has no GitHub check reader: no request is sent, so nothing is observed and nothing erased."""
+
+
+_NO_READER = "The update source has no supported GitHub check reader."
+
+
+def _run_key(run: dict) -> tuple:
+    return run.get("sha"), run.get("run_id"), run.get("attempt")
+
+
+def _terminal_attempt(run):
+    return (type(run.get('run_id')) is int and run['run_id'] > 0
+            and type(run.get('attempt')) is int and run['attempt'] > 0
+            and run.get('status') == 'completed' and isinstance(run.get('conclusion'), str) and bool(run['conclusion']))
+
+
+def _read_earlier_attempts(runs, sources, prior, observe, get):
+    """The workflow list reports the latest attempt only; older attempts have exact endpoints."""
+    incomplete, unread = set(), []
+    for (sha, number, newest), source in tuple(sources.items()):
+        if type(number) is not int or number <= 0 or type(newest) is not int or newest <= 1:
+            continue
+        for attempt in range(newest - 1, 0, -1):
+            key = sha, number, attempt
+            if key in runs:
+                continue
+            cached = prior.get(key)
+            if cached and _terminal_attempt(cached):
+                runs[key] = dict(cached)
+                # The listing binds the workflow identity; only this exact cached attempt supplies its outcome.
+                sources[key] = {**source, "run_attempt": attempt, "status": cached["status"],
+                                "conclusion": cached["conclusion"]}
+                continue
+            try:
+                row = get(f"actions/runs/{number}/attempts/{attempt}")
+                if (not isinstance(row, dict) or type(row.get("id")) is not int
+                        or type(row.get("run_attempt")) is not int
+                        or (row["id"], row["run_attempt"], row.get("head_sha")) != (number, attempt, sha)
+                        or row.get("head_branch") != source.get("head_branch", "ouroboros")
+                        or row.get("event") != source.get("event", "push")
+                        or ("workflow_id" in source and row.get("workflow_id") != source["workflow_id"])
+                        or row.get("status") != "completed" or not isinstance(row.get("conclusion"), str)
+                        or not row["conclusion"]):
+                    raise ValueError("workflow attempt does not match the requested completed attempt")
+                observe(row)
+            except Exception as exc:
+                incomplete.add(sha)
+                unread.append(exc)
+                if isinstance(exc, _Budget):
+                    break
+    return incomplete, unread
+
+
+def post_merge_checks(commits: list[dict] | dict, repo_url: str, *, get_json=None) -> dict:
     """Read runs for first-parent integrations, newest first, including squash.
 
-    Page through the oldest integration before inferring skipped-run coverage.
-    Its own row, exhausted history or a run predating it establishes absence;
-    a physical 10-page response budget stays partial, never proof of absence.
-    Public GitHub needs no credential. Offline/rate-limit failures remain unknown.
+    Read the global listing to its end, or finish exact SHA listings for the whole range when cheaper.
+    Dates only choose the cheaper route. Neither a date nor one direct run proves a SHA's history complete.
+    A red read before stays by its run and attempt. The same ten-request budget includes older attempts;
+    a short listing for a SHA or an unread attempt never supplies a new indirect verdict for that SHA.
+    Public GitHub needs no credential. Offline/rate-limit failures remain unknown. A source without a GitHub
+    reader sends no request and ends at the same join as a failed read: what an earlier read observed stays,
+    marked retained, and the read is unavailable, never observed.
     """
+    # A retained qualification also supplies the range boundary, immutable earlier attempts and what was read.
+    material = commits if isinstance(commits, dict) else {"commits": commits}
+    commits, base_sha = material["commits"], material.get("base_sha", "")
     if not commits:
         return {"status": "observed", "runs": [], "missing_shas": []}
     get_json = get_json or _get_json
-    repo = _github_repo(repo_url)
-    if repo is None:
-        return {"status": "unavailable", "reason": "The update source has no supported GitHub check reader.",
-                "runs": [], "missing_shas": sorted(c["sha"] for c in commits)}
+    repo = _github_repo(repo_url)  # None: no reader. Nothing returns early: the join below owns what is kept.
     wanted = {c["sha"] for c in commits}
-    oldest = _date(commits[-1].get("date"))
-    runs = {}
-    status, reason = "partial", "GitHub response page budget reached."
+    runs, sources, current_keys = {}, {}, set()  # exact attempts; cached outcomes never enter current_keys
+    complete_run_lists = set()
+    earlier = material.get("github") or {}
+    prior = {_run_key(r): r for r in earlier.get("runs", []) if isinstance(r, dict)}
+    remaining = 10
+
+    def get(path):
+        nonlocal remaining
+        if repo is None:  # every request passes here, so none is sent
+            raise _NoReader(_NO_READER)
+        if not remaining:
+            raise _Budget(_BUDGET)
+        remaining -= 1
+        return get_json(f"https://api.github.com/repos/{repo}/{path}")
+
+    def observe(row):
+        sha = row.get("head_sha")
+        if not isinstance(sha, str) or not sha:
+            raise ValueError("workflow run without a head SHA")
+        if row.get("head_branch", "ouroboros") != "ouroboros" or row.get("event", "push") not in ("push", "workflow_dispatch"):
+            return
+        run = {"sha": sha, "status": row.get("status"), "conclusion": row.get("conclusion"),
+               "url": row.get("html_url"), "run_id": row.get("id"), "attempt": row.get("run_attempt")}
+        key = _run_key(run)
+        if sha in wanted and key not in runs:
+            current_keys.add(key)
+            runs[key], sources[key] = run, row
+            cached = prior.get(key, {})
+            if range_candidate(row) and "measured_base" in cached:
+                run["measured_base"] = cached["measured_base"]
+
+    status, reason = "observed", "No matching run is not a passing check."
     try:
-        for page in range(1, 11):
-            data = get_json(f"https://api.github.com/repos/{repo}/actions/workflows/"
-                            f"post-merge.yml/runs?per_page=100&page={page}")
-            rows = data["workflow_runs"]
+        oldest = _date(commits[-1].get("date"))
+        for rows, left in actions_pages(get, POST_MERGE_RUNS, "workflow_runs"):
             for row in rows:
-                sha = row.get("head_sha")
-                if sha in wanted and sha not in runs:
-                    runs[sha] = {"sha": sha, "status": row.get("status"), "conclusion": row.get("conclusion"),
-                                 "url": row.get("html_url"), "run_id": row.get("id"),
-                                 "attempt": row.get("run_attempt")}
-            if (len(rows) < 100 or commits[-1]["sha"] in runs or
-                    (oldest is not None and any((created := _date(row.get("created_at"))) is not None
-                                               and created < oldest for row in rows))):
-                status, reason = "observed", "No matching run is not a passing check."
+                observe(row)
+            if left == 0:
+                complete_run_lists = wanted
                 break
+            if not remaining:
+                status, reason = "partial", _BUDGET
+                break
+            # A late dispatch can put a SHA on this page while its push is still on an older page.
+            if left and oldest and any((created := _date(row.get("created_at"))) and created < oldest for row in rows):
+                if len(wanted) > min(remaining, (left + 99) // 100):
+                    continue
+                for sha in sorted(wanted):
+                    path = f"{POST_MERGE_RUNS}?branch=ouroboros&head_sha={urllib.parse.quote(sha, safe='')}"
+                    for matches, rest in actions_pages(get, path, "workflow_runs"):
+                        for match in matches:
+                            if match.get("head_sha") != sha:
+                                raise ValueError("SHA lookup returned another commit")
+                            observe(match)
+                        if rest == 0:
+                            complete_run_lists.add(sha)
+                break
+    except _Budget:
+        status, reason = "partial", _BUDGET
+    except _NoReader:
+        status, reason = "unavailable", _NO_READER
     except Exception as exc:
         status, reason = "unavailable", type(exc).__name__
-    absent = wanted - runs.keys() if status == "observed" else set()
+    incomplete_attempts, unread = _read_earlier_attempts(runs, sources, prior, observe, get)
+    # Join positive history by the actual keys on disk, never by walking every hypothetical attempt
+    # below a budget cut. A completed current listing still owns disappearance of a non-red run.
+    again = {key[:2] for key in current_keys}
+    for key, run in prior.items():
+        sha, number = run.get("sha"), run.get("run_id")
+        if key in runs or sha not in wanted:
+            continue
+        short_history = sha not in complete_run_lists or sha in incomplete_attempts
+        if ((number is not None and run.get('conclusion') == 'failure') or (short_history and _terminal_attempt(run))
+                or sha not in complete_run_lists and ((sha, number) not in again if number is not None
+                                                      else all(seen[0] != sha for seen in again))):
+            runs[key] = dict(run)
+    for key in runs.keys() - current_keys:
+        runs[key]['retained'] = True
+    known_shas = {run['sha'] for run in runs.values()}
+    fresh_absent = complete_run_lists - known_shas
+    absent = fresh_absent | (wanted.intersection(earlier.get('absent_shas') or ()) - known_shas - complete_run_lists)
+
+    def lookup(run):
+        source = sources.get(_run_key(run))
+        if source is not None and range_candidate(source):
+            try:
+                receipt = measured_window(source, get)
+            except Exception as exc:  # A missing proof does not erase the direct run outcome.
+                unread.append(exc)
+                return
+            run["measured_base"] = receipt[0] if receipt else None
+
+    missing = _missing_runs(commits, list(runs.values()), fresh_absent, base_sha, lookup,
+                            full_line=material.get('first_parent_complete') is True, previous=earlier,
+                            complete_run_lists=complete_run_lists, incomplete_attempts=incomplete_attempts)
+    # This certificate is written only for a target with a direct row AND an actual proven edge.
+    covered_interrupted = {s for run in runs.values() for s in run.get('covered_shas', ()) if s in known_shas}
+    if unread and status == "observed":  # neither unread attempt metadata nor unread jobs prove completeness
+        status, reason = "partial", _BUDGET if any(isinstance(exc, _Budget) for exc in unread) else type(unread[0]).__name__
     return {"status": status, "reason": reason, "runs": list(runs.values()), "absent_shas": sorted(absent),
-            "missing_shas": _missing_runs(commits, runs, absent)}
+            "interrupted_shas": sorted(covered_interrupted), "missing_shas": missing}
 
 
 def post_merge_reds(repo_url: str, *, get_json=None) -> dict:
@@ -198,12 +485,14 @@ def kept_reds(read: dict | None, stored: dict | None) -> dict | None:
 
 def range_qualification(material: dict, repo_url: str) -> dict:
     commits = material.get("first_parent_commits", material.get("commits")) or []
-    return {"base_sha": material["base_sha"], "target_sha": material["target_sha"],
-            "commits": [{"sha": c["sha"], "subject": c["subject"], "date": c.get("date"),
+    facts = {"base_sha": material["base_sha"], "target_sha": material["target_sha"],
+             "commits": [{"sha": c["sha"], "subject": c["subject"], "date": c.get("date"),
                          "receipt": c.get("qualification", commit_qualification(c.get("body") or "")),
                          "body_read": bool(c.get("receipt_read") or c.get("body_read", True))}
-                        for c in commits],
-            "github": post_merge_checks(commits, repo_url)}
+                         for c in commits]}
+    if material.get("first_parent_complete") is True:
+        facts["first_parent_complete"] = True
+    return {**facts, "github": post_merge_checks(facts, repo_url)}
 
 
 def compact_qualification(value):
@@ -267,15 +556,22 @@ def compact_qualification(value):
             'details': 'retained full runtime section: official_update.letter.qualification'}
     github = result.get('github')
     if isinstance(github, dict) and isinstance(github.get('runs'), list):
-        counts, whole = Counter(), []
-        for run in github['runs']:
-            if (not isinstance(run, dict) or set(run) - {'sha', 'status', 'conclusion', 'url', 'run_id', 'attempt'}
+        counts, retained, whole = Counter(), Counter(), []
+        for run in github['runs']:  # a measured base and the commits a run covers are shown by `missing_shas`
+            if (not isinstance(run, dict)
+                    or set(run) - {'sha', 'status', 'conclusion', 'url', 'run_id', 'attempt', 'measured_base', 'covered_shas', 'retained'}
+                    or ('retained' in run and type(run['retained']) is not bool)
+                    or not isinstance(run.get('measured_base', ''), (str, type(None)))
+                    or not isinstance(run.get('covered_shas', []), list)
                     or run.get('status') != 'completed'
                     or run.get('conclusion') not in ('success', 'failure', 'cancelled', 'skipped', 'timed_out')):
                 whole.append(run)
             else:
                 counts[run['conclusion']] += 1
+                if run.get('retained') is True:
+                    retained[run['conclusion']] += 1
         github['runs'] = {'count': len(github['runs']), 'completed': dict(counts), 'unabridged': whole,
+                          **({'retained': dict(retained)} if retained else {}),
                           'details': 'retained full runtime section: official_update.letter.qualification.github.runs'}
     return result
 
@@ -288,18 +584,17 @@ def refresh_qualification(authored: dict, repo_url: str, *, previous: dict | Non
     """
     if not previous or any(previous.get(k) != authored.get(k) for k in ("base_sha", "target_sha")):
         previous = authored
-    github = post_merge_checks(authored["commits"], repo_url)
-    if github.get("status") in ("unavailable", "partial"):
-        runs = {r["sha"]: dict(r) for r in previous.get("github", {}).get("runs", [])}
-        runs.update({r["sha"]: dict(r) for r in github.get("runs", [])})
-        # A failed read cannot establish new absences. Retain only proven ones;
-        # a newly observed run supersedes absence, including a prior coverage claim.
-        absent = set(previous.get("github", {}).get("absent_shas", [])) - runs.keys()
-        github = {**github, "absent_shas": sorted(absent),
-                  "missing_shas": _missing_runs(authored["commits"], runs, absent), "runs": list(runs.values())}
+    # The read keeps what ``previous`` observed that it cannot see now (``post_merge_checks``): a failed read
+    # establishes no new absence, and a newly observed run supersedes an absence, including a prior coverage claim.
+    github = post_merge_checks({**previous, "commits": authored["commits"]}, repo_url)
     old = authored.get("github") or {}
-    changed = ({r["sha"]: r for r in github.get("runs", [])} != {r["sha"]: r for r in old.get("runs", [])}
-               or github.get("missing_shas", []) != old.get("missing_shas", []))
+
+    def rows(github):
+        # Whether the same immutable outcome needed reading again is not a new test result.
+        return sorted(json.dumps({k: v for k, v in run.items() if k != 'retained'}, sort_keys=True)
+                      for run in github.get('runs', []))
+
+    changed = rows(github) != rows(old) or github.get("missing_shas", []) != old.get("missing_shas", [])
     return {**authored, "github": github}, changed
 
 
@@ -332,17 +627,20 @@ def qualification_summary(qualification: dict | None) -> dict | None:
         key = json.dumps(row, sort_keys=True)
         reviews[key] = reviews.get(key, 0) + 1
     github = qualification.get("github") if isinstance(qualification.get("github"), dict) else {}
-    conclusions: dict = {}
-    for run in github.get("runs") or []:
-        key = str(run.get("conclusion") or run.get("status") or "unknown")
+    conclusions, retained = {}, {}
+    for run in github.get('runs') or []:
+        key = str(run.get('conclusion') or run.get('status') or 'unknown')
         conclusions[key] = conclusions.get(key, 0) + 1
+        if run.get('retained') is True:
+            retained[key] = retained.get(key, 0) + 1
     landed = qualification.get("landed_over_review")  # absent when this install's rows were not read: unknown
     return {"base_sha": qualification.get("base_sha"), "target_sha": qualification.get("target_sha"),
             "commits": len(commits), "with_receipt": len(receipts), "checks": checks,
             "reviews": _review_summary_rows(reviews),
             **({"landed_over_review": len(landed)} if isinstance(landed, list) else {}),
             "post_merge": {"read": github.get("status", "unknown"), "reason": github.get("reason"),
-                           "runs": conclusions, "missing": len(github.get("missing_shas") or [])},
+                           "runs": conclusions, "missing": len(github.get("missing_shas") or []),
+                           **({'retained': retained} if retained else {})},
             "full": "query_data(op='json', kind='update_letter')"}
 
 

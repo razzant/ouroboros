@@ -29,6 +29,7 @@ from pathlib import Path
 import platform
 import sys
 import threading
+import uuid
 from time import monotonic
 
 if str(Path(__file__).resolve().parents[1]) not in sys.path:
@@ -36,7 +37,8 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything above `import pytest` below
-    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, TEST_DURATIONS_ENV,
+    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, SESSION_UNAVAILABLE,
+    TEST_DURATIONS_ENV,
     attempt_text as _attempt, cell as _cell, durations_command, error_text as _error,
     expected_failures as _expected_failures, final as _final, journal_projection as _journal_projection,
     journal_rows as _journal_rows, record_session_durations, run_verdict_command, system_of as _system,
@@ -47,7 +49,7 @@ from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything abov
 
 def output_dir(config) -> Path | None:
     value = getattr(getattr(config, "option", None), "ci_evidence_dir", None)
-    return Path(value).resolve() if value else None
+    return Path(value).absolute() if value else None
 
 
 def _case_outcomes(reports: list[dict]) -> dict[str, str]:
@@ -772,13 +774,46 @@ class _Results:
             except (OSError, UnicodeError) as error:
                 raise pytest.UsageError(f"--ci-listed is unreadable ({type(error).__name__})") from None
         if not hasattr(config, "workerinput"):  # xdist re-emits worker events on the controller.
-            try:
-                path = output_dir(config) / "events.jsonl"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                # Unbuffered: each row reaches the OS before a kill can lose it.
-                self.journal = path.open("wb", buffering=0)
-            except Exception as error:
-                self._journal_off(error)
+            config._ci_evidence_session = uuid.uuid4().hex
+            self._start_journal()
+
+    def _start_journal(self):
+        """Retain both outputs on sequential reuse; only the canonical names describe the current session."""
+        directory = output_dir(self.config)
+        result, journal = paths = (directory / "results.json", directory / "events.jsonl")
+        unavailable = directory / SESSION_UNAVAILABLE
+        self._can_export = False
+        try:
+            previous = [path for path in paths if path.is_file()]
+            self._can_export = result not in previous
+            if previous:
+                # A lock (or an interruption during the two moves) can leave an old file at a current name.
+                unavailable.touch()
+                suffix = ".previous"
+                while any(os.path.lexists(path.with_stem(path.stem + suffix)) for path in paths):
+                    suffix = f".previous-{uuid.uuid4().hex}"
+                for path in previous:
+                    archived = path.with_stem(path.stem + suffix)
+                    try:
+                        os.replace(path, archived)
+                    except OSError as error:
+                        if path == journal:
+                            raise  # Never truncate an earlier journal that could not be retained.
+                        from ouroboros.test_evidence import diagnostics_incomplete
+                        diagnostics_incomplete(type(error).__name__)
+                        print(f"CI_DIAGNOSTICS_INCOMPLETE: the earlier results.json was not set aside ({type(error).__name__})")
+                    else:
+                        if path == result:
+                            self._can_export = True
+                        print(f"CI_EVIDENCE: the earlier session's {path.name} is kept as {archived.name}")
+            directory.mkdir(parents=True, exist_ok=True)
+            # Unbuffered: each row reaches the OS before a kill can lose it.
+            self.journal = journal.open("wb", buffering=0)
+            header = {"event": "session", "session": self.config._ci_evidence_session}
+            self.journal.write((json.dumps(header) + "\n").encode("ascii"))
+            unavailable.unlink(missing_ok=True)  # Now a surviving export must match the new header.
+        except Exception as error:
+            self._journal_off(error)
 
     def _journal_off(self, error=None):
         journal, self.journal = self.journal, None
@@ -1015,8 +1050,10 @@ class _Results:
         if hasattr(self.config, "workerinput"):
             return  # xdist's controller receives the worker reports.
         try:
+            if not self._can_export:
+                return  # Do not replace a previous export we could not retain.
             facts = {
-                "format": 1, "session_exit_code": int(session.exitstatus),
+                "format": 1, "session": self.config._ci_evidence_session, "session_exit_code": int(session.exitstatus),
                 "tests_collected": session.testscollected, "reports": self.reports,
                 "collection_failures": self.collection_failures,
                 "collection_skips": self.collection_skips,

@@ -18,6 +18,7 @@ import urllib.error
 import pytest
 
 from scripts import post_merge_check as pmc
+from ouroboros.update_qualification import CONTINUOUS_STEP, MEASURED_STEP, RANGE_TITLE
 
 REPO = Path(__file__).resolve().parents[1]
 HEAD = "f" * 40
@@ -27,69 +28,419 @@ def _row(nodeid, outcome="passed", phase="call"):
     return {"nodeid": nodeid, "phase": phase, "outcome": outcome, "is_subtest": False}
 
 
-def _results(directory, reports, *, exit_code=None, collection=(), selected=None, skips=None):
+def _results(directory, reports, *, exit_code=None, collection=(), selected=None, skips=None, github=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     failed = any(row["outcome"] == "failed" for row in reports) or collection
     result = {
         "format": 1, "session_exit_code": (1 if failed else 0) if exit_code is None else exit_code,
-        "reports": reports,
+        "reports": reports, "tests_collected": len(selected if selected is not None else {r["nodeid"] for r in reports}),
         "collection_failures": [{"nodeid": path, "outcome": "failed"} for path in collection],
     }
     if selected is not None:  # what tests/ci_evidence.py's session left to run after every filter
         result["selected_nodeids"] = list(selected)
     if skips is not None:  # the collectors that skipped at collection; a producer older than the field names none
         result["collection_skips"] = list(skips)
+    if github is not None:
+        result["github"] = github
     (directory / "results.json").write_text(json.dumps(result), encoding="utf-8")
+    return result["session_exit_code"]
 
 
-def _selection(evidence, *, parallel="success", serial="success", node="success", inventory=None):
+def _selection(evidence, *, parallel="success", serial="success", node="success", inventory=None, reports=None, base="b" * 40):
     evidence.mkdir(parents=True, exist_ok=True)
+    outcomes = {"parallel": parallel, "serial": serial}
+    if inventory is None:
+        inventory = {}
+        if reports is None:
+            reports = {"parallel": _whole("tests/t.py::test_ok")}
+        for label, outcome in outcomes.items():
+            if outcome == "skipped":
+                continue
+            rows = reports.get(label, [])
+            ids = [r["nodeid"] for r in rows if r["phase"] == "setup"]
+            code = (1 if outcome == "failure" else 0) if ids else 5
+            inventory[label] = {"collection_reports": 1, "expected": ids, "exitcode": code,
+                                "executed": [r["nodeid"] for r in rows if r["phase"] == "teardown"]}
+            _results(evidence / label, rows, selected=ids, exit_code=code)
     (evidence / "selection.json").write_text(json.dumps({
-        "tier": "selected", "file_count": 3, "available": 40, "base": "b" * 40, "node": node,
-        "outcomes": {"parallel": parallel, "serial": serial}, "inventory": inventory or {},
+        "tier": "selected", "file_count": 3, "available": 40, "base": base, "node": node,
+        "outcomes": outcomes, "inventory": inventory,
+        "outcome": "success" if all(value == "success" for value in (*outcomes.values(), node)) else "failure",
     }), encoding="utf-8")
 
 
 # --- base ------------------------------------------------------------------------------------
 
-def _run(sha, conclusion="success", status="completed", number=1):
-    return {"id": number, "head_sha": sha, "status": status, "conclusion": conclusion}
+def _run(sha, conclusion="success", status="completed", number=1, attempt=1):
+    return {"id": number, "run_attempt": attempt, "head_sha": sha, "status": status, "conclusion": conclusion,
+            "display_title": RANGE_TITLE, "head_branch": "ouroboros", "event": "push"}
 
 
-def test_the_base_is_the_head_of_the_newest_completed_check():
+def _job(run, system, marker="success", *, base="1" * 40, scope="chain"):
+    return {"name": f"post-merge ({system}) from {base}", "run_id": run["id"], "run_attempt": run["run_attempt"],
+            "head_sha": run["head_sha"], "status": "completed", "conclusion": run["conclusion"],
+            "steps": [{"name": CONTINUOUS_STEP if scope == "chain" else MEASURED_STEP,
+                       "status": "completed", "conclusion": marker}]}
+
+
+def _window_job(run, window):
+    source = "confirmed" if window["continuous"] else "provisional"
+    return {**_job(run, "linux"), "name": "window", "conclusion": "success",
+            "steps": [{"name": f"Post-merge {source} base {window['base']}", "status": "completed", "conclusion": "success"}]}
+
+
+def test_the_base_is_the_head_of_the_newest_check_that_ran_on_both_systems():
     ancestors = {"a" * 40, "c" * 40}
     runs = [_run(HEAD, number=9), _run("d" * 40, status="in_progress", conclusion=None, number=8),
             _run("e" * 40, conclusion="cancelled", number=7), _run("x" * 40, number=6),
-            _run("c" * 40, conclusion="failure", number=5), _run("a" * 40, number=4)]
-    base, why = pmc.choose_base(runs, "a" * 40, HEAD, ancestor=lambda sha, head: sha in ancestors,
-                                parent=lambda head: pytest.fail("no fallback"))
-    # The run on HEAD itself, the unfinished, the cancelled and the non-ancestor runs are skipped.
-    assert base == "c" * 40 and "run 5, failure" in why
+            _run("c" * 40, conclusion="failure", number=5, attempt=2), _run("a" * 40, number=4)]
+
+    def get(path):
+        assert path == "actions/runs/5/attempts/2/jobs?per_page=100&page=1"
+        return {"total_count": 101, "jobs": [_job(runs[4], "linux"), _job(runs[4], "windows"), *[{}] * 98]}
+
+    base, why, continuous = pmc.choose_base(runs, "a" * 40, HEAD, get=get, ancestor=lambda sha, head: sha in ancestors,
+                                            parent=lambda head: pytest.fail("no fallback"))
+    assert continuous and base == "c" * 40 and "run 5, attempt 2, failure" in why
 
 
-def test_the_base_falls_back_to_the_previous_tip_and_then_to_the_first_parent():
+def test_a_partial_classification_keeps_the_selected_step_disagreement(tmp_path, monkeypatch):
+    _selection(tmp_path, parallel="failure", reports={"parallel": _whole("tests/t.py::test_red",
+                                                                        _row("tests/t.py::test_red", "failed"))})
+    def interrupted(*a, **kw):
+        raise RuntimeError("retry stopped after the checkpoint")
+    monkeypatch.setattr(pmc.subprocess, "call", interrupted)
+    with pytest.raises(RuntimeError, match="after the checkpoint"):
+        pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD, "--selected-outcome", "skipped"])
+    record = json.loads((tmp_path / "classification.json").read_text())
+    assert not record["selection_executed"] and record["failed"][0]["retry"] == "not run"
+    assert "selected workflow step was skipped" in record["problems"][0]
+
+
+@pytest.mark.parametrize("gap", ["no marker", "old marker", "skipped", "other attempt", "other run", "other head",
+                                 "other base", "push only", "unavailable"])
+def test_the_base_reaches_past_a_run_without_both_execution_witnesses(tmp_path, monkeypatch, gap):
+    newer = _run("b" * 40, number=30, attempt=2)
+    older = _run("a" * 40, number=29)
+    windows = _job(newer, "windows")
+    if gap == "no marker":
+        windows["steps"] = [{"name": "Upload the evidence", "conclusion": "success"}]
+    elif gap == "old marker":
+        windows["steps"][0]["name"] = "Selected test execution confirmed"
+    elif gap == "skipped":
+        windows["steps"][0]["conclusion"] = "skipped"
+    elif gap == "other attempt":
+        windows["run_attempt"] = 1
+    elif gap == "other run":
+        windows["run_id"] = 28
+    elif gap == "other head":
+        windows["head_sha"] = older["head_sha"]
+    elif gap == "other base":
+        windows = _job(newer, "windows", base="2" * 40)
+    elif gap == "push only":
+        windows = _job(newer, "windows", scope="push")
+
+    def get(self, path):
+        if path.startswith("actions/workflows/post-merge.yml/runs?"):
+            return {"total_count": 2, "workflow_runs": [newer, older]}
+        if path == "actions/runs/30/attempts/2/jobs?per_page=100&page=1":
+            if gap == "unavailable":
+                raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+            return {"total_count": 2, "jobs": [_job(newer, "linux", scope="push" if gap == "push only" else "chain"), windows]}
+        if path == "actions/runs/30/attempts/1/jobs?per_page=100&page=1":  # no window job chose its input either
+            return {"total_count": 0, "jobs": []}
+        assert path == "actions/runs/29/attempts/1/jobs?per_page=100&page=1"
+        return {"total_count": 2, "jobs": [_job(older, "linux"), _job(older, "windows")]}
+
+    monkeypatch.setattr(pmc.GitHub, "get", get)
+    monkeypatch.setattr(pmc, "is_ancestor", lambda *_: True)
+    monkeypatch.setenv("BEFORE", newer["head_sha"])
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    assert pmc.main(["base", "--head", HEAD, "--evidence-dir", str(tmp_path)]) == 0
+    receipt = json.loads((tmp_path / "base.json").read_text(encoding="utf-8"))
+    assert receipt["base"] == older["head_sha"] and "run 29, attempt 1" in receipt["why"]
+    # A bare 404 on the newest run's job list proves no loss, but withholds confirmation: the established base is
+    # kept and the range stays provisional.
+    assert receipt["continuous"] == (gap != "unavailable")
+    assert ("; earlier history unreadable" in receipt["why"]) == (gap == "unavailable")
+
+
+def test_an_oversized_handover_reaches_the_next_window_by_its_exact_receipt(tmp_path, monkeypatch):
+    first, head, following = "a" * 40, "c" * 40, "f" * 40
+    pending = [f"tests/test_leaf.py::test_case[{n:03d}]" for n in range(40)]
+    window = {"base": first, "head": head, "continuous": True}
+    (tmp_path / "base.json").write_text(json.dumps(window), encoding="utf-8")
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "base": first, "head": head, "selection_executed": True, "failed": [],
+    }), encoding="utf-8")
+    owed = [{"head": head, "run": 7, "attempt": 1, "base": first, "ids": pending}]
+    (tmp_path / "routing.json").write_text(json.dumps({"os": "windows", "untracked": pending, "awaiting_handoff": owed}),
+                                           encoding="utf-8")
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_RUN_ID", "7")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(pmc, "merges", lambda *_: [])
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 1
+    emitted = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    assert emitted["handoff_file"] == "yes" and emitted["window_scope"] == "push"
+    ref = json.loads(emitted["untracked"])["artifact"]
+    assert len(emitted["untracked"]) < 800 and (ref["run"], ref["attempt"]) == (7, 1)
+
+    run = _run(head, "failure", number=7)
+    windows = _job(run, "windows", base=first, scope="push")
+    windows["steps"].append({"name": "Post-merge untracked " + emitted["untracked"], "status": "completed",
+                             "conclusion": "success"})
+    jobs = [_window_job(run, window), _job(run, "linux", base=first), windows]
+
+    def read(run_id, attempt, part, digest):
+        saved = (tmp_path / "handoff.json").read_bytes()
+        assert (run_id, attempt, part, digest) == (7, 1, "windows", pmc.hashlib.sha256(saved).hexdigest())
+        return json.loads(saved)
+
+    gap = {"run": 7, "attempt": 1, "part": "windows", "base": first}
+    unavailable = urllib.error.HTTPError("artifact", 503, "Service Unavailable", None, None)
+    for fault in (None, FileNotFoundError("expired"), unavailable):
+        replay = {}
+        def handoff(*args):
+            if fault is not None:
+                raise fault
+            return read(*args)
+        base, _, continuous = pmc.choose_base([run], head, following, get=lambda _: {"total_count": 3, "jobs": jobs},
+                                              ancestor=lambda a, b: a < b, replay=replay, handoff=handoff)
+        # An expired receipt is a labelled gap, and this check measures that range again. One that could not be read
+        # now says nothing about what it holds, so the window it seeds is no confirmed range.
+        assert base == first and continuous == (fault is not unavailable)
+        assert replay["awaiting_handoff"] == ({"windows": owed} if fault is None else {})
+        assert replay["history_gaps"] == ([gap] if isinstance(fault, FileNotFoundError) else [])
+        assert replay["history_read"] is continuous
+
+
+def test_an_explicit_initial_window_seeds_the_next_push_across_run_and_job_pages(tmp_path, monkeypatch):
+    initial, before, head = "1" * 40, "2" * 40, "3" * 40
+    seed = {**_run(head, number=7, attempt=2), "event": "workflow_dispatch"}
+    env = {"GITHUB_SHA": head, "GITHUB_REPOSITORY": "razzant/ouroboros", "GITHUB_REF": "refs/heads/ouroboros",
+           "GITHUB_EVENT_NAME": "workflow_dispatch", "INITIAL_BASE": initial}
+    args = type("Args", (), {"head": None, "evidence_dir": tmp_path})
+    monkeypatch.setattr(pmc, "is_ancestor", lambda a, b: a in (head, initial, before) and a != b)
+    monkeypatch.setattr(pmc.GitHub, "get", lambda *a: {"total_count": 0, "workflow_runs": []})
+    assert pmc.command_base(args, env) == 0
+    first = json.loads((tmp_path / "base.json").read_text())
+    assert first["base"] == initial and first["continuous"]
+    path = pmc.POST_MERGE_RUNS + "?per_page=100&page="
+    jobs = "actions/runs/7/attempts/2/jobs?per_page=100&page="
+    pages = {
+        path + "1": {"total_count": 201, "workflow_runs": [{"display_title": "old"}] * 100},
+        path + "2": {"total_count": 201, "workflow_runs": [seed, *[{}] * 99]},
+        jobs + "1": {"total_count": 101, "jobs": [_job(seed, "linux", base=first["base"]), *[{}] * 99]},
+        jobs + "2": {"total_count": 101, "jobs": [_job(seed, "windows", base=first["base"])]},
+    }
+    monkeypatch.setattr(pmc.GitHub, "get", lambda self, url: pages.pop(url))
+    assert pmc.command_base(args, {"GITHUB_SHA": HEAD, "BEFORE": before}) == 0
+    second = json.loads((tmp_path / "base.json").read_text())
+    assert not pages and second["base"] == head and second["continuous"]
+
+
+@pytest.mark.parametrize("fault", ["before selection", "missing Windows", "cancelled dispatch", "window cleanup failed",
+                                   "wrong attempt", "invalid base"])
+def test_first_dispatch_keeps_its_base_without_certifying_a_missing_leg(fault):
+    from ouroboros.update_qualification import post_merge_checks
+
+    base, missed, head, docs = (str(i) * 40 for i in range(1, 5))
+    run = {**_run(head, conclusion="cancelled" if fault == "cancelled dispatch" else "failure"),
+           "event": "workflow_dispatch"}
+    window = _window_job(run, {"base": base, "continuous": True})
+    jobs = [window, _job(run, "linux", base=base)]
+    if fault == "wrong attempt":
+        window["run_attempt"] += 1
+    if fault == "before selection":
+        jobs.append(_job(run, "windows", marker="skipped", base=base))
+    if fault == "window cleanup failed":
+        window["conclusion"] = "failure"
+    if fault in ("cancelled dispatch", "window cleanup failed"):
+        jobs = [window]
+    if fault == "invalid base":
+        jobs[0] = _window_job(run, {"base": head, "continuous": True})
+
+    def get(path):
+        return ({"workflow_runs": [run], "total_count": 1} if "/workflows/" in path
+                else {"jobs": jobs, "total_count": len(jobs)})
+
+    # Only the previous starting point can be reused, including when repeating a dispatch at its own SHA.
+    for tip, initial in ((docs, ""), (head, missed)):
+        following, _, confirmed = pmc.choose_base([run], head, tip, get=get, initial=initial,
+                                                  ancestor=lambda a, b: a < b, parent=lambda _: head)
+        if fault in ("wrong attempt", "invalid base"):
+            assert following == (initial or head) and confirmed == bool(initial)
+        else:
+            assert confirmed and following == base
+    fact = post_merge_checks({"base_sha": base, "commits": [{"sha": head}, {"sha": missed}]},
+                             "https://github.com/test/repo", get_json=get)
+    assert fact["missing_shas"] == [missed] and not fact["runs"][0].get("covered_shas")
+
+
+@pytest.mark.parametrize("windows", ["failure", "success"])
+def test_a_rerun_of_failed_jobs_replays_the_base_its_first_attempt_chose_and_certifies_nothing(windows):
+    """Re-running only the failed Windows leg of the first dispatch lists that leg alone in the new attempt: its window
+    job and Linux leg stay in the first attempt. The next push replays the dispatch's confirmed base instead of starting
+    at its head, and no attempt joins one attempt's Linux leg to another's Windows leg."""
+    from ouroboros.update_qualification import post_merge_checks
+
+    base, missed, head, docs = (str(i) * 40 for i in range(1, 5))
+    run = {**_run(head, conclusion=windows, attempt=2), "event": "workflow_dispatch"}
+    first = {**run, "run_attempt": 1, "conclusion": "failure"}
+    attempts = {1: [_window_job(first, {"base": base, "continuous": True}), _job(first, "linux", base=base),
+                    _job(first, "windows", marker="skipped", base=base)],
+                2: [_job(run, "windows", marker="success" if windows == "success" else "skipped", base=base)]}
+    requests = []
+
+    def get(path):
+        requests.append(path)
+        if "/workflows/" in path:
+            return {"workflow_runs": [run], "total_count": 1}
+        jobs = attempts[int(path.split("/")[4])]
+        return {"jobs": jobs, "total_count": len(jobs)}
+
+    following, why, confirmed = pmc.choose_base([run], head, docs, get=get, ancestor=lambda a, b: a < b,
+                                                parent=lambda _: pytest.fail("no fallback to the dispatch's head"))
+    assert (following, confirmed) == (base, True) and "retained starting base of run 1, attempt 2" in why
+    assert requests == [f"actions/runs/1/attempts/{n}/jobs?per_page=100&page=1" for n in (2, 1)]
+    fact = post_merge_checks({"base_sha": base, "commits": [{"sha": head}, {"sha": missed}]}, "https://github.com/test/repo",
+                             get_json=lambda url: get(url.removeprefix("https://api.github.com/repos/test/repo/")))
+    assert fact["missing_shas"] == [missed] and not fact["runs"][0].get("covered_shas")
+
+
+@pytest.mark.parametrize("conclusion,outage", [("failure", False), ("failure", True), ("cancelled", False)])
+def test_unseeded_red_replays_the_earliest_known_base_without_promoting_it(conclusion, outage):
+    base, before, docs = (str(i) * 40 for i in range(1, 4))
+    run = _run(before, conclusion=conclusion)
+    jobs = [_window_job(run, {"base": base, "continuous": False}),
+            _job(run, "linux", base=base, scope="push"), _job(run, "windows", base=base, scope="push")]
+    requests = []
+
+    def get(path):
+        requests.append(path)
+        return {"jobs": jobs, "total_count": len(jobs)}
+
+    def runs():
+        yield run
+        if outage:
+            raise OSError("older history offline")
+
+    following, _, confirmed = pmc.choose_base(runs(), before, docs, get=get, ancestor=lambda a, b: a < b)
+    assert following == base and not confirmed
+    assert requests == ["actions/runs/1/attempts/1/jobs?per_page=100&page=1"]
+
+
+@pytest.mark.parametrize("red_start", ["same", "earlier"])
+def test_a_green_provisional_check_settles_the_window_it_measured(red_start):
+    earlier, base, red_head, green_head, docs = (str(i) * 40 for i in range(1, 6))
+    red, green = _run(red_head, conclusion="failure", number=1), _run(green_head, number=2)
+    starts = {1: base if red_start == "same" else earlier, 2: base}
+    jobs = {run["id"]: [_window_job(run, {"base": starts[run["id"]], "continuous": False}),
+                        *(_job(run, leg, base=starts[run["id"]], scope="push") for leg in ("linux", "windows"))]
+            for run in (red, green)}
+
+    def get(path):
+        return {"jobs": jobs[int(path.split("/")[2])], "total_count": 3}
+
+    following, _, confirmed = pmc.choose_base([green, red], green_head, docs, get=get, ancestor=lambda a, b: a < b)
+    # The green check re-measured the red one's window on both systems; a red window starting earlier is still a gap.
+    assert (following, confirmed) == ((green_head, False) if red_start == "same" else (earlier, False))
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_contiguous_provisional_greens_settle_the_older_red_without_certifying_earlier_history(checkpoint):
+    base, red, repaired, last, head = [str(i) * 40 for i in range(1, 6)]
+    runs = [_run(last, number=3), _run(repaired, number=2), _run(red, "failure", number=1)]
+    starts = {3: repaired, 2: base, 1: base}
+
+    def get(path):
+        run = runs[3 - int(path.split("/")[2])]
+        start = starts[run["id"]]
+        window = _window_job(run, {"base": start, "continuous": False})
+        if checkpoint and run == runs[0]:
+            window["steps"].append({"name": 'Post-merge replay input {"history_read":true,"awaiting_handoff":{}}',
+                                    "status": "completed", "conclusion": "success"})
+        jobs = [window, *(_job(run, leg, base=start, scope="push") for leg in ("linux", "windows"))]
+        return {"jobs": jobs, "total_count": len(jobs)}
+
+    def listed():
+        yield runs[0]
+        assert not checkpoint, "a completed provisional history search was repeated"
+        yield from runs[1:]
+
+    following, _, confirmed = pmc.choose_base(listed(), last, head, get=get, ancestor=lambda a, b: a < b)
+    assert following == last and not confirmed
+
+
+def test_push_runs_from_before_range_receipts_end_the_search():
+    initial, before, head = (str(i) * 40 for i in range(1, 4))
+    legacy = {**_run(before), "display_title": "Merge pull request #1 from someone/change"}
+
+    def runs():
+        yield legacy
+        pytest.fail("history older than range receipts was read")
+
+    for start, expected in (("", (before, False)), (initial, (initial, True))):
+        base, _, continuous = pmc.choose_base(runs(), before, head, get=lambda path: pytest.fail(f"read {path}"),
+                                              ancestor=lambda a, b: a < b, initial=start)
+        assert (base, continuous) == expected
+
+
+@pytest.mark.parametrize("fault", ["short page", "missing metadata", "offline", "other branch", "other repo", "push", "side parent"])
+def test_initialization_cannot_hide_missing_history_or_cross_dispatch_authority(tmp_path, monkeypatch, fault):
+    env = {"GITHUB_SHA": HEAD, "GITHUB_REPOSITORY": "razzant/ouroboros", "GITHUB_REF": "refs/heads/ouroboros",
+           "GITHUB_EVENT_NAME": "workflow_dispatch", "INITIAL_BASE": "b" * 40}
+    env.update({"other branch": {"GITHUB_REF": "refs/heads/feature"}, "other repo": {"GITHUB_REPOSITORY": "fork/r"},
+                "push": {"GITHUB_EVENT_NAME": "push"}}.get(fault, {}))
+    monkeypatch.setattr(pmc, "is_ancestor", lambda *_: fault != "side parent")
+    def get(self, url):
+        if fault == "offline":
+            raise OSError("offline")
+        if fault == "missing metadata":
+            return {"total_count": 1, "workflow_runs": [{"display_title": RANGE_TITLE}]}
+        assert fault == "short page"
+        return {"total_count": 101, "workflow_runs": []}
+    monkeypatch.setattr(pmc.GitHub, "get", get)
+    args = type("Args", (), {"head": None, "evidence_dir": tmp_path})
+    if fault in ("short page", "missing metadata", "offline"):
+        assert pmc.command_base(args, env) == 0
+        window = json.loads((tmp_path / "base.json").read_text())
+        assert window["base"] == env["INITIAL_BASE"] and not window["continuous"]
+    else:
+        assert pmc.command_base(args, env) != 0 and not (tmp_path / "base.json").exists()
+
+
+def test_a_branch_without_the_recovery_base_can_still_check_the_push():
     parent = lambda head: "p" * 40  # noqa: E731
-    assert pmc.choose_base([], "a" * 40, HEAD, ancestor=lambda sha, head: True, parent=parent) == (
-        "a" * 40, "the branch tip before this push")
+    ancestor = lambda sha, head: sha == "a" * 40  # noqa: E731
+    base, why, continuous = pmc.choose_base([], "a" * 40, HEAD, ancestor=ancestor, parent=parent)
+    assert base == "a" * 40 and not continuous and "tip before this push" in why
     for before in ("", pmc.ZERO_SHA, "n" * 40):  # missing, a new branch, not an ancestor
-        base, why = pmc.choose_base([_run("n" * 40)], before, HEAD,
-                                    ancestor=lambda sha, head: sha != "n" * 40, parent=parent)
-        assert (base, why) == ("p" * 40, "the first parent of this push")
+        base, why, continuous = pmc.choose_base([], before, HEAD, ancestor=ancestor, parent=parent)
+        assert base == "p" * 40 and not continuous and "first parent" in why
 
 
-def test_the_base_command_survives_an_api_error_and_publishes_its_choice(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("unreadable", ["runs", "jobs"])
+def test_the_base_command_survives_an_api_error_and_publishes_its_choice(tmp_path, monkeypatch, capsys, unreadable):
     def broken(self, path):
+        if unreadable == "jobs" and path.startswith("actions/workflows/"):
+            return {"total_count": 1, "workflow_runs": [_run("c" * 40)]}
         raise urllib.error.HTTPError(path, 503, "Service Unavailable", None, None)
 
     monkeypatch.setattr(pmc.GitHub, "get", broken)
-    monkeypatch.setattr(pmc, "is_ancestor", lambda sha, head: sha == "a" * 40)
+    monkeypatch.setattr(pmc, "is_ancestor", lambda sha, head: True)
     output = tmp_path / "github-output"
     environ ={"GITHUB_SHA": HEAD, "BEFORE": "a" * 40, "GITHUB_OUTPUT": str(output), "GITHUB_REPOSITORY": "o/r"}
     parsed = type("Args", (), {"head": None, "evidence_dir": tmp_path / "evidence"})
     assert pmc.command_base(parsed, environ) == 0
-    assert output.read_text(encoding="utf-8") == f"base={'a' * 40}\n"
-    assert json.loads((tmp_path / "evidence" / "base.json").read_text(encoding="utf-8"))["base"] == "a" * 40
+    outputs = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    receipt = json.loads((tmp_path / "evidence" / "base.json").read_text(encoding="utf-8"))
+    assert outputs["base"] == receipt["base"] == "a" * 40 and not receipt["continuous"]
+    assert json.loads(outputs["window"]) == receipt
     assert "HTTP 503" in capsys.readouterr().out
 
 
@@ -266,7 +617,9 @@ def test_container_args_never_name_a_node_the_tree_lacks():
     # A missing function or class falls back to the module, which then covers every node in it.
     assert args == ["tests/test_a.py", "tests/test_b.py::test_one", "tests/test_broken.py"]
     assert absent == ["tests/test_gone.py::test_x"]
-    args, _ = pmc.container_args(ids[:5], sources.get)
+    # A parameter's own `::` or `@` names no class or function: the container stays the test.
+    structured = ["tests/test_a.py::test_param[x@y::z]", "tests/test_a.py::TestK::test_m[a::b@c]"]
+    args, _ = pmc.container_args(ids[:5] + structured, sources.get)
     assert args == ["tests/test_a.py::TestInherited", "tests/test_a.py::TestK::test_m",
                     "tests/test_a.py::test_param", "tests/test_a.py::test_plain"]
 
@@ -274,16 +627,17 @@ def test_container_args_never_name_a_node_the_tree_lacks():
 # --- classify --------------------------------------------------------------------------------
 
 def test_one_retry_separates_failed_from_flaky(tmp_path):
-    _selection(tmp_path, parallel="failure", serial="failure")
-    _results(tmp_path / "parallel", [_row("tests/t.py::test_flaky", "failed"), _row("tests/t.py::test_broken", "failed"),
-                                     _row("tests/t.py::test_fine")])
-    _results(tmp_path / "serial", [_row("tests/s.py::test_skips_now", "failed", "setup")])
+    flaky, broken, setup = "tests/t.py::test_flaky", "tests/t.py::test_broken", "tests/s.py::test_skips_now"
+    _selection(tmp_path, parallel="failure", serial="failure", reports={
+        "parallel": [*_whole(flaky, _row(flaky, "failed")), *_whole(broken, _row(broken, "failed")),
+                     *_whole("tests/t.py::test_fine")],
+        "serial": [_row(setup, "failed", "setup"), _row(setup, phase="teardown"), *_whole("tests/s.py::test_ok")]})
     seen = []
 
     def retry(args, directory):
         seen.append((list(args), Path(directory)))
-        _results(directory, [_row("tests/t.py::test_flaky"), _row("tests/t.py::test_broken", "failed"),
-                             _row("tests/s.py::test_skips_now", "skipped", "setup")])
+        return _results(directory, [*_whole(flaky), *_whole(broken, _row(broken, "failed")),
+                                    _row(setup, "skipped", "setup"), _row(setup, phase="teardown")])
 
     provisional = []
     record = pmc.classify(tmp_path, run=retry, node=lambda: pytest.fail("the Node lane was green"),
@@ -303,6 +657,66 @@ def test_one_retry_separates_failed_from_flaky(tmp_path):
     assert [(row["id"], row["retry"]) for row in record["failed"]] == [
         ("tests/s.py::test_skips_now", "skipped"), ("tests/t.py::test_broken", "failed")]
     assert record["failed"][0]["pass"] == "serial" and record["problems"] == []
+
+
+def test_a_module_that_does_not_collect_again_leaves_the_retry_complete_and_the_other_outcomes_kept(tmp_path):
+    """The retry runs on past a module that does not import (--continue-on-collection-errors, exit 1): that module
+    is FAILED and goes to bisection, while a red that ran whole and passed on the same retry is FLAKY."""
+    broken, flaky = "tests/test_broken.py", "tests/t.py::test_flaky"
+    _selection(tmp_path, parallel="failure", reports={"parallel": _whole(flaky, _row(flaky, "failed"))})
+    _results(tmp_path / "parallel", _whole(flaky, _row(flaky, "failed")), collection=[broken], selected=[flaky])
+    retried = []
+
+    def retry(ids, directory):
+        retried.append(list(ids))
+        return _results(directory, _whole(flaky), collection=[broken], selected=[flaky])
+
+    record = pmc.classify(tmp_path, run=retry, node=lambda: 0)
+    assert retried == [[flaky, broken]] and record["complete"] is True
+    assert [(row["id"], row["retry"]) for row in record["failed"]] == [(broken, "failed")]
+    assert [row["id"] for row in record["flaky"]] == [flaky]
+    assert not any("retry" in problem for problem in record["problems"])
+
+
+@pytest.mark.parametrize("initial, later", [("collection", "call"), ("call", "collection"),
+                                             ("call", "setup"), ("call", "teardown")])
+def test_retry_does_not_confirm_a_different_phase_or_collector(tmp_path, monkeypatch, initial, later):
+    module = "tests/t.py"
+    test = module + "::test_case"
+    initial_id = module if initial == "collection" else test
+    later_id = module if later == "collection" else test
+    _selection(tmp_path, parallel="failure", reports={"parallel": _whole(test, _row(test, "failed"))})
+    if initial == "collection":
+        _results(tmp_path / "parallel", [], collection=[module], selected=[])
+
+    def retry(ids, directory):
+        assert list(ids) == [initial_id]
+        if later == "collection":
+            return _results(directory, [], collection=[module], selected=[])
+        if later == "setup":
+            reports = [_row(test, "failed", "setup"), _row(test, phase="teardown")]
+        elif later == "teardown":
+            reports = [*_whole(test)[:-1], _row(test, "failed", "teardown")]
+        else:
+            reports = _whole(test, _row(test, "failed"))
+        return _results(directory, reports, selected=[test])
+
+    record = pmc.classify(tmp_path, run=retry)
+    assert record["complete"] and record["flaky"] == []
+    found = {row["id"]: row for row in record["failed"]}
+    assert set(found) == {initial_id, later_id} and found[initial_id]["retry"] == "unknown"
+    initial_why = "did not collect" if initial == "collection" else "failed in call"
+    later_why = "did not collect" if later == "collection" else f"failed in {later}"
+    if later_id == initial_id:
+        assert found[initial_id]["why"] == f"{initial_why}; on retry: {later_why}"
+    else:
+        assert found[initial_id]["why"] == initial_why
+        assert found[later_id] == {"id": later_id, "pass": "retry", "why": later_why, "retry": "first seen on retry"}
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(pmc, "first_parent_chain", lambda *_: pytest.fail("no exact repeat to bisect"))
+    assert pmc.main(["attribute", "--evidence-dir", str(tmp_path), "--base", "b" * 40, "--head", HEAD]) == 0
+    verdicts = json.loads((tmp_path / "attribution.json").read_text(encoding="utf-8"))["verdicts"]
+    assert {row["id"]: row["verdict"] for row in verdicts} == dict.fromkeys(found, "unattributed")
 
 
 LINTED = "ruff F811 tests/t.py fake_route"
@@ -411,12 +825,15 @@ def test_the_size_check_is_the_release_lane_over_the_modules_that_mark_it(tmp_pa
 
     def run(args, directory, *, cwd, env):
         seen.append((list(args), Path(directory), Path(cwd), env))
-        _results(directory, [_row("tests/test_sized.py::test_a", "failed")])
+        nodeid = "tests/test_sized.py::test_a"
+        _results(directory, _whole(nodeid, _row(nodeid, "failed")))
+        return 1
 
     session = pmc.size_session(tmp_path / "size", base="b" * 40, mode="approved", cwd=repo, run=run)
     assert seen == [(["-m", "size_ratchet", "tests/nested/test_deep.py", "tests/test_sized.py"], tmp_path / "size", repo,
                      {"OURO_SIZE_RATCHET_BASE_REF": "b" * 40, "OURO_BOOK_GROWTH_MODE": "approved"})]
     assert pmc.size_findings(session) == ({"size tests/test_sized.py::test_a": "failed in call"}, [])
+    assert pmc.size_session(tmp_path / "size", base="b" * 40, cwd=repo, run=lambda *a, **k: 2) is None
     _git(repo, "rm", "-q", "--cached", "tests/test_sized.py", "tests/nested/test_deep.py")
     assert pmc.size_modules(repo) == []  # an untracked module is not the tree's
     assert pmc.size_session(tmp_path / "none", base="b" * 40, cwd=repo, run=run) is None and len(seen) == 1
@@ -433,33 +850,41 @@ def test_the_release_size_modules_are_found_in_this_checkout():
 
 
 def test_a_size_check_that_skipped_or_did_not_finish_measured_nothing(tmp_path):
-    _results(tmp_path / "skip", [_row("tests/test_smoke.py::test_a"), _row("tests/test_b.py::test_books", "skipped", "setup")])
+    skipped = "tests/test_b.py::test_books"
+    _results(tmp_path / "skip", [*_whole("tests/test_smoke.py::test_a"), _row(skipped, "skipped", "setup"),
+                                 _row(skipped, phase="teardown")])
     found, problems = pmc.size_findings(pmc.read_session(tmp_path / "skip"))
     assert found == {} and problems == ["the size check skipped `tests/test_b.py::test_books`, so it measured nothing there"]
     # A module id of the size check is an aggregate like any other: a skip at collection within it is no pass.
     _results(tmp_path / "uncollected", _whole("tests/test_b.py::test_a"), skips=["tests/test_b.py::TestK"])
     assert pmc.size_status(pmc.read_session(tmp_path / "uncollected"), ["size tests/test_b.py"]) == {
         "size tests/test_b.py": "skipped"}
-    _results(tmp_path / "green", [_row("tests/test_smoke.py::test_a")])
+    _results(tmp_path / "green", _whole("tests/test_smoke.py::test_a"))
     assert pmc.size_findings(pmc.read_session(tmp_path / "green")) == ({}, [])
+    _results(tmp_path / "wrong-exit", _whole(skipped, _row(skipped, "failed")), exit_code=0)
+    assert pmc.size_findings(pmc.read_session(tmp_path / "wrong-exit")) == (
+        {"size " + skipped: "failed in call"}, ["the size check reported a failure despite a zero exit"])
     unfinished = ["the size check could not run or finish, so it went unchecked"]
     _results(tmp_path / "interrupted", [_row("tests/test_smoke.py::test_a", "failed")], exit_code=2)
     assert pmc.size_findings(pmc.read_session(tmp_path / "interrupted")) == (None, unfinished)
     assert pmc.size_findings(pmc.read_session(tmp_path / "missing")) == (None, unfinished)
     assert pmc.size_findings(None) == (None, unfinished)  # no module marks a size test
     assert pmc.size_status(None, [SIZED]) == {SIZED: "unknown"}
+    for rows in ([], [_row("tests/t.py::test_a", phase="setup")], [_row("tests/t.py::test_a", "failed", "setup"),
+                                                                   _row("tests/t.py::test_a", phase="teardown")]):
+        _results(tmp_path / "incomplete", rows)
+        assert "did not measure every collected test" in " ".join(pmc.size_findings(pmc.read_session(tmp_path / "incomplete"))[1])
 
 
 def test_a_red_size_test_is_failed_without_a_retry(tmp_path):
-    _selection(tmp_path, parallel="failure")
-    _results(tmp_path / "parallel", [_row("tests/t.py::test_red", "failed")])
-    _results(tmp_path / "serial", [])
-    _results(tmp_path / "size", [_row(SIZED.removeprefix("size "), "failed"), _row("tests/test_smoke.py::test_ok")])
+    red, sized = "tests/t.py::test_red", SIZED.removeprefix("size ")
+    _selection(tmp_path, parallel="failure", reports={"parallel": _whole(red, _row(red, "failed"))})
+    _results(tmp_path / "size", [*_whole(sized, _row(sized, "failed")), *_whole("tests/test_smoke.py::test_ok")])
     retried = []
 
     def retry(args, directory):
         retried.append(list(args))
-        _results(directory, [_row("tests/t.py::test_red", "failed")])
+        return _results(directory, _whole(red, _row(red, "failed")))
 
     record = pmc.classify(tmp_path, run=retry, node=lambda: 0, size=lambda: pmc.read_session(tmp_path / "size"))
     assert retried == [["tests/t.py::test_red"]]  # the size test is deterministic: never in the retry
@@ -473,20 +898,43 @@ def test_a_red_size_test_is_failed_without_a_retry(tmp_path):
     assert "size_checked" not in record and [row["id"] for row in record["failed"]] == ["tests/t.py::test_red"]
 
 
+@pytest.mark.parametrize("pytest_exit", [0, 1])
+def test_size_wrapper_mismatch_keeps_fresh_red_without_certifying_measurement(tmp_path, monkeypatch, pytest_exit):
+    _selection(tmp_path)
+    nodeid = SIZED.removeprefix("size ")
+    monkeypatch.setattr(pmc, "size_modules", lambda _: [nodeid.split("::", 1)[0]])
+
+    def run(args, directory, **kwargs):
+        _results(directory, _whole(nodeid, _row(nodeid, "failed" if pytest_exit else "passed")))
+        return pytest_exit + 1  # A cleanup failure changes the wrapper status after pytest exported.
+
+    session = pmc.size_session(tmp_path / "size", base="b" * 40, run=run)
+    assert session["exit"] == pytest_exit and session["runner_exit"] == pytest_exit + 1
+    record = pmc.classify(tmp_path, size=lambda: session, run=lambda *_: pytest.fail("a size test is not retried"))
+    assert record["selection_executed"] and not record["size_checked"]
+    assert record["problems"] == [f"the size check runner exit {pytest_exit + 1} disagrees with pytest exit {pytest_exit}"]
+    assert record["failed"] == ([{"id": SIZED, "pass": "size", "why": "failed in call", "retry": "failed"}]
+                                if pytest_exit else [])
+    assert pmc.size_status(session, [SIZED]) == {SIZED: "unknown"}  # not evidence to retire a known red
+
+
 def test_classify_runs_the_gates_its_leg_names_and_measures_books_by_the_decided_mode(tmp_path, monkeypatch):
     _selection(tmp_path)
-    for label in ("parallel", "serial"):
-        _results(tmp_path / label, [_row(f"tests/{label}.py::test_ok")])
     sessions, linted = [], []
     monkeypatch.setattr(pmc, "size_session", lambda directory, **kwargs: sessions.append(kwargs) or None)
     monkeypatch.setattr(pmc, "lint_findings", lambda: linted.append(True) or {})
     monkeypatch.setattr(pmc, "run_pytest", lambda *a, **k: pytest.fail("nothing to retry"))
-    (tmp_path / "growth.json").write_text(json.dumps({"mode": "approved", "approved": ["a" * 40]}), encoding="utf-8")
+    growth = {"mode": "approved", "approved": ["a" * 40], "base": "b" * 40, "head": HEAD}
+    (tmp_path / "growth.json").write_text(json.dumps(growth), encoding="utf-8")
     assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD, "--lint", "--size", "--base", "b" * 40]) == 0
     record = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
     assert sessions == [{"base": "b" * 40, "mode": "approved"}] and linted == [True]
     assert record["gates"] == ["lint", "size"] and record["size"] == {
         "base": "b" * 40, "mode": "approved", "decided": True, "approved": ["a" * 40]}
+    for field in ("base", "head"):
+        (tmp_path / "growth.json").write_text(json.dumps({**growth, field: "c" * 40}), encoding="utf-8")
+        assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD, "--size", "--base", "b" * 40]) == 0
+        assert sessions[-1] == {"base": "b" * 40, "mode": "block"}
     (tmp_path / "growth.json").unlink()  # the growth step did not run: books are measured strictly
     assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD, "--size", "--base", "b" * 40]) == 0
     record = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
@@ -494,42 +942,96 @@ def test_classify_runs_the_gates_its_leg_names_and_measures_books_by_the_decided
     assert record["gates"] == ["size"] and linted == [True]  # this leg did not lint
     assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD]) == 0  # the Windows leg
     record = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
-    assert record["gates"] == [] and "size" not in record and len(sessions) == 2 and linted == [True]
+    assert record["gates"] == [] and "size" not in record and len(sessions) == 4 and linted == [True]
     with pytest.raises(SystemExit):
         pmc.main(["classify", "--evidence-dir", str(tmp_path), "--size"])
 
 
 def test_a_red_node_lane_is_retried_as_one_target(tmp_path):
-    for code, verdict in ((0, "flaky"), (1, "failed")):
+    for code, verdict in ((0, "flaky"), (1, "failed"), (2, "failed")):
         evidence = tmp_path / str(code)
         _selection(evidence, node="failure")
-        _results(evidence / "parallel", [_row("tests/t.py::test_ok")])
-        _results(evidence / "serial", [])
         record = pmc.classify(evidence, run=lambda *a: pytest.fail("no pytest red to retry"), node=lambda: code)
         assert [row["id"] for row in record[verdict]] == [pmc.NODE_LANE]
+        assert record["complete"] is (code != 2)
+        if code == 2:
+            assert record["failed"][0]["retry"] == "unknown"
 
 
-def test_a_retry_pytest_refuses_runs_the_nodes_the_tree_defines(tmp_path):
-    _selection(tmp_path, parallel="failure")
-    _results(tmp_path / "parallel", [_row("tests/t.py::test_p[redacted-value]", "failed")])
-    _results(tmp_path / "serial", [])
+@pytest.mark.parametrize("sibling_red", [False, True])
+def test_a_retry_pytest_refuses_runs_the_nodes_the_tree_defines(tmp_path, sibling_red):
+    red = "tests/t.py::test_p[redacted-value]"
+    _selection(tmp_path, parallel="failure", reports={"parallel": _whole(red, _row(red, "failed"))})
     sessions = []
 
     def run(args, directory):
         sessions.append(list(args))
         if len(sessions) == 1:  # "ERROR: not found": nothing ran
-            _results(directory, [], exit_code=4)
-        else:
-            _results(directory, [_row("tests/t.py::test_p[redacted-value]")])
+            return _results(directory, [], exit_code=4)
+        sibling = "tests/t.py::test_p[sibling]"
+        return _results(directory, _whole(red) + (_whole(sibling, _row(sibling, "failed")) if sibling_red else []))
 
     record = pmc.classify(tmp_path, run=run, node=lambda: 0, read_source={"tests/t.py": "def test_p(v): pass\n"}.get)
+    assert [(row["id"], row["retry"]) for row in record["failed"]] == (
+        [("tests/t.py::test_p[sibling]", "first seen on retry")] if sibling_red else [])
     assert sessions == [["tests/t.py::test_p[redacted-value]"], ["tests/t.py::test_p"]]
     assert [row["id"] for row in record["flaky"]] == ["tests/t.py::test_p[redacted-value]"]
 
 
+def test_bisection_only_receives_the_ids_that_failed_again(tmp_path, monkeypatch):
+    gone, again, sibling = (f"tests/t.py::test_p[{name}]" for name in ("gone", "again", "sibling"))
+    _selection(tmp_path, parallel="failure", reports={"parallel": [
+        *_whole(gone, _row(gone, "failed")), *_whole(again, _row(again, "failed"))]})
+
+    def retry(args, directory):
+        if list(args) == ["tests/t.py::test_p"]:
+            return _results(directory, [*_whole(sibling), *_whole(again, _row(again, "failed"))])
+        return _results(directory, [], exit_code=4)
+
+    record = pmc.classify(tmp_path, run=retry, read_source={"tests/t.py": "def test_p(v): pass"}.get)
+    assert {row["id"]: row["retry"] for row in record["failed"]} == {gone: "unknown", again: "failed"}
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(pmc, "first_parent_chain", lambda a, b: [a, b])
+    def bisect(chain, ids, probe, **kw):
+        assert ids == [again]
+        return [{"id": again, "verdict": "culprit", "culprit": HEAD, "last_good": chain[0]}]
+    monkeypatch.setattr(pmc, "bisect", bisect)
+    assert pmc.main(["attribute", "--evidence-dir", str(tmp_path), "--base", "b" * 40, "--head", HEAD]) == 0
+    verdicts = json.loads((tmp_path / "attribution.json").read_text())["verdicts"]
+    assert {row["id"]: row["verdict"] for row in verdicts} == {gone: "unattributed", again: "culprit"}
+    text, red = pmc.render_summary(tmp_path, system="windows")
+    assert red and gone in text and "retry: unknown" in text
+
+
+@pytest.mark.parametrize("fault", ["lost export", "runner failure"])
+def test_a_passing_retry_without_a_matching_final_result_stays_unconfirmed(tmp_path, monkeypatch, fault):
+    red = "tests/t.py::test_retry"
+    _selection(tmp_path, parallel="failure", reports={"parallel": _whole(red, _row(red, "failed"))})
+
+    def retry(ids, directory):
+        code = _results(directory, _whole(red))
+        if fault == "lost export":
+            (directory / "results.json").unlink()
+            (directory / "events.jsonl").write_text("\n".join(json.dumps({"event": "report", **row})
+                                                             for row in _whole(red)), encoding="utf-8")
+            return code
+        return 2
+
+    record = pmc.classify(tmp_path, run=retry)
+    assert record["selection_executed"] and not record["complete"]
+    assert record["flaky"] == [] and record["failed"][0]["retry"] == "unknown"
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    assert pmc.render_summary(tmp_path, system="windows")[1]
+    monkeypatch.setattr(pmc, "first_parent_chain", lambda *_: pytest.fail("no bisection of an unconfirmed retry"))
+    assert pmc.main(["attribute", "--evidence-dir", str(tmp_path), "--base", "b" * 40, "--head", HEAD]) == 0
+
+
 def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
-    assert pmc.classify(tmp_path)["problems"] == [
-        "the selected run left no selection.json (its selection failed or it died early)"]
+    record = pmc.classify(tmp_path)
+    assert record["problems"] == ["the selected run left no selection.json (its selection failed or it died early)"]
+    assert record["complete"] and not record["selection_executed"]
+    _selection(tmp_path, parallel="skipped", serial="skipped")  # the plan was written before a pass started
+    assert not pmc.classify(tmp_path)["selection_executed"]
     _selection(tmp_path, parallel="failure", serial="skipped",
                inventory={"parallel": {"expected": ["tests/t.py::a", "tests/t.py::b"], "executed": ["tests/t.py::a"]}})
     _results(tmp_path / "parallel", [_row("tests/t.py::a")])
@@ -541,7 +1043,7 @@ def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
     (tmp_path / "serial").mkdir()
     (tmp_path / "serial" / "events.jsonl").write_text(json.dumps({"event": "start", "nodeid": "tests/s.py::test_slow"}),
                                                       encoding="utf-8")
-    record = pmc.classify(tmp_path, run=lambda args, directory: _results(directory, [_row("tests/s.py::test_slow")]),
+    record = pmc.classify(tmp_path, run=lambda args, directory: _results(directory, _whole("tests/s.py::test_slow")),
                           node=lambda: 0)
     assert record["problems"][1] == "the serial pass did not finish"
     assert [(row["id"], row["why"]) for row in record["flaky"]] == [
@@ -558,7 +1060,7 @@ def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeyp
 
     def retry(ids, directory):
         retried.extend(ids)
-        _results(directory, [_row(red)])
+        return _results(directory, _whole(red))
 
     record = pmc.classify(tmp_path, run=retry, node=lambda: 0)
     assert retried == [red] and not record["failed"]
@@ -576,6 +1078,240 @@ def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeyp
     assert pmc.render_summary(tmp_path)[1]
 
 
+@pytest.mark.parametrize("case,counts,problem", [
+    ("empty", {"parallel": 1, "serial": 0}, ""),
+    ("call skip", {"parallel": 1, "serial": 1}, ""),
+    ("mixed setup skip", {"parallel": 1, "serial": 1}, ""),
+    ("all setup skip", {"parallel": 1}, "in setup before their call"),
+    ("subtest only", {"parallel": 1}, "missing selected test reports"),
+    ("collector skipped", {"parallel": 1}, "after a collector skipped"),
+    ("both empty", {"parallel": 0, "serial": 0}, "both selected passes collected zero tests"),
+])
+def test_an_empty_pass_and_a_setup_skip_have_distinct_workflow_results(tmp_path, case, counts, problem):
+    one, two = "tests/t.py::test_a", "tests/s.py::test_b"
+    setup_skip = [_row(two, "skipped", "setup"), _row(two, phase="teardown")]
+    reports = {"parallel": [] if case == "both empty" else _whole(one)}
+    if case == "call skip":
+        reports["serial"] = _whole(two, _row(two, "skipped"))
+    if case in ("mixed setup skip", "all setup skip"):
+        reports["serial"] = setup_skip + (_whole(one) if case == "mixed setup skip" else [])
+    if case == "subtest only":
+        reports["serial"] = _whole(two, {**_row(two), "is_subtest": True})
+    _selection(tmp_path, reports=reports)
+    if case == "collector skipped":
+        _results(tmp_path / "serial", [], selected=[], exit_code=5, skips=["tests/s.py"])
+    record = pmc.classify(tmp_path)
+    assert record["selection"]["calls"] == counts and record["selection_executed"] is (not problem)
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path, system="windows")
+    assert red == bool(problem) and (problem or "— GREEN") in text
+
+
+def test_selection_rejects_an_older_result_even_if_its_journal_also_survived(tmp_path):
+    node = "tests/t.py::test_current"
+    _selection(tmp_path, reports={"parallel": _whole(node)})
+    selection = json.loads((tmp_path / "selection.json").read_text())
+    selection["inventory"]["parallel"]["session"] = "current"
+    (tmp_path / "selection.json").write_text(json.dumps(selection))
+    directory = tmp_path / "parallel"
+    assert _results(directory, _whole("tests/t.py::stale")) == 0
+    export = directory / "results.json"
+    export.write_text(json.dumps({**json.loads(export.read_text()), "session": "older"}))
+    (directory / "events.jsonl").write_text(json.dumps({"event": "session", "session": "older"}) + "\n")
+    record = pmc.classify(tmp_path)
+    assert not record["selection_executed"] and record["selection"]["calls"] == {"serial": 0}
+    assert record["diagnostics_incomplete"] == ["parallel"]
+
+
+def test_distinct_inventory_ids_can_share_a_redacted_id_in_the_public_reports(tmp_path):
+    first, second, masked = (f"tests/t.py::test_name[{p}]" for p in ("first@x", "second::y", "redacted"))
+    # The serial pass runs without xdist, so its export names the selection it ran (an xdist controller's names none).
+    _selection(tmp_path, reports={"serial": [*_whole(first), *_whole(second)]})
+    _results(tmp_path / "serial", [*_whole(masked), *_whole(masked)], selected=[masked, masked])
+    record = pmc.classify(tmp_path)
+    assert record["selection_executed"] and record["selection"]["calls"] == {"parallel": 0, "serial": 2}
+    _results(tmp_path / "serial", [*_whole(masked), *_whole(masked)], selected=[masked, "tests/t.py::other"])
+    assert not pmc.classify(tmp_path)["selection_executed"]
+
+
+@pytest.fixture
+def offline_cost(monkeypatch):
+    for name in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("case,system,red,scope", [
+    ("complete", "windows", False, "chain"), ("complete", "linux", False, "chain"),
+    ("different selection", "windows", True, ""), ("selected step failed", "windows", True, ""),
+    ("push only", "windows", False, "push"),
+    ("unmeasured size", "linux", True, ""), ("wrong size base", "linux", True, ""),
+    ("tracked red", "linux", True, "chain"), ("untracked red", "linux", True, "push"),
+    ("no routing record", "windows", True, "push"), ("other OS", "windows", True, "push"),
+    ("missing tracking list", "windows", True, "push"), ("cost failed", "linux", True, "chain"),
+    # A cost test that failed is a red no issue tracks; a lint gate that never ran measured nothing.
+    ("missing cost reports", "linux", True, ""), ("partial cost", "linux", True, ""),
+    ("cost red", "linux", True, "push"), ("lint unchecked", "linux", True, ""),
+    ("old classification", "windows", False, ""),
+])
+def test_summary_marks_only_a_recoverable_window_independently_of_green(
+        tmp_path, monkeypatch, offline_cost, case, system, red, scope):
+    base = "b" * 40
+    output = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(pmc, "merges", lambda *_: [])
+    (tmp_path / "base.json").write_text(json.dumps({
+        "base": base, "head": HEAD, "continuous": case != "push only"}), encoding="utf-8")
+    _selection(tmp_path)
+    assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD,
+                     "--base", ("d" * 40 if case == "different selection" else base),
+                     "--selected-outcome", "failure" if case == "selected step failed" else "success"]) == 0
+    path = tmp_path / "classification.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if system == "linux":
+        record.update(gates=["lint", "size"], size={"base": "c" * 40 if case == "wrong size base" else base},
+                      size_checked=case != "unmeasured size", lint_checked=case != "lint unchecked")
+        if case == "unmeasured size":
+            record["problems"].append("the size check did not measure every collected test")
+        if case == "lint unchecked":
+            record["problems"].append("ruff could not run, so the lint gate went unchecked")
+        # "cost failed": the step failed while its report passed; "cost red": the report holds the failure.
+        monkeypatch.setenv("COST_CONTRACT_OUTCOME", "failure" if case in ("cost failed", "cost red") else "success")
+        cost = "tests/test_cost_contract.py::test_cost"
+        if case != "missing cost reports":
+            rows = _whole(cost, _row(cost, "failed")) if case == "cost red" else _whole(cost)
+            _results(tmp_path / "cost-contract", rows[:-1] if case == "partial cost" else rows)
+    if case in ("tracked red", "untracked red", "no routing record", "other OS", "missing tracking list"):
+        node = "tests/t.py::test_red"
+        record["failed"] = [{"id": node, "pass": "parallel", "why": "failed in call", "retry": "failed"}]
+        if case != "no routing record":
+            routing = {"os": "linux" if case == "other OS" else system}
+            if case != "missing tracking list":
+                routing["untracked"] = [node] if case == "untracked red" else []
+                routing["awaiting_handoff"] = [{"head": HEAD, "run": 7, "attempt": 1, "base": base, "ids": ids}
+                                               for ids in [routing["untracked"]] if ids]
+            (tmp_path / "routing.json").write_text(json.dumps(routing), encoding="utf-8")
+    if case == "old classification":
+        del record["selection_executed"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", system]) == int(red)
+    assert output.read_text(encoding="utf-8").splitlines()[-1] == f"window_scope={scope}"
+
+
+@pytest.mark.parametrize("handoff", ["tracked", "refused extension", "interrupted retry"])
+def test_docs_only_push_selects_the_red_module_until_its_os_has_an_issue(tmp_path, monkeypatch, offline_cost, handoff):
+    from ouroboros import test_selection, update_qualification
+    from tests._post_merge_github import FakeGitHub, tracking_issue
+
+    module = "tests/test_leaf.py"
+    first, second = (f"{module}::test_{name}" for name in ("one", "two"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "ouroboros")
+    base = _commit(repo, {"leaf.py": "value = 1\n", "tests/test_floor.py": "def test_floor(): pass\n",
+                          module: "from leaf import value\ndef test_one(): assert value == 1\ndef test_two(): assert value < 2\n"})
+    monkeypatch.setattr(test_selection, "FLOOR_TESTS", {"tests/test_floor.py": "fixture"})
+    monkeypatch.setattr(pmc, "REPO_ROOT", repo)
+    missed = _commit(repo, {"leaf.py": "value = 2\n"})
+    head = _commit(repo, {"README.md": "First push\n"})
+    run = {**_run(head, conclusion="failure", number=7), "event": "workflow_dispatch"}
+    run_page = f"{pmc.POST_MERGE_RUNS}?per_page=100&page=1"
+    history = {run_page: {"workflow_runs": [], "total_count": 0}}
+    monkeypatch.setattr(pmc.GitHub, "get", lambda self, path: history[path])
+    args = type("Args", (), {"head": None, "evidence_dir": tmp_path})
+    assert pmc.command_base(args, {"GITHUB_SHA": head, "GITHUB_EVENT_NAME": "workflow_dispatch", "INITIAL_BASE": base,
+                                   "GITHUB_REPOSITORY": "razzant/ouroboros", "GITHUB_REF": "refs/heads/ouroboros"}) == 0
+    window = json.loads((tmp_path / "base.json").read_text(encoding="utf-8"))
+    assert window["base"] == base and window["continuous"]
+    jobs = [_window_job(run, window)]
+    github = FakeGitHub(label=True, issues=[tracking_issue(5, {"kind": "unattributed", "os": "windows", "ids": [first]}, head=head)],
+                        fail=[("PATCH", "issues/5")] if handoff == "refused extension" else [])
+    failures = _whole(first, _row(first, "failed")) + _whole(second, _row(second, "failed"))
+
+    def retry(command, **kwargs):
+        if handoff == "interrupted retry":
+            raise RuntimeError("interrupted after the first measurements")
+        return _results(Path(command[command.index("--ci-evidence-dir") + 1]), failures)
+
+    monkeypatch.setattr(pmc.subprocess, "call", retry)
+    monkeypatch.setattr(pmc, "size_session", lambda directory, **kw: pmc.read_session(directory))
+    monkeypatch.setattr(pmc, "lint_findings", lambda: {})
+    monkeypatch.setenv("COST_CONTRACT_OUTCOME", "success")
+    for system in ("linux", "windows"):
+        evidence = tmp_path / system
+        linux = system == "linux"
+        _selection(evidence, base=base, parallel="success" if linux else "failure",
+                   reports={"parallel": _whole(first) + _whole(second) if linux else failures})
+        (evidence / "base.json").write_bytes((tmp_path / "base.json").read_bytes())
+        output = evidence / "output"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(evidence / "summary"))
+        classify = ["classify", "--evidence-dir", str(evidence), "--head", head, "--base", base,
+                    "--selected-outcome", "success" if linux else "failure"]
+        if linux:
+            _results(evidence / "size", _whole("tests/test_size.py::test_size"))
+            _results(evidence / "cost-contract", _whole("tests/test_cost.py::test_cost"))
+            classify += ["--lint", "--size"]
+        if not linux and handoff == "interrupted retry":
+            with pytest.raises(RuntimeError, match="after the first measurements"):
+                pmc.main(classify)
+        else:
+            assert pmc.main(classify) == 0
+        with monkeypatch.context() as patch:
+            patch.setattr(pmc, "GitHub", lambda *_: github)
+            assert pmc.main(["route", "--evidence-dir", str(evidence), "--os", system, "--head", head,
+                             "--run-url", "https://example.invalid/run/7"]) == 0
+        held = not linux and handoff == "refused extension"
+        routing = json.loads((evidence / "routing.json").read_text(encoding="utf-8"))
+        assert routing["untracked"] == ([second] if held else [])
+        assert pmc.main(["summary", "--evidence-dir", str(evidence), "--os", system]) == int(not linux)
+        summary = (evidence / "summary").read_text(encoding="utf-8")
+        assert ("Keep the starting base" in summary) == held
+        assert ("retry: not run" in summary) == (not linux and handoff == "interrupted retry")
+        scope = dict(line.split("=", 1) for line in output.read_text().splitlines())["window_scope"]
+        assert scope == ("push" if held else "chain")
+        leg = _job(run, system, base=base, scope=scope)
+        debt = dict(line.split("=", 1) for line in output.read_text().splitlines())["untracked"]
+        leg["steps"].append({"name": "Post-merge untracked " + debt, "status": "completed", "conclusion": "success"})
+        jobs.append(leg)
+
+    history[run_page] = {"workflow_runs": [run], "total_count": 1}
+    history["actions/runs/7/attempts/1/jobs?per_page=100&page=1"] = {"jobs": jobs, "total_count": len(jobs)}
+    docs_head = _commit(repo, {"README.md": "Documentation only\n"})
+    assert pmc.command_base(args, {"GITHUB_SHA": docs_head, "BEFORE": head}) == 0
+    following = json.loads((tmp_path / "base.json").read_text(encoding="utf-8"))
+    assert following["continuous"] and following["base"] == (base if handoff == "refused extension" else head)
+    selection = test_selection.select_tests(repo, base=following["base"])
+    assert (module in selection.files) == (handoff == "refused extension")
+    if handoff == "refused extension":
+        assert following["replay"] == {"history_read": True, "history_gaps": [], "awaiting_handoff": {"windows": [
+            {"head": head, "run": None, "attempt": 1, "base": base, "ids": [second]}]}}
+        monkeypatch.setenv("GITHUB_RUN_ID", "8")
+        for outcome in ("skipped", "passed"):
+            replay = tmp_path / outcome
+            rows = _whole(first) + (_whole(second) if outcome == "passed" else [
+                _row(second, "skipped", "setup"), _row(second, phase="teardown")])
+            _selection(replay, base=base, reports={"parallel": rows})
+            _identified(replay / "parallel", rows, sha=docs_head, run_id="8", platform="Windows")
+            (replay / "base.json").write_text(json.dumps(following))
+            monkeypatch.setenv("GITHUB_OUTPUT", str(replay / "outputs"))
+            assert pmc.main(["classify", "--evidence-dir", str(replay), "--head", docs_head, "--base", base]) == 0
+            with monkeypatch.context() as patch:
+                patch.setattr(pmc, "GitHub", lambda *_: github)
+                assert pmc.main(["route", "--evidence-dir", str(replay), "--os", "windows", "--head", docs_head,
+                                 "--run-url", "run/8"]) == 0
+            assert pmc.main(["summary", "--evidence-dir", str(replay), "--os", "windows"]) == int(outcome == "skipped")
+            expected = [second] if outcome == "skipped" else []
+            assert json.loads((replay / "routing.json").read_text())["untracked"] == expected
+            assert (replay / "outputs").read_text().splitlines()[-1] == (
+                "window_scope=push" if expected else "window_scope=chain")
+    # The Update reader still sees the original direct red and the range both systems measured.
+    observed = update_qualification.post_merge_checks({"base_sha": base, "commits": [{"sha": head}, {"sha": missed}]},
+        "https://github.com/test/repo", get_json=lambda url: history[url.removeprefix("https://api.github.com/repos/test/repo/")])
+    [direct] = observed["runs"]
+    assert direct["conclusion"] == "failure" and direct["covered_shas"] == [missed] and observed["missing_shas"] == []
+
+
 @pytest.mark.parametrize("cost_outcome,session,expected_red", [
     ("failure", "failed", True), ("failure", "passed", True),
     ("failure", "unfinished", True), ("skipped", "missing", True),
@@ -584,13 +1320,14 @@ def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeyp
     ("", "missing", True),
 ])
 def test_cost_outcome_reaches_the_real_summary_command(tmp_path, monkeypatch, capsys,
-                                                      cost_outcome, session, expected_red):
+                                                      offline_cost, cost_outcome, session, expected_red):
     (tmp_path / "classification.json").write_text(json.dumps({
         "complete": True, "failed": [], "flaky": [], "problems": [], "not_run": {}}), encoding="utf-8")
     nodeid = "tests/test_cost_contract.py::test_rest_law"
     if session not in ("missing", "unfinished"):
-        _results(tmp_path / "cost-contract", [_row(nodeid, session,
-                 "setup" if session == "skipped" else "call")])
+        rows = ([_row(nodeid, "skipped", "setup"), _row(nodeid, phase="teardown")] if session == "skipped"
+                else _whole(nodeid, _row(nodeid, session)))
+        _results(tmp_path / "cost-contract", rows)
     elif session == "unfinished":
         directory = tmp_path / "cost-contract"
         directory.mkdir()
@@ -627,7 +1364,7 @@ BREACH = "tests/test_cost_contract.py::test_room_history_is_flat[k30-R_late]"
     ("red_session", True, "Cost contract not fully verified"),
 ])
 def test_only_a_known_breach_that_ran_leaves_the_cost_contract_verified(tmp_path, monkeypatch, capsys,
-                                                                        case, expected_red, said):
+                                                                        offline_cost, case, expected_red, said):
     """#2972: a gap row's strict xfail that ran is measured, listed with its reason, and not red by itself."""
     (tmp_path / "classification.json").write_text(json.dumps({
         "complete": True, "failed": [], "flaky": [], "problems": [], "not_run": {}}), encoding="utf-8")
@@ -664,6 +1401,35 @@ def test_only_a_known_breach_that_ran_leaves_the_cost_contract_verified(tmp_path
     assert (notice in text) is (case in ("executed", "unreported", "red_session"))
     if case == "executed":
         assert "1 passed, 0 failed/unfinished, 0 skipped, 1 known breach(es) measured." in text
+
+
+@pytest.mark.parametrize("foreign", [{}, {"sha": "e" * 40}, {"run_id": "78"}, {"run_attempt": "1"}, None])
+def test_cost_evidence_must_name_the_current_actions_run_and_attempt(tmp_path, monkeypatch, capsys, foreign):
+    base = "b" * 40
+    for name, value in {
+        "base": {"base": base, "head": HEAD, "continuous": True},
+        "classification": {"base": base, "head": HEAD, "selection_executed": True, "size_checked": True,
+                           "size": {"base": base}},
+        "routing": {"os": "linux", "untracked": [], "awaiting_handoff": []},
+    }.items():
+        (tmp_path / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
+    output = tmp_path / "outputs"
+    monkeypatch.setattr(pmc, "merges", lambda *_: [])
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setenv("COST_CONTRACT_OUTCOME", "success")
+    identity = {"sha": HEAD, "run_id": "77", "run_attempt": "2"}
+    for key, value in identity.items():
+        monkeypatch.setenv(f"GITHUB_{key.upper()}", value)
+    _results(tmp_path / "cost-contract", [*_whole("tests/test_cost_contract.py::test_ok"), *_whole(BREACH, _xfail(BREACH))],
+             github=None if foreign is None else {**identity, **foreign})
+    accepted = foreign == {}
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--attempt", "2"]) == int(not accepted)
+    assert output.read_text(encoding="utf-8").splitlines()[-1] == ("window_scope=chain" if accepted else "window_scope=")
+    text = capsys.readouterr().out
+    assert ("1 known breach(es) measured" in text) is accepted
+    assert ("::notice title=Known cost-contract breach" in text) is accepted
+    assert ("no result matches this GitHub commit, run and attempt" in text) is (not accepted)
 
 
 @pytest.mark.parametrize("stage", ["classify", "attribute", "route"])
@@ -719,6 +1485,51 @@ def test_a_recheck_runs_only_the_listed_tests_and_absence_needs_their_modules_co
             {"event": "report", **_row("tests/t.py::test_param[1]")}]), encoding="utf-8")
     assert pmc.recheck_ids(ids[:3], tmp_path / "killed", read_source=sources.get, run=killed) == dict(zip(
         ids[:3], ["passed", "failed", "unknown"]))  # test_param[1] was still running when the session ended
+
+
+def test_route_collects_unselected_owed_ids_without_retiring_a_reported_skip(tmp_path, monkeypatch):
+    from tests._post_merge_github import FakeGitHub
+
+    module = "tests/test_owed_fixture.py"
+    renamed, deselected, skipped = [f"{module}::test_{name}" for name in ("old_name", "deselected", "skipped")]
+    _selection(tmp_path)
+    new = "tests/test_floor.py::test_floor"
+    rows = _whole(new) + [_row(skipped, "skipped", "setup"), _row(skipped, phase="teardown")]
+    _identified(tmp_path / "parallel", rows, platform="Windows")
+    (tmp_path / "base.json").write_text(json.dumps({"replay": {
+        "awaiting_handoff": {"windows": [{"head": HEAD, "run": 60, "attempt": 1, "base": None,
+                                          "ids": [renamed, deselected, skipped]}]},
+    }}), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_RUN_ID", "77")
+    github = FakeGitHub(label=True)
+    monkeypatch.setattr(pmc, "GitHub", lambda *_: github)
+    monkeypatch.setattr(pmc, "working_source", lambda _: "def test_new_name(): pass\n")
+    calls = []
+
+    def collect(args, directory):
+        calls.append(args)
+        listed = Path(next(arg.split("=", 1)[1] for arg in args if arg.startswith("--ci-listed=")))
+        assert listed.read_text(encoding="utf-8").splitlines() == [deselected, renamed]
+        code = _results(directory, [], selected=())
+        path = directory / "results.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["listed"] = {"unmatched": [renamed]}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return code
+
+    recheck = pmc.recheck_ids
+    monkeypatch.setattr(pmc, "recheck_ids", lambda ids, directory, **kw: recheck(
+        ids, directory, read_source=pmc.working_source, run=collect, **kw))
+    assert pmc.main(["route", "--evidence-dir", str(tmp_path), "--head", HEAD,
+                     "--run-url", "run/77", "--os", "windows"]) == 0
+    record = json.loads((tmp_path / "routing.json").read_text(encoding="utf-8"))
+    # The recorded reds get their tracker before the recheck, which then takes off only the test that is gone:
+    # the skip and the test no session ran stay on the issue.
+    assert len(calls) == 1 and record["created"] == [100] and record["untracked"] == []
+    assert record["narrowed"] == [{"issue": 100, "ids": [renamed]}]
+    body = github.issues[100]["body"]
+    assert deselected in body and skipped in body and renamed not in body
+    assert record["rechecked"] == {deselected: "unknown", renamed: "absent"}
 
 
 def test_the_head_picks_the_module_a_recheck_starts_from_so_a_slow_red_front_holds_back_no_fixed_tail(tmp_path):
@@ -812,8 +1623,6 @@ def test_the_runner_final_inventory_failure_is_not_a_green_selected_run(tmp_path
     selection = json.loads((tmp_path / "selection.json").read_text(encoding="utf-8"))
     selection["outcome"] = "failure"  # the final floor check failed after both passes succeeded
     (tmp_path / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
-    for label in ("parallel", "serial"):
-        _results(tmp_path / label, [_row(f"tests/{label}.py::test_ok")])
     result = pmc.classify(tmp_path, run=lambda *a: pytest.fail("no retry of the whole selection"), node=lambda: 0)
     assert not result["failed"] and "inventory/floor" in result["problems"][0]
     (tmp_path / "classification.json").write_text(json.dumps(result), encoding="utf-8")
@@ -875,6 +1684,44 @@ def test_route_records_its_hand_over_before_the_recheck_and_reuses_this_runs_pas
     assert seen == {"saved": {"handed": "before the recheck"}, "same_run": {"tests/t.py::test_here": "passed"}}
     assert json.loads((tmp_path / "routing.json").read_text(encoding="utf-8"))["narrowed"] == [{"issue": 5, "ids": ["x"]}]
     assert "narrowed [5]" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("filed", [True, False])
+def test_a_rerun_inherits_the_failed_attempt_and_only_the_branch_tip_retires_issues(tmp_path, monkeypatch, filed):
+    """The first attempt could not hand `second` over. Its rerun takes that record over: it files the red under the
+    attempt that saw it fail, keeps it owed while the issue refuses the write and, no longer at the branch tip,
+    takes nothing off an issue whose test passes again."""
+    from tests._post_merge_github import FakeGitHub, tracking_issue
+
+    first, second = "tests/t.py::test_fixed", "tests/t.py::test_skips"
+    run = _run(HEAD, conclusion="failure", number=7)
+    leg = _job(run, "windows", scope="push")
+    owed = [{"head": HEAD, "run": 7, "attempt": 1, "base": "1" * 40, "ids": [second]}]
+    leg["steps"].append({"name": "Post-merge untracked " + json.dumps(owed),
+                         "status": "completed", "conclusion": "success"})
+    jobs = [leg, _window_job(run, {"base": "1" * 40, "continuous": True})]
+    github = FakeGitHub(label=True, issues=[tracking_issue(5, {"os": "windows", "kind": "unattributed", "ids": [first]})],
+                        fail=[] if filed else [("PATCH", "issues/5")])
+    github.repo = "razzant/ouroboros"  # the link of a recorded failure names the repository
+    pages = {"actions/runs/7/attempts/1/jobs?per_page=100&page=1": {"jobs": jobs, "total_count": 2},
+             "git/ref/heads/ouroboros": {"object": {"sha": "a" * 40}}}
+    monkeypatch.setattr(github, "get", lambda path: pages.get(path, {}))
+    monkeypatch.setattr(pmc, "GitHub", lambda *_: github)
+    monkeypatch.setattr(pmc, "working_source", lambda _: "def test_skips(): pass")
+    monkeypatch.setenv("GITHUB_RUN_ID", "7")
+    rows = _whole(first) + [_row(second, "skipped", "setup"), _row(second, phase="teardown")]
+    _selection(tmp_path, reports={"parallel": rows})
+    _identified(tmp_path / "parallel", rows, run_id="7", platform="Windows")
+    assert pmc.main(["route", "--attempt", "2", "--os", "windows", "--evidence-dir", str(tmp_path),
+                     "--run-url", "run/7/attempts/2", "--head", HEAD]) == 0
+    record = json.loads((tmp_path / "routing.json").read_text())
+    assert record["awaiting_handoff"] == ([] if filed else owed) and record["untracked"] == ([] if filed else [second])
+    assert record["updated"] == ([5] if filed else []) and not record["closed"] and not record["narrowed"]
+    assert github.issues[5]["state"] == "open" and [number for number, _ in github.comments] == ([5] if filed else [])
+    # The record is filed under the attempt that saw it fail, never under the rerun that carried it.
+    link = "https://github.com/razzant/ouroboros/actions/runs/7/attempts/1"
+    assert all(link in text and "run/7/attempts/2" not in text for _, text in github.comments)
+    assert (second in github.issues[5]["body"]) is filed and "run/7/attempts/2" not in github.issues[5]["body"]
 
 
 def test_the_summary_names_narrowed_issues_and_a_recheck_that_did_not_finish(tmp_path):
@@ -958,6 +1805,16 @@ def _git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
 
 
+def _commit(repo, files):
+    """Write `files` into the fixture repository and commit them on its first-parent line: the new SHA."""
+    for path, text in files.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "change")
+    return _git(repo, "rev-parse", "HEAD")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the probe runner is POSIX CI only")
 def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
@@ -978,7 +1835,7 @@ def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp
     evidence.mkdir()
     sized = "size tests/test_v.py::test_size"
     (evidence / "classification.json").write_text(json.dumps(
-        {"failed": [{"id": "tests/test_v.py::test_value"}, {"id": pmc.NODE_LANE}, {"id": sized}],
+        {"failed": [{"id": n, "retry": "failed"} for n in ("tests/test_v.py::test_value", pmc.NODE_LANE, sized)],
          "size": {"base": shas[0], "mode": "approved"}}), encoding="utf-8")
     probed, measured = [], []
 
@@ -1037,7 +1894,7 @@ def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, m
 def test_attribution_explains_a_failed_check_without_changing_red(tmp_path, verdict):
     nodeid = "tests/t.py::test_red"
     (tmp_path / "classification.json").write_text(json.dumps({"complete": True,
-        "failed": [{"id": nodeid, "why": "failed in call", "pass": "serial", "retry": "skipped"}],
+        "failed": [{"id": nodeid, "why": "failed in call", "pass": "serial", "retry": "failed"}],
         "flaky": [], "problems": []}), encoding="utf-8")
     (tmp_path / "attribution.json").write_text(json.dumps({"verdicts": [
         {"id": nodeid, "verdict": verdict}]}), encoding="utf-8")
@@ -1057,7 +1914,7 @@ def test_the_summary_is_red_only_for_failures_left_after_their_retry(tmp_path):
     text, red = pmc.render_summary(tmp_path, [("1" * 40, "Merge pull request #2146 from x"), ("2" * 40, "direct")])
     assert not red and "GREEN" in text and "2 commit(s) (#2146)" in text and "`tests/t.py::test_f`" in text
     (tmp_path / "classification.json").write_text(json.dumps({
-        "failed": [{"id": "tests/t.py::test_a", "why": "failed in call", "pass": "serial"}], "flaky": [],
+        "failed": [{"id": "tests/t.py::test_a", "why": "failed in call", "pass": "serial", "retry": "failed"}], "flaky": [],
         "problems": [], "selection": {}}), encoding="utf-8")
     (tmp_path / "attribution.json").write_text(json.dumps({"verdicts": [
         {"id": "tests/t.py::test_a", "verdict": "culprit", "culprit": "c" * 40, "last_good": "b" * 40}]}), encoding="utf-8")
@@ -1065,7 +1922,7 @@ def test_the_summary_is_red_only_for_failures_left_after_their_retry(tmp_path):
         "comments": [2067], "created": [100], "updated": [], "closed": [5], "warnings": ["comment on #9: HTTP 403"],
         "handed": [{"ids": ["tests/t.py::test_a"], "pr": 2067, "issue": 100}]}), encoding="utf-8")
     text, red = pmc.render_summary(tmp_path)
-    assert red and ("| `tests/t.py::test_a` | failed in call | culprit | `cccccccccccc` | `bbbbbbbbbbbb` "
+    assert red and ("| `tests/t.py::test_a` | failed in call (retry: failed) | culprit | `cccccccccccc` | `bbbbbbbbbbbb` "
                     "| PR #2067, issue #100 |") in text
     assert "closed as green: #5" in text and "**Warning:** comment on #9: HTTP 403" in text
     web = "https://github.com/o/r"
@@ -1119,6 +1976,142 @@ def run_tests():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize(("fault", "problem"), [
+    ("none", ""), ("persistent test failure", ""), ("unconfirmed empty", "test inventory recorded no collection"),
+    ("missing", "expected and executed test ids differ (missing or duplicate execution)"),
+    ("duplicate", "expected and executed test ids differ (missing or duplicate execution)"),
+    ("disagreement", "worker collections disagree"), ("unfinished", "test inventory has no terminal exit code"),
+    ("unreadable", "test inventory unavailable"), ("floor", "floor modules collected no tests"),
+    # Without its export a pass that ran tests is unmeasured, whatever its phase journal shows; an empty pass's
+    # inventory still proves it.
+    ("lost results", "no valid results.json"), ("damaged results", "no valid results.json"), ("lost empty results", ""),
+    ("no empty diagnostics", ""), ("partial journal with intact results", ""),
+    ("partial journal", "no valid results.json"), ("torn journal", "no valid results.json"),
+    ("wrong journal IDs", "no valid results.json"), ("collector skipped", "collector skipped"),
+    ("subtest only", "no valid results.json"), ("partial results", "missing selected test reports"),
+    ("interrupted", "inconsistent pytest exit/collection"), ("runner mismatch", "runner exit 2 disagrees with pytest exit 1"),
+    ("missing Node", "the complete Node lane did not run to completion"),
+])
+def test_selected_inventory_and_an_independent_test_retry_reach_the_workflow_result(
+        run_tests, tmp_path, monkeypatch, fault, problem):
+    from ouroboros import test_selection
+
+    module = "tests/test_example.py"
+    flaky, other = f"{module}::test_retry[x@y::z]", f"{module}::test_other"
+    files = (module, "tests/test_empty_floor.py") if fault == "floor" else (module,)
+    monkeypatch.setattr(test_selection, "FLOOR_TESTS", dict.fromkeys(files, "fixture"))
+    chosen = test_selection.TestSelection("selected", HEAD, files, (), (), "policy", len(files))
+    monkeypatch.setattr(test_selection, "select_tests", lambda *a, **k: chosen)
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: (int(fault == "missing Node"), ""))
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
+    output, summary = tmp_path / "output", tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    def first_pass(label, argv, cwd):
+        if label == "warm":
+            return 0
+        expected = [flaky, other] if label == "parallel" else []
+        reports = _whole(flaky, _row(flaky, "failed")) if expected else []
+        if expected and fault != "missing":
+            reports.extend(_whole(other))
+        code = (2 if fault == "interrupted" else 1) if expected else 5
+        directory = tmp_path / label
+        exported = reports[:-1] if expected and fault == "partial results" else reports
+        _results(directory, exported, exit_code=code, selected=expected)
+        if expected and fault == "partial journal with intact results":
+            (directory / "events.jsonl").write_text(json.dumps({"event": "start", "nodeid": other}))
+        if not expected and fault == "no empty diagnostics":
+            (directory / "results.json").unlink()
+        if (expected and fault in ("lost results", "damaged results", "partial journal", "torn journal",
+                                   "wrong journal IDs", "subtest only")) or (not expected and fault in ("lost empty results", "collector skipped")):
+            journal = [dict(row) for row in reports]
+            if fault == "partial journal":
+                journal.pop()
+            if fault == "wrong journal IDs":
+                for row in journal:
+                    if row["nodeid"] == other:
+                        row["nodeid"] = "tests/test_example.py::test_unrelated"
+            if fault == "subtest only":
+                journal[-2]["is_subtest"] = True
+            text = "\n".join(json.dumps({"event": "report", **row}) for row in journal)
+            (directory / "events.jsonl").write_text(text + ("\n{" if fault == "torn journal" else ""), encoding="utf-8")
+            if fault == "damaged results":
+                (directory / "results.json").write_text("{", encoding="utf-8")
+            else:
+                (directory / "results.json").unlink()
+        rows = [{"event": "start"}]
+        if not expected and fault == "collector skipped":
+            rows.append({"event": "collector", "outcome": "skipped"})
+        if expected or fault != "unconfirmed empty":
+            rows.append({"event": "collection", "ids": expected})
+        if expected and fault == "disagreement":
+            rows.append({"event": "collection", "ids": [other, flaky]})
+        rows.extend({"event": "report", "nodeid": row["nodeid"], "when": row["phase"], "outcome": row["outcome"]}
+                    for row in reports if row["phase"] == "teardown" or row["outcome"] == "failed")
+        if expected and fault == "duplicate":
+            rows.append(rows[-1])  # the other test's second teardown; its id is still in both sets
+        if not expected or fault != "unfinished":
+            rows.append({"event": "finish", "exitcode": code})
+        data = "\n".join(map(json.dumps, rows)) if not expected or fault != "unreadable" else "{"
+        (tmp_path / f"inventory-{label}.jsonl").write_text(data, encoding="utf-8")
+        return 2 if expected and fault == "runner mismatch" else code
+
+    monkeypatch.setattr(run_tests, "_run", first_pass)
+    expected_code = 2 if fault in ("interrupted", "runner mismatch") else 1
+    assert run_tests.main(["--selected", "--keep-going", "--evidence-dir", str(tmp_path)]) == expected_code
+
+    retries = []
+    persistent = fault == "persistent test failure"
+
+    def retry(command, *, cwd, env):
+        directory = Path(command[command.index("--ci-evidence-dir") + 1])
+        retries.append((directory / "argsfile.txt").read_text(encoding="ascii").splitlines())
+        _results(directory, _whole(flaky, _row(flaky, "failed" if persistent else "passed")), selected=[flaky])
+        return int(persistent)
+
+    monkeypatch.setattr(pmc.subprocess, "call", retry)
+    assert pmc.main(["classify", "--evidence-dir", str(tmp_path), "--head", HEAD]) == 0
+    assert retries == [[flaky]]
+    classified = json.loads((tmp_path / "classification.json").read_text(encoding="utf-8"))
+    assert [row["id"] for row in classified["flaky"]] == ([] if persistent else [flaky])
+    assert [row["id"] for row in classified["failed"]] == ([flaky] if persistent else [])
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == int(persistent or bool(problem))
+    text = summary.read_text(encoding="utf-8")
+    assert flaky in text and ("Failed checks (1)" if persistent else "Flaky (1)") in text
+    selection = json.loads((tmp_path / "selection.json").read_text(encoding="utf-8"))
+    label = "serial" if fault == "unconfirmed empty" else "parallel"
+    cause = (selection.get("floor_problem") or selection.get("node_problem") or selection["inventory"][label].get("problem"))
+    if problem and fault not in ("partial results", "interrupted", "lost results", "damaged results", "partial journal",
+                                  "torn journal", "wrong journal IDs", "subtest only", "collector skipped"):
+        assert problem in cause and problem in text
+    elif problem:
+        assert problem in text
+    else:
+        assert not cause
+    assert ("— RED" if problem or persistent else "— GREEN") in text
+    assert classified["selection_executed"] is (not problem)
+    outputs = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    assert outputs["window_scope"] == ""  # this fixture has no shared base receipt
+
+
+def test_each_commit_reaches_the_selection_and_needs_selected(run_tests, monkeypatch, tmp_path):
+    from ouroboros import test_selection
+
+    asked = []
+
+    def select(repo, **options):
+        asked.append(options)
+        raise ValueError("stop after reading the selection inputs")
+
+    monkeypatch.setattr(test_selection, "select_tests", select)
+    for flags, each in (([], False), (["--each-commit"], True)):
+        assert run_tests.main(["--selected", "--base", "HEAD", *flags, "--evidence-dir", str(tmp_path)]) == 2
+        assert asked[-1]["each_commit"] is each
+    with pytest.raises(SystemExit):
+        run_tests.main(["--each-commit"])
 
 
 @pytest.mark.parametrize("keep_going", [False, True])

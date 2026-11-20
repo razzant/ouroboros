@@ -75,14 +75,20 @@ def _git(repo: Path, *args: str) -> bytes:
                           check=True, timeout=30, env=host_git_env()).stdout
 
 
-def changed_paths(repo: Path, base: str) -> tuple[str, tuple[str, ...]]:
-    """Resolve once; --no-renames keeps both sides of a module rename in scope."""
+def changed_paths(repo: Path, base: str, *, each_commit: bool = False) -> tuple[str, tuple[str, ...]]:
+    """Resolve once; --no-renames keeps both sides of a module rename in scope. ``each_commit`` adds what each
+    first-parent commit of base..HEAD changed against its first parent: a change the range's
+    net diff hides (a later commit reverted it) still selects."""
     from ouroboros.git_observation import numstat_paths
 
     oid = _git(repo, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}").decode().strip()
     cmd = ["git", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", oid, "--"]
     paths = numstat_paths(_git(repo, *cmd[1:]), cmd, lambda args: _git(repo, *args[1:]))
     paths.extend(os.fsdecode(p) for p in _git(repo, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0") if p)
+    if each_commit:
+        history = _git(repo, "log", "--first-parent", "--diff-merges=first-parent", "--no-renames", "--format=",
+                       "--name-only", "-z", f"{oid}..HEAD", "--")
+        paths.extend(os.fsdecode(p) for p in history.split(b"\0") if p)
     return oid, tuple(sorted(set(paths)))
 
 
@@ -111,21 +117,30 @@ def apparatus_change(path: str) -> bool:
 _RELEASE_CARRIERS = frozenset({"pyproject.toml", "uv.lock", "web/package.json", "web/package-lock.json"})
 _PYPROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]+)"', re.M)
 
+_JSON_VERSION = r'(?:\s*"name"\s*:\s*"[^"\n]*"\s*,)?\s*"version"\s*:\s*"'
+_CARRIER_VERSION = {
+    "pyproject.toml": re.compile(r'(^\[project\]\n(?:name\s*=\s*"[^"\n]*"\n)?version\s*=\s*")([^"\n]+)', re.M),
+    "uv.lock": re.compile(r'(^\[\[package\]\]\nname = "ouroboros"\nversion = ")([^"\n]+)', re.M),
+    "web/package.json": re.compile(r'(\A\{' + _JSON_VERSION + r')([^"\n]+)'),
+    "web/package-lock.json": re.compile(r'((?:\A\{|^  "packages": \{\s*"": \{)' + _JSON_VERSION + r')([^"\n]+)', re.M),
+}
 
-def _release_versions(repo: Path, base: str) -> set[str]:
-    """Both spellings of the base and candidate release version (VERSION and its PEP 440 form)."""
+
+def _release_text(repo: Path, revision: str | None, path: str) -> str:
+    if revision is None:
+        return (repo / path).read_text(encoding="utf-8")
+    return _git(repo, "show", f"{revision}:{path}").decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _release_versions(repo: Path, base: str, head: str | None = None) -> set[str]:
+    """Both spellings of the release version on each side of this change."""
     versions = set()
     for name in ("VERSION", "pyproject.toml"):
-        texts = []
-        try:
-            texts.append(_git(repo, "show", f"{base}:{name}").decode("utf-8"))
-        except (subprocess.SubprocessError, UnicodeError):
-            pass
-        try:
-            texts.append((repo / name).read_text(encoding="utf-8"))
-        except OSError:
-            pass
-        for text in texts:
+        for revision in (base, head):
+            try:
+                text = _release_text(repo, revision, name)
+            except (OSError, UnicodeError, subprocess.SubprocessError):
+                continue
             if name == "VERSION":
                 versions.add(text.strip())
             elif match := _PYPROJECT_VERSION.search(text):
@@ -133,17 +148,33 @@ def _release_versions(repo: Path, base: str) -> set[str]:
     return {version for version in versions if version}
 
 
-def _version_only_change(repo: Path, base: str, path: str, versions: set[str]) -> bool:
+def _version_only_change(repo: Path, base: str, path: str, versions: set[str], head: str | None = None) -> bool:
     try:
-        # Both sides with universal newlines, as read_text gives the checkout: a blob a
-        # Windows checkout stored with CRLF bytes must not turn a version bump into apparatus.
-        old = _git(repo, "show", f"{base}:{path}").decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-        new = (repo / path).read_text(encoding="utf-8")
+        old, new = (_release_text(repo, revision, path) for revision in (base, head))
     except (OSError, UnicodeError, subprocess.SubprocessError):
         return False
-    for version in sorted(versions, key=len, reverse=True):
-        old, new = old.replace(version, "\0"), new.replace(version, "\0")
-    return bool(versions) and old == new
+    # Only the project's own version fields are release bookkeeping. A dependency may
+    # have the same version number. Unrecognized layout changes conservatively select full.
+    if old == new:
+        return True
+
+    def mask(text):
+        return _CARRIER_VERSION[path].sub(lambda m: m[1] + "\0" if m[2] in versions else m[0], text)
+
+    return mask(old) == mask(new)
+
+
+def _version_only_window(repo: Path, base: str, path: str, versions: set[str], each_commit: bool) -> bool:
+    if not _version_only_change(repo, base, path, versions):
+        return False
+    if each_commit:
+        # Path-limited first-parent history includes merges that changed the carrier relative to parent one.
+        commits = _git(repo, "log", "--first-parent", "--format=%H", f"{base}..HEAD", "--", path)
+        for commit in commits.decode("ascii").split():
+            parent = f"{commit}^1"
+            if not _version_only_change(repo, parent, path, _release_versions(repo, parent, commit), commit):
+                return False
+    return True
 
 
 def _module(path: str) -> str:
@@ -266,7 +297,7 @@ class TestSelection:
 
 
 def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
-                      extra_tests=(), full_tests=False, test_reason="") -> TestSelection:
+                      extra_tests=(), full_tests=False, test_reason="", each_commit=False) -> TestSelection:
     """Pure candidate scan seam, also used for historical shadow comparisons."""
     repo = Path(repo)
     extra = validate_widening(repo, extra_tests, full_tests, test_reason)
@@ -281,7 +312,7 @@ def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
     versions = _release_versions(repo, base) if _RELEASE_CARRIERS & set(changed) else set()
     apparatus = "verification apparatus changed"
     full = [(p, apparatus) for p in changed if apparatus_change(p)
-            and not (p in _RELEASE_CARRIERS and _version_only_change(repo, base, p, versions))]
+            and not (p in _RELEASE_CARRIERS and _version_only_window(repo, base, p, versions, each_commit))]
     full += [(p, "body cutover/recovery changed") for p in changed if p in _CUTOVER]
     if full_tests:
         full.append(("*", "author requested full: " + test_reason.strip()))
@@ -322,10 +353,11 @@ def policy_digest() -> str:
     return hashlib.sha256(_POLICY_SOURCE + json.dumps(FLOOR_TESTS, sort_keys=True).encode()).hexdigest()
 
 
-def select_tests(repo: Path, *, base="HEAD", extra_tests=(), full_tests=False, test_reason="") -> TestSelection:
-    oid, paths = changed_paths(Path(repo), base)
+def select_tests(repo: Path, *, base="HEAD", extra_tests=(), full_tests=False, test_reason="",
+                 each_commit=False) -> TestSelection:
+    oid, paths = changed_paths(Path(repo), base, each_commit=each_commit)
     return select_from_paths(Path(repo), paths, base=oid, extra_tests=extra_tests,
-                             full_tests=full_tests, test_reason=test_reason)
+                             full_tests=full_tests, test_reason=test_reason, each_commit=each_commit)
 
 
 def inherit_widening(repo: Path, request: dict, earlier: dict) -> dict:

@@ -12,6 +12,7 @@ import pytest
 from ouroboros import test_selection
 from ouroboros.preflight_inventory import MODULE
 from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
+from tests.ci_verdicts import SESSION_UNAVAILABLE
 from tests.test_preflight_runner import _make_repo
 
 WINDOWS_COMMAND_LINE = 32_767  # CreateProcess takes a command line shorter than this, terminator included
@@ -79,6 +80,9 @@ def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path
     assert row["tier"] == "selected" and row["expected_files"] == ["tests/test_floor.py", "tests/test_leaf.py"]
     assert row["omitted_files"] == 1 and set(row["inventory"]) == {"parallel", "serial"}
     assert sorted(row["inventory"]["parallel"]["executed"]) == sorted(row["inventory"]["parallel"]["expected"])
+    empty = row["inventory"]["serial"]
+    assert empty["collection_reports"] == 1 and empty["expected"] == empty["executed"] == []
+    assert empty["exitcode"] in (0, 5)
     assert "selected: 2/3 Python modules" in capsys.readouterr().out
     assert node == [True]
     assert row["outcomes"] == {"parallel": "success", "serial": "success"}
@@ -90,6 +94,74 @@ def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path
     assert json.loads((evidence / "selection.json").read_text(encoding="utf-8"))["tier"] == "full"
     assert github_output.read_text(encoding="utf-8").splitlines()[-2:] == ["parallel_outcome=failure", "serial_outcome=skipped"]
     assert node == [True, True]
+
+
+def test_selected_cli_reuse_keeps_raw_inventory_and_projections_by_attempt(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("selected_cli", Path(__file__).resolve().parents[1] / "scripts/run_tests.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    module = "tests/test_fixture.py"
+    chosen = test_selection.TestSelection("selected", "base", (module,), (), (), "policy", 1)
+    monkeypatch.setattr(test_selection, "select_tests", lambda *a, **k: chosen)
+    monkeypatch.setattr(test_selection, "FLOOR_TESTS", {module: "fixture floor"})
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "base.json").write_bytes(b"another producer's evidence")
+    public = f"{module}::test_param[masked]"
+    lanes = ("parallel", "serial")
+    paths = [evidence / "selection.json", *(evidence / f"inventory-{lane}.jsonl" for lane in lanes),
+             *(evidence / lane / name for lane in lanes for name in ("results.json", "events.jsonl"))]
+
+    def run(label, argv, cwd):
+        if label == "warm":
+            return 0
+        identity = f"{label}-{attempt}"
+        raw = [f"{module}::test_param[{identity}-{suffix}]" for suffix in ("a", "b")]
+        code = int(attempt == 3)
+        reports = [{"nodeid": public, "phase": phase, "outcome": "failed" if code and phase == "call" else "passed"}
+                   for _ in raw for phase in ("setup", "call", "teardown")]
+        lane = evidence / label
+        lane.mkdir(exist_ok=True)
+        assert not (lane / "events.jsonl").exists() and not (lane / "results.json").exists()
+        (lane / "results.json").write_text(json.dumps({"session": identity, "session_exit_code": code,
+                                                      "reports": reports, "tests_collected": len(raw)}), encoding="utf-8")
+        logs = [{"event": "session", "session": identity}, *({"event": "report", **r} for r in reports)]
+        (lane / "events.jsonl").write_text("\n".join(map(json.dumps, logs)) + "\n", encoding="utf-8")
+        rows = [{"event": "start"}, {"event": "evidence_session", "session": identity},
+                {"event": "collection", "ids": raw},
+                *({"event": "report", "when": "teardown", "nodeid": node, "outcome": "passed"} for node in raw),
+                {"event": "finish", "exitcode": code}]
+        (evidence / f"inventory-{label}.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+        if (label, attempt) == ("parallel", 2):
+            (lane / SESSION_UNAVAILABLE).touch()  # a producer that never confirmed its session in this directory
+        return code
+
+    monkeypatch.setattr(cli, "_run", run)
+    history = {}
+    for attempt in (1, 2, 3):
+        assert cli.main(["--selected", "--evidence-dir", str(evidence)]) == int(attempt == 3)
+        assert len(list(evidence.glob("selection.previous-*.json"))) == attempt - 1
+        selection = paths[0].read_bytes()
+        if attempt < 3:
+            history[selection] = [path.read_bytes() for path in paths]
+    for archive in evidence.glob("selection.previous-*.json"):
+        suffix = archive.stem.removeprefix("selection")
+        assert [path.with_stem(path.stem + suffix).read_bytes() for path in paths] == history.pop(archive.read_bytes())
+    assert not history
+    current = json.loads(selection)
+    assert current["outcomes"] == {"parallel": "failure", "serial": "skipped"}
+    assert current["inventory"]["parallel"]["session"] == "parallel-3"
+    assert (evidence / "inventory-serial.jsonl").read_bytes() == b""
+    assert not (evidence / "serial" / "results.json").exists() and not (evidence / "serial" / "events.jsonl").exists()
+    assert (evidence / "base.json").read_bytes() == b"another producer's evidence"
+    # The second attempt's producer never confirmed its session: its marker is set aside with that attempt's files
+    # (one suffix), and never stands at the current name over a later attempt.
+    [parked] = (evidence / "parallel").glob(SESSION_UNAVAILABLE + ".previous-*")
+    assert not (evidence / "parallel" / SESSION_UNAVAILABLE).exists()
+    assert (evidence / f"selection{parked.suffix}.json").is_file()
 
 
 def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt_in_ones(tmp_path, monkeypatch, capsys):
@@ -298,7 +370,9 @@ def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
     post = yaml.safe_load((ROOT / ".github/workflows/post-merge.yml").read_text(encoding="utf-8"))
     steps = {step.get("id"): step for step in post["jobs"]["post-merge"]["steps"] if step.get("id")}
     selected = steps["selected"]
-    assert selected["run"].startswith('python scripts/run_tests.py --selected --base "$BASE" --keep-going')
+    # The tier only: the step's exact command (--each-commit, --keep-going, its evidence directory) has one owner,
+    # tests/test_post_merge_workflow.py::test_the_steps_check_retry_attribute_hand_over_and_report_in_order.
+    assert selected["run"].startswith("python scripts/run_tests.py --selected ")
     # The run's exit belongs to classify and summary, which retry, bisect and decide the job.
     assert selected["timeout-minutes"] > 0 and selected["continue-on-error"] is True
     assert "continue-on-error" not in steps["classify"]

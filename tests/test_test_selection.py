@@ -241,6 +241,25 @@ def test_git_candidate_includes_dirty_untracked_deleted_and_renamed_inputs(repo)
         selection.select_tests(repo, base="missing-base")
 
 
+def test_each_commit_still_selects_a_change_a_later_commit_reverted(repo):
+    """A post-merge window spans first-parent commits (``--each-commit``): an edit to a test module that a later commit
+    restores leaves the range's net diff, yet the red it exposed still fails at the head."""
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout.decode().strip()
+    git("init", "-q")
+    git("config", "user.email", "selection@example.invalid")
+    git("config", "user.name", "Selection tests")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base, original = git("rev-parse", "HEAD"), (repo / "tests/test_unrelated.py").read_text(encoding="utf-8")
+    for text in ("def test_exposed(): assert False\n", original):  # the edit, then its revert
+        write(repo, "tests/test_unrelated.py", text)
+        git("commit", "-qam", "change")
+    assert selection.select_tests(repo, base=base).changed == ()
+    result = selection.select_tests(repo, base=base, each_commit=True)
+    assert result.changed == ("tests/test_unrelated.py",) and "tests/test_unrelated.py" in result.files
+
+
 @pytest.mark.parametrize("action", ["rename", "remove"])
 def test_a_removed_or_renamed_test_module_selects_the_importers_it_would_break(repo, action):
     def git(*args):
@@ -281,17 +300,30 @@ def test_a_release_bump_alone_stays_selected_but_other_carrier_edits_run_full(re
     git("config", "core.safecrlf", "false")
     project = '[project]\nname = "ouroboros"\nversion = "{}"\ndependencies = [{}]\n'
     write_carrier("VERSION", "7.7.0-rc.1\n")
-    write_carrier("pyproject.toml", project.format("7.7.0rc1", ""))
+    dependency = '"example==7.7.0rc1"'
+    write_carrier("pyproject.toml", project.format("7.7.0rc1", dependency))
     write_carrier("web/package.json", '{\n  "version": "7.7.0-rc.1"\n}\n')
     git("add", ".")
     git("commit", "-qm", "base")
     write_carrier("VERSION", "7.7.0-rc.2\n")  # P9: every numbered release bumps the carriers
-    write_carrier("pyproject.toml", project.format("7.7.0rc2", ""))
+    write_carrier("pyproject.toml", project.format("7.7.0rc2", dependency))
     write_carrier("web/package.json", '{\n  "version": "7.7.0-rc.2"\n}\n')
+    base = git("rev-parse", "HEAD")
+    write_carrier("pyproject.toml", project.format("7.7.0rc2", '"example==7.7.0rc2"'))
+    assert selection.select_tests(repo).tier == "full"
+    write_carrier("pyproject.toml", project.format("7.7.0rc2", dependency))
     assert selection.select_tests(repo).tier == "selected"
+    git("commit", "-qam", "version only")
+    assert selection.select_tests(repo, base=base, each_commit=True).tier == "selected"
     write_carrier("pyproject.toml", project.format("7.7.0rc2", '"requests"'))
     result = selection.select_tests(repo)
     assert result.tier == "full" and ("pyproject.toml", "verification apparatus changed") in result.reasons
+    git("commit", "-qam", "dependency")
+    write_carrier("pyproject.toml", project.format("7.7.0rc2", dependency))
+    git("commit", "-qam", "restore dependencies")
+    assert selection.select_tests(repo, base=base).tier == "selected"
+    replay = selection.select_tests(repo, base=base, each_commit=True)
+    assert replay.tier == "full" and ("pyproject.toml", "verification apparatus changed") in replay.reasons
 
 
 def test_floor_exists_in_this_checkout():

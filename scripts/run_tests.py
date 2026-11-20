@@ -4,6 +4,7 @@
     python scripts/run_tests.py                  full battery (node lane + every default-lane test)
     python scripts/run_tests.py --selected --base HEAD  commit/PR floor + affected tests, with both lanes
     python scripts/run_tests.py --selected --keep-going ...  the same, but a red lane does not skip the next
+    python scripts/run_tests.py --selected --each-commit ...  also what each first-parent commit since --base changed
     python scripts/run_tests.py --node            only the complete Node lane (CI runs it as its own step)
     python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv
     python scripts/run_tests.py tests/test_x.py  focused run; every argument is forwarded to pytest
@@ -44,6 +45,11 @@ _PYTEST_EXIT_NO_TESTS = 5
 # `-n`): inherited, it would make the battery's own controller take itself for a worker.
 _OUTER_WORKER_KEYS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_XDIST_WORKER_COUNT")
 _INTERRUPT_EXPORT_SEC, _INTERRUPT_TERM_SEC = 7, 2  # busy xdist workers already spend ~5 s in teardown
+# In a pass's evidence directory while its producer (tests/ci_evidence.py) has put no new journal there: the
+# results.json and events.jsonl an earlier session left describe no current one. Spelled once, here, where a
+# selected run sets it aside with an attempt's files; the producer and its readers take it from this file
+# (tests/ci_verdicts.py), which is why this module's top level stays stdlib imports and definitions.
+SESSION_UNAVAILABLE = "evidence-session-unavailable"
 
 
 def _cpu_default() -> int:
@@ -157,8 +163,9 @@ def _run(label: str, argv, cwd: pathlib.Path, node: str = "") -> int:
         finally:
             container.close()
             lease.close()
-    if diagnostic and code in (0, _PYTEST_EXIT_NO_TESTS):
-        code = 1
+    if diagnostic and code in (0, 1, _PYTEST_EXIT_NO_TESTS):
+        # Exit 1 alone means a test failed. Pytest also records its own exit; Node does not.
+        code = 2 if code == 1 or label == "node" else 1
     print(f"=== {label}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
     return code
 
@@ -222,14 +229,51 @@ def _node_lane() -> tuple[int, str]:
                                           f"--test-concurrency={admitted.workers}", *files], REPO / WEB_DIR, node), node
 
 
+def _retain_selected_evidence(root: pathlib.Path) -> None:
+    """Park the previous battery's fixed files together before any lane can replace them.
+
+    The shared suffix pairs private inventory and selection with each pass's public export and
+    journal. No archived file takes a current filename, even when the new run skips a pass.
+    """
+    from uuid import uuid4
+
+    labels = ("parallel", "serial")
+    paths = [root / "selection.json", *(root / f"inventory-{label}.jsonl" for label in labels),
+             *(root / label / name for label in labels for name in ("results.json", "events.jsonl", SESSION_UNAVAILABLE))]
+    previous = [path for path in paths if path.is_symlink() or path.is_file()]
+    if not previous:
+        return
+    while True:
+        suffix = ".previous-" + uuid4().hex
+        destinations = [path.with_stem(path.stem + suffix) for path in previous]
+        if not any(map(os.path.lexists, destinations)):
+            break
+    moved = []
+    try:
+        for path, destination in zip(previous, destinations):
+            path.rename(destination)
+            moved.append((path, destination))
+    except OSError:
+        for path, destination in reversed(moved):
+            destination.rename(path)
+        raise
+    print(f"=== selected: earlier evidence kept with suffix {suffix}", flush=True)
+
+
 def _selected(args, evidence) -> int:
     from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
     from ouroboros.preflight_probe import probe_dir, record_admission, write_worker_probe
     from ouroboros.test_selection import select_tests
 
+    if evidence is not None:
+        try:
+            _retain_selected_evidence(evidence)
+        except OSError as exc:
+            print(f"could not retain previous selected evidence: {exc}", file=sys.stderr)
+            return 2
     try:
         selection = select_tests(REPO, base=args.base or "HEAD", extra_tests=args.extra_test,
-                                 full_tests=args.full_tests, test_reason=args.test_reason)
+                                 full_tests=args.full_tests, test_reason=args.test_reason, each_commit=args.each_commit)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         print(f"selection failed: {exc}", file=sys.stderr)
         return 2
@@ -251,6 +295,8 @@ def _selected(args, evidence) -> int:
     code, node = _node_lane()
     carried = [node] if node else []  # the passes run the Node the lane ran
     record["node"] = "success" if code == 0 else "failure"
+    if code and (not node or code != 1):
+        record["node_problem"] = f"the complete Node lane did not run to completion (runner exit {code})"
     if code == 0 or args.keep_going:
         _warm_bytecode(selection.files, root)
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
@@ -266,24 +312,26 @@ def _selected(args, evidence) -> int:
                 command = lambda admitted, command=command: record_admission(root, admitted) or command  # noqa: E731
             code = _run(spec.label, command, REPO, *carried)
             inventory, problem = read_inventory(root, spec.label)
+            if inventory.get("exitcode") is not None and inventory["exitcode"] != code and not inventory.get("problem"):
+                problem = inventory["problem"] = f"runner exit {code} disagrees with pytest exit {inventory['exitcode']}"
             record["inventory"][spec.label] = inventory
             record["outcomes"][spec.label] = "success" if code in (0, _PYTEST_EXIT_NO_TESTS) and not problem else "failure"
             output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-            if code not in (0, _PYTEST_EXIT_NO_TESTS):
-                red = red or code
-                if not args.keep_going:
-                    break
-                continue
-            code = int(bool(problem))
-            if problem:
-                print(f"inventory failed: {problem}", file=sys.stderr)
+            if problem and (inventory.get("problem") or code in (0, _PYTEST_EXIT_NO_TESTS)):
+                print(f"{spec.label} inventory failed: {problem}", file=sys.stderr)
+            if code in (0, _PYTEST_EXIT_NO_TESTS):
+                code = int(bool(problem))
+            if code:
                 red = red or code
                 if not args.keep_going:
                     break
         code = red or code
-        if code == 0 and (problem := inventory_problem(selection, record["inventory"])):
-            print(problem, file=sys.stderr)
-            code = 1
+        # A test failure and a missing floor can coexist. Check the floor only against readable collections.
+        if code == 0 or (args.keep_going and all(row.get("collection_reports") for row in record["inventory"].values())):
+            if problem := inventory_problem(selection, record["inventory"]):
+                record["floor_problem"] = problem
+                print(problem, file=sys.stderr)
+                code = code or 1
         completed = True
     finally:
         if previous is None:
@@ -345,6 +393,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep-going", action="store_true",
                         help="with --selected: a red lane does not skip the next one (the post-merge check "
                              "wants every failure of the run, not the first)")
+    parser.add_argument("--each-commit", action="store_true",
+                        help="with --selected: also select what each first-parent commit since --base changed, "
+                             "which their net diff hides once a later commit reverts it (the post-merge window)")
     parser.add_argument("--node", action="store_true", help="only the complete Node lane, owned like every pass")
     parser.add_argument("--evidence-dir", type=pathlib.Path,
                         help="write pytest diagnostics under DIR/<phase>; never inherited by nested pytest",
@@ -359,12 +410,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     point_at_durations()
     if not args.selected and (args.base or args.extra_test or args.full_tests or args.test_reason or args.defer_full
-                              or args.keep_going):
-        parser.error("--base, --defer-full, --keep-going and widening options require --selected")
+                              or args.keep_going or args.each_commit):
+        parser.error("--base, --defer-full, --keep-going, --each-commit and widening options require --selected")
     if args.node:
         if args.selected or pytest_args:
             parser.error("--node runs only the Node lane")
-        return _node_lane()[0]
+        code, node = _node_lane()
+        return 2 if code == 1 and not node else code
     if args.selected:
         if pytest_args:
             parser.error("--selected cannot be combined with arbitrary pytest arguments")

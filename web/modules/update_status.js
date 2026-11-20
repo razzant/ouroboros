@@ -161,13 +161,25 @@ export function preflightEvidenceRows(preflight) {
     for (const run of github.runs || []) {
         const covers = run.covered_shas?.length
             ? `\nThis run also covers: ${run.covered_shas.map((sha) => sha.slice(0, 8)).join(', ')}.` : '';
-        rows.push({ label: `${String(run.sha).slice(0, 8)} post-merge`,
-            value: `${run.conclusion || run.status || 'unknown'}${run.url ? ` ${run.url}` : ''}${covers}` });
+        const exact = Number.isSafeInteger(run.run_id) && run.run_id > 0
+            && Number.isSafeInteger(run.attempt) && run.attempt > 0;
+        const identity = exact ? ` · run #${run.run_id}, attempt ${run.attempt}` : '';
+        const link = exact ? exactPostMergeAttemptUrl(run) : run.url;
+        rows.push({ label: `${String(run.sha).slice(0, 8)} post-merge${identity}`,
+            value: `${run.conclusion || run.status || 'unknown'}${run.retained === true ? ' (previously observed)' : ''}${link ? ` ${link}` : ''}${covers}` });
     }
     if (github.missing_shas?.length) {
         rows.push({ label: 'No matching run observed', value: github.missing_shas.map((sha) => sha.slice(0, 8)).join(', ') });
     }
     return rows;
+}
+
+// The run URL supplies the existing GitHub repository; only the observed numeric identity selects the attempt.
+function exactPostMergeAttemptUrl(run) {
+    const match = typeof run.url === 'string' && run.url.match(
+        /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/actions\/runs\/([1-9]\d*)(?:\/attempts\/[1-9]\d*)?$/);
+    if (!match || match[2] !== String(run.run_id)) return '';
+    return `https://github.com/${match[1]}/actions/runs/${run.run_id}/attempts/${run.attempt}`;
 }
 
 // The retained attempt's before/after samples as labelled rows of its Last attempt (owner 25.10: A). Only a number
