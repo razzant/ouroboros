@@ -2,14 +2,22 @@
 from typing import Any, Literal, TypedDict
 
 
+class ReplyExcerpt(TypedDict):
+    """Sender-reported rendered words and their zero-based UTF-16 position within the addressed body."""
+    text: str
+    start_utf16: int
+
+
 class ChatReplyReference(TypedDict, total=False):
     """A ``reply_to`` reference as the host resolved it (``chat_references.reference_from_row``); an
     unresolved one is ``{address, unresolved: true}``."""
     address: str
+    row_sha256: str  # full digest of a resolved row; older references only carry the display address
     chat_id: int
     role: Literal["user", "assistant", "system"]
     author_label: str
     kind: str
+    excerpt: ReplyExcerpt
     snippet: str
     chars: int  # the quoted text's whole length, present when ``snippet`` cuts it
     ts: str

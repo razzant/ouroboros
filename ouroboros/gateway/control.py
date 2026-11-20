@@ -240,6 +240,14 @@ async def api_command(request: Request) -> JSONResponse:
             # the true caller here (disclosed non-goal).
             send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", ""),
                                             **({"ui_control": control} if control else {})}
+            if "reply_excerpt" in body:
+                from ouroboros.chat_references import ingress_reply
+                try:
+                    reply = await asyncio.to_thread(ingress_reply, request_drive_root(request), body)
+                except ValueError as exc:
+                    return json_error(str(exc), 400, accepted=False)
+                send_kwargs["accepted_reply"] = reply
+                send_kwargs["task_metadata"].update(reply_excerpt=reply["excerpt"], reply_reference=reply)
             # Publication precedes readiness. Bind the independent owner, keeping
             # this transport's metadata if the supervisor becomes ready meanwhile.
             if bridge is None or str(cmd).strip().lower() == "/restart":
@@ -253,35 +261,20 @@ async def api_command(request: Request) -> JSONResponse:
             if visible_task_id:
                 _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()
             if visible_text:
-                # X3: no invented ids. `visible_task_id` is a caller-supplied
-                # UI correlation key; when the caller has none there is no task
-                # id yet (`ui_send` returns nothing — the router mints the id at
-                # promotion), and the old bare "skill_repair" literal was a
-                # fabricated id persisted into the durable chat log. The typed
-                # truth is an empty id plus the pending marker.
-                task_id = visible_task_id
-                ts = utc_now_iso()
+                # The live and saved receipts share the caller's correlation id.
+                # Without one, the id stays empty until the router promotes the task.
+                receipt = {"ts": utc_now_iso(), "source": "skill_repair", "task_id": visible_task_id}
                 payload = {
                     "type": "chat",
                     "role": "system",
                     "content": visible_text,
-                    "ts": ts,
-                    "source": "skill_repair",
                     "system_type": "skill_repair",
-                    "task_id": task_id,
+                    **receipt,
                 }
-                if not task_id:
+                if not visible_task_id:
                     payload["task_id_pending"] = True
                 broadcast_ws_sync(payload)
-                log_chat(
-                    "system",
-                    0,
-                    0,
-                    visible_text,
-                    ts=ts,
-                    source="skill_repair",
-                    task_id=task_id,
-                )
+                log_chat("system", 0, 0, visible_text, **receipt)
         return JSONResponse({"status": "ok"})
     except Exception as exc:
         return json_exception(exc, 400)

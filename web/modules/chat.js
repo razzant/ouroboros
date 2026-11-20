@@ -256,7 +256,7 @@ export function createChatInstance({
     const onWs = (event, fn) => wsDisposers.push(ws.on(event, fn));
     const replies = createChatReplies({ chatId, feed: messagesDiv, input, composerArea: inputArea, key: storeKey('ouro_chat_reply'),
         reading: () => reading, onDomWrite: withStableViewport, history: () => historyReveal,
-        navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible() });
+        navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible(), onDraftChange: () => composer?.invalidateDraft() });
     const chatMedia = createChatMedia({
         durableChatMediaUrl,
         formatMsgTime,
@@ -304,7 +304,8 @@ export function createChatInstance({
 
     // Sent attachment messages not yet confirmed saved: "Send again" with one id, kept by this tab across a reload.
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
-        root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: replies.compose,
+        root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: (...args) => composer?.prepareNewMessage(...args),
+        savedExcerpt: (...args) => composer?.savedExcerpt(...args),
         storage: sessionStorage, storageKey: storeKey('ouro_chat_unconfirmed') });
 
     let _syncPass1Active = false;
@@ -2604,17 +2605,17 @@ export function createChatInstance({
         if (destroyed) return;
         await awaitInitialHydration();
         // A message this tab kept across a reload that the first read did not show saved is in doubt.
-        if (!destroyed) unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
-            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
+        if (!destroyed) unconfirmed.reconcile(({ frame, reply, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
+            false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views, reply }));
     })();
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
-    composer = createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
+    composer = createComposer({ page, byId, ws, replies, unconfirmed, chatSessionId, isMain, chatId, projectId, storeKey,
         refreshState: refreshHeaderControlState, openSettings, onLayout: () => updateMessagesPadding(),
         onSent: showSent, readingBack: () => !reading.stick && reading.ownMove });
 
     // A send the composer made, shown in the feed: the bubble, its doubt until the host's saved echo, `Sending...`.
-    function showSent({ text, frame, result, views }) {
+    function showSent({ text, frame, reply, result, views, draft, draftVersion }) {
         const sentTs = new Date().toISOString();
         reading.cancel(); // an accepted Send supersedes any saved place
         const row = addMessage(text, 'user', false, sentTs, false, {
@@ -2622,14 +2623,13 @@ export function createChatInstance({
             source: 'web',
             senderSessionId: chatSessionId,
             clientMessageId: result?.clientMessageId || '',
-            forceStick: true, reply: replies.echoRow(),
+            forceStick: true, reply,
             attachments: views,
         });
-        replies.clear();
         // Only the host's saved echo proves acceptance: every message's frame stays (a bare slash command is a
         // command); a queued one is the socket queue's until it is written.
-        if (views.length || !text.startsWith('/')) unconfirmed.track({ ...frame, client_message_id: result.clientMessageId },
-            { views, ts: sentTs, queued: result?.status === 'queued' });
+        if (views.length || frame.reply_excerpt || !text.startsWith('/')) unconfirmed.track({ ...frame, client_message_id: result.clientMessageId },
+            { views, reply, draft, draftVersion, ts: sentTs, queued: result?.status === 'queued' });
         // Chat sends carry their minted client_message_id.
         const pendingId = result?.clientMessageId || '';
         if (pendingId) {

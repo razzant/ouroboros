@@ -249,3 +249,235 @@ test('Send waits for a pending effort-range save; a refused save keeps the draft
         assert.equal(rec.getAttribute('aria-valuetext'), 'High', 'the control shows the server value again');
     } finally { instance.destroy(); restoreDom(env.prior); }
 });
+
+// ouro:panic reaches the composer through the page's global event bus (chat_activity.js
+// raises it on its Panic send); the DOM fixture has none, so a test installs one. This is
+// synthetic in-memory cancellation — a real Panic is never sent here.
+function panicBus() {
+    const keys = ['addEventListener', 'removeEventListener', 'dispatchEvent'];
+    const prior = keys.map(key => Object.getOwnPropertyDescriptor(globalThis, key));
+    const bus = new EventTarget();
+    globalThis.addEventListener = bus.addEventListener.bind(bus);
+    globalThis.removeEventListener = bus.removeEventListener.bind(bus);
+    globalThis.dispatchEvent = bus.dispatchEvent.bind(bus);
+    return () => keys.forEach((key, i) => {
+        if (prior[i]) Object.defineProperty(globalThis, key, prior[i]);
+        else delete globalThis[key];
+    });
+}
+
+// The deferred-save fixture: the room's effort-range save held on a deferred promise, and a ws
+// stub that keeps its handlers, so a send is observed across the settings await and a host row
+// can answer it mid-flight.
+function deferredSaveRoom({ savedReply = null, uploads = null } = {}) {
+    const pending = [];
+    const deleted = [];
+    const env = installDom(async (url, options) => {
+        if (String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ messages: [], window: { complete: true } }) };
+        if (String(url) === '/api/owner/effort-range') return new Promise((resolve) => pending.push(resolve));
+        if (uploads && String(url).startsWith('/api/chat/upload')) {
+            if (options?.method === 'DELETE') { deleted.push(JSON.parse(options.body).filename); return { ok: true, json: async () => ({}) }; }
+            const data = await uploads();
+            return { ok: data.ok !== false, json: async () => data };
+        }
+        return { ok: true, json: async () => ({ active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true }) };
+    });
+    globalThis.sessionStorage.setItem('ouro_chat_session_id', 'session-me');
+    if (savedReply) globalThis.sessionStorage.setItem('ouro_chat_reply', JSON.stringify(savedReply));
+    const handlers = new Map();
+    const frames = [];
+    let generation = 0;
+    const instance = createChatInstance({
+        ws: {
+            ws: { readyState: 1 },
+            on(type, fn) { if (!handlers.has(type)) handlers.set(type, new Set()); handlers.get(type).add(fn); return () => handlers.get(type).delete(fn); },
+            isConnected: () => true,
+            send: (frame) => { frames.push(frame); return { status: 'sent', clientMessageId: `cm-${frames.length}` }; },
+        },
+        state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+        updateUnreadBadge() {}, chatId: 1, idPrefix: 'chat', mountEl: env.mount,
+        stateSnapshots: { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+            gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
+    });
+    const input = document.byId.get('chat-input');
+    const press = () => {
+        const event = { key: 'Enter', target: input, preventDefault() { event.defaultPrevented = true; } };
+        for (const listener of input.listeners.get('keydown')) listener(event);
+        return event;
+    };
+    const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
+    instance.hydrateStateSnapshot({ effort_range: { min: 'low', recommended: 'medium', max: 'high' } });
+    const rec = env.mount.children[0].children.find((node) => node.classList.contains('chat-toolbar-row'))
+        .children.find((node) => node.classList.contains('chat-effort-range'))
+        .querySelector('.chat-effort-rec');
+    return {
+        frames, input, press, settle, deleted, instance,
+        type(text) { input.value = text; for (const fn of input.listeners.get('input')) fn(); },
+        set(text) { input.value = text; },  // no input event: the draft is untouched, its version stands
+        stageFiles(list) { const files = document.byId.get('chat-file-input');
+            files.files = list.map(([name, type]) => ({ name, type }));
+            for (const fn of files.listeners.get('change')) fn({ target: files }); },
+        removeBadge(index) { const preview = document.byId.get('chat-attachment-preview');
+            const button = preview.querySelectorAll('[data-attachment-remove]')[index];
+            for (const fn of button.listeners.get('click')) fn({ target: button }); },
+        beginSave() { for (const listener of rec.listeners.get('keydown'))
+            listener({ key: 'ArrowRight', currentTarget: rec, preventDefault() {} }); },
+        resolveSave(ok = true) { pending.shift()({ ok, json: async () => (ok
+            ? { ok: true, effort_range: { min: 'low', recommended: 'high', max: 'high' } }
+            : { error: 'Effort range refused.', saved: false, code: 'effort_range_invalid' }) }); },
+        echo(n, extra = {}) { for (const fn of handlers.get('chat') || []) fn({ type: 'chat', role: 'user', chat_id: 1,
+            ts: '2026-10-16T09:40:00Z', source: 'web', sender_session_id: 'session-me', content: frames[n - 1].content,
+            client_message_id: `cm-${n}`, ingress_accepted: true, ...extra }); },
+        firePanic: () => globalThis.dispatchEvent(new CustomEvent('ouro:panic')),
+        reopen() { for (const fn of handlers.get('open') || []) fn({ previouslyConnected: true }); },
+        close() { instance.destroy(); restoreDom(env.prior); },
+    };
+}
+
+test('an accepted Panic during the settings save stops the pending send before it sends', async () => {
+    const restoreBus = panicBus();
+    const f = deferredSaveRoom();
+    try {
+        f.beginSave();
+        f.type('check the schedule');
+        f.press();
+        assert.equal(f.frames.length, 0, 'Send waits for the save');
+        f.firePanic();
+        f.resolveSave(true);
+        await f.settle();
+        assert.equal(f.frames.length, 0, 'no chat frame follows an accepted Panic');
+        assert.equal(f.input.value, 'check the schedule', 'the newer draft stays untouched');
+    } finally { f.close(); restoreBus(); }
+});
+
+test('an accepted Panic during the upload stops the pending send and cleans the completed upload', async () => {
+    const restoreBus = panicBus();
+    let release;
+    const stored = `${'0'.repeat(32)}_note.txt`;
+    const f = deferredSaveRoom({ uploads: () => new Promise((resolve) => { release = resolve; }).then(() => ({
+        ok: true, filename: stored, display_name: 'note.txt', mime: 'text/plain',
+        view: { name: 'note.txt', kind: 'file', available: true, size: 3, url: `/api/files/download?upload=${stored}` } })) });
+    try {
+        f.stageFiles([['note.txt', 'text/plain']]);
+        f.type('see the file');
+        f.press();
+        assert.equal(f.frames.length, 0, 'the upload is in flight');
+        f.firePanic();
+        release();
+        await f.settle();
+        assert.equal(f.frames.length, 0, 'no chat frame follows an accepted Panic');
+        assert.deepEqual(f.deleted, [stored], 'the completed upload is cleaned up, not orphaned');
+    } finally { f.close(); restoreBus(); }
+});
+
+test('a message submitted after a Panic is sent; the send the Panic crossed stays abandoned', async () => {
+    const restoreBus = panicBus();
+    const f = deferredSaveRoom();
+    try {
+        f.beginSave();
+        f.type('check the schedule');
+        f.press();
+        f.firePanic();
+        f.resolveSave(true);
+        await f.settle();
+        assert.equal(f.frames.length, 0, 'the crossed send is abandoned');
+        f.type('a new message');
+        f.press();
+        await f.settle();
+        assert.deepEqual(f.frames.map((frame) => frame.content), ['a new message'], 'Send works again for a new submission');
+        assert.equal(f.input.value, '');
+        f.reopen();  // a reconnect is no resume: nothing the Panic crossed leaves afterwards
+        await f.settle();
+        assert.equal(f.frames.length, 1);
+    } finally { f.close(); restoreBus(); }
+});
+
+test('a late edit during the settings save still sends the submitted words and keeps the newer draft', async () => {
+    const f = deferredSaveRoom();
+    try {
+        f.beginSave();
+        f.type('plan the migration');
+        f.press();
+        f.type('plan the migration and the rollback');
+        f.resolveSave(true);
+        await f.settle();
+        assert.equal(f.frames.length, 1, 'the submitted message finishes');
+        assert.equal(f.frames[0].content, 'plan the migration');
+        assert.equal(f.input.value, 'plan the migration and the rollback', 'the newer draft is not consumed');
+    } finally { f.close(); }
+});
+
+test('a selected retry whose original id is confirmed during the settings save sends nothing again', async () => {
+    const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
+    const f = deferredSaveRoom({ savedReply: reply });
+    try {
+        f.type('First note.');
+        f.press();
+        await f.settle();
+        assert.equal(f.frames.length, 1);
+        assert.equal(f.frames[0].reply_excerpt.text, 'star atlas');
+        f.beginSave();
+        f.set('First note.');
+        f.press();
+        assert.equal(f.frames.length, 1, 'the same-draft Send is a retry, and it waits for the save');
+        f.echo(1, { ingress_dispatched: true, reply_to: { address: reply.address, excerpt: reply.excerpt } });
+        f.resolveSave(true);
+        await f.settle();
+        assert.equal(f.frames.length, 1, 'a confirmed id is not sent again');
+        assert.equal(f.input.value, '', 'the confirmed reply consumed its own draft');
+        assert.equal(globalThis.sessionStorage.getItem('ouro_chat_reply'), null);
+    } finally { f.close(); }
+});
+
+test('a selected retry confirmed by a saved row without its reply still sends nothing again', async () => {
+    const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
+    const f = deferredSaveRoom({ savedReply: reply });
+    try {
+        f.type('First note.');
+        f.press();
+        await f.settle();
+        const first = f.frames[0];
+        f.beginSave();
+        f.set('First note.');
+        f.press();
+        // A saved row an older core echoes without the reply this tab would clean the composer
+        // with still confirms the id: accepted, its dispatch still owed.
+        f.echo(1, { ingress_pending: true });
+        f.resolveSave(true);
+        await f.settle();
+        assert.equal(f.frames.length, 1, 'a confirmed id is not sent again');
+        assert.equal(f.frames[0], first);
+        assert.equal(f.input.value, 'First note.', 'the owner\'s draft stays as the newer draft');
+        assert.deepEqual(JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_reply')).excerpt, reply.excerpt);
+    } finally { f.close(); }
+});
+
+test('a badge kept in the newer draft keeps its own upload ref, not the removed badge\'s', async () => {
+    const reply = { address: 'row:1@a#1', role: 'assistant', excerpt: { start_utf16: 3, text: 'star atlas' } };
+    const names = [];
+    const f = deferredSaveRoom({ savedReply: reply, uploads: () => {
+        const stored = `${String(names.length + 1).padStart(32, '0')}_${names.length + 1}.txt`;
+        names.push(stored);
+        return { ok: true, filename: stored, display_name: `${names.length}.txt`, mime: 'text/plain',
+            view: { name: `${names.length}.txt`, kind: 'file', available: true, size: 3, url: `/api/files/download?upload=${stored}` } };
+    } });
+    try {
+        f.stageFiles([['1.txt', 'text/plain'], ['2.txt', 'text/plain']]);
+        f.type('with both files');
+        f.beginSave();
+        f.press();
+        // The owner drops the first badge and edits the words while the send waits on the room's
+        // save; the submitted message still goes out with the files it snapshotted, and the kept
+        // badge must take its own ref — never the removed one's by position.
+        f.removeBadge(0);
+        f.type('a newer draft');
+        f.resolveSave(true);
+        await f.settle();
+        assert.equal(f.frames.length, 1);
+        assert.equal(f.frames[0].attachments.length, 2, 'Send fixes the files before waiting');
+        assert.equal(f.input.value, 'a newer draft', 'the newer draft is not consumed');
+        const keptVersion = JSON.parse(globalThis.sessionStorage.getItem('ouro_chat_draft_version') || 'null');
+        assert.deepEqual(keptVersion?.uploads?.map((item) => item.filename), [names[1]],
+            'the kept badge keeps its own completed upload and so survives a reload');
+    } finally { f.close(); }
+});

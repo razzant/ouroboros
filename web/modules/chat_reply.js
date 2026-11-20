@@ -14,7 +14,9 @@ import { bindBubbleActions } from './message_actions.js';
 import { revealTimelineNode } from './chat_render_batch.js';
 import { afterMotion } from './motion.js';
 import { readBand } from './project_read_state.js';
+import { bindExcerptAction, clearExcerptHighlight, excerptRange, highlightExcerpt } from './chat_reply_excerpt.js';
 import { createChatSearch } from './chat_search.js';
+import { foldHides } from './project_answer.js';
 
 export const REPLY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"'
     + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -57,7 +59,7 @@ function failureText({ state, task_id: taskId, error }) {
  * for cancellation. Neither the quote's stored chat label nor its task chooses the destination.
  */
 export function createChatReplies({ chatId, feed, input, composerArea = null, key = '', reading, history = () => null,
-    navigate = null, present = () => true, onDomWrite = (write) => write(), actions = undefined }) {
+    navigate = null, present = () => true, onDomWrite = (write) => write(), actions = undefined, onDraftChange = () => {} }) {
     // The strip is the field's first line: inside the field, right before its text row (composer.js); a bare field (a
     // test fixture) takes it itself.
     const textRow = input.closest('.chat-text-row') || input;
@@ -68,6 +70,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     let strip = null;
     let targetTimer = 0;
     let search = null;  // the room's search (below), whose open surface the clearance counts
+    const selection = bindExcerptAction({ feed, present, choose: (row, excerpt) => start({ ...bubbleRef(row), excerpt }) });
     const bubbleActions = bindBubbleActions({ feed, registry: actions, onDomWrite });
     // How much of the feed's top the room's header (and an open search, chat_search.js) covers: a placed row lands
     // under them, not behind them.
@@ -125,19 +128,23 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     let revealGeneration = 0, revealing = 0, held = null;
 
     const remember = () => {
+        onDraftChange();
         if (!storage || !storageKey) return;
         try {
             if (staged) storage.setItem(storageKey, JSON.stringify(staged));
             else storage.removeItem(storageKey);
-        } catch { /* a refused write leaves the strip for this page only */ }
+        } catch {
+            if (staged?.excerpt) {
+                try { storage.removeItem(storageKey); } catch { /* storage can be disabled */ }
+                showToast(tr('chat.reply.draft_storage', 'This quote will only be kept until this tab reloads.'), 'info');
+            }
+        }
     };
 
     const rowOf = (address) => (address ? [...feed.querySelectorAll('[data-row-address]')]
         .find((node) => node.dataset.rowAddress === address) : null) || null;
 
     function markTarget(target, focus = true) {
-        clearTimeout(targetTimer);
-        feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
         void target.offsetWidth;
         target.classList.add('is-quote-target');
         if (target.tabIndex < 0) target.tabIndex = -1;
@@ -153,6 +160,9 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
      * keyboard where it is, and a search's `locate(target)` names its first matching words (a Range, or null), placed
      * in view with the row. */
     async function reveal(address, isCurrent = () => true, prepared = null, { focus = true, locate = null } = {}) {
+        clearExcerptHighlight(feed.ownerDocument);
+        clearTimeout(targetTimer);
+        feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
         const position = reading();
         const following = held?.claimed() ? held.following : position.stick;
         const claimed = position.claim ? position.claim() : (position.cancel(), () => true);
@@ -208,7 +218,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             const result = await history()?.reference(address, wanted, prepared);
             if (!wanted() || !result) return null;
             if (result.state === 'moved' && Number.isInteger(result.chat_id) && navigate) {
-                return navigate(address, result.chat_id, wanted);
+                return navigate(address, result.chat_id, wanted, locate);
             }
             if (!result.target) return result;
             target = result.target;
@@ -228,7 +238,20 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     }
 
     async function jump(ref) {
-        const result = await reveal(ref.address);
+        const locate = ref.excerpt ? target => {
+            const range = target.dataset.rowAddress === ref.address && excerptRange(target, ref.excerpt);
+            if (!range) {
+                showToast(tr('chat.reply.passage_changed', 'The message is here. The quoted passage could not be located.'), 'info');
+                return null;
+            }
+            if (foldHides(range, target)) {
+                showToast(tr('chat.find.folded', 'The words are in the folded part of this answer: its Project shows it in full.'), 'info');
+                return null;
+            }
+            highlightExcerpt(range, TARGET_MS);
+            return range;
+        } : null;
+        const result = await reveal(ref.address, () => true, null, { locate });
         if (!result || result.state === 'found') return;
         const [code, words] = failureText(result);
         showToast(tr(`chat.reply.${code}`, words), 'info');
@@ -261,7 +284,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     }
     function paint(animate = true) {
         const before = strip;
-        strip = staged ? createReplyQuote(staged, { composer: true, onJump: jump, onCancel: () => cancel() }) : null;
+        strip = staged ? createReplyQuote(staged, { composer: true, onJump: jump, onDomWrite, onCancel: () => cancel() }) : null;
         if (strip) {
             const main = strip.querySelector('.chat-quote-main');
             main.id = `${input.id}-reply`;
@@ -304,8 +327,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     }
 
     /** After a send: the next message answers nothing. */
-    function clear() {
-        if (!staged) return;
+    function clear(expected = staged) {
+        if (!staged || staged !== expected) return;
         staged = null;
         paint();
         remember();
@@ -324,13 +347,18 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     function bubbleRef(bubble) {
         const address = bubble?.dataset?.rowAddress || '';
         if (!address) return null;
-        const role = ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
-        const words = bubble.querySelector(':scope > .message')?.textContent
+        const caption = bubble.matches('[data-reply-caption]') ? bubble : null;
+        if (caption) bubble = bubble.closest('.chat-bubble');
+        const cardDisplay = bubble.dataset.replyExcerptDisabled === '1';
+        const role = cardDisplay ? 'system' : ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
+        const words = caption?.textContent || bubble.querySelector(':scope > .message')?.textContent
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';
         const sender = bubble.querySelector(':scope > .sender, :scope > .chat-bubble-voice > .sender');
-        return { address, chat_id: chatId, role, author_label: sender?.textContent || '',
-            kind: bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
-            ts: bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '', task_id: bubble.dataset.taskId || '' };
+        return { address, chat_id: chatId, role,
+            author_label: cardDisplay ? authorOf('system') : caption?.dataset.sourceAuthor || sender?.textContent || '',
+            kind: cardDisplay ? 'system' : bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
+            ts: caption ? caption.dataset.sourceTs || '' : bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '',
+            task_id: bubble.dataset.taskId || '' };
     }
 
     /** The Reply button, placed with the bubble's Copy in one control row. Needs a row address: an unsaved echo has none. */
@@ -424,12 +452,13 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         decorate(bubble, row) {
             const address = String(row?.row_address || '');
             if (address) bubble.dataset.rowAddress = address;
+            if (row?.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
             // Work speech another room also shows: its read is shared (read_ahead.js).
             if (row?.room_revisions && typeof row.room_revisions === 'object') bubble.dataset.roomRevisions = JSON.stringify(row.room_revisions);
             const sender = bubble.querySelector('.sender');
             const role = ROLE_NAMES.find((name) => bubble.classList.contains(name));
             const relay = role === 'assistant' ? createRelayQuote(row?.relay, { onDomWrite, card: bubble.dataset.systemType === 'relay_entry' }) : null;
-            const quote = relay || createReplyQuote(row?.reply_to, { onJump: jump });
+            const quote = relay || createReplyQuote(row?.reply_to, { onJump: jump, onDomWrite });
             if (quote && !relay && role !== 'user') {
                 quote.dataset.derived = '1';
                 quote.dataset.address = normalizeReplyRef(row.reply_to)?.address || '';
@@ -450,8 +479,15 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             if (row?.role !== 'user' || !cmid || !address) return false;
             const bubble = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
                 .find((node) => node.dataset.clientMessageId === cmid);
+            if (bubble && row.reply_excerpt_disabled) bubble.dataset.replyExcerptDisabled = '1';
             if (!bubble || bubble.dataset.rowAddress === address) return false;
             bubble.dataset.rowAddress = address;
+            if (row.reply_to?.excerpt || row.reply_to?.role === 'system') {
+                const saved = createReplyQuote(row.reply_to, { onJump: jump, onDomWrite });
+                const local = bubble.querySelector(':scope > .chat-quote');
+                if (local) { bubble.insertBefore(saved, local); local.remove(); }
+                else bubble.querySelector('.sender')?.after(saved);
+            }
             if (!bubble.querySelector(':scope > .chat-message-actions > .chat-message-reply')) mountControl(bubble);
             syncDerivedQuotes(bubble);
             return true;
@@ -468,18 +504,10 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         /** The room's search of its saved messages (chat_search.js): Cmd+F on a Mac, Ctrl+F elsewhere, and "+". */
         search,
         get revealing() { return revealing !== 0; },
-        /**
-         * "Send as a new message" under a delivery doubt: the owner's words join this composer's draft (sent, they are
-         * a new message with a fresh id); nothing is sent here.
-         */
-        compose(words) {
-            const draft = input.value.trimEnd();
-            input.value = draft ? `${draft}\n\n${words}` : words;
-            input.dispatchEvent?.(new Event('input', { bubbles: true }));  // the composer's own sizing and draft keeping
-            input.focus({ preventScroll: true });
-        },
-        /** The field of the chat frame: only the address travels, the host makes the snippet. */
-        frameField: () => (staged ? { reply_to: staged.address } : {}),
+        /** The host resolves the address; the optional citation belongs to the sender. */
+        frameField: (ref = staged) => (ref ? { reply_to: ref.address, ...(ref.excerpt ? { reply_excerpt: ref.excerpt } : {}) } : {}),
+        canSelect: selection.canSelect,
+        selectText: selection.select,
         /** The local echo of a reply, shaped like a row so it draws the same quote (it has no row address yet). */
         echoRow: () => (staged ? { reply_to: staged } : null),
         clear,
@@ -487,6 +515,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             destroyed = true;
             clearTimeout(targetTimer);
             search.destroy();
+            selection.destroy();
             bubbleActions.destroy();
             decks.destroy();
             keyHost?.removeEventListener('keydown', onKeydown);

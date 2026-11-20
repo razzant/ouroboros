@@ -59,7 +59,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 Keyed replay preserves nodes, disclosure, focus, selection and child lifecycle; current results win. Bounds: `LIVE_CARD_CAP` live cards; `chat_history.js` pages; `chat_preview.js` unread saved text without actions/coverage/receipts. `chat_reading_position.js` owns anchors and cancellable claims: ↓ reaches retained rows while loading; `showLatest({arrive})`/`project_read_state.js` land covered arrivals. `createHistoryControls` puts gaps at the feed edge, not notices over newest rows. Floating headers reserve measured height. Origins: `project_dialogue.project_origin_identity`.
 
-`chat_reply.js`: jumps and `chat_search.js` (`GET /api/chat/search`) via `reveal`; `chat_history_reveal.js`: `around=<row_address>` pages. `app.js` preloads via full registry without newest/ACK arrival. Cards reveal exact lines, not portals/context; task refs: cards.
+`chat_reply.js` lands Reply/search (`chat_history_reveal.js`, `/api/chat/search`). `chat_reply_excerpt.js` maps authored ranges and captions; card display text stays whole-row Reply only. `app.js` preloads without newest/ACK arrival. Cards reveal exact lines, not portals; task refs: cards.
 
 #### Main rows and host-stamped card rows
 

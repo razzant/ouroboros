@@ -62,7 +62,7 @@ function* fitSteps(el, fit) {
     const box = yield () => {
         if (!el.isConnected || !el.clientWidth) return null;
         const style = getComputedStyle(el);
-        const job = { el, width: el.clientWidth, limit: fit.lines * lineHeight(style) + 1, nowrap: style.whiteSpace === 'nowrap' };
+        const job = { el, width: el.clientWidth, limit: fit.lines * lineHeight(style) + 1, nowrap: ['nowrap', 'pre'].includes(style.whiteSpace) };
         job.whole = inside(job);
         return job;
     };

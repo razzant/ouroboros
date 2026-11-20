@@ -72,13 +72,15 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
     keeps a task-keyed System row from borrowing its target task's own origin.
     """
     from ouroboros.chat_references import reference_from_row
+    from ouroboros.owner_relay import owner_source_row
     from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
 
     client_message_id = str(evt.get("client_message_id") or "").strip()
     try:
-        row = next((quote["owner_row"] for quote in evt.get("quotes") or []
-                    if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
-                    and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
+        quote = next((quote for quote in evt.get("quotes") or []
+                      if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
+                      and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
+        row = quote["owner_row"] if quote is not None else None
         source = evt.get("source_ref")
         if row is None and owner_message_ref_is_valid(source) and (
                 not client_message_id or source["client_message_id"] == client_message_id):
@@ -87,7 +89,16 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
             from supervisor.message_ingress import accepted_chat_message
 
             row = accepted_chat_message(ctx.DRIVE_ROOT, int(evt.get("chat_id") or 0), client_message_id)
-        return reference_from_row(row) if row else {}
+        if not row:
+            return {}
+        root = row.get("_owner_source_root") or ctx.DRIVE_ROOT
+        reference = reference_from_row(owner_source_row(row), root)
+        address = quote["source"].get("address") if quote else None
+        if address and address != reference["address"]:  # a re-carried row includes local presentation fields
+            from ouroboros.chat_references import resolve_reply
+
+            return resolve_reply(root, address)
+        return reference
     except Exception:
         log.debug("Routing notice origin unavailable for %s", client_message_id, exc_info=True)
         return {}

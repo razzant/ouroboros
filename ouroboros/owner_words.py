@@ -86,7 +86,7 @@ REPLY_TARGET = "reply_target"  # the message my human replied to: its author's w
 UNREAD_TARGET = "(its words are not carried here; this address reads them)"
 # A place connector names the replied message by its platform id alone: nothing the host stores answers to it.
 UNREAD_PLATFORM = "(its words are not carried: the connector named only its platform message id, no host address)"
-ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref", "author", "attachments")
+ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref", "author", "attachments", "reply_citation")
 _RUN_ORIGIN_MARKERS = ("initiator", "source", "task_type")
 _ANNOTATED_ACTS = frozenset({"promote_chat_to_task", "route_to_project", "steer_task", "mailbox_delivery"})
 _ANNOTATED_STATUSES = frozenset({"scheduled", "delivered", "read"})
@@ -179,26 +179,66 @@ def _held_origin(ref: Mapping[str, Any], held: Any) -> Mapping[str, Any] | None:
     return next(iter(matches.values())) if len(matches) == 1 else None
 
 
+def _reply_body_key(address: Any, view: Any = None, author: Any = None) -> tuple:
+    """A stored row can supply a whole-row notice and a distinct authored body (or no readable body)."""
+    return str(address or ""), str(view or ""), str(author or "author not recorded") if view else ""
+
+
+def _reply_bodies(rows: List[Dict[str, Any]]) -> dict:
+    return {_reply_body_key(row["ref"], row.get("reply_view"), row.get("author")): row
+            for row in rows if row["source"] == REPLY_TARGET}
+
+
+def _carried_selection(citation: Any, bodies: dict, *, attachments: bool = False) -> dict:
+    """Rejoin one reply's citation to its by-value source view, never to an ordinary Reply's display."""
+    citation = _mapping(citation)
+    if not (address := citation.get("address")):
+        return {}
+    # An older field did not distinguish the target's views; never infer authored words from that row.
+    author, view = citation.get("author") or "", citation.get("reply_view")
+    body = bodies.get(_reply_body_key(address, view, author), {}) if view else {}
+    return {"address": address, "author": author, "excerpt": citation.get("excerpt"), "text": body.get("text", ""),
+            **({"attachments": body["attachments"]} if attachments and body.get("attachments") else {})}
+
+
+def _same_selection(prior: Mapping[str, Any], citation: Mapping[str, Any]) -> bool:
+    """Two carriers' records of one selected reply: the exact address and passage (offsets refer to the rendered
+    body, so the selections are compared to each other, never to raw Markdown) and one source actor. Each reader
+    labels a person its own way (``You`` and ``User [source=web]``), so the host's role for the replied row decides
+    when both recorded it, else the label itself; an identity is never read out of a label."""
+    actor = "role" if prior.get("role") and citation.get("role") else "author"
+    return all(prior.get(key) == citation.get(key) for key in ("address", "excerpt", actor))
+
+
 def _deduped(rows: List[Dict[str, Any]], *, addressed: bool = False) -> List[Dict[str, Any]]:
     """Drop empty rows and repeats of one source: its reference, else (none recorded) its whitespace-normalized
     text and its time; the text alone only when no time was recorded either. Similar words under different
     references or times are not copies (BIBLE P1): two "yes" stay two. The first row of one identity keeps its
     carrier and its date, and takes a later twin's files when it has none (a corpus row records a relayed row's
     words; its held chat row keeps the upload references): a row never loses a file to its own identity. A reply
-    target repeats by its address: two replies of my human to one message keep one target row, beside the first."""
+    target repeats by its address and view: two replies to the same form keep one target row, beside the first."""
     from ouroboros.project_dialogue import _text_sha256
 
     seen: Dict[Any, Dict[str, Any]] = {}  # one identity -> the row kept for it
     kept = []
     for row in rows:
-        key = (row["source"] == REPLY_TARGET, row["ref"]) if row["ref"] else (
-            _text_sha256(row["text"]), str(row.get("ts") or ""))
         if not _kept(row):
             continue
+        if row["source"] == REPLY_TARGET:
+            key = _reply_body_key(row["ref"], row.get("reply_view"), row.get("author"))
+        else:
+            key = (False, row["ref"]) if row["ref"] else (_text_sha256(row["text"]), str(row.get("ts") or ""))
         if key not in seen:
             kept.append(seen.setdefault(key, row))
             continue
         first = seen[key]
+        if citation := _mapping(row.get("reply_citation")):
+            prior = first.setdefault("reply_citation", citation)
+            # Two carriers of the same reply can differ only in whether they could read the original.
+            if (row["ref"] and row["text"] == first["text"] and prior.get("reply_view") == "unread"
+                    and citation.get("reply_view") == "authored" and citation.get("address") and citation.get("excerpt")
+                    and _same_selection(prior, citation)):
+                first["reply_citation"] = citation
         if row.get("attachments") and not first.get("attachments"):
             first["attachments"] = row["attachments"]
         # Only the birth capture requests coordinates. A normalized-text match
@@ -210,7 +250,11 @@ def _deduped(rows: List[Dict[str, Any]], *, addressed: bool = False) -> List[Dic
             for field in ("address", "room_id", "origin_ref"):
                 if field in row:
                     first.setdefault(field, row[field])
-    return kept
+    # A second carrier of the same reply can know less (or more); don't print its unused source view by itself.
+    cited = {_reply_body_key(citation["address"], citation["reply_view"], citation.get("author")) for row in kept
+             if (citation := _mapping(row.get("reply_citation"))).get("reply_view") and citation.get("address")}
+    return [row for row in kept if not row.get("reply_view") or
+            _reply_body_key(row["ref"], row["reply_view"], row.get("author")) in cited]
 
 
 def _absent_marker(record: Mapping[str, Any] | None) -> str:
@@ -359,8 +403,15 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
                                    **{k: item[k] for k in ("source_task_id", "quiz_id") if item.get(k)},
                                    **{k: target[k] for k in ("card_id", "pressed_label", "submitted_values") if target.get(k)}}
     if target.get("address"):
-        rows.append(_row(target.get("text"), source=REPLY_TARGET, carrier=carrier, task_id=task_id,
-                         ref=target["address"], author=target.get("author") or "author not recorded"))
+        replied = _row(target.get("text"), source=REPLY_TARGET, carrier=carrier, task_id=task_id,
+                       ref=target["address"], author=target.get("author") or "author not recorded",
+                       attachments=target.get("attachments"))
+        if target.get("excerpt"):  # each reply selects its own words; the associated source body can be shared
+            replied["reply_view"] = "authored" if replied["text"] else "unread"
+            rows[0]["reply_citation"] = {"address": target["address"], "author": target.get("author") or "",
+                                         "excerpt": target["excerpt"], "reply_view": replied["reply_view"],
+                                         **({"role": target["role"]} if target.get("role") else {})}
+        rows.append(replied)
     return rows
 
 
@@ -736,7 +787,7 @@ def is_answered_card(reply: Any) -> bool:
     return str(_mapping(reply).get("address") or "").startswith("quiz ")
 
 
-def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
+def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
     """The whole message my human's words reply to, under its author, by the address the door resolved: one
     sha-checked read. Unreadable: the address alone; a reply to a work card names work, not anyone's words. Its
     author is signed without the places' owner snapshot on purpose: a target is context, never my human's words."""
@@ -744,19 +795,32 @@ def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
     address = str(reference.get("address") or "")
     if not address or address.startswith("task:"):
         return {}
+    citation = {"excerpt": reference["excerpt"]} if reference.get("excerpt") else {}
     if reference.get("unresolved"):
-        return {"address": address, "author": "", "text": ""}
+        return {"address": address, "author": "", "text": "", **citation}
+    recorded_author = str((reference.get("author") if citation else "") or reference.get("author_label") or "")
     from ouroboros.chat_chain import resolve_row
-    from ouroboros.dialogue_provenance import render_row_text, row_author
+    from ouroboros.chat_references import (REPLY_ROLES, card_reply_display, excerpt_source_text, project_answer_text,
+                                           reply_role)
+    from ouroboros.dialogue_provenance import quote_words, render_row_text, row_author
     from ouroboros.store import StoreError
 
+    # The host's role for the replied row rides with a selection: the actor its carriers agree on (``_same_selection``).
+    recorded_role = {"role": reference["role"]} if citation and reference.get("role") in REPLY_ROLES else {}
     try:
-        row, _resolution = resolve_row(drive_root, address)
+        row = resolve_row(drive_root, address)[0] if drive_root is not None else None
     except (StoreError, OSError, ValueError, TypeError):
         row = None
     if not row:
-        return {"address": address, "author": str(reference.get("author_label") or ""), "text": ""}
-    return {"address": address, "author": row_author(row)["label"], "text": render_row_text(row)}
+        return {"address": address, "author": recorded_author, "text": "", **citation, **recorded_role}
+    if display := card_reply_display(drive_root, row):
+        return {"address": address, "author": "System", "text": display, **citation}
+    if citation:
+        return {"address": address, "author": "Ouroboros" if project_answer_text(row) else row_author(row)["label"],
+                "text": excerpt_source_text(row), **citation, "role": reply_role(row),
+                **({"attachments": row["attachments"]} if row.get("attachments") else {})}
+    return {"address": address, "author": row_author(row)["label"],
+            "text": quote_words(row) if _mapping(row.get("reply_to")).get("excerpt") else render_row_text(row)}
 
 
 def task_governing_words(task: Mapping[str, Any], *, addressed: bool = False) -> Tuple[List[Dict[str, str]], str]:
@@ -774,8 +838,11 @@ def task_governing_words(task: Mapping[str, Any], *, addressed: bool = False) ->
                    task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"), author=item.get("author"),
                    attachments=item.get("attachments"))
         if _kept(row):
-            if isinstance(fact := item.get("answer_input"), Mapping):
-                row["answer_input"] = dict(fact)
+            for key in ("answer_input", "reply_citation"):
+                if isinstance(fact := item.get(key), Mapping):
+                    row[key] = dict(fact)
+            if row["source"] == REPLY_TARGET and item.get("reply_view") in ("authored", "unread"):
+                row["reply_view"] = item["reply_view"]
             if addressed and isinstance(item.get("address"), str):
                 row["address"] = item["address"]
             if addressed and isinstance(origin := item.get("origin_ref"), Mapping):
@@ -799,7 +866,7 @@ def _chat_words(row: Mapping[str, Any], *, key: str, carrier: str, source: str, 
     from ouroboros.answer_facts import card_input
     living = card_input(row, root, source)
     replied = living.get("reply_to") or answered_card_reply(block, asker) or reply_target(
-        root, reference if root is not None else {**reference, "unresolved": True})
+        root, reference if root is not None or reference.get("excerpt") else {**reference, "unresolved": True})
     carried = _mapping(row.get("corpus_answer"))
     item = living or {"source": row_source(row, source), "content": owner_text(row),
                       "reply_to": carried.get("reply_to") or replied,
@@ -991,6 +1058,7 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     adds, and the opening message dated by its door (``_opening``). Never a room, context or marked row: a
     permission my human gave another work is not this one's. Reads the context's attributes and writes nothing."""
     from ouroboros.answer_facts import card_input, row_source
+    from ouroboros.dialogue_provenance import excerpt_citation
     from ouroboros.owner_relay import owner_text
 
     rows: List[Dict[str, Any]] = []
@@ -998,12 +1066,19 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
 
     def add(row: Mapping[str, Any]) -> Dict[str, Any]:  # the listed copy of this source, gaps filled by a later one
+        target = _mapping(row.get("reply_to"))
+        if "excerpt" in target:
+            row = {**row, "reply_to": {k: v for k, v in target.items() if k not in ("excerpt", "role")},
+                   "reply_citation": excerpt_citation(target)}
         refs = source_refs(row)
         listed = next((kept[ref] for ref in refs if ref in kept), None)
         if listed is None:
             rows.append(listed := dict(row))
             kept.update(dict.fromkeys(refs, listed))
         listed.update({key: row[key] for key in ("reply_to", "ts") if row.get(key) and not listed.get(key)})
+        if (row.get("reply_citation") and not listed.get("reply_citation") and target.get("address")
+                and _mapping(listed.get("reply_to")).get("address") == target["address"]):
+            listed.update(reply_citation=row["reply_citation"], reply_to=row["reply_to"])
         return listed
     for item in getattr(ctx, "_owner_directives", None) or []:
         if isinstance(item, Mapping):
@@ -1011,14 +1086,19 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
             if _opening(item, origin) and origin.get("ts") and not listed.get("ts"):
                 listed["ts"] = str(origin["ts"])
     last: Dict[str, Any] | None = None  # the field row a following reply target belongs to
-    for row in task_governing_words(_ctx_metadata(ctx))[0]:
+    inherited, _ = task_governing_words(_ctx_metadata(ctx))
+    bodies = _reply_bodies(inherited)
+    for row in inherited:
         if row["source"] == REPLY_TARGET:
+            if row.get("reply_view"):
+                continue  # selected targets are paired by their citation, never by adjacency
             if last is not None and not last.get("reply_to"):
                 last["reply_to"] = {"address": row["ref"], "author": row.get("author") or "", "text": row["text"]}
             last = None
             continue
+        target = _carried_selection(row.get("reply_citation"), bodies)
         last = add({"source": row["source"], "content": row["text"], "msg_id": row["ref"],
-                    **({"ts": row["ts"]} if row["ts"] else {})})
+                    **({"ts": row["ts"]} if row["ts"] else {}), **({"reply_to": target} if target else {})})
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
@@ -1280,7 +1360,9 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
 def words_block(row: Mapping[str, Any], indent: str = "") -> str:
     """One row as every section prints it: its stamp, its words (a reply target's unread fact) and its files line."""
     text = str(row.get("text") or "") or (unread_target(row) if row.get("source") == REPLY_TARGET else "")
-    text = "\n".join(part for part in (text, attachments_line(row.get("attachments"))) if part)
+    from ouroboros.dialogue_provenance import excerpt_citation
+    text = "\n".join(part for part in (text, attachments_line(row.get("attachments")),
+                                     excerpt_citation(_mapping(row.get("reply_citation")))) if part)
     return words_stamp(row) + "\n" + "\n".join(indent + line if line else line for line in text.split("\n"))
 
 

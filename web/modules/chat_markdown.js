@@ -76,7 +76,7 @@ function renderImageReference({ href, title, tokens, text }) {
     try { address = encodeURI(String(href ?? '')).replace(/%25/g, '%'); } catch { address = ''; }
     const titleAttr = title ? ` title="${attributeText(title)}"` : '';
     return `<span class="md-image-ref" data-md-image-href="${attributeText(address)}"${titleAttr}>`
-        + `Image${alt ? `: ${alt}` : ''}</span>`;
+        + `<span class="md-image-label">Image${alt ? ': ' : ''}</span>${alt}</span>`;
 }
 
 function getMarkdownParser(breaks = true) {

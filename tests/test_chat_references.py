@@ -46,14 +46,16 @@ def test_reply_survives_rotation_and_missing_reference_stays_explicit(tmp_path):
         resolve_reply(tmp_path, {"snippet": "forged"})
 
 
-def test_skill_ingress_shares_reply_and_address_with_web(tmp_path, monkeypatch):
+@pytest.mark.parametrize("extra", [{}, {"reply_excerpt": {"text": "this", "start_utf16": 5}}])
+def test_skill_ingress_shares_reply_and_address_with_web(tmp_path, monkeypatch, extra):
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     row = message_bus.log_chat("out", 1, 0, "Pick this", ts="2026-10-01T00:00:00Z")
     address = format_address(row_address(row))
     accepted, rejoined = message_bus.accept_local_message(
         bridge, tmp_path, "yes", chat_id=1, user_id=1, client_message_id="skill-reply",
-        source="skill:telegram", task_metadata={"reply_to": address})
+        source="skill:telegram", task_metadata={"reply_to": address, **extra})
     assert not rejoined and accepted["reply_to"]["address"] == address
+    assert accepted["reply_to"].get("excerpt") == extra.get("reply_excerpt")
     queued = bridge._inbox.get_nowait()
     message_bus.record_inbound_message(bridge, queued, chat_id=1, user_id=1,
         client_message_id="skill-reply", text="yes", ts=accepted["ts"])
@@ -170,3 +172,171 @@ def test_a_call_opening_row_names_itself_on_its_live_echo():
     owner = {**opening, "role": "user", "system_type": ""}
     owner.pop("host_fact")
     assert "row_client_message_id" not in projection_fields(owner), "the owner's own row keeps its id alone"
+
+
+@pytest.mark.parametrize("comment", ["", "  Follow the creek at dawn.  "])
+def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_path, monkeypatch, comment):
+    from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply
+    from ouroboros.gateway.task_decision import deliver_as_owner_message
+    from ouroboros.owner_quiz import late_answer_owner_text
+    from ouroboros.owner_words import reply_target
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    block = {"quiz_id": "trail", "state": "answered", "answered_after_terminal": True,
+             "answered_index": 0, "options": ["Take the ridge"], "comment": comment}
+    answer = {"task_id": "trail-work", "quiz_id": "trail", "answer_snapshot": {"task_id": "trail-work", "quiz": block}}
+    text = late_answer_owner_text(block)
+    assert deliver_as_owner_message(tmp_path, 1, text, "quiz_late_answer:trail-work:trail",
+                                    task_metadata={"late_answer": answer}) == (True, "")
+    [stored] = dialogue_test.chat_rows(tmp_path)
+    assert stored["late_answer"] == answer and stored["text"] == text
+    [live] = echoes
+    [history] = [r for r in _history(tmp_path) if r.get("client_message_id") == stored["client_message_id"]]
+    assert live["content"] == history["text"] == text  # don't change what a card submission displayed
+    assert live["role"] == history["role"] == "user"
+    assert live.get("reply_excerpt_disabled", False) == history.get("reply_excerpt_disabled", False) == (not comment)
+    address = live["row_address"]
+    excerpt = {"text": "creek" if comment else "ridge", "start_utf16": text.index("creek" if comment else "ridge")}
+    request = {"reply_to": address, "reply_excerpt": excerpt}
+    if comment:
+        reply = ingress_reply(tmp_path, request)
+        assert reply["role"] == "user" and reply["excerpt"] == excerpt
+        assert reply_target(tmp_path, reply)["text"] == comment
+    else:
+        with pytest.raises(ReplyExcerptNotAuthored):
+            ingress_reply(tmp_path, request)
+        reply = resolve_reply(tmp_path, address)
+        assert reply["role"] == "system" and reply["author_label"] == "System"
+        target = reply_target(tmp_path, reply)
+        assert "wrote no words" in target["text"] and "the text of task trail-work" in target["text"]
+
+
+def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp_path, monkeypatch):
+    from ouroboros.dialogue_provenance import quote_words, relation_text
+    from ouroboros.owner_words import reply_target
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    source = "Amber **moon**. See the [map](atlas)."
+    original = message_bus.log_chat("out", 1, 0, source, ts="2026-10-01T00:00:00Z")
+    address = format_address(row_address(original))
+    # A client can claim arbitrary rendered words. Only the addressed source can speak for its author.
+    excerpt = {"text": "A different passage.\n  " + "Snow-covered hills. " * 12, "start_utf16": 7}
+    meta = {"reply_to": address, "reply_excerpt": {**excerpt, "author": "Pretender", "role": "user"}}
+    bridge.handle_web_message("Trace this path.", client_message_id="selected", task_metadata=meta)
+    stored = dialogue_test.chat_rows(tmp_path)[-1]
+    ref = stored["reply_to"]
+    assert ref == {**reference_from_row(original), "excerpt": excerpt}
+    assert ref == echoes[-1]["reply_to"] == bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
+    assert ref == next(r for r in _history(tmp_path) if r.get("client_message_id") == "selected")["reply_to"]
+    assert json.dumps(excerpt["text"], ensure_ascii=False) in relation_text(stored)
+    assert quote_words(stored) == stored["text"] == "Trace this path."
+    assert reply_target(tmp_path, ref)["text"] == source
+    monkeypatch.setattr("ouroboros.chat_references.resolve_row", lambda *args: (None, {}))
+    bridge.handle_web_message("Trace this path.", client_message_id="selected", task_metadata=meta)
+    for replacement in ({}, {"reply_excerpt": {**excerpt, "start_utf16": 2}}, {"reply_excerpt": {**excerpt, "text": "Amber"}}):
+        with pytest.raises(ValueError, match="different message"):
+            bridge.handle_web_message("Trace this path.", client_message_id="selected",
+                                      task_metadata={"reply_to": address, **replacement})
+    with pytest.raises(ValueError, match="unavailable"):
+        bridge.handle_web_message("Trace this path.", client_message_id="fresh", task_metadata=meta)
+    assert bridge._inbox.empty()
+
+
+@pytest.mark.parametrize("words", ["Meet here", "Meet here\n\n[Attached file: map.pdf]"])
+def test_selected_web_attachment_source_keeps_only_the_author_caption(tmp_path, monkeypatch, words):
+    from ouroboros.chat_references import ingress_reply
+    from ouroboros.owner_words import reply_target
+
+    _web_bridge(tmp_path, monkeypatch)
+    tail = "[Attached file: map.pdf]"
+    file = {"name": "map.pdf", "mime": "application/pdf", "size": 55}
+    source = message_bus.log_chat("in", 1, 1, f"{words}\n\n{tail}", source="web",
+                                  message_meta={"attachments": [file]})
+    address = format_address(row_address(source))
+    selection = {"text": "Meet here", "start_utf16": 0}
+    whole = ingress_reply(tmp_path, {"reply_to": address})
+    ref = ingress_reply(tmp_path, {"reply_to": address, "reply_excerpt": selection})
+    assert ref["snippet"] == " ".join(words.split())
+    assert tail in reply_target(tmp_path, whole)["text"]  # whole-row Reply did not change
+    target = reply_target(tmp_path, ref)
+    assert target["text"] == words and target["attachments"][0]["name"] == "map.pdf"
+
+
+@pytest.mark.parametrize("excerpt", [None, {}, {"text": " ", "start_utf16": 0},
+                                     {"text": "a", "start_utf16": False}, {"text": "a", "start_utf16": -1},
+                                     {"text": "a", "start_utf16": 2**53}, {"text": "\ud800", "start_utf16": 1}])
+def test_invalid_excerpt_never_downgrades_to_an_ordinary_reply(excerpt):
+    from ouroboros.chat_references import reply_identity
+
+    with pytest.raises(ValueError, match="reply_excerpt"):
+        reply_identity({"reply_to": "row:1@2026-10-01T00:00:00Z#0123456789ab", "reply_excerpt": excerpt})
+
+
+def test_excerpt_of_project_answer_keeps_runtime_citation_and_whole_authored_source(tmp_path, monkeypatch):
+    from ouroboros.context import build_runtime_section
+    from ouroboros.owner_words import reply_target
+    from tests._context_shared import _make_health_env
+
+    _web_bridge(tmp_path, monkeypatch)
+    selected = "The star chart is ready. " * 10 + "Finish."
+    answer = f"**Atlas**\n\n{selected}"
+    mirror = message_bus.log_chat("system", 1, 0, "Observatory update", record_type="project_completion_summary",
+                                  message_meta={"completion_answer": answer, "project_id": "observatory"})
+    from ouroboros.chat_references import ingress_reply
+    excerpt = {"text": selected, "start_utf16": 6}
+    ref = ingress_reply(tmp_path, {"reply_to": format_address(row_address(mirror)), "reply_excerpt": excerpt})
+    task = {"id": "chart", "type": "task", "metadata": {"reply_reference": ref}}
+    model = json.loads(build_runtime_section(_make_health_env(tmp_path / "env"), task).split("\n\n", 1)[1])
+    assert model["reply_to"]["excerpt"] == excerpt and "client-reported" in model["reply_excerpt_note"]
+    target = reply_target(tmp_path, ref)
+    assert target == {"address": ref["address"], "author": "Ouroboros", "text": answer, "excerpt": excerpt,
+                      "role": ref["role"]} and ref["role"] == "assistant"
+    question = message_bus.log_chat("out", 1, 0, "Which chart?", record_type="quiz")
+    with pytest.raises(ValueError, match="authored chat message"):
+        ingress_reply(tmp_path, {"reply_to": format_address(row_address(question)), "reply_excerpt": excerpt})
+
+
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("initial_width", [12, 35, 64])
+def test_reply_digest_acceptance_and_retry_verify_the_whole_supplied_prefix(tmp_path, monkeypatch, selected, initial_width):
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    source = message_bus.log_chat("out", 1, 0, "A harbor.", record_type="proactive_message")
+    row = row_address(source)
+    prefix = format_address(row).rsplit("#", 1)[0] + "#"
+    digest = row["row_sha256"]
+    fields = {"reply_excerpt": {"text": "harbor", "start_utf16": 2}} if selected else {}
+    def send(sha):
+        bridge.handle_web_message("Explain", client_message_id="same-reply",
+                                  task_metadata={"reply_to": prefix + sha, **fields})
+    wrong = digest[:-1] + ("1" if digest[-1] == "0" else "0")
+    if selected:
+        with pytest.raises(ValueError, match="unavailable"):
+            send(wrong)
+    send(digest[:initial_width])
+    assert echoes[-1]["reply_to"]["address"] == prefix + digest[:12]
+    assert echoes[-1]["reply_to"]["snippet"] == "A harbor."
+    monkeypatch.setattr("ouroboros.chat_references.resolve_row", lambda *_: pytest.fail("accepted digest lost"))
+    for length in (12, 36, 64):
+        send(digest[:length])
+    with pytest.raises(ValueError, match="different message"):
+        send(wrong)
+    assert bridge._inbox.qsize() == 1
+
+
+def test_older_reply_with_only_a_short_address_requires_the_source_for_more_digits(tmp_path, monkeypatch):
+    from ouroboros.chat_references import same_reply
+
+    _web_bridge(tmp_path, monkeypatch)
+    source = message_bus.log_chat("out", 1, 0, "Earlier source.")
+    row = row_address(source)
+    short = format_address(row)
+    prefix = short.rsplit("#", 1)[0] + "#"
+    digest = row["row_sha256"]
+    wrong = digest[:-1] + ("1" if digest[-1] == "0" else "0")
+    saved = {"address": short}
+    assert same_reply(tmp_path, saved, {"address": prefix + digest})
+    assert not same_reply(tmp_path, saved, {"address": prefix + wrong})
+    monkeypatch.setattr("ouroboros.chat_references.resolve_history_row", lambda *_: (None, {"state": "absent"}))
+    assert same_reply(tmp_path, saved, {"address": short})
+    assert not same_reply(tmp_path, saved, {"address": prefix + digest})

@@ -27,10 +27,17 @@ KIND_RELAY = "relay_entry"
 ROUTED_BY_HEAD = "routed:head"
 
 
+def owner_source_row(row) -> dict:
+    """The host-recorded row a retained copy stands for: without the relay's local annotations (the root it was
+    read from; the carriage fact ``inject_carried`` keeps beside a carried row), so every forward of one row
+    names the address its store answers to."""
+    return {key: value for key, value in (row or {}).items()
+            if key != "_owner_source_root" and not (key == "carried" and isinstance(value, dict))}
+
+
 def owner_row_address(row) -> str:
     """Canonical row address, excluding local source-authority annotations."""
-    clean = {key: value for key, value in (row or {}).items() if key != "_owner_source_root"}
-    return format_address(row_address(clean))
+    return format_address(row_address(owner_source_row(row)))
 
 
 def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
@@ -148,8 +155,9 @@ def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None, 
     root = source_root or (row or {}).get("_owner_source_root") or (
         canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None)
     if quotable_owner_row(row, root, accounts=accounts):
+        # A forwarded copy brings its teller's carriage fact: this work holds the source row, as reached here.
         held_owner_messages(ctx)[owner_row_address(row)] = {
-            **copy.deepcopy(row), "_owner_source_root": str(root) if root else ""}
+            **copy.deepcopy(owner_source_row(row)), "_owner_source_root": str(root) if root else ""}
         persist_held_state(ctx)
         return row
     return None
@@ -246,10 +254,11 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
                         "address": address or owner_row_address(row),
                         "client_message_id": str(row.get("client_message_id") or "")},
              "owner_row": copy.deepcopy(row)}
-    if root and row.get("late_answer"):
+    reply = row.get("reply_to")
+    if root and (row.get("late_answer") or isinstance(reply, dict) and reply.get("excerpt")):
         quote["owner_row"].setdefault("_owner_source_root", str(root))
-    if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
-        quote["reply_to"] = copy.deepcopy(row["reply_to"])
+    if isinstance(reply, dict) and reply:
+        quote["reply_to"] = copy.deepcopy(reply)
     if late := late_answer_ref(row.get("late_answer")):
         block = resolved_late_quiz(root, late)
         fact = late_quiz_input(late, block)
@@ -377,6 +386,7 @@ def _quote_body(row: dict, line: str, living: dict | None = None, root=None) -> 
     the message it replies to, the card it answers and the files it carries, each as a host frame beside my human's
     words."""
     from ouroboros.answer_facts import card_input, press_record, row_words
+    from ouroboros.dialogue_provenance import excerpt_citation
     from ouroboros.owner_words import OWNER_PRESS, answered_card_source
 
     root = row.get("_owner_source_root") or root
@@ -389,8 +399,19 @@ def _quote_body(row: dict, line: str, living: dict | None = None, root=None) -> 
         text = row_words(row, root)
     body = f"{line}\n{text}"
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
+        source = {key: value for key, value in row["reply_to"].items() if key != "excerpt"}
+        citation = excerpt_citation(row["reply_to"])
+        if citation and root is not None and "text" not in source:
+            from ouroboros.owner_words import reply_target
+
+            target = reply_target(root, row["reply_to"])
+            source["text"] = target.get("text") or "(source unavailable)"
+            if target.get("attachments"):
+                source["attachments"] = target["attachments"]
         body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"
-                 + json.dumps(row["reply_to"], ensure_ascii=False))
+                 + json.dumps(source, ensure_ascii=False))
+        if citation:
+            body += "\n" + citation
     if (target := (living or row.get("corpus_answer") or {}).get("reply_to")) and not row.get("late_answer"):
         body += f"\n[Host question frame]\n{target.get('author')}: {target.get('text')}"
     answered, asker = answered_card_source(row, root)
@@ -879,6 +900,8 @@ def _words_identity(row: dict) -> Any:
 def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     """``(address, chat row)`` for a row of the set this run holds no chat row for (a direct turn's input): its
     words, time, room and client id as the corpus recorded them, in the shape a quote is built from."""
+    from ouroboros.owner_words import _carried_selection, _reply_body_key
+
     ref, client = str(row.get("ref") or ""), ""
     chat_id = int(getattr(ctx, "current_chat_id", None) or 1)
     if ref.startswith("chat "):
@@ -889,10 +912,13 @@ def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     pristine = {"direction": "in", "chat_id": chat_id, "ts": str(row.get("ts") or ""), "text": row["text"],
                 **({"client_message_id": client} if client else {}),
                 **({"attachments": copy.deepcopy(row["attachments"])} if row.get("attachments") else {})}
+    if selection := _carried_selection(citation := row.get("reply_citation"), targets or {}, attachments=True):
+        pristine["reply_to"] = {**selection, "author_label": selection["author"],
+                                **({"role": citation["role"]} if citation.get("role") else {})}
     if "answer_input" in row or row["source"] in ("owner_press", "owner_card_input"):
         fact = row.get("answer_input") or {}
         address = fact.get("reply_address")
-        target = (targets or {}).get(address) or {}
+        target = (targets or {}).get(_reply_body_key(address)) or {}
         answer = {"source": row["source"], **{k: fact[k] for k in ("source_task_id", "quiz_id") if fact.get(k)}}
         if target:
             answer["reply_to"] = {"address": address, "author": target.get("author"), "text": target["text"],
@@ -909,7 +935,7 @@ def _rows_to_carry(ctx, root) -> list:
     author's words ride inside its row's quote). The quote is built from the chat row the run holds for it (its
     carriage fact stripped), else from the row's recorded form; a row's identities are its printed references
     (now and before its room rode with it) and its address."""
-    from ouroboros.owner_words import REPLY_TARGET, _chat_ref, _deduped, _earlier_refs, _held_words, _tree_words
+    from ouroboros.owner_words import REPLY_TARGET, _chat_ref, _deduped, _earlier_refs, _held_words, _reply_bodies, _tree_words
 
     held = held_owner_messages(ctx)
     by_ref = {}
@@ -920,7 +946,7 @@ def _rows_to_carry(ctx, root) -> list:
                 str(key), {k: v for k, v in value.items() if k != "carried"}, str(fact.get("went_to") or ""))
     rows, _root, accounts = _tree_words(ctx)
     rows = _deduped(rows + _held_words(held, root, str(ctx.task_id), context=True, accounts=accounts))
-    targets = {row["ref"]: row for row in rows if row["source"] == REPLY_TARGET}
+    targets = _reply_bodies(rows)
     earlier, carried = _earlier_refs(ctx), []
     for row in rows:
         if row["source"] == REPLY_TARGET:

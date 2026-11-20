@@ -456,12 +456,16 @@ def accepted_chat_message(drive_root, chat_id: int, client_message_id: str) -> O
     return None if found is None else dict(found.row)
 
 
-def rejoin_or_refuse(row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
+class ClientMessageIdConflict(ValueError):
+    """A submission id already belongs to different accepted input."""
+
+
+def rejoin_or_refuse(root, row: dict, source: str, logged: str, refs: Any, reply: Optional[dict] = None,
                     *, execution_transport: Optional[dict] = None) -> None:
     """A redelivered frame may rejoin the accepted row only as the same message of the same source
     (text, ordered attachment content and the Reply it points at)."""
     if row.get("source") != source:
-        raise ValueError("client_message_id is already bound to another source")
+        raise ClientMessageIdConflict("client_message_id is already bound to another source")
     if row.get("execution_transport") != execution_transport:
         from ouroboros.contracts.realtime import RealtimeSetupError
 
@@ -470,9 +474,10 @@ def rejoin_or_refuse(row: dict, source: str, logged: str, refs: Any, reply: Opti
         from ouroboros.contracts.realtime import RealtimeSetupError
 
         raise RealtimeSetupError("realtime_restart_required", "this call's accepting process ended; start a new call")
+    from ouroboros.chat_references import same_reply
     if (not same_message(row, logged, refs)
-            or (row.get("reply_to") or {}).get("address", "") != (reply or {}).get("address", "")):
-        raise ValueError("client_message_id was already used for a different message")
+            or not same_reply(root, row.get("reply_to") or {}, reply or {})):
+        raise ClientMessageIdConflict("client_message_id was already used for a different message")
 
 
 def hand_over(root: Path, chat_id: int, message_id: str, name: Optional[str]) -> bool:
@@ -509,14 +514,14 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     if not logged:
         raise ValueError("message is empty")
     from ouroboros.chat_references import ingress_reply
-    reply = ingress_reply(drive_root, message.get("task_metadata") or {})
-    if reply:  # a replayed obligation dispatches the same reference
-        message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
         row = accepted_chat_message(root, chat_id, message_id)
+        reply = ingress_reply(drive_root, message.get("task_metadata") or {}, accepted=row)
+        if reply:  # a replayed obligation dispatches the same reference
+            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
         fresh = attempted = False
         if row is None:
             attempted = True
@@ -539,7 +544,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             hand_over(root, chat_id, message_id, name)
         else:
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
-            rejoin_or_refuse(row, source, logged, refs, reply,
+            rejoin_or_refuse(root, row, source, logged, refs, reply,
                             execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
             if saved_press := late_press_ref(row.get("card_press")):
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "card_press": saved_press}
@@ -623,6 +628,8 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         ref = dict(ref)
         ts = ref["ts"]
         placeholder = row.get("text_placeholder") is True
+        if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
+            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": row["reply_to"]}
     elif message.get("suppress_chat_log"):
         return None
     else:
@@ -637,7 +644,7 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         # no words or caption from the sender: TEXT is the host's placeholder
         placeholder = not str(message.get("text") or "").strip() and not str(message.get("image_caption") or "").strip()
         from ouroboros.chat_references import ingress_reply
-        reply = ingress_reply(message_bus.DATA_DIR, metadata)
+        reply = message.get("accepted_reply") or ingress_reply(message_bus.DATA_DIR, metadata)
         if reply:
             metadata["reply_reference"] = reply
             message["task_metadata"] = metadata
@@ -661,7 +668,7 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         views = attachment_views((message.get("task_metadata") or {}).get("chat_attachments"))
         bridge.broadcast({
             "type": "photo" if message.get("image_base64") and not views else "chat", "role": "user",
-            "content": text if views and placeholder else str(message.get("text") or ""),
+            "content": text if views else str(message.get("text") or ""),
             "caption": str(message.get("image_caption") or ""), **({"text_placeholder": True} if views and placeholder else {}),
             "image_base64": "" if views else str(message.get("image_base64") or ""), **({"attachments": views} if views else {}),
             "mime": str(message.get("image_mime") or "image/jpeg"), "ts": ts, "source": source,
@@ -716,9 +723,6 @@ def handle_web_message(
     metadata = dict(task_metadata or {})
     host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
     call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
-    reply = ingress_reply(bus.DATA_DIR, metadata)
-    if reply:  # the obligation of a fresh acceptance replays the same reference
-        metadata["reply_reference"] = reply
     if str(project_id or "").strip():
         metadata.setdefault("project_id", str(project_id).strip())
     from ouroboros.chat_uploads import attachment_placeholder
@@ -731,6 +735,9 @@ def handle_web_message(
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
         row = accepted_chat_message(bus.DATA_DIR, thread_id, client_message_id) if client_message_id else None
+        reply = ingress_reply(bus.DATA_DIR, metadata, accepted=row)
+        if reply:  # the obligation of a fresh acceptance replays the same reference
+            metadata["reply_reference"] = reply
         fresh = False
         if row is None:
             attachments = claim_refs(metadata.get("chat_attachments"), bus.DATA_DIR)  # DELETE refuses them now
@@ -757,7 +764,7 @@ def handle_web_message(
             # attachment content and the same Reply rejoin it (no second row); anything else under
             # that id is refused, claiming none of its uploads. A rejoin dispatches only by taking
             # the row's still-owed dispatch (once); a dispatch that began is never replayed.
-            rejoin_or_refuse(row, "web", log_text, stored_refs(metadata.get("chat_attachments")), reply,
+            rejoin_or_refuse(bus.DATA_DIR, row, "web", log_text, stored_refs(metadata.get("chat_attachments")), reply,
                             execution_transport=metadata.get("execution_transport"))
             ts, attachments = str(row.get("ts") or ts), row.get("attachments")
             log_text, placeholder = str(row.get("text") or log_text), row.get("text_placeholder") is True

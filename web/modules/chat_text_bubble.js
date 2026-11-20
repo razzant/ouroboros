@@ -75,13 +75,14 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         const { rendered, rich: richMarkdown, shown, skillReview } = bubbleWords(text, role, { markdown, systemType, source,
             attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview });
         if (skillReview) bubble.classList.add('chat-skill-review');
+        const authored = ['user', 'assistant'].includes(role) && !isProgress && opts.textPlaceholder !== true && Boolean(shown);
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
         bubble.innerHTML = `
             <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
-            <div class="message${richMarkdown ? ' ui-rich-content' : ''}">${rendered}</div>
+            <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
             ${evidenceLinkHtml(opts.evidenceRef)}
             ${pendingHtml}
             ${timeHtml}

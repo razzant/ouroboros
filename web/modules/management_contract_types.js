@@ -983,6 +983,8 @@
 
 /**
  * @typedef {Object} CommandRequest
+ * @property {string=} reply_to
+ * @property {import('./client_contract_types.js').ReplyExcerpt=} reply_excerpt
  * @property {string} cmd
  * @property {string=} if_boot // optional boot.since precondition; Panic ignores it
  * @property {Object=} client_surface

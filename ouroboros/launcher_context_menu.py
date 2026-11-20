@@ -34,8 +34,11 @@ list but WebView2's was decided by real right-clicks in a disposable guest:
 from __future__ import annotations
 
 import functools
+import json
 import logging
 from typing import Any, Sequence
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 log = logging.getLogger("launcher.context_menu")
 
@@ -131,10 +134,81 @@ def filter_cocoa_menu(menu: Any) -> None:
         menu.removeItemAtIndex_(index)
 
 
-def _restore_cocoa(guilib: Any, _window: Any) -> None:
+def enable_quote_menu(window: Any, url: str) -> None:
+    """Only the launcher's main, loopback chat document may add the selection action."""
+    origin = urlsplit(url)
+    if (origin.scheme == "http" and origin.hostname == "127.0.0.1" and origin.port
+            and origin.username is None and origin.password is None and origin.path in ("", "/")):
+        window._quote_menu_origin = f"http://127.0.0.1:{origin.port}"
+
+
+def _chat_document(view: Any) -> bool:
+    if view is not _quote_view:
+        return False
+    current = urlsplit(str(view.URL().absoluteString()))
+    return current.path in ("", "/") and f"{current.scheme}://{current.netloc}" == _quote_origin
+
+
+_quote_view = None
+_quote_origin = ""
+_quote_ticket = ""
+_QUOTE_ITEM = "OuroborosReplyToQuote"
+
+
+def _quote_script(method: str, ticket: str) -> str:
+    # WK can navigate between the native URL check and evaluating this fixed invocation in the document.
+    return (f"location.origin === {json.dumps(_quote_origin)} && location.pathname === '/' && "
+            "document.querySelector('meta[name=ouroboros-ui-owner]')?.content === 'core' && "
+            f"window.ouroReplyToQuote?.{method}({json.dumps(ticket)}) === true")
+
+
+def _add_quote_item(view: Any, menu: Any, ticket: str) -> None:
+    from AppKit import NSMenuItem
+
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Reply to quote", "ouroReplyToQuote:", "")
+    item.setTarget_(view)
+    item.setIdentifier_(_QUOTE_ITEM)
+    item.setRepresentedObject_(ticket)
+    menu.insertItem_atIndex_(item, 0)
+    menu.update()
+
+
+def _offer_quote(view: Any, menu: Any) -> None:
+    global _quote_ticket
+    if view is not _quote_view or view is None:
+        return
+    ticket = _quote_ticket = uuid4().hex
+    for item in list(menu.itemArray()):
+        if str(item.identifier()) == _QUOTE_ITEM:
+            menu.removeItem_(item)
+    if not _chat_document(view):
+        return
+
+    def available(eligible: Any, error: Any) -> None:
+        if error is None and bool(eligible) and ticket == _quote_ticket and _chat_document(view):
+            _add_quote_item(view, menu, ticket)
+
+    view.evaluateJavaScript_completionHandler_(_quote_script("available", ticket), available)
+
+
+def ouroReplyToQuote_(view: Any, sender: Any) -> None:  # noqa: N802 (AppKit action)
+    global _quote_ticket
+    ticket = str(sender.representedObject())
+    if view is not _quote_view or not ticket or ticket != _quote_ticket:
+        return
+    _quote_ticket = ""
+    if _chat_document(view):
+        view.evaluateJavaScript_completionHandler_(_quote_script("activate", ticket), None)
+
+
+def _restore_cocoa(guilib: Any, window: Any) -> None:
+    global _quote_view, _quote_origin
+    if getattr(window, "_quote_menu_origin", None):
+        _quote_view = guilib.BrowserView.instances[window.uid].webview
+        _quote_origin = window._quote_menu_origin
     if "cocoa" in _patched:
         return
-    from objc import classAddMethods
+    from objc import classAddMethods, selector
 
     def willOpenMenu_withEvent_(_view: Any, menu: Any, _event: Any) -> None:  # noqa: N802 (Objective-C selector)
         if _debug():
@@ -144,8 +218,14 @@ def _restore_cocoa(guilib: Any, _window: Any) -> None:
         except Exception:
             log.warning("This menu stays empty: it could not be filtered.", exc_info=True)
             menu.removeAllItems()
+            return
+        try:
+            _offer_quote(_view, menu)
+        except Exception:
+            log.warning("The chat quote action is unavailable.", exc_info=True)
 
-    classAddMethods(guilib.BrowserView.WebKitHost, [willOpenMenu_withEvent_])
+    action = selector(ouroReplyToQuote_, signature=b"v@:@")
+    classAddMethods(guilib.BrowserView.WebKitHost, [willOpenMenu_withEvent_, action])
     _patched.add("cocoa")
 
 

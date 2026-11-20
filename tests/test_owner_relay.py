@@ -530,6 +530,47 @@ def test_a_carried_entry_renders_the_carried_line_and_holds_the_row_outside_corp
     assert section["owner_quote_handles"] == [address]
 
 
+@pytest.mark.parametrize("selected", [False, True], ids=["plain", "selected-reply"])
+def test_a_carried_row_told_on_keeps_the_address_its_store_answers_to(tmp_path, selected):
+    """A row the host carried is held with its carriage fact beside it. Told on to another work, and on again, it
+    is the same stored row: each holder keeps it under the address the store's sha-checked read answers to, as a
+    row that reached that work, and a selected reply keeps its passage."""
+    from ouroboros.chat_chain import resolve_row
+    from ouroboros.owner_relay import inject_relay, owner_quote, owner_row_address
+
+    excerpt = {"text": "owner", "start_utf16": 6}
+    _, replied = source(tmp_path)
+    reply = {"reply_to": {"address": replied, "role": "user", "author_label": "You", "excerpt": excerpt}} if selected else {}
+    stored = dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z",
+                                                     "text": "Carry this on.", "client_message_id": "owner-2", **reply}).row
+    address = format_address(row_address(stored))
+    assert resolve_row(tmp_path, address)[0] == stored
+    child = tmp_path / "child"
+    child.mkdir()
+    _carried_entry(tmp_path, child, "helper", owner_quote(tmp_path, stored, address=address), went_to="sibling")
+    holder = _helper(child)
+    _drain_incoming_messages([], queue.Queue(), child, "helper", None, set(), owner_ctx=holder)
+    carried = held_owner_messages(holder)[address]
+    assert carried["carried"]["went_to"] == "sibling" and owner_row_address(carried) == address
+    for hop in ("second", "third"):
+        quotes, error = quote_rows(holder, [address])
+        assert not error
+        entry, created = write_relay(tmp_path, hop, relay_id=f"onward-{hop}", note="note", quotes=quotes, chat_id=1,
+                                     teller_task_id=holder.task_id)
+        assert created
+        holder, frames = context(tmp_path), []
+        holder.task_id = hop
+        inject_relay(holder, entry, frames)
+        held = held_owner_messages(holder)
+        assert list(held) == [address] and "carried" not in held[address]
+        assert [row["msg_id"] for row in holder._owner_directives] == [address]
+        assert resolve_row(tmp_path, next(iter(held)))[0] == stored, "the address is the stored row's own"
+        assert f"handle {address}]" in frames[0]["content"]
+        if selected:
+            assert holder._owner_directives[0]["reply_to"]["excerpt"] == excerpt
+            assert f"Sender-selected passage of You at {replied}" in frames[0]["content"]
+
+
 def test_one_address_is_one_entry_and_a_row_held_under_the_same_fact_renders_nothing(tmp_path):
     """Two drains of a root write the member identical bytes under one id, whichever name the project has by then;
     an entry delivered again (a crash before its ack) renders nothing more; a context entry after the addressed one

@@ -10,7 +10,7 @@ import { isPanicFrame } from './panic.js';
 // response for the sender's own bubble, the echo for other tabs, history for
 // replay — the same dict everywhere. Nothing here builds a file URL.
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { documentReaderKind } from './document_reader.js';
 
@@ -241,7 +241,7 @@ async function degrade(atoms, block, node, view) {
  * file is staged, revoked when it is removed, sent or the composer is destroyed,
  * and kept across a failed send so the owner can retry.
  */
-export function createComposerAttachments({ preview, attachBtn, fileInput, input, onLayout, showToast }) {
+export function createComposerAttachments({ preview, attachBtn, fileInput, input, onLayout, showToast, onChange = () => {} }) {
     let pending = [];
     let uploading = false;
 
@@ -267,6 +267,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
                 if (uploading) return;
                 const removeId = button.dataset.attachmentRemove || '';
                 pending = pending.filter((item) => item.id !== removeId || (revoke(item), false));
+                onChange();
                 render();
             });
         });
@@ -288,6 +289,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
             display_name: file.name || 'upload',
             thumb: thumbFor(file),
         })));
+        onChange();
         render();
     }
 
@@ -302,17 +304,27 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     }
 
     /**
-     * Upload every staged file in order; `connected()` is checked before each one.
+     * Upload the submitted files in order; `connected()` is checked before each one.
      * Resolves with `{filename, display_name, mime, view}` per file. On failure the
      * uploads already made are handed back on the error (`error.uploaded`) for
      * cleanup, and the staged files (with their thumbnails) stay for a retry.
      */
-    async function upload(connected) {
+    async function upload(connected, items = pending.slice()) {
         const uploaded = [];
         setUploading(true);
         try {
-            for (const item of [...pending]) {
+            for (const item of items) {
                 if (!connected()) throw new Error('Connection closed during upload. Reconnect and try again.');
+                if (item.upload) {
+                    const { view } = item.upload;
+                    const available = view?.url && await apiFetch(view.url, { method: 'HEAD', cache: 'no-store' });
+                    if (!available || available.status === 404) throw new Error(fmt(
+                        'Saved attachment “{name}” is unavailable. Remove it or attach it again.', { name: item.display_name }));
+                    if (!available.ok) throw new Error(fmt('Could not check saved attachment “{name}”. Try again.',
+                        { name: item.display_name }));
+                    uploaded.push({ ...item.upload, reused: true });
+                    continue;
+                }
                 const data = await apiClient.uploadChatAttachment(item.file);
                 uploaded.push({
                     filename: data.filename || '',
@@ -324,7 +336,7 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
             if (!connected()) throw new Error('Connection closed after upload. Reconnect and try again.');
             return uploaded;
         } catch (error) {
-            error.uploaded = uploaded;
+            error.uploaded = uploaded.filter(item => !item.reused);
             throw error;
         } finally {
             setUploading(false);
@@ -332,15 +344,39 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     }
 
     function clear() {
+        const changed = pending.length > 0;
         pending.forEach(revoke);
         pending = [];
+        if (changed) onChange();
         render();
     }
 
     return {
         stage,
         upload,
+        snapshot: () => pending.slice(),
         clear,
+        // Once a message has actually been sent, a badge still staged keeps the ref of the upload
+        // that just completed, matched by its staged identity and never by list index: a removed or
+        // replaced badge cannot take another item's ref. Its old retry frame remains independent:
+        // removing the badge must not delete the file from that frame.
+        keepUploads(staged, uploads) {
+            const refs = new Map();
+            staged.forEach((item, index) => {
+                const upload = draftUpload(uploads[index]);
+                if (upload) refs.set(item.id, upload);
+            });
+            for (const item of pending) {
+                const upload = refs.get(item.id);
+                if (upload) item.upload = upload;
+            }
+        },
+        restoreUploads(uploads) {
+            pending = (Array.isArray(uploads) ? uploads : []).map(draftUpload).filter(Boolean)
+                .map((upload, index) => ({ id: `saved-${index}`, display_name: upload.display_name, upload }));
+            if (pending.length) render();
+        },
+        get uploads() { return pending.flatMap(item => item.upload ? [item.upload] : []); },
         destroy() { pending.forEach(revoke); pending = []; },
         get count() { return pending.length; },
         get busy() { return uploading; },
@@ -349,7 +385,19 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
 
 // What a reload keeps of a sent frame: its words, identity, routing and the refs of uploads the
 // host already stores — never bytes, never the send-time client_surface (an honest gap on resend).
-const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to'];
+export function sameExcerpt(left, right) {
+    return Boolean(left && right && left.start_utf16 === right.start_utf16 && left.text === right.text);
+}
+
+const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt'];
+
+function draftUpload(raw) {
+    const filename = String(raw?.filename || '');
+    if (!/^[0-9a-f]{32}_[^/\\\r\n]+$/.test(filename)) return null;
+    const [view] = attachmentViews([raw.view]);
+    return { filename, display_name: String(raw.display_name || view?.name || 'attachment'), mime: String(raw.mime || ''),
+        view: view?.available && new URLSearchParams(view.url.split('?')[1]).get('upload') === filename ? view : null };
+}
 
 function keptFrame(frame) {
     if (isPanicFrame(frame)) return null;
@@ -403,7 +451,7 @@ export function placeIngressNote(bubble, note) {
  * instance's `hasPendingWork`, which keeps a Project room holding one hidden instead of
  * destroying it. Nothing here resends by itself or deletes an upload: those stay on the host.
  */
-export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, storage = null, storageKey = '' }) {
+export function createUnconfirmedSends({ send, root, onDomWrite, showToast, compose = null, savedExcerpt = null, storage = null, storageKey = '' }) {
     const frames = new Map();  // id -> { frame, views, ts, restored, queued }
     const bubbleOf = (id) => [...(root()?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
         .find((node) => node.dataset.clientMessageId === id) || null;
@@ -412,7 +460,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         const kept = storage && storageKey ? storage.getItem(storageKey) : null;
         for (const entry of kept === null ? [] : JSON.parse(kept)) {
             const frame = keptFrame(entry?.frame);
-            if (frame) frames.set(String(frame.client_message_id), { frame, views: attachmentViews(entry.views),
+            if (frame) frames.set(String(frame.client_message_id), { frame, reply: entry.reply, draft: entry.draft, draftVersion: entry.draftVersion, views: attachmentViews(entry.views),
                 ts: String(entry.ts || ''), restored: true });
             else unreadable = true;
         }
@@ -427,7 +475,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         try {
             if (!frames.size) storage.removeItem(storageKey);
             else storage.setItem(storageKey, JSON.stringify([...frames.values()]
-                .map(({ frame, views, ts }) => ({ frame: keptFrame(frame), views, ts }))));
+                .map(({ frame, reply, draft, draftVersion, views, ts }) => ({ frame: keptFrame(frame), reply, draft, draftVersion, views, ts }))));
         } catch {
             showToast(tr('chat.send_unconfirmed_unkept',
                 'This tab could not keep the unsaved message for a reload. Send again still works until then.'), 'error',
@@ -447,7 +495,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             return;
         }
         // The doubt waits for the next fact; a pending saved row keeps its note, without actions.
-        onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note, bubbleOf(id)), true));
+        if (note) onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note, bubbleOf(id)), true));
     }
 
     // Without its actions a pending saved note is the quiet tick again (placeIngressNote).
@@ -487,7 +535,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
     // Saved by a host process that has since ended: what it did with the row is unknown, and nothing replays it.
     // The one honest next step is a NEW message: its action prepares the composer with the owner's own words and sends
     // nothing; the saved row stays as it is, and the owner reads, edits and sends (or does not) from the composer.
-    function doubtDelivery(bubble) {
+    function doubtDelivery(bubble, reply) {
         let note = bubble.querySelector('[data-ingress-saved]');
         if (!note) {
             note = Object.assign(document.createElement('div'), { className: 'msg-pending' });
@@ -500,7 +548,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         if (compose) {
             const words = () => bubble.querySelector('.message')?.textContent || '';
             // Short visible words so the sentence and its action share one row on a phone; the name stays whole.
-            const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words()));
+            const asNew = action(tr('chat.send_as_new_short', 'Send as new'), 'send_as_new', () => compose(words(), reply?.excerpt ? reply : null));
             asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
             note.append(asNew);
         }
@@ -518,13 +566,28 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         }
     }
 
+    function matchingDraft(draft, reply, draftVersion) {
+        return [...frames.values()].find(entry => entry.draftVersion === draftVersion && entry.draft === draft
+            && entry.frame.reply_to === reply.reply_to && sameExcerpt(entry.frame.reply_excerpt, reply.reply_excerpt));
+    }
+
     return {
-        track(frame, { views = [], ts = '', queued = false } = {}) {
+        track(frame, { views = [], ts = '', queued = false, reply, draft, draftVersion } = {}) {
             if (isPanicFrame(frame)) return;
             const id = String(frame?.client_message_id || '');
             if (!id) return;
-            frames.set(id, { frame, views: attachmentViews(views), ts, queued });
+            frames.set(id, { frame, reply, draft, draftVersion, views: attachmentViews(views), ts, queued });
             persist();
+        },
+        prepareExcerptRetry(draft, reply, draftVersion) {
+            const entry = matchingDraft(draft, reply, draftVersion);
+            if (!entry) return null;
+            const id = entry.frame.client_message_id;
+            // If an echo settled it during a settings save, this was still a retry, not a fresh message.
+            return () => {
+                if (frames.get(id) === entry && entry.draft !== undefined && !entry.queued)
+                    retry(id, bubbleOf(id)?.querySelector('[data-ingress-unconfirmed]'));
+            };
         },
         /** The socket's offline queue wrote (or dropped) a queued frame: from now on it is this tab's to offer again. */
         flushed(id) {
@@ -538,6 +601,16 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             const id = String(row?.client_message_id || '');
             if (row?.role !== 'user' || row.ingress_accepted !== true || !frames.has(id)) return;
             const bubble = bubbleOf(id);
+            const entry = frames.get(id);
+            if (entry.draft !== undefined) {
+                // The composer's cleanup needs the row's exact reply; an accepted saved row
+                // confirms this id whatever it echoes, so its retry claim ends either way.
+                if (entry.frame.reply_to === row.reply_to?.address
+                    && sameExcerpt(entry.frame.reply_excerpt, row.reply_to?.excerpt))
+                    savedExcerpt?.(entry.draft, entry.frame, entry.draftVersion);
+                delete entry.draft;
+                if (row.ingress_pending) persist();
+            }
             if (row.ingress_dispatched === true) {
                 forget(id);
             } else if (row.ingress_pending === true) {
@@ -546,7 +619,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
                 frames.get(id).restored = false;
             } else if (bubble) {  // without its bubble the frame waits, so the doubt is not lost unseen
                 forget(id);
-                onDomWrite(() => doubtDelivery(bubble));
+                onDomWrite(() => doubtDelivery(bubble, row.reply_to));
             }
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */

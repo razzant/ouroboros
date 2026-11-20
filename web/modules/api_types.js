@@ -269,6 +269,7 @@
  * @property {boolean=} ingress_pending This live host process accepted the row and has entered or refused neither yet: a later echo or history read says which.
  * @property {Array<NonNullable<UploadResponse['view']>>=} attachments The owner message's ChatAttachmentView list: the same views history replays.
  * @property {boolean=} text_placeholder The owner row's text is the host's placeholder (no words were sent): no caption is shown.
+ * @property {boolean=} reply_excerpt_disabled The displayed card input is not one authored passage.
  * @property {boolean=} markdown
  * @property {boolean=} is_progress
  * @property {string=} task_id

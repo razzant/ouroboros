@@ -401,3 +401,96 @@ def test_solitary_inline_photo_retains_a_staged_original_after_acceptance(tmp_pa
     assert decode_block(block) == raw
     assert client.post("/chat/inject", headers=_headers(), json=body).json()["rejoined"] is True
     assert bridge._inbox.empty()
+
+
+def test_named_skill_reply_rejoins_only_the_same_passage_after_source_loss(tmp_path, monkeypatch):
+    from ouroboros.chat_chain import format_address, row_address
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    client = _client(tmp_path, bridge)
+    original = message_bus.log_chat("out", CHAT, 0, "Harbor, harbor.")
+    excerpt = {"text": "harbor", "start_utf16": 8}
+    body = {"chat_id": CHAT, "client_message_id": MSG, "text": "The second pier.",
+            "reply_to": format_address(row_address(original)), "reply_excerpt": excerpt}
+    assert client.post("/chat/inject", headers=_headers(), json=body).status_code == 202
+    assert chat_rows(tmp_path)[-1]["reply_to"]["excerpt"] == excerpt
+    monkeypatch.setattr("ouroboros.chat_references.resolve_row", lambda *args: (None, {}))
+    rejoined = client.post("/chat/inject", headers=_headers(), json=body)
+    assert rejoined.status_code == 202 and rejoined.json()["rejoined"]
+    changed = {**body, "reply_excerpt": {**excerpt, "start_utf16": 0}}
+    assert client.post("/chat/inject", headers=_headers(), json=changed).status_code == 409
+    assert bridge._inbox.qsize() == 1
+
+
+@pytest.mark.parametrize("named", [False, True], ids=["unnamed", "named"])
+@pytest.mark.parametrize("source", ["question", "missing"])
+def test_a_refused_passage_is_one_bad_request_named_or_not(tmp_path, monkeypatch, named, source):
+    """A passage with no readable authored source is the request's fault on both inject paths; nothing is saved or
+    queued, and 409 stays the answer to a reused id that names a different message."""
+    from ouroboros.chat_chain import format_address, row_address
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    client = _client(tmp_path, bridge)
+    address = format_address(row_address(message_bus.log_chat("out", CHAT, 0, "Which pier?", record_type="quiz")))
+    if source == "missing":
+        address = address[:-1] + ("0" if address[-1] != "0" else "1")
+    saved = len(chat_rows(tmp_path))
+    body = {"chat_id": CHAT, "text": "The second pier.", "reply_to": address,
+            "reply_excerpt": {"text": "pier", "start_utf16": 6}, **({"client_message_id": MSG} if named else {})}
+    refused = client.post("/chat/inject", headers=_headers(), json=body)
+    assert refused.status_code == 400 and "quote" in refused.text
+    assert len(chat_rows(tmp_path)) == saved and bridge._inbox.qsize() == 0
+
+
+def test_unnamed_skill_queues_the_host_resolution_of_an_authored_notice(tmp_path, monkeypatch):
+    from ouroboros.chat_chain import format_address, row_address
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    client = _client(tmp_path, bridge)
+    original = message_bus.log_chat("out", CHAT, 0, "Harbor, harbor.", record_type="proactive_message")
+    address = format_address(row_address(original))
+    excerpt = {"text": "harbor", "start_utf16": 8}
+    forged = {"address": address, "snippet": "Wrong", "author_label": "Someone else"}
+    body = {"chat_id": CHAT, "text": "The second pier.", "reply_to": address, "reply_excerpt": excerpt,
+            "accepted_reply": forged, "reply_reference": forged, "task_metadata": {"reply_reference": forged}}
+    assert client.post("/chat/inject", headers=_headers(), json=body).status_code == 202
+    monkeypatch.setattr("ouroboros.chat_references.resolve_row", lambda *_: pytest.fail("second source read"))
+    [update] = bridge.get_updates(0, timeout=0)
+    message_bus.record_inbound_message(bridge, update["message"], chat_id=CHAT, user_id=0,
+                                       client_message_id="queued", text=body["text"], ts="later")
+    saved = chat_rows(tmp_path)[-1]["reply_to"]
+    assert (saved["author_label"], saved["snippet"], saved["excerpt"]) == ("Ouroboros", original["text"], excerpt)
+
+
+@pytest.mark.parametrize("mode", ["named", "unnamed", "canonical_row_only"])
+def test_skill_injection_routes_the_accepted_reply_after_dequeue(tmp_path, monkeypatch, mode):
+    from types import SimpleNamespace
+
+    import server
+    from ouroboros.chat_chain import format_address, row_address
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {})
+    routed = []
+    monkeypatch.setattr(server, "_route_owner_message", lambda bridge, ctx, row: routed.append(row))
+    ctx = SimpleNamespace(load_state=lambda: {"owner_id": 1}, update_state=lambda mutator: mutator({"owner_id": 1}))
+    original = message_bus.log_chat("out", CHAT, 0, "Copper lantern")
+    excerpt = {"text": "lantern", "start_utf16": 7}
+    body = {"chat_id": CHAT, "text": "Which lantern?", "reply_excerpt": excerpt,
+            "reply_to": format_address(row_address(original))}
+    if mode != "unnamed":
+        body["client_message_id"] = MSG
+    assert _client(tmp_path, bridge).post("/chat/inject", headers=_headers(), json=body).status_code == 202
+    if mode == "canonical_row_only":
+        updates = bridge.get_updates(0, timeout=0)
+        updates[0]["message"].pop("task_metadata")  # a carrier older than the canonical reply fact
+        monkeypatch.setattr(bridge, "get_updates", lambda *_a, **_k: updates)
+    server._process_bridge_updates(bridge, 0, ctx)
+    assert len(routed) == 1
+    reply = routed[0]["task_metadata"]["reply_reference"]
+    assert reply == chat_rows(tmp_path)[-1]["reply_to"]
+    assert reply["address"] == body["reply_to"] and reply["excerpt"] == excerpt

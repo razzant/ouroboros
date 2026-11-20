@@ -687,11 +687,24 @@ def relay_quotes(entry: Mapping[str, Any]) -> List[Mapping[str, Any]]:
     return [_mapping(quote) for quote in quotes if _text(_mapping(quote).get("text"))]
 
 
+def excerpt_citation(ref: Mapping[str, Any]) -> str:
+    """Label the sender's complete citation independently of source speech and newly typed words."""
+    excerpt = _mapping(ref.get("excerpt"))
+    if not isinstance(excerpt.get("text"), str) or type(excerpt.get("start_utf16")) is not int or not ref.get("address"):
+        return ""
+    author = ref.get("author") or ref.get("author_label") or "author not recorded"
+    return (f"[Sender-selected passage of {author} at {ref['address']}; client-reported rendered text, "
+            f"UTF-16 offset {excerpt['start_utf16']}, citation only] "
+            + json.dumps(excerpt["text"], ensure_ascii=False))
+
+
 def relation_text(entry: Mapping[str, Any]) -> str:
     """The relations the host resolved for a row, as labelled lines after its words: what it
     replies to and, on a relay, the owner's words it quotes, complete, with where they were said
     and what they replied to. History keeps these fields; every text reader shows them too."""
     def reference(ref: Mapping[str, Any]) -> str:
+        if citation := excerpt_citation(ref):
+            return citation
         if ref.get("unresolved"):
             return f"[Reply to {_text(ref.get('address'))}: not resolved]"
         chars = ref.get("chars")  # a cut preview's whole length: the model reads how much the address holds
@@ -1004,7 +1017,8 @@ def render_row_text(row: Mapping[str, Any]) -> str:
 
 def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
     """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
-    accepted comment for an answered quiz, plain text for inbound place rows and reactions, else ``render_row_text``.
+    accepted card words, plain text for inbound place rows, reactions and rows carrying sender-reported citations,
+    else ``render_row_text``.
     Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
     from ouroboros.answer_facts import living_card_input, word_spans
     if carried := _mapping(row.get("corpus_answer")):
@@ -1019,7 +1033,9 @@ def quote_parts(row: Mapping[str, Any], root: Any = None) -> tuple[str, ...]:
         quiz, _ = answered_card_source(row, row.get("_owner_source_root") or root)
         quiz = _mapping(quiz)
         return () if quiz.get("secret_request") else (str(quiz.get("comment") or ""),)
-    if (row.get("direction") == "in" and row_provenance(row) == "place"
+    if (_mapping(row.get("reply_to")).get("excerpt")
+            or any(_mapping(quote.get("reply_to")).get("excerpt") for quote in relay_quotes(row))
+            or row.get("direction") == "in" and row_provenance(row) == "place"
             or reaction_fact(_mapping(row.get("transport")).get("message"))):
         return (str(row.get("text") or ""),)
     return (render_row_text(row),)

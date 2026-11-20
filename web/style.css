@@ -11896,12 +11896,12 @@ html[data-layout="stack"] .project-panel {
     from { box-shadow: 0 0 0 3px var(--accent-25); }
     to { box-shadow: 0 0 0 3px transparent; }
 }
-:is(.chat-bubble, .chat-live-card, .chat-live-line).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
 /* A row that takes focus only to be returned to (a quote's target, a closed row menu) shows the one keyboard ring. */
 :is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus { outline: none; }
 :is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-    :is(.chat-bubble, .chat-live-card, .chat-live-line).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
 }
 
 /* === The quote panel (docs/DESIGN.md "Replies"): one component (chat_reply_quote.js) inside a bubble and
@@ -11944,6 +11944,28 @@ html[data-layout="stack"] .project-panel {
     font: inherit;
     text-align: start;
     cursor: pointer;
+}
+.chat-reply-selection-action {
+    position: fixed;
+    z-index: var(--z-popover);
+    top: var(--quote-top);
+    left: var(--quote-left);
+}
+.chat-bubble[data-select-text] :is([data-reply-body], [data-reply-caption]) {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+::highlight(reply-excerpt) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
+.chat-quote[data-excerpt] { display: flex; align-items: center; }
+.chat-quote[data-excerpt] .chat-quote-main { flex: 1; }
+.chat-quote[data-excerpt] .chat-quote-head { flex-wrap: wrap; row-gap: 0; }
+.chat-quote[data-excerpt] .chat-quote-text { display: block; white-space: pre; }
+.chat-quote[data-excerpt] .chat-quote-text[data-expanded="1"] {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-block-size: 32vh;
+    overflow-y: auto;
 }
 .chat-quote-main:hover { background: var(--menu-item-hover); }
 /* A quoted photo leads the panel with its thumbnail (the head and the line stand to its right). */

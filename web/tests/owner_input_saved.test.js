@@ -785,7 +785,7 @@ test('a Telegram caption that ends like a tail is kept word for word, live and o
     const caption = 'Keep this note\n\n[Attached file: plan.pdf]';
     const telegram = { role: 'user', chat_id: 1, ts: TS, source: 'skill:telegram', sender_label: 'Telegram (Anton)',
         sender_session_id: '', attachments: [view] };
-    const message = (node) => node.innerHTML.match(/<div class="message[^"]*">([\s\S]*?)<\/div>/)[1];
+    const message = (node) => node.innerHTML.match(/<div class="message[^"]*" data-reply-body>([\s\S]*?)<\/div>/)[1];
     const live = fixture();
     try {
         live.echo({ ...telegram, content: caption, client_message_id: 'tg:1' });
@@ -816,6 +816,6 @@ test('Restart typed with a staged file stays the exact command; words around it 
         assert.equal(command.content, '/restart', 'exact, as the host gate matches it');
         assert.equal(command.attachments.length, 1, 'its file rides the same row');
         assert.equal(prose.content, '/restart please\n\n[Attached file: scan.pdf]', 'prose keeps the tail: never the command');
-        assert.ok(room.bubble('cm-1').innerHTML.includes('<div class="message">/restart</div>'));
+        assert.ok(room.bubble('cm-1').innerHTML.includes('<div class="message" data-reply-body>/restart</div>'));
     } finally { tab.close(); }
 });

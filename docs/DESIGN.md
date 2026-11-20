@@ -2024,8 +2024,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   running host) says "Saved, not delivered." and keeps Send again: the host
   hands that row over once. A kept message whose saved row a host process before
   a restart took says "Saved; delivery not confirmed." with Send as new, which
-  only puts the words back in the composer as a new message: nothing is
-  replayed. Rows nobody kept stay plain history ("Input saved"). That plain
+  only puts the words back in the composer, after words already typed, as a
+  new message: nothing is replayed. While Send is busy or the composer holds
+  a staged reply or file it asks to finish or clear that draft first; a
+  selected reply returns with its quote, and only into an empty composer.
+  Rows nobody kept stay plain history ("Input saved"). That plain
   saved fact is one quiet tick before the message's time, its words its
   accessible text and a pointer's title: saved, never read or started, so no
   second tick, and a row the host never said is saved shows none; a doubt, an
@@ -2033,25 +2036,25 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
-Reply addresses a row for Ouroboros to interpret, never routes. A Main reply to a Project message also
-appears there at its time as the same Main message (owner 28.10, A), without telling, waking or resuming
-anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row menus; work cards in
-menus only, never hover-only. Reply stages the composer's first-line strip (`Replying to`, quoted author,
-one line, ×; Esc cancels). Send carries the address; the host builds the snippet. Questions use their own field.
+A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
+(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+menu, questions their own field. Select words in one message for **Reply to quote** beside them or
+in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
+Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. A refused
+or unconfirmed selected reply keeps its draft; retry reuses its message ID. Send fixes the words, reply and files before
+waiting; a later draft stays.
 
-One quote component serves bubbles, strips and relays: above the text, a 2 px
-bar and tint in the quoted author's ink (the tint lies on the quote glass, so inside a
-dark voice it reads as a shade of graphite cooled or warmed by the quoted author, not as
-a second bubble; inside the dark Ouroboros voice a quote of Ouroboros lies on that voice's
-capsule step, its author in the voice's readable word), one line cut on a word; a photo leads
-with its thumbnail. Pressing a reply quote reveals the exact row, loading its
-bounded page in this room when present, otherwise its available home. Containing
-timelines open and scroll; the line is focused and highlighted below the header.
-A card, portal or retained copy cannot substitute. Refusal/failure preserves the view and newest-following intent; a toast explains why, offering Try again
-only if a retry can differ. New gestures/navigation cancel the read. Only the quoted stream is positioned:
-the other (narration beside owner speech or vice versa) stays unloaded down that chain until `Scroll to
-latest message`. Old sources read no newer messages. Ouroboros quotes its addressee only when not directly
-above; its own card does not count.
+Bubbles, strips and relays share quote glass with a 2 px bar and the quoted author’s tint over the
+bubble’s graphite in dark mode. Ouroboros quoting Ouroboros uses its capsule step and readable
+author ink. Whole-row replies show the host preview. Passages label the sender’s selection and name
+the source author, including for screen readers. Show all expands the text. Photos lead with a thumbnail. Pressing a quote loads the exact row’s
+bounded page here if present, otherwise in its home. Timelines open and scroll to the focused row
+below the header. A passage also highlights its saved range; if it changed, a notice explains why
+only the row is marked. Cards, portals and retained copies cannot substitute. A failed jump keeps
+the view and newest-following intent; its toast offers Try again only for retryable failures.
+New gestures or navigation cancel the read. Only the quoted stream loads: its sibling stays
+unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
+messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):

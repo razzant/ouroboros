@@ -716,13 +716,13 @@ test("an owner message links its http(s) address live and from history, and Copy
     const words = 'Read `https://e.com/a?b=1&c=2`, then <b>reply</b>.';
     const link = '<a class="md-link" href="https://e.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">'
         + 'https://e.com/a?b=1&amp;c=2</a>';
-    const message = (bubble) => bubble.innerHTML.match(/<div class="message">[\s\S]*?<\/div>/)?.[0];
+    const message = (bubble) => bubble.innerHTML.match(/<div class="message" data-reply-body>[\s\S]*?<\/div>/)?.[0];
     const saved = row('chat:211', words, { role: 'user', client_message_id: 'owner:211', source: 'web' });
     const f = fixture(t);
     await f.refresh();
     f.emit({ ...saved, content: words, history_id: undefined });
     const live = f.bubbles()[0];
-    assert.equal(message(live), `<div class="message">Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
+    assert.equal(message(live), `<div class="message" data-reply-body>Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
     const copied = [];
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => copied.push(text) } });
     t.after(() => delete navigator.clipboard);

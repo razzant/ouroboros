@@ -35,6 +35,7 @@ HOST_CONTEXT_KIND_KEY = "_host_context_kind"
 # merged with other content, and no host or helper rewrite takes them.
 OWNER_WORDS_KIND = "owner_words"
 OWNER_ROW_KINDS = frozenset({OWNER_WORDS_KIND, "owner_dialogue"})
+REPLY_CITATION_KIND = "reply_citation"  # Context immediately before the owner words that select it, not owner speech.
 # The host's facts beside my human's words reaching running work (``return_facts``): one line of that run, never a word.
 RETURN_FACTS_KIND = "return_facts"
 

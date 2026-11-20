@@ -40,6 +40,25 @@ def test_fitting_view_and_irreducible_tail_never_cut(tmp_path):
         assert receipt is None and kept == rows == before
 
 
+def test_physical_cut_keeps_fresh_reply_citation_and_never_bisects_an_older_reply(tmp_path):
+    old_quote = bound_host_row('reply_citation', 'An old citation.' * 800)
+    old_words = bound_host_row('owner_words', 'My old reply.' * 100)
+    fresh_quote = bound_host_row('reply_citation', 'A fresh citation.' * 800)
+    fresh_words = bound_host_row('owner_words', 'My newest reply.')
+    facts = bound_host_row('return_facts', 'Facts before my words.')
+    rows = [*conversation()[:2], old_quote, facts, old_words, {'role': 'assistant', 'content': 'Earlier answer.'},
+            fresh_quote, facts, fresh_words, {'role': 'assistant', 'content': 'Current tail.'}]
+    budget = estimate_context_prompt_tokens(rows) - 500
+    kept, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id='cited-cut',
+                                       measure=estimate_context_prompt_tokens, usable=budget)
+    assert receipt['positions'] == [2, 3, 4]
+    assert kept[-4:] == rows[-4:]
+    assert json.loads(read_actor_source_bytes(tmp_path, 'cited-cut', receipt['source'])) == rows
+    cut, receipt = physical_window_cut(rows, drive_root=tmp_path, task_id='cited-cut',
+                                      measure=estimate_context_prompt_tokens, usable=1)
+    assert cut == rows and receipt is None
+
+
 def test_text_refusal_uses_same_physical_cut_without_changing_round_or_dispatch(tmp_path):
     rows = conversation()
     ctx = SimpleNamespace(messages=rows, accumulated_usage={'_context_refusal_round': 3,

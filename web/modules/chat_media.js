@@ -743,6 +743,14 @@ export function createChatMedia({
         listen(action('copy'), 'click', () => copyImage(sourceRef, mime), undefined, item);
     }
 
+    function captionMarker(msg, caption) {
+        return caption.trim() && msg.row_address?.startsWith('row:') && !msg.text_placeholder
+            && (msg.role === 'assistant' || msg.role === 'user')
+            ? ` data-reply-caption data-row-address="${escapeHtmlAttr(msg.row_address)}"`
+                + ` data-source-ts="${escapeHtmlAttr(msg.ts || '')}" data-source-author="${escapeHtmlAttr(messageSender(msg, msg.role))}"`
+            : '';
+    }
+
     function buildMediaBubble(msg) {
         if (destroyed) return null;
         const type = msg.msg_type || msg.type;
@@ -751,13 +759,13 @@ export function createChatMedia({
         const mimePattern = type === 'photo' ? /^image\/[a-z0-9.+-]+$/i : /^video\/[a-z0-9.+-]+$/i;
         const mime = mimePattern.test(String(msg.mime || '')) ? String(msg.mime) : fallback;
         const source = mediaSource(msg, type, mime);
-        if (!source) return null;
         const caption = String(msg.caption || '');
+        const captionBody = caption ? `<div class="message"${captionMarker(msg, caption)}>${escapeHtml(caption)}</div>` : '';
+        if (!source) return captionBody ? bubbleFrame(msg, captionBody) : null;
         if (type === 'video') {
             const extension = (mime.split('/')[1]?.split('+')[0] || '').slice(0, 10) || 'mp4';
             const sourceRef = mediaSourceRef(msg, source);
-            const body = `${caption ? `<div class="message">${escapeHtml(caption)}</div>` : ''}
-                <div class="message">${playerHtml({ src: source })}</div>`;
+            const body = `${captionBody}<div class="message">${playerHtml({ src: source })}</div>`;
             const bubble = bubbleFrame(msg, body);
             const player = bubble.querySelector('.chat-media-player');
             wirePlayer(bubble, bubble.querySelector('video'), {
@@ -769,7 +777,7 @@ export function createChatMedia({
         const body = `<div class="message"><div class="chat-gallery-grid">
             <figure class="chat-gallery-item">
                 ${photoHtml(source, 'Photo attachment')}
-                ${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ''}
+                ${caption ? `<figcaption${captionMarker(msg, caption)}>${escapeHtml(caption)}</figcaption>` : ''}
             </figure>
         </div></div>`;
         const bubble = bubbleFrame(msg, body);
@@ -810,7 +818,7 @@ export function createChatMedia({
             </button>`;
         }
         const body = `<div class="message"><div class="chat-file-grid">
-            <div class="chat-file-item">${content}${caption ? `<div class="chat-file-caption">${escapeHtml(caption)}</div>` : ''}</div>
+            <div class="chat-file-item">${content}${caption ? `<div class="chat-file-caption"${captionMarker(msg, caption)}>${escapeHtml(caption)}</div>` : ''}</div>
         </div></div>`;
         const bubble = bubbleFrame(msg, body);
         if (mime.startsWith('audio/') && source.src) {
@@ -863,11 +871,13 @@ export function createChatMedia({
         const map = kind === 'photos' ? photoGroups : fileGroups;
         const selector = kind === 'photos' ? '.chat-gallery-item' : '.chat-file-item';
         const gridSelector = kind === 'photos' ? '.chat-gallery-grid' : '.chat-file-grid';
-        const ownItem = bubble.querySelector(selector);
-        if (ownItem && bubble.dataset.messageKey) ownItem.dataset.messageKey = bubble.dataset.messageKey;
-        if (ownItem && msg.history_id) {
-            ownItem.dataset.historyId = msg.history_id;
-            stampNodeTimestamp(ownItem, msg.ts);
+        const item = bubble.querySelector(selector);
+        if (!item) return insertMessageNode(bubble) !== false; // caption only
+        if (bubble.dataset.messageKey) item.dataset.messageKey = bubble.dataset.messageKey;
+        if (bubble.dataset.rowAddress) item.dataset.rowAddress = bubble.dataset.rowAddress;
+        if (msg.history_id) {
+            item.dataset.historyId = msg.history_id;
+            stampNodeTimestamp(item, msg.ts);
             delete bubble.dataset.historyId;
         }
         if (!taskId) {
@@ -880,9 +890,8 @@ export function createChatMedia({
             || Number(existing?.dataset.ts) === Date.parse(msg.ts || '')
                 && Number(existing?.dataset.historyOffset) <= Number(msg.history_position?.offset);
         if (existing && isFeedTailWrapper(existing) && sourceAfter) {
-            const item = bubble.querySelector(selector);
             const grid = existing.querySelector(gridSelector);
-            if (!item || !grid) return false;
+            if (!grid) return false;
             grid.appendChild(item);
             existing.classList.add('is-multiple');
             if (!existing.querySelector('.chat-group-title')) {
