@@ -44,7 +44,8 @@ def _manifest(final: Dict[str, Any]) -> Dict[str, Any]:
     return json.loads(pathlib.Path(final["candidate_manifest_ref"]["path"]).read_text())
 
 
-def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
+def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys, monkeypatch):
+    from ouroboros import context_attempt_reader as reader
     from ouroboros.context_attempt_reader import main, read_attempt
 
     first = _dispatch(data_root, 'reader-test')
@@ -79,23 +80,30 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
         read_attempt(data_root, 'reader-test', foreign['attempt_id'])
     assert main([*args, '--after', last['attempt_id']]) == 0
     assert [row['attempt_id'] for row in json.loads(capsys.readouterr().out)['attempts']] == [first['attempt_id']]
-    bound = [*args, '--attempt', last['attempt_id'], '--max-bytes']
-    assert main([*bound, '1']) == 2
-    bounded = capsys.readouterr()
-    details = json.loads(bounded.err)
-    assert not bounded.out and details['body'] == 'over_limit'
-    # The gap names the record by digest, size, kind and its place under the data root; no folder of this computer.
-    ref = _manifest(last)['redacted_projection_ref']
-    assert details['redacted_ref'] == {**{key: value for key, value in ref.items() if key != 'path'},
-                                       'path': f"observability/blobs/{ref['sha256']}.json.gz"}
-    # A report of that gap is still written whole, and the terminal names the gap and what admits the body.
-    assert main([*bound, '1', '--report']) == 0
-    gap = capsys.readouterr()
+    bound = [*args, '--attempt', last['attempt_id']]
+    # --max-bytes only raises the bounds: one byte still reads the request under the default.
+    assert main([*bound, '--max-bytes', '1']) == 0
+    assert 'Different request' in capsys.readouterr().out
+    with monkeypatch.context() as smaller:  # a request over the (here lowered) default bound
+        smaller.setattr(reader, '_BODY_LIMIT', 1)
+        assert main(bound) == 2
+        bounded = capsys.readouterr()
+        details = json.loads(bounded.err)
+        assert not bounded.out and details['body'] == 'over_limit'
+        # The gap names the record by digest, size, kind and its place under the data root; no folder of this computer.
+        ref = _manifest(last)['redacted_projection_ref']
+        assert details['redacted_ref'] == {**{key: value for key, value in ref.items() if key != 'path'},
+                                           'path': f"observability/blobs/{ref['sha256']}.json.gz"}
+        # A report of that gap is still written whole, and the terminal names the gap and the one --max-bytes that
+        # admits the request and its record (the record is under its 2 MiB default, so the request's size).
+        assert main([*bound, '--report']) == 0
+        gap = capsys.readouterr()
     assert json.loads(gap.out)['facts']['redacted_ref'] == details['redacted_ref']
     assert str(data_root) not in gap.out + bounded.err and str(data_root.resolve()) not in gap.out + bounded.err
     assert json.loads(gap.out)['stored_json'] is None and json.loads(gap.out)['facts']['body'] == 'over_limit'
+    assert details['retry_max_bytes'] == details['recorded_bytes']
     assert f"over_limit; --max-bytes {details['recorded_bytes']}" in gap.err
-    assert main([*bound, str(details['recorded_bytes'])]) == 0
+    assert main([*bound, '--max-bytes', str(details['recorded_bytes'])]) == 0
     assert 'Different request' in capsys.readouterr().out
     # An otherwise admitted ref to truncated gzip must not print partial request bytes.
     blob = pathlib.Path(_manifest(first)['redacted_projection_ref']['path'])
@@ -266,23 +274,26 @@ def test_local_request_reader_lists_and_reads_only_physical_attempts(data_root, 
 
 
 def test_local_request_reader_names_an_oversized_sealed_record_and_reads_it_on_request(data_root, capsys):
-    """The redactions of 16,000 token-bearing URL parameters make an attempt's sealed record larger than 2 MiB while
-    its request stays small. That is a gap naming the record's size, and an explicit --max-bytes of that size reads
-    the request; the record admitted that way is still checked against its digest."""
+    """The redactions of 16,000 token-bearing URL parameters make an attempt's sealed record larger than 2 MiB; its
+    request is larger still, yet under the 16 MiB default. That is a gap naming the record's size, and the --max-bytes
+    it names reads the request at once: the allowance raises the record's bound and never lowers the request's. The
+    record admitted that way is still checked against its digest."""
     from ouroboros.context_attempt_reader import main
 
     payload = _payload()
     payload['messages'][0]['content'][0]['text'] = 'see https://example.test/a?' + '&'.join(
         f'token=t{index:05d}' for index in range(16_000))
+    payload['messages'].append({'role': 'user', 'content': 'tide table ' * 500_000})
     attempt = _dispatch(data_root, 'record-reader-test', payload=payload)
     record = pathlib.Path(attempt['candidate_manifest_ref']['path'])
     size = record.stat().st_size
-    assert size > 2 * 1024 * 1024 > _manifest(attempt)['redacted_projection_ref']['size']
+    assert 16 * 1024 * 1024 > _manifest(attempt)['redacted_projection_ref']['size'] > size > 2 * 1024 * 1024
     args = ['--data-root', str(data_root), 'record-reader-test', '--attempt', attempt['attempt_id']]
     assert main([*args, '--report']) == 0
     gap = capsys.readouterr()
     facts = json.loads(gap.out)['facts']
-    assert (facts['body'], facts['recorded_bytes'], facts['max_bytes']) == ('manifest_over_limit', size, 2 * 1024 * 1024)
+    assert (facts['body'], facts['recorded_bytes'], facts['max_bytes'], facts['retry_max_bytes']) == (
+        'manifest_over_limit', size, 2 * 1024 * 1024, size)
     assert f'manifest_over_limit; --max-bytes {size} admits it' in gap.err
     assert main([*args, '--max-bytes', str(size)]) == 0
     assert 'example.test' in capsys.readouterr().out
@@ -292,33 +303,145 @@ def test_local_request_reader_names_an_oversized_sealed_record_and_reads_it_on_r
     assert not capsys.readouterr().out
 
 
-def test_local_request_report_too_large_for_the_page_is_a_gap_with_the_command_that_writes_it(
-        data_root, capsys, monkeypatch):
-    """Beautiful Context opens no report over its limit, so a request that would make one is reported as that gap,
-    with the reader's command without --report that writes the request itself for another tool."""
+def _windows_argv(line: str) -> list:
+    """How the Windows C runtime splits a command line into the arguments python.exe receives."""
+    args, word, quoted, slashes, started = [], [], False, 0, False
+    for ch in line:
+        if ch == '\\':
+            slashes, started = slashes + 1, True
+            continue
+        if ch == '"':
+            word.append('\\' * (slashes // 2))
+            if slashes % 2:
+                word.append('"')
+            else:
+                quoted = not quoted
+            slashes, started = 0, True
+            continue
+        word.append('\\' * slashes)
+        slashes = 0
+        if ch in ' \t' and not quoted:
+            if started:
+                args.append(''.join(word))
+            word, started = [], False
+            continue
+        word.append(ch)
+        started = True
+    word.append('\\' * slashes)
+    if started:
+        args.append(''.join(word))
+    return args
+
+
+def _cmd_passes_on(line: str) -> bool:
+    """cmd.exe hands the line to the program as written: no & | < > ^ ( ) outside double quotes, nothing it expands."""
+    quoted = False
+    for ch in line:
+        if ch == '"':
+            quoted = not quoted
+        elif ch in '%!' or (not quoted and ch in '&|<>^()'):
+            return False
+    return not quoted
+
+
+def _printed_command(err: str) -> str:
     import re
+
+    return re.search(r'without --report: (python -m ouroboros\.context_attempt_reader .+) > request\.json\)', err).group(1)
+
+
+def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_command_reads_it(
+        data_root, capsys, monkeypatch):
+    """Beautiful Context opens no report over its limit, so a request that would make one is reported as that gap:
+    a bounded record of the attempt, never its exclusion list, which grows with every masked secret (16,000 here make
+    the full report several times the request), its sizes and the one --max-bytes admitting the request and its
+    sealed record. The command the terminal gives with it writes the request."""
     import shlex
 
     from ouroboros import context_attempt_reader as reader
 
-    attempt = _dispatch(data_root, 'page-reader-test')
-    size = _manifest(attempt)['redacted_projection_ref']['size']
-    monkeypatch.setattr(reader, 'PAGE_LIMIT', size)  # the report adds its facts and escapes: it cannot fit
-    args = ['--data-root', str(data_root), 'page-reader-test', '--attempt', attempt['attempt_id']]
-    for extra in ([], ['--max-bytes', '1']):  # read whole, or over this export's bound and over the page's
-        if extra:
-            monkeypatch.setattr(reader, 'PAGE_LIMIT', size - 1)
-        assert reader.main([*args, *extra, '--report']) == 0
-        gap = capsys.readouterr()
+    parse = _windows_argv if os.name == 'nt' else shlex.split
+    payload = _payload()
+    payload['messages'][0]['content'][0]['text'] = 'see https://example.test/a?' + '&'.join(
+        f'token=t{index:05d}' for index in range(16_000))
+    attempt = _dispatch(data_root, 'page-reader-test', payload=payload)
+    smaller_payload = _payload()
+    smaller_payload['messages'].append({'role': 'user', 'content': 'tide table ' * 300})  # larger than its gap report
+    small = _dispatch(data_root, 'page-reader-test', payload=smaller_payload)
+    body, record = _manifest(attempt)['redacted_projection_ref']['size'], pathlib.Path(
+        attempt['candidate_manifest_ref']['path']).stat().st_size
+    assert record > 2 * 1024 * 1024 > body
+    kept = {'task_id', 'attempt_id', 'ledger_state', 'provider_body', 'transport_observation', 'model', 'provider',
+            'ts_reserved', 'ts_dispatched', 'ts_final', 'settle_reason', 'sha256', 'redacted_ref', 'body',
+            'recorded_bytes', 'page_limit_bytes', 'retry_max_bytes'}
+    args = ['--data-root', str(data_root), 'page-reader-test', '--attempt']
+    # Read whole but too large for the page; and over this export's bound as well as over the page's.
+    small_body = _manifest(small)['redacted_projection_ref']['size']
+    for chosen, limit, smaller, allowance, size, said in ((attempt, body, None, record, body, 'example.test'),
+                                                          (small, small_body - 1, 1, small_body, small_body, 'tide')):
+        with monkeypatch.context() as patch:
+            patch.setattr(reader, 'PAGE_LIMIT', limit)
+            if smaller:
+                patch.setattr(reader, '_BODY_LIMIT', smaller)
+            extra = ['--max-bytes', str(record)] if chosen is attempt else []
+            assert reader.main([*args, chosen['attempt_id'], *extra, '--report']) == 0
+            gap = capsys.readouterr()
         document = json.loads(gap.out)
         facts = document['facts']
-        assert document['stored_json'] is None and 'bytes' not in facts
-        assert (facts['body'], facts['recorded_bytes'], facts['page_limit_bytes']) == (
-            'over_page_limit', size, reader.PAGE_LIMIT)
-        command = re.search(r'without --report: (python -m ouroboros\.context_attempt_reader .+) > request\.json\)',
-                            gap.err).group(1)
-        assert reader.main(shlex.split(command)[3:]) == 0
-        assert 'summarize this' in capsys.readouterr().out
+        assert len(gap.out.encode('utf-8')) <= limit and document['stored_json'] is None and set(facts) <= kept
+        assert (facts['body'], facts['recorded_bytes'], facts['page_limit_bytes'], facts['retry_max_bytes']) == (
+            'over_page_limit', size, limit, allowance)
+        assert reader.main(parse(_printed_command(gap.err))[3:]) == 0
+        assert said in capsys.readouterr().out
+
+
+def test_local_request_reader_gives_windows_a_command_cmd_exe_passes_on(tmp_path, capsys, monkeypatch):
+    """On Windows the command a page-limit gap gives is written for cmd.exe, the shell the documentation names: & ^
+    ( ) and spaces stay inside double quotes, the program reads back the very folder, task and attempt, and a value
+    cmd.exe would still expand stays a placeholder."""
+    from types import SimpleNamespace
+
+    from ouroboros import context_attempt_reader as reader
+
+    root = tmp_path / 'R&D'
+    monkeypatch.setenv('OUROBOROS_DATA_DIR', str(root))
+    monkeypatch.setenv('OUROBOROS_SETTINGS_PATH', str(root / 'settings.json'))
+    monkeypatch.setenv('TOTAL_BUDGET', '100')
+    monkeypatch.setattr(ua, 'estimate_cost_optional', lambda *args, **kwargs: 0.01)
+    (root / 'state').mkdir(parents=True)
+    payload = _payload()
+    payload['messages'].append({'role': 'user', 'content': 'tide table ' * 500})
+    attempt = _dispatch(root, 'windows-reader-test', payload=payload)
+    body = _manifest(attempt)['redacted_projection_ref']['size']
+    monkeypatch.setattr(reader, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(reader, 'PAGE_LIMIT', body)
+    assert reader.main(['--data-root', str(root), 'windows-reader-test', '--attempt', attempt['attempt_id'],
+                        '--report']) == 0
+    line = _printed_command(capsys.readouterr().err)
+    assert _cmd_passes_on(line) and _windows_argv(line)[3:] == [
+        '--data-root', str(root), 'windows-reader-test', '--attempt', attempt['attempt_id'], '--max-bytes', str(body)]
+    words = ['python', '-m', 'ouroboros.context_attempt_reader', '--data-root']
+    for folder in ('D:\\a\\temp\\data', 'D:\\R&D\\data', 'C:\\Program Files (x86)\\Ouroboros\\data', 'D:\\data\\'):
+        line = reader._retry_command(SimpleNamespace(data_root=folder, task_id='t-1', attempt='a1'), 7)
+        line = line.removesuffix(' > request.json')
+        assert _cmd_passes_on(line) and _windows_argv(line) == [*words, folder, 't-1', '--attempt', 'a1', '--max-bytes', '7']
+    line = reader._retry_command(SimpleNamespace(data_root='D:\\%TEMP%\\data', task_id='t 1', attempt='a1'), 7)
+    assert '--data-root DATA "t 1" --attempt a1 ' in line and _cmd_passes_on(line.removesuffix(' > request.json'))
+
+
+def test_local_request_reader_names_a_receipt_recorded_without_a_request(data_root, capsys):
+    """A live conversation records its sends as receipts that arrived already billed: each one attempt, with no
+    request prepared on this computer. Its report names that instead of a lost link."""
+    from ouroboros.context_attempt_reader import list_attempts, main
+
+    receipt = ua.record_received_attempt(ua.AttemptRequest(
+        model='openai/gpt-realtime', provider='openai', task_id='live-reader-test', drive_root=data_root,
+        source='live_connection_usage'), {'prompt_tokens': 3}, cost_usd=0.001)
+    assert [row['attempt_id'] for row in list_attempts(data_root, 'live-reader-test')['attempts']] == [
+        receipt.attempt_id]
+    assert main(['--data-root', str(data_root), 'live-reader-test', '--attempt', receipt.attempt_id, '--report']) == 0
+    gap = capsys.readouterr()
+    assert json.loads(gap.out)['facts']['body'] == 'receipt_only' and '(receipt_only)' in gap.err
 
 
 def test_local_request_reader_names_a_data_root_without_a_usage_store(tmp_path, capsys):
@@ -367,9 +490,13 @@ def test_local_request_reader_reports_selected_file_not_current_file(data_root, 
     witness = plan.core.base_prompt_source
     physical = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False,
                                       base_prompt_source=witness)
-    # The witness rides beside the record: a copy keeps it, and no serialized form of the record holds it.
+    # The witness rides beside the record: a copy keeps it, and no serialized form of the record holds it. A record
+    # without one carries its None the same way, so every copy reads the instance's own value back.
     assert replace(physical, prefix={'departs': 'first'}).base_prompt_source == witness
     assert 'base_prompt_source' not in asdict(physical)
+    bare = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False)
+    assert 'base_prompt_source' in vars(bare) and replace(bare, prefix={'departs': 'first'}).base_prompt_source is None
+    assert 'base_prompt_source' not in asdict(bare)
     with ua.bind_physical_attempt_context(physical):
         first = _dispatch(data_root, 'reader-test', payload=payload)
         later = _dispatch(data_root, 'reader-test', payload=_payload())  # the same witness over another first message

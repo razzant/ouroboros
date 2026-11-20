@@ -51,8 +51,8 @@ class PhysicalAttemptContext:
     base_prompt_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
 
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]]) -> None:
-        if base_prompt_source is not None:
-            object.__setattr__(self, "base_prompt_source", tuple(base_prompt_source))
+        # Always the instance's own value, None included: ``replace`` reads every InitVar back from the instance.
+        object.__setattr__(self, "base_prompt_source", base_prompt_source and tuple(base_prompt_source))
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made

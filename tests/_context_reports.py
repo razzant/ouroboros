@@ -112,7 +112,7 @@ def context_reports(root: pathlib.Path, monkeypatch, capsys) -> dict:
     The refused send is then settled as its task's end settles it: without a receipt, its price unknown.
     Each value is the exact bytes ``--report`` wrote; ``failed`` and ``retried`` pair an attempt id with its report.
     """
-    from ouroboros.context_attempt_reader import main
+    from ouroboros import context_attempt_reader as reader
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
@@ -132,12 +132,14 @@ def context_reports(root: pathlib.Path, monkeypatch, capsys) -> dict:
     failed, retried = _rejected_then_answered(root, "retry-task", monkeypatch, payload=copy.deepcopy(payload))
     _settle_abandoned(root, failed)
 
-    def report(task: str, attempt: str, *extra: str) -> bytes:
+    def report(task: str, attempt: str) -> bytes:
         capsys.readouterr()
-        assert main(["--data-root", str(root), task, "--attempt", attempt, "--report", *extra]) == 0
+        assert reader.main(["--data-root", str(root), task, "--attempt", attempt, "--report"]) == 0
         return capsys.readouterr().out.encode("utf-8")
 
+    with monkeypatch.context() as bound:  # --max-bytes only raises the bound: a gap needs a smaller default
+        bound.setattr(reader, "_BODY_LIMIT", 1)
+        over_limit = report("report-task", attempts[0])
     return {"attempts": attempts, "first": report("report-task", attempts[0]),
-            "second": report("report-task", attempts[1]),
-            "over_limit": report("report-task", attempts[0], "--max-bytes", "1"),
+            "second": report("report-task", attempts[1]), "over_limit": over_limit,
             "failed": (failed, report("retry-task", failed)), "retried": (retried, report("retry-task", retried))}

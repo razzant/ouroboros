@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
-import subprocess
 import sys
 import zlib
 from pathlib import Path
@@ -15,18 +15,17 @@ from ouroboros.evidence_packs import EvidenceUnavailable
 from ouroboros.model_send_seal import SEAL_VERSION
 
 _PAGE_SIZE = 40
-_BODY_LIMIT = 16 * 1024 * 1024
-_MANIFEST_LIMIT = 2 * 1024 * 1024  # an attempt's sealed record; an explicit --max-bytes above it raises it too
+_BODY_LIMIT = 16 * 1024 * 1024  # the request's default bound; --max-bytes only raises it
+_MANIFEST_LIMIT = 2 * 1024 * 1024  # the attempt's sealed record; a --max-bytes above it raises this bound too
 PAGE_LIMIT = 48 * 1024 * 1024  # the largest report web/context-report.html opens (tests/test_widgets_ui_static.py)
 _FAILURE_FACTS = ("stage", "exception_type", "provider_status_code", "provider_code", "transport_cause_type")
-# A task's physical attempts (``usage_store.ATTEMPT_ROW``) of every billing category, newest first by the immutable,
-# unique ``seq_first``: the list, its cursor and an exact selection apply the one rule. The task index addresses the
-# task (``INDEXED BY`` refuses a plan that scans the ledger). No money, usage or payload fields.
-_LIFE = "attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, ts_final, ts_last"
-_PAGE_SQL = (f"SELECT {_LIFE} FROM attempts INDEXED BY attempts_task WHERE task_id=? AND {usage_store.ATTEMPT_ROW} "
-             "AND seq_first<? ORDER BY seq_first DESC LIMIT ?")
-_CURSOR_SQL = f"SELECT seq_first FROM attempts WHERE attempt_id=? AND task_id=? AND {usage_store.ATTEMPT_ROW}"
-_ROW_SQL = f"SELECT {_LIFE}, {usage_store.ATTEMPT_ROW} AS one_attempt FROM attempts WHERE attempt_id=? AND task_id=?"
+# The selected row by the store's own page columns and one-attempt rule; the list and its cursor are the store's page.
+_ROW_SQL = (f"SELECT {usage_store.TASK_PAGE_COLUMNS}, {usage_store.ATTEMPT_ROW} AS one_attempt FROM attempts "
+            "WHERE attempt_id=? AND task_id=?")
+# What a report too large for the page keeps: the attempt's identity, ledger state and recorded life, and its sizes.
+_PAGE_GAP_FACTS = ("task_id", "attempt_id", "ledger_state", "provider_body", "transport_observation", "model",
+                   "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason", "sha256", "redacted_ref")
+_CMD_PLAIN = re.compile(r"[A-Za-z0-9_.:\\/+-]+")  # what cmd.exe and the Windows argument parser pass on unquoted
 
 
 class _RecordTooLarge(Exception):
@@ -44,6 +43,11 @@ def _admit_record(limit: int):
         if path.suffix == ".json" and (size := path.stat().st_size) > limit:
             raise _RecordTooLarge(size)
     return admit
+
+
+def _allowance(body: int, record: int) -> int:
+    """The one ``--max-bytes`` admitting the request and its sealed record (the record only above its default)."""
+    return max(body, record if record > _MANIFEST_LIMIT else 0)
 
 
 def _inspect(root: Path):
@@ -68,15 +72,12 @@ def _transport_observation(row: dict) -> str:
 
 
 def list_attempts(root: Path, task_id: str, *, after: str = "") -> dict:
-    """A bounded task-local selection; a cursor from another task, or naming no physical attempt, never advances it."""
-    before = 2 ** 63 - 1
+    """A bounded task-local selection of its physical attempts in every category (``Txn.task_attempt_page``); a cursor
+    from another task, or naming no physical attempt, never advances it."""
     with _inspect(root) as txn:
-        if after:
-            cursor = txn.conn.execute(_CURSOR_SQL, (str(after), str(task_id))).fetchone()
-            if cursor is None:
-                raise ValueError("Attempt cursor is not a physical attempt of this task")
-            before = cursor["seq_first"]
-        page = [dict(row) for row in txn.conn.execute(_PAGE_SQL, (str(task_id), before, _PAGE_SIZE + 1))]
+        page = txn.task_attempt_page(task_id, None, after=after, limit=_PAGE_SIZE + 1)
+    if page is None:
+        raise ValueError("Attempt cursor is not a physical attempt of this task")
     rows = page[:_PAGE_SIZE]
     return {"attempts": rows, "next_after": rows[-1]["attempt_id"] if len(page) > _PAGE_SIZE else None}
 
@@ -109,7 +110,7 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
                  report_facts: bool = False) -> tuple[dict, bytes | None]:
     """Read the exact attempt's redacted host projection, not raw bytes or provider receipt.
 
-    ``max_bytes`` bounds the request (16 MiB by default) and, above its 2 MiB default, the attempt's sealed record."""
+    ``max_bytes`` only raises bounds: the request's 16 MiB default and, above its 2 MiB, the sealed record's."""
     with _inspect(root) as txn:
         row = txn.attempt(attempt_id)
         life = txn.conn.execute(_ROW_SQL, (str(attempt_id), str(task_id))).fetchone()
@@ -125,16 +126,19 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
         facts.update(_recorded_life(row, dict(life)))
     ref = row.get("candidate_manifest_ref")
     if not isinstance(ref, dict) or not ref:
-        return {**facts, "body": "not_linked"}, None  # a producer may fail after sealing but before linking
+        # A receipt recorded already billed (a live conversation's) had no request prepared here; any other row may
+        # have lost its producer after sealing but before linking.
+        receipt = row.get("reservation_basis") == "receipt_already_received"
+        return {**facts, "body": "receipt_only" if receipt else "not_linked"}, None
     if ref.get("model_send_seal_version") != SEAL_VERSION:
         return {**facts, "body": "not_recorded"}, None
     if ref.get("call_id") != attempt_id:
         raise ValueError("Attempt and manifest identifiers differ")
-    body_limit, record_limit = max_bytes or _BODY_LIMIT, max(_MANIFEST_LIMIT, max_bytes or 0)
+    body_limit, record_limit = max(max_bytes or 0, _BODY_LIMIT), max(max_bytes or 0, _MANIFEST_LIMIT)
     try:
-        manifest = observability.read_call_manifest_ref(
+        record, manifest = observability.read_call_manifest_ref(
             root, ref, task_id=task_id, max_bytes=record_limit, admit=_admit_record(record_limit),
-            call_types=("physical_llm_candidate",),
+            call_types=("physical_llm_candidate",), with_raw=True,
         )
         seal = manifest.get("model_send_seal")
         digest, size, basis = (row.get(k) for k in (
@@ -149,20 +153,21 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
             return {**facts, "body": "not_recorded"}, None
         if manifest.get("full_payload_redacted") is not True or projection != manifest.get("full_payload_ref"):
             raise ValueError("Not a sealed redacted physical request")
-        facts.update(host_exclusions=seal.get("exclusions"), file_trace=manifest.get("file_trace", "not_recorded"))
+        facts.update(host_exclusions=seal.get("exclusions"), file_trace=manifest.get("file_trace", "not_recorded"),
+                     record_bytes=len(record))
         recorded_size = projection.get("size")
         if type(recorded_size) is not int or recorded_size < 0:
             raise ValueError("Redacted request has no recorded size")
         if recorded_size > body_limit:
             return {**facts, "body": "over_limit", "recorded_bytes": recorded_size, "max_bytes": body_limit,
+                    "retry_max_bytes": _allowance(recorded_size, len(record)),
                     "redacted_ref": _portable(projection, root)}, None
-        # A shared CAS skeleton may be larger than the logical request it represents.
-        # The immutable ref binds the reconstructed size independently of this envelope bound.
-        # The task's own pack answers first; the shared index is only read, never rebuilt (its packing pass does).
-        raw = observability.read_blob_ref(root, projection, max_bytes=max(body_limit, _BODY_LIMIT), raw_bytes=True,
-                                          task_id=task_id)
+        # The immutable ref binds the reconstructed size (a shared skeleton may be larger than the request it holds);
+        # the task's own pack answers first, and the shared index is only read, never rebuilt (its packing pass does).
+        raw = observability.read_blob_ref(root, projection, max_bytes=body_limit, raw_bytes=True, task_id=task_id)
     except _RecordTooLarge as exc:
-        return {**facts, "body": "manifest_over_limit", "recorded_bytes": exc.size, "max_bytes": record_limit}, None
+        return {**facts, "body": "manifest_over_limit", "recorded_bytes": exc.size, "max_bytes": record_limit,
+                "retry_max_bytes": exc.size}, None
     except EvidenceUnavailable as exc:  # where packed bytes lie cannot be learned now: never their absence
         return {**facts, "body": "evidence_unavailable", "evidence_reason": exc.reason}, None
     except FileNotFoundError:
@@ -177,30 +182,53 @@ def _document(facts: dict, stored: str | None) -> bytes:
 
 def report_document(facts: dict, raw: bytes | None) -> tuple[dict, bytes]:
     """The ``--report`` document. A request Beautiful Context could not open (``PAGE_LIMIT``), read or over this
-    export's bound, is reported as that gap: re-exporting cannot help the page, the reader without ``--report`` can."""
+    export's bound, is reported as that gap: a bounded record of the attempt (``_PAGE_GAP_FACTS``), its sizes and the
+    one ``--max-bytes`` with which the reader without ``--report`` writes it. Any other gap keeps its own facts, its
+    exclusions too while they fit; the document is measured before it is returned."""
     if raw is not None and len(document := _document(facts, raw.decode("utf-8"))) <= PAGE_LIMIT:
         return facts, document
     if raw is not None or (facts["body"] == "over_limit" and facts["recorded_bytes"] > PAGE_LIMIT):
         recorded = len(raw) if raw is not None else facts["recorded_bytes"]
-        facts = {**{key: value for key, value in facts.items() if key != "bytes"},
-                 "body": "over_page_limit", "recorded_bytes": recorded, "page_limit_bytes": PAGE_LIMIT}
-    return facts, _document(facts, None)
+        facts = {**{key: facts[key] for key in _PAGE_GAP_FACTS if key in facts}, "body": "over_page_limit",
+                 "recorded_bytes": recorded, "page_limit_bytes": PAGE_LIMIT,
+                 "retry_max_bytes": facts.get("retry_max_bytes") or _allowance(recorded, facts.get("record_bytes", 0))}
+    elif len(_document(facts, None)) > PAGE_LIMIT:  # the exclusions are what can grow without bound
+        facts = {key: value for key, value in facts.items() if key != "host_exclusions"}
+    if len(document := _document(facts, None)) > PAGE_LIMIT:
+        raise ValueError("Even this attempt's gap report exceeds the page limit")
+    return facts, document
 
 
-def _command(parts: list[str]) -> str:
-    return subprocess.list2cmdline(parts) if os.name == "nt" else " ".join(map(shlex.quote, parts))
+def _shell_word(value: str, placeholder: str, windows: bool) -> str:
+    """One word as this system's documented shell passes it on: POSIX quoting, else cmd.exe's. cmd.exe reads & | < >
+    ^ ( ) literally between double quotes and the Windows argument parser removes them (backslashes before the closing
+    quote doubled); a value cmd.exe would still expand (% !) or end (a quote, a line break) stays a placeholder."""
+    if not windows:
+        return shlex.quote(value)
+    if _CMD_PLAIN.fullmatch(value):
+        return value
+    if re.search(r'["%!\r\n]', value):
+        return placeholder
+    return '"' + re.sub(r"(\\+)$", r"\1\1", value) + '"'
+
+
+def _retry_command(args: argparse.Namespace, allowance: int) -> str:
+    """The reader's command without ``--report`` that writes the request to a file, for the shell of this system."""
+    windows = os.name == "nt"
+    words = [(str(args.data_root), "DATA"), (args.task_id, "TASK_ID"), ("--attempt", ""), (args.attempt, "ATTEMPT_ID"),
+             ("--max-bytes", ""), (str(allowance), "")]
+    return ("python -m ouroboros.context_attempt_reader --data-root "
+            + " ".join(_shell_word(value, placeholder, windows) for value, placeholder in words) + " > request.json")
 
 
 def _gap_words(facts: dict, args: argparse.Namespace) -> str:
     """The terminal's line for a report without a body: the gap and what admits the request, if anything does."""
-    body, recorded = facts["body"], facts.get("recorded_bytes")
+    body, allowance = facts["body"], facts.get("retry_max_bytes") or facts.get("recorded_bytes")
     if body in ("over_limit", "manifest_over_limit"):
-        return f"{body}; --max-bytes {recorded} admits it"
+        return f"{body}; --max-bytes {allowance} admits it"
     if body == "over_page_limit":
-        raw = ["python", "-m", "ouroboros.context_attempt_reader", "--data-root", str(args.data_root), args.task_id,
-               "--attempt", args.attempt, "--max-bytes", str(recorded)]
-        return (f"{body}: the request is {recorded} bytes and Beautiful Context opens at most {PAGE_LIMIT}; write it "
-                f"for another tool without --report: {_command(raw)} > request.json")
+        return (f"{body}: the request is {facts['recorded_bytes']} bytes and Beautiful Context opens at most "
+                f"{PAGE_LIMIT}; write it for another tool without --report: {_retry_command(args, allowance)}")
     if body == "evidence_unavailable":
         return f"{body}: the packed record could not be located now ({facts['evidence_reason']}); run again later"
     return body
@@ -215,7 +243,8 @@ def main(argv: list[str] | None = None) -> int:
     select.add_argument("--attempt", help="Write the selected redacted body to stdout and facts to stderr")
     parser.add_argument("--report", action="store_true",
                         help="Write a local Beautiful Context JSON report instead of the raw body")
-    parser.add_argument("--max-bytes", type=int, help="Override the read bound for the selected attempt only")
+    parser.add_argument("--max-bytes", type=int,
+                        help="Raise the read bounds of the selected attempt (the request's 16 MiB, its record's 2 MiB)")
     args = parser.parse_args(argv)
     if args.report and args.attempt is None:
         parser.error("--report needs --attempt")
