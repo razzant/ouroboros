@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-t7/bvd7vjo/liMcC9iiC3VVFx+doKVal+d7EkxnR9x4='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-73dLTlWKiwGY+efViDci0R//7oXcHtwj70Y6KsMzWd0='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -199,9 +199,9 @@ function parts(content, out = [], under = '') {
   if (typeof content === 'string') { if (content) push('', content); return out; }
   if (content === null || content === undefined) return out;
   if (!Array.isArray(content)) { push('Content', () => exactOf(content)); return out; }
-  content.forEach((part, index) => {
+  content.forEach((part) => {
     if (typeof part === 'string') push('', part);
-    else if (!isRecord(part)) push('Part', () => memberOf(content, index));
+    else if (!isRecord(part)) push('Part', () => exactOf(part));
     else if (part.type === 'tool_use') push(['Tool call', part.name, part.id].filter(Boolean).join(' · '), () => memberOf(part, 'input', {}));
     else if (part.type === 'tool_result') parts(part.content, out, ['Tool result', part.tool_use_id].filter(Boolean).join(' · '));
     else if (/image/.test(String(part.type))) push('Image', `${size(JSON.stringify(part).length)} of image data, kept in the stored JSON.`);
@@ -238,13 +238,15 @@ function indentJson(source) {
   }
   return out;
 }
-// Where each value of the stored JSON lies in its text, keyed by the value JSON.parse built of it: an opened row shows
-// that text, so a number keeps every digit JSON.parse rounds (9007199254740993). One pass over the text, at most once.
+// Where each object and array of the stored JSON lies in its text, and each object's members, keyed by the value
+// JSON.parse built: an opened row shows that text, so a number keeps every digit JSON.parse rounds (9007199254740993).
+// One pass over the text, at most once.
 let spans = null;
 function sourceSpans() {
   if (spans) return spans;
   spans = new WeakMap();
   let at = 0;
+  const token = /[^,\]}\s]*/y;
   const blank = () => { while (at < source.length && ' \t\n\r'.includes(source[at])) at += 1; };
   const string = () => {
     let end = at;
@@ -260,28 +262,28 @@ function sourceSpans() {
     const start = at;
     const open = source[at];
     if (open === '{' || open === '[') {
-      const members = new Map();
+      const members = open === '{' ? new Map() : null;  // an array's text is its own: no span per element
       at += 1;
       blank();
       for (let index = 0; source[at] !== (open === '{' ? '}' : ']'); index += 1) {
-        const key = open === '{' ? JSON.parse(string()) : index;
-        if (open === '{') { blank(); at += 1; blank(); }
+        const key = members ? JSON.parse(string()) : index;
+        if (members) { blank(); at += 1; blank(); }
         const from = at;
         walk(node !== null && typeof node === 'object' ? node[key] : undefined);
-        members.set(key, [from, at]);
+        members?.set(key, [from, at]);
         blank();
         if (source[at] === ',') { at += 1; blank(); }
       }
       at += 1;
       if (node !== null && typeof node === 'object') spans.set(node, { at: [start, at], members });
     } else if (open === '"') string();
-    else while (at < source.length && !',]} \t\n\r'.includes(source[at])) at += 1;
+    else { token.lastIndex = at; token.exec(source); at = token.lastIndex; }
   };
   try { blank(); walk(body); } catch { spans = new WeakMap(); }  // without spans a value is shown as parsed
   return spans;
 }
 const rawMember = (holder, key) => {
-  const at = holder !== null && typeof holder === 'object' ? sourceSpans().get(holder)?.members.get(key) : null;
+  const at = holder !== null && typeof holder === 'object' ? sourceSpans().get(holder)?.members?.get(key) : null;
   return at ? source.slice(...at) : null;
 };
 const asRecorded = (raw, value) => (raw === null ? pretty(value) : /^[{[]/.test(raw) ? indentJson(raw) : raw);
