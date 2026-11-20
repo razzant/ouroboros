@@ -213,7 +213,14 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('[data-collapse="local-model"] > summary').click()
     page.locator('[data-collapse="more-providers"] > summary').click()
-    for field in page.locator(".wizard-content input, .wizard-content select").all():
+    # A choice strip's value travels in a hidden input that no reader reaches (it has no `labels`); the strip's
+    # named button group is what the owner reads and presses, so that is what must carry the name.
+    carriers = page.locator(".wizard-content [data-connection-choice] input[type=hidden]")
+    assert carriers.count() > 0
+    for carrier in carriers.all():
+        assert carrier.evaluate("el => Boolean(el.closest('[data-connection-choice]')"
+                                ".querySelector('[role=group][aria-label]')?.getAttribute('aria-label').trim())")
+    for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
         assert field.evaluate("el => el.labels.length > 0 || Boolean(el.getAttribute('aria-label'))")
         assert field.evaluate("el => el.classList.contains('ui-control')")
         hint = field.get_attribute("aria-describedby")
