@@ -953,6 +953,178 @@ def test_an_append_during_a_missed_pass_costs_no_second_read_and_a_late_target_j
     assert membership._target_facts(facts.rooms, legacy)[0] == membership.TARGET_WORK
 
 
+def test_a_discarded_race_pass_keeps_its_gap_out_of_the_report_and_finishes_quiet_once(tmp_path, monkeypatch):
+    """The batching/text-edit race made to bite. A mid-pass ``revise_text`` moves the marks a whole-view
+    pass read under, so the pass is discarded -- after it had already decided a legacy Reply's unreadable
+    target unknown and emitted its Project's gap, and after a mid-race repair stored that target's exact
+    row again. What the discard owes: the returned report is the retry's own (the discarded pass's row
+    list and gap reach no reader), a quiet finish is collected exactly once however many passes ran, and
+    the retry -- ordinary live resolution under fresh marks, its own row list still the view's -- already
+    honors the mid-race repair: no stale gap survives it, and the recovered row joins its room with the
+    next view."""
+    from ouroboros import memory_inventory as mi, room_appearances, room_membership as membership
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chronicle_store import ChronicleStore
+    from tests._dialogue import import_all, seed
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    target = {**_SUMMARY, "client_message_id": "repaired-target"}
+    legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+    reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "torn",
+             "text": "Owner words torn", "reply_to": legacy}
+    seed(tmp_path, archives={"chat_20261001T000000.jsonl": [json.dumps(target)[:48] + "\n", reply]})
+    import_all(tmp_path)
+    ChronicleStore(tmp_path).ensure_activated()
+    assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+    ds.append(tmp_path, "chat", {"ts": "2026-10-01T05:30:00Z", "direction": "system", "chat_id": 1,
+                                 "task_id": "nova-root", "type": "task_summary", "text": "Done quietly.",
+                                 "client_message_id": "quiet-done", "wake_silent": True,
+                                 "quiet_effective": True})
+    decoy = ds.append(tmp_path, "chat", {"ts": "2026-10-01T06:30:00Z", "direction": "in", "chat_id": 1,
+                                         "client_message_id": "decoy", "text": "An editable Main row."})
+
+    def view():
+        gaps, quiet = {}, {}
+        return mi.open_rows_by_room(tmp_path, gaps=gaps, quiet=quiet), gaps, quiet
+
+    def ids(view, room):
+        return [meta.get("client_message_id") for _address, meta, _pos in view.get(str(room), [])]
+
+    cold, gaps, _quiet = view()
+    assert gaps == {str(nova): {"reply_target_unreadable"}}  # the standing gap of the unreadable target
+    assert ids(cold, nova) == ["quiet-done"]  # its Project holds the quiet Done, not the Reply
+    assert "torn" in ids(cold, 1) and "torn" not in ids(cold, nova)
+
+    lookup, moved, passes = membership._target_facts, [], []
+    real_capture = membership.capture_reply_targets
+
+    def repair_and_edit_once(rooms, ref):
+        result = lookup(rooms, ref)
+        if ref.get("address") == legacy["address"] and not moved:
+            moved.append(True)
+            ds.append(tmp_path, "chat", dict(target), appearances=None)  # the repair: its exact row again
+            ds.revise_text(tmp_path, "chat", decoy.seq, "An edited Main row.")  # the edit that discards the pass
+        return result
+
+    def recording_capture(rooms, read):
+        def recording():
+            result = read()
+            passes.append(result)
+            return result
+        return real_capture(rooms, recording)
+
+    with monkeypatch.context() as race:
+        race.setattr(membership, "_target_facts", repair_and_edit_once)
+        race.setattr(membership, "capture_reply_targets", recording_capture)
+        raced, raced_gaps, raced_quiet = view()
+    assert len(moved) == 1 and len(passes) == 2  # one discarded pass, one retry under the moved marks
+    assert passes[0][2] == {nova}  # the discarded pass did emit the gap it decided, under its own marks
+    assert "repaired-target" not in ids(passes[0][0], nova)  # its row list was fixed at its start
+    assert "torn" in ids(raced, nova)  # the report is the retry's own, never the discarded pass's
+    assert raced_gaps == {}  # the retry resolves live: the repair is honored, no stale gap survives it
+    assert [meta.get("client_message_id") for _a, meta, _p in raced_quiet[str(nova)]] == ["quiet-done"]
+    fresh, gaps, quiet = view()
+    assert gaps == {}  # the recovered exact address closes the gap for the fresh read
+    assert "torn" in ids(fresh, nova) and "torn" in ids(fresh, 1)
+    assert "repaired-target" in ids(fresh, 1)  # the recovered row stands where every reader finds it
+    assert [meta.get("client_message_id") for _a, meta, _p in quiet[str(nova)]] == ["quiet-done"]  # once
+
+
+def test_a_same_path_store_replacement_is_decided_by_identity_alone_not_by_stale_cached_answers(tmp_path):
+    """A backup restored over the live path is a different store at the same address: a saved target's
+    decision is a fact of the file it was read from (``store.file_identity``), never of the path. The
+    replacement keeps every other mark equal -- the same chat text revision, the same ends of both
+    streams -- so the identity is the only thing that moved: the target's exact address answers before
+    the swap and no longer after, while the cache still holds the found answer under the old file,
+    which is exactly what a stale cache would have returned."""
+    import os
+
+    from ouroboros import chat_chain, room_membership as membership
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.projects_registry import RoomResolver
+
+    target_text, filler_text = "Target of the live store.", "Backup filler row stands."
+    assert len(target_text) == len(filler_text)  # the streams' ends are byte coordinates: equal rows, equal ends
+
+    def a_store(root, first_row):
+        nova = _project(root, "nova")
+        _born_in(root, "nova-root", nova)
+        target = {**_SUMMARY, "text": target_text}
+        legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+        reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "swap",
+                 "text": "Owner words swap", "reply_to": legacy}
+        ds.append(root, "chat", first_row, appearances=None)
+        ds.append(root, "chat", reply, appearances=None)
+        return legacy
+
+    live, backup = tmp_path / "live", tmp_path / "backup"
+    live.mkdir()
+    backup.mkdir()
+    target = {**_SUMMARY, "text": target_text}
+    filler = {**_SUMMARY, "ts": "2026-10-01T04:00:00Z", "text": filler_text}
+    legacy = a_store(live, dict(target))
+    assert a_store(backup, filler) == legacy
+    rooms = RoomResolver(live)
+    membership._SAVED_TARGETS.clear()
+    identity = membership._store_identity(live)
+    assert membership.reply_target(rooms, legacy) == (membership.TARGET_WORK, "nova-root", 1)
+    assert chat_chain.resolve_row(live, legacy["address"], stream="chat")[0]["text"] == target_text
+    revision, ends = membership._text_revision(live), membership._stream_ends(live)
+    assert (membership._text_revision(backup), membership._stream_ends(backup)) == (revision, ends)
+    for root in (live, backup):  # Windows: no connection may stay open over a replaced file
+        with ds.transaction(root, write=False):
+            pass
+    live_path, backup_path = ds.path(live), ds.path(backup)
+    for suffix in ("-wal", "-shm"):
+        live_side, backup_side = (path.with_name(path.name + suffix) for path in (live_path, backup_path))
+        if backup_side.exists():
+            os.replace(backup_side, live_side)
+        else:
+            live_side.unlink(missing_ok=True)
+    os.replace(backup_path, live_path)
+    assert membership._store_identity(live) != identity  # a different file at the same path
+    assert (membership._text_revision(live), membership._stream_ends(live)) == (revision, ends)  # only identity moved
+    held = membership._SAVED_TARGETS[(str(live), legacy["address"])]
+    assert held[0][0] == membership.TARGET_WORK and held[1] == identity  # the stale answer is still cached
+    assert not chat_chain.resolve_row(live, legacy["address"], stream="chat")[0]  # the address answers no more
+    assert membership.reply_target(rooms, legacy) == (membership.TARGET_ABSENT, "nova-root", 1)
+
+
+def test_two_legacy_references_to_one_unreadable_address_use_only_their_own_fallbacks_in_either_order(tmp_path):
+    """Two Replies an older body saved to the same unreadable exact address -- one reference carrying
+    its target's task, the other naming only a room -- share one decision at that address, but each
+    reference's own fallback is the only thing it may join: the task's room for one, the named chat
+    for the other, never the other's, whichever is decided first and in either order."""
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chat_references import reference_from_row
+    from tests._dialogue import import_all, seed
+
+    nova, beta = _project(tmp_path, "nova"), _project(tmp_path, "beta")
+    _born_in(tmp_path, "nova-root", nova)
+    target = {**_SUMMARY}
+    legacy = {key: value for key, value in reference_from_row(target).items() if key != "target_home"}
+    with_task = {**legacy, "task_id": "nova-root", "chat_id": 1}
+    without_task = {key: value for key, value in legacy.items() if key != "task_id"}
+    without_task["chat_id"] = beta
+    reply = {"ts": "2026-10-01T06:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "shared",
+             "text": "Owner words shared", "reply_to": with_task}
+    seed(tmp_path, archives={"chat_20261001T000000.jsonl": [json.dumps(target)[:48] + "\n", reply]})
+    import_all(tmp_path)
+    facts = mi.membership_facts(tmp_path)
+
+    def could_join(ref):
+        row = {"ts": "2026-10-01T06:30:00Z", "direction": "in", "chat_id": 1, "text": "Owner words",
+               "reply_to": ref}
+        return membership.unknown_target_rooms(row, facts.project_chat_ids, facts.rooms)
+
+    assert membership._saved_target(facts.rooms, with_task)[0] == membership.TARGET_UNKNOWN
+    cases = ((with_task, frozenset({nova})), (without_task, frozenset({beta})))
+    for first, second in (cases, tuple(reversed(cases))):
+        membership._SAVED_TARGETS.clear()  # each order is decided from a cold cache
+        assert could_join(first[0]) == first[1] and could_join(second[0]) == second[1]
+
+
 def test_an_unreadable_target_is_a_gap_of_its_projects_memory_and_evidence_reads(tmp_path):
     """History, room reads, evidence and the memory view name the same gap for the Projects the Reply could
     join, and only for them; rows not derived yet are a gap of the indexed reads too."""
