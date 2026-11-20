@@ -539,7 +539,7 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     assert "claim this work's room and of the notes their heads link, none of my other memory;" in prompt
     assert selection.startswith("Every child starts with my human's words for the work verbatim and dated, ")
     assert ("other knowledge stays one read away. Omit or shared: it also starts with the heads of the notes that "
-            "claim its room, " in selection)
+            "claim its room and of the notes their heads link, SYSTEM/BIBLE, " in selection)
     # The declared half keeps its own contract: the rest of shared memory, dialogue, parent context and attachments
     # are not its inputs; the assignment governs exchange.
     shared, declared = selection.split("declared selects only the authored ", 1)

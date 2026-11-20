@@ -68,7 +68,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "description": (
                 "Every child starts with my human's words for the work verbatim and dated, the marks in force "
                 "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
-                "with the heads of the notes that claim its room, SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
+                "with the heads of the notes that claim its room and of the notes their heads link, SYSTEM/BIBLE, "
+                "book maps, my identity, life's top-level account (except Agent-session "
                 "supervisors), the child's room page, full assignment and attachments. declared selects only "
                 "the authored objective/context/constraints and full governance/task authority for an independent "
                 "first position; it excludes the rest of shared memory (identity, life account, room page), "
