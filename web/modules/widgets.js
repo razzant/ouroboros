@@ -8,6 +8,7 @@ import {
 } from './widget_job.js';
 import { getPath } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
+import { cardThemeValues } from './card_frames.js';
 import { boardFrameGeometry, mountModuleWidget, mountRouteIframeWidget, setFrameHeight } from './widget_module.js';
 import { SHELL_ICONS } from './page_icons.js';
 import {
@@ -888,7 +889,9 @@ export function initWidgets(ctx = {}) {
     document.getElementById('content').appendChild(page.firstElementChild);
     const reportMount = document.querySelector('[data-context-report-mount]');
     const reportButton = document.querySelector('[data-context-report]');
+    let stopReportTheme = () => {};
     const closeReport = () => {
+        stopReportTheme();
         reportMount.replaceChildren();
         reportMount.hidden = true;
         reportButton.setAttribute('aria-expanded', 'false');
@@ -899,10 +902,14 @@ export function initWidgets(ctx = {}) {
         frame.title = 'Beautiful Context';
         frame.setAttribute('sandbox', 'allow-scripts');
         frame.referrerPolicy = 'no-referrer';
-        // An opaque frame reads no host token: its name tells it the painted palette, and nothing else is told.
-        const theme = window.ouroTheme?.theme;
-        if (theme === 'light' || theme === 'dark') frame.name = `ouro-theme:${theme}`;
+        // An opaque frame reads no host token: told the palette one way, it answers nothing. Its name carries the theme
+        // for the first paint; a message, the theme and its card's colours at load and at each change while open.
+        const tell = () => frame.contentWindow?.postMessage(
+            { type: 'ouro-context-report-theme', ...cardThemeValues(document, reportMount) }, '*');
+        frame.name = `ouro-theme:${cardThemeValues(document, reportMount).name}`;
         frame.src = '/static/context-report.html';
+        frame.addEventListener('load', tell);
+        stopReportTheme = onThemeChange(tell);
         reportMount.append(frame);
         reportMount.hidden = false;
         reportButton.setAttribute('aria-expanded', 'true');

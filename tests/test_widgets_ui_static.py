@@ -71,6 +71,27 @@ def test_context_report_page_is_admitted_by_its_own_csp_hashes():
         assert directives[directive] == f"'sha256-{digest}'", directive
 
 
+def test_context_report_frame_is_told_its_palette_one_way_and_shares_the_readers_page_limit():
+    """The page hears only its embedding window's palette message and sends nothing back; the host tells it at load
+    and at every theme change while it is open, and stops on close. The page and the reader name one page limit, so
+    a report the reader writes is one the page opens (the browser lane: ``tests/test_widgets_ui_browser.py``)."""
+    import re
+
+    from ouroboros.context_attempt_reader import PAGE_LIMIT
+
+    (script,) = re.findall(r"<script\b[^>]*>(.*?)</script>", _read("web/context-report.html"), re.S)
+    assert not re.search(r"postMessage|fetch\(|WebSocket|XMLHttpRequest|sendBeacon|EventSource", script)
+    assert "event.source === window.parent" in script and "told.type !== 'ouro-context-report-theme'" in script
+    (limit,) = re.findall(r"const maxBytes = (\d+) \* 1024 \* 1024;", script)
+    assert int(limit) * 1024 * 1024 == PAGE_LIMIT
+    host = _widgets_js()
+    click = host.index("reportButton.addEventListener('click'")
+    opened = host[click:host.index("const list = document.getElementById('widgets-list');")]
+    closed = host[host.index("const closeReport = () => {"):click]
+    assert "frame.addEventListener('load', tell);" in opened and "stopReportTheme = onThemeChange(tell);" in opened
+    assert "type: 'ouro-context-report-theme'" in opened and "stopReportTheme();" in closed
+
+
 def test_widgets_schema_v1_composition_uses_stable_tree_keys():
     source = _widgets_js()
     renderer = _render_js()

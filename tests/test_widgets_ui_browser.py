@@ -984,6 +984,18 @@ def test_ui_smoke_widgets_page_has_a_typed_address_and_one_nav_landmark(
 
 
 
+# In the top window only: every message the Beautiful Context frame posts to it (none is expected; a probe proves
+# the recorder hears one).
+_REPORT_MESSAGES = """(() => {
+  if (window.top !== window) return;
+  window.__reportMessages = [];
+  window.addEventListener('message', (event) => {
+    const report = document.querySelector("iframe[title='Beautiful Context']");
+    if (report && event.source === report.contentWindow) window.__reportMessages.push(String(event.data));
+  }, true);
+})();"""
+
+
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("browser_name", ("chromium", "webkit"))
 def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
@@ -994,7 +1006,9 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
     The reports are the real reader's over real sealed attempts. A stale CSP hash, a body shown under another
     attempt's facts, an earlier result left under a failed selection, text drawn as markup, a request held
     twice in the frame, a gap explained only inside a closed disclosure or a ledger state read as a final
-    charge each fail here.
+    charge each fail here. So does a frame that keeps its old palette when the device's theme changes while a
+    report is open, or that sends anything out: a message to its parent, a request or a WebSocket frame, before or
+    after a file is chosen (the frame's own page load is the observers' positive control).
     """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
@@ -1007,33 +1021,62 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
     first, second = reports["attempts"]
     (failed, failed_report), (retried, retried_report) = reports["failed"], reports["retried"]
     stored = json.loads(reports["first"])["stored_json"]
+    private = ("Marigold", "fenders", first, second, failed, retried)  # what no request or socket frame may carry
     selector = "iframe[title='Beautiful Context']"
     url = direct_server_with_data["url"]
+    evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or tmp_path / "evidence") / "beautiful-context"
+    evidence.mkdir(parents=True, exist_ok=True)
+    phase, requests, sockets = ["boot"], [], []
+
+    def on_request(request):
+        try:
+            where = request.frame.url
+        except PlaywrightError:  # a request of a frame already gone
+            where = ""
+        requests.append({"phase": phase[0], "path": urllib.parse.urlsplit(request.url).path, "url": request.url,
+                         "frame": where, "navigation": request.is_navigation_request(),
+                         "data": (request.post_data_buffer or b"").decode("utf-8", "replace")})
+
+    def on_socket(socket):
+        record = {"phase": phase[0], "url": socket.url, "sent": []}
+        socket.on("framesent", lambda payload: record["sent"].append(str(payload)))
+        sockets.append(record)
+
     try:
         with sync_playwright() as pw:
             browser = getattr(pw, browser_name).launch(headless=True)
-            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            context = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+            context.add_init_script(_REPORT_MESSAGES)
+            context.on("request", on_request)
+            page = context.new_page()
+            page.on("websocket", on_socket)
             page.set_default_timeout(15_000)
             errors, failed_loads = record_console_errors(page), record_failed_loads(page)
             try:
-                page.goto(f"{url}/#widgets", wait_until="domcontentloaded", timeout=30_000)
+                with page.expect_websocket():  # the page's own socket, observed from its start
+                    page.goto(f"{url}/#widgets", wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_selector("#page-widgets.active")
+                page.evaluate("() => window.ouroTheme.set('system')")  # Appearance follows the device, as installed
+                expect(page.locator("html")).to_have_attribute("data-theme", "dark")
                 assert page.locator(selector).count() == 0
+                phase[0] = "open"
                 page.get_by_role("button", name="Beautiful Context").click()
                 report = page.locator(selector)
-                # Opaque and bridge-free: scripts only, its own address, and the palette's name as the one thing told.
+                # Opaque and bridge-free: scripts only, its own address, and the palette as the one thing told.
                 assert report.get_attribute("sandbox") == "allow-scripts"
                 assert report.get_attribute("src") == "/static/context-report.html"
                 frame = page.frame_locator(selector)
-                assert frame.locator("html").get_attribute("data-theme") == page.locator("html").get_attribute("data-theme")
-                facts, rows = frame.locator("#attempt-facts"), frame.locator("#request .rows[data-kind='messages'] > .row")
+                expect(frame.locator("html")).to_have_attribute("data-theme", "dark")
+                facts = frame.locator("#attempt-facts")
+                rows = frame.locator("#request .rows[data-kind='messages'] > .row")
                 stored_body = frame.locator("#stored-body")
+                mount = page.locator("[data-context-report-mount]")
 
                 def choose(content, shown: str, where: str = "#report-status") -> None:
                     # Through the picker a person uses: the control must take the click itself.
                     with page.expect_file_chooser() as picker:
                         frame.locator("#report-file").click()
-                    picker.value.set_files([] if content is None else {
+                    picker.value.set_files([] if content is None else content if isinstance(content, str) else {
                         "name": "report.json", "mimeType": "application/json", "buffer": content})
                     frame.locator(where).get_by_text(shown).wait_for()
 
@@ -1047,6 +1090,35 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     expect(stored_body).to_be_hidden()
                     assert rows.count() == 0 and frame.locator("#privacy").is_hidden()
 
+                def gap(**facts_of_gap) -> bytes:
+                    return json.dumps({"format": "ouroboros.context-report/1", "stored_json": None, "facts": {
+                        "task_id": "report-task", "attempt_id": "earlier-attempt", **facts_of_gap}}).encode("utf-8")
+
+                def shoot(name: str) -> None:
+                    # WebKit's screenshot puts a stylesheet into the frame, which the frame's policy refuses: that one
+                    # console line per picture is the screenshot's, never the page's, and is set aside here.
+                    seen = len(errors)
+                    mount.screenshot(path=str(evidence / f"{browser_name}-{name}.png"), caret="initial")
+                    page.wait_for_timeout(200)
+                    errors[seen:] = [each for each in errors[seen:] if browser_name != "webkit"
+                                     or each[1] != "/static/context-report.html"
+                                     or not each[0].startswith("Refused to apply a stylesheet because its hash")]
+
+                def inks() -> tuple:
+                    # The host's text on the card the frame lies on, and the frame's own headline, each as painted.
+                    host = page.evaluate("""() => {
+                        const probe = document.createElement('span');
+                        probe.style.color = 'var(--text-primary)';
+                        document.querySelector('[data-context-report-mount]').append(probe);
+                        const ink = getComputedStyle(probe).color;
+                        probe.remove();
+                        return [document.documentElement.dataset.theme, ink];
+                    }""")
+                    inside = frame.locator("#headline").evaluate(
+                        "(node) => [document.documentElement.dataset.theme, getComputedStyle(node).color]")
+                    return host, inside
+
+                phase[0] = "select"
                 choose(reports["first"], first, "#attempt-facts")
                 assert "receipt not confirmed" in facts.inner_text() and second not in facts.inner_text()
                 assert "Request recorded" in frame.locator("#headline").inner_text()
@@ -1055,6 +1127,20 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 # tool, and a row's text exists only while that row is open.
                 assert stored_body.text_content() == stored
                 assert rows.count() == 4 and frame.locator(".part").count() == 0
+                # The device turns light and back while the report is open: the frame takes each palette from its
+                # card, its text reads as the card's own text, and the report stays where it was.
+                host, inside = inks()
+                assert inside == host and host[0] == "dark", (host, inside)
+                shoot("1-dark-opened")
+                for step, scheme in enumerate(("light", "dark"), 2):
+                    page.emulate_media(color_scheme=scheme)
+                    expect(page.locator("html")).to_have_attribute("data-theme", scheme)
+                    expect(frame.locator("html")).to_have_attribute("data-theme", scheme)
+                    host, inside = inks()
+                    assert inside == host and host[0] == scheme, (scheme, host, inside)
+                    assert first in facts.inner_text() and stored_body.text_content() == stored and rows.count() == 4
+                    expect(frame.locator("#report-result")).to_be_visible()
+                    shoot(f"{step}-{scheme}-switched")
                 asked = rows.nth(1)
                 assert "secret masked" in asked.locator("summary").inner_text()
                 assert "calls inspect" in rows.nth(2).locator("summary").inner_text()
@@ -1083,15 +1169,50 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 choose(retried_report, retried, "#attempt-facts")
                 assert failed not in frame.locator("body").text_content() and "Failure" not in facts.inner_text()
                 assert "abandoned" not in facts.inner_text()
+                # An open record names only its open accounting; what the transport returned stays the Transport's.
+                for state, words_of_state in (
+                        ("dispatched", "marked this send as started; its accounting record is still open"),
+                        ("unresolved", "keeps this attempt’s accounting record open")):
+                    choose(gap(body="not_linked", attempt_id=f"open-{state}", ledger_state=state,
+                               transport_observation="error_reply_recorded"), f"open-{state}", "#attempt-facts")
+                    words = facts.inner_text()
+                    assert words_of_state in words and "Transport returned an error reply" in words
+                    assert "no outcome" not in words and "does not know how" not in words
                 # A report of a gap says which gap at the top; an earlier /1 report without the later facts opens.
                 choose(reports["over_limit"], "larger than this report", "#headline")
                 gap_reads_without_opening(f"--max-bytes {len(stored.encode('utf-8'))}")
                 assert stored_body.text_content() == "Request body unavailable: over_limit"
-                choose(json.dumps({"format": "ouroboros.context-report/1", "stored_json": None, "facts": {
-                    "task_id": "report-task", "attempt_id": "earlier-attempt", "body": "not_linked"}}).encode("utf-8"),
-                    "No saved request is linked", "#headline")
+                # Its record is named under the data folder, never by this computer's folders, and still in full.
+                record = json.loads(frame.locator("#record-body").text_content())["redacted_ref"]
+                assert record == json.loads(reports["over_limit"])["facts"]["redacted_ref"]
+                assert record["path"].startswith("observability/blobs/")
+                assert {"sha256", "size", "kind", "encoding"} <= set(record)
+                choose(gap(body="not_linked"), "No saved request is linked", "#headline")
                 gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
+                for facts_of_gap, headline, words in (
+                        ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152},
+                         "sealed record is larger", "--max-bytes 2258277 to include it"),
+                        ({"body": "evidence_unavailable", "evidence_reason": "busy"}, "could not be located just now",
+                         "run the reader again later"),
+                        ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648},
+                         "larger than this page opens", "python -m ouroboros.context_attempt_reader --data-root DATA "
+                         "report-task --attempt earlier-attempt --max-bytes 52428800 > request.json"),
+                        ({"body": "not_one_attempt", "ledger_kind": "subscription_session"},
+                         "names no single model request", "List the task’s attempts")):
+                    choose(gap(**facts_of_gap), headline, "#headline")
+                    gap_reads_without_opening(words)
+                assert "Ledger row" in facts.inner_text() and "subscription_session" in facts.inner_text()
+                assert "Ledger state" not in facts.inner_text() and "Transport" not in facts.inner_text()
+                # A file the page cannot open says how to read that request elsewhere, not only that it is too large.
+                large = tmp_path / "large-report.json"
+                with large.open("wb") as handle:
+                    handle.truncate(48 * 1024 * 1024 + 1)
+                choose(str(large), "more than the 48 MiB this page opens")
+                assert (f"without --report: python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID "
+                        f"--attempt ATTEMPT_ID --max-bytes {48 * 1024 * 1024 + 1} > request.json") in frame.locator(
+                    "#report-status").inner_text()
+                assert frame.locator("#report-result").is_hidden()
                 # A selection that is no report removes the result instead of leaving the last one in view.
                 for content, words in ((b"", "the file is empty"), (reports["first"][:200], "not complete JSON"),
                                        (b'{"stored_json": null}', "another kind of document"),
@@ -1101,7 +1222,15 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                         "#report-status").inner_text()
                     assert frame.locator("#report-result").is_hidden() and facts.inner_text() == ""
                     assert stored_body.text_content() == ""
-                assert unexpected_console_errors(errors, failed_loads) == []
+                assert unexpected_console_errors(errors, failed_loads) == [], errors
+                # Nothing left the frame: no message to its parent (a probe from the frame itself reaches the same
+                # recorder), no request but its own page load, and no socket frame with the reports' words.
+                assert page.evaluate("() => window.__reportMessages") == []
+                (inner,) = [each for each in page.frames if each.url.endswith("/static/context-report.html")]
+                inner.evaluate("() => window.parent.postMessage('probe', '*')")
+                page.wait_for_function("() => window.__reportMessages.length === 1")
+                assert page.evaluate("() => window.__reportMessages") == ["probe"]
+                phase[0] = "leave"
                 page.locator("nav#primary-sidebar [data-nav-page]:not([data-nav-page='widgets'])").first.click()
                 report.wait_for(state="detached")
             finally:
@@ -1110,3 +1239,10 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))
         raise
+    loads = [each for each in requests if each["path"] == "/static/context-report.html"]
+    assert [(each["phase"], each["navigation"]) for each in loads] == [("open", True)], loads
+    assert not [each for each in requests if "context-report.html" in each["frame"] and not each["navigation"]]
+    assert not [each for each in requests if any(word in each["url"] + each["data"] for word in private)]
+    assert sockets and sockets[0]["phase"] == "boot", sockets  # the page's own socket, observed from its start
+    assert {each["url"] for each in sockets} == {sockets[0]["url"]}, sockets
+    assert not [each for each in sockets for sent in each["sent"] if any(word in sent for word in private)]

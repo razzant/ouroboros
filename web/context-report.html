@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-YCEKmHhh9UsDZkYxBzYB+GofqXj6AyQTKEsGwDFkRTc='; style-src 'sha256-f/pvUT3AyGTaU1UNYOl8WzyOV3eeglhoA+StwvJw6NI='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-6jBTMq/sSrR4HIc4nMXbWqYjYRzJ4SnYRZIk/aYSX/4='; style-src 'sha256-/vUsxd6I/5ZzNr83y5nZjWQgpOe2k77bp1Z6Mkvf27U='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
-/* An opaque frame inherits no host tokens: system colours follow the scheme the host names in the frame's
-   name (ouro-theme:light or ouro-theme:dark), else the device's. Sizes, radii and spacing are the design book's. */
+/* An opaque frame inherits no host token. The host names its scheme in the frame's name (ouro-theme:light or
+   ouro-theme:dark) for the first paint, then tells it, one way, the theme and the --ouro-* colours of the card it lies
+   on, at load and at every change; without them the device's scheme and these fallbacks paint. Sizes, radii and
+   spacing are the design book's. */
 :root { color-scheme: light dark; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   --warn: #805000; --bad: #b52b3b; --focus: #bf2f40; }
 :root[data-theme="light"] { color-scheme: light; }
@@ -13,8 +15,9 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) { --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; }
 }
-body { margin: 0; padding: 16px; color: CanvasText; overflow-wrap: anywhere;
-  --meta: color-mix(in srgb, CanvasText 70%, Canvas); --tray: color-mix(in srgb, CanvasText 6%, transparent); }
+body { margin: 0; padding: 16px; color: var(--ouro-text, CanvasText); overflow-wrap: anywhere;
+  --meta: var(--ouro-text-meta, color-mix(in srgb, CanvasText 70%, Canvas));
+  --tray: var(--ouro-tray, color-mix(in srgb, CanvasText 6%, transparent)); }
 h1, h2, p, ol, dl, pre { margin: 0; }
 h1, h2 { font-size: 16px; line-height: 1.3; font-weight: 600; }
 h2 { margin-block: 24px 8px; }
@@ -26,7 +29,7 @@ h2 small, .meta, dt, #report-help, .note { font-size: 12px; line-height: 1.35; f
 .pick:hover .button { background: color-mix(in srgb, CanvasText 11%, transparent); }
 #report-file { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
 #report-file:focus-visible + .button, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-#report-status[data-tone="bad"] { color: var(--bad); }
+#report-status[data-tone="bad"] { color: var(--ouro-error, var(--bad)); }
 #report-help { margin-block-start: 12px; }
 #report-help ol { padding-inline-start: 20px; }
 #report-help li { margin-block-start: 4px; }
@@ -37,7 +40,7 @@ summary { cursor: pointer; border-radius: 12px; }
 dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; }
 dd { margin: 0; min-width: 0; }
 .callout { margin-block-start: 12px; padding: 12px 16px; border-radius: 12px; background: var(--tray); }
-.callout strong { font-weight: 600; color: var(--warn); }
+.callout strong { font-weight: 600; color: var(--ouro-warn, var(--warn)); }
 .rows { display: grid; gap: 4px; }
 .row { border-radius: 12px; background: var(--tray); }
 .row > summary { display: grid; grid-template-columns: 0.75rem 1.5rem 5.5rem minmax(0, 1fr) max-content; gap: 8px;
@@ -96,6 +99,24 @@ const theme = /^ouro-theme:(light|dark)$/.exec(window.name);
 if (theme) document.documentElement.dataset.theme = theme[1];
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+// The host tells the painted palette one way (web/modules/widgets.js): the theme and the colours of the card this frame
+// lies on, at load and at every change. Only the embedding window is heard, only this shape is applied, and nothing
+// is ever posted back, so what the frame reads stays in it. The colours go to a rule of this page's own stylesheet
+// (CSSOM), never to a style attribute, which its policy refuses.
+const PALETTE = ['--ouro-text', '--ouro-text-meta', '--ouro-tray', '--ouro-warn', '--ouro-error'];
+const sheet = document.querySelector('style')?.sheet;
+const palette = sheet ? sheet.cssRules[sheet.insertRule(':root {}', sheet.cssRules.length)].style : null;
+window.addEventListener('message', (event) => {
+  const told = event.source === window.parent ? event.data : null;
+  if (!isRecord(told) || told.type !== 'ouro-context-report-theme' || !['light', 'dark'].includes(told.name)
+      || !isRecord(told.tokens)) return;
+  document.documentElement.dataset.theme = told.name;
+  for (const token of PALETTE) {
+    const value = told.tokens[token];
+    if (typeof value === 'string' && /^[^;{}<>]{1,200}$/.test(value)) palette?.setProperty(token, value);
+    else palette?.removeProperty(token);
+  }
+});
 const text = (value) => (typeof value === 'string' && value ? value : 'Not recorded');
 const count = (number) => number.toLocaleString('en-US');
 const size = (chars) => (chars < 1000 ? `${chars} chars` : `${count(Math.round(chars / 100) / 10)}k chars`);
@@ -121,15 +142,19 @@ const ABSENT = new Map([
     'It was saved without a sealed redacted copy this reader understands, as attempts of older versions were.']],
   ['unavailable', ['The saved request was not found',
     'The attempt links a record whose file was not found in the data folder the reader was given. Retention may have removed it.']],
+  ['not_one_attempt', ['This ID names no single model request',
+    'Its ledger row accounts for a delegated session, a dispatch outside Ouroboros’s metering or imported history, which may stand for many requests, so no saved request belongs to it. List the task’s attempts and choose one of them.']],
+  ['evidence_unavailable', ['The saved request could not be located just now',
+    'Its record lies in a packed archive, and the index that says where could not answer. Nothing is known to be lost: run the reader again later.']],
 ]);
 // A ledger state is accounting. The report carries no money field, so these words name what the ledger
 // recorded about the attempt's record and never a price, a charge or a delivery.
 const STATES = new Map([
   ['reserved', 'Reserved — the ledger opened this attempt; no dispatch is recorded'],
   ['released', 'Released — the ledger closed this attempt as not dispatched'],
-  ['dispatched', 'Dispatched — the ledger marked this send as started and recorded no outcome'],
+  ['dispatched', 'Dispatched — the ledger marked this send as started; its accounting record is still open'],
   ['settled', 'Settled — the ledger closed this attempt’s accounting record'],
-  ['unresolved', 'Unresolved — the ledger does not know how this send ended'],
+  ['unresolved', 'Unresolved — the ledger keeps this attempt’s accounting record open; a late receipt may still close it'],
 ]);
 // Why a record was closed, in words for the reasons the ledger writes; any other reason is shown as recorded.
 const SETTLED = new Map([
@@ -267,27 +292,47 @@ function add(label, value) {
 }
 const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
   ['tools', 'Tools'], ['functions', 'Functions']];
+// The reader's own command that writes a request this page cannot open to a file for another tool.
+const elsewhere = (task, attempt, admits) => 'Write the request itself to a file for another tool with the reader '
+  + `without --report: python -m ouroboros.context_attempt_reader --data-root DATA ${task} --attempt ${attempt} `
+  + `--max-bytes ${admits} > request.json`;
+// A gap's headline and explanation; one that something can admit says what does.
+function gapWords(facts) {
+  const recorded = Number.isInteger(facts.recorded_bytes) ? facts.recorded_bytes : 0;
+  const shown = recorded ? bytes(recorded) : 'larger';
+  const bound = (value) => (Number.isInteger(value) ? bytes(value) : 'less');
+  const again = `Run the reader again with --max-bytes ${recorded || 'N'} to include it.`;
+  if (facts.body === 'over_limit') {
+    return ['The saved request is larger than this report’s limit', `It is ${shown}; this export allowed ${bound(facts.max_bytes)}. ${again}`];
+  }
+  if (facts.body === 'manifest_over_limit') {
+    return ['The attempt’s sealed record is larger than this report’s limit',
+      `The record that seals the request is ${shown}; this export read at most ${bound(facts.max_bytes)} of it. ${again}`];
+  }
+  if (facts.body === 'over_page_limit') {
+    return ['The saved request is larger than this page opens', `It is ${shown}; Beautiful Context opens reports of at most `
+      + `${bound(facts.page_limit_bytes)}. ${elsewhere(text(facts.task_id), text(facts.attempt_id), recorded || 'N')}`];
+  }
+  return ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`];
+}
 function show(facts, name) {
   const absent = body === null;
-  let [headline, why] = absent ? ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`]
+  const [headline, why] = absent ? gapWords(facts)
     : ['Request recorded for this attempt', 'This is the host’s historical copy, saved before sending with known secrets masked. It is not the provider’s receipt.'];
-  if (absent && facts.body === 'over_limit') {
-    const recorded = Number.isInteger(facts.recorded_bytes) ? facts.recorded_bytes : 0;
-    headline = 'The saved request is larger than this report’s limit';
-    why = `It is ${recorded ? bytes(recorded) : 'larger'}; this export allowed ${Number.isInteger(facts.max_bytes) ? bytes(facts.max_bytes) : 'less'}. `
-      + `Run the reader again with --max-bytes ${recorded || 'N'} to include it.`;
-  }
   byId('headline').textContent = headline;
   byId('explain').textContent = why;
   add('Attempt', text(facts.attempt_id));
   add('Task', text(facts.task_id));
-  add('Requested model', [facts.model, facts.provider].filter((value) => typeof value === 'string' && value).join(' via ') || 'Not recorded');
-  add('Reserved', when(facts.ts_reserved));
-  add('Dispatched', when(facts.ts_dispatched));
-  add('Last state recorded', when(facts.ts_final));
-  add('Ledger state', stateWords(facts));
-  add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
-  add('Failure', failureWords(facts.failure));
+  if (facts.body === 'not_one_attempt') add('Ledger row', text(facts.ledger_kind));
+  else {
+    add('Requested model', [facts.model, facts.provider].filter((value) => typeof value === 'string' && value).join(' via ') || 'Not recorded');
+    add('Reserved', when(facts.ts_reserved));
+    add('Dispatched', when(facts.ts_dispatched));
+    add('Last state recorded', when(facts.ts_final));
+    add('Ledger state', stateWords(facts));
+    add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
+    add('Failure', failureWords(facts.failure));
+  }
   byId('privacy').hidden = absent;
   // The one whole copy of the request in this frame; a report of a gap names its gap here too.
   stored.textContent = absent ? `Request body unavailable: ${text(facts.body)}` : source;
@@ -326,7 +371,10 @@ input.addEventListener('change', async () => {
   clear();
   delete status.dataset.tone;
   if (!file) { status.textContent = 'No report selected.'; return; }
-  if (file.size > maxBytes) return refuse(epoch, 'the file is larger than the 48 MiB this view reads.');
+  if (file.size > maxBytes) {
+    return refuse(epoch, `the file is ${bytes(file.size)}, more than the ${bytes(maxBytes)} this page opens. `
+      + `${elsewhere('TASK_ID', 'ATTEMPT_ID', file.size)}`);
+  }
   if (!file.size) return refuse(epoch, 'the file is empty. A failed export leaves an empty file; run the reader again and read what it says in the terminal.');
   status.textContent = 'Reading the selected file…';
   let report;
