@@ -67,13 +67,15 @@ _OPEN_STATES = ("reserved", "dispatched", "unresolved")
 _OPEN_PREDICATE = ("(state IN ('reserved','dispatched','unresolved') "
                    "OR (state='settled' AND settle_reason='abandoned'))")
 # ``Txn.task_attempt_page``: newest first by the immutable, unique ``seq_first`` (``seq`` moves on every write).
-_LIFECYCLE_COLUMNS = "attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, ts_final, ts_last"
-_TASK_PAGE_SQL = (f"SELECT {_LIFECYCLE_COLUMNS} FROM attempts INDEXED BY attempts_task "
+_TASK_PAGE_SQL = ("SELECT attempt_id, state, settle_reason, model, provider, ts_reserved, ts_dispatched, "
+                  "ts_final, ts_last FROM attempts INDEXED BY attempts_task "
                   "WHERE task_id=? AND category=? AND seq_first<? ORDER BY seq_first DESC LIMIT ?")
 _TASK_CURSOR_SQL = "SELECT seq_first FROM attempts WHERE attempt_id=? AND task_id=? AND category=?"
-# A period's model calls by position (``Txn.period_bounds``) and reservation time: the ledger's own calls, never
-# sessions, unmetered dispatches or imported history (rows that carry no reservation time).
-_PERIOD_WHERE = "rowid>=? AND rowid<? AND COALESCE(kind, 'attempt')='attempt' AND julianday(ts_reserved)>=julianday(?)"
+# One physical attempt (``ATTEMPT_ROW``): a row of the ledger's own calls, an older one naming no kind included; never a
+# session, an unmetered dispatch or a folded or legacy history row. A period's model calls (``Txn.period_bounds``) are
+# such rows by position and reservation time, which imported history does not carry.
+ATTEMPT_ROW = "COALESCE(kind, 'attempt')='attempt'"
+_PERIOD_WHERE = f"rowid>=? AND rowid<? AND {ATTEMPT_ROW} AND julianday(ts_reserved)>=julianday(?)"
 
 # One root's money rows of a recent window by range, never the root's whole life (the consciousness
 # allowance, ``consciousness_allowance``); a store an older body created gains it at the lifespan boot.
@@ -426,11 +428,9 @@ class Txn:
         return capture(self.conn, f"SELECT {', '.join(_BUCKET_CAPTURE)} FROM summaries "
                        f"WHERE {' OR '.join(terms) or '0'}", params, _BUCKET_CAPTURE)
 
-    def task_attempt_page(self, task_id: str, category: Optional[str], *, after: str = "",
+    def task_attempt_page(self, task_id: str, category: str, *, after: str = "",
                           limit: int) -> Optional[List[Dict[str, Any]]]:
-        """Lifecycle facts of one task's attempts, newest first, ``limit`` rows older than ``after``.
-
-        ``None`` selects all billing categories for this physical task.
+        """Lifecycle facts of one task's attempts in one category, newest first, ``limit`` rows older than ``after``.
 
         ``after`` must name an attempt of this task and category (else ``None``): its first
         record is the cursor, so older rows stay reachable while newer ones join a fresh list.
@@ -438,24 +438,13 @@ class Txn:
         ledger); ordering still sorts the task's matching rows before the bounded page returns.
         No money, usage or payload fields."""
         before = 2 ** 63 - 1
-        cursor_sql, page_sql = _TASK_CURSOR_SQL, _TASK_PAGE_SQL
-        scope = (str(task_id), str(category))
-        if category is None:
-            cursor_sql = cursor_sql.replace(" AND category=?", "")
-            page_sql = page_sql.replace(" AND category=?", "")
-            scope = (str(task_id),)
         if after:
-            cursor = self.conn.execute(cursor_sql, (str(after), *scope)).fetchone()
+            cursor = self.conn.execute(_TASK_CURSOR_SQL, (str(after), str(task_id), str(category))).fetchone()
             if cursor is None:
                 return None
             before = cursor["seq_first"]
-        return [dict(record) for record in self.conn.execute(page_sql, (*scope, before, int(limit)))]
-
-    def attempt_lifecycle(self, attempt_id: str) -> Optional[Dict[str, Any]]:
-        """One attempt's ``task_attempt_page`` row: lifecycle facts, no money, usage or payload fields."""
-        record = self.conn.execute(f"SELECT {_LIFECYCLE_COLUMNS} FROM attempts WHERE attempt_id=?",
-                                   (str(attempt_id),)).fetchone()
-        return None if record is None else dict(record)
+        return [dict(record) for record in self.conn.execute(_TASK_PAGE_SQL, (
+            str(task_id), str(category), before, int(limit)))]
 
     def review_seat_costs(self, category: str, *, limit: int) -> List[Dict[str, Any]]:
         """What one reviewer seat cost in one wave: per (wave, row), the summed cost of every
@@ -885,8 +874,7 @@ def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SE
     Receipt callbacks run after the transaction and name lock have closed.
     ``remaining_sec`` optionally narrows each acquisition to a caller's one deadline
     (query_data SQL); it never enlarges a wait or changes other callers' defaults.
-    An offline inspection uses the normal lock tier but declines an export-marked
-    store without participating in its handoff.
+    ``inspect_only`` (an offline read) declines an export-marked store without joining its handoff.
     """
     if inspect_only and (write or migrate or exporting):
         raise ValueError("usage inspection cannot write, migrate or export")
@@ -905,10 +893,9 @@ def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SE
         try:  # the enforced tier's COMMIT waits for readers to drain
             with _core.transaction(conn, write=write, finish=txn.commit,
                                    commit_wait_sec=USAGE_LOCK_TIMEOUT_SEC if tier == TIER_ENFORCED else None):
-                marked = txn.meta("export") is not None
-                if marked and inspect_only:
+                if inspect_only and txn.meta("export") is not None:  # refused before any handoff is owed
                     raise UsageExportInProgress("usage inspection unavailable while the store is being exported")
-                handoff = marked
+                handoff = txn.meta("export") is not None
                 if write and not exporting and handoff:
                     raise UsageExportInProgress(f"usage store is being exported for a switch; money writes are "
                                                 f"refused until it completes or is abandoned: {root / STORE_REL}")

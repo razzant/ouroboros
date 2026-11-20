@@ -11,7 +11,6 @@ Reverse — the bounded reconciliation sweep joins seals and attempts both ways.
 from __future__ import annotations
 
 import copy
-import dataclasses
 import gzip
 import json
 import os
@@ -24,7 +23,9 @@ import pytest
 from ouroboros import model_send_seal as seal_mod
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient, _canonical_candidate_bytes
-from tests._usage_store_testing import ledger_rows
+from tests._context_reports import (
+    _dispatch, _payload, _rejected_then_answered, _Response, _rows, _scope, _settle_abandoned, _target,
+)
 
 
 @pytest.fixture
@@ -37,61 +38,6 @@ def data_root(tmp_path, monkeypatch):
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *args, **kwargs: 0.01)
     (root / "state").mkdir(parents=True)
     yield root
-
-
-class _Response:
-    _payload = {
-        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-        "usage": {"prompt_tokens": 50, "completion_tokens": 2, "cost": 0.0},
-    }
-
-    def model_dump(self):
-        return copy.deepcopy(self._payload)
-
-
-def _scope(root: pathlib.Path, task_id: str) -> ua.UsageScope:
-    return ua.UsageScope(
-        drive_root=root, task_id=task_id, root_task_id=task_id,
-        category="task", source="test.model_send",
-    )
-
-
-def _target() -> Dict[str, Any]:
-    return {"provider": "openai", "usage_model": "openai/gpt-x", "resolved_model": "gpt-x"}
-
-
-def _payload() -> Dict[str, Any]:
-    return {
-        "model": "gpt-x",
-        "messages": [{
-            "role": "user",
-            "content": [{
-                "type": "text",
-                "text": "OPENAI_API_KEY=sk-secret-model-send-seal summarize this",
-            }],
-        }],
-        "tools": [{
-            "type": "function",
-            "function": {"name": "inspect", "parameters": {"type": "object"}},
-        }],
-        "max_tokens": 32,
-    }
-
-
-def _rows(root: pathlib.Path):
-    return ledger_rows(root)
-
-
-def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category=None):
-    client = LLMClient(api_key="unused")
-    scope = _scope(root, task_id)  # other modules bind their own scope here (tests/test_boot_dependency_sync.py)
-    with ua.usage_scope(scope if category is None else dataclasses.replace(scope, category=category)):
-        client._create_chat_completion_with_retries(
-            lambda **_candidate: _Response(),
-            payload if payload is not None else _payload(),
-            target if target is not None else _target(),
-        )
-    return _rows(root)[-1]
 
 
 def _manifest(final: Dict[str, Any]) -> Dict[str, Any]:
@@ -138,10 +84,15 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     bounded = capsys.readouterr()
     details = json.loads(bounded.err)
     assert not bounded.out and details['body'] == 'over_limit'
-    assert details['redacted_ref'] == _manifest(last)['redacted_projection_ref']
+    # The gap names the record by digest, size, kind and its place under the data root; no folder of this computer.
+    ref = _manifest(last)['redacted_projection_ref']
+    assert details['redacted_ref'] == {**{key: value for key, value in ref.items() if key != 'path'},
+                                       'path': f"observability/blobs/{ref['sha256']}.json.gz"}
     # A report of that gap is still written whole, and the terminal names the gap and what admits the body.
     assert main([*bound, '1', '--report']) == 0
     gap = capsys.readouterr()
+    assert json.loads(gap.out)['facts']['redacted_ref'] == details['redacted_ref']
+    assert str(data_root) not in gap.out + bounded.err and str(data_root.resolve()) not in gap.out + bounded.err
     assert json.loads(gap.out)['stored_json'] is None and json.loads(gap.out)['facts']['body'] == 'over_limit'
     assert f"over_limit; --max-bytes {details['recorded_bytes']}" in gap.err
     assert main([*bound, str(details['recorded_bytes'])]) == 0
@@ -156,41 +107,6 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     assert main([*args, '--attempt', first['attempt_id']]) == 2
     failed = capsys.readouterr()
     assert not failed.out and 'unavailable' in failed.err
-
-
-def _rejected_then_answered(root: pathlib.Path, task_id: str, monkeypatch, payload=None):
-    """One call whose first send the provider rejects and whose retry is answered: the two attempt ids, failed first."""
-    from ouroboros.context_attempt_reader import list_attempts
-
-    client = LLMClient(api_key="unused")
-
-    class _Rejected(RuntimeError):
-        status_code = 400
-        body = {"error": {"code": "unsupported_parameter", "type": "invalid_request_error"}}
-
-    replies = [_Rejected("temperature unsupported: private words"), _Response()]
-
-    def create(**_candidate):
-        reply = replies.pop(0)
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
-
-    monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *args: None)
-    with ua.usage_scope(_scope(root, task_id)):
-        client._create_chat_completion_with_retries(
-            create, {**(payload if payload is not None else _payload()), "temperature": 0.7}, _target())
-    answered, failed = (row["attempt_id"] for row in list_attempts(root, task_id)["attempts"][:2])
-    return failed, answered
-
-
-def _settle_abandoned(root: pathlib.Path, attempt_id: str) -> Dict[str, Any]:
-    """Close an open attempt as its task's end does: settled with no receipt, its price unknown."""
-    row = next(row for row in _rows(root) if row["attempt_id"] == attempt_id)
-    reservation = ua.AttemptReservation(attempt_id, root, row["model"], row["provider"],
-                                        row.get("reservation_upper_bound_usd"))
-    assert ua.terminalize_abandoned_attempt(reservation, reason="owner_task_terminal") == "settled"
-    return next(row for row in _rows(root) if row["attempt_id"] == attempt_id)
 
 
 def test_local_request_report_names_a_failure_by_type_never_by_its_words(data_root, monkeypatch):
@@ -254,6 +170,167 @@ def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_ro
     assert main(['--data-root', str(data_root), 'short-reader-test', '--attempt', attempt['attempt_id'],
                  '--max-bytes', str(ref['size'])]) == 0
     assert 'go' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('damage', ['missing', 'damaged'])
+def test_local_request_reader_reads_a_packed_request_from_its_task_pack(data_root, capsys, damage):
+    """Once its task is packed, an attempt's request is read from the task's own pack: a missing or damaged shared
+    evidence index neither stops the export nor is rebuilt or marked by it (the packing pass owns that index)."""
+    from ouroboros import evidence_packer, evidence_packs, store
+    from ouroboros.context_attempt_reader import main
+    from ouroboros.utils import utc_now_iso
+
+    attempt = _dispatch(data_root, 'packed-reader-test')
+    with store.open_store(data_root, write=True) as txn:  # a finished task, which the packing pass packs
+        txn.store_task({'task_id': 'packed-reader-test', 'status': 'completed', '_schema_version': 1,
+                        'updated_at': utc_now_iso()})
+    evidence_packs._READERS.clear()
+    try:
+        evidence_packer.run_pass(data_root)
+        ref = _manifest(attempt)['redacted_projection_ref']
+        assert not pathlib.Path(ref['path']).exists()
+        assert not evidence_packs.shared_placement_path(data_root, ref['sha256']).exists()
+        packs = data_root / 'observability' / 'packs'
+        index = packs / evidence_packs.INDEX_NAME
+        index.unlink() if damage == 'missing' else index.write_bytes(b'not a database at all')
+        before = index.read_bytes() if index.exists() else None
+        args = ['--data-root', str(data_root), 'packed-reader-test', '--attempt', attempt['attempt_id']]
+        assert main(args) == 0
+        assert 'summarize this' in capsys.readouterr().out
+        assert main([*args, '--report']) == 0
+        assert json.loads(capsys.readouterr().out)['facts']['body'] == 'redacted_host_candidate'
+        assert (index.read_bytes() if index.exists() else None) == before
+        assert not (packs / evidence_packs.DAMAGED_MARK).exists()
+    finally:
+        evidence_packs._READERS.clear()
+
+
+def test_local_request_reader_names_a_record_it_cannot_locate_now(data_root, capsys, monkeypatch):
+    """A packed record whose place cannot be learned now (a busy index) is a named gap, never "not found"."""
+    from ouroboros import evidence_packs
+    from ouroboros.context_attempt_reader import main
+
+    attempt = _dispatch(data_root, 'busy-reader-test')
+    wanted, real = _manifest(attempt)['redacted_projection_ref']['sha256'], evidence_packs.blob_bytes
+
+    def busy(root, ref, **kwargs):
+        if ref.get('sha256') == wanted:
+            raise evidence_packs.EvidenceUnavailable('evidence_unavailable: busy', reason='busy')
+        return real(root, ref, **kwargs)
+
+    monkeypatch.setattr(evidence_packs, 'blob_bytes', busy)
+    args = ['--data-root', str(data_root), 'busy-reader-test', '--attempt', attempt['attempt_id']]
+    assert main([*args, '--report']) == 0
+    gap = capsys.readouterr()
+    facts = json.loads(gap.out)['facts']
+    assert (facts['body'], facts['evidence_reason']) == ('evidence_unavailable', 'busy')
+    assert 'evidence_unavailable' in gap.err and 'run again later' in gap.err
+    assert main(args) == 2
+    plain = capsys.readouterr()
+    assert not plain.out and json.loads(plain.err)['body'] == 'evidence_unavailable'
+
+
+def test_local_request_reader_lists_and_reads_only_physical_attempts(data_root, capsys):
+    """One ID is one request only for a row of the ledger's own calls (``usage_store.ATTEMPT_ROW``), an older row
+    without a kind included. A delegated session or a folded history group may stand for many sends: the list leaves
+    it out, a cursor naming it advances nothing, and its exact selection says why no request belongs to it."""
+    from ouroboros.context_attempt_reader import list_attempts, main, read_attempt
+    from tests._usage_store_testing import write_compacted_journal
+
+    task = 'mixed-reader-test'
+    older = {'task_id': task, 'root_task_id': task, 'provider': 'openai', 'model': 'm', 'category': 'task',
+             'source': 'journal'}
+    write_compacted_journal(data_root, [{**older, 'attempt_id': 'folded-group', 'folded_attempt_count': 3,
+                                         'cost_usd': '1', 'cost_final': True}], [
+        *({**older, 'attempt_id': 'kindless', 'state': state, 'reservation_upper_bound_usd': '0.5',
+           'pricing_known': True} for state in ('reserved', 'dispatched')),
+        {**older, 'kind': 'subscription_session', 'attempt_id': 'session-run', 'state': 'settled',
+         'provider': 'claudexor', 'subscription_route': 'route', 'cost_usd': 0.5, 'cost_final': True}])
+    sent = _dispatch(data_root, task, category='evolution')
+    assert {row['attempt_id']: row.get('kind') for row in _rows(data_root) if row.get('task_id') == task} == {
+        'folded-group': 'usage_baseline_group', 'kindless': None, 'session-run': 'subscription_session',
+        sent['attempt_id']: 'attempt'}
+    assert [row['attempt_id'] for row in list_attempts(data_root, task)['attempts']] == [sent['attempt_id'], 'kindless']
+    args = ['--data-root', str(data_root), task]
+    for cursor in ('session-run', 'folded-group'):
+        assert main([*args, '--after', cursor]) == 2
+        assert not capsys.readouterr().out
+    assert list_attempts(data_root, task, after=sent['attempt_id'])['attempts'][0]['attempt_id'] == 'kindless'
+    assert read_attempt(data_root, task, 'kindless')[0]['body'] == 'not_linked'
+    for one, kind in (('session-run', 'subscription_session'), ('folded-group', 'usage_baseline_group')):
+        facts, body = read_attempt(data_root, task, one, report_facts=True)
+        assert (facts['body'], facts['ledger_kind'], body) == ('not_one_attempt', kind, None)
+        assert main([*args, '--attempt', one, '--report']) == 0
+        gap = capsys.readouterr()
+        assert json.loads(gap.out)['facts']['body'] == 'not_one_attempt' and '(not_one_attempt)' in gap.err
+
+
+def test_local_request_reader_names_an_oversized_sealed_record_and_reads_it_on_request(data_root, capsys):
+    """The redactions of 16,000 token-bearing URL parameters make an attempt's sealed record larger than 2 MiB while
+    its request stays small. That is a gap naming the record's size, and an explicit --max-bytes of that size reads
+    the request; the record admitted that way is still checked against its digest."""
+    from ouroboros.context_attempt_reader import main
+
+    payload = _payload()
+    payload['messages'][0]['content'][0]['text'] = 'see https://example.test/a?' + '&'.join(
+        f'token=t{index:05d}' for index in range(16_000))
+    attempt = _dispatch(data_root, 'record-reader-test', payload=payload)
+    record = pathlib.Path(attempt['candidate_manifest_ref']['path'])
+    size = record.stat().st_size
+    assert size > 2 * 1024 * 1024 > _manifest(attempt)['redacted_projection_ref']['size']
+    args = ['--data-root', str(data_root), 'record-reader-test', '--attempt', attempt['attempt_id']]
+    assert main([*args, '--report']) == 0
+    gap = capsys.readouterr()
+    facts = json.loads(gap.out)['facts']
+    assert (facts['body'], facts['recorded_bytes'], facts['max_bytes']) == ('manifest_over_limit', size, 2 * 1024 * 1024)
+    assert f'manifest_over_limit; --max-bytes {size} admits it' in gap.err
+    assert main([*args, '--max-bytes', str(size)]) == 0
+    assert 'example.test' in capsys.readouterr().out
+    raw = record.read_bytes()
+    record.write_bytes(raw[:-1] + (b' ' if raw[-1:] != b' ' else b'\n'))  # same size, valid JSON, another digest
+    assert main([*args, '--max-bytes', str(size)]) == 2
+    assert not capsys.readouterr().out
+
+
+def test_local_request_report_too_large_for_the_page_is_a_gap_with_the_command_that_writes_it(
+        data_root, capsys, monkeypatch):
+    """Beautiful Context opens no report over its limit, so a request that would make one is reported as that gap,
+    with the reader's command without --report that writes the request itself for another tool."""
+    import re
+    import shlex
+
+    from ouroboros import context_attempt_reader as reader
+
+    attempt = _dispatch(data_root, 'page-reader-test')
+    size = _manifest(attempt)['redacted_projection_ref']['size']
+    monkeypatch.setattr(reader, 'PAGE_LIMIT', size)  # the report adds its facts and escapes: it cannot fit
+    args = ['--data-root', str(data_root), 'page-reader-test', '--attempt', attempt['attempt_id']]
+    for extra in ([], ['--max-bytes', '1']):  # read whole, or over this export's bound and over the page's
+        if extra:
+            monkeypatch.setattr(reader, 'PAGE_LIMIT', size - 1)
+        assert reader.main([*args, *extra, '--report']) == 0
+        gap = capsys.readouterr()
+        document = json.loads(gap.out)
+        facts = document['facts']
+        assert document['stored_json'] is None and 'bytes' not in facts
+        assert (facts['body'], facts['recorded_bytes'], facts['page_limit_bytes']) == (
+            'over_page_limit', size, reader.PAGE_LIMIT)
+        command = re.search(r'without --report: (python -m ouroboros\.context_attempt_reader .+) > request\.json\)',
+                            gap.err).group(1)
+        assert reader.main(shlex.split(command)[3:]) == 0
+        assert 'summarize this' in capsys.readouterr().out
+
+
+def test_local_request_reader_names_a_data_root_without_a_usage_store(tmp_path, capsys):
+    from ouroboros.context_attempt_reader import main
+
+    missing = tmp_path / 'not-a-data-folder'
+    for tail in ([], ['--attempt', 'any', '--report']):
+        assert main(['--data-root', str(missing), 'task', *tail]) == 2
+        failed = capsys.readouterr()
+        assert not failed.out and 'No usage store under --data-root' in failed.err
+        assert str(missing.resolve() / 'state' / 'usage.sqlite') in failed.err
+    assert not missing.exists()
 
 
 @pytest.mark.parametrize('claudexor_shape', [False, True])
