@@ -283,6 +283,74 @@ def test_a_declared_child_holds_no_head_and_its_receipt_names_the_omission_only_
     assert "Nova working head." in _held(_plan(world, task=shared))
 
 
+def test_a_declared_start_whose_shelf_cannot_be_listed_names_no_omission_and_keeps_the_rest(world, monkeypatch):
+    """A declared helper's start lists the global shelf once. Listed, its native receipt and its session's memory
+    delivery name the heads it leaves out; unlisted (EIO), the native request still builds and the delivery keeps
+    its marks, naming no omission, as starts did before helpers held heads."""
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.subagent_work_order import session_memory_references
+    from tests._memory_inventory_shared import MIND
+
+    _write(world, "main-page", "Main working head.")
+    store = ChronicleStore(world[0].drive_root)
+    assert store.ensure_activated()["kind"] == "activation"
+    store.mark({"kind": "task", "task_id": "x"}, "Keep the local time zone", MIND, room_id="1")
+    contract = {"objective": "Judge the release", "input_sources": "declared"}
+    native = {**TASK, "id": "declared-child", "delegation_role": "subagent", "task_contract": contract,
+              "configured_subagent": {"route": {"kind": "api_model"}}, "metadata": {CARRIED_NAMES: ["room:1"]}}
+    session = _scheduler(world, "declared-session", {CARRIED_NAMES: ["room:1"]}, contract=contract)
+
+    def starts():
+        plan = _plan(world, task=native)
+        return json.dumps(plan.messages_for(plan.initial_mode)), session_memory_references(session)
+
+    request, delivery = starts()
+    assert "which a shared child holds: main-page" in request
+    assert "because its input is declared: main-page.]" in delivery and "Keep the local time zone" in delivery
+
+    def unlisted(*_args, **_kwargs):
+        raise OSError(errno.EIO, "the shelf listing failed")
+
+    monkeypatch.setattr(knowledge, "inventory_knowledge", unlisted)
+    request, delivery = starts()
+    assert "Knowledge navigation unavailable: OSError" in request and "which a shared child holds" not in request
+    assert "Knowledge navigation unavailable: OSError" in delivery and "Keep the local time zone" in delivery
+    assert "because its input is declared" not in delivery and "could not be read here" not in delivery
+
+
+def test_a_zero_character_head_reaches_the_parents_receipt_and_the_overview_reference_does_not(world):
+    """A claimed note that starts with `## Details` holds a zero-character head: its session start names its title
+    and revision, and its start row and the run's terminal receipt name it as ``{topic, revision, chars: 0}`` beside
+    a head with text, with no empty blob and no reference for it; the overview's reference is no sent head."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_invocation import invocation_record
+    from ouroboros.delegate_terminal import terminal_custody_disclosure
+    from ouroboros.subagent_work_order import session_memory_references
+
+    root = world[0].drive_root
+    details = _write(world, "details", "## Details\n\nBelow the head.\n", title="Details page")
+    plain = _write(world, "plain", "Plain head.\n\n## More\n")
+    _write(world, knowledge.OVERVIEW_TOPIC, "The shared understanding.")
+    session = _scheduler(world, "session", {CARRIED_NAMES: ["room:1"]})
+    body = {"prompt": "Build", "instructions": session_memory_references(session)}
+    assert "### Details page\n" in body["instructions"] and "Shared understanding reference." in body["instructions"]
+    facts = [{"topic": "details", "revision": details.revision, "chars": 0},
+             {"topic": "plain", "revision": plain.revision, "chars": len("Plain head.\n\n")}]
+    assert [{key: head[key] for key in ("topic", "revision", "chars")} for head in session._session_held_heads] == facts
+    custody._CUSTODY.clear()
+    assert custody.record_start_requested(root, run_id="", task_id="session", invocation_id="inv", idempotency_key="inv",
+                                          max_seconds=60, request=body, project_id="", project_owned=False,
+                                          route="codex", held_heads=session._session_held_heads)
+    assert custody.record_started(root, custody.RunCustody(run_id="run", task_id="session", route_id="codex",
+                                                           invocation_id="inv"))
+    assert custody.emit(root, custody.SETTLED, {"run_id": "run", "task_id": "session", "state": "succeeded"})
+    (row,) = [row for row in custody.custody_rows(root) if row.get("type") == custody.START_REQUESTED]
+    receipt = terminal_custody_disclosure(root, "session")["terminal_runs"][0]
+    assert row["held_heads"] == receipt["held_heads"] == facts and invocation_record(root, "inv")["request"] == body
+    assert len(list((root / "observability" / "blobs").glob("*.txt.gz"))) == 1  # the plain head's text alone
+    custody._CUSTODY.clear()
+
+
 def test_with_no_recorded_claim_helpers_start_and_are_scheduled_as_before(world, actors, monkeypatch):
     """No claim on the install: nothing is carried, said or held, and a helper's start is byte-equal to one built
     without held heads at all, for a child and a nanny, in a Project room and in a place turn's room."""
@@ -589,6 +657,31 @@ def test_a_linked_head_without_a_summary_still_yields_before_the_claimed_head(wo
     assert dict(claimed_first)["a"] == "reader", order  # c yields only at the emergency floor, after a's summary
     floor = _held(seen[claimed_first])
     assert floor.count("[Head omitted at the physical window's emergency floor.]") == len(claimed_first) - 1
+
+
+def test_a_linked_head_whose_summary_saves_no_room_keeps_only_its_reader_before_the_claimed_head(world):
+    """Three heads only a link holds: `y`, whose authored summary is short, steps to it; `x`, whose summary is shorter
+    than its head but whose summary form (the summary beside its own marker) is not, and `z`, whose summary is as
+    long as its head, keep only their exact readers, marked with why, before the claimed `a` steps."""
+    shorter = ("Telling of x. " * 3_000)[:39_960]
+    assert len(shorter) < len("Head x. " * 5_000)
+    _write(world, "a", "Head a. " * 5_000 + "\n\nIt links [x](x.md), [y](y.md) and [z](z.md).\n",
+           summary="Authored telling of a.")
+    _write(world, "x", "Head x. " * 5_000, claims=(), summary=shorter)
+    _write(world, "y", "Head y. " * 5_000, claims=(), summary="Authored telling of y.")
+    _write(world, "z", "Head z. " * 5_000, claims=(), summary="Telling of z, as long as its head. " * 1_150)
+    _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 8_000)
+    captured, seen = _core(world), {}
+    for window in range(196_000, 8_000, -4_000):
+        plan = _plan(world, window, core=captured)
+        seen.setdefault(tuple(_cuts(plan)), plan)
+    order = list(seen)
+    steps = [("x", "reader"), ("y", "summary"), ("z", "reader"), ("a", "summary")]
+    assert order[1:5] == [tuple(steps[:count]) for count in range(1, 5)], order
+    held = _held(seen[order[3]])
+    assert "Head a. " * 5_000 in held and "Head x. Head x." not in held and "Head z. Head z." not in held
+    assert "Telling of x" not in held and "Telling of z" not in held
+    assert held.count("\n\n[Head omitted: its summary form saves no room.]") == 2
 
 
 def _index(plan, mode=None):

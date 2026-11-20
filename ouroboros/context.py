@@ -959,7 +959,8 @@ def _capture_context_core(
         context_env, task_id=str(task.get("id") or ""), active_root=active_root, attempt_key=attempt_key)
     from ouroboros import held_notes
 
-    omitted = held_notes.claimed_topics(canonical_root, names, global_knowledge.get("inventory")) if declared else ()
+    # A shelf that could not be listed names no omission (its outline names the gap); it is never listed twice.
+    omitted = held_notes.claimed_topics(canonical_root, names, global_knowledge.get("inventory", ())) if declared else ()
     dynamic_parts = [declared_receipt_section(task, omitted)] if declared else [health_section] if health_section else []
     dynamic_parts.extend(review_activity)
     try:
