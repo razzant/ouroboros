@@ -24,6 +24,15 @@ from ouroboros.settings_setup_contract import (
 )
 from tests.test_onboarding_complete_endpoint import WIZARD_PAYLOAD, onboarding as onboarding
 
+def _forget_state(root):
+    """Leave ``root`` with no state copy and no witness, as a new data root has none. The usage store this test's
+    server holds open stays where it is: Windows refuses to delete an open file, and that store is no evidence
+    of an earlier supervisor."""
+    shutil.rmtree(root / "state", ignore_errors=True)
+    for name in ("state.json", "state.last_good.json", "state.initialized.json"):
+        assert not (root / "state" / name).exists(), name
+
+
 
 def _client(tmp_path: pathlib.Path) -> TestClient:
     from ouroboros.gateway.router import collect_routes
@@ -124,7 +133,7 @@ def test_the_page_reads_the_control_and_writes_nothing(monkeypatch, tmp_path):
         assert "consciousness" not in bootstrap["stepOrder"]
         assert _tree(tmp_path) == seeded, "reading the control wrote state"
 
-    shutil.rmtree(tmp_path / "state")
+    _forget_state(tmp_path)
     monkeypatch.setattr(onboarding_host, "load_settings", lambda: {ONBOARDING_COMPLETED_KEY: "2026-11-04T10:00:00+00:00"})
     with _client(tmp_path) as client:
         assert client.get("/api/onboarding/bootstrap").json()["bootstrap"]["consciousnessOffer"]["offered"] is False
@@ -239,7 +248,7 @@ def test_a_fresh_install_left_on_is_born_on_and_one_left_off_is_born_off(minted,
     assert not (tmp_path / "state" / "state.json").exists(), "completion writes no state; the mint carries the choice"
     assert _boot_control() == (True, None)
     # The other direction, in the same home: a switch turned off (or a page that sends nothing) is born off.
-    shutil.rmtree(tmp_path / "state")
+    _forget_state(tmp_path)
     minted.settings_path.unlink(missing_ok=True)
     _complete(minted, consciousness=False)
     assert not minted.saved().get(ONBOARDING_CONSCIOUSNESS_KEY)
@@ -273,7 +282,7 @@ def test_a_field_sent_where_a_state_exists_changes_nothing_and_a_stale_page_lift
         _complete(minted, **body)
         assert _boot_control() == (False, OWNER_STOP)
     # An install that predates the step (born off, no fact) reads the same: setup never changes an existing state.
-    shutil.rmtree(tmp_path / "state")
+    _forget_state(tmp_path)
     minted.settings_path.unlink(missing_ok=True)
     _complete(minted)
     assert _boot_control() == (False, None)
@@ -317,7 +326,7 @@ def test_an_off_after_a_saved_on_is_the_first_states_choice_while_it_is_to_come(
     _complete(minted, consciousness=False)
     assert minted.saved()[ONBOARDING_CONSCIOUSNESS_KEY] == ""
     assert _boot_control() == (False, None)
-    shutil.rmtree(tmp_path / "state")
+    _forget_state(tmp_path)
     _complete(minted, consciousness=True)
     assert minted.saved()[ONBOARDING_CONSCIOUSNESS_KEY] == "on"
     assert _boot_control() == (True, None)
@@ -373,7 +382,7 @@ def test_a_panic_before_the_first_mint_leaves_it_off_and_a_later_stop_wins_acros
     (tmp_path / "state" / "panic_stop.flag").write_text("panic", encoding="utf-8")
     assert _boot_control() == (False, None), "a pending Panic withholds the setup's choice"
     # Without the Panic the same root and document are born on; then the owner's Stop wins and survives a restart.
-    shutil.rmtree(tmp_path / "state")
+    _forget_state(tmp_path)
     assert _boot_control() == (True, None)
     assert _persist_stop(OWNER_STOP) == ""
     assert _boot_control() == (False, OWNER_STOP)
