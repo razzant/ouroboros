@@ -690,7 +690,10 @@ def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ..
     File-name text in any case (also percent-encoded) only selects candidates to parse; the
     existing Markdown resolver decides identity. No graph or disk index is kept.
     """
-    target = shelf_spelling(note.address)
+    try:
+        target = shelf_spelling(note.address)
+    except (OSError, ValueError):  # a reserved on-disk name (the generated index): the caller's spelling, as before
+        target = note.address
     filename = _folded(target.path.name)
 
     def names_target(where: dict) -> bool:  # only a spelling of the target's own name asks the shelf
