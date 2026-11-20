@@ -26,6 +26,13 @@ def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[D
     return ({**body, "instructions": instructions} if facts else body), facts
 
 
+def head_references(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The held heads a start's stored envelope names by reference (``stored_request``), as its row lists them. The
+    envelope of a row that lists none (a start before held heads, or one that sent none) is opaque: ``request_body``
+    reads marker-shaped prose in it as written."""
+    return {"held_heads": copy.deepcopy(row["held_heads"])} if row.get("held_heads") else {}
+
+
 def request_shape(body):
     """Bounded no-write evidence, never an envelope that could authorize replay."""
     body = body if isinstance(body, dict) else {}
@@ -70,6 +77,7 @@ def pending_invocations(
                 "operation_id": str(row.get("operation_id") or ""),
                 "request": row.get("request") if isinstance(row.get("request"), dict) else None,
                 "request_ref": row.get("request_ref"),
+                **head_references(row),
                 **({"request_shape": copy.deepcopy(row["request_shape"])} if "request_shape" in row else
                    {"request_shape": request_shape(row["request"])} if isinstance(row.get("request"), dict) else {}),
                 "route": str(row.get("route") or ""),
@@ -142,7 +150,7 @@ def current_rows(root, rows):
                      pending_invocations(root, [facts["request"]], materialize=False))
         source = facts["request"]
         for record in projected:
-            record.update(store_facts(source))  # a cached projection may predate a store fact its row holds
+            record.update(store_facts(source), **head_references(source))  # a cached projection may predate a fact its row holds
             for key in ("processing", "row_processing"):
                 if key in source:
                     record[key] = copy.deepcopy(source[key])
@@ -243,7 +251,8 @@ def request_body(drive_root: Any, row: Dict[str, Any], *,
     """Resolve the canonical replay envelope, legacy inline first, then raw CAS.
 
     The raw CAS blob holds the full unredacted envelope, stored before the
-    start-requested row, its held heads by reference (``stored_request``).
+    start-requested row, its held heads by reference where the row lists them
+    (``head_references``).
     Unreadable references leave the request unknown for the caller's existing
     refusal paths; never rebuild a paid invocation from current settings. A body
     whose bytes cannot be located now (the envelope or a held head's text) is
@@ -263,7 +272,7 @@ def request_body(drive_root: Any, row: Dict[str, Any], *,
     try:
         task_id = str(row.get("task_id") or "") or None
         body = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="json", task_id=task_id)
-        if isinstance(body, dict) and _HELD_HEAD.search(str(body.get("instructions") or "")):
+        if isinstance(body, dict) and row.get("held_heads") and _HELD_HEAD.search(str(body.get("instructions") or "")):
             body = {**body, "instructions": _HELD_HEAD.sub(lambda found: read_blob_ref(pathlib.Path(drive_root), {
                 "sha256": found[1], "kind": "txt", "encoding": "gzip", "size": int(found[2])}, expected_kind="txt",
                 task_id=task_id), body["instructions"])}

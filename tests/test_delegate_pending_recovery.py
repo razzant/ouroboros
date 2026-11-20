@@ -519,3 +519,34 @@ def test_a_session_start_keeps_its_held_heads_by_address_and_revision_and_replay
     blob.unlink()
     assert invocation_record(tmp_path, "inv-held")["request"] is None
     custody._CUSTODY.clear()
+
+
+def test_only_a_start_whose_row_lists_held_heads_reads_its_envelope_with_head_references(tmp_path):
+    """A mark quoting the reference delimiter, in the envelope of a start that sent no held heads (or ran before
+    them), replays as written; a start whose row lists its heads still reads them back, also through an open-request
+    projection the previous build cached without that list."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros import store
+    from ouroboros.delegate_invocation import invocation_record
+    from ouroboros.delegate_pending import pending_invocations, request_body
+
+    custody._CUSTODY.clear()
+    example ="\x00held head x@r sha256=" + "b" * 64 + " size=5\x00"
+    head = "Nova's working head.\n"
+    plain = {"prompt": "Build", "instructions": "A mark quotes the delimiter " + example + " as text."}
+    held = {"prompt": "Build", "instructions": "## Held knowledge notes\n\n### Nova\n\n" + head + "\n[Host: ...]"}
+    heads = [{"topic": "circle/nova", "revision": "a" * 64, "chars": len(head), "text": head}]
+    for invocation, body, extra in (("inv-plain", plain, {}), ("inv-held", held, {"held_heads": heads})):
+        assert custody.record_start_requested(
+            tmp_path, run_id="", task_id="nanny", invocation_id=invocation, idempotency_key=invocation,
+            max_seconds=60, request=body, project_id="", project_owned=False, route="codex", **extra)
+    with store.open_store(tmp_path, write=True) as txn:  # the held start's projection as the previous build cached it
+        facts = txn.get_row("custody_open", "invocation:inv-held")
+        txn.put_row("custody_open", "invocation:inv-held", {**facts, "pending": [
+            {key: value for key, value in record.items() if key != "held_heads"} for record in facts["pending"]]})
+    assert {row["invocation_id"]: request_body(tmp_path, row) for row in pending_invocations(tmp_path)} == {
+        "inv-plain": plain, "inv-held": held}
+    chain = pending_invocations(tmp_path, custody.custody_rows(tmp_path))  # a recovery sweep's own projection
+    assert {row["invocation_id"]: row["request"] for row in chain} == {"inv-plain": plain, "inv-held": held}
+    assert [invocation_record(tmp_path, key)["request"] for key in ("inv-plain", "inv-held")] == [plain, held]
+    custody._CUSTODY.clear()
