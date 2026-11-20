@@ -431,13 +431,11 @@ page closes the reveal, and a late read cannot reopen it. Built-in, custom,
 skill-requested and MCP header fields use the same interaction; loading Settings
 keeps saved secrets masked. Pending reads and failures are shown at the field.
 
-A choice among a few short words is one strip: one track, each option as wide as its word and at
-least a touch target, only the chosen one filled in the soft crimson, and that fill travels along the line to a new
-choice (`web/modules/segment_fill.js`); it wraps and never scrolls sideways. A choice
-that needs a line per option is a list of choices (Access), and a choice of many or long labels
-is a native select, clipped at its own edge with the full label in the platform's popup: a control
-never widens its column. The composer's capsules are the same control with a sliding thumb. An
-empty inherit choice is as real as any other, and the focused choice wears the one focus ring.
+A few short options share a wrapping strip: each as wide as its word and at least a touch target.
+Soft crimson slides to the chosen word (`web/modules/segment_fill.js`); composer capsules use the same thumb.
+Choices needing a line each form a list (Access). Many or long labels use a native select, clipped within
+its column; the platform popup shows the full label. Model Source (§7) uses a live menu instead.
+Inherit is a real choice; focus wears one ring.
 Model selection uses the shared editable chooser: suggestions assist typing
 without becoming an allowlist. A saved unknown model remains editable; a
 catalog refresh preserves the real input, selection and composition. Escape
@@ -2922,16 +2920,13 @@ Account changes withdraw old metadata during pending or failed catalog reads.
 Unknown stays unknown. `model_roles.js` and `model_roles.css` own the shared
 Settings/wizard editor.
 
-A source is chosen, never spelled. Every surface that assigns a model — the
-Models roles, Available subagents (reviewers included), the first-run wizard and
-the quota-wait picker — offers one grouped source select with the same groups
-in the same order: Subscriptions · models, API keys (one entry per connection:
-each enabled key holding its credential, named "OpenRouter" or "OpenRouter ·
-Claude credits", then one disabled pointer to Accounts; a saved choice that
-cannot send stays selectable as "(no key)", "(off)" or "(removed)"), Agents · sessions where a session
-is possible. The model chooser lists only the chosen source's catalog, so a
-suggestion's transport is the selected source; any id can still be typed. The composer's
-Model capsule alone searches across sources, each row naming its own. The
+A source is chosen, never spelled. Models roles, Available subagents (including reviewers), setup
+and quota-wait offer the same grouped menu. A returned subscription appears in the open list;
+keyboard focus and a tap keep their source by value as rows arrive. In order: Subscriptions · models,
+API keys (one per enabled, credentialed connection, e.g. “OpenRouter” or “OpenRouter · Claude credits”,
+then a disabled pointer to Accounts; a saved “(no key)”, “(off)” or “(removed)” choice stays selectable),
+and Agents · sessions where supported. Each field reads suggestions from its selected source; any model id
+can be typed. The composer's Model capsule searches across sources, naming each row's source; place and circle fields also use the whole list. The
 stored spellings (`provider::model`, `claudexor::source=model`,
 `harness=model`) are serialization authored by the editor: never required from
 the owner, never a field placeholder or help-text instruction, never the

@@ -692,35 +692,38 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
                                  for item in catalog.get("items") or []]}
 
 
+async def _draft_body(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        return None
+
+
 async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
-    """The model catalog of an unsaved setup draft: the access it names (keys, connection rows, local model) over
-    the saved settings, asked as ``GET /api/model-catalog`` asks the saved one. Only the access fields are read,
-    never the whole-draft validator: Main is picked from this list, so it answers while Main is blank."""
+    """List models for draft access (keys, connections and local model) while Main is still unchosen."""
     from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
     from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_setup_contract import draft_access
 
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
+    body = await _draft_body(request)
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
+    provider_id = request.query_params.get("provider_id")
+    if provider_id is not None and not provider_id.strip():
+        return unsaved_error("provider_id must name one connection.", 400)
     saved = load_settings()
     connections, keys, typed, error = draft_access(body, saved)
     if error:
         return unsaved_error(error, 400, code="invalid_onboarding_settings")
     local = {key: body[key] for key in ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CONTEXT_LENGTH") if key in body}
-    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed))
+    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed,
+                                             provider_id=provider_id))
 
 
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     """Read-only canonical preview for the wizard; never persists or projects env."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
+    body = await _draft_body(request)
     if not isinstance(body, dict):
         return unsaved_error("JSON body must be an object.", 400)
 
@@ -834,10 +837,7 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
     from ouroboros.config import get_runtime_mode, normalize_runtime_mode
     from supervisor.state_initialization import first_state_pending as first_state_due
 
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
+    body = await _draft_body(request)
     attempt_id, attempt_error = parse_completion_attempt(body)
     if not isinstance(body, dict) or attempt_error:
         return unsaved_error(attempt_error or "JSON body must be an object.", 400)

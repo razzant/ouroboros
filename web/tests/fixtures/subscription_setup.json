@@ -17,7 +17,8 @@
   },
   "catalog": {
     "model_sources": [{"id": "codex", "label": "Codex", "credentialHarness": "codex"}],
-    "items": [{"id": "gpt-test", "value": "claudexor::codex=gpt-test", "name": "Fixture model", "label": "Fixture model", "source_id": "codex", "credential_profile_id": "personal", "context_window": 272000, "max_context_window": 872000, "is_default": true, "provenance": "fixture", "supported_options": ["reasoning_effort"]}],
+    "items": [{"id": "gpt-test", "value": "claudexor::codex=gpt-test", "name": "Fixture model", "label": "Fixture model", "source_id": "codex", "credential_profile_id": "personal", "context_window": 272000, "max_context_window": 872000, "is_default": true, "provenance": "fixture", "supported_options": ["reasoning_effort"]},
+              {"id": "gpt-test", "value": "claudexor::codex=gpt-test", "name": "Fixture model", "label": "Fixture model", "source_id": "codex", "credential_profile_id": "work", "context_window": 272000, "max_context_window": 500000, "is_default": true, "provenance": "fixture", "supported_options": ["reasoning_effort"]}],
     "errors": []
   },
   "preview": {

@@ -419,6 +419,7 @@ def build_setup_contract(host_mode: str = "desktop") -> dict:
 
     managed_checker = checker() is not None
     return {
+        "scopedModelCatalogs": True,
         "version": 1,
         "hostMode": "web" if host_mode == "web" else "desktop",
         "steps": [dict(item) for item in _STEPS],
