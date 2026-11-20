@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._wizard_walk import past_consciousness
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
@@ -26,8 +27,7 @@ def _summary(ui, *, answer=STARTER, status=200, width=1360):
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector("#quick-start-btn:not([hidden])")
     page.click("#quick-start-btn")
-    page.wait_for_selector("[data-consciousness-step]")
-    page.click("#next-btn")  # Review & start lands on Consciousness; its Continue goes to Summary
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     page.wait_for_selector(".summary-card")
     return page
 
@@ -153,8 +153,7 @@ def test_fresh_root_offer_arrives_after_summary_preserving_owner_ticks(starter_u
     page.route('**/api/onboarding/starter-skills', offer)
     page.goto(ui['url'] + '/onboarding')
     page.locator('#quick-start-btn:not([hidden])').click()
-    page.locator('[data-consciousness-step]').wait_for()
-    page.locator('#next-btn').click()  # Review & start lands on Consciousness; its Continue goes to Summary
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     row = page.locator('.skills-starter-row')
     row.wait_for()
     assert 'Reading the Ouroboros hub…' in row.inner_text()
@@ -232,8 +231,7 @@ def test_summary_still_polls_after_five_minutes_in_earlier_setup(starter_ui):
     assert len(reads) == 1
     page.evaluate('window.setupElapsed = 300_000')
     page.locator('#quick-start-btn').click()
-    page.locator('[data-consciousness-step]').wait_for()
-    page.locator('#next-btn').click()  # Review & start lands on Consciousness; its Continue goes to Summary
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     row = page.locator('.skills-starter-row')
     row.wait_for()
     assert 'Reading the Ouroboros hub' in row.inner_text()

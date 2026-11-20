@@ -1,5 +1,6 @@
 """Processing intent through Settings › Models and onboarding, with no model calls."""
 import pytest
+from tests._wizard_walk import walk
 from tests import test_subscription_role_routes_browser as roles
 from tests.settings_browser_helpers import commit_row, open_settings, press_editor_save
 
@@ -80,8 +81,7 @@ def test_onboarding_processing_draft_returns_and_reaches_finish(subscription_ui)
     page.wait_for_selector('[data-global-processing]')
     assert page.locator('[data-global-processing]').input_value() == 'fast'
     assert page.locator('[data-model-role="main"] [data-model-role-processing]').input_value() == 'standard'
-    for _ in range(4):  # Models → Access → Consciousness → Budget → Summary
-        page.locator('#next-btn').click()
+    walk(page, "models", "summary")
     page.wait_for_selector('.summary-card')
     assert 'Processing: Standard (override)' in page.locator('.summary-card').text_content()
     roles.capture(page, 'processing-onboarding-summary')
