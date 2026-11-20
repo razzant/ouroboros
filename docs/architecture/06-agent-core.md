@@ -153,7 +153,7 @@ Sends use `execute_physical_attempt`; `transport_custody` composes one-send poli
 
 `_usage_response.py` classifies finishes (`reply_usability`: commentary continues; a refusal, failed or non-limit incomplete terminal is no result); `loop_output_exhaustion.py` recovers cuts (docstring). Empty exhaustion: informed turn → strictly smaller same-route host/exposed-tool view → configured bindings once; exact children stay exact. Text is never executed. Owner/core/books/unseen/effort/ceiling stay; no cooldown, cache bypass or window learning. Unsent work resumes; exhaustion keeps incomplete work with Continue, no recap. Other rails win; cache reuse may fall.
 
-Attempt timing and local request inspection (`context_attempt_reader.py`): [observability](../MODEL_SEND_OBSERVABILITY.md).
+A round's `llm_round` carries its `work` and `host_steps` (docs/MODEL_SEND_OBSERVABILITY.md §8).
 
 #### Prompt caching
 

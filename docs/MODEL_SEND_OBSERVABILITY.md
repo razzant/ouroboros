@@ -16,6 +16,14 @@ If the selected body exceeds the 16 MiB default, the reader reports its recorded
 
 An attempt without a ledger-bound capture reference reports `not_linked`, even if failed preparation left a manifest on disk. Inspection declines an export-marked usage store without completing its handoff. SQLite may use its ordinary sidecars and locks, and looking up a packed body can refresh the derived evidence index. Neither changes the recorded request or accounting rows. Diagnostics and the redacted body may still contain private text or paths.
 
+Beautiful Context on Widgets opens a locally selected report in an isolated frame, not from a server archive route. Generate one with the retained request reader in a separate source checkout containing it, from a private local shell:
+
+```sh
+python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --attempt ATTEMPT_ID --report > PRIVATE_REPORT.json
+```
+
+Use binary-safe stdout redirection (e.g. a POSIX shell or `cmd.exe`), a new private non-synced path outside Files, and discard failed exports. Reports can contain private text even after redaction and are not meant to be forwarded automatically. Open the JSON with **Beautiful Context → Open local report**; the frame neither uploads nor persists its selection, and closing it clears the view. A report belongs to one attempt: it carries that attempt's IDs, ledger state and what the ledger recorded of its times, route and a failure's type (never its words), so two attempts that sent the same body stay two reports. The page lists the request's messages and tools as rows that open into their whole text, and keeps the retained redacted host JSON literal and whole beside the recorded file versions. It is the host's historical copy, not a receipt of provider input, and a ledger state is accounting of the attempt's record, never proof of delivery or of a final price. A gap stays a gap: a report without a body (`not_linked`, `not_recorded`, `unavailable`, `over_limit`) is still written, the terminal names the gap, and the page says which one it is instead of showing an earlier result; an empty or cut file is refused as such. The ordinary CLI without `--report` still writes the exact stored JSON bytes.
+
 ## 1. Scope of the claim
 
 The invariant binds exactly one object: **`model_send` — the physical
@@ -206,32 +214,6 @@ pre-dispatch identity re-check exists; explicit audit (§3.2) checks its retaine
 from "our two copies agree" to "the durable record agrees with the wire".
 
 ## 6. Non-goals
-
-Beautiful Context on Widgets opens a locally selected report in an isolated
-frame, not from a server archive route. Generate one with the retained request
-reader in a separate source checkout containing it, from a private local shell:
-
-```sh
-python -m ouroboros.context_attempt_reader --data-root LOCAL_DATA TASK_ID --attempt ATTEMPT_ID --report > PRIVATE_REPORT.json
-```
-
-Use binary-safe stdout redirection (e.g. a POSIX shell or `cmd.exe`), a new
-private non-synced path outside Files, and discard failed exports. Reports can
-contain private text even after redaction and are not meant to be forwarded
-automatically. Open the JSON with **Beautiful Context → Open local report**; the
-frame neither uploads nor persists its selection, and closing it clears the view.
-A report belongs to one attempt: it carries that attempt's IDs, ledger state and
-what the ledger recorded of its times, route and a failure's type (never its
-words), so two attempts that sent the same body stay two reports. The page lists
-the request's messages and tools as rows that open into their whole text, and
-keeps the retained redacted host JSON literal and whole beside the recorded file
-versions. It is the host's historical copy, not a receipt of provider input, and
-a ledger state is accounting, never proof of delivery. A gap stays a gap: a
-report without a body (`not_linked`, `not_recorded`, `unavailable`, `over_limit`)
-is still written, the terminal names the gap, and the page says which one it is
-instead of showing an earlier result; an empty or cut file is refused as such.
-The ordinary CLI without `--report` still writes the exact stored JSON bytes.
-
 
 - No byte claim for response objects, UI rendering, events/chat/progress
   narration planes (they remain projections; reverse-⟺ is `model_send` only).
