@@ -2856,7 +2856,8 @@ instead, and let the status text carry the claim.
 Accounts is the common connection surface for subscriptions and API keys. An API key is a §6 row of its provider (the built-in Default, then keys added with Add key): name and status, a meta line naming its roles, Test, its on/off and Remove (on Default it clears the key); an OpenAI key's API strip (Chat Completions · Responses; new keys start on Responses) is what Test uses. A role names its key; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host, keeping the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
-Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
+Source / Model / Account row to change it. In the wizard each role says once, under its name,
+what work it serves (the setup contract's note, Fallback its order sentence); never a hover title. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
 confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
 Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
