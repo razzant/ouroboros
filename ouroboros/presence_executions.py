@@ -300,10 +300,12 @@ _EXECUTION_REGISTRIES: "weakref.WeakSet[PresenceTurnExecutions]" = weakref.WeakS
 PROACTIVE_TURNS = PresenceTurnExecutions()
 
 
-def _find_execution(turn_id: str) -> tuple[PresenceTurnExecutions | None, PresenceTurnExecution | None]:
+def _find_execution(
+    turn_id: str, expected: PresenceTurnExecution | None = None,
+) -> tuple[PresenceTurnExecutions | None, PresenceTurnExecution | None]:
     for registry in list(_EXECUTION_REGISTRIES):
         execution = registry.find(turn_id)
-        if execution is not None:
+        if execution is not None and (expected is None or execution is expected):
             return registry, execution
     return None, None
 

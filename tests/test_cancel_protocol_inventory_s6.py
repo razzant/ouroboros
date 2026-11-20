@@ -136,6 +136,12 @@ TERMINAL_WRITERS = {
     # Same terminal status under the locked projector; this records only the
     # deterministic successor link after a positive first-round no-effect proof.
     ('ouroboros/presence_runner.py::_retry_target', 'STATUS_FAILED'): 'terminal',
+    # The Host author's own observed end of an inline turn: a Stop before its body ran (cancelled) or a pause no
+    # supervisor can resume (failed, no_continuation_owner). Its locked projector writes only that author's own
+    # still-running row (cancel_requested too, for a Stop), so a terminal already there stays. No answer exists.
+    ('ouroboros/presence_runner.py::_end_inline_turn', 'status'): 'dynamic',
+    # A gate waiter stopped before it ran: create_only, so a row the turn already has is read, never rewritten.
+    ('ouroboros/presence_runner.py::cancel_gate_waiter.stop', 'STATUS_CANCELLED'): 'terminal',
     # D12 durable new-work intent (start_task): prepare creates the "requested" row
     # before emission; claim moves its locked projector to "admitting" and keeps
     # "requested". Boot reconciliation (prior workers proved gone) settles ONLY a

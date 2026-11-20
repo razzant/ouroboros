@@ -148,6 +148,21 @@ def queued_address(task: Any, existing: Any) -> Dict[str, Any]:
     chat = task.get("chat_id") if isinstance(task, dict) else None
     return {"chat_id": chat} if chat is not None and (existing or {}).get("chat_id") is None else {}
 
+
+def queued_presence_cancel(task: Dict[str, Any], existing: Dict[str, Any], patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The first Stop write keeps its admitted source; an existing cancellation already won."""
+    run = task.get("_presence_run")
+    if not isinstance(run, dict):
+        return patch
+    if existing.get("status") == "cancelled":
+        return None
+    metadata = task.get("metadata")
+    identity = metadata.get("presence_event_identity") if isinstance(metadata, dict) else None
+    if existing or not isinstance(identity, str) or not identity:
+        return patch  # A legacy seed without an admitted identity grants no replay authority.
+    return {**queued_address(task, existing), **patch, "metadata": metadata, "source": "presence"}
+
+
 def _cancel_result_fields(
     task: Optional[Dict[str, Any]],
     *,

@@ -176,3 +176,40 @@ def test_undeclared_word_signal_is_refused_before_capture(word_place, client, mo
     heard = client.post("/presence/turn", json={"event": wire})
     assert heard.status_code == 200 and heard.json()["outcome"] == "silent"
     assert len(list(dialogue_store.iter_rows(root, "chat"))) == 1
+
+
+def test_lost_reply_replays_after_connector_removes_its_signal(word_place, client, monkeypatch):
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _previous_turn_path
+    from tests._presence_event import event_payload
+
+    root, place, _, event = word_place
+    monkeypatch.setattr("ouroboros.config.get_consciousness_autonomy", lambda: "act")
+    p.edit_place(root, place.place_id, "set_state", author="owner", state="active")
+    p.edit_place(root, place.place_id, "add_wake", author="owner", fact=SIGNAL)
+    calls = []
+
+    class Model:
+        def handle_task(self, task):
+            calls.append(task["id"])
+            write_task_result(root, task["id"], "completed", result="Already answered",
+                              metadata={**task["metadata"], "presence_outcome": "message",
+                                        "presence_result_text": "Already answered"}, terminal_origin="model_final")
+            return [{"type": "presence_result", "outcome": "message", "text": "Already answered"}]
+
+    client.app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
+        repo_dir=root, drive_root=root, agent_factory=lambda **_kw: Model(), **kw)
+    wire = {**event_payload(event), "facts": [SIGNAL]}
+    first = client.post("/presence/turn", json={"event": wire})
+    assert first.status_code == 200 and first.json()["text"] == "Already answered"
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: [])
+    pointer = _previous_turn_path(root, conversation_key(event.provider, event.account_id, event.conversation_id))
+    pointer.unlink()
+    retry = client.post("/presence/turn", json={"event": wire})
+    assert retry.status_code == 200 and retry.json() == first.json()
+    assert pointer.is_file()
+    changed = client.post("/presence/turn", json={"event": {**wire, "text": "Different input"}})
+    assert changed.json()["code"] == "presence_event_identity_conflict"
+    fresh = client.post("/presence/turn", json={"event": {**wire, "source_event_id": "new-event"}})
+    assert (fresh.status_code, fresh.json()["disposition"]) == (400, "rejected")
+    assert len(calls) == 1 and not dialogue_store.rows_by_client_id(root, "new-event")

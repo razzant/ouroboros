@@ -218,6 +218,8 @@ def test_a_registered_turn_without_a_begun_execution_gets_one_and_a_replacement_
     assert first.execution.client_message_id == "m-5" and registry.executions() == [first.execution]
     second = registry.register("act-5", 5)
     assert registry.executions() == [second.execution] and second.execution is not first.execution
+    assert registry.unregister("act-5", expected=first) is None
+    assert registry.get("act-5") is second
     registry.clear()
     assert registry.executions() == []
 

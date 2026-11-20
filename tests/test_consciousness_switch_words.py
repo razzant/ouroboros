@@ -216,7 +216,7 @@ def test_places_that_could_not_be_read_are_not_no_places(tmp_path, monkeypatch):
 
     import ouroboros.places as places_module
 
-    def unreadable(_root):
+    def unreadable(_root, **_kw):
         raise OSError("places.json unreadable")
 
     monkeypatch.setattr(places_module, "place_records", unreadable)
@@ -289,7 +289,7 @@ def test_the_preview_counts_people_by_service(tmp_path, monkeypatch):
     stored = {"t": SimpleNamespace(place_id="t", label="Telegram · Lab", state="active", provider="telegram"),
               "g": SimpleNamespace(place_id="g", label="GitHub · repo", state="active", provider="github")}
     monkeypatch.setattr(places_module, "place_records",
-                        lambda _root: SimpleNamespace(places=stored, circle_context=lambda _pid: None))
+                        lambda _root, **_kw: SimpleNamespace(places=stored, circle_context=lambda _pid: None))
     seen = {}
 
     def people(_root, ids, *, days, now=None, services=None):
@@ -301,6 +301,23 @@ def test_the_preview_counts_people_by_service(tmp_path, monkeypatch):
     assert seen == {"ids": ["t", "g"], "days": 7, "services": {"t": "telegram", "g": "github"}}
     assert "2 people wrote there in the last 7 days." in preview["lines"]
 
+
+def test_the_switch_preview_never_materializes_the_legacy_wake_import(tmp_path, monkeypatch):
+    """The preview GET only reads: over an unimported legacy store it projects the imported row in memory and
+    leaves the old store exactly as it was — no places file is created by simply opening the preview (review r4:
+    ``persist_import`` on a read-only door)."""
+    import ouroboros.places as places_module
+    from tests._place_wake_import import legacy_wake_install
+
+    legacy_wake_install(tmp_path, monkeypatch)
+    path = places_module.places_path(tmp_path)
+    legacy = tmp_path / "state" / "presence_bindings.json"
+    source = legacy.read_bytes()
+    preview = V.read_switch_preview(tmp_path, "on")
+    assert not path.exists(), "opening the preview wrote no places store"
+    assert legacy.read_bytes() == source, "the legacy source stays intact"
+    assert len(preview["places"]) == 1 and preview["places"][0]["label"] == "slack", \
+        "the imported row is projected in memory and named by the preview"
 
 
 def test_the_turn_on_receipt_says_what_the_dialog_said_and_names_no_wake_at_zero():
@@ -372,6 +389,23 @@ def test_building_context_never_runs_the_place_import(tmp_path):
     (tmp_path / "state" / "places.json").write_text(
         json.dumps({"schema_version": 1, "places": {}, "migration": {"presence_bindings_v1": True}}))
     assert _places_imported(tmp_path) is True
+
+
+def test_a_provisional_import_counts_as_imported_for_the_drive_state(tmp_path):
+    """Drive state recognizes a Places import that already materialized its rows and still
+    waits on its wake review: the marker ``import_recorded`` reads, the import never runs."""
+    import json
+
+    from ouroboros.context_sections import _places_imported
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {},
+         "migration": {"presence_bindings_v1": False, "wake_import_open": True}}))
+    assert _places_imported(tmp_path) is True
+    (tmp_path / "state" / "places.json").write_text(json.dumps(
+        {"schema_version": 1, "places": {}, "migration": None}))
+    assert _places_imported(tmp_path) is False  # a damaged marker never counts as imported
 
 
 def test_a_saved_panic_stays_named_after_a_restart(tmp_path, monkeypatch):

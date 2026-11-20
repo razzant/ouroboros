@@ -1218,7 +1218,7 @@ def test_a_cold_start_wait_says_each_change_of_reason(core_settings, world, fast
     broken = "{\"TELEGRAM_BOT_TOKEN\": "
     core_settings.SETTINGS_PATH.write_text(broken, encoding="utf-8")
     unreadable = "Telegram settings could not be read; the bridge waits until it can read the saved token."
-    unset = "Telegram bot token is not set; the bridge waits for it (Settings → Secrets)."
+    unset = "Telegram bot token is not set; the bridge waits for it (Settings → Accounts and keys)."
     caplog.set_level(logging.INFO)
 
     def said() -> list[tuple[str, str]]:
@@ -1244,8 +1244,8 @@ def test_a_cold_start_wait_says_each_change_of_reason(core_settings, world, fast
 
 
 @pytest.mark.parametrize("reason,words", [
-    ("telegram_rejected", "Telegram refused this token; save a new one in Secrets"),
-    ("telegram_startup_failed", "Telegram refused this token; save a new one in Secrets"),
+    ("telegram_rejected", "Telegram refused this token; save a new one in Settings → Accounts and keys"),
+    ("telegram_startup_failed", "Telegram refused this token; save a new one in Settings → Accounts and keys"),
     ("connection_settings_invalid", "the proxy or Bot API server below is invalid"),
     ("startup_error", "Stopped by an internal error; see the skill's log"),
     ("poller_failed", "Stopped by an internal error; see the skill's log"),
@@ -1303,17 +1303,19 @@ def test_every_mini_app_state_reads_in_owner_words_never_its_code(core_settings,
     assert _companion_states() <= set(connection._MINIAPP_WORDS) | set(connection._MINIAPP_LEADS)
 
 
-@pytest.mark.parametrize("wait", ["creation_limit", "registering", "stale_creation_limit"])
+@pytest.mark.parametrize("wait", ["creation_limit", "registering", "host_absent", "stale_creation_limit"])
 def test_a_companion_wait_reads_as_its_cause_and_next_automatic_attempt(core_settings, world, monkeypatch, wait):
     """The status the companion itself publishes (its own wait code and status writer, not a hand-made file):
     a creation limit names its cause and the planned time of the next automatic attempt on this computer's clock,
-    a new link names its registration, and a heartbeat gone stale still reads as stale."""
+    a missing name is rechecked until the reconnect threshold, and a heartbeat gone
+    stale still reads as stale."""
     scripts = str(Path(__file__).resolve().parents[1] / "skills" / "telegram" / "scripts")
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
     import companion
 
     api = _core(world)
+    pending = []
 
     async def publish() -> int:
         status = companion.RuntimeStatus(world.state, cloudflared_version="2026.7.2")
@@ -1321,19 +1323,25 @@ def test_a_companion_wait_reads_as_its_cause_and_next_automatic_attempt(core_set
         stop, server = asyncio.Event(), asyncio.create_task(asyncio.Event().wait())
         pacing = companion.CreationPacing()
 
-        async def first_wait(*_args, **_kwargs):
+        async def after_publication(*_args, **_kwargs):
+            if wait == "host_absent":
+                pending.append(world.plugin._connection_fields(api)["miniapp_status"])
+                return
             raise companion.ShutdownRequested("published")
 
-        async def unmarked(*_args, **_kwargs):
-            return companion.PublicProbeOutcome.UNHEALTHY_RESPONSE
-
-        monkeypatch.setattr(companion, "_wait_or_stop", first_wait)
-        monkeypatch.setattr(companion, "probe_public_gateway_once", unmarked)
+        monkeypatch.setattr(companion, "_wait_or_stop", after_publication)
+        outcome = companion.PublicProbeOutcome.UNHEALTHY_RESPONSE
+        if wait == "host_absent":
+            outcome = companion.PublicProbeOutcome.HOST_ABSENT
+            monkeypatch.setattr(companion, "_VERIFY_GRACE_SEC", 0.0)
+        monkeypatch.setattr(companion, "probe_public_gateway_once", AsyncMock(side_effect=[outcome] * 3))
+        interruption = contextlib.nullcontext() if wait == "host_absent" else pytest.raises(companion.ShutdownRequested)
         try:
-            with pytest.raises(companion.ShutdownRequested):
-                if wait == "registering":
-                    await companion._wait_for_public_verification(
+            with interruption:
+                if wait in {"registering", "host_absent"}:
+                    result = await companion._wait_for_public_verification(
                         "https://calm-lake-1.trycloudflare.com/", object(), observer, 42, status, stop, server)
+                    assert result is companion._GenerationResult.RECONNECT
                 else:
                     pacing.limit_confirmed()
                     await companion._wait_out_creation_limit(companion._GenerationContext(
@@ -1345,6 +1353,8 @@ def test_a_companion_wait_reads_as_its_cause_and_next_automatic_attempt(core_set
         return pacing.until_epoch
 
     deadline = asyncio.run(publish())
+    if wait == "host_absent":
+        assert pending == ["Public DNS reports no such hostname. Checking the link again."] * 2
     if wait.startswith("stale"):
         payload = json.loads((world.state / "status.json").read_text(encoding="utf-8"))
         payload["updated_at_epoch"] -= 120
@@ -1355,9 +1365,11 @@ def test_a_companion_wait_reads_as_its_cause_and_next_automatic_attempt(core_set
         "creation_limit": "Waiting: Cloudflare limits new links from this network; next automatic attempt "
                           "planned for " + connection._when(deadline, time.time()),
         "registering": "Checking its new public link while Cloudflare registers it",
+        "host_absent": "Reconnecting the Mini App after repeated public link checks failed.",
         "stale_creation_limit": "Not running: no recent heartbeat",
     }[wait]
     assert "cloudflare_rate_limited" not in shown and "public_marker_pending" not in shown
+    assert "public_host_absent" not in shown
 
 
 def test_a_working_bridge_that_loses_telegram_says_so_and_recovers_without_a_probe(tmp_path, monkeypatch):

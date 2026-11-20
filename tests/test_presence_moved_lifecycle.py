@@ -31,10 +31,10 @@ def _seed_and_built(root):
     """The lane's seed of a Host turn and the turn's own built task, from the real producers."""
     from ouroboros.presence_carrier import presence_seed_task
     from ouroboros.presence_runner import _build_task
-    from tests.test_conversation_lane_presence import _payload
+    from tests._presence_event import event_payload
 
     seed = presence_seed_task(admission=_admission(), event=_event(), skill_name="telegram-bot",
-                              event_payload=_payload(_event()), staged_files=[], gate_wait=True)
+                              event_payload=event_payload(_event()), staged_files=[], gate_wait=True)
     built = _build_task(_admission(), _event(), drive_root=root, staged_files=(), physical_task_id=seed["id"])
     return seed, built
 

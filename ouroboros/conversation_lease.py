@@ -70,6 +70,7 @@ class PresenceTurnLease:
         self._ended = False
         self.execution: Any = None
         self.review_wait: Any = None
+        self.inline_stop: threading.Event | None = None
         self.task_id = ""
         self.intake_agent: Any = None
         self._live_fd: int | None = None
@@ -128,7 +129,9 @@ class PresenceTurnLease:
                 finally:
                     self.intake_agent = None
                     with _AUTHORS_LOCK:
-                        _AUTHORS.pop((self._root(), self.task_id), None)
+                        key = (self._root(), self.task_id)
+                        if _AUTHORS.get(key) is self:
+                            del _AUTHORS[key]
                     self._clear_live_author()
         finally:
             if resources is not None:
@@ -398,15 +401,21 @@ def live_author(conversation_key: str, *, drive_root: Any = None) -> str:
         os.close(fd)
 
 
+def local_author_lease(drive_root, author: str):
+    """The exact live lease in this process, including while its author has lent the conversation."""
+    with _AUTHORS_LOCK:
+        lease = _AUTHORS.get((str(Path(drive_root).resolve()), author))
+        return lease if lease is not None and not lease._ended else None
+
+
 def presence_author_agent(drive_root, author: str):
     """The local inline author's intake owner, including while its conversation is lent.
 
     Question delivery uses this existing actor's final-drain lock. A census on
     another process never invents a local admission endpoint.
     """
-    with _AUTHORS_LOCK:
-        lease = _AUTHORS.get((str(Path(drive_root).resolve()), author))
-    return lease.intake_agent if lease is not None and not lease._ended else None
+    lease = local_author_lease(drive_root, author)
+    return lease.intake_agent if lease is not None else None
 
 
 def _intake_path(drive_root: Any, task_id: str) -> Path:

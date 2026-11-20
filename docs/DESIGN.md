@@ -2304,10 +2304,12 @@ actions.” Outgoing: “before some actions”; Off: “the Safety Supervisor i
 All add “Silent and Paused are locks; words are not.” Absent Safety keeps the old
 explanation. Notes retain authorship.
 
-“What calls it here” lists supported kinds, connector suggestions at Connect and
-saved author chips: “A checked kind calls it here at once, when <Service> reports it.”
-Sheet/reader use status labels over manifest labels; otherwise core words stay. Signals keep
-declared labels/settings.
+“What calls it here” lists supported kinds, connector suggestions at Connect and each saved kind with its author:
+“A checked kind calls it here at once, when <Service> reports it.” A saved kind the connector no longer offers
+can still be unchecked; removing it does not make it available to add again.
+Sheet/reader prefer status labels to manifest labels, then core words. Signals keep declared labels/settings.
+For an unfinished import or an older choice with unchecked suggestions, explain beside the kinds and offer
+“Add the suggested kinds” and “Keep my current choice”. Either saves the choice for this connection.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
 A cause that keeps the place quiet (the host's `quiet`: the switch off, Panic, the allowance spent, Advises) is the

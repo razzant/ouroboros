@@ -33,7 +33,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ouroboros.presence_admission import PresenceAdmission
 from ouroboros.presence_events import PresenceTurnError, PresenceTurnEvent
@@ -151,6 +151,7 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
         "metadata": {"source": "presence", "client_message_id": event.source_event_id,
                      "presence_event_identity": identity, "presence_request_waits": True,
                      "presence": {"binding_id": admission.binding_id, "transport_skill": admission.transport_skill,
+                                  "delivery_reporting_version": event.delivery_reporting_version,
                                   "event": {"source_event_id": event.source_event_id, "provider": event.provider,
                                             "account_id": event.account_id, "conversation_id": event.conversation_id,
                                             "thread_id": event.thread_id, "conversation_key": event.conversation_key}}},
@@ -172,24 +173,43 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
 
 def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path, skill_name: str,
                            admission: PresenceAdmission, event: PresenceTurnEvent, event_payload: Mapping[str, Any],
-                           staged_files: Sequence[Any], gate_wait: bool) -> None:
+                           staged_files: Sequence[Any], gate_wait: bool,
+                           expects_supervisor_pool: bool | Callable[[], bool] = False,
+                           stop_requested: Callable[[], bool] | None = None) -> None:
     """Admit a Host turn's body to the conversation lane (under Q); the carrier runs it.
 
-    The Host keeps authentication, capture, dedup and its in-flight reservation; the gate
-    (conversation lock, ``OUROBOROS_PRESENCE_MAX_ACTIVE`` slot) is acquired by the carrier.
-    The row is admitted under Q and the gate lock, its barrier runs outside both, the carrier
-    takes it under Q again (``dispatch_admitted_turn``). A server whose pool has not armed starts
-    nothing: ``PresenceTurnNotStarted`` (a typed retry), no row over an unrestored saved queue
-    (#1952); a Host without a queue of its own keeps the disclosed degraded executor (2A).
+    The carrier takes the conversation gate. Before its pool starts, a server returns a typed
+    retry. After a spawn refusal, or in a standalone Host, this caller owns the inline start:
+    no supervisor tick is owed to retry its publication or bind its executor.
     """
     from supervisor import queue, workers
-    from supervisor.conversation_lane import LANE_CONVERSATION, admit_turn, armed, dispatch_admitted_turn
+    from supervisor.conversation_lane import admit_turn, armed, conversation_row, dispatch_admitted_turn
     from supervisor.conversation_lane import replenish_after_claim, spawn_refusal
-    from supervisor.inline_carrier import InlineExecutorUnavailable
+    from supervisor.inline_carrier import InlineExecutorUnavailable, InlineThreadNotStarted
+    from supervisor.queue_publication import publication_identity
+    from supervisor.queue_snapshot import saved_queue_unowned
 
-    # A server whose carrier spawn failed keeps the disclosed degraded executor (the observed physical fact).
-    if not armed() and queue.owns_live_queue(drive_root) and not spawn_refusal():
+    def inline_queue():
+        if armed():
+            return None
+        if queue.owns_live_queue(drive_root):
+            if spawn_refusal():
+                return publication_identity()
+        elif not (expects_supervisor_pool() if callable(expects_supervisor_pool) else expects_supervisor_pool):
+            return None  # a standalone Host has no queue to read or publish
         raise PresenceTurnNotStarted("the worker pool of this server has not started yet; retry the event")
+
+    with queue._queue_lock:
+        if stop_requested and stop_requested():
+            raise PresenceTurnNotStarted("this server is shutting down; retry the event")
+        checked_queue = inline_queue()
+    if checked_queue is not None:
+        try:
+            unowned = saved_queue_unowned(require_readable=True)
+        except (OSError, ValueError) as exc:
+            raise PresenceTurnNotStarted("the saved queue could not be read; retry the event") from exc
+        if unowned:
+            raise PresenceTurnNotStarted("the saved queue has not been restored; retry the event")
     if not gate_wait:
         # Version 2 never waits in the gate, and a busy gate costs no lane admission (no row, no barrier, no
         # spare claimed, no carrier spawned): one non-blocking pass of the carrier's own acquisition, released.
@@ -204,28 +224,78 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
     # the Host's root, never the pool's global DRIVE_ROOT (unset, or another root, in a standalone Host).
     task["drive_root"] = str(drive_root)
     with queue._queue_lock, workers._repo_writer_gate_lock:
-        held = workers.RUNNING.get(str(task["id"]))
-        if any(str(row.get("id") or "") == str(task["id"]) for row in queue.PENDING) or (
-                isinstance(held, dict) and held.get("lane") != LANE_CONVERSATION):
+        if stop_requested and stop_requested():
+            raise PresenceTurnNotStarted("this server is shutting down; retry the event")
+        tid = str(task["id"])
+        held = workers.RUNNING.get(tid)
+        if conversation_row(held):
+            raise PresenceTurnInterrupted("the previous carrier still owns this event; retry after it exits")
+        if held or any(str(row.get("id") or "") == tid for row in queue.PENDING):
             # The queue keeps this id's saved work (a moved turn's park, its Resume or a restart's return): the
             # retry is answered from that custody, never a second lane row or author for the same id.
             refusal = PresenceTurnError("presence_turn_parked", "source_event_id", turn_ref=str(task["id"]),
                                         disposition="retained")
             refusal.custody = "queued"
             raise refusal
+        inline = not armed()
+        if inline and inline_queue() != checked_queue:
+            raise PresenceTurnNotStarted("the queue changed during admission; retry the event")
+        queue_identity = checked_queue if inline else publication_identity()
+        reason = spawn_refusal() or "pool_not_started"
         meta = admit_turn(task, chat_id=int(task["chat_id"]), client_message_id=event.source_event_id,
-                          quiet=True, reply_expected=False)
+                          quiet=True, reply_expected=False, reserved=inline)
+        meta["_presence_execution"] = execution  # process-local waiter, never part of the dispatched or saved task
+        if not inline and stop_requested is not None:
+            meta["_presence_handoff"] = (stop_requested, queue_identity)
     try:
-        dispatch_admitted_turn(meta)  # the barrier outside Q, then the carrier (or the degraded executor)
-    except InlineExecutorUnavailable as exc:
-        # Nothing ran and no carrier will come to this process: the row leaves now and the Host answers
-        # a typed retry; its reservation returns with the settlement, the gate was never taken.
+        if inline:
+            from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, disclose_inline_turn, start_inline_turn
+
+            # The snapshot records the reserved executor before the body runs. The
+            # process-local slot becomes visible to Stop under Q with the thread start.
+            if queue_identity is not None:
+                published = queue.publish_queue_snapshot(reason="conversation_turn_admitted",
+                                                         expected_identity=queue_identity)
+            with queue._queue_lock:
+                if workers.RUNNING.get(tid) is not meta:
+                    raise PresenceTurnInterrupted("the admission was taken by Stop; retry the event for its outcome")
+                if stop_requested and stop_requested():
+                    raise InlineExecutorUnavailable("this server is shutting down; retry the event")
+                if queue_identity is None and (armed() or inline_queue() is not None):
+                    raise InlineExecutorUnavailable("the worker pool changed during admission; retry the event")
+                if queue_identity is not None and (published is not True or publication_identity() != queue_identity):
+                    raise InlineExecutorUnavailable("the presence admission could not be published")
+                meta.pop("_unpublished", None)
+                start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason=reason)
+            disclose_inline_turn(meta["task"], EXECUTOR_INLINE_DEGRADED, reason, host_root=Path(drive_root))
+            return
+        dispatch_admitted_turn(meta)
+    except PresenceTurnInterrupted:
+        raise  # Stop already took this admission and its outcome
+    except Exception as exc:
         with queue._queue_lock:
-            if workers.RUNNING.get(str(task["id"])) is meta:
-                workers.RUNNING.pop(str(task["id"]))
-            queue.persist_queue_snapshot(reason="presence_turn_not_started")
-        raise PresenceTurnNotStarted("presence turn thread could not start") from exc
-    replenish_after_claim()  # the spare the turn took is replaced now, or its own carrier started now (4A)
+            if meta.get("worker_id") is not None:
+                return  # a carrier has already started
+            if workers.RUNNING.get(tid) is not meta:
+                if isinstance(exc, InlineThreadNotStarted) and execution.result.done():
+                    refusal = execution.result.exception(timeout=0)
+                    if isinstance(refusal, PresenceTurnNotStarted):
+                        raise refusal  # the lane withdrew this same admission before we retook Q
+                raise PresenceTurnInterrupted("the admission left the lane before dispatch") from exc
+            if not inline and not isinstance(exc, InlineExecutorUnavailable):
+                raise
+            workers.RUNNING.pop(tid)
+            withdraw = queue_identity is not None and publication_identity() == queue_identity
+        try:
+            if withdraw:
+                queue.publish_queue_snapshot(reason="presence_turn_not_started", expected_identity=queue_identity)
+        except Exception:
+            log.warning("Could not publish the withdrawal of presence turn %s", tid, exc_info=True)
+        if isinstance(exc, InlineThreadNotStarted):
+            raise PresenceTurnNotStarted("presence turn thread could not start") from exc
+        raise PresenceTurnNotStarted(str(exc)) from exc
+    if stop_requested is None or not stop_requested():
+        replenish_after_claim()  # replace the spare or start a waiting carrier now (4A)
 
 
 def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_root: Any, *,
@@ -269,10 +339,13 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
         if facts.get("identity") is not None:
             event = replace(event, identity=dict(facts["identity"]))
         gate = _configured_gate(root)
+        inline_stop = getattr(owner_wait_callback, "stop_event", None)
         if facts.get("gate_wait", True):
             from ouroboros.cancel_intents import has_active_intent
 
             def stopped() -> bool:
+                if inline_stop is not None and inline_stop.is_set():
+                    return True
                 try:
                     return bool(has_active_intent(root, turn_id, strict=False))
                 except Exception:
@@ -287,7 +360,13 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
             if lease is None:
                 raise _capacity_full(busy)
         lease.execution = FrameExecution(turn_id, out_q)
+        lease.inline_stop = inline_stop
         try:
+            if inline_stop is not None and inline_stop.is_set():
+                raise PresenceTurnError("presence_turn_cancelled", "conversation_key", turn_ref=turn_id)
+            if inline_stop is not None:
+                lease.review_wait = owner_wait_callback
+
             def factory(**kwargs):
                 from ouroboros.agent import make_agent
 
@@ -338,12 +417,108 @@ def _frame_identity(task: Mapping[str, Any], worker_id: Any, error: Any) -> dict
             "parked": str(getattr(error, "parked", "") or "")}
 
 
-def handle_presence_turn_initial(evt: dict[str, Any], ctx: Any) -> None:
+def _inline_owns_turn(ctx: Any, turn_id: str) -> bool:
+    """Under Q, also cover the exit window after the row leaves and before the Host returns its waiter."""
+    from supervisor.conversation_lane import host_presence_row
+
+    row = getattr(ctx, "RUNNING", {}).get(turn_id)
+    if row is not None:
+        return host_presence_row(row)
+    return any(wid < -1 and slot.busy_task_id == turn_id for wid, slot in getattr(ctx, "WORKERS", {}).items())
+
+
+def handle_presence_turn_initial(evt: dict[str, Any], ctx: Any, *, expected: PresenceTurnExecution | None = None) -> None:
     """A carrier published a continuing author's initial envelope: the Host's waiter takes it."""
-    _registry, execution = _find_execution(str(evt.get("turn_id") or ""))
+    from supervisor.queue import _queue_lock
+
+    turn_id = str(evt.get("turn_id") or "")
+    with _queue_lock:
+        if expected is None and _inline_owns_turn(ctx, turn_id):
+            return  # this Host receives its own initial frame directly, never on the shared bus
+        _registry, execution = _find_execution(turn_id, expected)
     if execution is None or not isinstance(evt.get("result"), dict):
         return
     execution.publish_initial(PresenceTurnResult(**evt["result"]), return_capacity=bool(evt.get("return_capacity", True)))
+
+
+def finish_inline_presence(meta: dict, evt: dict, ctx: Any) -> None:
+    """The thread has returned from its body. Release its exact admission and deliver its own final frame."""
+    from supervisor import queue
+
+    task = meta["task"]
+    turn_id = str(task["id"])
+    root = task.get("drive_root") or ctx.DRIVE_ROOT
+    error = evt.get("error") or {}
+    if error.get("code") == "presence_turn_cancelled" and error.get("field") == "conversation_key":
+        from ouroboros.presence_runner import cancel_gate_waiter, presence_turn_replay
+
+        try:
+            physical = cancel_gate_waiter(Path(root), task)
+        except Exception:
+            # No slot or waiter is live after unwind. Keep this exact admission as
+            # settlement-only: a source-matched resend retries the write even without a pool tick.
+            log.exception("Could not record cancellation of %s before releasing the gate waiter", turn_id)
+            with queue._queue_lock:
+                if ctx.RUNNING.get(turn_id) is meta:
+                    meta["_presence_cancel_unsettled"] = True
+            if expected := meta.get("_presence_execution"):
+                _settle_frame({"error": _error_payload(PresenceTurnError(
+                    "presence_result_unreadable", "source_event_id", turn_ref=turn_id, disposition="retry"))},
+                    *_find_execution(turn_id, expected))
+            return
+        try:
+            metadata = task["metadata"]
+            result = presence_turn_replay(Path(root), turn_id, metadata["presence"]["event"]["conversation_key"],
+                                          metadata["presence_event_identity"], repair_pointer=True)
+            if result is None:
+                raise PresenceTurnInterrupted("the stopped waiter did not settle the source's other author")
+            evt = {"error": None, "result": _result_payload(result)}
+        except PresenceTurnError as exc:
+            evt = {"error": _error_payload(exc)}  # the durable outcome (Stop, or an earlier terminal)
+        except Exception:
+            log.warning("Could not project the terminal of stopped Presence waiter %s", physical, exc_info=True)
+            evt = {}
+    _release_inline_presence(root, turn_id, meta, ctx)
+    if expected := meta.get("_presence_execution"):
+        _settle_frame(evt, *_find_execution(turn_id, expected))
+
+
+def _release_inline_presence(root: Any, turn_id: str, meta: dict, ctx: Any) -> None:
+    from supervisor import queue
+
+    with queue._queue_lock:
+        removed = ctx.RUNNING.get(turn_id) is meta
+        if removed:
+            ctx.RUNNING.pop(turn_id)
+    try:
+        if removed and queue.owns_live_queue(root):
+            queue.persist_queue_snapshot(reason="presence_turn_settled")
+    except Exception:
+        log.debug("presence settlement snapshot failed for %s", turn_id, exc_info=True)
+
+
+def retry_inline_gate_stop(root: Path, turn_id: str, identity: str) -> None:
+    """A resend may finish the stopped waiter, never re-admit it or start a thread."""
+    from supervisor import queue, workers
+    from ouroboros.presence_runner import cancel_gate_waiter
+    from ouroboros.store import StoreError
+
+    with queue._queue_lock:
+        meta = workers.RUNNING.get(turn_id)
+        if not meta or not meta.get("_presence_cancel_unsettled"):
+            return
+        seed = meta["task"]
+        if Path(seed["drive_root"]).resolve() != Path(root).resolve():
+            return
+        if seed["metadata"]["presence_event_identity"] != identity:
+            raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=turn_id)
+    try:
+        cancel_gate_waiter(Path(root), seed)
+    except (OSError, ValueError, StoreError) as exc:
+        if isinstance(exc, PresenceTurnError):
+            raise
+        raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=turn_id) from exc
+    _release_inline_presence(root, turn_id, meta, workers)
 
 
 def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
@@ -359,28 +534,24 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
     from supervisor.queue import _queue_lock
 
     turn_id = str(evt.get("turn_id") or "")
-    registry, execution = _find_execution(turn_id)
-    if execution is not None and registry is not None:
-        error_payload = evt.get("error")
-        if isinstance(error_payload, dict):
-            registry.settle_from_frame(execution, error=_error_from_payload(error_payload))
-        elif isinstance(evt.get("result"), dict):
-            registry.settle_from_frame(execution, result=PresenceTurnResult(**evt["result"]))
-        else:
-            registry.settle_from_frame(execution, error=PresenceTurnNotStarted("presence turn settled without a result"))
     named = "worker_id" in evt
     with _queue_lock:
         current = ctx.RUNNING.get(turn_id)
+        if _inline_owns_turn(ctx, turn_id):
+            return
+        registry, execution = _find_execution(turn_id)
         if not named:
             meta = ctx.RUNNING.pop(turn_id, None)
             wid = meta.get("worker_id") if isinstance(meta, dict) else None
         else:
             wid = evt.get("worker_id")
             sender = ctx.WORKERS.get(wid) if wid is not None else None  # a respawned slot is another process's
-            own = (isinstance(current, dict) and not evt.get("parked") and current.get("worker_id") == wid
-                   and int(current.get("attempt") or 1) == int(evt.get("attempt") or 1)
-                   and (sender is None or _same_process(sender, evt.get("pid"))))
-            meta = ctx.RUNNING.pop(turn_id, None) if own else None
+            same_sender = sender is None or (sender.busy_task_id == turn_id and _same_process(sender, evt.get("pid")))
+            same = (isinstance(current, dict) and current.get("worker_id") == wid and same_sender
+                    and int(current.get("attempt") or 1) == int(evt.get("attempt") or 1))
+            if not same_sender or (not same and (current is not None or sender is None)):
+                execution = None  # the current Host waiter is not this frame's to settle
+            meta = ctx.RUNNING.pop(turn_id, None) if same and not evt.get("parked") else None
         slot = ctx.WORKERS.get(wid) if wid is not None else None
         newer = ctx.RUNNING.get(turn_id)
         if (slot is not None and slot.busy_task_id == turn_id and not getattr(slot, "reaping", False)
@@ -391,7 +562,8 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
         try:  # the row ended here: a remote Host offers nothing more to this author, whatever its carrier did
             from ouroboros.conversation_lease import close_author_intake
 
-            close_author_intake(Path(getattr(ctx, "DRIVE_ROOT", None) or queue.DRIVE_ROOT), turn_id)
+            root = (meta or {}).get("task", {}).get("drive_root") or getattr(ctx, "DRIVE_ROOT", None) or queue.DRIVE_ROOT
+            close_author_intake(Path(root), turn_id)
         except Exception:
             log.debug("author intake of %s not closed at settlement", turn_id, exc_info=True)
     if meta is not None:
@@ -399,6 +571,18 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
             queue.persist_queue_snapshot(reason="presence_turn_settled")
         except Exception:
             log.debug("presence settlement snapshot failed for %s", turn_id, exc_info=True)
+    _settle_frame(evt, registry, execution)
+
+
+def _settle_frame(evt: dict, registry: Any, execution: PresenceTurnExecution | None) -> None:
+    if execution is not None and registry is not None:
+        error_payload = evt.get("error")
+        if isinstance(error_payload, dict):
+            registry.settle_from_frame(execution, error=_error_from_payload(error_payload))
+        elif isinstance(evt.get("result"), dict):
+            registry.settle_from_frame(execution, result=PresenceTurnResult(**evt["result"]))
+        else:
+            registry.settle_from_frame(execution, error=PresenceTurnInterrupted("presence turn ended without a result"))
 
 
 def _same_process(slot: Any, pid: Any) -> bool:
@@ -407,7 +591,8 @@ def _same_process(slot: Any, pid: Any) -> bool:
     from supervisor.worker_pool_lifecycle import is_worker_slot
 
     try:
-        return not is_worker_slot(slot) or int(getattr(slot.proc, "pid", 0) or 0) == int(pid or 0)
+        expected = slot.proc.pid if is_worker_slot(slot) else os.getpid()
+        return int(expected) == int(pid)
     except Exception:
         return False
 
@@ -422,9 +607,13 @@ def settle_ended_turn(turn_id: str) -> bool:
     already retired the execution, so it is never overwritten. Called after the row left RUNNING, so a resend
     admits a fresh row. Never raises."""
     try:
-        registry, execution = _find_execution(str(turn_id or ""))
-        if execution is None or registry is None:
-            return False
+        from supervisor import workers
+        from supervisor.queue import _queue_lock
+
+        with _queue_lock:
+            registry, execution = _find_execution(str(turn_id or ""))
+            if execution is None or registry is None or _inline_owns_turn(workers, turn_id):
+                return False
         registry.settle_from_frame(execution, error=PresenceTurnInterrupted(
             f"presence turn {turn_id} ended in its carrier without a settlement; resend the same event"))
         return True
@@ -475,13 +664,16 @@ def saves_exact_pause(ctx: Any, rail: str) -> bool:
     a moved text turn, on the owner's Pause and the money/authority rails, never the model's own sleep or
     detach. Read at the request, not at the carrier's start: the owner can move a turn while it runs."""
     from ouroboros.budget_pause import RAIL_MODEL_SLEEP
+    from ouroboros.tool_access import canonical_data_root
+    from supervisor.conversation_lane import inline_resume_available
 
+    waiter = getattr(ctx, "model_wait_context", None)
     if rail == RAIL_MODEL_SLEEP:
         return False
-    from ouroboros.tool_access import canonical_data_root
-
-    return moved_text_turn(canonical_data_root(ctx), str(getattr(ctx, "task_id", "") or ""),
-                           getattr(ctx, "task_metadata", None))
+    root = canonical_data_root(ctx)
+    if getattr(waiter, "inline_presence_stop", None) is not None and not inline_resume_available(root):
+        return False
+    return moved_text_turn(root, str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "task_metadata", None))
 
 
 def owner_allowance_lift(task: Mapping[str, Any], drive_root: Any) -> dict[str, Any]:
@@ -772,6 +964,15 @@ def park_moved_turn(drive_root: Any, task: Mapping[str, Any], events: list, *, a
     if pause is None or sink is None:
         return None
     root, task_id = Path(drive_root), str(task["id"])
+    from supervisor.conversation_lane import inline_resume_available
+
+    if getattr(lease, "inline_stop", None) is not None and not (
+            inline_resume_available(root) and moved_text_turn(root, task_id, task.get("metadata"))):
+        from ouroboros.presence_runner import _end_inline_turn
+
+        _end_inline_turn(root, task_id, identity, "failed", "no_continuation_owner",
+                         "This Presence turn cannot pause because no supervisor can resume it.")
+        return None  # finish_turn reads the actual terminal, including an answer that landed first
     limit = pause.get("resource_limit") if isinstance(pause.get("resource_limit"), dict) else {}
     pause_id = str((limit.get("checkpoint") or {}).get("pause_id") or "")  # none before the body ran
     _record_yield(root, task, getattr(getattr(agent, "tools", None), "_ctx", None), lease, event, identity)
@@ -1007,7 +1208,7 @@ def carry_saved_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_root
 
 
 __all__ = ["PRESENCE_RUN_KEY", "FrameExecution", "adopt_saved_records", "answer_parked_turn", "carry_presence_turn",
-           "carry_saved_turn", "dispatch_presence_turn", "handle_presence_turn_initial",
+           "carry_saved_turn", "dispatch_presence_turn", "finish_inline_presence", "handle_presence_turn_initial",
            "handle_presence_turn_settled", "kept_allowance_lift", "lift_allowance", "lift_live_allowance", "lifted_record",
            "moved_text_turn", "owner_allowance_lift", "owner_resume_decision", "owner_resume_lift", "park_moved_turn",
            "park_record", "presence_seed_task",

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import places as p
-from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
+from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint, conversation_key
+from tests._place_wake_import import admit_live, base_reader, document, legacy_wake_install, old_load_places, wake_declaration
 from tests.frozen_presence_bindings import save_presence_binding
 
 
@@ -88,6 +89,17 @@ def test_facts_and_empty_wakes(tmp_path):
     assert not p.wake_matches(replace(place, wakes=()), [p.FACT_LEGACY_ADDRESSED])
 
 
+@pytest.mark.parametrize("author", ["owner", "ouroboros"])
+def test_same_wakes_on_an_ordinary_connection_preserve_the_place_and_file(tmp_path, author):
+    facts = ["mention", "direct_message"]
+    place = connect(tmp_path, wakes=facts)
+    path = p.places_path(tmp_path)
+    before = path.read_bytes()
+    saved = p.edit_place(tmp_path, place.place_id, "set_wakes", author=author, wakes=facts, expected_revision=place.revision)
+    assert saved == place
+    assert path.read_bytes() == before
+
+
 def test_resolution_and_owner_confirmation(tmp_path):
     broad = connect(tmp_path)
     narrow = connect(tmp_path, conversation_id="room", scope="conversation")
@@ -108,8 +120,9 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
     behavior = SimpleNamespace(skill_dir=root, manifest=SimpleNamespace(raw_extra={"presence": {
         "instructions": "Keep these exact words.\n", "context_topics": ["social"],
         "runtime_defaults": {"model_slot": "main"}}}))
-    connector = SimpleNamespace(manifest=SimpleNamespace(contributes=[{"provides": "place", "wakes": ["group_dm"]}]))
-    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: behavior if name == "mind" else connector)
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: behavior if name == "mind" else None)
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection",
+                        lambda: [wake_declaration("group_dm")])
     state = root / "state" / "skills" / "mind" / "presence_profile_state.json"
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"runtime_overrides": {"model_slot": "light"}, "workspace_root": "/work"}))
@@ -134,6 +147,398 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
     assert (root / "state" / "presence_bindings.json").read_bytes() == source
 
 
+def test_core_first_import_finishes_once_at_live_admission_and_the_first_dm_focuses(tmp_path, monkeypatch):
+    from ouroboros.place_intake import decide_attention
+    from ouroboros.presence_events import PresenceTurnEvent
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    legacy = p.WakeItem("legacy_addressed", "migration")
+    assert place.wakes == (legacy,)
+    published.append(wake_declaration("any_message", connector="another-bridge"))
+    assert admit_live(tmp_path, place).place == place
+    published.append(wake_declaration("direct_message", "mention"))
+    source = (tmp_path / "state" / "presence_bindings.json").read_bytes()
+    admission = admit_live(tmp_path, place)
+    assert admission.place.wakes == (legacy, p.WakeItem("direct_message", "connector"), p.WakeItem("mention", "connector"))
+    assert replace(admission.place, wakes=place.wakes, revision=place.revision) == place
+    key = conversation_key("slack", "team", place.conversation_id)
+    event = PresenceTurnEvent("first-dm", "slack", "team", place.conversation_id, "", key,
+                              {"platform_actor_id": "person"}, {}, {}, "hello", facts=("direct_message",))
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    assert decide_attention(tmp_path, admission, event)[0] == "focus"
+    saved = p.places_path(tmp_path).read_bytes()
+    published[:] = [wake_declaration("any_message")]
+    assert admit_live(tmp_path, place).place == admission.place and p.places_path(tmp_path).read_bytes() == saved
+    assert (tmp_path / "state" / "presence_bindings.json").read_bytes() == source
+
+
+@pytest.mark.parametrize("defaults", [[], ["direct_message"]])
+def test_connector_first_import_takes_even_an_empty_declaration_as_final(tmp_path, monkeypatch, defaults):
+    published = legacy_wake_install(tmp_path, monkeypatch, published=[wake_declaration(*defaults)])
+    place, = p.load_places(tmp_path)
+    assert [w.fact for w in place.wakes] == ["legacy_addressed", *defaults]
+    published[:] = [wake_declaration("any_message")]
+    assert admit_live(tmp_path, place).place == place
+    assert document(tmp_path)["migration"]["presence_bindings_v1"] is True
+
+
+@pytest.mark.parametrize("connector_first", [True, False])
+def test_legacy_transport_keeps_declared_order_across_its_place_contributions(tmp_path, monkeypatch, connector_first):
+    rows = [wake_declaration("mention"),
+            {**wake_declaration("direct_message", "mention", "signal.inbox"), "id": "inbox",
+             "facts": ["direct_message", "mention", {"id": "signal.inbox", "label": "Inbox item"}]}]
+    published = legacy_wake_install(tmp_path, monkeypatch, published=rows if connector_first else ())
+    place, = p.load_places(tmp_path)
+    if not connector_first:
+        published.extend(rows)
+    assert admit_live(tmp_path, place).place.wakes == (
+        p.WakeItem("legacy_addressed", "migration"), p.WakeItem("mention", "connector"),
+        p.WakeItem("direct_message", "connector"), p.WakeItem("signal.inbox", "connector"))
+
+
+@pytest.mark.parametrize("actions", [
+    [("set_wakes", {"wakes": ["legacy_addressed"]})],
+    [("add_wake", {"fact": "mention"}), ("remove_wake", {"fact": "mention"})],
+    [("remove_wake", {"fact": "direct_message"})],
+    [("set_wakes", {"wakes": []})],
+])
+@pytest.mark.parametrize("author", ["owner", "ouroboros"])
+def test_every_explicit_wake_action_records_review_even_when_the_list_is_unchanged(tmp_path, monkeypatch, actions, author):
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    for action, args in actions:
+        previous = place
+        place = p.edit_place(tmp_path, place.place_id, action, author=author, expected_revision=place.revision, **args)
+        assert place.revision > previous.revision
+        assert p.place_records(tmp_path).choices[place.place_id] == {
+            "connected_revision": place.connected_revision, "wakes_reviewed": True}
+    before = p.places_path(tmp_path).read_bytes()
+    assert p.edit_place(tmp_path, place.place_id, "set_wakes", author=author, expected_revision=place.revision,
+                        wakes=[wake.fact for wake in place.wakes]) == place
+    assert p.places_path(tmp_path).read_bytes() == before
+    published.append(wake_declaration("direct_message"))
+    assert admit_live(tmp_path, place).place == place
+
+
+def test_note_state_and_circle_edits_keep_pending_across_fresh_reads(tmp_path, monkeypatch):
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    circle = p.create_circle(tmp_path, name="Friends", author="owner")
+    noted = p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("set_circle", {"circle_id": circle["circle_id"]}), ("set_state", {"state": "silent"}),
+        ("add_note", {"text": "Keep quiet here."})])
+    p.delete_circle(tmp_path, circle["circle_id"], author="owner")
+    published.append(wake_declaration("direct_message"))
+    admitted = admit_live(tmp_path, place).place
+    assert admitted.state == "silent" and admitted.notes == noted.notes
+    assert admitted.wakes[-1] == p.WakeItem("direct_message", "connector")
+
+
+def test_late_empty_declaration_closes_import_before_later_defaults(tmp_path, monkeypatch):
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    published.append(wake_declaration())
+    closed = admit_live(tmp_path, place).place
+    assert closed.revision > place.revision and closed.wakes == place.wakes
+    published[:] = [wake_declaration("any_message")]
+    assert admit_live(tmp_path, closed).place == closed
+
+
+def old_same_list_save(root, place):
+    """Two separate v1 locks. The setter reports success even when its second transaction writes nothing."""
+    old_load_places(root, [p.place_summary(place)])
+    path = p.places_path(root)
+    before = path.read_bytes()
+    submitted = [wake.fact for wake in place.wakes]
+    seen = []
+
+    def save(current):
+        old = base_reader(current)[place.place_id]
+        assert old.revision == place.revision
+        wakes = tuple(next((item for item in old.wakes if item.fact == fact), p.WakeItem(fact, "owner"))
+                      for fact in dict.fromkeys(submitted))
+        updated = replace(old, wakes=wakes)
+        assert updated == old
+        seen.append(updated)
+        return None  # v1 _write's unchanged-place/unchanged-choice branch
+
+    p.update_json_locked(path, save)
+    assert seen == [place] and path.read_bytes() == before
+
+
+def test_restored_old_reader_closes_proof_before_a_successful_same_list_save(tmp_path, monkeypatch):
+    from ouroboros.places_migration import wake_review
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    place = p.edit_place(tmp_path, place.place_id, "set_state", author="owner", state="paused")
+    old_same_list_save(tmp_path, place)
+    assert document(tmp_path)["migration"]["presence_bindings_v1"] is True
+    published.append(wake_declaration("direct_message"))
+    assert admit_live(tmp_path, place).place == place
+    assert wake_review(p.place_records(tmp_path), place, ["direct_message"]) == "ambiguous"
+
+
+@pytest.mark.parametrize("damage", ["revision", "author", "malformed"])
+def test_a_stale_or_malformed_witness_only_offers_manual_review(tmp_path, monkeypatch, damage):
+    from ouroboros.places_migration import wake_review
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    value = document(tmp_path)
+    row = value["places"][place.place_id]
+    if damage == "revision":
+        value["revision"] += 1
+        row["revision"] = value["revision"]
+    elif damage == "author":
+        row["wakes"][0]["author"] = "owner"
+    else:
+        value["place_choices"][place.place_id]["wake_import"]["revision"] = True
+    path = p.places_path(tmp_path)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    before = path.read_bytes()
+    published.append(wake_declaration("direct_message"))
+    live = admit_live(tmp_path, place).place
+    assert wake_review(p.place_records(tmp_path), live, ["direct_message"]) == "ambiguous"
+    assert path.read_bytes() == before
+
+
+def test_legacy_disconnect_seals_before_an_old_reader_can_revive_it(tmp_path, monkeypatch):
+    from ouroboros.places_migration import wake_review
+    published = legacy_wake_install(tmp_path, monkeypatch, ids=("a" * 32, "b" * 32))
+    first, other = p.load_places(tmp_path)
+    p.edit_place(tmp_path, first.place_id, "disconnect", author="owner")
+    assert set(old_load_places(tmp_path, [p.place_summary(first), p.place_summary(other)])) == {other.place_id}
+    published.append(wake_declaration("direct_message"))
+    assert admit_live(tmp_path, other).place == other
+    assert wake_review(p.place_records(tmp_path), other, ["direct_message"]) == "ambiguous"
+    again = connect(tmp_path, place_id=first.place_id)
+    assert again.connected_revision > first.connected_revision and admit_live(tmp_path, again).place == again
+    assert first.place_id not in p.place_records(tmp_path).choices
+
+
+def test_partial_import_keeps_its_problem_and_cannot_revive_the_repaired_binding(tmp_path, monkeypatch):
+    from ouroboros.places_migration import wake_review
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    endpoint = PresenceEndpoint("slack", "team", "other")
+    missing = PresenceBinding("c" * 32, "slack-bridge", "missing-mind", endpoint, endpoint)
+    save_presence_binding(tmp_path, missing)
+    place, = p.load_places(tmp_path)
+    problems = p.migration_problems(tmp_path)
+    assert problems[0]["binding_id"] == missing.binding_id
+    fixed = replace(place, place_id=missing.binding_id, legacy_binding_ids=(missing.binding_id,))
+    assert set(old_load_places(tmp_path, [p.place_summary(fixed)])) == {place.place_id}
+    assert p.migration_problems(tmp_path) == problems
+    published.append(wake_declaration("direct_message"))
+    assert admit_live(tmp_path, place).place == place
+    assert wake_review(p.place_records(tmp_path), place, ["direct_message"]) == "ambiguous"
+
+
+def test_unrelated_disconnect_does_not_close_a_pending_legacy_import(tmp_path, monkeypatch):
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    ordinary = connect(tmp_path, conversation_id="another")
+    p.edit_place(tmp_path, ordinary.place_id, "disconnect", author="owner")
+    published.append(wake_declaration("direct_message"))
+    assert admit_live(tmp_path, place).place.wakes[-1] == p.WakeItem("direct_message", "connector")
+
+
+def test_a_known_binding_is_never_re_read_and_its_broken_source_blocks_no_fresh_window(tmp_path, monkeypatch):
+    """A re-import (the migration stamp was lost, the rows stayed — a rollback's shape) skips bindings the stored
+    rows already carry, without re-reading their sources: a behavior skill that broke since adds no problem, so a
+    fresh binding's pending window stays proven and its review stays pending, never ambiguous. No wakes are added
+    to the known row without proof; its own later suggestions stay a human choice."""
+    from ouroboros.places_migration import wake_review
+    behavior = SimpleNamespace(skill_dir=tmp_path, manifest=SimpleNamespace(raw_extra={
+        "presence": {"instructions": "Keep these words.", "context_topics": ["social"]}}))
+    transport = SimpleNamespace(manifest=SimpleNamespace(contributes=[]))
+    skills = {"mind": behavior, "mind-2": behavior, "slack-bridge": transport}
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: skills.get(name))
+    published = []
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: published)
+    origin = PresenceEndpoint("slack", "team", "aaaaaaaa")
+    save_presence_binding(tmp_path, PresenceBinding("a" * 32, "slack-bridge", "mind", origin, origin))
+    imported, = p.load_places(tmp_path)  # the first import: one pending place, its window open
+    assert imported.wakes == (p.WakeItem("legacy_addressed", "migration"),)
+    value = document(tmp_path)
+    del value["migration"]  # the stamp is lost but the row stays
+    p.places_path(tmp_path).write_text(json.dumps(value), encoding="utf-8")
+    skills.pop("mind")  # the known binding's behavior source is unreadable now
+    second = PresenceEndpoint("slack", "team", "cccccccc")
+    save_presence_binding(tmp_path, PresenceBinding("c" * 32, "slack-bridge", "mind-2", second, second))
+    rows = {row.place_id: row for row in p.load_places(tmp_path)}  # the re-import runs
+    assert p.migration_problems(tmp_path) == [], "a known binding's broken source is not this import's problem"
+    assert document(tmp_path)["migration"]["wake_import_open"] is True, "the fresh binding's window stayed open"
+    assert rows["a" * 32] == imported, "the known row is untouched: no wakes added without proof"
+    fresh = rows["c" * 32]
+    assert fresh.wakes == (p.WakeItem("legacy_addressed", "migration"),)
+    records = p.place_records(tmp_path)
+    assert wake_review(records, fresh, ["direct_message"]) == "pending"
+    # The known row lost its witness with the stamp: later suggestions are a human choice, never automatic.
+    assert wake_review(records, imported, ["direct_message"]) == "ambiguous"
+
+
+@pytest.mark.parametrize("old_writer", [True, False])
+def test_racing_choice_wins_even_if_an_old_writer_keeps_the_row_revision(tmp_path, monkeypatch, old_writer):
+    legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    saved = []
+
+    def publish_after_save():
+        if old_writer:
+            old_same_list_save(tmp_path, place)
+        else:
+            p.edit_place(tmp_path, place.place_id, "set_wakes", author="owner", wakes=[])
+        saved.append(p.get_place(tmp_path, place.place_id))
+        return [wake_declaration("direct_message")]
+
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", publish_after_save)
+    admission = admit_live(tmp_path, place)
+    assert saved == [admission.place] and admission.place == p.get_place(tmp_path, place.place_id)
+    assert admission.place.wakes == (place.wakes if old_writer else ())
+
+
+def test_note_racing_the_first_typed_event_keeps_the_note_and_finishes_import(tmp_path, monkeypatch):
+    legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    notes = []
+
+    def publish_after_note():
+        if not notes:
+            changed = p.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="Keep this.")
+            notes.extend(changed.notes)
+        return [wake_declaration("direct_message")]
+
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", publish_after_note)
+    admitted = admit_live(tmp_path, place).place
+    assert list(admitted.notes) == notes and notes[-1].text == "Keep this."
+    assert admitted.wakes[-1] == p.WakeItem("direct_message", "connector")
+
+
+def test_racing_note_edits_never_defer_the_first_event_past_the_wake_import(tmp_path, monkeypatch):
+    """Review item 7: two revision conflicts used to leave the admission on the migration placeholder, so a
+    direct-message-only first event settled silent and its retry replayed that stored outcome; the import finished
+    only on the next event. The completion now binds to the record as it stands under the store lock: the racing
+    edit is kept, the import finishes in the first event's own admission, and that event is heard as a wake."""
+    from ouroboros.place_intake import decide_attention
+    from ouroboros.presence_events import PresenceTurnEvent
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    published.append(wake_declaration("direct_message"))
+    edits = []
+
+    def publish_under_edit():
+        assert len(edits) < 2, "one completion under the lock finishes the import; no second declarations read"
+        edits.append(p.edit_place(tmp_path, place.place_id, "add_note", author="owner", text=f"Note {len(edits) + 1}"))
+        return published
+
+    with monkeypatch.context() as racing:
+        racing.setattr("ouroboros.extension_registry_state.live_contribution_projection", publish_under_edit)
+        admission = admit_live(tmp_path, place)
+    assert len(edits) == 1
+    admitted = admission.place
+    assert admitted.notes == edits[0].notes
+    assert admitted.notes[:-1] == place.notes and admitted.notes[-1].text == "Note 1"
+    assert admitted.wakes == (*place.wakes, p.WakeItem("direct_message", "connector"))
+    assert admitted.revision > edits[0].revision
+    assert document(tmp_path)["migration"]["presence_bindings_v1"] is True
+    key = conversation_key("slack", "team", admitted.conversation_id)
+    event = PresenceTurnEvent("first-dm", "slack", "team", admitted.conversation_id, "", key,
+                              {"platform_actor_id": "person"}, {}, {}, "hello", facts=("direct_message",))
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    assert decide_attention(tmp_path, admission, event)[0] == "focus", "the first direct message is never settled silent"
+
+
+def test_unpublished_connector_declarations_repeat_the_first_dm_instead_of_settling_it(tmp_path, monkeypatch):
+    """The open migration case: a connector updated while its live declarations are temporarily unavailable.
+    The first real DM must not settle silent-heard forever on the placeholder list — the door repeats the event
+    instead; once the registry publishes, the first repeat of that same event completes the import once and the
+    event gets its real decision. A genuinely old connector (nothing declared in its installed manifest) still
+    settles plain heard, so its events never loop."""
+    from ouroboros.place_intake import WAKE_IMPORT_PENDING, author_hears, decide_attention
+    from ouroboros.presence_events import PresenceTurnEvent
+    from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
+    from ouroboros import extension_registry_state as registry
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    assert place.wakes == (p.WakeItem("legacy_addressed", "migration"),)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    key = conversation_key("slack", "team", place.conversation_id)
+    event = PresenceTurnEvent("first-dm", "slack", "team", place.conversation_id, "", key,
+                              {"platform_actor_id": "person"}, {}, {}, "hello", facts=("direct_message",))
+
+    # Old connector: nothing installed, nothing published — the plain DM stays settled silent-heard.
+    old = admit_live(tmp_path, place)
+    assert decide_attention(tmp_path, old, event) == ("silent", {"reason": "no_wake_match"})
+    assert decide_attention(tmp_path, old, replace(event, facts=None))[0] == "focus"
+
+    # The connector updated on disk; the live registry has not published it yet (the temporary gap).
+    entry = wake_declaration("direct_message", "group_dm")
+    del entry["skill"]  # only the published row carries its connector's name
+    manifest = parse_skill_manifest_text(json.dumps({"name": place.connector, "type": "extension",
+        "permissions": ["presence"], "contributes": [entry]}))
+    transport = SimpleNamespace(skill_dir=tmp_path, content_hash="reviewed", manifest=manifest)
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill",
+                        lambda _root, name: transport if name == "slack-bridge" else None)
+    monkeypatch.setattr("ouroboros.extension_liveness.runtime_state_for_loaded_skill",
+                        lambda *_: {"desired_live": True, "reason": "ready", "live_loaded": False})
+    before = p.places_path(tmp_path).read_bytes()
+    admission = admit_live(tmp_path, place)
+    assert admission.place.wakes == place.wakes, "unpublished file content applies nothing"
+    pending = ("retry", {"reason": WAKE_IMPORT_PENDING, "retry_after": 60})
+    assert decide_attention(tmp_path, admission, event) == pending
+    assert author_hears(*pending, event) is True
+    group = replace(event, facts=("group_dm",))
+    assert decide_attention(tmp_path, admission, group) == pending
+    assert author_hears(*pending, group) is None
+    assert author_hears(*pending, replace(group, thread_id="topic")) is True
+    with monkeypatch.context() as settled:
+        for desired, reason in ((True, "load_error"), (False, "disabled"), (False, "review_stale")):
+            settled.setattr("ouroboros.extension_liveness.runtime_state_for_loaded_skill", lambda *_, desired=desired, reason=reason: {
+                "desired_live": desired, "reason": reason, "live_loaded": False})
+            assert decide_attention(tmp_path, admission, event) == ("silent", {"reason": "no_wake_match"})
+    bundle = registry._ExtensionRegistrations(content_hash=transport.content_hash, skill_dir=str(tmp_path.resolve()))
+    monkeypatch.setitem(registry._extensions, place.connector, bundle)
+    assert decide_attention(tmp_path, admission, event) == ("silent", {"reason": "no_wake_match"})
+    with monkeypatch.context() as reload:
+        reload.setattr(registry, "_unloading", {place.connector})
+        reload.setattr("ouroboros.extension_liveness.runtime_state_for_loaded_skill",
+                       lambda *_: {"desired_live": True, "reason": "ready", "live_loaded": True})
+        assert decide_attention(tmp_path, admission, event) == pending
+    # A bot not selected by the old choice gets no live mail; ordinary group chatter is only background.
+    for other, hears in ((replace(event, facts=("any_message",)), False),
+                         (replace(event, actor={"is_bot": True}), None)):
+        decision, details = decide_attention(tmp_path, admission, other)
+        assert decision == "silent" and author_hears(decision, details, other) is hears
+    assert p.places_path(tmp_path).read_bytes() == before, "the repeated decision settled nothing"
+
+    # The registry catches up: the first repeat of the same event id completes the import once, then decides for real.
+    published.append(wake_declaration("direct_message", "group_dm"))
+    admission = admit_live(tmp_path, place)
+    assert admission.place.wakes == (p.WakeItem("legacy_addressed", "migration"),
+                                     p.WakeItem("direct_message", "connector"), p.WakeItem("group_dm", "connector"))
+    assert decide_attention(tmp_path, admission, event)[0] == "focus"
+    assert document(tmp_path)["migration"]["presence_bindings_v1"] is True
+    saved = p.places_path(tmp_path).read_bytes()
+    assert admit_live(tmp_path, admission.place).place == admission.place
+    assert p.places_path(tmp_path).read_bytes() == saved, "the import completes exactly once"
+
+
+def test_refused_origin_does_not_complete_a_wake_import(tmp_path, monkeypatch):
+    from ouroboros.presence_admission import PresenceAdmissionError
+    ready = legacy_wake_install(tmp_path, monkeypatch)
+    place, = p.load_places(tmp_path)
+    ready.append(wake_declaration("direct_message"))
+    before = p.places_path(tmp_path).read_bytes()
+    with monkeypatch.context() as refused:
+        refused.setattr("ouroboros.presence_admission.origin_outside", lambda *_: True)
+        with pytest.raises(PresenceAdmissionError, match="presence_origin_mismatch"):
+            admit_live(tmp_path, place)
+    assert p.places_path(tmp_path).read_bytes() == before
+    assert admit_live(tmp_path, place).place.wakes[-1].fact == "direct_message"
+
+
 def test_empty_and_malformed_sources_preserved(tmp_path):
     assert p.load_places(tmp_path) == []
     assert p.load_places(tmp_path) == []
@@ -142,6 +547,9 @@ def test_empty_and_malformed_sources_preserved(tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text("{broken")
     assert p.paused_places_sentence(other) == "Paused places: unknown (place records could not be read)."
+    with pytest.raises(p.PlaceError, match="repair") as preview:
+        p.place_records(other, persist_import=False)
+    assert preview.value.code == "places_migration_failed" and not p.places_path(other).exists()
     with pytest.raises(p.PlaceError, match="repair"):
         p.load_places(other)
     assert path.read_text(encoding="utf-8") == "{broken"
@@ -252,7 +660,8 @@ def test_invalid_revision_is_not_an_unconditional_write(tmp_path, revision):
 @pytest.mark.parametrize("fact", ["signal.words", "signal.a-b_2", "signal." + "a" * 40])
 def test_signal_choices_persist_and_matching_keeps_bot_gate(tmp_path, monkeypatch, fact):
     monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: [{
-        "provides": "place", "skill": "slack-bridge", "facts": [{"id": fact, "label": "Chosen words"}]}])
+        "provides": "place", "skill": "slack-bridge", "destination": "vendor:Slack",
+        "facts": [{"id": fact, "label": "Chosen words"}]}])
     place = connect(tmp_path)
     saved = p.edit_place(tmp_path, place.place_id, "add_wake", author="owner", fact=fact)
     assert saved.wakes == (p.WakeItem(fact, "owner"),)
@@ -281,28 +690,6 @@ def test_invalid_signal_never_enters_storage(tmp_path, fact):
 
 
 # ---- circles: sibling metadata in the same document, one locked writer -------------------------------------------
-def document(root):
-    return json.loads(p.places_path(root).read_text(encoding="utf-8"))
-
-
-def base_reader(value):
-    """The place reader of a body predating circles (3e05 ``_document``/``_decode``): strict ``Place(**row)``, the
-    connection witness, no knowledge of ``circles`` or ``place_choices``."""
-    assert value["schema_version"] == 1 and isinstance(value["places"], dict)
-    out = {}
-    for key, row in value["places"].items():
-        data = dict(row)
-        connection = value.get("connections", {}).get(key)
-        data["connected_revision"] = (connection["connected_revision"] if isinstance(connection, dict)
-                                      and connection.get("written_revision") == data.get("revision", 0) else data.get("revision", 0))
-        for name, cls in (("wakes", p.WakeItem), ("notes", p.NoteEntry), ("owner_accounts", p.OwnerAccount)):
-            data[name] = tuple(cls(**item) for item in data.get(name, ()))
-        for name in ("context_topics", "legacy_binding_ids"):
-            data[name] = tuple(data.get(name, ()))
-        out[key] = p.Place(**data)
-    return out
-
-
 def test_a_choice_moves_the_place_revision_once_and_an_unchanged_choice_writes_nothing(tmp_path):
     place = connect(tmp_path)
     circle = p.create_circle(tmp_path, name="Team", text="Help by the facts.", author=p.AUTHOR_OWNER)

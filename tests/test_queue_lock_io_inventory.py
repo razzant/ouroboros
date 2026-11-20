@@ -180,7 +180,7 @@ def _drive_presence(lane, monkeypatch) -> None:
     from ouroboros.presence_carrier import dispatch_presence_turn
     from ouroboros.presence_runner import PresenceTurnExecutions
     from supervisor import workers
-    from tests.test_conversation_lane_presence import _payload
+    from tests._presence_event import event_payload
     from tests.test_presence_runner import _admission, _event
 
     admission, event = _admission(), _event()
@@ -191,7 +191,7 @@ def _drive_presence(lane, monkeypatch) -> None:
         turn_id, identity="id-audit", reserve=lambda: True, release=lambda: None,
         dispatch=lambda execution: dispatch_presence_turn(
             execution, drive_root=lane.root, skill_name="telegram-bot", admission=admission, event=event,
-            event_payload=_payload(event), staged_files=[], gate_wait=True))
+            event_payload=event_payload(event), staged_files=[], gate_wait=True))
     assert started and turn_id in workers.RUNNING
 
 

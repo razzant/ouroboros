@@ -675,6 +675,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     from ouroboros.post_task_checkpoint import post_task_model_waits
     from ouroboros.store_hot_facts import snapshot
     from supervisor import queue as queue_mod
+    from supervisor.conversation_lane import host_inline_drive_roots, inline_resume_available
     from supervisor.owner_pause_control import warm_paused_member
 
     direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe(availability=availability)
@@ -699,10 +700,14 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     "_owner_pause_warm": warm_paused_member(meta)} if isinstance(meta, dict) else {},
                  _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0)
                 for task_id, meta in queue_mod.RUNNING.items()]
+            # The Host-owned inline rows are the lane's own table's (the map ``admit_turn`` writes); the
+            # queue facade's RUNNING is that same object only once ``workers.init`` bound it, and a
+            # standalone Host serves this census with the two maps distinct.
+            host_drives = host_inline_drive_roots(drive_root)
     except Exception:
         if availability is not None:
             availability["complete"] = False
-        pending_rows, fence_rows, running_rows = [], {}, []
+        pending_rows, fence_rows, running_rows, host_drives = [], {}, [], {}
     try:
         late_owners = list(post_task_model_waits(drive_root))
     except Exception:
@@ -719,10 +724,13 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     for tid, row in owners:
         root = row.get("budget_drive_root") or drive_root
         requests.extend(((drive_root, tid), (root, tid), (root, str(row.get("root_task_id") or tid))))
+    # Pause can save a Host-owned turn only to its live pool. Check once per such drive, outside Q.
+    resumable = {root for root in set(host_drives.values()) if inline_resume_available(root)}
+    no_pause = {tid for tid, root in host_drives.items() if root not in resumable}
     with nullcontext() if owners_only else snapshot(requests):  # which work is current needs no per-row control facts
         return _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                                          running_rows, late_owners, availability, decision_owners, owners_only,
-                                         question_details, work_facts, presence_rows)
+                                         question_details, work_facts, presence_rows, no_pause)
 
 
 def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None, listed=frozenset()) -> list:
@@ -751,19 +759,28 @@ def _moved_text_pausable(bindings: dict, task_id: Any, *, started: bool, executo
                 and executor != EXECUTOR_INLINE_CALL and transport is None)
 
 
-def _mark_carried_presence(drive_root: Any, activities: list, bindings: dict, work_facts: Any, owners_only: bool) -> None:
-    """Every Presence activity the conversation lane carries (its lane row among the direct rows): that RUNNING row is
-    the Stop door's target from admission (``cancelable``), its work says a recorded Stop until the Stop takes it
-    (``cancel_pending``), as an in-process author's does, and a moved text turn says so (``presence_pause``)."""
+def _mark_carried_presence(drive_root: Any, activities: list, bindings: dict, work_facts: Any, owners_only: bool,
+                           no_pause: frozenset | set) -> None:
+    """Every Presence activity the conversation lane carries (its lane row or its inline executor's registered
+    actor among the direct rows): that RUNNING row is the Stop door's target from admission (``cancelable``), its
+    work says a recorded Stop until the Stop takes it (``cancel_pending``), as an in-process author's does. A moved
+    text turn offers Pause while it can be resumed, never while its drive is one of ``no_pause``."""
     from ouroboros.cancel_intents import cancel_pending
+    from supervisor.active_activity import TURN_PHASES
 
+    # The producer's own start fact: ``inline_carrier.start_inline_turn`` advances a registered entry's
+    # EXECUTION to ``started`` while the entry's ``phase`` stays ``preparing`` (only an actor with no
+    # RUNNING row has its entry phase moved, ``events._handle_main_llm_call_state``), and the snapshot
+    # carries that execution as ``turn_phase``. A lane row says started with its ``working`` phase.
+    started_marks = frozenset(TURN_PHASES[TURN_PHASES.index("started"):])
     for activity in activities:
         if activity.get("kind") != "presence":
             continue
         task_id = str(activity.get("activity_id") or "")
         activity["cancelable"] = True
-        if _moved_text_pausable(bindings, task_id, started=activity.get("phase") != "preparing",
-                                executor=str(activity.get("executor") or "")):
+        started = activity.get("phase") != "preparing" or str(activity.get("turn_phase") or "") in started_marks
+        if task_id not in no_pause and _moved_text_pausable(
+                bindings, task_id, started=started, executor=str(activity.get("executor") or "")):
             activity["presence_pause"] = True
         if work_facts is not None and not owners_only:
             work_facts[task_id] = {"running": True, "cancel_pending": bool(cancel_pending(drive_root, task_id))}
@@ -771,7 +788,7 @@ def _mark_carried_presence(drive_root: Any, activities: list, bindings: dict, wo
 
 def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                               running_rows, late_owners, availability, decision_owners, owners_only,
-                              question_details=True, work_facts=None, presence_rows=()) -> list:
+                              question_details=True, work_facts=None, presence_rows=(), no_pause=frozenset()) -> list:
     """Direct turns, ROOT managed queue tasks and live inline Presence turns as ONE activity list.
 
     Additive beside ``active_direct_turns`` (kept unchanged for compatibility):
@@ -795,7 +812,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                   for row in direct_rows]
     census_ids = {row.get("activity_id") for row in activities}
     bindings = task_bindings if isinstance(task_bindings, dict) else {}
-    _mark_carried_presence(drive_root, activities, bindings, work_facts, owners_only)
+    _mark_carried_presence(drive_root, activities, bindings, work_facts, owners_only, no_pause)
     try:
         from ouroboros.task_results import resolve_task_lineage
 

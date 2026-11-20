@@ -403,9 +403,12 @@ class DirectActivityRegistry:
         log.debug("Registered direct activity: %s (chat_id=%s, kind=%s)", aid, chat_id, kind)
         return entry
 
-    def unregister(self, activity_id: str) -> Optional[DirectActivityEntry]:
+    def unregister(self, activity_id: str, *,
+                   expected: Optional[DirectActivityEntry] = None) -> Optional[DirectActivityEntry]:
         aid = str(activity_id or "").strip()
         with self._lock:
+            if expected is not None and self._activities.get(aid) is not expected:
+                return None
             entry = self._activities.pop(aid, None)
             ended = self._drop(entry.execution) if entry is not None else None
             self._lock.notify_all()

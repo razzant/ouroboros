@@ -67,7 +67,9 @@ def _presence_error(message: str, status: int, code: str, disposition: str, **fa
 def _presence_exception(exc: Exception, status: int) -> JSONResponse:
     code = str(getattr(exc, "code", "presence_admission_failed"))
     disposition = "blocked"
-    if code in {"chat_log_unwritable", "presence_result_missing", "presence_bindings_unreadable",
+    if code == "places_unreadable":
+        status, disposition = 503, "retry"
+    elif code in {"chat_log_unwritable", "presence_result_missing", "presence_bindings_unreadable",
                 "presence_resources_unavailable", "presence_attempt_outcome_unknown",
                 "presence_result_unreadable", "presence_event_identity_unproven",
                 "presence_start_unwritable"}:
@@ -94,27 +96,32 @@ def _presence_exception(exc: Exception, status: int) -> JSONResponse:
     return _presence_error(str(exc), status, code, disposition, **facts)
 
 
-def _queue_custody_refusal(data_dir: Any, turn_id: str, identity: str) -> None:
+def _queue_custody_refusal(data_dir: Any, turn_id: str, identity: str, *, require_proven: bool = False) -> None:
     """Raise the typed retained answer of a turn whose saved work the queue keeps (``presence_recovery.queue_custody``),
     before any intake, reservation, admission or author; a canonical terminal is the replay's, not this answer."""
     from pathlib import Path
 
     from ouroboros.presence_recovery import CUSTODY_HOLDS, custody_refusal, queue_custody
-    from ouroboros.presence_runner import _retry_target, _stored_turn
+    from ouroboros.presence_runner import _assert_event_identity, _retry_target, _stored_turn
 
     physical = _retry_target(Path(data_dir), turn_id, identity) if identity else turn_id
     stored = _stored_turn(Path(data_dir), physical, identity)
     if stored and (custody := queue_custody(Path(data_dir), physical, stored)) in CUSTODY_HOLDS:
+        if require_proven:
+            _assert_event_identity(stored, physical, identity, require_proven=True)
         raise custody_refusal(stored, physical, custody)
 
 
-def _admit_presence(ctx: host.HostServiceContext, skill_name: str, binding_id: str, **origin: str) -> Any:
+def _admit_presence(ctx: host.HostServiceContext, skill_name: str, binding_id: str, *, live_event: bool = True,
+                    persist_import: bool = True, **origin: str) -> Any:
     from ouroboros.presence_admission import admit_presence_turn
 
     return admit_presence_turn(
         drive_root=ctx.data_dir,
         authenticated_transport_skill=skill_name,
         binding_id=binding_id,
+        live_event=live_event,
+        persist_import=persist_import,
         **origin,
     )
 
@@ -143,10 +150,9 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
     if await host._bounded_host_read(ctx, functools.partial(store.migrating, ctx.data_dir)):  # P1: the turn writes its result
         return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
-    from ouroboros.presence_admission import PresenceAdmissionError
+    from ouroboros.presence_admission import PresenceAdmissionError, WakeImportPending, admit_captured_wakes
     from ouroboros.presence_continuation import continuation_version, turn_response
-    from ouroboros.places import declared_fact_labels
-    from ouroboros.presence_events import PresenceEventInvalid, outside_origin, parse_presence_event
+    from ouroboros.presence_events import PresenceEventInvalid, connector_fact_labels, outside_origin, parse_event_wire
     from ouroboros.presence_executions import PresenceTurnInterrupted
     from ouroboros.presence_runner import (
         PresenceTurnError,
@@ -165,15 +171,15 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         reporting_version = delivery_reporting_version(payload.get("delivery_reporting_version", 0))
         continuing = continuation_version(payload.get("continuation_version", 0))
         event_payload = payload.get("event")
-        # The whole event is checked before admission (``presence_events``); its place's origin after it.
-        declared = declared_fact_labels(skill_name)  # the words its admission carries to the focus, by value
-        event = parse_presence_event(event_payload, vouched_facts=declared,
-                                     staged_files=payload.get("staged_files"), reporting_version=reporting_version,
-                                     continuing=continuing)
-        admission = replace(await host._bounded_host_read(ctx, functools.partial(
-            host._admit_presence, ctx, skill_name, str(payload.get("binding_id") or ""),
+        # Check the wire and resolve its origin without writing a legacy place.
+        binding_id = str(payload.get("binding_id") or "")
+        event = await host._bounded_host_read(ctx, functools.partial(
+            parse_event_wire, event_payload,
+            staged_files=payload.get("staged_files"), reporting_version=reporting_version, continuing=continuing))
+        admission = await host._bounded_host_read(ctx, functools.partial(
+            host._admit_presence, ctx, skill_name, binding_id, persist_import=False,
             provider=event.provider, account_id=event.account_id, conversation_id=event.conversation_id,
-            thread_id=event.thread_id)), fact_labels=declared)
+            thread_id=event.thread_id))
         if outside_origin(admission, event):
             return _presence_error("presence event does not match its owner-created binding", 403,
                                    "presence_origin_mismatch", "rejected")
@@ -181,13 +187,38 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             ctx, functools.partial(host._presence_staged_files, ctx, skill_name, payload.get("staged_files")))
         turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
         identity = presence_event_identity(admission.binding_id, event)
+        from ouroboros.presence_carrier import retry_inline_gate_stop
+
+        await host._bounded_host_read(ctx, functools.partial(retry_inline_gate_stop, ctx.data_dir, turn_id, identity))
+        replay = functools.partial(presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity, continuing)
+        try:
+            declared = await host._bounded_host_read(ctx, functools.partial(
+                connector_fact_labels, ctx.data_dir, admission, event))
+        except (PresenceEventInvalid, WakeImportPending):
+            # Today's declaration governs fresh capture, not an exact repeat's existing custody.
+            result = await host._bounded_host_read(ctx, functools.partial(replay, repair_pointer=True))
+            if result is None:
+                execution = ctx.presence_turns.find(turn_id)
+                if execution is None:
+                    await host._bounded_host_read(ctx, functools.partial(
+                        _queue_custody_refusal, ctx.data_dir, turn_id, identity, require_proven=True))
+                    # The live execution may have settled between the two reads.
+                    result = await host._bounded_host_read(ctx, functools.partial(replay, repair_pointer=True))
+                    if result is None:
+                        raise
+                else:
+                    if execution.identity != identity:
+                        raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=turn_id)
+                    result = await asyncio.wrap_future(execution.initial if continuing else execution.result)
+            return JSONResponse(await host._bounded_host_read(ctx, functools.partial(
+                turn_response, result, continuing, ctx.data_dir)))
+        admission = replace(admission, fact_labels=declared)
         from ouroboros.presence_runner import capture_presence_event
         # Hearing precedes allowance, wake and capacity; cached custody remains the replay authority.
         captured = await host._bounded_host_read(ctx, functools.partial(
             capture_presence_event, admission, event, drive_root=ctx.data_dir, staged_files=staged_files))
         # A settled turn answers from its durable row without queueing behind its conversation.
-        result = await host._bounded_host_read(ctx, functools.partial(
-            presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity, continuing))
+        result = await host._bounded_host_read(ctx, replay)
         if result is None and turn_id not in ctx.presence_turns.live():
             # Saved work the queue keeps (a moved turn's park, Resume or restart return), or that no read yet
             # confirms: answered from that custody before any intake, reservation, admission or author.
@@ -201,18 +232,23 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         if not started:
             started = await host._bounded_host_read(ctx, functools.partial(
                 live_author, event.conversation_key, drive_root=ctx.data_dir)) == turn_id
+        admission = await host._bounded_host_read(ctx, functools.partial(
+            admit_captured_wakes, ctx.data_dir, admission, event))
         if result is None and admission.place is not None and not started:
             from ouroboros.place_intake import (
-                ROUTE_TO_MIND, allowance_attention, author_hears, decide_attention, offer_arrival, settle_heard,
+                ROUTE_TO_MIND, WAKE_IMPORT_PENDING, allowance_attention, author_hears, decide_attention,
+                offer_arrival, settle_heard,
             )
             decision, allowance = await host._bounded_host_read(ctx, functools.partial(
                 decide_attention, ctx.data_dir, admission, event))
             # The conversation's current author, else its sole reading root, hears it first, wake or background,
             # before any rate, reservation, slot or allowance; its final drain settles what it accepted.
             wake = author_hears(decision, allowance, event)
-            handed, recipient = ("", "") if wake is None else await host._bounded_host_read(ctx, functools.partial(
-                offer_arrival, ctx.data_dir, captured, event, wake=wake))
-            if handed == ROUTE_TO_MIND and decision == "silent":  # several works read it: a focus chooses, as any wake
+            handed, recipient = "", ""
+            if wake is not None or allowance.get("reason") == WAKE_IMPORT_PENDING:
+                handed, recipient = await host._bounded_host_read(ctx, functools.partial(
+                    offer_arrival, ctx.data_dir, captured, event, wake=wake))
+            if handed == ROUTE_TO_MIND and decision == "silent":  # a pending wake still needs its publication
                 decision, allowance = await host._bounded_host_read(ctx, functools.partial(allowance_attention, ctx.data_dir))
             if handed and handed != ROUTE_TO_MIND:
                 result = await host._bounded_host_read(ctx, functools.partial(
@@ -220,6 +256,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             elif decision == "silent":
                 result = await host._bounded_host_read(ctx, functools.partial(settle_heard, ctx.data_dir, captured, event, allowance["reason"]))
             elif decision == "retry":
+                if allowance.get("reason") == WAKE_IMPORT_PENDING:
+                    raise WakeImportPending()
                 return _presence_error("Consciousness allowance is unavailable; retry this event.", 429,
                     "consciousness_allowance_exhausted", "retry", retry_after=allowance["retry_after"])
             else:
@@ -242,7 +280,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
                 release=functools.partial(ctx._leave_inflight, budget),
                 dispatch=functools.partial(
                     dispatch_presence_turn, drive_root=ctx.data_dir, skill_name=skill_name, admission=admission,
-                    event=event, event_payload=event_payload, staged_files=staged_files, gate_wait=continuing < 2),
+                    event=event, event_payload=event_payload, staged_files=staged_files, gate_wait=continuing < 2,
+                    expects_supervisor_pool=lambda: ctx.expects_supervisor_pool, stop_requested=ctx.stop_requested),
             ))
             if execution is None:
                 return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
@@ -254,9 +293,11 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         return _presence_error("invalid json", 400, "presence_payload_invalid", "rejected")
     except PresenceEventInvalid as exc:
         return _presence_error(exc.message, 400, exc.code, "rejected")
+    except WakeImportPending as exc:
+        return _presence_error(str(exc), 429, exc.code, "retry", retry_after=exc.retry_after)
     except (PresenceAdmissionError, PresenceTurnError) as exc:
         return _presence_exception(exc, 403 if exc.code == "presence_origin_mismatch"
-                                   else 429 if exc.code == "presence_capacity_full" else 409)
+                                   else 429 if exc.code in {"presence_capacity_full", WakeImportPending.code} else 409)
     except PresenceTurnNotStarted as exc:
         return _presence_error(str(exc), 503, "presence_turn_not_started", "retry")
     except PresenceTurnInterrupted as exc:  # its carrier ended unreported: the resend reads the durable row
@@ -300,8 +341,9 @@ async def _api_presence_history(request: Request) -> JSONResponse:
         parsed = parse_history_request(payload)
         first = parsed.records[0].event
         admission = await host._bounded_host_read(ctx, functools.partial(
-            host._admit_presence, ctx, skill_name, parsed.binding_id, provider=first.provider,
-            account_id=first.account_id, conversation_id=first.conversation_id, thread_id=first.thread_id))
+            host._admit_presence, ctx, skill_name, parsed.binding_id, live_event=False, persist_import=False,
+            provider=first.provider, account_id=first.account_id, conversation_id=first.conversation_id,
+            thread_id=first.thread_id))
         if outside_origin(admission, first):
             return _presence_error("presence history does not match its owner-created binding", 403,
                                    "presence_origin_mismatch", "rejected")

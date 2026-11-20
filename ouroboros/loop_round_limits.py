@@ -1073,7 +1073,8 @@ def _handle_model_wait_control(
         ctx.accumulated_usage["_last_llm_error_kind"] = "provider_outcome_unknown"
     control_text = str(controls.get("finalize_now") or "")
     first_line = control_text.splitlines()[0].strip() if control_text else ""
-    if hard_stop or first_line == REASON_OWNER_STOPPED_DIRECT_TURN:
+    inline_stop = getattr(owner, "inline_presence_stop", None)
+    if hard_stop or first_line == REASON_OWNER_STOPPED_DIRECT_TURN or (inline_stop is not None and inline_stop.is_set()):
         return _handle_direct_turn_hard_stop(ctx)
     if reason == "cancelled":
         raise error

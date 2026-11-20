@@ -1091,6 +1091,7 @@ def _finish_captured_pending(
     cascade (``may_close`` False) a closure intent it joined is an ordinary cancel of the row."""
     q = _queue_module()
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+    from supervisor.cancel_publication import queued_presence_cancel
     from supervisor.ended_work_helpers import prepare_closure, stop_closed_runs
 
     cost_fields = _reconstructed_cost_fields(q, task_id, task)
@@ -1102,6 +1103,7 @@ def _finish_captured_pending(
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         stored = write_task_result(
             q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _last_word=closing.get("last_word"), _cancel_observed=True,
+            _field_projector=lambda current, patch: queued_presence_cancel(task, current, patch),
             **{**closing.get("lineage", {}), **_cancel_result_fields(
                 task, existing=existing, result=closing.get("result") or "Task cancelled by user/agent request.",
                 **closing.get("cancel_fields", {}), **cost_fields, **_intent_outcome_fields(intent or {}),

@@ -423,6 +423,43 @@ test('state and attention writes carry the record revision and keep connector-se
         { wakes: ['direct_message', 'mention', 'reply_to_me', 'any_message'], expected_revision: 8 }]);
 });
 
+for (const [review, action, expected] of [
+    ['pending', 'keep-wakes', ['legacy_addressed', 'mention']],
+    ['ambiguous', 'add-suggestions', ['legacy_addressed', 'mention', 'direct_message']],
+]) {
+    test(`the ${review} import note sends the owner's ${action} choice on the shown revision`, async (t) => {
+        const { document } = sheetDom(t);
+        const raw = { ...FIXTURE.places.places[0], wake_review: review, revision: 12,
+            wakes: [{ fact: 'legacy_addressed', author: 'migration' }, { fact: 'mention', author: 'owner' }],
+            facts: ['mention', 'direct_message'], wake_suggestions: ['direct_message', 'mention'] };
+        const requests = [];
+        const sheet = openPlaceSheet(normalizePlace(raw), { circles: [], update: async (_id, change) => {
+            requests.push(change);
+            return normalizePlace({ ...raw, wake_review: undefined, revision: 13 });
+        } });
+        t.after(() => sheet.close());
+        const body = document.body.querySelector('[data-place-body]');
+        const wakes = body.querySelector('[data-place-section="wakes"]');
+        assert.match(wakes.textContent, review === 'pending' ? /next event will add them/ : /unchecked suggestions/);
+        assert.match(wakes.textContent, /Add the suggested kinds/);
+        assert.match(wakes.textContent, /Keep my current choice/);
+        assert.ok(wakes.querySelector('[data-fact="legacy_addressed"]'));
+        await click(body, `[data-place-act="${action}"]`);
+        assert.deepEqual(requests, [{ wakes: expected, expected_revision: 12 }]);
+        assert.equal(body.querySelector('[data-place-act="keep-wakes"]'), null);
+    });
+}
+
+test('a pending import without suggestions still lets the owner keep the checked kinds', (t) => {
+    const { document } = sheetDom(t);
+    const sheet = openPlaceSheet({ ...slack, wakeReview: 'pending', wakeSuggestions: [] });
+    t.after(() => sheet.close());
+    const body = document.body.querySelector('[data-place-body]');
+    assert.equal(body.querySelector('[data-place-act="add-suggestions"]').disabled, true);
+    assert.equal(body.querySelector('[data-place-act="keep-wakes"]').disabled, false);
+    assert.doesNotMatch(placeSheetBodyHtml(slack), /Keep my current choice/);
+});
+
 test('a stale disconnect is refused with drafts kept; the fresh disconnect sends the answered revision', async (t) => {
     const { document, routes } = sheetDom(t);
     const requests = [];
@@ -613,8 +650,45 @@ test('the attention vocabulary comes from the host when absent and honors a decl
     assert.match(limited, /data-i18n-authored>Words you chose</);
     assert.match(limited, /added by Ouroboros/);
     assert.doesNotMatch(limited, /data-fact="any_message"/);
-    assert.doesNotMatch(placeSheetBodyHtml({ ...slack, facts: [] }), /type="checkbox"/);
+    // An explicit empty declaration offers no missing kind; the saved choice stays visible and removable.
+    const emptied = placeSheetBodyHtml({ ...slack, facts: [] });
+    assert.equal((emptied.match(/type="checkbox"/g) || []).length, slack.wakes.length);
+    assert.equal((emptied.match(/data-place-act="remove-wake"/g) || []).length, slack.wakes.length);
+    assert.doesNotMatch(emptied, /data-place-act="add-wake"/);
+    assert.doesNotMatch(placeSheetBodyHtml({ ...slack, facts: [], wakes: [] }), /type="checkbox"/);
     assert.match(html, /Everything else here it sees at its next own wake and decides what to read\./);
+});
+
+test('a saved kind no declaration lists stays visible and removable; only declared kinds can be added', async (t) => {
+    const { document } = sheetDom(t);
+    // Review item 6: the import collected signal.inbox from a second contribution of the same transport; after the
+    // import is finished this sheet's declaration lists only `mention`. The saved choice stays whole whatever is
+    // declared — shown with its own words, removable — while an undeclared kind is never offered for adding, and
+    // the migration's own legacy_addressed survives every keep/remove still visible and removable.
+    const raw = { ...FIXTURE.places.places[0], revision: 5,
+        wakes: [{ fact: 'legacy_addressed', author: 'migration' }, { fact: 'mention', author: 'connector' },
+            { fact: 'signal.inbox', author: 'connector' }],
+        facts: ['mention'], labels: { 'signal.inbox': 'Inbox item' } };
+    const html = placeSheetBodyHtml(normalizePlace(raw));
+    assert.match(html, /data-place-act="remove-wake" data-fact="signal.inbox" checked/);
+    assert.match(html, /data-place-act="remove-wake" data-fact="legacy_addressed" checked/);
+    assert.match(html, /data-i18n-authored>Inbox item</);
+    assert.doesNotMatch(html, /data-place-act="add-wake"/);
+    const requests = [];
+    const sheet = openPlaceSheet(normalizePlace(raw), { circles: [], update: async (_id, change) => {
+        requests.push(change);
+        return normalizePlace({ ...raw, revision: 6,
+            wakes: (change.wakes || []).map((fact) => ({ fact, author: 'connector' })) });
+    } });
+    t.after(() => sheet.close());
+    const body = document.body.querySelector('[data-place-body]');
+    await click(body, '[data-fact="signal.inbox"]');
+    assert.deepEqual(requests, [{ wakes: ['legacy_addressed', 'mention'], expected_revision: 5 }]);
+    // The repaint after the write: the removed kind is gone, the migration's own kind stays visible and removable.
+    assert.equal(body.querySelector('[data-fact="signal.inbox"]'), null);
+    assert.ok(body.querySelector('[data-fact="legacy_addressed"]'));
+    await click(body, '[data-fact="legacy_addressed"]');
+    assert.deepEqual(requests[1], { wakes: ['mention'], expected_revision: 6 });
 });
 
 test('Silent still wakes for its list and holds what it would say or change; Paused is not woken', () => {

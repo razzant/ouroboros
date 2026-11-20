@@ -493,7 +493,7 @@ def test_a_call_freezes_what_its_connector_calls_each_matched_kind(tmp_path, pla
     connector gives no words of its own adds none (a text turn's carrier: ``test_conversation_lane_presence``)."""
     from ouroboros.subagent_messages import place_origin
 
-    declared = [{"provides": "place", "skill": "meet_bridge", "facts": [
+    declared = [{"provides": "place", "skill": "meet_bridge", "destination": "vendor:Meet", "facts": [
         "mention", {"id": "signal.new_discussion", "label": "New discussion"},
         {"id": "direct_message", "label": "Mail addressed to you"}]}]
     monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: declared)
@@ -509,16 +509,33 @@ def test_a_call_freezes_what_its_connector_calls_each_matched_kind(tmp_path, pla
     assert "matched_labels" not in plain["focus"] and "labels" not in place_origin(plain), plain["focus"]
 
 
-def test_a_text_turn_freezes_what_its_connector_calls_each_matched_kind(doors):
+def test_a_text_turn_freezes_what_its_connector_calls_each_matched_kind(doors, monkeypatch):
     """The text door reads its connector's declared words onto the admission, and the turn's carrier takes them with
     the seed: the focus it ran under keeps the words of its matched kinds, and its work's ``place_origin`` carries them."""
     from ouroboros.subagent_messages import place_origin
     from ouroboros.task_results import load_task_result
+    from ouroboros.extension_registry_state import live_contribution_projection
+    from ouroboros.place_projection import places_view
 
-    answer = doors.client.post("/presence/turn", json={"event": _wire("t-words", facts=["mention", SIGNAL]),
+    selected, = live_contribution_projection()
+    p.edit_place(doors.root, doors.place.place_id, "disconnect", author="owner")
+    named = p.connect_place(doors.root, connector="bridge", provider="chat", account_id="a", conversation_id="r",
+                            contribution_id=selected["id"], wakes=[SIGNAL])
+    sibling = {**selected, "id": "sibling", "facts": [
+        {"id": SIGNAL, "label": "Sibling's words"}, {"id": "signal.other", "label": "Other chat fact"}]}
+    foreign = {**sibling, "id": "foreign", "destination": "vendor:Other",
+               "facts": [{"id": "signal.foreign", "label": "Other provider's fact"}]}
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: [foreign, sibling, selected])
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [])
+    place, = places_view(doors.root)["places"]
+    assert place["place_id"] == named.place_id and place["labels"] == {SIGNAL: "Words you chose appear"}
+
+    answer = doors.client.post("/presence/turn", json={"event": _wire("t-words", facts=["mention", SIGNAL, "signal.other"]),
                                                        "staged_files": [], "continuation_version": 1,
                                                        "delivery_reporting_version": 1})
     assert answer.status_code == 200, answer.json()
     ran = load_task_result(doors.root, answer.json()["turn_ref"])["metadata"]  # the turn's own record
     assert ran["focus"]["matched_labels"] == {SIGNAL: "Words you chose appear"}, ran["focus"]
     assert place_origin(ran)["labels"] == {SIGNAL: "Words you chose appear"}
+    wrong_provider = doors.client.post("/presence/turn", json={"event": _wire("t-other", facts=["signal.foreign"])})
+    assert (wrong_provider.status_code, wrong_provider.json()["code"]) == (400, "presence_payload_invalid")

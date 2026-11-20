@@ -94,14 +94,13 @@ def owns_live_queue(drive_root: Any) -> bool:
 
 
 def init(drive_root: pathlib.Path) -> None:
-    global DRIVE_ROOT, FINALIZATION_GRACE_SEC, INITIALIZED, OWNER_PID, QUEUE_SNAPSHOT_PATH, QUEUE_PUBLICATION
-    from supervisor.queue_publication import reset as reset_publication
+    global DRIVE_ROOT, FINALIZATION_GRACE_SEC, INITIALIZED, OWNER_PID, QUEUE_SNAPSHOT_PATH
+    from supervisor.queue_publication import new_generation
 
-    QUEUE_PUBLICATION = None
-    reset_publication()  # nothing marked or published by this generation, no tick publisher yet
-    DRIVE_ROOT = drive_root
-    INITIALIZED, OWNER_PID = True, os.getpid()
-    QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
+    with new_generation():  # one step under Q and the publish lock: nothing marked or published, a new writer
+        DRIVE_ROOT = drive_root
+        INITIALIZED, OWNER_PID = True, os.getpid()
+        QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec()
     BUDGET_ROOT_FENCES.clear()
     # A previous process's direct-chat turns must not outlive it in the roster,

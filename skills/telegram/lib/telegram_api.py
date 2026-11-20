@@ -1080,12 +1080,12 @@ _MENU_TEXTS_EN = {
         "• `/status` — Request live system status (if allowed)\n"
         "• `/panic` — Emergency stop for the bound owner, in every mode\n"
         "• `/help` — Show this friendly usage guide\n\n"
-        "Modes description (changed in Web UI → Settings → Telegram):\n"
+        "In Ouroboros, open the Telegram skill's settings to choose a command mode.\n"
         "• **strict** — allow only `/menu`, `/help`, `/language` and owner `/panic`\n"
         "• **safe_commands** — allow status monitoring\n"
         "• **full_access** — allow status + background loop start/stop"
     ),
-    "slash_blocked_strict": "⛔ Slash commands are not allowed in strict mode. Use `/menu` to see available options, or change mode in Settings → Telegram.",
+    "slash_blocked_strict": "⛔ Slash commands are not allowed in strict mode. Use `/menu` to see available options, or change the mode in the Telegram skill's settings.",
     "slash_blocked_mode": "⛔ This command is not allowed in the current mode. Use `/menu` to see available options.",
     "not_authorized": "Not authorized",
     "updating_status": "Updating status metrics...",

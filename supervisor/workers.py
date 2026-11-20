@@ -309,9 +309,7 @@ def worker_pool_admission_state(ctx: Any = None) -> Dict[str, Any]:
 def ensure_worker_pool_started(n: int = 0, *, allow_disabled_restart: bool = False) -> bool:
     """Start an absent pool; only explicit internal recovery may clear disablement."""
     with _queue_lock:
-        # Update admission can be closed while the one authorized assisted
-        # resolver is already running. That does not make an existing healthy
-        # pool absent and must never trigger a second full-pool spawn.
+        # The running assisted resolver still owns its pool while update admission is closed.
         if _worker_pool_execution_state()["available"]:
             return True
     state = worker_pool_admission_state()
@@ -825,6 +823,7 @@ def _terminalization_retry_spec(task: Any) -> Optional[Dict[str, Any]]:
         "trigger": str(raw.get("trigger") or "terminalization_retry").strip() or "terminalization_retry",
         "reconcile_delegate_custody": bool(raw.get("reconcile_delegate_custody", True)),
         "stop_source": str(raw.get("stop_source") or ""),
+        "unstarted_presence": raw.get("unstarted_presence") is True,
     }
 
 
@@ -990,7 +989,7 @@ def _attach_retry_event_state(task: Dict[str, Any], event_published: Optional[bo
 def _make_terminalization_retry_task(
     task: Dict[str, Any], task_id: str, *, reason: str, status: str, trigger: str,
     reconcile_delegate_custody: bool = True, claim: Optional[Dict[str, Any]] = None,
-    event_published: Optional[bool] = None, stop_source: str = "",
+    event_published: Optional[bool] = None, stop_source: str = "", unstarted_presence: bool = False,
 ) -> Dict[str, Any]:
     """Copy a killed task into durable, non-dispatchable terminalization custody."""
     retry = dict(task) if isinstance(task, dict) else {}
@@ -1016,6 +1015,8 @@ def _make_terminalization_retry_task(
         retry_spec["event_published"] = True
     if stop_source:
         retry_spec["stop_source"] = str(stop_source)
+    if unstarted_presence:
+        retry_spec["unstarted_presence"] = True
     retry[_TERMINALIZATION_RETRY_FIELD] = retry_spec
     return _attach_retry_event_state(_attach_retry_claim(retry, claim), event_published)
 
@@ -1023,7 +1024,7 @@ def _make_terminalization_retry_task(
 def _retain_terminalization_retry_task(
     task: Dict[str, Any], task_id: str, *, reason: str, status: str, trigger: str,
     reconcile_delegate_custody: bool = True, claim: Optional[Dict[str, Any]] = None,
-    event_published: Optional[bool] = None, stop_source: str = "",
+    event_published: Optional[bool] = None, stop_source: str = "", unstarted_presence: bool = False,
 ) -> Dict[str, Any]:
     """Return retry custody without replacing an existing stronger marker."""
     if isinstance(task, dict) and isinstance(task.get(_TERMINALIZATION_RETRY_FIELD), dict):
@@ -1037,7 +1038,7 @@ def _retain_terminalization_retry_task(
         reconcile_delegate_custody=reconcile_delegate_custody,
         claim=claim,
         event_published=event_published,
-        stop_source=stop_source,
+        stop_source=stop_source, unstarted_presence=unstarted_presence,
     )
 
 
@@ -1064,27 +1065,14 @@ def _audit_delegate_terminal_custody(
         )
 
 
-def _terminalization_status_accepted(
-    persisted: Any, requested: str, *, allow_interrupted: bool,
-) -> bool:
-    """Accept only a durable terminal status (or the intentional interrupted marker)."""
-    from ouroboros.task_results import STATUS_INTERRUPTED, _TRULY_TERMINAL_STATUSES
-
-    persisted_status = str(persisted or "").strip()
-    requested_status = str(requested or "failed").strip() or "failed"
-    return persisted_status in _TRULY_TERMINAL_STATUSES or (
-        allow_interrupted
-        and requested_status == STATUS_INTERRUPTED
-        and persisted_status == STATUS_INTERRUPTED
-    )
-
-
 def _settle_terminalization_task(
     task: Dict[str, Any], *, reason: str, status: str, trigger: str,
     reconcile_delegate_custody: bool = True, allow_interrupted: bool = False,
-    event_already_published: bool = False, stop_source: str = "",
+    event_already_published: bool = False, stop_source: str = "", unstarted_presence: bool = False,
 ) -> bool:
     """Write and publish one shutdown outcome, retaining custody on any failure."""
+    from supervisor.worker_pool_lifecycle import _terminalization_status_accepted
+
     if trigger == "deadline":
         # An expired queued row (#939) settles off Q on the reaper, which keeps the row.
         from supervisor.queue_timeouts import _queue_pending_deadline
@@ -1099,8 +1087,9 @@ def _settle_terminalization_task(
         _audit_delegate_terminal_custody(
             task_id, trigger, enabled=reconcile_delegate_custody,
         )
-        persisted = _write_failure_result(  # the call shape without a stop door is unchanged
+        persisted = _write_failure_result(
             task_id, reason=reason, status=requested_status, **({"stop_source": stop_source} if stop_source else {}),
+            **({"presence_seed": task} if unstarted_presence else {}),
         )
     except Exception:
         log.warning(
@@ -1152,7 +1141,7 @@ def _settle_terminalization_retry_task(
         trigger=request["trigger"],
         reconcile_delegate_custody=request["reconcile_delegate_custody"],
         allow_interrupted=False,
-        stop_source=request["stop_source"],
+        stop_source=request["stop_source"], unstarted_presence=request["unstarted_presence"],
         event_already_published=bool(
             isinstance(task.get(_TERMINALIZATION_RETRY_FIELD), dict)
             and task[_TERMINALIZATION_RETRY_FIELD].get("event_published")
@@ -1247,10 +1236,12 @@ from supervisor.worker_pool_lifecycle import _serialized_worker_lifecycle  # noq
 
 @_serialized_worker_lifecycle
 def spawn_workers(n: int = 0) -> None:
-    global _CTX, _WORKER_POOL_DISABLED_REASON
-    global _LAST_SPAWN_TIME
+    global _CTX, _WORKER_POOL_DISABLED_REASON, _LAST_SPAWN_TIME
+    from supervisor import conversation_lane
+    from supervisor.worker_pool_lifecycle import provides_pool
+
     with _queue_lock:
-        if WORKERS:
+        if any(map(provides_pool, WORKERS)):
             raise RuntimeError(
                 "spawn_workers requires an empty pool; stop the current workers "
                 "or use respawn_worker for one slot"
@@ -1297,13 +1288,11 @@ def spawn_workers(n: int = 0) -> None:
                 pass
             finally:
                 close_worker_stop_channel(worker.proc)
-        from supervisor import conversation_lane
-
         # The observed physical fact: Presence runs on the disclosed degraded executor, not a retry forever (S9).
         conversation_lane._SPAWN_REFUSED[0] = f"carrier_spawn_refused:{type(exc).__name__}"
         raise
     with _queue_lock:
-        if WORKERS:
+        if any(map(provides_pool, WORKERS)):
             for worker in new_workers.values():
                 try:
                     worker.proc.terminate()
@@ -1316,43 +1305,38 @@ def spawn_workers(n: int = 0) -> None:
         WORKERS.update(new_workers)
         _WORKER_POOL_DISABLED_REASON = ""
         _LAST_SPAWN_TIME = time.time()
-    from supervisor import conversation_lane
-
-    conversation_lane.arm(WORKERS)  # this generation keeps the lane's spare until a whole-table stop
+        conversation_lane.arm(WORKERS)  # publish pool membership and its admission owner together
     _record_worker_processes()
     # Readiness + SHA verification run off-loop so spawn does not block the supervisor loop.
     threading.Thread(target=_verify_worker_sha_after_spawn, args=(dict(new_workers), events_cursor, 1, spawned_at), daemon=True).start()
 
 
-def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
-    """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
+def _partition_slots_for_stop(lanes: Optional[frozenset], *, startup: bool) -> List[Worker]:
+    """Under Q, take the slots and any unbound Host reservations before releasing Q to join."""
+    from supervisor import conversation_lane
 
-    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
-    """
-    doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
+    doomed = [w for w in WORKERS.values() if (lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes)
+              and not (startup and w.wid < 0 and w.proc.is_alive())]
     if lanes is None:
-        from supervisor import conversation_lane
-
         conversation_lane.arm(None)
+    if not startup and (lanes is None or LANE_CONVERSATION in lanes):
+        for tid, meta in RUNNING.items():
+            if conversation_lane.host_presence_row(meta) and meta.get("worker_id") is None:
+                # Keep the reserved row visible for settlement. Its publisher can bind only the original object.
+                RUNNING[tid] = dict(meta)
     for w in doomed:
-        # The timeout reaper's ownership mark: assignment, the health check
-        # and the crash detector skip the slot while it is torn down.
         w.reaping = True
     return doomed
 
 
-def _spare_rows_for_stop(lanes: Optional[frozenset], doomed: List[Worker]) -> Dict[str, Dict[str, Any]]:
-    """Under the SAME Q hold as the stop's terminalization: the RUNNING rows the stop spares, popped.
-
-    A project fence spares the rows of the slots it does not own and every conversation-lane row,
-    the ones awaiting a carrier and the ones admitted while the doomed slots were torn down outside
-    Q included: a lane turn is never failed by a project stop. ``kill_workers`` restores them at its end.
-    """
-    spared_ids = {w.busy_task_id for w in WORKERS.values() if w not in doomed and w.busy_task_id}
+def _spare_rows_for_stop(lanes: Optional[frozenset], *, startup: bool) -> Dict[str, Dict[str, Any]]:
+    """Under Q after retiring slots: only a surviving row's exact carrier can claim it."""
     lane_spared = lanes is not None and LANE_CONVERSATION not in lanes
-    spared_rows = {tid: meta for tid, meta in RUNNING.items()
-                   if tid in spared_ids or (lane_spared and isinstance(meta, dict)
-                                            and meta.get("lane") == LANE_CONVERSATION)}
+    spared_ids = {slot.busy_task_id for slot in WORKERS.values() if slot.wid >= 0 and slot.busy_task_id}
+    spared_rows = {tid: meta for tid, meta in RUNNING.items() if isinstance(meta, dict) and (
+        tid in spared_ids or ((slot := WORKERS.get(meta.get("worker_id"))) is not None and slot.busy_task_id == tid)
+        or (lane_spared and meta.get("lane") == LANE_CONVERSATION)
+        or (startup and meta.get("_inline_bind") and (meta.get("task") or {}).get("_presence_run")))}
     for tid in spared_rows:
         RUNNING.pop(tid, None)
     return spared_rows
@@ -1379,15 +1363,19 @@ def _confirm_dead_slots(doomed: List[Worker]) -> tuple:
     unconfirmed_pids: list[int] = []
     for w in doomed:
         try:
-            if w.proc.pid and not w.proc.is_alive():
+            alive = w.proc.is_alive()
+            if w.proc.pid and not alive:
                 dead_pids.add(int(w.proc.pid))
                 from supervisor.worker_health import retire_confirmed_worker_consumers
                 retire_confirmed_worker_consumers(w, RUNNING.get(w.busy_task_id))
-            else:
+            elif alive or w.wid >= 0:
                 unconfirmed_pids.append(int(w.proc.pid or 0))
         except Exception:
+            alive = True  # a failed observation cannot retire a Host thread's Stop handle
             unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
             log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
+        if not (w.wid < 0 and alive) and WORKERS.get(w.wid) is w:
+            WORKERS.pop(w.wid)
     return dead_pids, unconfirmed_pids
 
 
@@ -1400,6 +1388,7 @@ def kill_workers(
     archive_service_logs: bool = True,
     disable_reason: str = "",
     preserve_pending: bool = False,
+    startup: bool = False,
     preserve_running_task_ids: Optional[set[str]] = None,
     reconcile_delegate_custody: bool = True,
     reconcile_review_custody: bool = True,
@@ -1414,7 +1403,8 @@ def kill_workers(
     conversation carriers and the rows they or an awaited carrier own leave the sweep
     under Q and return at its end, a returned owner turn still queued stays queued, so a
     project-pool fence never terminalises an owner's turn (owner decision 1A).
-    A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
+    At startup the old-pool sweep leaves a live Host thread to its author. At other
+    stops a surviving Host thread keeps its slot and row until its own exit.
     """
     global _WORKER_POOL_DISABLED_REASON
     from supervisor import conversation_lane, events_budget, queue, restart_retention as retention
@@ -1436,19 +1426,16 @@ def kill_workers(
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
-        doomed = _partition_slots_for_stop(lanes)
+        doomed = _partition_slots_for_stop(lanes, startup=startup)
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
     _tear_down_slots(doomed)
     with events_budget._parking_lock() as revoked:
-        # The spared rows are chosen under THIS hold, the one the terminalization below runs under:
-        # a lane turn admitted during the teardown is spared with the rest.
-        spared_rows = _spare_rows_for_stop(lanes, doomed)
-        cleared_running = len(RUNNING)
         dead_pids, unconfirmed_pids = _confirm_dead_slots(doomed)
-        for w in doomed:
-            if WORKERS.get(w.wid) is w:
-                WORKERS.pop(w.wid)
+        spared_rows = _spare_rows_for_stop(lanes, startup=startup)
+        close_basis = conversation_lane.pool_stop_basis(
+            not startup and lanes is None and stop_source in {"server_shutdown", "owner_restart"})
+        cleared_running = len(RUNNING)
         orphaned_ids, drained_ids, terminalization_retry_ids, preserved_successors = [], [], [], []
         # Exact pauses retain their queued marker and durable row across stops;
         # restore revalidates the same task instead of cancelling it as interrupted.
@@ -1541,6 +1528,8 @@ def kill_workers(
                     preserved_successors.append(str(task_id))
                     RUNNING.pop(str(task_id), None)
                     continue
+                unstarted_presence = (stop_source in {"server_shutdown", "owner_restart"} and meta.get("worker_id") is None
+                                      and meta.get("attempt") == 1 and meta.get("_presence_execution") is not None)
                 record_execution_close(DRIVE_ROOT, str(task_id), task, meta)  # #939: this attempt ends here
                 if _settle_terminalization_task(
                     task,
@@ -1549,7 +1538,7 @@ def kill_workers(
                     trigger="worker_pool_kill",
                     reconcile_delegate_custody=reconcile_delegate_custody,
                     allow_interrupted=True,
-                    stop_source=stop_source,
+                    stop_source=stop_source, unstarted_presence=unstarted_presence,
                 ):
                     if archive_service_logs:
                         try:
@@ -1570,7 +1559,7 @@ def kill_workers(
                         status=done_status,
                         trigger="worker_pool_kill",
                         reconcile_delegate_custody=reconcile_delegate_custody,
-                        stop_source=stop_source,
+                        stop_source=stop_source, unstarted_presence=unstarted_presence,
                     )
                     RUNNING.pop(str(task_id), None)
                     replaced = False
@@ -1654,7 +1643,8 @@ def kill_workers(
     if reconcile_review_custody:
         _reconcile_review_owners(DRIVE_ROOT, dead_pids)
     try:
-        snapshot_ok = retention.publish_pending_parks(queue, stop_source or "kill_workers", final=True) is not False
+        published = conversation_lane.publish_pool_stop_snapshot(stop_source or "kill_workers", close_basis)
+        snapshot_ok = published is True if close_basis is not None else published is not False
     except Exception:
         snapshot_ok = False
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)

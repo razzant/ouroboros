@@ -8,13 +8,18 @@ from pathlib import Path
 
 from ouroboros import presence_admission
 from ouroboros.dialogue_provenance import reaction_fact, reaction_words
-from ouroboros.places import (FACT_FROM_BOT, PlaceError, get_place, observed_facts, own_account_event,
-                              place_owner_accounts, wake_matches)
+from ouroboros.places import (FACT_FROM_BOT, counted_owner_accounts, observed_facts, own_account_event,
+                              place_records, wake_matches)
+from ouroboros.places_migration import wake_import_declarations_pending
 
 # What ``offer_arrival`` did: the reason its settlement records, or the mind's choice to make.
 HANDED_TO_AUTHOR, HANDED_TO_WORK, ROUTE_TO_MIND = "current_author", "conversation_work", "route"
 # A heard reason: an observed change whose initiator the connector could not name (``unattributed_change``).
 CHANGE_ACTOR_UNKNOWN = "change_actor_unknown"
+# A retry reason: an updated connector's declared wakes are installed but not admitted live yet
+# (``places_migration.wake_import_declarations_pending``); the pending wake list is not final, so the
+# no-match decision repeats instead of settling. Its backoff matches the transport's unknown-reset one.
+WAKE_IMPORT_PENDING = presence_admission.WakeImportPending.code
 _REACTION_FIELDS = {"schema_version", "change", "old", "new", "counts", "target"}
 _REACTION_LIST_LIMIT = 256
 _REACTION_VALUE_LIMIT = 256
@@ -136,18 +141,16 @@ def unattributed_change(event) -> bool:
 
 def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
     """Return silent / retry / focus, consulting current owner choices each time."""
-    try:
-        place = get_place(root, admission.place.place_id)
-    except PlaceError as exc:
-        if exc.code != "place_not_found":
-            raise
+    records = place_records(root)
+    place = records.places.get(admission.place.place_id)
+    if place is None:
         return "silent", {"reason": "disconnected"}
     facts = observed_facts(event)
     if place.state == "paused":
         return "silent", {"reason": "paused"}
     if not presence_admission.focus_enabled(root):
         return "silent", {"reason": "off"}
-    if own_account_event(place, event, place_owner_accounts(root).get(place.place_id)):
+    if own_account_event(place, event, counted_owner_accounts(records.places.values()).get(place.place_id)):
         # My own post (through the connector or any tool acting as that account) is heard and kept, never a reason
         # to wake me or to mail my live author.
         return "silent", {"reason": "own_account"}
@@ -164,7 +167,9 @@ def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
         bot = FACT_FROM_BOT in facts
         return "silent", {"reason": CHANGE_ACTOR_UNKNOWN, "background": not bot or bool(wake_matches(place, facts))}
     routed = isinstance(admission.allowance, dict) and admission.allowance.get(ROUTE_TO_MIND) is True
-    if not wake_matches(place, facts) and not routed:  # the Host's route travels by value to the runner's recheck
+    if not wake_matches(place, facts) and not routed:  # the Host's settled route travels by value to the carrier
+        if wake_import_declarations_pending(root, records, place, facts):
+            return "retry", {"reason": WAKE_IMPORT_PENDING, "retry_after": presence_admission.WakeImportPending.retry_after}
         return "silent", {"reason": "no_wake_match"}
     return allowance_attention(root)
 
@@ -205,6 +210,9 @@ def author_hears(decision: str, details: dict, event) -> bool | None:
     disconnected place and a bot without its wake item stay heard-only. A reaction is never a wake, nor a change
     whose initiator is unknown; an untagged follow-up in its own thread, topic or direct message is, and other room
     chatter stays background."""
+    if decision == "retry" and details.get("reason") == WAKE_IMPORT_PENDING:
+        # Only the ongoing exchange already has a reason to hear this. A background offer would settle the retry.
+        return True if FACT_FROM_BOT not in observed_facts(event) and _followup_in_scope(event) else None
     if decision in {"focus", "retry"}:
         return True
     if details.get("reason") in {"reaction_context_only", CHANGE_ACTOR_UNKNOWN}:
@@ -368,7 +376,7 @@ def _deliver(root, task: dict, event, pin: dict, prior: dict, accept, wake: bool
     return "pinned" if arrival_recipient(root, task["id"]) != prior else "refused"
 
 
-def _retry_holder(root, task: dict, event, pin: dict, wake: bool) -> tuple[str, str] | None:
+def _retry_holder(root, task: dict, event, pin: dict, wake: bool | None) -> tuple[str, str] | None:
     """An arrival already given to its pinned holder: settled with it once held there; while missing there and that
     holder reads now (its drain has not ended, so its mailbox was never cleared), offered to it again, deduplicated
     under its lock. Otherwise the mind takes a waking one with that holder named and its effect unknown;
@@ -381,6 +389,8 @@ def _retry_holder(root, task: dict, event, pin: dict, wake: bool) -> tuple[str, 
     reason = HANDED_TO_WORK if pin.get("to") == "work" else HANDED_TO_AUTHOR
     if place_event_retained(Path(pin["drive"]), holder, _arrival_msg_id(task)):
         return reason, holder
+    if wake is None:
+        return "", holder
     append = _arrival_append(root, Path(pin["drive"]), holder, task, event, wake, pin)
     if pin.get("to") == "author":
         if live_author(key, drive_root=root) == holder and accept_author_mail(root, holder, key, append):
@@ -433,7 +443,7 @@ def _bindings(task: dict) -> tuple:
     return (presence.get("binding_id"), presence.get("place_id"))
 
 
-def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
+def offer_arrival(root, task: dict, event, *, wake: bool | None) -> tuple[str, str]:
     """One source, one holder (``place_recipient`` on the arrival's own record, pinned before any append).
 
     The conversation's lease author first, whose focus can still tell its work; then its sole reader: a root, or an
@@ -444,6 +454,7 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
     may be this account's own echo, so never new work, yet still the running work's context; else it stays heard and
     asks no mind.
     ``{to: mind}`` wrote to no work, so a later current author may still take it; a work or author holder never moves.
+    With wake=None only a delivery already retained by its pinned holder counts.
     ``(outcome, holder)``; outcome "" leaves ordinary admission."""
     from ouroboros.place_arrivals import arrival_recipient, pin_recipient
     from ouroboros.room_reader import (
@@ -453,6 +464,8 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
     key, pin = event.conversation_key, arrival_recipient(root, task["id"])
     if pin.get("to") in {"work", "author"}:
         return _retry_holder(root, task, event, pin, wake) or offer_arrival(root, task, event, wake=wake)
+    if wake is None:
+        return "", ""
     done, author = _offer_author(root, task, event, wake, pin)
     if done == "held":
         return HANDED_TO_AUTHOR, author

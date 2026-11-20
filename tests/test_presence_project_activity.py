@@ -535,6 +535,65 @@ def _pause_doors(root, task_id, label):
                     "reason": "the owner asked to pause that conversation"}))
 
 
+def test_moved_host_turn_needs_a_pool_to_offer_pause(root, monkeypatch):
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
+    from supervisor import conversation_lane, queue as q, workers
+    from supervisor.active_activity import TURN_PHASES, get_direct_activity_registry
+    from tests.conversation_carrier_support import lane_row
+
+    seen = {}
+
+    def scenario(_author, task):
+        tid = task["id"]
+        seed = {**task, "_presence_turn": True, "_presence_run": True, "_execution_owner": {"kind": "presence"}}
+        lane_row(workers, seed, wid=-2, executor=EXECUTOR_INLINE_DEGRADED, pid=None)
+        # The turn's registered actor, exactly as ``inline_carrier.start_inline_turn`` leaves it: the
+        # entry's own phase stays ``preparing`` while its execution advanced to ``started``. That
+        # registry row shadows the lane row in the census (``_direct_turns_snapshot_safe``), so this is
+        # the shape every reader of the Pause offer actually gets.
+        registry = get_direct_activity_registry()
+        entry = registry.register(tid, int(task.get("chat_id") or 0), kind="presence", actor=None,
+                                  reply_expected=False)
+        entry.executor = EXECUTOR_INLINE_DEGRADED
+        entry.execution.advance("started")
+        try:
+            _move(root, tid, PROJECT)
+            for label, table in (("without_pool", None), ("with_pool", id(workers.WORKERS))):
+                monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", table)
+                census, works, complete = _state(root)
+                row = _row(census, tid)
+                seen[label] = (complete, row["kind"], row.get("presence_pause"), _actions(_work(works, tid)))
+                seen[f"{label}_row"] = (row.get("phase"), row.get("turn_phase"))
+                if table is None:
+                    seen["http"], seen["mind"] = _pause_doors(root, tid, "host-owned")
+            # The same contract with the queue facade's map never bound to the lane's table (a standalone
+            # Host before ``workers.init``): the row admission wrote still decides, so the started moved
+            # turn offers no Pause without a pool, and both doors say why.
+            monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)
+            monkeypatch.setattr(q, "RUNNING", {})
+            census, works, complete = _state(root)
+            row = _row(census, tid)
+            seen["unbound"] = (complete, row["kind"], row.get("presence_pause"), _actions(_work(works, tid)))
+            seen["unbound_http"], seen["unbound_mind"] = _pause_doors(root, tid, "unbound")
+        finally:
+            registry.unregister(tid, expected=entry)
+
+    _live_turn(root, scenario)
+    assert seen["without_pool"] == (True, "presence", None, ["stop"])
+    assert seen["http"] == (409, "no_continuation_owner")
+    assert seen["mind"] == {"ok": False, "error": "presence_pause_unsupported", "reason_code": "no_continuation_owner"}
+    assert seen["with_pool"] == (True, "presence", True, ["pause", "stop"])
+    # The census read the registered actor's own row: its entry phase stands still while its execution moved.
+    started = TURN_PHASES[TURN_PHASES.index("started"):]
+    for label in ("without_pool", "with_pool"):
+        assert seen[f"{label}_row"][0] == "preparing" and seen[f"{label}_row"][1] in started
+    # The unbound queue map changes nothing: still no offer, still the truthful refusal at both doors.
+    assert seen["unbound"] == (True, "presence", None, ["stop"])
+    assert seen["unbound_http"] == (409, "no_continuation_owner")
+    assert seen["unbound_mind"] == {"ok": False, "error": "presence_pause_unsupported",
+                                    "reason_code": "no_continuation_owner"}
+
+
 def test_pause_of_a_live_inline_turn_refuses_typed_at_every_door_and_changes_nothing(root, monkeypatch):
     from ouroboros import task_results
     from ouroboros.cancel_intents import cancel_pending

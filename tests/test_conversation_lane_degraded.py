@@ -277,8 +277,14 @@ def test_start_inline_turn_refuses_a_row_a_carrier_already_holds(degraded):
 @pytest.mark.parametrize("executor", [EXECUTOR_INLINE_CALL, EXECUTOR_INLINE_DEGRADED])
 def test_inline_start_phases_reach_the_admitted_row(degraded, monkeypatch, executor):
     """The real inline thread/worker endpoint keeps admission's generation, like the pool handoff."""
+    from ouroboros.owner_wait import worker_owner_wait
+    from supervisor import active_activity
+
     out = InputQueue()
     monkeypatch.setattr(workers, "get_event_q", lambda *a, **k: out)
+    receipt_locks = []
+    monkeypatch.setattr(active_activity, "record_direct_turn",
+                        lambda *a, **kw: receipt_locks.append(workers._queue_lock._is_owned()))
 
     def handle(task):
         degraded.actor.ran.append(task)
@@ -290,11 +296,14 @@ def test_inline_start_phases_reach_the_admitted_row(degraded, monkeypatch, execu
     task = worker_chat_lane._seed_task(1, "hello", None, None, {"client_message_id": "cm-phase"})
     task["_conversation_prepare"] = {"quiet": False}
     with workers._queue_lock:
-        meta = conversation_lane.admit_turn(task, chat_id=1, client_message_id="cm-phase", reserved=True)
+        meta = conversation_lane.admit_turn(task, chat_id=1, client_message_id="cm-phase",
+                                            reply_expected=True, reserved=True)
     assert conversation_lane.publish_awaiting_rows()
     with workers._queue_lock:
         slot = inline_carrier.start_inline_turn(meta, executor=executor, reason="test")
     _await_inline(slot)
+    assert slot.wid >= 0 and degraded.actor.owner_wait_callback.func is worker_owner_wait
+    assert receipt_locks and not any(receipt_locks)
     frames = []
     while not out.empty():
         frame = out.get_nowait()

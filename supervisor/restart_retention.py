@@ -335,8 +335,9 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *, pa
     return parked
 
 
-def publish_pending_parks(q, reason, *, final=False):
-    """Retry interrupted placements. Their queue marker is a hint. Only the exact durable row can confirm."""
+def publish_pending_parks(q, reason, *, final=False, expected_identity=None):
+    """Retry interrupted placements. Their queue marker is a hint. Only the exact durable row can confirm.
+    ``expected_identity`` is the barrier's (``queue_publication.publish_queue_snapshot``)."""
     from ouroboros.budget_pause import budget_pause_row, set_budget_pause
 
     with q._queue_lock:
@@ -344,7 +345,7 @@ def publish_pending_parks(q, reason, *, final=False):
                   if task.get("_park_confirmation") and task.get("_budget_pause")]
     if not parked and not final:
         return False
-    persisted = q.publish_queue_snapshot(reason=reason)
+    persisted = q.publish_queue_snapshot(reason=reason, **({} if expected_identity is None else {"expected_identity": expected_identity}))
     if persisted:
         for task, marker, source in parked:
             root = task.get("budget_drive_root") or q.DRIVE_ROOT

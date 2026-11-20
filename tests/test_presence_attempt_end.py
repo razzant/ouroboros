@@ -81,6 +81,31 @@ def test_new_presence_rows_name_their_controller():
     assert "controller" not in execution_owner_record("/tmp", {"id": "pooled-x"}, "pooled")
 
 
+def test_cached_stop_requires_proven_event_identity(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from tests._presence_event import event_payload
+
+    event = _event()
+    identity = presence_runner.presence_event_identity("binding", event)
+    row = {"status": "cancelled", "metadata": {}}
+    monkeypatch.setattr(presence_runner, "load_task_result", lambda *_args, **_kwargs: row)
+    notice = Mock()
+    monkeypatch.setattr(presence_runner, "_notify_unresolved_turn", notice)
+
+    assert _cached_result(tmp_path, "turn") is None
+    with pytest.raises(PresenceTurnError) as unproven:
+        _cached_result(tmp_path, "turn", identity)
+    assert unproven.value.code == "presence_event_identity_unproven"
+    notice.assert_not_called()
+
+    row["metadata"]["presence"] = {"binding_id": "binding", "event": event_payload(event),
+                                   "observed_text": event.text}
+    with pytest.raises(PresenceTurnError) as stopped:
+        _cached_result(tmp_path, "turn", identity)
+    assert (stopped.value.code, stopped.value.disposition) == ("presence_turn_cancelled", "retained")
+    notice.assert_called_once_with(tmp_path, "turn")
+
+
 def test_cancelled_turn_ends_with_its_facts_released_outputs_and_child(tmp_path):
     ref, stored = _row(tmp_path, "ev-cancelled", "cancelled", parked=_parked(_dead_witness()), child="child-1")
     status, view = retained_work_view(stored, ref, tmp_path)

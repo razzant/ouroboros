@@ -6,18 +6,23 @@ so event dispatch never waits on ``rename`` and ``open``. The tick answers False
 completed, one tick later, and that tick's capture is the complete rewrite (FU1/R2 unchanged); a retry still on the
 disk is not another failure (the third consecutive ends the generation). The writer holds
 the newest capture only (a slow disk never queues a backlog), an older capture a barrier overtook is skipped under
-the publish lock, a capture of an ended generation is never written, and the writer ends with the loop that fed it
-(``stop_queue_writer``): the doors after the loop publish synchronously where they stand. Without the writer
-(startup, shutdown, tests) every path is the synchronous one it was.
+the publish lock, a capture of an ended generation is never written, the writer's or a synchronous barrier's (#3149),
+nor does its refresh extend the next generation's certificate or its tick answer that generation's failures; the
+switch itself (``queue.init``) waits for a write with Q free, and a witnessed barrier holding no work reads the saved
+queue at its last check, off Q. The writer ends with the loop that fed it (``stop_queue_writer``): the doors after
+the loop publish synchronously where they stand. Without the writer (startup, shutdown, tests) every path is the
+synchronous one it was.
 """
 
 from __future__ import annotations
 
 import inspect
+import json
 import threading
 
+import pytest
 
-from supervisor import queue, queue_publication
+from supervisor import queue, queue_publication, queue_snapshot
 from tests.test_queue_publication_followup4 import _read, _seed, _task, published as published  # noqa: F401 -- fixture
 
 WRITER = "queue-publisher"
@@ -157,6 +162,18 @@ def test_a_barrier_that_overtakes_a_tick_capture_leaves_the_older_capture_unwrit
     assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["p1", "p2"]
 
 
+def test_startup_cannot_overwrite_a_published_presence_admission(published):
+    root, _now = published
+    with queue._queue_lock:
+        startup = queue_publication._capture("startup")
+        queue.RUNNING["turn"] = {"task": _task("turn", type="presence"), "lane": "conversation"}
+    assert queue.publish_queue_snapshot(reason="conversation_turn_admitted") is True
+    admitted = _read(root, "queue_snapshot.json")
+    assert [row["id"] for row in admitted["running"]] == ["turn"]
+    assert queue_publication._publish(startup) is False, "an overtaken forced capture is refused; its door recaptures"
+    assert _read(root, "queue_snapshot.json") == admitted
+
+
 def test_a_capture_of_an_ended_generation_is_never_written(published, monkeypatch):
     """``reset`` (a new queue generation) while the writer still holds the old generation's capture: the write is
     refused under the publish lock and the documents stay the ones the next generation owns."""
@@ -170,12 +187,238 @@ def test_a_capture_of_an_ended_generation_is_never_written(published, monkeypatc
     queue.persist_queue_snapshot("tick")
     assert queue_publication.publish_queue_changes() is True
     gate.passed()  # the writer holds the ended generation's capture, encoding it
-    ending = threading.Thread(target=queue_publication.reset)  # ``queue.init``: the generation ends, the writer stops
+    switched, stop_writer = threading.Event(), old_writer.stop
+
+    def stop_after_switch():
+        switched.set()  # reset replaced this writer before asking it to stop
+        stop_writer()
+
+    monkeypatch.setattr(old_writer, "stop", stop_after_switch)
+    ending = threading.Thread(target=queue_publication.reset)
     ending.start()
-    gate.release.set()
-    ending.join(5)
+    try:
+        assert switched.wait(5)
+    finally:
+        gate.release.set()
+        ending.join(5)
     assert not ending.is_alive() and not old_writer.alive() and queue_publication._WRITER is not old_writer
     assert _snapshot_writes(writes) == [] and (root / "state/queue_snapshot.json").read_bytes() == before
+
+
+def _next_generation(root, monkeypatch):
+    """The same process's next queue generation: the real ``queue.init`` (the globals it rebinds restored after)."""
+    for name in ("OWNER_PID", "FINALIZATION_GRACE_SEC"):
+        monkeypatch.setattr(queue, name, getattr(queue, name))
+    monkeypatch.setattr(queue, "PRIOR_DIRECT_ROOTS", {})
+
+    def begin(*rows, landed=True):
+        queue.init(root)  # one switch under Q and the publish lock: no tick publisher, a new writer, nothing published
+        queue_snapshot._RESTORED.add(str(queue.QUEUE_SNAPSHOT_PATH.absolute()))  # its restore took custody
+        queue.PENDING[:] = [_task(task_id) for task_id in rows]
+        assert queue.persist_queue_snapshot("startup") is landed
+
+    return begin
+
+
+def test_a_delayed_synchronous_barrier_never_lands_over_the_next_generation(published, monkeypatch):
+    """#3149: a barrier captured under Q is still encoding when the same process's ``queue.init`` publishes its next
+    generation: refused at its last check, it writes nothing, its caller is told so, and the next generation's later
+    captures, numbered below the stale one, still land."""
+    root, _now = _seed(published)
+    begin = _next_generation(root, monkeypatch)
+    for task_id in ("o1", "o2", "o3"):  # the ending generation numbered more captures than the next one will
+        queue.PENDING.append(_task(task_id))
+        assert queue.publish_queue_snapshot(reason=task_id) is True
+    documents = queue_publication._documents
+
+    def encode(capture):
+        if capture["reason"] == "late":  # captured; the publish lock not taken yet
+            begin("new")
+        return documents(capture)
+
+    monkeypatch.setattr(queue_publication, "_documents", encode)
+    queue.PENDING.append(_task("departed"))
+    assert queue.publish_queue_snapshot(reason="late") is False, "the ended generation's capture is no durability"
+    document = _read(root, "queue_snapshot.json")
+    assert [row["id"] for row in document["pending"]] == ["new"]
+    assert _read(root, "queue.alive")["generation"] == document["generation"]
+    queue.PENDING.append(_task("after"))
+    assert queue.publish_queue_snapshot(reason="after") is True
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["new", "after"]
+
+
+def test_a_refresh_measured_before_queue_init_extends_no_certificate_of_the_next_generation(published, monkeypatch):
+    """The ending generation's quiet tick measured the pool; after ``queue.init`` and the next generation's own
+    publication that measurement certifies nothing, though its capture number is not below the next one's; the
+    next generation's own measurement refreshes as before."""
+    root, now = _seed(published)
+    begin = _next_generation(root, monkeypatch)
+
+    def measured():
+        with queue._queue_lock:
+            return (queue_publication._pool_counts(), queue_publication._STATE["capture_seq"],
+                    queue_publication.publication_identity())
+
+    ended = measured()
+    begin("new")
+    certificate = (root / "state/queue.alive").read_bytes()
+    now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC  # due: any extension would rewrite it
+    assert queue_publication._refresh_alive(*ended) is None
+    assert (root / "state/queue.alive").read_bytes() == certificate
+    assert queue_publication._refresh_alive(*measured()) is True
+    assert (root / "state/queue.alive").read_bytes() != certificate
+
+
+def test_a_barrier_witness_names_the_generation_and_destination_its_caller_admitted_under(published, monkeypatch):
+    """``publication_identity`` taken under Q with an admission: while both hold the barrier publishes; after
+    ``queue.init``, or with the destination moved, the same witness marks, captures and writes nothing (False)."""
+    root, _now = _seed(published)
+    begin = _next_generation(root, monkeypatch)
+    with queue._queue_lock:
+        queue.PENDING.append(_task("admitted"))
+        witness = queue_publication.publication_identity()
+    assert queue.publish_queue_snapshot(reason="admitted", expected_identity=witness) is True
+    begin("new")
+    document, revision = (root / "state/queue_snapshot.json").read_bytes(), queue_publication.queue_revision()
+    assert queue.publish_queue_snapshot(reason="withdrawn", expected_identity=witness) is False
+    assert queue_publication.queue_revision() == revision, "nothing marked for the next generation"
+    assert (root / "state/queue_snapshot.json").read_bytes() == document
+    with queue._queue_lock:
+        queue.PENDING.append(_task("now"))
+        current = queue_publication.publication_identity()
+    assert queue.publish_queue_snapshot(reason="admitted", expected_identity=current) is True
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["new", "now"]
+    monkeypatch.setattr(queue, "QUEUE_SNAPSHOT_PATH", root / "elsewhere" / "queue_snapshot.json")
+    assert queue.publish_queue_snapshot(reason="moved", expected_identity=current) is False
+    assert not (root / "elsewhere").exists()
+
+
+class _WatchedLock:
+    """The publish lock, telling the test when a thread starts to wait for it."""
+
+    def __init__(self) -> None:
+        self.lock, self.waiting = threading.Lock(), threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if blocking:
+            self.waiting.set()
+        return self.lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self.lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.release()
+
+
+def test_queue_init_waits_for_a_write_outside_q_and_switches_in_one_step(published, monkeypatch):
+    """While a write holds the publish lock, ``queue.init`` waits for it with Q free: work under Q goes on and a
+    witness taken there names the old generation whole; then drive, owner, path, writer and state switch together."""
+    root, _now = _seed(published)
+    begin = _next_generation(root, monkeypatch)
+    watched = _WatchedLock()
+    monkeypatch.setattr(queue_publication, "_PUBLISH_LOCK", watched)
+    with queue._queue_lock:
+        before = queue_publication.publication_identity()
+    watched.lock.acquire()  # a write in flight
+    starting = threading.Thread(target=begin, args=("new",), name="next-generation")
+    starting.start()
+    try:
+        assert watched.waiting.wait(5), "init reached the publish lock"
+        assert queue._queue_lock.acquire(timeout=5), "Q is not held across that wait"
+        try:
+            assert queue_publication.publication_identity() == before and queue.INITIALIZED
+        finally:
+            queue._queue_lock.release()
+    finally:
+        watched.lock.release()
+        starting.join(5)
+    assert not starting.is_alive()
+    with queue._queue_lock:
+        after = queue_publication.publication_identity()
+    assert after != before and after[1] == root / "state" / "queue_snapshot.json"
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["new"]
+
+
+@pytest.mark.parametrize("threaded", [True, False], ids=["writer", "synchronous"])
+def test_a_tick_across_queue_init_leaves_the_next_generations_failure_to_its_own_tick(published, monkeypatch,
+                                                                                         threaded):
+    """The ending generation's tick answers failures in the generation it read: ``queue.init`` once it left Q (as it
+    hands its capture over, or while it encodes it) and the next generation's failed first write leave that failure
+    to the next generation's loop, which counts it once on its own tick and then publishes."""
+    root, _now = _seed(published)
+    begin = _next_generation(root, monkeypatch)
+
+    def next_generation_fails() -> None:
+        with monkeypatch.context() as failing:
+            failing.setattr(queue, "atomic_write_text", lambda *_a: False)
+            begin("new", landed=False)
+
+    if threaded:
+        queue_publication.start_queue_writer()
+        monkeypatch.setattr(queue_publication._WRITER, "offer", lambda _capture: next_generation_fails())
+    else:
+        documents = queue_publication._documents
+
+        def encode(capture):
+            if capture["reason"] == "admitted":
+                next_generation_fails()
+            return documents(capture)
+
+        monkeypatch.setattr(queue_publication, "_documents", encode)
+    queue.PENDING.append(_task("p1"))
+    queue.persist_queue_snapshot("admitted")
+    # The ending loop: its writer failed nothing; its own synchronous capture is refused, not landed.
+    assert queue_publication.publish_queue_changes() is threaded
+    queue_publication.tick_publisher_started()  # the next generation's loop
+    queue_publication.start_queue_writer()
+    assert queue_publication.publish_queue_changes() is False, "its own failed write, answered once"
+    assert queue_publication.drain_writer()
+    assert queue_publication.publish_queue_changes() is True
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["new"]
+
+
+def test_a_witnessed_barrier_without_work_reads_the_saved_queue_at_its_last_check_off_q(published, monkeypatch):
+    """A witnessed withdrawal holding no work leaves custody to the saved file, read under the publish lock and not
+    under Q: a foreign saved queue is kept (None, its bytes stay), an absent file is a plain write, and this
+    generation's own snapshot that landed without its certificate is recognized and replaced."""
+    root, _now = published
+    state = root / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    reads, keeps = [], queue_publication._keeps_saved_queue
+
+    def watched(path, *held):
+        if not any(held):
+            reads.append(queue._queue_lock._is_owned())
+        return keeps(path, *held)
+
+    monkeypatch.setattr(queue_publication, "_keeps_saved_queue", watched)
+
+    def witness():
+        with queue._queue_lock:
+            return queue_publication.publication_identity()
+
+    foreign = json.dumps({"pending": [{"id": "saved", "task": {"id": "saved"}}], "running": [], "generation": "old"})
+    (state / "queue_snapshot.json").write_text(foreign, encoding="utf-8")
+    assert queue.publish_queue_snapshot(reason="withdrawn", expected_identity=witness()) is None
+    assert (state / "queue_snapshot.json").read_text(encoding="utf-8") == foreign, "a foreign saved queue stays"
+    (state / "queue_snapshot.json").unlink()
+    assert queue.publish_queue_snapshot(reason="withdrawn", expected_identity=witness()) is True
+    assert _read(root, "queue_snapshot.json")["pending"] == [], "absent: written, not assumed"
+    queue_publication.reset()  # a generation that has published nothing of its own yet
+    queue.PENDING.append(_task("admitted"))
+    with monkeypatch.context() as failing:
+        failing.setattr(queue_publication, "_write_alive", lambda *_a: False)  # the snapshot lands, its certificate not
+        assert queue.publish_queue_snapshot(reason="admitted", expected_identity=witness()) is False
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["admitted"]
+    queue.PENDING.clear()
+    assert queue.publish_queue_snapshot(reason="withdrawn", expected_identity=witness()) is True
+    assert _read(root, "queue_snapshot.json")["pending"] == [] and _read(root, "queue.alive")["generation"]
+    assert reads == [False, False, False], "every saved-file custody read ran off Q"
 
 
 def test_a_quiet_tick_refreshes_the_certificate_on_the_writer(published, monkeypatch):

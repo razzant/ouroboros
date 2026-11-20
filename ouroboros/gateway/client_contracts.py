@@ -635,6 +635,7 @@ class PlaceSummary(TypedDict):
     icon: PlaceIcon
     readiness: PlaceReadiness
     wake_suggestions: List[str]
+    wake_review: NotRequired[Literal["pending", "ambiguous"]]
     facts: NotRequired[List[Any]]
     source: NotRequired[Dict[str, Any]]
     settings: NotRequired[str]

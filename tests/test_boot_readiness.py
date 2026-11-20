@@ -371,6 +371,107 @@ def test_the_generation_thread_itself_waits_for_the_extensions_event(monkeypatch
             thread.join(timeout=5)
 
 
+@pytest.mark.parametrize("planned", [False, True], ids=["local-consciousness-only", "pooled-main"])
+def test_host_pool_expectation_tracks_boot_and_settings_start(boot_app, monkeypatch, planned):
+    from starlette.testclient import TestClient
+    from ouroboros.gateway.host_service import create_host_service_app
+    from ouroboros.server_runtime import has_startup_ready_provider
+
+    srv, _root = boot_app
+    settings = {"LOCAL_MODEL_SOURCE": "Qwen/Qwen2.5-7B-Instruct-GGUF", "USE_LOCAL_CONSCIOUSNESS": True}
+    if planned:
+        settings["USE_LOCAL_MAIN"] = True
+    captured, opened, stop = [], threading.Event(), threading.Event()
+
+    async def no_socket(root, _boot, expects_supervisor_pool, stop_requested):
+        host = create_host_service_app(root, expects_supervisor_pool=expects_supervisor_pool,
+                                       stop_requested=stop_requested)
+        context = host.state.host_service_context
+        captured.append((context, context.expects_supervisor_pool))
+        opened.set()
+
+    monkeypatch.setattr(srv, "load_settings", lambda **_kw: dict(settings))
+    monkeypatch.setattr(srv, "has_startup_ready_provider", has_startup_ready_provider)
+    previous_init = threading.Event()
+    previous_init.set()  # a previous lifespan's successful initialization is not this pool's outcome
+    monkeypatch.setattr(srv, "_supervisor_init_done", previous_init)
+    monkeypatch.setattr(srv, "_supervisor_thread", None)
+    monkeypatch.setattr(srv, "_supervisor_generation", lambda _settings: stop.wait(30))
+    # Preserve the same callback Settings and onboarding invoke; only the physical generation is simulated.
+    start = srv.app.app.state.start_supervisor_if_needed
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", start)
+    monkeypatch.setattr(srv.server_boot, "serve_host_service", no_socket)
+    monkeypatch.setattr(srv.server_boot, "start_background_services", lambda *_a, **_kw: None)
+    with TestClient(srv.app):
+        try:
+            assert opened.wait(10)
+            [(context, boot_expectation)] = captured
+            assert boot_expectation is planned
+            assert not context.stop_requested()
+            # Check only the admission callback's view of an already-set latch.
+            with monkeypatch.context() as latched:
+                latched.setattr(srv, "panic_termination_requested", lambda: True)
+                assert context.stop_requested()
+            if not planned:
+                assert context.expects_supervisor_pool is False
+                assert start({**settings, "USE_LOCAL_MAIN": True}) is True
+                assert context.expects_supervisor_pool is True  # admitted, but no pool has initialized yet
+        finally:
+            stop.set()
+    assert context.stop_requested()
+
+
+@pytest.mark.parametrize("planned, skip_live_data", [(True, False), (False, False), (False, True)],
+                         ids=["supervisor", "providerless", "default-data-guard"])
+def test_lifespan_does_not_race_recovery_against_provider_supervisor(boot_app, monkeypatch, planned, skip_live_data):
+    from starlette.testclient import TestClient
+
+    from ouroboros import extension_loader
+    from supervisor import workers
+
+    srv, root = boot_app  # even the simulated default-data guard has a private temp root
+    calls = []
+    when_ready = srv.store_switch.when_ready
+
+    def at_store_publication(drive, first, *rest):
+        when_ready(drive, lambda: calls.append("store") or first(), *rest)
+
+    def settlement(drive, _repo, **kwargs):
+        assert drive == root and "store" in calls and srv._extensions_ready.is_set()
+        assert not srv._supervisor_ready.is_set()
+        assert kwargs == {"skip_live_data": skip_live_data, "prior_worker_pids": None if skip_live_data else {777}}
+        calls.append("recovery")
+
+    def planned_supervisor(_settings):
+        assert "store" in calls and srv._extensions_ready.is_set()
+        calls.append("supervisor")
+        return _ready_supervisor(srv)  # its actual recovery is covered in test_startup_terminal_files
+
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _settings: planned)
+    if skip_live_data:
+        monkeypatch.delenv("OUROBOROS_DATA_DIR", raising=False)
+        same_location = srv.same_location
+        monkeypatch.setattr(srv, "same_location", lambda left, right: (
+            left == root and right == srv.pathlib.Path.home() / "Ouroboros" / "data") or same_location(left, right))
+    monkeypatch.setattr(srv, "finish_unconfirmed_stops", lambda *_a: None)
+    monkeypatch.setattr(srv, "begin_owned_stop", lambda *_a, **_kw: None)
+    monkeypatch.setattr(srv, "stop_owned_work", lambda *_a: None)
+    monkeypatch.setattr(workers, "kill_workers", lambda **_kw: None)
+    monkeypatch.setattr(srv.server_boot, "start_background_services", lambda *_a, **_kw: None)
+    monkeypatch.setattr(srv.store_switch, "when_ready", at_store_publication)
+    monkeypatch.setattr(extension_loader, "reload_all", lambda *_a, **_kw: calls.append("extensions"))
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", planned_supervisor)
+    monkeypatch.setattr(srv, "_run_startup_task_recovery", settlement)
+    monkeypatch.setattr(srv, "_startup_worker_pids", lambda drive: calls.append("prior-workers") or {777})
+    with TestClient(srv.app) as client:
+        _wait(lambda: _health(client)["boot"]["phase"] == "ready")
+    # Store and extensions may publish in either order; neither can be skipped before the owner runs.
+    ready_prefix = ["store"] if skip_live_data else ["extensions", "store"]
+    expected_tail = ["supervisor"] if planned else (["recovery"] if skip_live_data else ["prior-workers", "recovery"])
+    assert sorted(calls[:-len(expected_tail)]) == ready_prefix
+    assert calls[-len(expected_tail):] == expected_tail
+
+
 # --- the notice a frame gets before the dialogue opened -------------------------------------
 
 def test_the_initialization_notice_says_why_the_message_was_not_saved(monkeypatch):

@@ -143,6 +143,7 @@
  * @property {'off'|'light'|'full'=} safety_mode
  * @property {Object<string,string>=} labels
  * @property {Array<string>} wake_suggestions
+ * @property {'pending'|'ambiguous'=} wake_review
  * @property {Array<*>=} facts
  * @property {Object<string,*>=} source
  * @property {string=} settings

@@ -71,11 +71,11 @@ def _turn(app, binding_id: str, source_event_id: str, conversation_id: str = "ro
         _request(app, {"binding_id": binding_id, "event": _event(source_event_id, conversation_id)}))
 
 
-def _presence_app(tmp_path: pathlib.Path, runner, *, account_wide: bool = False):
+def _presence_app(tmp_path: pathlib.Path, runner, *, account_wide: bool = False, **kwargs):
     _seed_token(tmp_path, skill="telegram-bot", token=TOKEN, permissions=["presence"],
                 manifest_permissions=["presence"])
     binding_id = _seed_presence_behavior(tmp_path, account_wide=account_wide)
-    app = create_host_service_app(tmp_path, presence_runner=runner)
+    app = create_host_service_app(tmp_path, presence_runner=runner, **kwargs)
     from ouroboros.presence_carrier import set_presence_runner
     set_presence_runner(tmp_path, runner)  # the conversation-lane carrier's body is this test's runner
     return app, binding_id, app.state.host_service_context
@@ -96,9 +96,12 @@ def _resolve_preparation_once(monkeypatch, ctx, binding_id: str) -> None:
     Each read still runs as bounded executor work (``_bounded_host_read``); only its body is
     constant-time, and it returns what the real resolution returned.
     """
+    from ouroboros.presence_events import presence_event_origin
+
     identity = ctx.authenticate_token_payload(TOKEN)
     ctx.require_permission(*identity, "presence")
-    admission = host_service._admit_presence(ctx, identity[0], binding_id)
+    admission = host_service._admit_presence(ctx, identity[0], binding_id, persist_import=False,
+                                             **presence_event_origin(_event("prepare")))
     authenticate, require = ctx.authenticate_token_payload, ctx.require_permission
     monkeypatch.setattr(ctx, "authenticate_token_payload",
                         lambda raw: identity if raw == TOKEN else authenticate(raw))
@@ -259,8 +262,10 @@ def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path,
 
     monkeypatch.setattr(threading.Thread, "start", refuse_turn_threads)
     refused = asyncio.run(_turn(app, binding_id, "e-1"))
+    payload = json.loads(refused.body)
     assert refused.status_code == 503
-    assert json.loads(refused.body)["error"] == "presence turn thread could not start"
+    assert payload["error"] == "presence turn thread could not start"
+    assert payload["code"] == "presence_turn_not_started" and payload["disposition"] == "retry"
     assert calls == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
     assert workers.RUNNING == {} and workers.WORKERS == {}, "nothing ran: no lane row and no pseudo-slot remain"
 
@@ -286,6 +291,34 @@ def test_an_unarmed_server_returns_a_typed_retry_without_starting_the_host_turn(
     queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(saved), encoding="utf-8")
     before = queue.QUEUE_SNAPSHOT_PATH.read_bytes()
 
+    for _ in range(2):  # an unchanged retry remains unstarted, with no retained in-flight reservation
+        refused = asyncio.run(_turn(app, binding_id, "boot-event"))
+        payload = json.loads(refused.body)
+        assert refused.status_code == 503
+        assert payload["code"] == "presence_turn_not_started" and payload["disposition"] == "retry"
+        assert calls == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
+        assert workers.RUNNING == {} and workers.WORKERS == {}
+        assert queue.QUEUE_SNAPSHOT_PATH.read_bytes() == before
+
+
+def test_a_server_bound_host_before_queue_init_retries_typed_and_starts_nothing(tmp_path):
+    """#3149: the embedded server's Host carries the boot factory's ``expects_supervisor_pool`` fact before it
+    opens, so the pre-``queue.init`` window (``owns_live_queue`` false in this Host-only world) answers the same
+    typed 503 as the post-init unarmed window: nothing admitted, no row, no pseudo-slot, no publication over the
+    saved queue, no retained reservation. The default (a standalone Host) stays False and keeps the degraded
+    executor (the tests above)."""
+    from supervisor import conversation_lane, queue, workers
+
+    calls = []
+    app, binding_id, ctx = _presence_app(tmp_path, lambda **kwargs: calls.append(1) or _answer(**kwargs),
+                                         expects_supervisor_pool=True)
+    assert ctx.expects_supervisor_pool is True
+    assert create_host_service_app(tmp_path).state.host_service_context.expects_supervisor_pool is False
+    assert not queue.INITIALIZED and not conversation_lane.armed() and not queue.owns_live_queue(tmp_path)
+    saved = {"pending": [{"id": "saved-work", "task": {"id": "saved-work"}}], "running": []}
+    queue.QUEUE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    before = queue.QUEUE_SNAPSHOT_PATH.read_bytes()
     for _ in range(2):  # an unchanged retry remains unstarted, with no retained in-flight reservation
         refused = asyncio.run(_turn(app, binding_id, "boot-event"))
         payload = json.loads(refused.body)

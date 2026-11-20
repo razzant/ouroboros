@@ -1,16 +1,10 @@
 """Task-local custody of model quota/auth waits and role-specific continuation.
 
-The existing task owns its worker, writer lane, mailbox and durable result.
-This module keeps only the live call's wait and role overrides. It neither
-schedules work nor records physical attempts: every resumed call still goes
-through LLMClient and the ordinary physical-attempt ledger.
-
-Resource recovery order (quota, sign-in, an engine-dated unavailable pool): the
-transport's Auto account rotation, then every configured route of the round,
-and only then the owner. A round whose later route exists returns its refusal
-instead of waiting (``ResourceDeferral``); the owner question is then opened
-from that retained refusal, never from another generation, and nothing sleeps
-to a reset. An inline Presence turn never waits for a resource or the owner.
+The task owns its worker, writer lane, mailbox and durable result. Every resumed call
+goes through LLMClient and the ordinary physical-attempt ledger. Quota, sign-in and
+engine-dated pool refusals try Auto rotation, then every route of the round. Only
+then may its retained ResourceDeferral open an owner question. Nothing sleeps to a
+reset. Inline Presence cannot wait on quota. Its private questions use its conversation lease.
 
 It also owns the one execution clock (#939) every finite execution bound reads:
 the narrower of the global ceiling and a task's API/CLI ``execution_timeout_sec``
@@ -575,6 +569,11 @@ class TaskModelWait:
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
         self.canonical_root = task.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root
         self.task_id = str(task.get("id") or "")
+        self.inline_presence_stop = None
+        if task.get("_presence_turn") and drive_root:
+            from ouroboros.conversation_lease import local_author_lease
+
+            self.inline_presence_stop = getattr(local_author_lease(drive_root, self.task_id), "inline_stop", None)
         self.attempt = int(task.get("_attempt") or 1)
         self.event_queue = event_queue
         self.worker_slot_held = worker_slot_held
@@ -783,6 +782,8 @@ class TaskModelWait:
 
         if self.closed:
             return "task_ended"
+        if self.inline_presence_stop is not None and self.inline_presence_stop.is_set():
+            return "cancelled"
         control_gap = None
         if self.owner_control is None:
             try:

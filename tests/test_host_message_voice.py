@@ -216,7 +216,7 @@ HOST_ROW_CLASSES = {
     "taken_walk_notice": ("runtime_state", 1),  # what the engine was told of earlier delegated results, once
     "terminal_incident": ("no_mind", 2),
     "ui_hold": ("runtime_state", 1),
-    "worker_failure": ("no_mind", 2),  # the exhausted crash retry + the degraded executor's disclosure (inline_carrier._disclose); the crash-storm toast is gone
+    "worker_failure": ("no_mind", 2),  # the exhausted crash retry + the degraded executor's disclosure (inline_carrier.disclose_inline_turn); the crash-storm toast is gone
     "worker_readiness_notice": ("runtime_state", 2),
 }
 # The closed classes; none is "the success of a landed act" (its receipt or card already says it).

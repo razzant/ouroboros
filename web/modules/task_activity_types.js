@@ -66,7 +66,7 @@
  * @property {Object=} project_admission_hold  // accepted unstarted work waiting for original Project authority
  * @property {boolean=} can_resume Positive current queue/grant authority, never derived from a label.
  * @property {boolean=} cancelable
- * @property {boolean=} presence_pause  // a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
+ * @property {boolean=} presence_pause  // a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it; withheld while no running pool can resume the host-owned turn (the door refuses no_continuation_owner)
  * @property {string=} pause_cause  // budget | owner | authority | restart | sleep | unknown; display only
  * @property {boolean=} finishing_reviews  // review work an owner Pause lets finish runs on; display only, no count
  * @property {Object=} late_work  // answered root whose late work remains: title, answered_at; display only

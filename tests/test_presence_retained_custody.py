@@ -186,6 +186,67 @@ def _focus_admission_enabled(monkeypatch):
 
 # --- a moved turn's queue custody, when the queue or its binding cannot be read (#2566) ---------------------------
 
+@pytest.mark.parametrize("parked", [False, True], ids=["live", "parked"])
+def test_v0_repeat_with_a_retired_signal_reads_its_existing_custody(root, monkeypatch, parked):
+    from ouroboros.presence_events import connector_fact_labels, parse_event_wire, presence_event_origin
+    from ouroboros.presence_runner import PresenceTurnResult, _build_task, presence_event_identity
+
+    def unexpected(**_kwargs):
+        pytest.fail("an exact repeat never starts a second turn")
+
+    app, binding, ctx = _presence_app(root, unexpected)
+    signal = "signal.release"
+    published = [{"provides": "place", "id": "inbox", "skill": "telegram-bot", "destination": "vendor:Telegram",
+                  "facts": [{"id": signal, "label": "Release posted"}]}]
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: published)
+    wire = {**_event("retired-signal"), "facts": [signal]}
+    admission = host_service._admit_presence(ctx, "telegram-bot", binding, persist_import=False,
+                                             **presence_event_origin(wire))
+    event = parse_event_wire(wire)
+    assert connector_fact_labels(root, admission, event)[signal] == "Release posted"
+    built = _build_task(admission, event, drive_root=root, staged_files=())
+    tid, identity = built["id"], presence_event_identity(admission.binding_id, event)
+    if parked:
+        _boot_window_row(root, tid, built, status="scheduled",
+                         pause={"state": "paused", "pause_id": "p", "source_ref": "source", "task_attempt": 1})
+    else:
+        execution, started = ctx.presence_turns.start_or_dispatch(
+            tid, identity=identity, reserve=lambda: True, release=lambda: None, dispatch=lambda _ex: None)
+        assert started
+    published.clear()
+
+    async def repeat():
+        post = host_service._api_presence_turn(_request(app, {"binding_id": binding, "event": wire}))
+        if parked:
+            return await post
+        joined, find = asyncio.Event(), ctx.presence_turns.find
+
+        def observe(ref):
+            found = find(ref)
+            if found is execution:
+                joined.set()
+            return found
+
+        monkeypatch.setattr(ctx.presence_turns, "find", observe)
+        pending = asyncio.create_task(post)
+        try:
+            await asyncio.wait_for(joined.wait(), 30)
+        finally:
+            ctx.presence_turns.settle_from_frame(execution, result=PresenceTurnResult("silent", "", tid))
+        return await pending
+
+    response = asyncio.run(repeat())
+    body = json.loads(response.body)
+    if parked:
+        assert response.status_code == 409
+        assert (body["code"], body["custody"], body["turn_ref"]) == ("presence_turn_parked", "queued", tid)
+    else:
+        assert response.status_code == 200 and body["outcome"] == "silent"
+    fresh = asyncio.run(host_service._api_presence_turn(_request(app, {
+        "binding_id": binding, "event": {**wire, "source_event_id": "new-signal-event"}})))
+    assert fresh.status_code == 400 and json.loads(fresh.body)["disposition"] == "rejected"
+
+
 def _returned_turn(root, monkeypatch):
     """Production recovery and enqueue after the owner's Restart: a moved turn that yielded its conversation keeps its old
     running row, its controller gone, beside the PENDING successor the queue now holds. Returns its id and stored row."""

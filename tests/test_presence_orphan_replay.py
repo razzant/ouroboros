@@ -393,6 +393,71 @@ def _host_body(binding_id, source_event_id=_HOST_EVENT_ID):
     }}
 
 
+@pytest.mark.usefixtures("lone_host_world")
+def test_waiting_host_event_retries_when_its_fallback_thread_cannot_start(tmp_path, monkeypatch):
+    import os
+
+    import httpx
+
+    from supervisor import conversation_lane, queue, queue_publication, workers
+    from tests.conversation_carrier_support import booted_host_lane
+
+    calls = []
+    app, binding = _host(tmp_path, [_answering_agent(calls, "Recovered", tmp_path)])
+    ctx = app.state.host_service_context
+    booted_host_lane(monkeypatch, workers)
+    monkeypatch.setattr(queue, "INITIALIZED", True)
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    monkeypatch.setattr(queue_publication, "_PUBLISHER", threading.current_thread())
+    spare, = conversation_lane.lane_carriers()
+    spare.ready_identity, spare.booting, spare.readiness_exhausted = None, True, False
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        awaiting_tick = asyncio.Event()
+        # Drive the next supervisor pass ourselves after the Host has admitted the waiting row.
+        monkeypatch.setattr(conversation_lane, "replenish_after_claim",
+                            lambda: loop.call_soon_threadsafe(awaiting_tick.set))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                     headers={"X-Skill-Token": "presence-token"}) as client:
+            body = _host_body(binding)
+            request = asyncio.create_task(client.post("/presence/turn", json=body))
+            await awaiting_tick.wait()
+            turn_id, = ctx.presence_turns.live()
+            execution = ctx.presence_turns.find(turn_id)
+            assert ctx._inflight["telegram-bot:presence"] == 1 and not request.done()
+
+            start = threading.Thread.start
+
+            def refuse_thread(thread):
+                if thread.name == f"inline_degraded-{turn_id}":
+                    raise RuntimeError("thread unavailable")
+                return start(thread)
+
+            with monkeypatch.context() as failure, queue._queue_lock:
+                failure.setattr(threading.Thread, "start", refuse_thread)
+                assert conversation_lane.dispatch_awaiting_turns() == 0  # a booting spare can still arrive
+                assert workers.RUNNING[turn_id]["worker_id"] is None and not execution.result.done()
+                spare.booting, spare.readiness_exhausted = False, True
+                assert conversation_lane.dispatch_awaiting_turns() == 0
+            assert execution.initial.exception(timeout=0) is execution.result.exception(timeout=0)
+            refused = await request
+            assert refused.status_code == 503 and (refused.json()["code"], refused.json()["disposition"]) == (
+                "presence_turn_not_started", "retry")
+            assert not calls and not ctx.presence_turns.live() and not any(ctx._inflight.values())
+            assert turn_id not in workers.RUNNING and set(workers.WORKERS) == {spare.wid}
+            assert queue.publish_queue_changes() and queue_publication.drain_writer(10)
+            assert not json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())["running"]
+
+            retried = await client.post("/presence/turn", json=body)
+            assert retried.status_code == 200 and retried.json()["text"] == "Recovered"
+            replay = await client.post("/presence/turn", json=body)
+            assert replay.status_code == 200 and replay.json() == retried.json()
+            assert [task["id"] for task in calls] == [turn_id] and not any(ctx._inflight.values())
+
+    asyncio.run(asyncio.wait_for(scenario(), 60))
+
+
 def _host_post(tmp_path, agents):
     app, binding_id = _host(tmp_path, agents)
     client = TestClient(app)

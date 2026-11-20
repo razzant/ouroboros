@@ -64,6 +64,12 @@ def is_worker_slot(slot: Any) -> bool:
     return getattr(slot, "executor", EXECUTOR_WORKER) not in INLINE_EXECUTORS
 
 
+def provides_pool(wid: Any) -> bool:
+    """Whether the slot at this address is pool capacity: boot owns the nonnegative ones; a Host thread's negative
+    pseudo-slot (``inline_carrier._HOST_SLOT_IDS``) runs its own turn and is none. Availability and census share it."""
+    return wid >= 0
+
+
 def project_slots(pool: Any = None) -> list:
     pool = _pool().WORKERS if pool is None else pool
     return [slot for slot in pool.values() if is_project_slot(slot)]
@@ -97,13 +103,15 @@ def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
     wait or warm sleep, a live in-slot wait: ``pool_admission.waits_on_its_process``). The booting/reaping/
     retiring flags overlap (a fresh slot is booting and reaping until its readiness row);
     ``assignable_idle_workers`` is what dispatch could use this instant. Conversation carriers are another
-    lane, outside the cap, counted apart. No queue, filesystem or admission work; ``worker_ready`` asks
-    each slot's ``Process`` whether it is alive.
+    lane, outside the cap, counted apart; a Host thread is no carrier (``provides_pool``), so a reader of
+    the counts finds the availability the owner computes. No queue, filesystem or admission work;
+    ``worker_ready`` asks each slot's ``Process`` whether it is alive.
     """
     from ouroboros.runtime_limits import get_max_workers
 
     slots, running = _pool().WORKERS if pool is None else pool, _pool().RUNNING if running is None else running
-    projects, carriers, now = project_slots(slots), lane_slots(slots), time.time()
+    projects, now = project_slots(slots), time.time()
+    carriers = [slot for wid, slot in slots.items() if is_lane_slot(slot) and provides_pool(wid)]
     busy = [slot for slot in projects if getattr(slot, "busy_task_id", None) is not None]
     waiting = sum(not pool_admission.acting(slot, running.get(slot.busy_task_id), now) for slot in busy)
     return {
@@ -189,11 +197,23 @@ def _recorded_cancel_fields(task_id: str, *, stop_source: str = "", reason: str 
         return {}
 
 
+def _terminalization_status_accepted(
+    persisted: Any, requested: str, *, allow_interrupted: bool,
+) -> bool:
+    """Accept a durable terminal status or an intentionally requested interrupted marker."""
+    from ouroboros.task_results import STATUS_INTERRUPTED, _TRULY_TERMINAL_STATUSES
+
+    settled = str(persisted or "").strip()
+    return settled in _TRULY_TERMINAL_STATUSES or (
+        allow_interrupted and requested == settled == STATUS_INTERRUPTED)
+
+
 def _write_failure_result(
     task_id: str,
     reason: str = "Worker process was stopped before this task finished. Task was not completed.",
     status: str = "",
     stop_source: str = "",
+    *, presence_seed: Optional[dict] = None,
 ) -> str:
     """Write failure result for a crashed/orphaned task.
 
@@ -207,6 +227,9 @@ def _write_failure_result(
     owner Stop stays a Stop), only a task no intent names takes the door's own cause, and an
     unreadable intent store records none. A cancelled result without a door source still retains its
     recorded intent (including Panic).
+
+    An unbound first Presence admission can retain its event on the first ordinary shutdown Stop
+    write. A door label alone is not a recorded request and cannot authorize that attribution.
     """
     if not task_id:
         return ""
@@ -226,6 +249,11 @@ def _write_failure_result(
         f_cost_fields = _pool().reconstruct_task_cost(str(task_id), fields=True)
         cause = (_recorded_cancel_fields(task_id, stop_source=stop_source, reason=reason)
                  if stop_source or final_status == STATUS_CANCELLED else {})
+        source_fields = {}
+        if presence_seed is not None and final_status == STATUS_CANCELLED and cause.get("cancel_origin", {}).get("request_id"):
+            from supervisor.cancel_publication import queued_presence_cancel
+
+            source_fields = {"_field_projector": lambda current, patch: queued_presence_cancel(presence_seed, current, patch)}
         stored = write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
@@ -241,6 +269,7 @@ def _write_failure_result(
             ),
             **f_cost_fields,
             **cause,
+            **source_fields,
         )
         persisted_status = str((stored or {}).get("status") or "").strip()
         if (
@@ -1111,7 +1140,7 @@ def reconcile_worker_capacity(residual_demand, reading: Any = None) -> None:
             # Retire only acknowledged surplus; growth never creates a project spare during work.
             for slot in quiet[keep:]:
                 retire_quiescent_worker(slot)
-        next_id = max(_pool().WORKERS, default=-1) + 1
+        next_id = max(0, max(_pool().WORKERS, default=-1) + 1)
     for wid in range(next_id, next_id + missing):
         # Starts run without Q. The serializer excludes Stop/update/exhaustion teardown;
         # the readiness owner can still fence the pool while this start is in flight.
@@ -1206,17 +1235,18 @@ def _worker_pool_execution_state(pool: Any = None) -> Dict[str, Any]:
     live ready project processes (``pool_admission``); with no healthy slot left nothing can run.
     """
     table = _pool().WORKERS if pool is None else pool
-    projects = project_slots(table)
     with _queue_lock:
+        has_pool = any(provides_pool(wid) for wid in table)  # a Host thread surviving a failed spawn is none
+        projects = project_slots(table)
         disabled_reason = str(_pool()._WORKER_POOL_DISABLED_REASON or "")
         healthy = any(not getattr(w, "readiness_exhausted", False) for w in projects)
         if not disabled_reason and not healthy and pool_admission.parked(projects):
             disabled_reason = "worker_readiness_exhausted"
-    available = len(table) > 0 and not disabled_reason
+    available = has_pool and not disabled_reason
     return {
         "available": available,
         "reason_code": "" if available else "worker_pool_unavailable",
-        "disabled_reason": disabled_reason or ("no_workers" if not table else ""),
+        "disabled_reason": disabled_reason or ("no_workers" if not has_pool else ""),
         "worker_count": len(projects),
     }
 

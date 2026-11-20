@@ -87,7 +87,10 @@ def _keeps_saved_queue(path: Any, *held: Any, require_readable: bool = False) ->
     if require_readable and not (isinstance(saved, dict) and all(
             isinstance(saved.get(lane), list) for lane in ("pending", "running"))):
         raise ValueError("could not establish the saved pending and running queues")
-    return isinstance(saved, dict) and bool(saved.get("pending") or saved.get("running"))
+    from supervisor.queue_publication import wrote_snapshot
+
+    return (isinstance(saved, dict) and bool(saved.get("pending") or saved.get("running"))
+            and not wrote_snapshot(key, saved.get("generation")))
 
 
 def saved_queue_unowned(*, require_readable: bool = False) -> bool:

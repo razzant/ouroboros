@@ -6,9 +6,9 @@ spawn refused, or the repo-writer gate closed in an assisted-update marker windo
 (``executor=inline_degraded``, owner decision 2A) — or when the turn is a live
 realtime call whose host port is process-local (``executor=inline_call``, owner
 decision 3A), the SAME task body (``worker_process.run_worker_task``) runs on a
-daemon thread of this process over in-memory queues: the same frames on the
-server's bus, the same RUNNING row and census, the same mailbox controls, the
-pooled owner-wait protocol. Never chosen because something is busy.
+daemon thread with the same RUNNING row, census and mailbox controls. A pool
+handles owner waits over its bus. A Host with no pool owns the private wait and
+settles its reservation when the thread leaves the worker body.
 
 The carrier registers a thread-backed pseudo-slot in ``WORKERS`` (``lane``
 ``conversation``, ``executor`` named) so the worker protocol reaches it: owner-wait
@@ -31,6 +31,8 @@ import pathlib
 import threading
 import time
 from collections import deque
+from itertools import count
+from threading import Event
 from types import SimpleNamespace
 from typing import Any, Callable, Deque, Dict, Optional
 
@@ -49,6 +51,9 @@ INLINE_KEPT = 50  # the disclosed executions this process remembers for the vita
 _INLINE: Deque[Dict[str, Any]] = deque(maxlen=INLINE_KEPT)
 _INLINE_LOCK = threading.Lock()
 _DEGRADED_TOTAL = [0]
+# Boot owns nonnegative pool addresses. A Presence thread may still be unwinding
+# when a new pool takes slot zero or the same source event is retried.
+_HOST_SLOT_IDS = count(-2, -1)  # -1 already denotes a row without a worker
 
 
 def _pool():
@@ -76,8 +81,8 @@ class InlineCarrier:
         self._on_stop = on_stop
 
     def start(self) -> None:
-        self._started = True
         self._thread.start()
+        self._started = True
 
     def is_alive(self) -> bool:
         return self._started and self._thread.is_alive()
@@ -122,26 +127,69 @@ def inline_executors_fact(limit: int = 5) -> Dict[str, Any]:
             "recent": vitals["inline_executions"][-limit:]}
 
 
-class _UnarmedFrames:
-    """The inline executor's frames in a process with no started pool generation (a Host serving alone;
-    a server before its first spawn or after a whole-table stop): nothing guarantees a supervisor
-    consumer, so a Presence turn's own settlement frames resolve its Host waiter HERE; every other
-    frame rides the bus as usual."""
+class _InlineFrames:
+    """The Host's endpoint for its Presence thread, or a turn without a pool bus.
 
-    def __init__(self, inner: Any) -> None:
+    Its author waits for private replies on the same stack. Its final frame is released by the
+    carrier's exit, after run_worker_task has finished using the slot.
+    """
+
+    def __init__(self, inner: Any, root: Any, execution: Any, presence_id: str) -> None:
         self._inner = inner
+        self.root = pathlib.Path(root)
+        self.execution = execution
+        self.presence_id = presence_id
+        self.stop_event = Event()
+        self.settlement = None
+
+    def __call__(self, ctx: Any, checkpoint: dict) -> str:
+        from ouroboros.owner_wait import direct_owner_wait
+
+        return direct_owner_wait(ctx, checkpoint)
+
+    def put_nowait(self, item: Any) -> None:
+        self.put(item, block=False)
 
     def put(self, item: Any, *args: Any, **kwargs: Any) -> None:
         kind = item.get("type") if isinstance(item, dict) else None
-        if kind in ("presence_turn_initial", "presence_turn_settled"):
-            from ouroboros.presence_carrier import handle_presence_turn_initial, handle_presence_turn_settled
-
-            handler = handle_presence_turn_initial if kind == "presence_turn_initial" else handle_presence_turn_settled
-            try:
-                handler(item, _pool())
-            except Exception:
-                log.exception("inline executor could not settle its own presence frame %s", kind)
+        if kind == "task_done" and self.presence_id and item.get("task_id") == self.presence_id:
+            return  # the local exit owns this terminal, including after a bus consumer catches up
+        if kind == "presence_turn_settled":
+            self.settlement = item  # the body returns its row, slot and Host reservation together at exit
             return
+        if kind == "presence_turn_initial":
+            from ouroboros.presence_carrier import handle_presence_turn_initial
+
+            handle_presence_turn_initial(item, _pool(), expected=self.execution)
+            return
+        if (kind == "budget_pause" and item.get("phase") != "consumed"
+                and self.presence_id and item.get("task_id") == self.presence_id):
+            # The local exit can retire RUNNING before the supervisor drains its bus.
+            # Transfer the pause to its ordinary queue owner before returning to the author.
+            from supervisor import message_bus, queue
+            from supervisor.events_budget import _handle_budget_pause
+
+            if not queue.owns_live_queue(self.root):
+                raise RuntimeError("the queue cannot resume a Presence turn from this Host")
+            ctx = SimpleNamespace(
+                DRIVE_ROOT=self.root, RUNNING=queue.RUNNING, PENDING=queue.PENDING, WORKERS=_pool().WORKERS,
+                sort_pending=queue.sort_pending, persist_queue_snapshot=queue.publish_queue_snapshot,
+                bridge=message_bus.try_get_bridge())
+            _handle_budget_pause(item, ctx)
+            return
+        if kind in ("send_quiz", "send_quiz_state"):
+            from supervisor import events_chat_delivery, message_bus
+
+            bridge = message_bus.try_get_bridge()
+            bridge_root = message_bus.DATA_DIR
+            if bridge_root and self.root.resolve() != pathlib.Path(bridge_root).resolve():
+                raise RuntimeError("the attached private question route belongs to another Host")
+            if bridge is not None and bridge_root:
+                ctx = SimpleNamespace(DRIVE_ROOT=self.root, bridge=bridge, append_jsonl=append_jsonl)
+                events_chat_delivery.EVENT_HANDLERS[kind](item, ctx)
+                return
+            if self._inner is None:
+                raise RuntimeError("no Host delivery route for the private question")
         if self._inner is None:
             log.debug("inline executor frame %s has no bus in this process; dropped", kind)
             return
@@ -153,7 +201,8 @@ class _UnarmedFrames:
         return getattr(self._inner, name)
 
 
-def _disclose(task: Dict[str, Any], executor: str, reason: str) -> None:
+def disclose_inline_turn(task: Dict[str, Any], executor: str, reason: str, *,
+                         host_root: Optional[pathlib.Path] = None) -> None:
     row = {"ts": utc_now_iso(), "type": "conversation_inline_executor", "task_id": str(task.get("id") or ""),
            "chat_id": int(task.get("chat_id") or 0), "executor": executor, "reason": reason}
     with _INLINE_LOCK:
@@ -161,13 +210,16 @@ def _disclose(task: Dict[str, Any], executor: str, reason: str) -> None:
         if executor == EXECUTOR_INLINE_DEGRADED:
             _DEGRADED_TOTAL[0] += 1
     try:
-        from supervisor.state import append_jsonl
-
-        append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", row)
+        append_jsonl((host_root or _pool().DRIVE_ROOT) / "logs" / "supervisor.jsonl", row)
     except Exception:
         log.debug("inline executor row not written", exc_info=True)
     if executor == EXECUTOR_INLINE_DEGRADED:
         try:
+            if host_root is not None:
+                from supervisor.message_bus import DATA_DIR
+
+                if not DATA_DIR or host_root.resolve() != pathlib.Path(DATA_DIR).resolve():
+                    return
             _pool().send_with_budget(
                 int(task.get("chat_id") or 0),
                 f"⚠️ No conversation carrier could start ({reason}); continuing this turn in direct-chat "
@@ -181,7 +233,8 @@ def _disclose(task: Dict[str, Any], executor: str, reason: str) -> None:
 
 
 def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent: Any = None,
-                      realtime_turn: Any = None, on_failure: Optional[Callable[[Any, BaseException], bool]] = None) -> Any:
+                      realtime_turn: Any = None, on_failure: Optional[Callable[[Any, BaseException], bool]] = None,
+                      on_not_started: Optional[Callable[[dict, InlineThreadNotStarted], None]] = None) -> Any:
     """Under Q: bind the admitted RUNNING row to a fresh pseudo-slot and start its body thread.
 
     ``meta`` is the lane's RUNNING meta (``conversation_lane.admit_turn``), no carrier's
@@ -190,7 +243,8 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
     pooled owner wait over the pseudo-slot's queue), registered in the direct
     activity registry for the in-process seams; a live call gets its turn attached.
     A row reserved for this executor (``_inline_bind``) stays reserved until its thread
-    runs. Returns the installed slot.
+    runs. A Host with its own queue publishes the reserved executor at admission.
+    Its no-pool caller discloses the started thread after releasing Q. Returns the installed slot.
     """
     import queue as stdqueue
     from functools import partial
@@ -206,95 +260,126 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
         raise RuntimeError(f"conversation turn {task_id} was admitted but its row could not be published")
     if meta.get("worker_id") is not None:
         raise RuntimeError(f"conversation turn {task_id} is already held by carrier {meta['worker_id']}")
-    owner = dict(task.get("_execution_owner") or {})
-    owner.update(lane=LANE_CONVERSATION, executor=executor)
-    task["_execution_owner"] = owner
     from supervisor.conversation_lane import armed
 
-    wid = max(pool.WORKERS, default=-1) + 1
+    presence = bool(task.get("_presence_run"))
+    # A Host reservation can bind across pool startup. A pooled admission may degrade only while its pool runs.
+    reserved_presence = presence and bool(meta.get("_inline_bind"))
+    pool_armed = armed()
+    if presence and not pool_armed and not reserved_presence:
+        raise InlineExecutorUnavailable("the Presence turn's pool stopped before its carrier could start")
+    owner = task.get("_execution_owner") or {}
+    task["_execution_owner"] = {**owner, "lane": LANE_CONVERSATION, "executor": executor}
+    wid = next(_HOST_SLOT_IDS) if presence else max(0, max(pool.WORKERS, default=-1) + 1)
     in_q: Any = stdqueue.Queue()
-    if armed():
+    if pool_armed and not presence:
         out_q = pool.get_event_q()
     else:
-        # No started pool generation: a producer here never creates a bus of its own (a Host serving alone
-        # would start a manager process nothing drains). An attached server bus is used; without one the
-        # Presence frames settle in-process and the rest has no consumer to reach.
+        # Presence waits and settles on its own thread, even when the attached bus serves other turns.
+        # A standalone Host never creates a manager for a bus nobody drains.
         try:
-            out_q = _UnarmedFrames(pool.get_event_q(create=False))
-        except TypeError:
-            out_q = _UnarmedFrames(pool.get_event_q())  # a test's event-queue stub takes no create kwarg
+            bus = pool.get_event_q(create=False)
         except RuntimeError:
-            out_q = _UnarmedFrames(None)
-    presence = bool(task.get("_presence_run"))
+            bus = None
+        out_q = _InlineFrames(bus, task.get("drive_root") or pool.DRIVE_ROOT, meta.get("_presence_execution"),
+                              task_id if presence else "")
     if agent is None:
         # A Presence body is its own runner (``presence_carrier.carry_presence_turn`` builds the actor):
         # the pseudo-slot needs only the owner-wait seam, never a fresh native agent.
         agent = SimpleNamespace(owner_wait_callback=None, _event_queue=None) if presence else pool._get_chat_agent()
-    agent.owner_wait_callback = partial(worker_owner_wait, wid, in_q, out_q)
+    agent.owner_wait_callback = out_q if presence else partial(worker_owner_wait, wid, in_q, out_q)
     if realtime_turn is not None:
         agent._realtime_turn = realtime_turn
     dispatched = {**task, "_phase_generation": str(meta.get("phase_generation") or "")}
     if meta.get("fresh_identity"):
         dispatched["_fresh_identity"] = True
-    registry = get_direct_activity_registry()
-    entry = registry.register(
-        task_id, int(task.get("chat_id") or 0), client_message_id=str(meta.get("client_message_id") or ""),
-        project_id=str(task.get("project_id") or ""), kind="presence" if presence else "direct_chat",
-        origin_message_ref=task.get("origin_message_ref"), actor=agent,
-        reply_expected=bool(meta.get("reply_expected")),
-    )
-    entry.executor = executor
-    if entry.execution is not None:
-        entry.execution.advance("started")
     slot = pool.Worker(wid=wid, proc=None, in_q=in_q, busy_task_id=task_id, lane=LANE_CONVERSATION, executor=executor)
     slot.booting, slot.reaping = False, False
+    registry = get_direct_activity_registry()
+    entry = None
 
     def body() -> None:
-        from supervisor.worker_process import run_worker_task
+        with _queue_lock:  # start and registration share the caller's Q hold
+            if entry is None:
+                return
 
         try:
+            from supervisor.worker_process import run_worker_task
+
+            drive_root = out_q.root if presence else pool.DRIVE_ROOT
+            if presence and not reserved_presence:
+                disclose_inline_turn(task, executor, reason, host_root=out_q.root)
             run_worker_task(agent, dispatched, wid=wid, out_q=out_q, repo_dir=str(pool.REPO_DIR),
-                            drive_root=str(pool.DRIVE_ROOT), on_failure=on_failure)
+                            drive_root=str(drive_root), on_failure=on_failure)
             slot.proc.exitcode = 0
         except Exception:
             slot.proc.exitcode = 1
             log.warning("Inline executor %s for %s ended with an error", executor, task_id, exc_info=True)
         finally:
-            registry.unregister(task_id)
-            with _queue_lock:
-                if pool.WORKERS.get(wid) is slot:
-                    pool.WORKERS.pop(wid)
+            try:
+                if presence:
+                    from ouroboros.presence_carrier import finish_inline_presence
 
-    slot.proc = InlineCarrier(body, name=f"{executor}-{task_id}", on_stop=lambda: arm_inline_stop(task_id))
+                    finish_inline_presence(meta, out_q.settlement or {}, pool)
+            finally:
+                try:
+                    registry.unregister(task_id, expected=entry)
+                finally:
+                    with _queue_lock:
+                        if pool.WORKERS.get(wid) is slot:
+                            pool.WORKERS.pop(wid)
+
+    on_stop = out_q.stop_event.set if presence else lambda: arm_inline_stop(task_id)
+    slot.proc = InlineCarrier(body, name=f"{executor}-{task_id}", on_stop=on_stop)
     slot.process_birth = f"inline:{task_id}"
-    slot.ready_identity = None
     pool.WORKERS[wid] = slot
     meta["worker_id"] = wid
     meta["dispatched_at"] = time.time()
     meta["executor"] = executor
-    _disclose(task, executor, reason)
-    queue.persist_queue_snapshot(reason="conversation_turn_inline")
     try:
-        slot.proc.start()
-    except RuntimeError as exc:
-        # The process can start no thread: nothing ran. The pseudo-slot and the activity entry leave, the
-        # row returns to "admitted, awaiting a carrier" (its owner record names the worker executor again),
-        # and the caller learns it by type: the Host answers a typed retry, the tick tries again later.
-        registry.unregister(task_id)
-        if pool.WORKERS.get(wid) is slot:
-            pool.WORKERS.pop(wid)
+        if not reserved_presence:
+            queue.persist_queue_snapshot(reason="conversation_turn_inline")
+        try:
+            slot.proc.start()
+        except Exception as exc:
+            if not slot.proc.is_alive():
+                raise InlineThreadNotStarted(f"{executor} thread could not start: {exc}") from exc
+        entry = registry.register(
+            task_id, int(task.get("chat_id") or 0), client_message_id=str(meta.get("client_message_id") or ""),
+            project_id=str(task.get("project_id") or ""), kind="presence" if presence else "direct_chat",
+            origin_message_ref=task.get("origin_message_ref"), actor=None if presence else agent,
+            reply_expected=bool(meta.get("reply_expected")),
+        )
+    except Exception as exc:
+        pool.WORKERS.pop(wid)
         meta["worker_id"] = None
         meta.pop("dispatched_at", None)
         meta.pop("executor", None)
-        task["_execution_owner"] = {**owner, "executor": EXECUTOR_WORKER}
-        queue.persist_queue_snapshot(reason="conversation_turn_inline_unstarted")
-        raise InlineExecutorUnavailable(f"{executor} thread could not start: {exc}") from exc
+        task["_execution_owner"] = owner
+        if not reserved_presence:
+            try:
+                if isinstance(exc, InlineThreadNotStarted) and on_not_started is not None:
+                    on_not_started(meta, exc)
+            finally:  # include any withdrawn admission in the same rollback snapshot
+                queue.persist_queue_snapshot(reason="conversation_turn_inline_unstarted")
+        if isinstance(exc, InlineThreadNotStarted):
+            raise
+        raise InlineExecutorUnavailable(f"{executor} could not bind the turn") from exc
+    entry.executor = executor
+    if entry.execution is not None:
+        entry.execution.advance("started")
     meta.pop("_inline_bind", None)  # bound and running: the reservation has done its work
+    if not presence:
+        disclose_inline_turn(task, executor, reason)
     return slot
 
 
 class InlineExecutorUnavailable(RuntimeError):
-    """The inline executor's thread could not start: nothing ran, the admitted row still awaits a carrier."""
+    """The inline executor could not take the admitted turn."""
+
+
+class InlineThreadNotStarted(InlineExecutorUnavailable):
+    """The thread start itself failed before the body ran."""
 
 
 def arm_inline_stop(task_id: str) -> None:
@@ -551,5 +636,6 @@ def stop_direct_chat_turn(task_id: str, turn: Dict[str, Any], *, deliver: bool =
 
 
 __all__ = ["DIRECT_TURN_STOP_ENDED", "DIRECT_TURN_STOP_GONE", "DIRECT_TURN_STOP_LIVE", "EXECUTOR_INLINE_CALL",
-           "EXECUTOR_INLINE_DEGRADED", "InlineCarrier", "InlineExecutorUnavailable", "arm_inline_stop", "inline_executors_fact", "inline_vitals", "refused_carrier_reason",
+           "EXECUTOR_INLINE_DEGRADED", "InlineCarrier", "InlineExecutorUnavailable", "InlineThreadNotStarted",
+           "arm_inline_stop", "disclose_inline_turn", "inline_executors_fact", "inline_vitals", "refused_carrier_reason",
            "run_inline_turn", "start_inline_turn", "stop_direct_chat_turn"]

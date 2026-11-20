@@ -312,9 +312,10 @@ def test_a_refresh_a_later_capture_overtook_leaves_that_captures_newer_counts(pu
     pool["worker_total"] = 3
     with queue._queue_lock:  # the quiet tick's one measurement, handed to the writer
         measured, after = queue_publication._pool_counts(), queue_publication._STATE["capture_seq"]
+        identity = queue_publication.publication_identity()
     pool.update(worker_total=0, assignable_idle_workers=0)  # the pool empties; a barrier publishes that first
     assert queue.publish_queue_snapshot("barrier") is True
-    assert queue_publication._refresh_alive(measured, after) is True
+    assert queue_publication._refresh_alive(measured, after, identity) is True
     assert _read(root, "queue.alive")["pool"]["worker_total"] == 0
     assert queue_observation.load_queue_document(root)["worker_total"] == 0
 

@@ -234,7 +234,7 @@ test('a form of read-only fields is a status: its check refreshes those fields i
         fields: ['token_status', 'bridge_status', 'miniapp_status'].map((name) => ({ name, label: name, type: 'text', disabled: true })),
     };
     const reads = [
-        { token_status: 'Not set (Settings → Secrets)', bridge_status: 'Waiting for a bot token', miniapp_status: 'Waiting for a bot token' },
+        { token_status: 'Not set (Settings → Accounts and keys)', bridge_status: 'Waiting for a bot token', miniapp_status: 'Waiting for a bot token' },
         { token_status: 'Saved', bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
         { token_status: "Can't read saved settings now; the current token stays in use", bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
     ];
@@ -304,7 +304,7 @@ test('Telegram\'s Connection shows each long production sentence whole, posts wh
     };
     const reads = [
         { token_status: "Can't read saved settings now; the current token stays in use",
-          bridge_status: 'Stopped: Telegram refused this token; save a new one in Secrets', miniapp_status: long },
+          bridge_status: 'Stopped: Telegram refused this token; save a new one in Settings → Accounts and keys', miniapp_status: long },
         { token_status: 'Saved', bridge_status: 'Connecting with the saved token…',
           miniapp_status: 'Applying the token once the old Mini App has stopped', message: 'Status checked.' },
     ];

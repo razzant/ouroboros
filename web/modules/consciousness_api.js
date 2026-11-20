@@ -78,6 +78,7 @@ export function normalizePlace(raw) {
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
             .filter((item) => item.fact),
         wakeSuggestions: [...new Set(list(place.wake_suggestions).map(text).filter(Boolean))],
+        wakeReview: ['pending', 'ambiguous'].includes(place.wake_review) ? place.wake_review : null,
         notes: list(place.notes).map((note) => ({
             id: text(note?.note_id), text: text(note?.text), author: text(note?.author), at: text(note?.at),
         })).filter((note) => note.text),

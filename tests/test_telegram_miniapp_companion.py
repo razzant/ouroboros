@@ -225,16 +225,17 @@ def test_doh_parser_accepts_public_ipv4_and_rejects_bad_answers() -> None:
     )
 
     invalid_payloads = [
-        {**valid, "Status": 3},
         {**valid, "TC": True},
         {**valid, "Question": [{"name": "wrong.example", "type": 1}]},
         {**valid, "Answer": [{"name": host, "type": 1, "data": "127.0.0.1"}]},
         {**valid, "Answer": [{"name": host, "type": 1, "data": "224.0.0.1"}]},
         {**valid, "Answer": [{"name": host, "type": 1, "data": "not-an-ip"}]},
+        {**valid, "Answer": []},
     ]
     for payload in invalid_payloads:
-        with pytest.raises(gateway._PublicProbeError):
+        with pytest.raises(gateway._PublicProbeError) as excinfo:
             gateway._parse_doh_ipv4_response(json.dumps(payload).encode(), host)
+        assert not isinstance(excinfo.value, gateway._PublicHostAbsentError), payload
     with pytest.raises(gateway._PublicProbeError, match="oversized"):
         gateway._parse_doh_ipv4_response(
             b"{" + b" " * gateway._MAX_DOH_RESPONSE_BYTES + b"}",
@@ -433,6 +434,90 @@ def test_public_gateway_dns_failure_uses_doh_but_marker_failure_does_not(
             )
         )
     assert doh_calls == []
+
+
+def test_probe_once_splits_confirmed_absence_from_observer_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the public verdict using the HTTP responses the two observers actually deliver."""
+    class Tunnel:
+        returncode = None
+
+    host = "fresh-name.trycloudflare.com"
+    question = {"name": host.upper() + ".", "type": 1}
+    nxdomain = {"Status": 3, "TC": False, "Question": [question]}
+    httpx = gateway.httpx
+    client = httpx.AsyncClient
+
+    def probe(packet: dict | None, *, local_dns_failure: bool = True) -> gateway.PublicProbeOutcome:
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.host == host:
+                error = httpx.ConnectError("connect failed", request=request)
+                if local_dns_failure:
+                    raise error from socket.gaierror("name lookup failed")
+                raise error
+            assert local_dns_failure and request.url.host == "1.1.1.1"
+            assert dict(request.url.params) == {"name": host, "type": "A"}
+            if packet is None:
+                raise httpx.ReadTimeout("resolver timed out", request=request)
+            return httpx.Response(200, headers={"content-type": "application/dns-json"}, json=packet)
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(respond), **kw))
+        return asyncio.run(gateway.probe_public_gateway_once(f"https://{host}/", Tunnel()))
+
+    soa = {"name": "trycloudflare.com.", "type": 6, "data": "ns.example. hostmaster.example. 1 2 3 4 5"}
+    for packet in (nxdomain, {**nxdomain, "Question": [{**question, "class": 1}], "Answer": [], "Authority": [soa]}):
+        assert probe(packet) is gateway.PublicProbeOutcome.HOST_ABSENT, packet
+
+    address = {"name": host, "type": 1, "data": "104.16.230.132"}
+    alias = {"name": host, "type": 5, "data": "edge.example."}
+    for changes in (
+        {"Status": 2}, {"Status": 5}, {"Status": "3"}, {"TC": True}, {"TC": None},
+        {"Question": []}, {"Question": [question, question]}, {"Question": [{**question, "name": "other.example."}]},
+        {"Question": [{**question, "name": host + ".."}]}, {"Question": [{**question, "type": 28}]},
+        {"Question": [{**question, "class": 3}]}, {"Question": [{**question, "class": True}]},
+        {"Answer": [address]}, {"Answer": [alias]}, {"Answer": [alias, {**address, "name": alias["data"]}]},
+        {"Answer": None}, {"Answer": {}},
+    ):
+        assert probe({**nxdomain, **changes}) is gateway.PublicProbeOutcome.OBSERVER_UNAVAILABLE, changes
+    assert probe(None) is gateway.PublicProbeOutcome.OBSERVER_UNAVAILABLE
+    assert probe(nxdomain, local_dns_failure=False) is gateway.PublicProbeOutcome.OBSERVER_UNAVAILABLE
+
+
+def test_is_dns_resolution_error_reads_the_installed_client_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinguish resolver failure from TCP refusal through httpcore's real exception mapping."""
+    httpx = gateway.httpx
+    real_dns = socket.getaddrinfo
+    host = "gateway.invalid"
+    resolved: list[Any] = []
+
+    def dns(target: Any, *args: Any, **kwargs: Any) -> Any:
+        if target in (host, host.encode()):
+            resolved.append(target)
+            raise socket.gaierror(socket.EAI_NONAME, "synthetic local resolver failure")
+        assert target in ("127.0.0.1", b"127.0.0.1", "::1", b"::1"), target
+        return real_dns(target, *args, **kwargs)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False, http2=False) as client:
+            with pytest.raises(httpx.ConnectError) as dns_error:
+                await gateway._probe_gateway_normally(client, f"https://{host}/", timeout_sec=2.0)
+            assert resolved, "the real client never consulted the substitute resolver"
+            assert gateway._is_dns_resolution_error(dns_error.value)
+
+            # Keep the port reserved but never listen; no other test can claim it between bind and connect.
+            with socket.socket() as reserved:
+                reserved.bind(("127.0.0.1", 0))
+                with pytest.raises(httpx.ConnectError) as tcp_error:
+                    await gateway._probe_gateway_normally(
+                        client, f"http://127.0.0.1:{reserved.getsockname()[1]}/", timeout_sec=2.0
+                    )
+            assert not gateway._is_dns_resolution_error(tcp_error.value)
+
+    monkeypatch.setattr(socket, "getaddrinfo", dns)
+    asyncio.run(scenario())
 
 
 def test_public_gateway_retries_doh_after_initial_dns_propagation_miss(

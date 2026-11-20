@@ -950,6 +950,10 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     wid = evt.get("worker_id")
     meta = ctx.RUNNING.get(str(task_id or ""), {}) if task_id else {}
+    from supervisor.conversation_lane import host_presence_row
+
+    if host_presence_row(meta):
+        return  # this Host releases the row when its own thread leaves run_worker_task
     task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
     prepared_attempt = evt.get("_files_prepared_attempt")
     if prepared_attempt is not None and (

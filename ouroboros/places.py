@@ -1,12 +1,12 @@
 """Host-owned places, circles, atomic revisioned choices and typed wake matching.
 
-The store is installation-local. Its first locked write imports legacy bindings
-once; connectors never rewrite an existing place when their declarations change.
+The installation's first locked import copies legacy bindings once. Admission
+can finish their outstanding wake defaults through ``places_migration``.
 Working folders are addresses, not capability fences. Missing state is empty;
 malformed state is a repair error and is never replaced with an empty store.
 
 Circles live in the same document beside the place rows (an ordered ``circles``
-list and ``place_choices`` by place id: its circle and its description), so one
+list and per-connection ``place_choices`` including the legacy wake witness), so one
 read resolves a place with the words it inherits and one lock writes both. A
 place row keeps its frozen keys: a body predating circles reads every place and
 ignores the circles (``PlaceRecords``).
@@ -17,7 +17,7 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -62,14 +62,13 @@ def valid_wake_fact(fact: Any) -> bool:
     return isinstance(fact, str) and (fact in (*WAKE_FACTS, FACT_LEGACY_ADDRESSED) or is_wake_signal(fact))
 
 
-def declared_fact_labels(connector: str) -> dict[str, str]:
-    """``{fact: label}`` its live publication words itself (a signal, which only it can vouch for, or a core kind)."""
+def declared_fact_labels(place: Place) -> dict[str, str]:
+    """The live declarations for this place vouch for its signals and their labels."""
+    from ouroboros.extension_contributions import place_fact_labels
     from ouroboros.extension_registry_state import live_contribution_projection
+    from ouroboros.places_migration import matching_declarations
 
-    return {fact["id"]: fact["label"] for row in live_contribution_projection()
-            if row.get("provides") == "place" and row.get("skill") == connector
-            for fact in row.get("facts", []) if isinstance(fact, dict)
-            and valid_wake_fact(fact.get("id")) and isinstance(fact.get("label"), str)}
+    return place_fact_labels(matching_declarations(place, live_contribution_projection()))
 
 
 class PlaceError(ValueError):
@@ -221,7 +220,7 @@ def _valid_circle(row: Any) -> bool:
 
 
 def _valid_choice(row: Any) -> bool:
-    """A place's circle (who placed it, when) and description (who wrote it, when), for one connection."""
+    """Check one connection's circle and authored description. Migration validates its own optional witness."""
     return (isinstance(row, dict) and type(row.get("connected_revision")) is int and row["connected_revision"] >= 0
             and all(isinstance(row.get(key, ""), str) for key in (
                 "circle_id", "placed_by", "placed_at", "description", "description_author", "description_at"))
@@ -245,41 +244,30 @@ def _read(drive_root: Any) -> dict:
 def paused_places_sentence(drive_root: Any) -> str:
     """Name current pauses, including legacy imports in memory, without writing."""
     try:
-        current = _read(drive_root)
-        migration_pending = not current.get("migration", {}).get("presence_bindings_v1")
-        current = _migrated_document(drive_root, current)
+        stored = _read(drive_root)
+        current = _migrated_document(drive_root, stored)
         rows = current["places"]
     except (PlaceError, OSError, ValueError):
         return "Paused places: unknown (place records could not be read)."
     labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
     sentence = "Paused places (no writing there; tasks are not affected): " + ", ".join(labels) + "." if labels else ""
-    if migration_pending and current.get("migration", {}).get("problems"):
+    if current is not stored and current.get("migration", {}).get("problems"):
         sentence += " Paused legacy places: unknown (some old connections could not be read)."
     return sentence.strip()
 
 
 def _migrated_document(drive_root: Any, current: dict) -> dict:
     """Apply the legacy import in memory for both display and the durable migration."""
-    from ouroboros.places_migration import legacy_places
+    from ouroboros.places_migration import import_bindings, import_recorded
 
-    current = _document(current or None)
-    if current.get("migration", {}).get("presence_bindings_v1"):
-        return current
-    rows = dict(current["places"])
-    imported, problems = legacy_places(Path(drive_root))
-    known = {bid for row in rows.values() for bid in row.get("legacy_binding_ids", ())}
-    for place in imported:
-        if not known.intersection(place.legacy_binding_ids):
-            rows.setdefault(place.place_id, place_summary(place))
-    return {**current, "places": rows, "revision": current["revision"] + 1,
-            "migration": {"presence_bindings_v1": True, "at": utc_now_iso(), "problems": problems}}
+    return current if import_recorded(current) else import_bindings(Path(drive_root), current)
 
 
 def migrate_places(drive_root: Any) -> dict:
     """Atomically import each binding once; a failed import leaves all source bytes intact."""
     path = places_path(drive_root)
     try:
-        return update_json_locked(path, lambda current: _migrated_document(drive_root, current),
+        return update_json_locked(path, lambda current: _migrated_document(drive_root, _document(current or None)),
                                   strict_existing_dict=True, reject_existing_empty_dict=True)
     except PlaceError:
         raise
@@ -299,6 +287,7 @@ class PlaceRecords:
     places: Mapping[str, Place]
     circles: tuple[Mapping[str, Any], ...]
     choices: Mapping[str, Mapping[str, Any]]
+    migration: Mapping[str, Any] = field(default_factory=dict)
 
     def circle(self, circle_id: str) -> Mapping[str, Any] | None:
         return next((row for row in self.circles if circle_id and row["circle_id"] == circle_id), None)
@@ -341,14 +330,15 @@ def _records(document: dict) -> PlaceRecords:
     rows = {key: _decode(value, connections.get(key)) for key, value in sorted(document["places"].items())}
     choices = {key: row for key, row in document.get("place_choices", {}).items()
                if key in rows and row["connected_revision"] == rows[key].connected_revision}
-    return PlaceRecords(document["revision"], rows, tuple(document.get("circles", ())), choices)
+    return PlaceRecords(document["revision"], rows, tuple(document.get("circles", ())), choices, document.get("migration", {}))
 
 
-def place_records(drive_root: Any) -> PlaceRecords:
-    """The places, circles and choices from one read (the legacy import runs first, as ``load_places``)."""
+def place_records(drive_root: Any, *, persist_import: bool = True) -> PlaceRecords:
+    """One snapshot. A display projects unimported legacy rows in memory."""
+    from ouroboros.places_migration import import_recorded
     current = _read(drive_root)
-    if not current.get("migration", {}).get("presence_bindings_v1"):
-        current = migrate_places(drive_root)
+    if not import_recorded(current):
+        current = migrate_places(drive_root) if persist_import else _migrated_document(drive_root, current)
     return _records(current)
 
 
@@ -356,18 +346,18 @@ def load_places(drive_root: Any) -> list[Place]:
     return list(place_records(drive_root).places.values())
 
 
-def migration_problems(drive_root: Any) -> list[dict]:
-    load_places(drive_root)
-    return list(_read(drive_root).get("migration", {}).get("problems", []))
+def migration_problems(drive_root: Any, records: PlaceRecords | None = None) -> list[dict]:
+    return list((records or place_records(drive_root, persist_import=False)).migration.get("problems", []))
 
 
 def place_room_index(drive_root: Any, place_id: str, *, details: bool = False) -> list[dict]:
     from ouroboros.place_arrivals import room_index
-    return room_index(drive_root, get_place(drive_root, place_id), details=details)
+    return room_index(drive_root, get_place(drive_root, place_id, persist_import=False), details=details)
 
 
-def get_place(drive_root: Any, place_id: str) -> Place:
-    for place in load_places(drive_root):
+def get_place(drive_root: Any, place_id: str, *, persist_import: bool = True) -> Place:
+    rows = load_places(drive_root) if persist_import else place_records(drive_root, persist_import=False).places.values()
+    for place in rows:
         if place.place_id == place_id:
             return place
     raise PlaceError("place_not_found", "place_id")
@@ -685,8 +675,13 @@ def _transact(drive_root: Any, mutate: Any, author: str = "", by: Any = None) ->
     """One locked read-modify-write of the place document after the legacy import (same lock file): ``mutate(document)``
     returns the next document or None (nothing written); removed words are kept first (``place_words_history``)."""
     from ouroboros.place_words_history import keeping
+    from ouroboros.places_migration import after_place_write
+
+    def apply(before):
+        return after_place_write(before, mutate(before))
+
     load_places(drive_root)
-    update_json_locked(places_path(drive_root), keeping(drive_root, mutate, author, by),
+    update_json_locked(places_path(drive_root), keeping(drive_root, apply, author, by),
                        strict_existing_dict=True, reject_existing_empty_dict=True)
 
 
@@ -699,7 +694,7 @@ def _with_choices(document: dict, choices: dict) -> dict:
 
 def _write(drive_root: Any, place_id: str, change: Any, expected_revision: int | None = None,
            choose: Any = None, author: str = "", by: Any = None) -> Place | None:
-    """One place's change; ``choose(choice, document)`` changes its circle or description in the same transaction.
+    """One place's change; ``choose(choice, document)`` updates its connection choices in the same transaction.
     A changed choice is a change of the place: its revision moves (its connection's written revision with it), so a
     sheet holding the older revision meets a conflict instead of overwriting."""
     _expected(expected_revision)
@@ -805,6 +800,9 @@ def edit_place(drive_root: Any, place_id: str, action: str, *, author: str,
         for name, args in changes:
             if name in _CHOICE_ACTIONS:
                 choice = _change_choice(choice, name, author, args, document)
+            elif name in ("set_wakes", "add_wake", "remove_wake") and document["places"][place_id].get("legacy_binding_ids"):
+                choice = {k: v for k, v in choice.items() if k != "wake_import"}
+                choice["wakes_reviewed"] = True
         return choice
     return _write(drive_root, place_id, change, expected_revision, choose, author, by)
 
@@ -963,14 +961,14 @@ def _change_place(old: Place | None, action: str, author: str, values: dict) -> 
         if not isinstance(facts, list) or any(not valid_wake_fact(f) for f in facts):
             raise PlaceError("place_wake_invalid", "wakes")
         added_signals = {f for f in facts if is_wake_signal(f)} - {w.fact for w in old.wakes}
-        if added_signals and not added_signals <= declared_fact_labels(old.connector).keys():
+        if added_signals and not added_signals <= declared_fact_labels(old).keys():
             raise PlaceError("place_wake_undeclared", "wakes", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         return replace(old, wakes=tuple(next((w for w in old.wakes if w.fact == fact), WakeItem(fact, author)) for fact in dict.fromkeys(facts)))
     if action in {"add_wake", "remove_wake"}:
         fact = values.get("fact", "")
         if not valid_wake_fact(fact):
             raise PlaceError("place_wake_invalid", "fact")
-        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_fact_labels(old.connector):
+        if action == "add_wake" and is_wake_signal(fact) and fact not in declared_fact_labels(old):
             raise PlaceError("place_wake_undeclared", "fact", "place_wake_undeclared: this connector has not declared that signal; turn it on or choose a listed kind.")
         items = tuple(w for w in old.wakes if w.fact != fact)
         if action == "add_wake":

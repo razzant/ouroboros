@@ -518,6 +518,9 @@ def in_process_stop_now(owner_ctx: Any) -> Optional[bool]:
     waiter = getattr(owner_ctx, "model_wait_context", None)
     if waiter is None or (getattr(waiter, "worker_slot_held", True) and not runner_reads_stop(waiter)):
         return False
+    inline_stop = getattr(waiter, "inline_presence_stop", None)
+    if inline_stop is not None and inline_stop.is_set():
+        return True
     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, read_active_intents, stop_policy
 
     task_id = str(waiter.task_id or "").strip()

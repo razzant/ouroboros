@@ -129,7 +129,7 @@ INVENTORY: Dict[Site, Row] = {
     # No carrier can start (spawn refused, a marker window, no pool generation; never "busy"): the same body, disclosed.
     ("supervisor/worker_chat_lane.py", "_degrade_if_no_carrier_can_start", "start_inline_turn"): Row(
         INLINE_DEGRADED, "at admission, on inline_carrier.refused_carrier_reason, a physical fact"),
-    ("supervisor/conversation_lane.py", "dispatch_awaiting_turns", "start_inline_turn"): Row(
+    ("supervisor/conversation_lane.py", "_dispatch_awaiting_turns", "start_inline_turn"): Row(
         INLINE_DEGRADED, "a turn already waiting, on the same physical fact"),
     ("supervisor/inline_carrier.py", "start_inline_turn.body", "run_worker_task"): Row(
         INLINE_DEGRADED, "the worker's task body on this process's thread, the pseudo-slot's (a live call's too)"),
@@ -387,7 +387,7 @@ def test_a_presence_event_runs_no_turn_body_in_this_process(lane, monkeypatch):
     frames (tests/test_conversation_lane_presence.py); nothing here runs it."""
     from ouroboros import presence_carrier, presence_runner
     from ouroboros.presence_runner import PresenceTurnExecutions
-    from tests.test_conversation_lane_presence import _payload
+    from tests._presence_event import event_payload
     from tests.test_presence_runner import _admission, _event
 
     started: List[str] = []
@@ -399,7 +399,7 @@ def test_a_presence_event_runs_no_turn_body_in_this_process(lane, monkeypatch):
         turn_id, identity="id-1", reserve=lambda: True, release=lambda: None,
         dispatch=lambda execution: presence_carrier.dispatch_presence_turn(
             execution, drive_root=lane.root, skill_name="telegram-bot", admission=admission, event=event,
-            event_payload=_payload(event), staged_files=[], gate_wait=True))
+            event_payload=event_payload(event), staged_files=[], gate_wait=True))
     assert began and lane.spare.in_q.get_nowait()["id"] == turn_id, "the body went to the carrier"
     _no_door(started)
 

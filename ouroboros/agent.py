@@ -1005,6 +1005,8 @@ class OuroborosAgent:
                         self._release_turn()
                     return [event]
                 self._release_turn()
+                if task.get("_presence_turn") and (task.get("metadata") or {}).get("presence_request_waits"):
+                    raise  # the Host-admitted author's runner owns its RUNNING barrier and Stop
                 if _worker_immediate_stop(exc, waiter):
                     return []  # as in the body: the supervisor's cancellation kills and settles this task
                 raise
@@ -1313,33 +1315,23 @@ class OuroborosAgent:
                     direct_chat=conversation_origin(task),
                 ),
             }
+            limit_event = {  # the one body both supervisor events below carry
+                "task_id": task_id,
+                "task_type": str(task.get("type") or "task"),
+                "worker_id": task.get("worker_id"),
+                "chat_id": task.get("chat_id"),
+                "root_task_id": resource_limit["root_task_id"],
+                "resource_limit": resource_limit,
+            }
             if resource_limit["scope"] == "root" and not replay_safe and not conversation_origin(task):
                 # One root admission latch is enough. Existing siblings finish
                 # any sent request and meet the same ledger rail before another.
-                self._pending_events.append({
-                    "type": "budget_root_fence",
-                    "task_id": task_id,
-                    "task_type": str(task.get("type") or "task"),
-                    "worker_id": task.get("worker_id"),
-                    "chat_id": task.get("chat_id"),
-                    "root_task_id": resource_limit["root_task_id"],
-                    "resource_limit": resource_limit,
-                    "ts": utc_now_iso(),
-                })
+                self._pending_events.append({"type": "budget_root_fence", **limit_event, "ts": utc_now_iso()})
             if replay_safe:
                 # Supervisor owns the queue transition.  No task_done/result is
                 # emitted: the same task stays pending with a durable pause
                 # marker until an explicit owner resume or cancel.
-                self._pending_events.append({
-                    "type": "budget_pause",
-                    "task_id": task_id,
-                    "task_type": str(task.get("type") or "task"),
-                    "worker_id": task.get("worker_id"),
-                    "chat_id": task.get("chat_id"),
-                    "root_task_id": resource_limit["root_task_id"],
-                    "resource_limit": resource_limit,
-                    "ts": utc_now_iso(),
-                })
+                self._pending_events.append({"type": "budget_pause", **limit_event, "ts": utc_now_iso()})
                 return list(self._pending_events)
             message_fn = _budget_exhausted_message if conversation_origin(task) else _queued_budget_exhausted_message
             text = message_fn()

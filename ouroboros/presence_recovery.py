@@ -118,7 +118,8 @@ def custody_refusal(stored: Mapping[str, Any], task_id: str, custody: str) -> An
     facts = retained_turn_facts(stored, task_id)
     code = (facts["code"] if custody == CUSTODY_TERMINAL else
             "presence_turn_parked" if custody == CUSTODY_QUEUED else "presence_turn_custody_unknown")
-    error = PresenceTurnError(code, "source_event_id", turn_ref=task_id, work_ref=str(facts.get("work_ref") or ""),
+    field = "no_continuation_owner" if code == "presence_continuation_unavailable" else "source_event_id"
+    error = PresenceTurnError(code, field, turn_ref=task_id, work_ref=str(facts.get("work_ref") or ""),
                               disposition="retained", delivery_reporting_version=facts["delivery_reporting_version"])
     if custody != CUSTODY_TERMINAL:
         error.custody = custody
@@ -136,8 +137,9 @@ def retained_turn_facts(stored: Mapping[str, Any], task_id: str) -> dict[str, An
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), Mapping) else {}
     event = presence.get("event") if isinstance(presence.get("event"), Mapping) else {}
     reason, status = str(stored.get("reason_code") or ""), str(stored.get("status") or "")
-    code = ("presence_resources_unavailable" if reason == "resource_refusal_no_resend" else
-            "presence_turn_cancelled" if status == "cancelled" else "presence_attempt_outcome_unknown")
+    from ouroboros.presence_runner import _terminal_refusal
+
+    code = _terminal_refusal(stored) or "presence_attempt_outcome_unknown"
     facts: dict[str, Any] = {
         "code": code, "turn_ref": task_id, "recorded_status": status,
         "reason_code": reason, "source_event_id": str(event.get("source_event_id") or ""),

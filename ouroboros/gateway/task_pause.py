@@ -70,7 +70,10 @@ async def api_task_pause(request: Request) -> JSONResponse:
         return JSONResponse(result, status_code=202 if result.get("latch_pending") else 200)
     error = str(result.get("error") or "pause_refused")
     status = 404 if error == "task_not_live" else 409 if error in _CONFLICTS else 503
-    return json_error(f"pause refused: {error}", status, task_id=task_id, reason_code=error,
+    # The door's own stored reason survives (a host-owned turn no running pool can resume refuses
+    # ``no_continuation_owner``); ``error`` stays the status vocabulary.
+    return json_error(f"pause refused: {error}", status, task_id=task_id,
+                      reason_code=str(result.get("reason_code") or error),
                       **({"root_task_id": result["root_task_id"]} if result.get("root_task_id") else {}))
 
 

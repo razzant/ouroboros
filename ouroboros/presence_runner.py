@@ -346,8 +346,9 @@ def _retry_reset(row: Mapping[str, Any], task_id: str, identity: str) -> datetim
     return reset if reset.tzinfo is not None else None
 
 
-def _retry_target(drive_root: Path, first_id: str, identity: str, *, claim: bool = False) -> str:
-    """Follow immutable predecessor links; only the conversation-lock holder may claim one.
+def _retry_target(drive_root: Path, first_id: str, identity: str, *, claim: bool = False,
+                  stop_successor: Callable[[str], Any] | None = None) -> str:
+    """Follow immutable predecessor links; only the gate holder or its stopped waiter may publish one.
 
     The current failed row stays intact. A crashed claim points at an unused
     successor, whose own RUNNING barrier still precedes every model/tool effect.
@@ -385,6 +386,8 @@ def _retry_target(drive_root: Path, first_id: str, identity: str, *, claim: bool
             return {"presence_retry_next": successor}
 
         try:
+            if stop_successor:
+                stop_successor(successor)  # never make an unused successor newly reachable by recovering a Stop
             write_task_result(drive_root, current_id, STATUS_FAILED,
                               strict_existing_dict=True, _field_projector=link)
         except (OSError, ValueError, StoreError) as exc:
@@ -409,27 +412,27 @@ def presence_event_identity(binding_id: str, event: PresenceTurnEvent) -> str:
     return hashlib.sha256(json.dumps(facts, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-def _assert_event_identity(stored: Mapping[str, Any], task_id: str, identity: str) -> None:
+def _assert_event_identity(stored: Mapping[str, Any], task_id: str, identity: str, *, require_proven: bool = False) -> None:
     if not stored or not identity:
         return
     metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
     prior = str(metadata.get("presence_event_identity") or "")
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
     old = presence.get("event") if isinstance(presence.get("event"), dict) else {}
-    if not prior and old and all(old.get(key) is not None for key in (
-            "source_event_id", "provider", "account_id", "conversation_id", "thread_id", "actor")):
+    if (not prior and presence.get("binding_id") and isinstance(presence.get("observed_text"), str)
+            and isinstance(old.get("actor"), Mapping) and all(old.get(key) is not None for key in (
+                "source_event_id", "provider", "account_id", "conversation_id", "thread_id"))):
         # Older turns already stored the exact event and observed text, before a separate
         # digest was introduced. Reconstruct its identity instead of stranding valid replies.
         prior = presence_event_identity(str(presence.get("binding_id") or ""), PresenceTurnEvent(
             source_event_id=str(old["source_event_id"]), provider=str(old["provider"]),
             account_id=str(old["account_id"]), conversation_id=str(old["conversation_id"]),
             thread_id=str(old["thread_id"]), conversation_key=str(old.get("conversation_key") or ""),
-            actor=old["actor"] if isinstance(old["actor"], Mapping) else {},
-            conversation={}, message={}, text=str(presence.get("observed_text") or "")))
+            actor=old["actor"], conversation={}, message={}, text=presence["observed_text"]))
     if prior and prior != identity:
         raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=task_id)
-    if (not prior and not is_reconciled_presence_placeholder(stored)
-            and str(stored.get("status") or "") in {STATUS_COMPLETED, STATUS_FAILED}):
+    if not prior and (require_proven or (not is_reconciled_presence_placeholder(stored)
+            and str(stored.get("status") or "") in {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED})):
         # An incomplete legacy terminal cannot authorize cross-room replay.
         raise PresenceTurnError("presence_event_identity_unproven", "source_event_id", turn_ref=task_id)
 
@@ -459,6 +462,51 @@ def _stored_turn(drive_root: Path, task_id: str, identity: str = "") -> dict[str
         raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id) from exc
 
 
+def _end_inline_turn(root: Path, task_id: str, identity: str, status: str, reason: str, notice: str) -> dict:
+    """Record the Host author's observed end, only on its own still-running result."""
+    from ouroboros.task_results import write_task_result
+
+    def same_author(current: dict, fields: dict) -> dict | None:
+        metadata = current.get("metadata") or {}
+        running = current.get("status") == STATUS_RUNNING or (
+            status == STATUS_CANCELLED and current.get("status") == "cancel_requested")
+        if running and metadata.get("presence_event_identity") == identity:
+            return fields
+        return None
+
+    fields = {}
+    if status == STATUS_CANCELLED:
+        from supervisor.owner_stop import owner_stop_origin
+
+        origin = owner_stop_origin(root, task_id)
+        if origin.get("stop_policy") == "immediate":
+            fields["cancel_origin"] = origin
+    return write_task_result(root, task_id, status, reason_code=reason, result=notice, terminal_origin="host_notice",
+                             strict_existing_dict=True, _terminal_observed=True, _field_projector=same_author, **fields)
+
+
+def cancel_gate_waiter(root: Path, seed: Mapping[str, Any]) -> str:
+    """Settle a stopped gate waiter using the same source-bound retry link as a running author."""
+    from ouroboros.task_results import write_task_result
+
+    identity = seed["metadata"]["presence_event_identity"]
+    notice = "The Host stopped this Presence turn before it ran."
+
+    def stop(task_id: str) -> dict:
+        row = _stored_turn(root, task_id, identity) or write_task_result(
+            root, task_id, STATUS_CANCELLED, create_only=True, strict_existing_dict=True,
+            metadata=seed["metadata"], chat_id=seed["chat_id"], source=seed["source"],
+            result=notice, reason_code="presence_turn_cancelled", terminal_origin="host_notice")
+        _assert_event_identity(row, task_id, identity)
+        return row
+
+    task_id = _retry_target(root, seed["id"], identity, claim=True, stop_successor=stop)
+    row = stop(task_id)
+    if row.get("status") == "cancel_requested":
+        _end_inline_turn(root, task_id, identity, STATUS_CANCELLED, "presence_turn_cancelled", notice)
+    return task_id
+
+
 def _terminal_refusal(stored: Mapping[str, Any]) -> str:
     """Classify an unresolved attempt without certifying silence or absence of effects.
 
@@ -472,6 +520,8 @@ def _terminal_refusal(stored: Mapping[str, Any]) -> str:
         return "presence_resources_unavailable"
     if str(stored.get("status") or "") == STATUS_CANCELLED:
         return "presence_turn_cancelled"  # the owner's Stop: retained, never a reply or a re-run
+    if stored.get("reason_code") == "no_continuation_owner":
+        return "presence_continuation_unavailable"
     if (str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED}
             or str(stored.get("status_reconciled_from") or "") in {STATUS_RUNNING, STATUS_INTERRUPTED}):
         return "presence_attempt_outcome_unknown"
@@ -505,7 +555,8 @@ def _refused_turn(drive_root: Path, task_id: str, stored: Mapping[str, Any], cod
     _notify_unresolved_turn(drive_root, task_id)
     from ouroboros.presence_recovery import retained_turn_facts
 
-    return PresenceTurnError(code, "source_event_id", turn_ref=task_id,
+    field = "no_continuation_owner" if code == "presence_continuation_unavailable" else "source_event_id"
+    return PresenceTurnError(code, field, turn_ref=task_id,
                              work_ref=str(retained_turn_facts(stored, task_id).get("work_ref") or ""),
                              disposition="retry" if retryable else "retained",
                              delivery_reporting_version=int(presence.get("delivery_reporting_version") == 1))
@@ -515,13 +566,15 @@ def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> Presen
     if identity:
         task_id = _retry_target(drive_root, task_id, identity)
     stored = _stored_turn(drive_root, task_id, identity)
+    if stored.get("status") == STATUS_CANCELLED and not identity:
+        return None  # only a source-bound replay can project the retained Stop before taking the gate
     refusal = _terminal_refusal(stored)
     if refusal == "presence_resources_unavailable":
         reset = _retry_reset(stored, task_id, identity)
         if reset is not None and reset <= datetime.now(timezone.utc):
             return None  # the conversation-lock holder claims its successor
         raise _refused_turn(drive_root, task_id, stored, refusal, identity=identity)
-    if refusal and (str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED}
+    if refusal and (str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
                     or is_reconciled_presence_placeholder(stored)):
         return None  # the conversation gate distinguishes a live author from a lost attempt
     if refusal:
@@ -745,7 +798,7 @@ def _repair_pointer(drive_root: Path, conversation_key: str, physical_id: str) -
                          sends=sends or [], actions=_turn_actions(rows), work_ref=settled.work_ref,
                          finished_at=str(stored.get("ts") or ""),
                          delivery=_delivery_state(settled.delivery_reporting_version, sends, message, outcome),
-                         lent_at=_first_lent_at(stored))
+                         lent_at=_first_lent_at(stored) or str(stored.get("ts") or ""))
 
 
 def _pointer_behind(drive_root: Path, conversation_key: str, task_id: str) -> bool:
@@ -774,7 +827,8 @@ def _pointer_behind(drive_root: Path, conversation_key: str, task_id: str) -> bo
 
 
 def presence_turn_replay(drive_root: Path, task_id: str, conversation_key: str,
-                         identity: str = "", continuation_version: int = 0) -> PresenceTurnResult | None:
+                         identity: str = "", continuation_version: int = 0, *,
+                         repair_pointer: bool = False) -> PresenceTurnResult | None:
     """A settled turn's durable answer, returned without the gate; None when the turn must (re)run.
 
     A version-1 consumer gets a continuing author's stored initial envelope (write-once),
@@ -793,6 +847,9 @@ def presence_turn_replay(drive_root: Path, task_id: str, conversation_key: str,
             _repair_pointer(Path(drive_root), conversation_key, envelope.task_id)
             return envelope
     cached = _cached_result(Path(drive_root), task_id, identity)
+    if cached is not None and repair_pointer:
+        _repair_pointer(Path(drive_root), conversation_key, cached.task_id)
+        return cached
     return None if cached is None or _pointer_behind(Path(drive_root), conversation_key, cached.task_id) else cached
 
 
@@ -1085,7 +1142,7 @@ def capture_presence_event(admission: PresenceAdmission, event: PresenceTurnEven
 
 
 def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identity: str, event: PresenceTurnEvent,
-                events: Sequence[Mapping[str, Any]], *, own_start: int) -> PresenceTurnResult:
+                events: Sequence[Mapping[str, Any]], *, own_start: int, replay_completed: bool = False) -> PresenceTurnResult:
     """A turn's end, still under its conversation lock: the durable terminal decides, a refused or unknown
     one is retained (``_refused_turn``), an unreported reply is logged at its conversation and the pointer
     names this turn without undoing a newer one. Shared by the Host's carrier and a moved turn's saved
@@ -1107,6 +1164,8 @@ def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identit
         raise _refused_turn(Path(drive_root), task_id, terminal, refusal,
                             identity=identity, work_ref=work_ref)
     if not isinstance(row, dict):
+        if replay_completed:
+            return presence_result_from_stored(terminal, task_id, drive_root)
         raise PresenceTurnError("presence_result_missing", "presence_result")
     continued = terminal.get("presence_continuation") if isinstance(terminal.get("presence_continuation"), dict) else {}
     result = PresenceTurnResult(
@@ -1281,13 +1340,14 @@ def run_presence_turn(
                 and not any(row.get("direction") == "in" for row in prior_rows)):
             log_dialogue(direction="in", user_id=actor_id, text=event.text or task["text"])
         if admission.place is not None:
-            from ouroboros.place_intake import decide_attention, settle_heard
+            from ouroboros.place_intake import WAKE_IMPORT_PENDING, decide_attention, settle_heard
             decision, allowance = decide_attention(Path(drive_root), admission, event)
             if decision == "silent":
                 return settle_heard(Path(drive_root), task, event, allowance["reason"],
                                     captured_task_id=_task_id(admission, event))
             if decision == "retry":
-                error = PresenceTurnError("consciousness_allowance_exhausted", "allowance")
+                error = (PresenceTurnError(WAKE_IMPORT_PENDING, "place") if allowance.get("reason") == WAKE_IMPORT_PENDING
+                         else PresenceTurnError("consciousness_allowance_exhausted", "allowance"))
                 error.disposition, error.retry_after = "retry", allowance["retry_after"]
                 raise error
             task["metadata"]["focus_allowance"] = allowance
@@ -1337,6 +1397,7 @@ def run_presence_turn(
                     retain_focus_source(drive_root, _task_id(admission, event))
         except (OSError, ValueError, StoreError) as exc:
             raise PresenceTurnError("presence_start_unwritable", "source_event_id", turn_ref=task_id) from exc
+        stopped_before_body = False
         try:
             from supervisor.worker_chat_lane import name_wake_on_admission
             name_wake_on_admission(drive_root, task, broadcast=(
@@ -1353,8 +1414,16 @@ def run_presence_turn(
                 intake_open = open_author_intake(Path(drive_root), task_id, event.conversation_key)
             except Exception:
                 log.debug("author intake fact not written for %s", task_id, exc_info=True)
+            from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
+
             try:
                 events = agent.handle_task(task)
+            except PhysicalAttemptPreconditionFailed as exc:
+                if (not getattr(exc, "before_task_start", False) or getattr(exc, "control_reason", None) != "cancelled"):
+                    raise
+                _end_inline_turn(Path(drive_root), task_id, identity, STATUS_CANCELLED,
+                                 "presence_turn_cancelled", "The Host stopped this Presence turn.")
+                events, stopped_before_body = [], True
             finally:
                 if intake_open:
                     try:
@@ -1377,7 +1446,8 @@ def run_presence_turn(
                                  identity=identity, sink=event_sink)
         if parked is not None:
             raise parked
-        return finish_turn(Path(drive_root), task, task_id, identity, event, events, own_start=own_start)
+        return finish_turn(Path(drive_root), task, task_id, identity, event, events, own_start=own_start,
+                           replay_completed=getattr(lease, "inline_stop", None) is not None or stopped_before_body)
 
     if admitted is not None:
         if admitted.conversation_key != str(event.conversation_key or "").strip():

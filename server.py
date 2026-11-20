@@ -698,7 +698,7 @@ def _run_supervisor(settings: dict) -> None:
         interrupted_running: list = []
         restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", lambda: restore_pending_from_snapshot(terminalized=interrupted_running))
         _start_preparation_generation(stop=stop_requested)
-        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True))
+        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True, startup=True))
         run_startup_phase(_loop_liveness, "startup:worker_spawn", spawn_workers)
         from ouroboros.server_process import record_applied_restart_settings
         record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
@@ -776,19 +776,17 @@ def _run_supervisor(settings: dict) -> None:
         _supervisor_error = f"Supervisor init failed: {exc}"
         _consciousness = None
         log.critical("Supervisor initialization failed", exc_info=True)
+        if not panic_termination_requested():
+            from supervisor.conversation_lane import close_presence_after_failed_startup
+            close_presence_after_failed_startup()
         try:
-            # Provider-configured lifespan normally relies on this supervisor
-            # owner for boot recovery. If initialization itself fails, keep the
-            # same custody pass instead of serving with orphan RUNNING rows.
-            recovery_pids = prior_worker_pids
-            if recovery_pids is None:
-                try:
-                    recovery_pids = _startup_worker_pids(DATA_DIR)
-                except Exception:
-                    recovery_pids = None
+            # Even a failed supervisor initialization owes its boot custody pass.
+            if prior_worker_pids is None:
+                with suppress(Exception):
+                    prior_worker_pids = _startup_worker_pids(DATA_DIR)
             _run_startup_task_recovery(
                 DATA_DIR, REPO_DIR, skip_live_data=_pytest_default_real_data_dir,
-                prior_worker_pids=recovery_pids,
+                prior_worker_pids=prior_worker_pids,
             )
         except Exception:
             log.critical("Startup recovery after supervisor initialization failure failed", exc_info=True)
@@ -1138,14 +1136,18 @@ async def lifespan(app):
     body_stop = threading.Event()  # lifespan ownership survives a cognitive supervisor revival; the boot coordinator's stop
     start_body = (lambda: None) if pytest_default_real_data_dir else bind_body_lifespan(
         lifespan_drive_root, body_stop, collection_ready=_supervisor_ready.is_set)
-    # A provider-ready boot starts the supervisor once the store published and the extensions registered.
     startup_provider_ready = has_startup_ready_provider(settings)
-    if not startup_provider_ready:  # readiness follows the store's publication (store_switch.when_ready below)
+    if startup_provider_ready:
+        _supervisor_init_done.clear()  # a prior lifespan's outcome does not settle this planned pool
+    else:  # readiness follows the store's publication (store_switch.when_ready below)
         _supervisor_init_done.set()
         log.info("No supported provider or local routing configured. Supervisor not started.")
 
     boot = SimpleNamespace(host_service_task=None, host_service_server=None, host_service_listener=ExitStack(),
                            extension_reconcile_task=None)
+
+    def body_stopping() -> bool:
+        return panic_termination_requested() or any(e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled))
 
     # --- at the store's publication (on the import thread): the dialogue first, repairs after ---
     def _dialogue() -> None:
@@ -1154,15 +1156,7 @@ async def lifespan(app):
         later settings save starts."""
         if startup_provider_ready and not body_stop.is_set() and not pytest_default_real_data_dir:
             _dialogue_cutover(lifespan_drive_root)
-            _open_dialogue(settings, stop_requested=lambda: any(
-                e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled)))
-
-    recovery = None
-    if not startup_provider_ready:  # after the store's publication: the recovery writes, then readiness (P1)
-        recovery = lambda: not body_stop.is_set() and _run_startup_task_recovery(  # noqa: E731
-            lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
-            prior_worker_pids=None if pytest_default_real_data_dir else _startup_worker_pids(lifespan_drive_root),
-        )
+            _open_dialogue(settings, stop_requested=body_stopping)
 
     def _after_extensions() -> None:
         """The body runtime and the supervisor (or the providerless recovery and readiness), only
@@ -1171,11 +1165,13 @@ async def lifespan(app):
         if body_stop.is_set() or not _await_extensions_ready(body_stop):
             return
         start_body()
-        if recovery is not None:
-            recovery()
-            _supervisor_ready.set()
-        else:
+        if startup_provider_ready:
             _start_supervisor_if_needed(settings)
+        else:  # the published store owns recovery even without a cognitive supervisor
+            if not body_stop.is_set():
+                _run_startup_task_recovery(lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
+                    prior_worker_pids=None if pytest_default_real_data_dir else _startup_worker_pids(lifespan_drive_root))
+            _supervisor_ready.set()
 
     store_switch.when_ready(lifespan_drive_root, _dialogue, _after_extensions)  # never on this thread: it starts the coordinator next
 
@@ -1222,15 +1218,16 @@ async def lifespan(app):
         ("owned_stops", lambda: live and finish_unconfirmed_stops(lifespan_drive_root)),  # before any extension/replacement process (§9)
         ("inherited_records", lambda: live and start_inherited_import(lifespan_drive_root)),  # the one-time disk walk, off the ready path
         ("usage_store", _usage_store),
-        ("event_queue_preparation", lambda: live and startup_provider_ready and server_boot.prepare_event_queue(lifespan_drive_root, lambda: (
-            panic_termination_requested() or any(e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled))))),
+        ("event_queue_preparation", lambda: live and startup_provider_ready and server_boot.prepare_event_queue(lifespan_drive_root, body_stopping)),
         ("pinned_node", lambda: live and server_boot.prepare_pinned_node(lifespan_drive_root)),  # local, before any Playwright
         ("skills", lambda: live and server_boot.seed_skills(lifespan_drive_root, settings, provider_ready=startup_provider_ready)),
         ("projects", lambda: live and server_boot.reconcile_projects(lifespan_drive_root)),
         ("log_listings", lambda: live and server_boot.remember_log_listings(lifespan_drive_root)),
         ("services", lambda: server_boot.start_background_services(
             settings, local_model=has_local, boot_managed_update=_boot_managed_update_tasks, warm_daemon=live)),
-        ("host_service", lambda: server_boot.on_loop(_event_loop, server_boot.serve_host_service(lifespan_drive_root, boot))),
+        ("host_service", lambda: server_boot.on_loop(_event_loop, server_boot.serve_host_service(lifespan_drive_root, boot,
+            lambda: not _supervisor_init_done.is_set() or _supervisor_thread is not None,
+            body_stopping))),
         ("review_jobs", lambda: live and server_boot.reconcile_review_jobs(lifespan_drive_root)),
         ("extensions", _extensions),
         ("ui_translation", lambda: live and _start_ui_translation(lifespan_drive_root, _supervisor_stop)),  # after the skills registered their tables

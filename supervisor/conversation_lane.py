@@ -44,9 +44,9 @@ import logging
 import pathlib
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED, EXECUTOR_WORKER, LANE_CONVERSATION
 from supervisor.queue import _queue_lock
 
 log = logging.getLogger(__name__)
@@ -82,6 +82,13 @@ def armed() -> bool:
     return _ARMED_TABLE is not None and _ARMED_TABLE == id(_pool().WORKERS)
 
 
+def inline_resume_available(drive_root: Any) -> bool:
+    """Whether a Presence thread in this process can hand its pause to this root's running pool."""
+    from supervisor.queue import owns_live_queue
+
+    return armed() and owns_live_queue(drive_root)
+
+
 def _pool():
     """The parent module, read at call time (the owner-approved D18/D33 mechanical exception)."""
     from supervisor import workers
@@ -92,6 +99,32 @@ def _pool():
 def conversation_row(meta: Any) -> bool:
     """A RUNNING row the conversation lane admitted (its carrier may be awaited, a worker or inline)."""
     return isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION
+
+
+def host_presence_row(meta: Any) -> bool:
+    """A Host owns its reserved or thread-bound Presence turn, including after a running pool fails to refill."""
+    if not conversation_row(meta) or not (meta.get("task") or {}).get("_presence_run"):
+        return False
+    wid = meta.get("worker_id")
+    return bool(meta.get("_inline_bind")) or (isinstance(wid, int) and wid < -1)
+
+
+def host_inline_meta(task_id: Any) -> Optional[Dict[str, Any]]:
+    """Under Q: the lane's RUNNING meta of ``task_id`` when its Host owns the turn inline, else None.
+
+    Reads the lane's own table — the map ``admit_turn`` writes. The queue facade's ``RUNNING`` is that
+    same object only once ``workers.init`` bound it (``init_queue_refs``); a standalone Host answers the
+    Pause door with the two maps distinct, so the Pause contract reads the row that actually exists."""
+    meta = _pool().RUNNING.get(str(task_id or ""))
+    return meta if host_presence_row(meta) else None
+
+
+def host_inline_drive_roots(default_root: Any = None) -> Dict[str, str]:
+    """Under Q: every RUNNING row its Host owns inline (``host_presence_row``) mapped to the drive root
+    the row names (``default_root`` when it names none): the census's Pause-availability domain, from the
+    same authoritative table as ``host_inline_meta``."""
+    return {str(tid): str((meta.get("task") or {}).get("drive_root") or default_root or "")
+            for tid, meta in _pool().RUNNING.items() if host_presence_row(meta)}
 
 
 def lane_carriers(pool: Any = None) -> list:
@@ -206,12 +239,6 @@ def _held_by_a_stop(rows: List[Dict[str, Any]]) -> set:
     return ids & (set(intents) | set(unseen or ()))
 
 
-def _unpublished(rows: List[Dict[str, Any]]) -> set:
-    """Under Q: the rows whose admission mark is not on disk yet; held from every carrier until
-    ``publish_awaiting_rows`` (outside Q) lands their barrier."""
-    return {str(meta["task"].get("id") or "") for meta in rows if meta.get("_unpublished")}
-
-
 def publish_awaiting_rows() -> bool:
     """Outside Q: one admission barrier for every lane row not on disk yet (a carrier awaited, or its own
     executor's bind); True when none stays unpublished.
@@ -248,14 +275,18 @@ def dispatch_admitted_turn(meta: Dict[str, Any]) -> None:
 
     publish_awaiting_rows()
     task_id = str(meta["task"].get("id") or "")
+    withdrawals: list = []
     with _queue_lock:
         if (_pool().RUNNING.get(task_id) is not meta or meta.get("worker_id") is not None
-                or meta.get("_unpublished") or meta.get("_inline_bind")):
+                or meta.get("_inline_bind")):
             return
-        slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
-        if slot is not None and hand_to_carrier(meta, slot):
-            return
-        _degrade_if_no_carrier_can_start(meta)
+        slot = None if meta.get("_unpublished") else ready_idle_carrier(for_owner=owner_turn(meta["task"]))
+        if not _presence_handoff_closed(meta, withdrawals) and not meta.get("_unpublished"):
+            if slot is not None and hand_to_carrier(meta, slot):
+                return
+            if not _presence_handoff_closed(meta, withdrawals):
+                _degrade_if_no_carrier_can_start(meta)
+    _finish_presence_withdrawals(withdrawals)
 
 
 def take_awaiting_turn(task_id: str) -> Any:
@@ -309,8 +340,11 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     task_id = str(task["id"])
     task.setdefault("root_task_id", task_id)
     origin = "presence" if task.get("_presence_turn") else "direct"
-    task["_execution_owner"] = {**execution_owner_record(pool.DRIVE_ROOT, task, origin),
-                                "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
+    host_presence = reserved and origin == "presence"
+    root = (task.get("drive_root") or pool.DRIVE_ROOT) if origin == "presence" else pool.DRIVE_ROOT
+    task["_execution_owner"] = {**execution_owner_record(root, task, origin),
+                                "lane": LANE_CONVERSATION,
+                                "executor": EXECUTOR_INLINE_DEGRADED if host_presence else EXECUTOR_WORKER}
     task[PREPARE_KEY] = {
         "admitted_at": now, "quiet": bool(quiet), "reply_expected": bool(reply_expected),
         "client_message_id": str(client_message_id or ""),
@@ -324,7 +358,9 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     if reserved:
         meta["_inline_bind"] = True
     pool.RUNNING[task_id] = meta
-    queue.persist_queue_snapshot(reason="conversation_turn_admitted")  # a mark under Q; the barrier follows outside it
+    # The unarmed Host owns its reserved Presence row's synchronous barrier and withdrawal.
+    if not host_presence:
+        queue.persist_queue_snapshot(reason="conversation_turn_admitted")
     return meta
 
 
@@ -357,6 +393,8 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
                                 "executor": EXECUTOR_WORKER}
     meta = _awaiting_row(task, attempt=int(task.get("_attempt") or 1), client_message_id=prior.get("client_message_id"),
                          reply_expected=prior.get("reply_expected"), fresh_identity=prior.get("fresh_identity"))
+    if "_presence_execution" in prior:
+        meta["_presence_execution"] = prior["_presence_execution"]  # the same Host request awaits its retried body
     meta["_unpublished"] = True
     _pool().RUNNING[str(task["id"])] = meta
     queue.persist_queue_snapshot(reason="conversation_turn_retried")
@@ -478,7 +516,176 @@ def hand_to_carrier(meta: Dict[str, Any], slot: Any) -> bool:
     return True
 
 
-def dispatch_awaiting_turns() -> int:
+def _take_unstarted_presence(meta: dict) -> Any:
+    """Under Q: take this exact, unbound first admission for the Host's retryable outcome."""
+    turn_id = meta["task"]["id"]
+    expected = meta.get("_presence_execution")
+    if expected is None or meta.get("attempt") != 1 or _pool().RUNNING.get(turn_id) is not meta:
+        return None  # a crash retry keeps the same waiter for a turn a previous carrier already held
+    from ouroboros.presence_executions import _find_execution
+
+    registry, execution = _find_execution(turn_id, expected)
+    if registry is not None and execution is not None and take_awaiting_turn(turn_id) is not None:
+        return registry, execution
+    return None
+
+
+def _withdraw_unstarted_presence(meta: dict, cause: BaseException) -> None:
+    """Under Q, during thread-start rollback: only a first admission can tell the Host nothing ran."""
+    if taken := _take_unstarted_presence(meta):
+        from ouroboros.presence_executions import PresenceTurnNotStarted
+
+        registry, execution = taken
+        error = PresenceTurnNotStarted("presence turn thread could not start")
+        error.__cause__ = cause
+        registry.settle_from_frame(execution, error=error)
+
+
+def _presence_handoff_closed(meta: dict, withdrawals: list, *, closing: bool = False) -> bool:
+    """Under Q, at the fresh Presence claim: an observed closure forbids the handoff.
+
+    The latch read orders this claim against ordinary server shutdown; a later Stop
+    cannot undo a successful put. An explicit task Stop keeps its own settlement.
+    """
+    handoff = meta.get("_presence_handoff")
+    if handoff is None:
+        return False
+    from supervisor import queue
+    from supervisor.queue_publication import publication_identity
+
+    stopped, identity = handoff
+    same_generation = publication_identity() == identity
+    if same_generation and not closing and not stopped():
+        return False
+    # A failed supervisor startup can be retried in the same process with the
+    # same RUNNING map. Release only our exact unbound row, never a different
+    # drive's row; its old publication identity grants no write in the new one.
+    if ((same_generation or queue.owns_live_queue(meta["task"].get("drive_root")))
+            and not _held_by_a_stop([meta]) and (taken := _take_unstarted_presence(meta))):
+        withdrawals.append((identity, taken))
+    return True
+
+
+def _finish_presence_withdrawals(withdrawals: list) -> None:
+    """Outside Q: publish the removed admissions before releasing their live Host waiters."""
+    if not withdrawals:
+        return
+    from supervisor import queue
+    from supervisor.queue_publication import publication_identity
+
+    with _queue_lock:
+        current = publication_identity()
+    published = False
+    try:
+        if any(identity == current for identity, _ in withdrawals):
+            published = queue.publish_queue_snapshot(reason="presence_turn_not_started",
+                                                     expected_identity=current) is True
+    except Exception:
+        log.warning("Could not publish withdrawn Presence admissions", exc_info=True)
+    finally:
+        settle_presence_withdrawals(withdrawals, current if published else None)
+
+
+def settle_presence_withdrawals(withdrawals: list, published_identity: Any) -> None:
+    """Outside Q: a removed admission and a confirmed publication are separate facts."""
+    from ouroboros.presence_executions import PresenceTurnInterrupted, PresenceTurnNotStarted
+
+    for identity, (registry, execution) in withdrawals:
+        error = (PresenceTurnNotStarted("the Presence carrier is closing; retry the event")
+                 if identity == published_identity else PresenceTurnInterrupted(
+                     "the Presence withdrawal was not confirmed; resend the same event for its outcome"))
+        registry.settle_from_frame(execution, error=error)
+
+
+def take_closing_presence() -> list:
+    """Under Q: withdraw fresh pooled admissions before generic pool teardown."""
+    withdrawals: list = []
+    for meta in awaiting_turns():
+        _presence_handoff_closed(meta, withdrawals, closing=True)
+    return withdrawals
+
+
+def take_closing_reserved_presence(withdrawals: list) -> None:
+    """Under Q: withdraw the unbound Host-inline reservations an ordinary pool stop owns.
+
+    The stop's partition has already copied each unbound reserved row aside for settlement
+    (``workers._partition_slots_for_stop``), so its publisher can bind only the original
+    object and the body never starts. A pooled admission in that position is withdrawn by
+    ``take_closing_presence``; the reserved first message gets the same closing: without a
+    recorded owner Stop — whose custody keeps the row, its exact source and its retained
+    refusal — a never-started admission must stay retryable, never become the generic
+    teardown's terminal ``cancelled`` that carries neither a Stop nor the event identity (a
+    retry of that event is then refused forever). A row whose waiter already settled — its
+    publisher refused the fenced copy — is only taken out of RUNNING: the waiter heard its
+    outcome and the stop's snapshot publishes the removal. Retried bodies (``attempt``
+    above 1), rows without this process's first admission and rows a Stop holds keep the
+    settlement that already owns them.
+    """
+    from supervisor.queue_publication import publication_identity
+
+    identity = publication_identity()
+    for meta in list(_pool().RUNNING.values()):
+        if not host_presence_row(meta) or meta.get("worker_id") is not None:
+            continue
+        if (meta.get("attempt") != 1 or meta.get("_presence_execution") is None
+                or _held_by_a_stop([meta])):
+            continue
+        if (taken := _take_unstarted_presence(meta)) is not None:
+            withdrawals.append((identity, taken))
+        else:
+            take_awaiting_turn(str(meta["task"]["id"]))
+
+
+def pool_stop_basis(eligible: bool) -> Any:
+    """Under Q: bind the closing claims to the existing shutdown barrier's generation."""
+    from supervisor.queue_publication import publication_identity
+
+    withdrawals = take_closing_presence() if eligible else []
+    if eligible:
+        take_closing_reserved_presence(withdrawals)
+    return (withdrawals, publication_identity()) if withdrawals else None
+
+
+def publish_pool_stop_snapshot(reason: str, basis: Any) -> bool | None:
+    """Publish the existing shutdown snapshot, which confirms its saved parks, and settle any claims it carried."""
+    from supervisor import queue, restart_retention as retention
+
+    if basis is None:
+        return retention.publish_pending_parks(queue, reason, final=True)
+    withdrawals, identity = basis
+    published = None
+    try:
+        published = retention.publish_pending_parks(queue, reason, final=True, expected_identity=identity)
+        return published
+    finally:
+        settle_presence_withdrawals(withdrawals, identity if published is True else None)
+
+
+def close_presence_after_failed_startup() -> None:
+    """End unbound admissions; a failed, partially armed pool has no next tick."""
+    try:
+        with _queue_lock:
+            if armed():
+                arm(None)  # preserve the observed spawn refusal of a pool that never armed
+            withdrawals = take_closing_presence()
+        _finish_presence_withdrawals(withdrawals)
+    except Exception:
+        log.warning("Could not close awaiting Presence admissions after supervisor startup failed", exc_info=True)
+
+
+def dispatch_awaiting_turns(*, require_armed: bool = False) -> int:
+    """Claim under Q, then complete any shutdown withdrawals outside it."""
+    withdrawals: list = []
+    try:
+        with _queue_lock:
+            if require_armed and (not armed() or not _pool().WORKERS):
+                return 0
+            return _dispatch_awaiting_turns(withdrawals)
+    finally:
+        _finish_presence_withdrawals(withdrawals)
+
+
+def _dispatch_awaiting_turns(withdrawals: list) -> int:
     """Under Q: hand every awaiting turn to a ready idle carrier, oldest first; returns how many moved.
 
     When no carrier can start at all (``inline_carrier.refused_carrier_reason``: a
@@ -490,21 +697,27 @@ def dispatch_awaiting_turns() -> int:
     waiting = awaiting_turns()
     # A Stop's custody settles its rows; a row not yet on disk waits for its barrier (``publish_awaiting_rows``,
     # outside Q, before this pass): no carrier takes them.
-    held = _held_by_a_stop(waiting) | _unpublished(waiting)
+    held = _held_by_a_stop(waiting)
     moved = 0
     for meta in waiting:  # a wake waiting for the spare never holds up the owner's turn behind it
         if str(meta["task"].get("id") or "") in held:
             continue
-        slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
+        slot = None if meta.get("_unpublished") else ready_idle_carrier(for_owner=owner_turn(meta["task"]))
+        if _presence_handoff_closed(meta, withdrawals) or meta.get("_unpublished"):
+            continue
         if slot is not None and hand_to_carrier(meta, slot):
             moved += 1
-    waiting = [meta for meta in awaiting_turns() if str(meta["task"].get("id") or "") not in held]
+    waiting = [meta for meta in awaiting_turns()
+               if str(meta["task"].get("id") or "") not in held and not meta.get("_unpublished")]
     if waiting and not any(w.booting and w.busy_task_id is None for w in lane_carriers()):
         reason = refused_carrier_reason()
         if reason:
             for meta in waiting:
+                if _presence_handoff_closed(meta, withdrawals):
+                    continue
                 try:
-                    start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason=reason)
+                    start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason=reason,
+                                      on_not_started=_withdraw_unstarted_presence)
                     moved += 1
                 except Exception:
                     log.exception("Degraded executor could not start for %s", meta["task"].get("id"))
@@ -533,12 +746,11 @@ def reconcile_conversation_lane() -> None:
     if not armed() or not pool.WORKERS:
         return
     publish_awaiting_rows()
+    # A marker window forbids a spawn, not a waiting turn's carrier (or its degraded executor).
+    dispatch_awaiting_turns(require_armed=True)
     with _queue_lock:
         if not armed() or not pool.WORKERS:
             return
-        # A marker window forbids a spawn, never a waiting turn's carrier (a spare that finished booting)
-        # or its degraded executor: the turns are looked at first, the window decides growth below.
-        dispatch_awaiting_turns()
         if pool.repo_writer_admission_closed():
             return
         carriers = lane_carriers()
@@ -557,7 +769,7 @@ def reconcile_conversation_lane() -> None:
             quiet = [w for w in idle if w.quiescence_confirmed]
             for slot in quiet[1:]:
                 retire_quiescent_worker(slot)
-        next_id = max(pool.WORKERS, default=-1) + 1
+        next_id = max(0, max(pool.WORKERS, default=-1) + 1)
     for wid in range(next_id, next_id + missing):
         try:
             if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION):

@@ -1033,8 +1033,8 @@ tools:
 contributes:
   - id: place
     provides: place
-    label: Slack
-    destination: vendor:Slack
+    label: Slack               # display name; may change
+    destination: vendor:Slack  # stable provider identity for existing places, not display copy
     scope: account             # account | conversation
     wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]   # suggestions; the owner edits the list
     source: {route: status, refresh_s: 15}                               # optional status and Connect choices
@@ -1149,12 +1149,13 @@ Status `labels` can name core kinds in the connector's own words; they are safe 
 The sheet merges status labels over manifest labels. A runtime `/identity` check cannot negotiate a
 static manifest.
 
-Negotiate support through `/identity`: `presence_wake_signals: 1` advertises this seam. Older hosts may reject
-the `facts` manifest key, so do not publish signal declarations to a host without support. Intake accepts a
-signal only if the authenticated connector's current live place declaration lists it; another connector's
-declaration, a discovered-but-unloaded declaration, or arbitrary text cannot authorize it. Ordinary core fact
-intake remains compatible. New owner/tool signal choices likewise require that live declaration; existing
-choices remain readable and removable when the connector is off.
+Check `/identity` for `presence_wake_signals: 1` before declaring signals. Older hosts may reject `facts`.
+Intake uses live provider signals; new choices use the place's live declarations. Saved wakes stay removable offline.
+A retry of a settled turn can recover its answer after its signal is removed. HTTP 503 `places_unreadable`
+asks the connector to retry when the Host cannot read the place.
+An eligible unpublished signal retries before capture at any connected place. A proven pending import can
+also defer a core-only wake decision after capture. Retry the same event on HTTP 429 `wake_import_declarations_pending`.
+`/presence/turn` sends `disposition: retry` and `retry_after: 60` seconds. `/call/open` uses its call error envelope.
 
 Signal logic and its parameters belong to the connector's own settings. The host performs the existing fact
 membership matching, stores no new Place field, and does not match message text. A signal does not manufacture
@@ -1581,9 +1582,9 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   keep waiting in the gate.
 - **Interrupted turn.** A turn whose carrier ended before it answered (a Stop's kill, a crash, a
   pool stop) answers HTTP 503 `{ok: false, error, code: "presence_turn_interrupted", disposition:
-  "retry"}`; one that could not start at all (a server whose worker pool has not started yet, at
-  boot or after a whole-table stop, included) answers 503 `presence_turn_not_started`, also
-  `retry`. Resend the same event unchanged: the Host answers it from the turn's durable record (a
+  "retry"}`. Before a planned pool starts, or after a whole-table stop, a turn that could not start
+  answers 503 `presence_turn_not_started`, also `retry`. A Host intentionally running without a pool
+  can serve the turn inline. Resend the same event unchanged: the Host answers it from the turn's durable record (a
   replay, or the retained refusal), never by regenerating an ended attempt.
 - **Polls.** A version-2 turn's poll echoes `continuation_version: 2`; turns admitted at other
   versions keep `1`. Its terminal adds `reply_anchor: {source_event_id, message}`, where `message`

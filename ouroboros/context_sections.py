@@ -334,11 +334,14 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
 
 
 def _places_imported(root: Any) -> bool:
-    """Whether the place store exists with its legacy import done (a plain read, so it never runs the import)."""
+    """Whether the place store exists with its legacy import materialized, final or still
+    provisional — the same marker ``places_migration.import_recorded`` reads — so a plain
+    read answers and never runs the import."""
+    from ouroboros.places_migration import import_recorded
     from ouroboros.utils import read_json_dict
 
     document = read_json_dict(pathlib.Path(root) / "state" / "places.json") or {}
-    return bool((document.get("migration") or {}).get("presence_bindings_v1"))
+    return import_recorded(document) if isinstance(document.get("migration"), dict) else False
 
 
 def _switch_fact(root: Any, observed: Any, authority: Any) -> str:

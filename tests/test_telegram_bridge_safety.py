@@ -119,10 +119,13 @@ def test_existing_corrupt_settings_refuse_owner_rebinding(tmp_path, monkeypatch)
 
 def test_slash_messages_are_not_injected(tmp_path, monkeypatch):
     plugin = _load_plugin(tmp_path)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "en")
     # Explicitly strict (the default is now full_access); strict must still block slashes.
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, "TELEGRAM_COMMAND_MODE": "strict"}), encoding="utf-8")
     FakeTelegramClient.updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/restart"}}
+        {"update_id": mid, "message": {"message_id": mid, "chat": {"id": 42, "type": "private"},
+                                       "from": {"id": 42}, "text": command}}
+        for mid, command in enumerate(("/restart", "/help"), start=1)
     ]
     monkeypatch.setattr(plugin, "TelegramClient", FakeTelegramClient)
     injected = []
@@ -140,7 +143,10 @@ def test_slash_messages_are_not_injected(tmp_path, monkeypatch):
         pass
 
     assert injected == []
-    assert FakeTelegramClient.instances[-1].sent
+    refused, help_reply = FakeTelegramClient.instances[-1].sent
+    for chat_id, text in (refused, help_reply):
+        assert chat_id == 42 and "Telegram skill's settings" in text
+    assert "strict mode" in refused[1] and "full_access" in help_reply[1]
 
 
 def test_full_access_injects_raw_slash_commands(tmp_path, monkeypatch):

@@ -13,11 +13,11 @@ import secrets
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
-from ouroboros.presence_admission import admit_presence_turn, PresenceAdmissionError
-from ouroboros.presence_events import presence_event_origin
+from ouroboros.presence_admission import admit_captured_wakes, admit_presence_turn, PresenceAdmissionError
+from ouroboros.presence_events import connector_fact_labels, outside_origin, parse_event_wire
 from ouroboros.presence_runner import (PresenceTurnEvent, PresenceTurnError, PROACTIVE_TURNS,
-    _configured_gate, _task_id, _log_dialogue, _stable_numeric_id, capture_presence_event, presence_chat_id,
-    presence_event_identity, presence_turn_event, presence_turn_replay, run_presence_turn)
+    _configured_gate, _task_id, _log_dialogue, _stable_numeric_id, _stored_turn, capture_presence_event, presence_chat_id,
+    presence_event_identity, presence_turn_replay, run_presence_turn)
 
 log = logging.getLogger(__name__)
 MEETING_AUDIO_LABEL = "meeting audio"
@@ -42,7 +42,7 @@ def _require_waking_place(drive_root, admission, event, captured) -> None:
     """
     from ouroboros.config import get_consciousness_autonomy
     from ouroboros.consciousness_authority import LEVEL_OBSERVE, normalize_level
-    from ouroboros.place_intake import decide_attention, settle_heard
+    from ouroboros.place_intake import WAKE_IMPORT_PENDING, decide_attention, settle_heard
 
     place = admission.place
     if place is None or place.state != "active":
@@ -52,6 +52,9 @@ def _require_waking_place(drive_root, admission, event, captured) -> None:
     if decision == "focus" and normalize_level(get_consciousness_autonomy()) == LEVEL_OBSERVE:
         decision, details = "silent", {"reason": "advises"}
     if decision == "retry":
+        if details.get("reason") == WAKE_IMPORT_PENDING:
+            raise PresenceCallRefused(WAKE_IMPORT_PENDING,
+                                      "This place's updated wake declarations are not admitted yet.")
         raise PresenceCallRefused("consciousness_allowance_exhausted", "The consciousness allowance is used up.")
     if decision != "focus":
         reason = str(details.get("reason") or "heard")
@@ -64,17 +67,26 @@ def open_presence_call(*, drive_root, repo_dir, skill_name, binding_id="", event
     from ouroboros.call_protocol import CallSpec, OPENED_BY_SKILL
     from ouroboros.call_peers import open_hub, close_hub
     from ouroboros.live_conversation import LiveConversationTurn, feature_configuration
-    from ouroboros.places import declared_fact_labels
     from supervisor.message_bus import get_bridge
 
     try:
         # The connector's live declared signals and words, as /presence/turn admits them (one Host, one registry).
-        declared = declared_fact_labels(skill_name)
-        admission = replace(admit_presence_turn(drive_root=drive_root, authenticated_transport_skill=skill_name,
-            binding_id=binding_id, **presence_event_origin(event)), fact_labels=declared)
-        turn_event = presence_turn_event(event, admission, vouched_facts=declared)
+        turn_event = parse_event_wire(event)
+        admission = admit_presence_turn(drive_root=drive_root, authenticated_transport_skill=skill_name,
+            binding_id=binding_id, provider=turn_event.provider, account_id=turn_event.account_id,
+            conversation_id=turn_event.conversation_id, thread_id=turn_event.thread_id,
+            live_event=True, persist_import=False)
+        if outside_origin(admission, turn_event):
+            raise PresenceTurnError("presence_origin_mismatch", "event")
+        admission = replace(admission, fact_labels=connector_fact_labels(drive_root, admission, turn_event))
+        task_id = _task_id(admission, turn_event)
+        identity = presence_event_identity(admission.binding_id, turn_event)
+        if admission.place and admission.place.legacy_binding_ids:
+            # A stored turn can predate its room's capture record. Check its identity before finishing the import.
+            _stored_turn(Path(drive_root), task_id, identity)
         # Heard before any decision, as a text event is (host_service_places).
         captured = capture_presence_event(admission, turn_event, drive_root=Path(drive_root))
+        admission = admit_captured_wakes(Path(drive_root), admission, turn_event)
     except (PresenceAdmissionError, PresenceTurnError) as exc:
         raise PresenceCallRefused(exc.code, str(exc)) from exc
     _require_waking_place(drive_root, admission, turn_event, captured)
@@ -89,8 +101,6 @@ def open_presence_call(*, drive_root, repo_dir, skill_name, binding_id="", event
         lease = _configured_gate(Path(drive_root)).try_acquire(turn_event.conversation_key)
         if lease is None:
             raise PresenceCallRefused("presence_call_busy", "This conversation or the Presence capacity is busy.")
-        task_id = _task_id(admission, turn_event)
-        identity = presence_event_identity(admission.binding_id, turn_event)
         try:
             if presence_turn_replay(Path(drive_root), task_id, turn_event.conversation_key, identity, 0) is not None:
                 raise PresenceCallRefused("presence_call_settled", "This event's turn already ended.")

@@ -170,8 +170,77 @@ def start(r, h):
             drive_root=r.root, agent_factory=h.factory, admitted=lease), context=contextvars.copy_context())[0]
 
 
-@pytest.mark.parametrize("wake", ["answer", "timeout", "stop"])
-def test_required_question_lends_and_reacquires_in_production_loop(contact_runtime, monkeypatch, wake):
+def start_unarmed(r, h, monkeypatch):
+    import os
+    from ouroboros.presence_carrier import dispatch_presence_turn
+    from supervisor import conversation_lane, queue, workers
+    from tests._presence_event import event_payload
+
+    monkeypatch.setattr(workers, "RUNNING", queue.RUNNING)
+    monkeypatch.setattr(workers, "PENDING", queue.PENDING)
+    monkeypatch.setattr(workers, "WORKERS", {})
+    monkeypatch.setattr(workers, "REPO_DIR", h.repo)
+    monkeypatch.setattr(queue, "INITIALIZED", True)
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    monkeypatch.setattr(queue, "QUEUE_SNAPSHOT_PATH", r.root / "state" / "queue_snapshot.json")
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", ["carrier_spawn_refused:OSError"])
+    monkeypatch.setattr("ouroboros.agent.make_agent", h.factory)
+    event = replace(r.event, continuation_version=1)
+    execution, started = h.executions.start_or_dispatch(
+        presence_turn_task_id(r.admission.binding_id, event.source_event_id),
+        identity=presence_event_identity(r.admission.binding_id, event), reserve=lambda: True, release=lambda: None,
+        dispatch=lambda ex: dispatch_presence_turn(ex, drive_root=r.root, admission=r.admission, event=event,
+            skill_name=r.admission.transport_skill, event_payload={**event_payload(event), "facts": list(event.facts)},
+            staged_files=[], gate_wait=True, expects_supervisor_pool=True))
+    assert started
+    return execution
+
+
+@pytest.mark.parametrize("pooled", [False, True], ids=["inline", "pooled"])
+def test_stop_during_carrier_preparation_records_the_owner_request(contact_runtime, monkeypatch, pooled):
+    from ouroboros.agent import OuroborosAgent
+
+    r = contact_runtime
+    h = install_bootstrap_harness(monkeypatch, r.root, review_mode="off")
+    prepare = OuroborosAgent._prepare_task_start
+    requests = []
+
+    def stop_after_preparation(agent, task, settings):
+        prepared = prepare(agent, task, settings)
+        intent = request_cancel(r.root, task["id"], reason="owner stop", source="test", requested_stop_policy="immediate")
+        requests.append(intent["request_id"])
+        return prepared
+
+    monkeypatch.setattr(OuroborosAgent, "_prepare_task_start", stop_after_preparation)
+    if pooled:
+        from ouroboros.presence_carrier import carry_presence_turn, presence_seed_task
+        from ouroboros.utils import WORKER_PROCESS_ENV
+        from tests._presence_event import event_payload
+
+        monkeypatch.setenv(WORKER_PROCESS_ENV, "1")
+        monkeypatch.setattr("ouroboros.agent.make_agent", h.factory)
+        seed = presence_seed_task(admission=r.admission, event=r.event, skill_name=r.admission.transport_skill,
+                                  event_payload={**event_payload(r.event), "facts": list(r.event.facts or ())},
+                                  staged_files=[], gate_wait=True)
+        tid, out = seed["id"], queue.Queue()
+        carry_presence_turn(seed, out, r.root, r.root, worker_id=5)
+        error, = [frame["error"] for frame in out.queue if frame.get("type") == "presence_turn_settled"]
+        assert (error["code"], error["disposition"]) == ("presence_turn_cancelled", "retained")
+    else:
+        execution = start_unarmed(r, h, monkeypatch)
+        tid = execution.turn_id
+        with pytest.raises(PresenceTurnError) as stopped:
+            execution.result.result(timeout=40)
+        assert stopped.value.code == "presence_turn_cancelled"
+    row = load_task_result(r.root, tid)
+    assert row["status"] == "cancelled" and h.calls == 0
+    assert requests == [row["cancel_origin"]["request_id"]]
+
+
+@pytest.mark.parametrize("unarmed,wake", [(False, "answer"), (False, "timeout"), (False, "stop"),
+                                         (True, "answer"), (True, "stop"), (True, "carrier_stop")])
+def test_required_question_lends_and_reacquires_in_production_loop(contact_runtime, monkeypatch, unarmed, wake):
     r = contact_runtime
     h = install_bootstrap_harness(monkeypatch, r.root, review_mode="off")
     h.script = [
@@ -191,7 +260,7 @@ def test_required_question_lends_and_reacquires_in_production_loop(contact_runti
             return row
 
         monkeypatch.setattr(owner_wait, "checkpoint_owner_wait", bounded)
-    execution = start(r, h)
+    execution = start_unarmed(r, h, monkeypatch) if unarmed else start(r, h)
     try:
         initial = execution.initial.result(timeout=40)
         assert initial.status == "continuing" and not initial.text
@@ -203,7 +272,8 @@ def test_required_question_lends_and_reacquires_in_production_loop(contact_runti
         if wake != "timeout":
             wait_for(lambda: (load_task_result(r.root, tid).get("owner_wait") or {}).get("state") == "waiting",
                      timeout=15, what="private owner question parked")
-            r.pump()
+            if not unarmed:
+                r.pump()
             assert quiz_states(r.root, tid)[qid]["publication_chat_id"] == 1
             assert not lease.held() and h.calls == 1
             # The single active slot AND this exact conversation are available to another turn.
@@ -211,16 +281,35 @@ def test_required_question_lends_and_reacquires_in_production_loop(contact_runti
             borrowed = h.gate.acquire_resources(r.event.conversation_key, lambda: time.monotonic() > until)
             assert borrowed is not None
             borrowed.close()
+            if unarmed:
+                from ouroboros.budget_pause import RAIL_OWNER_PAUSE
+                from ouroboros.presence_carrier import saves_exact_pause
+                from supervisor.owner_pause_control import request_owner_pause
+                from supervisor.owner_stop import in_process_stop_now
+
+                with monkeypatch.context() as moved:
+                    moved.setattr("ouroboros.presence_carrier.moved_text_turn", lambda *_a, **_k: True)
+                    assert not saves_exact_pause(ctx, RAIL_OWNER_PAUSE)
+                    assert request_owner_pause(tid, request_id="pause") == {
+                        "ok": False, "error": "presence_pause_unsupported", "reason_code": "no_continuation_owner"}
+                assert in_process_stop_now(ctx) is False
             if wake == "answer":
                 response = _answer(r, tid, qid)
                 assert response.status_code == 200, response.text
                 assert not response.json().get("forwarded")
+            elif wake == "carrier_stop":
+                from supervisor import workers
+
+                slot = workers.WORKERS[workers.RUNNING[tid]["worker_id"]]
+                with monkeypatch.context() as request:
+                    request.setattr(slot.proc, "join", lambda *_a, **_k: pytest.fail("stop request waited for a thread"))
+                    assert slot.proc._ouroboros_stop_request()["confirmation"] == "unconfirmed"
             else:
                 request_cancel(r.root, tid, reason="owner stop", source="test")
         try:
             final = execution.result.result(timeout=40)
         except PresenceTurnError as exc:
-            assert wake == "stop" and exc.code == "presence_turn_cancelled"
+            assert wake in {"stop", "carrier_stop"} and exc.code == "presence_turn_cancelled"
             final = SimpleNamespace(text="")
         r.pump()
         row = load_task_result(r.root, tid)
@@ -235,7 +324,7 @@ def test_required_question_lends_and_reacquires_in_production_loop(contact_runti
             assert block["state"] == "expired_terminal" and "answered_index" not in block
             assert not block.get("wait_for_answer")
             assert any(f.get("state") == "expired_terminal" and f.get("chat_id") == 1 for f in r.frames)
-            if wake == "stop":
+            if wake in {"stop", "carrier_stop"}:
                 assert h.calls == 1 and not final.text
             else:
                 assert h.calls == 2 and "PRESENCE CONVERSATION RESUMED" in str(h.inputs[-1])

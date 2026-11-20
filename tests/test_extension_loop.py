@@ -44,7 +44,8 @@ def _quiet_host_bind(monkeypatch):
         yield object()
 
     class _Server:
-        def __init__(self, _config):
+        def __init__(self, config):
+            self.config = config
             self.should_exit = False
 
         async def serve(self, sockets=None):
@@ -156,7 +157,8 @@ def test_supervised_task_starts_when_host_service_precedes_extensions(tmp_path, 
             host_service_task=None, host_service_server=None, host_service_listener=ExitStack(),
         )
         try:
-            await server_boot.serve_host_service(tmp_path, boot)
+            await server_boot.serve_host_service(tmp_path, boot, expects_supervisor_pool=True)
+            assert boot.host_service_server.config.app.state.host_service_context.expects_supervisor_pool
             bus = event_bus.get_global_event_bus()
             again = bus.start_loop()
             assert again is bus._loop and again.is_running()

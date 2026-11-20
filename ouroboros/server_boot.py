@@ -164,11 +164,13 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     follow_moved_app()
 
 
-async def serve_host_service(root: pathlib.Path, boot: Any) -> None:
+async def serve_host_service(root: pathlib.Path, boot: Any, expects_supervisor_pool: bool | Callable[[], bool] = False,
+                             stop_requested: Callable[[], bool] | None = None) -> None:
     """Start the shared extension loop, then the companions' Host Service on the ASGI loop.
 
     Supervised tasks and async subscribers use the extension loop. The Host Service
     task, server and bound socket stay on this loop and land on ``boot`` for teardown.
+    Pool expectation and shutdown come from the server lifecycle, not from listener liveness.
     """
     from ouroboros.event_bus import init_global_event_bus
     from ouroboros.extension_companion import init_global_supervisor
@@ -176,7 +178,8 @@ async def serve_host_service(root: pathlib.Path, boot: Any) -> None:
 
     init_global_event_bus().start_loop()
     init_global_supervisor(root)
-    host_service_app = create_host_service_app(root)
+    host_service_app = create_host_service_app(root, expects_supervisor_pool=expects_supervisor_pool,
+                                               stop_requested=stop_requested)
     host_port = host_service_port()
     # Bind before starting the asyncio task: uvicorn's bind-error SystemExit otherwise escapes
     # run_forever and kills the main server. Keep that socket, removing the former

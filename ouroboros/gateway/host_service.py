@@ -197,12 +197,16 @@ class HostServiceContext:
         tool_schemas_getter: Optional[Callable[[], list[dict[str, Any]]]] = None,
         ws_broadcaster_getter: Optional[Callable[[], Callable[[dict], None]]] = None,
         presence_runner: Optional[Callable[..., Any]] = None,
+        expects_supervisor_pool: bool | Callable[[], bool] = False,
+        stop_requested: Optional[Callable[[], bool]] = None,
     ):
         self.data_dir = pathlib.Path(data_dir)
         self.bridge_getter = bridge_getter or self._default_bridge
         self.tool_schemas_getter = tool_schemas_getter or self._default_tool_schemas
         self.ws_broadcaster_getter = ws_broadcaster_getter or self._default_ws_broadcaster
         self.presence_runner = presence_runner
+        self._expects_supervisor_pool = expects_supervisor_pool
+        self.stop_requested = stop_requested
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
@@ -215,6 +219,12 @@ class HostServiceContext:
         from ouroboros.presence_runner import PresenceTurnExecutions
 
         self.presence_turns = PresenceTurnExecutions()
+
+    @property
+    def expects_supervisor_pool(self) -> bool:
+        """Read the embedded lifecycle's current intent, including startup from Settings."""
+        expected = self._expects_supervisor_pool
+        return expected() if callable(expected) else expected
 
     def _runner(self) -> Optional[Callable[..., Any]]:
         return self._presence_runner
@@ -1365,6 +1375,8 @@ def create_host_service_app(
     tool_schemas_getter: Optional[Callable[[], list[dict[str, Any]]]] = None,
     ws_broadcaster_getter: Optional[Callable[[], Callable[[dict], None]]] = None,
     presence_runner: Optional[Callable[..., Any]] = None,
+    expects_supervisor_pool: bool | Callable[[], bool] = False,
+    stop_requested: Optional[Callable[[], bool]] = None,
 ) -> Starlette:
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
@@ -1397,6 +1409,8 @@ def create_host_service_app(
         tool_schemas_getter=tool_schemas_getter,
         ws_broadcaster_getter=ws_broadcaster_getter,
         presence_runner=presence_runner,
+        expects_supervisor_pool=expects_supervisor_pool,
+        stop_requested=stop_requested,
     )
     return app
 

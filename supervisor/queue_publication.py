@@ -22,14 +22,21 @@ on the publication, outside Q. The tick's own writes leave the supervisor thread
 backlog; the tick reports each completed write failure once, and after ``LOOP_CRASH_LIMIT`` consecutive
 failures answers False until a write lands. While the boot still owes its late decision on saved pause
 envelopes (their index was unreadable), the tick answers None and a barrier False: no publication replaces
-the saved queue before that decision. A process with no live tick publisher (startup, shutdown, tests)
-publishes synchronously from every mark. A process-ending door (``pre_restart_exit``; the shutdown kill as
-``server_shutdown``) publishes embedded rows without the shared table, so an older body restores after a
-rollback; an export in another form never counts as that door's publication.
+the saved queue before that decision. Every capture and certificate refresh names its generation and
+destination (``publication_identity``: the writer ``new_generation`` installs and the snapshot path) and is
+refused unless both still hold at its last check under ``_PUBLISH_LOCK``. The switch (``queue.init``) holds Q
+and that lock together, the lock only tried under Q and awaited outside it, so an ended generation's capture
+is never written and its refresh extends no certificate. A caller that admitted under Q may name its
+generation to the barrier (``expected_identity``), which then marks and captures nothing for another one.
+A process with no live tick publisher (startup, shutdown, tests) publishes synchronously from every mark. A
+process-ending door (``pre_restart_exit``; the shutdown kill as ``server_shutdown``) publishes embedded rows
+without the shared table, so an older body restores after a rollback; an export in another form never counts
+as that door's publication.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -85,7 +92,7 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 # must never resurrect their permissions. published and census describe successful writes only.
 # Failed writes require a complete rewrite. The tick accounts for each failure once.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
-                          "capture_seq": 0, "published_seq": 0, "write_failed": False,
+                          "capture_seq": 0, "published_seq": 0, "write_failed": False, "written_snapshot": None,
                           "failed_writes": 0, "failures_answered": 0, "failed_streak": 0,
                           "alive_heartbeats": None, "alive_pool": None, "alive_written_at": 0.0}
 #: Consecutive failed writes after which the tick answers False on every tick until a write lands: the supervisor
@@ -98,13 +105,13 @@ _PUBLISH_LOCK = threading.Lock()
 
 
 class _TickWriter:
-    """The tick's newest capture or refresh. Drain waits for offered work; reset rejects the old writer."""
+    """The tick's newest capture or refresh. Drain waits for offered work; a new generation rejects the old writer."""
 
     def __init__(self) -> None:
         self.thread: Optional[threading.Thread] = None
         self.wake = threading.Condition()
         self.capture: Optional[Dict[str, Any]] = None  # the newest capture not taken yet
-        self.refresh: Optional[tuple] = None  # (pool, measured_after) of the newest quiet tick, to certify
+        self.refresh: Optional[tuple] = None  # (pool, measured_after, identity) of the newest quiet tick, to certify
         self.syncs: list = []
         self.closed = False
 
@@ -124,9 +131,9 @@ class _TickWriter:
             self.capture = capture  # a capture not taken yet is superseded: the newest state is what lands
             self.wake.notify()
 
-    def ask_refresh(self, pool: Dict[str, Any], measured_after: int) -> None:
+    def ask_refresh(self, pool: Dict[str, Any], measured_after: int, identity: tuple) -> None:
         with self.wake:
-            self.refresh = (pool, measured_after)
+            self.refresh = (pool, measured_after, identity)
             self.wake.notify()
 
     def drain(self, timeout: float) -> bool:
@@ -139,8 +146,8 @@ class _TickWriter:
         return done.wait(timeout)
 
     def stop(self, timeout: float = 5.0) -> None:
-        """End the thread once it wrote what it holds (``reset`` rebinds the module's writer first, so an ended
-        generation's capture is refused by ``_publish`` instead)."""
+        """End the thread once it wrote what it holds (``new_generation`` rebinds the module's writer first, so an
+        ended generation's capture is refused by ``_publish`` instead)."""
         with self.wake:
             self.closed = True
             self.wake.notify_all()
@@ -161,7 +168,7 @@ class _TickWriter:
                     return
             try:
                 if capture is not None:
-                    _publish(capture, writer=self)  # a publication certifies too: the refresh is subsumed
+                    _publish(capture)  # a publication certifies too: the refresh is subsumed
                 elif refresh is not None:
                     _refresh_alive(*refresh)
             except Exception:
@@ -173,15 +180,48 @@ class _TickWriter:
 _WRITER = _TickWriter()
 
 
-def reset() -> None:
-    """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher, no writer."""
+@contextlib.contextmanager
+def new_generation():
+    """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher, a new writer.
+
+    One short step under Q and ``_PUBLISH_LOCK`` together, so no capture or witness under Q and no last check under
+    the publish lock sees part of it; the caller's block rebinds its drive, owner and snapshot path inside it. The
+    publish lock is only tried under Q: while a write holds it, it is awaited outside Q and the step tried again
+    (Q never waits on the disk, and the order stays Q, then the publish lock). Never entered under Q. The ended
+    writer is stopped after both are released.
+    """
     global _PUBLISHER, _WRITER
-    _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
-                  write_failed=False, failed_writes=0, failures_answered=0, failed_streak=0, alive_heartbeats=None,
-                  alive_pool=None, alive_written_at=0.0)
-    _PUBLISHER = None
-    ended, _WRITER = _WRITER, _TickWriter()  # rebound first: a capture of the ended generation is refused by identity
+    while True:
+        with _queue()._queue_lock:
+            if _PUBLISH_LOCK.acquire(blocking=False):
+                try:
+                    _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0,
+                                  published_seq=0, written_snapshot=None, write_failed=False, failed_writes=0,
+                                  failures_answered=0, failed_streak=0, alive_heartbeats=None, alive_pool=None,
+                                  alive_written_at=0.0)
+                    _queue().QUEUE_PUBLICATION = None
+                    _PUBLISHER = None
+                    yield
+                    ended, _WRITER = _WRITER, _TickWriter()
+                finally:
+                    _PUBLISH_LOCK.release()
+                break
+        with _PUBLISH_LOCK:  # a write in flight: wait for it outside Q, then try again
+            pass
     ended.stop()
+
+
+def reset() -> None:
+    """A new queue generation on the same drive (``new_generation`` with nothing to rebind)."""
+    with new_generation():
+        pass
+
+
+def publication_identity() -> tuple:
+    """The generation and destination publication is for now: the writer ``new_generation`` installed and the
+    snapshot path. Opaque, compared with ``==``. A caller that admits under Q and publishes after leaving it takes it
+    under Q and names it to the barrier (``publish_queue_snapshot(expected_identity=...)``)."""
+    return (_WRITER, _queue().QUEUE_SNAPSHOT_PATH)
 
 
 def start_queue_writer() -> None:
@@ -224,9 +264,14 @@ def mark_dirty_locked(reason: str) -> None:
     _STATE["reason"] = reason
 
 
+def wrote_snapshot(path: str, generation: Any) -> bool:
+    """The snapshot file alone may have landed before its certificate or the dispatch projection failed."""
+    return _STATE["written_snapshot"] == (path, generation)
+
+
 def persist_queue_snapshot(reason: str = "") -> Optional[bool]:
     """Mark a transition. A live tick returns None and publishes later. Without it, publish now.
-    True means durable, False means the write failed, None also covers a queue outside our custody.
+    True means durable, False means not published, None also covers a queue outside our custody.
     Callers needing durability use publish_queue_snapshot."""
     if not _queue().INITIALIZED:  # a boot without a provider: state initialization reads a snapshot as history (#2412)
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
@@ -246,24 +291,33 @@ def barrier_of(ctx: Any):
     return getattr(ctx, "publish_queue_snapshot", None) or getattr(ctx, "persist_queue_snapshot", None)
 
 
-def publish_queue_snapshot(reason: str = "") -> Optional[bool]:
-    """Return True after publication, False on failure, None when the saved queue must be kept.
-    Without a tick, the queue's synchronous mark implements this barrier."""
-    if not tick_publisher_alive():
+def publish_queue_snapshot(reason: str = "", *, expected_identity: Any = None) -> Optional[bool]:
+    """Return True after publication, False when this capture is not certified on disk (its write failed, or its
+    generation or destination ended before its last check: nothing of it written), None when the saved queue must
+    be kept. Without a tick, the queue's synchronous mark implements this barrier. ``expected_identity``: the
+    ``publication_identity`` its caller took under Q, always published here, never through that stand-in. Once it
+    no longer holds: False, nothing marked or captured. While it holds and the capture carries no work of its own,
+    the saved file's custody is read at the last check, off Q (``_publish``)."""
+    if expected_identity is None and not tick_publisher_alive():
         return _queue().persist_queue_snapshot(reason=reason)
-    return _publish_now(reason)
+    return _publish_now(reason, expected_identity=expected_identity)
 
 
-def _publish_now(reason: str) -> Optional[bool]:
+def _publish_now(reason: str, *, expected_identity: Any = None) -> Optional[bool]:
     if not _queue().INITIALIZED:
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
         return None
+    if expected_identity is not None and expected_identity != publication_identity():
+        return False  # an ended generation's witness: not even the boot's late pass runs or marks on its behalf
     if not retry_pausing_envelopes(_queue()):
         return False
     while True:
         with _queue()._queue_lock:
+            identity = publication_identity()
+            if expected_identity is not None and expected_identity != identity:
+                return False  # the caller's generation ended: nothing is marked or captured for the next one
             _STATE["revision"] += 1
-            capture = _capture(reason)
+            capture = _capture(reason, identity=identity, defer_custody=expected_identity is not None)
         if capture is None:
             return None
         result = _publish(capture)
@@ -274,35 +328,44 @@ def _publish_now(reason: str) -> Optional[bool]:
 def publish_queue_changes() -> Optional[bool]:
     """Publish a new revision or census, otherwise refresh liveness. A kept queue returns None.
     The async tick reports each completed write failure once. After LOOP_CRASH_LIMIT consecutive
-    failures every tick returns False until a write succeeds, even while a retry is on disk."""
+    failures every tick returns False until a write succeeds, even while a retry is on disk.
+    Failures are answered in the generation the tick read: a tick across ``queue.init`` leaves
+    the next generation's failures to that generation's own tick."""
     if not _queue().INITIALIZED:
         return None
     if not retry_pausing_envelopes(_queue()):
         return None
     with _queue()._queue_lock:
+        identity = publication_identity()  # the generation this tick captures, measures, certifies and answers for
         if _kept_by_memo():
             return None  # the saved queue is still kept: decided once, not copied or counted again
         # One pool reading for capture and refresh. Worker-reported facts can move without a revision.
         pool, measured_after = _pool_counts(), _STATE["capture_seq"]
         census = _census(pool)
         moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
-        capture = _capture(_STATE["reason"] or "main_loop", census=census, pool=pool) if moved else None
-    if not _WRITER.alive():
+        capture = (_capture(_STATE["reason"] or "main_loop", census=census, pool=pool, identity=identity)
+                   if moved else None)
+        writer, _path = identity
+        threaded, answer = writer.alive(), None
+        refresh = capture is None and not moved and _queue().QUEUE_PUBLICATION is not None
+        if threaded and (capture is not None or refresh):  # the writer's failures since the tick last asked
+            failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
+            _STATE["failures_answered"] = failed
+            answer = failed == answered and _STATE["failed_streak"] < LOOP_CRASH_LIMIT
+    if not threaded:
         # Written where the tick stands: the outcome answers for this tick's own write, so every failure so
-        # far is answered with it.
-        outcome = (_refresh_alive(pool, measured_after) if not moved
+        # far is answered with it, in this generation only.
+        outcome = (_refresh_alive(pool, measured_after, identity) if not moved
                    else None if capture is None else _publish(capture))
-        _STATE["failures_answered"] = _STATE["failed_writes"]
+        with _queue()._queue_lock:
+            if identity == publication_identity():
+                _STATE["failures_answered"] = _STATE["failed_writes"]
         return outcome
     if capture is not None:
-        _WRITER.offer(capture)
-    elif not moved and _queue().QUEUE_PUBLICATION is not None:
-        _WRITER.ask_refresh(pool, measured_after)
-    else:
-        return None  # kept, or nothing of this process certified yet
-    failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
-    _STATE["failures_answered"] = failed
-    return failed == answered and _STATE["failed_streak"] < LOOP_CRASH_LIMIT
+        writer.offer(capture)
+    elif refresh:
+        writer.ask_refresh(pool, measured_after, identity)
+    return answer  # None: kept, or nothing of this process certified yet
 
 
 def _frozen(value: Any) -> Any:
@@ -360,10 +423,14 @@ def _kept_by_memo() -> bool:
     return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
 
 
-def _capture(reason: str, *, census: Optional[str] = None,
-             pool: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+def _capture(reason: str, *, census: Optional[str] = None, pool: Optional[Dict[str, Any]] = None,
+             identity: Optional[tuple] = None, defer_custody: bool = False) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept. ``pool`` and
-    ``census`` are the tick's (one measurement); a barrier's capture measures the pool here, once."""
+    ``census`` are the tick's (one measurement); a barrier's capture measures the pool here, once. ``identity``:
+    the generation and destination it is for (``publication_identity``, read under this hold), checked at its write.
+    ``defer_custody`` (a witnessed barrier): a capture with no work of its own leaves the custody decision, which
+    then reads the saved file, to its last check off Q (``custody_at_write``)."""
+    identity = publication_identity() if identity is None else identity
     if _kept_by_memo():
         return None
     pool = _pool_counts() if pool is None else pool
@@ -373,8 +440,9 @@ def _capture(reason: str, *, census: Optional[str] = None,
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
     budget_root_fences = [_frozen(row) for row in _queue().BUDGET_ROOT_FENCES.values()]
-    if _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
-                          acceptance_fences, budget_root_fences):
+    held = (pending_items, running_items, acceptance_fences, budget_root_fences)
+    custody_at_write = defer_custody and not any(held)  # without work of its own the decision would read the file
+    if not custody_at_write and _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, *held):
         log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
         _STATE["kept"] = _custody_key()
         return None
@@ -399,8 +467,8 @@ def _capture(reason: str, *, census: Optional[str] = None,
     from ouroboros.server_restart import _AGENT_RESTART_REPLY, agent_restart_snapshot
 
     return {
-        "revision": _STATE["revision"], "seq": _STATE["capture_seq"], "census": census,
-        "reason": reason, "rollback_readable": reason in _EXPORT_REASONS,
+        "revision": _STATE["revision"], "seq": _STATE["capture_seq"], "census": census, "identity": identity,
+        "custody_at_write": custody_at_write, "reason": reason, "rollback_readable": reason in _EXPORT_REASONS,
         "forced": reason in _FORCED_REASONS,
         "pending": pending_rows, "running": running_rows,
         "acceptance_fences": acceptance_fences, "budget_root_fences": budget_root_fences,
@@ -618,34 +686,41 @@ def _before_snapshot(old, new):
     return {"budget_root_fences": fences, "members": members}
 
 
-def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -> bool:
+def _publish(capture: Dict[str, Any]) -> Optional[bool]:
     """Outside Q, one writer at a time: encode, compare, then revoke -> changed documents -> certify.
 
-    ``writer``: the tick's thread names itself, so a capture of a generation that ended while it was encoding
-    (``reset`` replaced the writer) is never written over the next generation's documents.
+    The capture names its generation and destination (``publication_identity``), the tick's thread and a
+    synchronous barrier alike: one whose generation ended while it was encoding (``new_generation`` replaced the
+    writer) or whose destination moved is refused here, under the lock that step takes, before anything is
+    written; its documents go to the destination it was captured for. A capture that owes its custody decision
+    (``custody_at_write``) reads the saved file here, after those checks and off Q: None when that queue is kept.
     """
     documents, encoded = _documents(capture)
+    _writer, path = capture["identity"]
     with _PUBLISH_LOCK:
         if _queue().PRIOR_DIRECT_ROOTS.get("retry_pausing_envelopes"):
             return False
-        if writer is not None and writer is not _WRITER:
+        if capture["identity"] != publication_identity():
             return False  # an ended generation's capture: the next generation owns the documents now
         previous = _queue().QUEUE_PUBLICATION
         if _STATE["published_seq"] > capture["seq"]:
             # A later capture already published newer documents; while a later write failed, the bundle on
             # disk is unknown, so that publication is no durability for this caller either.
             return not (_STATE["write_failed"] or capture["forced"])
+        if capture["custody_at_write"] and _keeps_saved_queue(path):  # this lock orders it with every own write
+            log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody",
+                     capture["reason"])
+            return None
         # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
         # so every document is rewritten under a new generation and certified (R2/R3-A).
-        if (previous is None or previous[0] != _queue().QUEUE_SNAPSHOT_PATH or capture["forced"]
-                or _STATE["write_failed"]):
+        if previous is None or previous[0] != path or capture["forced"] or _STATE["write_failed"]:
             stale = list(documents)
         else:
             stale = [name for name in documents if previous[1].get(name) != encoded[name]]
         changed = bool(stale)
         generation = uuid.uuid4().hex if changed else previous[2]
         snapshot_generation = generation if _SNAPSHOT_NAME in stale else previous[2]
-        state = _queue().QUEUE_SNAPSHOT_PATH.parent
+        state = path.parent
 
         def write(name, document, content):
             stamp = generation if document is documents[name] else uuid.uuid4().hex
@@ -664,13 +739,14 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
                         write(_DISPATCH_NAME, early, machine_json(early))
                 if _SNAPSHOT_NAME in stale:
                     write(_SNAPSHOT_NAME, documents[_SNAPSHOT_NAME], encoded[_SNAPSHOT_NAME])
+                    _STATE["written_snapshot"] = (str((state / _SNAPSHOT_NAME).absolute()), generation)
             pool = _certified_pool(capture["pool"])
             if changed or _alive_due(capture["heartbeats"], pool):
                 _certify(state, snapshot_generation, capture["heartbeats"], pool)
             if _DISPATCH_NAME in stale and early is not dispatch:
                 write(_DISPATCH_NAME, dispatch, encoded[_DISPATCH_NAME])
             if changed:
-                _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, snapshot_generation)
+                _queue().QUEUE_PUBLICATION = (path, encoded, snapshot_generation)
             _STATE["published"] = max(_STATE["published"], capture["revision"])
             _STATE["published_seq"] = max(_STATE["published_seq"], capture["seq"])
             _STATE["census"] = capture["census"]  # written, so the tick's next census compares against it
@@ -689,12 +765,14 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
             return False
 
 
-def _refresh_alive(pool: Dict[str, Any], measured_after: int) -> Optional[bool]:
+def _refresh_alive(pool: Dict[str, Any], measured_after: int, identity: tuple) -> Optional[bool]:
     """A tick with nothing to publish: keep the certificate fresh for its readers (the heartbeats, and the counts of
     the pool that tick measured after capture ``measured_after``), never a new generation. A capture taken after that
-    measurement, once written, certified newer counts of its own: the refresh leaves them."""
+    measurement, once written, certified newer counts of its own: the refresh leaves them. ``identity``: the
+    generation and destination it measured in (``publication_identity``); once that generation ended the refresh
+    extends no certificate, the next generation's included (None, as for one that certified nothing)."""
     published = _queue().QUEUE_PUBLICATION
-    if published is None:
+    if published is None or identity != publication_identity():
         return None  # nothing of this process is certified; a kept saved queue stays uncertified
     if _STATE["write_failed"]:
         return False  # the document on disk is older than the facts: no certificate until a write lands
@@ -705,12 +783,14 @@ def _refresh_alive(pool: Dict[str, Any], measured_after: int) -> Optional[bool]:
     if not _alive_due(heartbeats, pool):
         return True
     with _PUBLISH_LOCK:
+        if identity != publication_identity():
+            return None  # a new generation began meanwhile: its certificate is not this measurement's
         if _STATE["write_failed"]:
             return False  # a barrier failed while this refresh was in flight: its revoked certificate stays revoked (R3-B)
         if _queue().QUEUE_PUBLICATION is not published or _STATE["published_seq"] > measured_after:
             return True  # a publication landed meanwhile and certified itself, or a later capture's counts stand
         try:
-            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[2], heartbeats, pool)
+            _certify(published[0].parent, published[2], heartbeats, pool)
         except Exception:
             log.warning("Failed to refresh queue liveness", exc_info=True)
             return False

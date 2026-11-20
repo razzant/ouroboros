@@ -1,11 +1,12 @@
 """Resolve authenticated connector events to host places; no behavior or tool ceiling."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 from ouroboros.places import Place, PlaceError, place_records, resolve_place
+from ouroboros.places_migration import complete_wake_import
 from ouroboros.presence_bindings import PresenceEndpoint
 
 
@@ -13,6 +14,14 @@ class PresenceAdmissionError(ValueError):
     def __init__(self, code: str, field: str, message: str = "") -> None:
         self.code, self.field = code, field
         super().__init__(message or f"{code}: {field}")
+
+
+class WakeImportPending(PresenceAdmissionError):
+    code = "wake_import_declarations_pending"
+    retry_after = 60
+
+    def __init__(self):
+        super().__init__(self.code, "place", "This connector's wake declarations are not available yet. Retry this event.")
 
 
 @dataclass(frozen=True)
@@ -36,30 +45,26 @@ class PresenceAdmission:
     place: Place | None = None
     allowance: Mapping[str, Any] | None = None
     circle: Mapping[str, Any] | None = None  # circle words with both origins, and model, at admission
-    # The words the connector's live declaration gives its facts (``places.declared_fact_labels``), as a door read
+    # The words the place's live declarations give its facts (``presence_events.connector_fact_labels``), as a door read
     # them; a carrier takes the whole map from its seed, by value: display only, never a fact's meaning.
     fact_labels: Mapping[str, str] | None = None
 
 
-def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",
-                        global_max_rounds: int | None = None, repo_path: str | None = None,
-                        provider: str = "", account_id: str = "", conversation_id: str = "",
-                        thread_id: str = "") -> PresenceAdmission:
-    """Authentication remains the Host's job; this resolves scope, never owner identity. The place and the circle
-    words it inherits come from one read of the place store."""
-    try:
-        records = place_records(drive_root)
-        if binding_id:
-            place = next((p for p in records.places.values()
-                          if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
-            if place is not None and place.connector != authenticated_transport_skill:
-                raise PresenceAdmissionError("presence_binding_wrong_transport", "binding_id")
-        else:
-            place = resolve_place(drive_root, connector=authenticated_transport_skill, provider=provider,
-                                  account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
-                                  places=records.places.values())
-    except PlaceError as exc:
-        raise PresenceAdmissionError(exc.code, exc.field, str(exc)) from exc
+def origin_outside(origin: PresenceEndpoint, provider: str, account_id: str, conversation_id: str, thread_id: str) -> bool:
+    """Whether the event's provider coordinates fall outside this connection."""
+    return (provider != origin.transport or account_id != origin.account_id
+            or (origin.conversation_id != "*" and conversation_id != origin.conversation_id)
+            or bool(origin.thread_id and thread_id != origin.thread_id))
+
+
+def _scoped_place(root, records, connector, binding_id, *, provider, account_id, conversation_id, thread_id, live_event):
+    if binding_id:
+        place = next((p for p in records.places.values() if binding_id in (p.place_id, *p.legacy_binding_ids)), None)
+        if place is not None and place.connector != connector:
+            raise PresenceAdmissionError("presence_binding_wrong_transport", "binding_id")
+    else:
+        place = resolve_place(root, connector=connector, provider=provider, account_id=account_id,
+                              conversation_id=conversation_id, thread_id=thread_id, places=records.places.values())
     if place is None:
         raise PresenceAdmissionError("place_not_connected", "place", "Add this place in Circles.")
     if ((provider and place.provider != provider)
@@ -68,6 +73,31 @@ def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str,
             or (place.thread_id and (provider or thread_id) and place.thread_id != thread_id)):
         raise PresenceAdmissionError("presence_origin_mismatch", "place")
     origin = PresenceEndpoint(place.provider, place.account_id or account_id, place.conversation_id or "*", place.thread_id)
+    if live_event and origin_outside(origin, provider, account_id, conversation_id, thread_id):
+        raise PresenceAdmissionError("presence_origin_mismatch", "place")
+    return place, origin
+
+
+def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",
+                        global_max_rounds: int | None = None, repo_path: str | None = None,
+                        provider: str = "", account_id: str = "", conversation_id: str = "",
+                        thread_id: str = "", live_event: bool = False, persist_import: bool = True) -> PresenceAdmission:
+    """Resolve a place and its circle from one snapshot. A live door previews the scope with persist_import=False
+    until the event passes capture. Only its subsequent admission can finish the proven import."""
+    def read_place():
+        records = place_records(drive_root, persist_import=persist_import)
+        place, origin = _scoped_place(drive_root, records, authenticated_transport_skill, binding_id, provider=provider,
+                                      account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
+                                      live_event=live_event)
+        return records, place, origin
+
+    try:
+        records, place, origin = read_place()
+        if live_event and persist_import and complete_wake_import(drive_root, records, place):
+            # Completion used the current record under the lock. Read the resulting place and circle together.
+            records, place, origin = read_place()
+    except PlaceError as exc:
+        raise PresenceAdmissionError(exc.code, exc.field, str(exc)) from exc
     destination = (PresenceEndpoint(**place.destination) if place.destination else
                    PresenceEndpoint(place.provider, place.account_id or account_id, conversation_id or place.conversation_id or "*", thread_id))
     return PresenceAdmission(binding_id=(place.legacy_binding_ids or (place.place_id,))[0],
@@ -76,6 +106,17 @@ def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str,
                              context_topics=place.context_topics, model_slot=place.model,
                              workspace_root=place.working_folder, place=place,
                              circle=records.circle_context(place.place_id))
+
+
+def admit_captured_wakes(root: Path, admission: PresenceAdmission, event) -> PresenceAdmission:
+    """Only a captured, validated arrival can finish its legacy connection's wake import."""
+    if admission.place is None or not admission.place.legacy_binding_ids:
+        return admission
+    current = admit_presence_turn(drive_root=root, authenticated_transport_skill=admission.transport_skill,
+                                  binding_id=admission.place.place_id, provider=event.provider,
+                                  account_id=event.account_id, conversation_id=event.conversation_id,
+                                  thread_id=event.thread_id, live_event=True)
+    return replace(current, fact_labels=admission.fact_labels)
 
 
 def switch_cause(drive_root: Path) -> str:

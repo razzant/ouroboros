@@ -368,15 +368,22 @@ def test_the_moved_lifecycle_flag_needs_a_moved_started_text_turn_whatever_its_p
 
     moved, origin_bound = {"t": {"project_id": "room"}}, {"t": {"project_id": "room", "origin_bound": True}}
 
-    def flagged(phase, bindings=moved, **row):
+    def flagged(phase, bindings=moved, no_pause=frozenset(), **row):
         activity = {"activity_id": "t", "kind": "presence", "phase": phase, **row}
-        _mark_carried_presence(None, [activity], bindings, None, True)
+        _mark_carried_presence(None, [activity], bindings, None, True, no_pause)
         return activity.get("presence_pause") is True
 
     assert flagged("working") and flagged("budget_paused")
     assert not flagged("preparing")  # nothing of it is saved yet: no Pause door and no return through a Restart
     assert not flagged("budget_paused", origin_bound) and not flagged("working", {})  # never moved
     assert not flagged("budget_paused", executor=EXECUTOR_INLINE_CALL)  # a live call never takes this lifecycle
+    # A registered inline actor's row keeps its entry phase at ``preparing`` while its execution started
+    # (``inline_carrier.start_inline_turn``); the row carries that producer's fact as ``turn_phase``.
+    assert flagged("preparing", turn_phase="started") and flagged("preparing", turn_phase="dispatched")
+    assert not flagged("preparing", turn_phase="admitted")  # registered, not yet started
+    # A drive no running pool can resume is named in ``no_pause``: no offer, whatever else the row says
+    # (the doors' ``no_continuation_owner``).
+    assert not flagged("working", no_pause={"t"})
 
 
 def test_hurry_of_a_presence_turns_lane_row_refuses_typed_and_seeds_nothing(root, monkeypatch):

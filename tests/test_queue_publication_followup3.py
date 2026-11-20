@@ -87,6 +87,74 @@ def test_an_idle_pool_with_the_lanes_spare_is_available_and_a_disabled_pool_refu
     assert _promotion_pool_disabled_from_snapshot(ctx) == "no_workers"
 
 
+class _EventSink:
+    """The supervisor's live event queue that answers nothing (``test_promote_admission_pending._DeadQueue``)."""
+
+    def __init__(self) -> None:
+        self.events = []
+
+    def put_nowait(self, event) -> None:
+        self.events.append(event)
+
+
+def test_a_host_thread_alone_is_no_pool_in_the_document_the_certificate_and_start_task(published, monkeypatch):
+    """#3149: a Host thread surviving a failed spawn runs its turn on a negative pseudo-slot. Its owner counts no
+    pool there (``no_workers``); the document, the certificate naming it and the readers deciding on them say the
+    same: a carrier's ``pool_available``, and ``start_task``'s own door, which refuses typed before any effect. A
+    real spare beside it is a started pool again: the same door emits its one event (nothing answers it here)."""
+    from ouroboros import config, utils
+    from ouroboros.model_detach import pool_available
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools import control_events
+    from ouroboros.tools.control_routing import _start_task
+    from supervisor import workers
+    from supervisor.worker_pool_lifecycle import LANE_CONVERSATION
+
+    root, _now = published
+    host = _slot(-2, LANE_CONVERSATION, busy="presence-turn")
+    host.executor = EXECUTOR_INLINE_DEGRADED
+    monkeypatch.setattr(workers, "WORKERS", {-2: host})
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0.05)  # the unanswered wait, kept short
+    monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_POLL_SEC", 0.005)
+
+    def published_facts(reason):
+        assert queue.persist_queue_snapshot(reason) is True
+        document, alive = _read(root, "queue_snapshot.json"), _read(root, "queue.alive")
+        assert alive["generation"] == document["generation"], "the certificate names this document"
+        with monkeypatch.context() as carrier:  # a conversation carrier reads the published document
+            carrier.setattr(utils, "in_worker_process", lambda: True)
+            detach = pool_available()["disabled_reason"]
+        return (workers._worker_pool_execution_state()["disabled_reason"],  # the owner's own answer
+                document["lane_carrier_total"], alive["pool"]["lane_carrier_total"], detach)
+
+    def start_task():  # the real door, with the context ``test_promote_admission_pending._promote_ctx`` uses
+        ctx = types.SimpleNamespace(pending_events=[], event_queue=_EventSink(), current_chat_id=1, drive_root=root,
+                                    budget_drive_root=str(root), project_id="", task_metadata={}, task_id="")
+        return _start_task(ctx, "Look into the report", title="Report check", workspace="none"), ctx
+
+    def refused_before_any_effect(out, ctx):
+        assert out.startswith("⚠️ PROMOTE_REJECTED: task ") and "(worker_pool_unavailable: no_workers)" in out, out
+        task_id = out.split(" was not scheduled", 1)[0].rsplit(" ", 1)[1]
+        assert ctx.event_queue.events == [] and ctx.pending_events == [], "no event emitted"
+        assert not load_task_result(root, task_id), "no durable intent written"
+
+    assert published_facts("host_thread") == ("no_workers", 0, 0, "no_workers")
+    refused_before_any_effect(*start_task())
+    workers.WORKERS[0] = _slot(0, LANE_CONVERSATION)  # a real spare starts beside it
+    assert published_facts("spare") == ("", 1, 1, "")
+    out, ctx = start_task()
+    assert out.startswith("Not confirmed yet: separate task "), out
+    [event] = ctx.event_queue.events
+    assert event["type"] == "promote_chat_to_task"
+    assert load_task_result(root, event["task_id"])["promotion_admission"]["status"] == "emitted"
+    del workers.WORKERS[0]  # the spare retires while the Host thread is still unwinding
+    assert published_facts("spare_retired") == ("no_workers", 0, 0, "no_workers")
+    refused_before_any_effect(*start_task())
+
+
 # ---- a failed pool measurement is published as unknown, never as an empty pool -------------------
 
 def test_a_failed_pool_measurement_publishes_unknown_and_every_reader_keeps_it_unknown(published, monkeypatch):
