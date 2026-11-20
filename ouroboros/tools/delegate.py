@@ -1233,7 +1233,8 @@ def get_tools() -> List[ToolEntry]:
                 "prompt": {"type": "string", "description":
                     "Direct start: a complete standalone task (why the work exists, decisions, material paths); "
                     "the session starts with my human's words for the work, the marks, the knowledge outline and, unless "
-                    "my input is declared, the heads of the notes that claim this work's room, none of my other memory; "
+                    "my input is declared, the heads of the notes that claim this work's room and of the notes their "
+                    "heads link, none of my other memory; "
                     "the host appends those words verbatim. The run starts in my write root; "
                     "a path named here does not move it: for another repository, schedule a child whose workspace is that repository. "
                     "Direct retry_of: omit or pass '' to replay the recorded request; other text must equal "

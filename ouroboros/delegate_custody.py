@@ -1020,7 +1020,7 @@ def record_start_requested(drive_root: Any, **payload: Any) -> bool:
             return False
         payload = {key: value for key, value in payload.items() if key != "request"}
         payload.update(request_ref=ref, request_shape=request_shape(body), prompt_chars=len(str(body.get("prompt") or "")),
-                       **({"held_heads": held} if held else {}))
+                       **held)
     from ouroboros.owner_pause import admit_delegated_start
 
     return admit_delegated_start(drive_root, payload)

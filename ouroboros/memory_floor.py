@@ -863,9 +863,10 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
 
     In a map frame each steps to its authored summary beside its exact reader, once the physical window has left no
     index or registry it could still outline and the request with memory at its shortest forms still exceeds the
-    heads' bound (``_host_steps``); there a claimed head without a summary stays whole, while a carried one keeps only
-    its exact reader, so it still yields first. At the emergency floor only the exact reader remains. A head whose
-    reader the actor cannot open has no shorter form at either step: it stays whole.
+    heads' bound (``_host_steps``); there a claimed head without a summary stays whole, while a carried one whose
+    summary form saves no room (or that has none) keeps only its exact reader where that is shorter, so it still
+    yields first; a head shorter than its reader form stays whole. At the emergency floor only the exact reader
+    remains. A head whose reader the actor cannot open has no shorter form at either step: it stays whole.
     """
     from ouroboros.held_notes import HeldNoteSection
 
@@ -882,7 +883,7 @@ def _held_note_steps(sections, receipts, fits, *, form="summary"):
             continue
         row = part.window_receipt(form)
         short = part.view_for_receipt(row, addressed)
-        if short is None and form == "summary" and part.carried_by:  # no summary to step to: its reader yields first
+        if form == "summary" and part.carried_by and not part.summary_saves(addressed):  # its reader yields first
             row = part.window_receipt("reader")
             short = part.view_for_receipt(row, addressed)
         current = addressed.get(part.section_id, part.full_text)
