@@ -402,7 +402,8 @@ def test_each_ui_invocation_keeps_its_raw_run_apart_and_publishes_only_its_diagn
                 if step.get("uses") == DOWNLOAD_ACTION]
     assert len(patterns) == 2 and fnmatchcase(concrete(proof["with"]["name"], "3", "2"), patterns[1]) is (
         workflow == "ui-browser.yml")
-    for shard in map(str, range(1, 10)):
+    shards = _workflow("ui-browser.yml")["jobs"]["ui-shard"]["strategy"]["matrix"]["shard"]
+    for shard in map(str, shards):
         for attempt in ("1", "2"):
             name = concrete(upload["with"]["name"], shard, attempt)
             assert "${{" not in name and not any(fnmatchcase(name, pattern) for pattern in patterns), name
