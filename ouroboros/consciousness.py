@@ -143,7 +143,7 @@ def panic_blocks_wake(drive_root: Any) -> bool:
 
 
 # Who turned consciousness off, saved in the same state write as ``bg_consciousness_enabled`` (owner 11.11, 5A; the
-# twin of /evolve off's provenance): the owner's doors (/bg from the app, Telegram or onboarding) and Panic leave a stop
+# twin of /evolve off's provenance): the owner's doors (/bg from the app, Telegram or a setup page) and Panic leave a stop
 # only the owner's start lifts, in every mode (P0: the owner's decision binds in Cyber Pro too); toggle_consciousness lifts only
 # a stop it placed. A stop with no saved source (placed before this key, a recovered state) is unknown: owner's.
 STOP_SOURCE_KEY = "bg_consciousness_stop_source"

@@ -325,12 +325,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const local = matching[0]?.local || false;
+            // What the role does, said once and visibly under its name (the contract's note; Fallback's own sentence).
+            const note = slot.slot === 'fallback' ? 'Tried in this order when the acting model refuses, cannot be reached or loses its answer. A wait starts only when none of them answers.' : slot.note;
             return `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}">
-                <div class="model-role-head"><h4 title="${escapeHtml(slot.note || '')}">${escapeHtml(slot.label.replace(/ Model$/, ''))}</h4>
+                <div class="model-role-head"><h4>${escapeHtml(slot.label.replace(/ Model$/, ''))}</h4>
                     ${slot.settingsToggleId ? `<label class="local-toggle ui-field ui-field-inline"><input class="ui-checkbox" id="${escapeHtml(slot.settingsToggleId)}" type="checkbox" data-model-local aria-label="${escapeHtml(slot.label)} local runtime" ${local ? 'checked' : ''}> Local</label>` : ''}
                     ${slot.slot === 'fallback' ? '<button type="button" class="btn btn-default" data-model-add>Add fallback</button>' : ''}
                 </div>
-                ${slot.slot === 'fallback' ? '<p class="model-role-copy">Tried in this order when the acting model refuses, cannot be reached or loses its answer. A wait starts only when none of them answers.</p>' : ''}
+                ${note ? `<p class="model-role-copy ui-field-help" data-model-role-note>${escapeHtml(note)}</p>` : ''}
                 ${matching.map((row, index) => rowHtml(row, index, matching.length)).join('')}
                 ${mainNote && slot.slot === 'main' ? `<p class="model-role-copy" id="${escapeHtml(hostId)}-main-note" data-main-follow-note>${escapeHtml(MAIN_FOLLOW_NOTE)}</p>` : ''}
             </section>`;

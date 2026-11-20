@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from tests._wizard_walk import past_consciousness, rail_shows_its_steps, walk
 from tests.test_subscription_setup_browser import (
     capture,
     subscription_ui as subscription_ui,
@@ -21,7 +22,7 @@ def _open_wizard(ui):
     page = ui["page"]
     page.goto(ui["url"] + "/onboarding")
     page.wait_for_selector("#quick-start-btn:not([hidden])")
-    assert page.locator(".wizard-step").count() == 5
+    assert rail_shows_its_steps(page)
     return page
 
 
@@ -77,6 +78,7 @@ def test_wizard_summary_refresh_keeps_focused_action_and_position(subscription_u
     page = _open_wizard(ui)
     page.set_viewport_size({"width": 390, "height": 600})
     page.click("#quick-start-btn")
+    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
     page.wait_for_selector(".summary-card")
     assert page.evaluate("document.activeElement.matches('.step-title') && window.scrollY === 0")
     page.locator("#next-btn").focus()
@@ -222,8 +224,7 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     assert routing.locator('[aria-pressed="true"]').count() == 1
     routing.locator('[data-local-mode="fallback"]').click()
     assert routing.locator('[data-local-mode="fallback"]').get_attribute("aria-pressed") == "true"
-    for _ in range(3):
-        page.click("#next-btn")
+    walk(page, "accounts", "budget")
     page.locator('[data-collapse="api-budget"] > summary').click()
     for name in ("Total Budget (USD)", "Per-task Cost Cap (USD)"):
         field = page.get_by_label(name, exact=True)

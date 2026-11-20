@@ -461,11 +461,12 @@ def test_setup_contract_exports_active_model_slots_only():
 # --------------------------------------------------------------------------
 
 
-def test_agents_share_accounts_in_the_five_step_onboarding():
-    """Subscriptions and API access share the first step, then the same role editors."""
+def test_agents_share_accounts_in_the_six_step_onboarding():
+    """Subscriptions and API access share the first step, then the same role editors; Consciousness is its own step
+    between access and limits (owner decision 2026-11-20)."""
     contract = build_setup_contract("web")
     ids = [step["id"] for step in contract["steps"]]
-    assert ids == ["accounts", "models", "review_mode", "budget", "summary"]
+    assert ids == ["accounts", "models", "review_mode", "consciousness", "budget", "summary"]
     assert build_setup_bootstrap({}, "web")["stepOrder"] == ids
     assert "coding agent" not in repr(contract).lower()
     assert contract["steps"][0]["title"] == "Connect your accounts"

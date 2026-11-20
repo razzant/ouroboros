@@ -364,3 +364,27 @@ def test_named_only_api_connections_survive_atomic_completion(onboarding, subscr
     assert (saved["OUROBOROS_MODEL"], saved["OUROBOROS_MODEL_LIGHT"], saved["OUROBOROS_MODEL_FALLBACKS"]) == (main, light, "")
     assert saved[ONBOARDING_COMPLETED_KEY]
     assert onboarding.calls["snapshot"] == (2 if subscriptions else 0)
+
+
+LUNA_CATALOG = [
+    {"value": "claudexor::codex=gpt-6.1-sol", "id": "gpt-6.1-sol", "source_id": "codex", "is_default": True,
+     "input_modalities": ["text"]},
+    {"value": "claudexor::codex=gpt-6-luna", "id": "gpt-6-luna", "source_id": "codex", "input_modalities": ["text"]},
+]
+
+
+@pytest.mark.parametrize("main, light", [
+    # Main left to its proposal: an empty Light takes its proposal too, the one the preview showed.
+    ("", "claudexor::codex=gpt-6-luna"),
+    # The owner chose Main: a blank Light beside it stays the owner's "Uses Main".
+    ("claudexor::codex=gpt-6.1-sol", ""),
+], ids=["proposed-main", "authored-main"])
+def test_an_empty_light_takes_its_proposal_only_beside_an_empty_main(onboarding, main, light):
+    onboarding.calls["snapshot_payload"] = {**LIVE_SNAPSHOT, "model_catalog": LUNA_CATALOG}
+    draft = {"subscriptionsConnected": True, "OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": ""}
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["model_settings"].get("OUROBOROS_MODEL_LIGHT", "") == light
+    response = onboarding.client.post("/api/onboarding/complete", json=draft)
+    assert response.status_code == 200, response.text
+    assert onboarding.saved()["OUROBOROS_MODEL_LIGHT"] == light
