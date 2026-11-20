@@ -501,12 +501,11 @@ def test_local_request_reader_reports_selected_file_not_current_file(data_root, 
     physical = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False,
                                       base_prompt_source=witness)
     # The witness rides beside the record: a copy keeps it, and no serialized form of the record holds it. A record
-    # without one carries its None the same way, so every copy reads the instance's own value back.
+    # without one holds just its fields, as the ledger writes them, and a copy of it still reads None.
     assert replace(physical, prefix={'departs': 'first'}).base_prompt_source == witness
     assert 'base_prompt_source' not in asdict(physical)
     bare = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False)
-    assert 'base_prompt_source' in vars(bare) and replace(bare, prefix={'departs': 'first'}).base_prompt_source is None
-    assert 'base_prompt_source' not in asdict(bare)
+    assert vars(bare) == asdict(bare) and replace(bare, prefix={'departs': 'first'}).base_prompt_source is None
     with ua.bind_physical_attempt_context(physical):
         first = _dispatch(data_root, 'reader-test', payload=payload)
         later = _dispatch(data_root, 'reader-test', payload=_payload())  # the same witness over another first message
