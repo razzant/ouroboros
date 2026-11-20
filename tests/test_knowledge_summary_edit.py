@@ -295,6 +295,36 @@ def test_summary_revision_keeps_a_recursive_yaml_field(tmp_path):
     assert _body(current) == b"Body.\n"
 
 
+def test_a_boolean_yaml_key_before_type_keeps_summary_and_field_edits_while_a_changed_field_refuses(
+        tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    address = store.resolve_knowledge_address(tmp_path, "weekly", "global")
+    address.path.parent.mkdir(parents=True)
+    address.path.write_bytes(b"---\non: Monday\ntype: note\nsummary: Old.\n---\nBody.\n")
+    original = store.read_knowledge_note(address)
+    assert list(original.metadata) == [True, "type", "summary"]  # PyYAML cannot sort a bool key beside str keys
+    _receipt(tools._knowledge_write(ctx, "weekly", mode="edit", scope="global", summary="New.",
+                                    expected_revision=original.revision))
+    summarized = store.read_knowledge_note(address)
+    _receipt(tools._knowledge_write(ctx, "weekly", "---\nclaims: [room:1]\nkeys: [ada]\n---\n", mode="edit",
+                                    scope="global", expected_revision=summarized.revision))
+    current = store.read_knowledge_note(address)
+    assert current.metadata == {True: "Monday", "type": "note", "summary": "New.", "claims": ["room:1"],
+                                "keys": ["ada"]}
+    assert _body(summarized) == _body(current) == b"Body.\n"
+    write_content = store._write_content
+
+    def change_another_field(*args, **kwargs):  # a re-render that changes a field the call did not revise
+        raw, claims = write_content(*args, **kwargs)
+        return raw.replace(b"true: Monday", b"true: Tuesday"), claims
+
+    monkeypatch.setattr(store, "_write_content", change_another_field)
+    refused = tools._knowledge_write(ctx, "weekly", mode="edit", scope="global", summary="Newer.",
+                                     expected_revision=current.revision)
+    assert "invalid_note: edit cannot change frontmatter" in refused
+    assert address.path.read_bytes() == current.raw
+
+
 def test_unparseable_source_leaves_both_change_facts_unknown(tmp_path):
     address = store.resolve_knowledge_address(tmp_path, "malformed", "global")
     address.path.parent.mkdir(parents=True)

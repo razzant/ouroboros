@@ -714,6 +714,14 @@ def yaml_fields(content: str) -> dict[str, Any] | None:
     return dict(source.frontmatter)
 
 
+def _merged_fields(old: Mapping[str, Any], supplied: Mapping[str, Any]) -> dict[str, Any]:
+    """Each supplied field replaces its own in place, every other field survives, and ``type`` defaults last: the
+    order the writer renders, which ``yaml_form`` compares when PyYAML cannot sort mixed keys (``on:`` is ``True``)."""
+    merged = {**old, **supplied}
+    merged.setdefault("type", "note")
+    return merged
+
+
 def _write_content(current: KnowledgeNote | None, content: str, mode: str,
                    old_str: str | None = None, summary: str | None = None,
                    items: list | None = None, fields: dict[str, Any] | None = None) -> tuple[bytes, bool]:
@@ -749,8 +757,7 @@ def _write_content(current: KnowledgeNote | None, content: str, mode: str,
                 return current.raw[:current.source.body_span.start_byte] + proposed, False
             return proposed, False  # No forced migration of an existing plain Markdown note.
         return b"---\ntype: note\n---\n\n" + proposed, False
-    merged = {**old, **source.frontmatter}
-    merged.setdefault("type", "note")
+    merged = _merged_fields(old, source.frontmatter)
     if current is None and (not isinstance(merged["type"], str) or not merged["type"].strip()):
         raise ValueError("A new note's type must be a non-empty string; any authored type is allowed")
     explicit_claims = "claims" in source.frontmatter
@@ -969,7 +976,7 @@ def write_knowledge_note(
                 bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
                 updated.raw[:current.source.body_span.start_byte] !=
                 current.raw[:current.source.body_span.start_byte]) and (
-                not revised or yaml_form(updated.metadata) != yaml_form({"type": "note", **current.metadata, **revised}))):
+                not revised or yaml_form(updated.metadata) != yaml_form(_merged_fields(current.metadata, revised)))):
             return KnowledgeWriteResult(False, f"invalid_note: {mode} cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
         change = text_change.exact_change(old_text, updated.text)
