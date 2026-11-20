@@ -964,16 +964,24 @@ def test_aggregate_range_keeps_interleaved_verbatim_rows_in_place():
 
 def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatch):
     """The receipt of a build inside ``measured_sections`` carries each section's wall and CPU time;
-    a build outside one carries neither, and the request itself is the same."""
+    a build outside one carries neither, and the request itself is the same. The batch read, the row
+    rendering and the running-focus lookup of the other conversations each hold only their own time."""
     from ouroboros.context_timing import measured_sections
     from ouroboros.agent_task_pipeline import build_review_context
-    from ouroboros import context_timing, skill_catalogue
+    from ouroboros import context_timing, memory_view, memory_view_conversations, skill_catalogue, task_store
+    from ouroboros.focus import normalize_focus
+    from tests._store_shared import seed_result
     from types import SimpleNamespace
 
     monkeypatch.setattr("shutil.disk_usage", lambda _path: SimpleNamespace(free=1, total=2))  # free space is dated too
 
     env, memory, _rooms = world(tmp_path)
     events = memory.drive_root / "logs" / "events.jsonl"
+    # A work of the alpha Project is running and has authored its focus: the other conversations name it, and their
+    # running-focus lookup has a task to read.
+    focus = normalize_focus("Finish the inventory check", {"reader": "get_task_result", "task_id": "alpha-live"},
+                            task_id="alpha-live", authored_at="2026-09-03T00:10:00+00:00")
+    seed_result(memory.drive_root, "alpha-live", {"status": "running", "project_id": "alpha", "focus": focus})
     # Skill discovery moved ahead of catalog rendering; its cost must still be
     # in installed_skills, and the always-on block and catalog share one read.
     clock = [0.0]
@@ -988,6 +996,25 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     monkeypatch.setattr(skill_catalogue, "discover_context_skills", discover_skills)
     monkeypatch.setattr(context_timing, "time", SimpleNamespace(
         perf_counter=lambda: clock[0], thread_time=lambda: clock[0] / 2))
+
+    # The three timed operations of the other conversations run for real, each moving the clock by a step of its own,
+    # so every span holds exactly its operation: 3 s for the one batch read of their open rows, 5 s for each row
+    # rendered, 7 s for the one read of the running work's focus. Nothing else of theirs moves the clock.
+    def stepping(seconds, real):
+        def step(*args, **kwargs):
+            clock[0] += seconds
+            return real(*args, **kwargs)
+        return step
+
+    rows, lookups = [], []  # the rows each render pass was given, and the tasks each focus lookup was asked for
+    write_lines, running_focus = memory_view_conversations._write_lines, memory_view_conversations._running_focus
+    monkeypatch.setattr(memory_view, "_row_texts", stepping(3.0, memory_view._row_texts))
+    monkeypatch.setattr(memory_view, "_spoken", stepping(5.0, memory_view._spoken))
+    monkeypatch.setattr(task_store, "display_documents", stepping(7.0, task_store.display_documents))
+    monkeypatch.setattr(memory_view_conversations, "_write_lines",
+                        lambda shown, *rest: rows.append(len(shown)) or write_lines(shown, *rest))
+    monkeypatch.setattr(memory_view_conversations, "_running_focus",
+                        lambda root, tasks: lookups.append(sorted(tasks)) or running_focus(root, tasks))
 
     def receipt():
         return [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()
@@ -1004,6 +1031,15 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     assert discoveries == [memory.drive_root]
     assert timed["sections_ms"]["installed_skills"] == 2000
     assert timed["sections_cpu_ms"]["installed_skills"] == 1000
+    # One capture rendered real rows of other conversations and read the running work's focus; each named span holds
+    # its own step, wall and CPU (half of it), and no other operation's.
+    assert len(rows) == 1 and rows[0] >= 2 and lookups == [["alpha-live"]]
+    read, render, looking = (f"memory_view.conversations.{name}" for name in ("read_rows", "render_rows", "running_focus"))
+    assert [timed["sections_ms"][name] for name in (read, render, looking)] == [3000, 5000 * rows[0], 7000]
+    assert [timed["sections_cpu_ms"][name] for name in (read, render, looking)] == [1500, 2500 * rows[0], 3500]
+    request = json.dumps(timed_messages, ensure_ascii=False)
+    assert "alpha again" in request and "beta again" in request  # the rows that were read and rendered
+    assert "get_task_result(task_id='alpha-live'): Finish the inventory check" in request  # the focus that was looked up
     events.write_bytes(history)  # the second build reads the same recent events as the first
     plain_messages, _cap = _messages(env, memory, task, review_context_builder=lambda: build_review_context(env))
     assert discoveries == [memory.drive_root, memory.drive_root]
