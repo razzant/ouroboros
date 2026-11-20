@@ -983,38 +983,6 @@ def test_ui_smoke_widgets_page_has_a_typed_address_and_one_nav_landmark(
         raise
 
 
-def _context_reports(root: pathlib.Path, monkeypatch, capsys) -> dict:
-    """Reports of one invented dialogue, written by the real reader from two real sealed attempts of one body."""
-    import copy
-
-    from ouroboros import usage_accounting as ua
-    from ouroboros.context_attempt_reader import main
-    from tests.test_model_send_seal import _dispatch, _payload
-
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    monkeypatch.setattr(ua, "estimate_cost_optional", lambda *args, **kwargs: 0.01)
-    (root / "state").mkdir(parents=True)
-    payload = _payload()
-    payload["messages"] = [
-        {"role": "system", "content": [{"type": "text", "text": "You answer from the tide table.\n\n## Rules\n\n- Heights in metres."}]},
-        {"role": "user", "content": "Can the Marigold berth at 14?\nShe arrives at 06:30.\n"
-                                    "OPENAI_API_KEY=sk-secret-model-send-seal <b>now</b>"},
-        {"role": "assistant", "content": None, "tool_calls": [
-            {"id": "call_1", "type": "function", "function": {"name": "inspect", "arguments": '{"berth": 14}'}}]},
-        {"role": "tool", "tool_call_id": "call_1", "content": "open\nfenders replaced"},
-    ]
-    attempts = [_dispatch(root, "report-task", payload=copy.deepcopy(payload))["attempt_id"] for _ in range(2)]
-
-    def report(attempt: str, *extra: str) -> bytes:
-        capsys.readouterr()
-        assert main(["--data-root", str(root), "report-task", "--attempt", attempt, "--report", *extra]) == 0
-        return capsys.readouterr().out.encode("utf-8")
-
-    return {"attempts": attempts, "first": report(attempts[0]), "second": report(attempts[1]),
-            "over_limit": report(attempts[0], "--max-bytes", "1")}
-
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("browser_name", ("chromium", "webkit"))
@@ -1024,17 +992,20 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
     """Widgets opens one local report at a time and shows that attempt, its messages and tools, or its gap.
 
     The reports are the real reader's over real sealed attempts. A stale CSP hash, a body shown under another
-    attempt's facts, an earlier result left under a failed selection, text drawn as markup or a request held
-    twice in the frame each fail here.
+    attempt's facts, an earlier result left under a failed selection, text drawn as markup, a request held
+    twice in the frame, a gap explained only inside a closed disclosure or a ledger state read as a final
+    charge each fail here.
     """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import expect, sync_playwright
 
+    from tests._context_reports import context_reports
     from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
-    reports = _context_reports(tmp_path / "report-data", monkeypatch, capsys)
+    reports = context_reports(tmp_path / "report-data", monkeypatch, capsys)
     first, second = reports["attempts"]
+    (failed, failed_report), (retried, retried_report) = reports["failed"], reports["retried"]
     stored = json.loads(reports["first"])["stored_json"]
     selector = "iframe[title='Beautiful Context']"
     url = direct_server_with_data["url"]
@@ -1043,7 +1014,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
             browser = getattr(pw, browser_name).launch(headless=True)
             page = browser.new_page(viewport={"width": 1280, "height": 800})
             page.set_default_timeout(15_000)
-            errors, failed = record_console_errors(page), record_failed_loads(page)
+            errors, failed_loads = record_console_errors(page), record_failed_loads(page)
             try:
                 page.goto(f"{url}/#widgets", wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_selector("#page-widgets.active")
@@ -1056,6 +1027,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 frame = page.frame_locator(selector)
                 assert frame.locator("html").get_attribute("data-theme") == page.locator("html").get_attribute("data-theme")
                 facts, rows = frame.locator("#attempt-facts"), frame.locator("#request .rows[data-kind='messages'] > .row")
+                stored_body = frame.locator("#stored-body")
 
                 def choose(content, shown: str, where: str = "#report-status") -> None:
                     # Through the picker a person uses: the control must take the click itself.
@@ -1065,13 +1037,23 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                         "name": "report.json", "mimeType": "application/json", "buffer": content})
                     frame.locator(where).get_by_text(shown).wait_for()
 
+                def gap_reads_without_opening(words: str) -> None:
+                    # What a person sees with every disclosure closed: the gap's headline and its explanation; the
+                    # stored JSON, where a gap also names itself, stays folded and is no evidence of either.
+                    assert frame.locator("#report-result details[open]").count() == 0
+                    expect(frame.locator("#headline")).to_be_visible()
+                    expect(frame.locator("#explain")).to_be_visible()
+                    assert words in frame.locator("#explain").inner_text()
+                    expect(stored_body).to_be_hidden()
+                    assert rows.count() == 0 and frame.locator("#privacy").is_hidden()
+
                 choose(reports["first"], first, "#attempt-facts")
                 assert "receipt not confirmed" in facts.inner_text() and second not in facts.inner_text()
                 assert "Request recorded" in frame.locator("#headline").inner_text()
                 assert "Private text can remain" in frame.locator("#privacy").inner_text()
                 # The request is in the frame once, whole and literal; the overview names every message and
                 # tool, and a row's text exists only while that row is open.
-                assert frame.locator("#stored-body").text_content() == stored
+                assert stored_body.text_content() == stored
                 assert rows.count() == 4 and frame.locator(".part").count() == 0
                 asked = rows.nth(1)
                 assert "secret masked" in asked.locator("summary").inner_text()
@@ -1086,15 +1068,29 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 # The same request sent again is another attempt, and it replaces what was shown.
                 choose(reports["second"], second, "#attempt-facts")
                 assert first not in frame.locator("body").text_content()
-                assert frame.locator("#stored-body").text_content() == stored
+                assert stored_body.text_content() == stored
+                # The first send failed and its retry was answered: the failed attempt's report is that attempt's,
+                # its request included, and its ledger state says how the record was closed, never a price.
+                choose(failed_report, failed, "#attempt-facts")
+                words = facts.inner_text()
+                assert "The send raised _Rejected · HTTP 400" in words and retried not in frame.locator("body").text_content()
+                assert "Settled — the ledger closed this attempt’s accounting record without a receipt (abandoned)" in words
+                assert "Request recorded" in frame.locator("#headline").inner_text()
+                assert json.loads(stored_body.text_content())["messages"] == json.loads(stored)["messages"]
+                shown = " ".join(frame.locator(node).inner_text() for node in ("#headline", "#explain", "#attempt-facts"))
+                for claim in ("final", "charge", "price", "cost", "$", "paid"):
+                    assert claim not in shown.lower(), claim
+                choose(retried_report, retried, "#attempt-facts")
+                assert failed not in frame.locator("body").text_content() and "Failure" not in facts.inner_text()
+                assert "abandoned" not in facts.inner_text()
                 # A report of a gap says which gap at the top; an earlier /1 report without the later facts opens.
                 choose(reports["over_limit"], "larger than this report", "#headline")
-                assert f"--max-bytes {len(stored.encode('utf-8'))}" in frame.locator("#explain").inner_text()
-                assert frame.locator("#stored-body").text_content() == "Request body unavailable: over_limit"
-                assert rows.count() == 0 and frame.locator("#privacy").is_hidden()
+                gap_reads_without_opening(f"--max-bytes {len(stored.encode('utf-8'))}")
+                assert stored_body.text_content() == "Request body unavailable: over_limit"
                 choose(json.dumps({"format": "ouroboros.context-report/1", "stored_json": None, "facts": {
                     "task_id": "report-task", "attempt_id": "earlier-attempt", "body": "not_linked"}}).encode("utf-8"),
-                    "No request was recorded", "#headline")
+                    "No saved request is linked", "#headline")
+                gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
                 # A selection that is no report removes the result instead of leaving the last one in view.
                 for content, words in ((b"", "the file is empty"), (reports["first"][:200], "not complete JSON"),
@@ -1104,8 +1100,8 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     assert content is None or "Cannot read this Beautiful Context JSON report" in frame.locator(
                         "#report-status").inner_text()
                     assert frame.locator("#report-result").is_hidden() and facts.inner_text() == ""
-                    assert frame.locator("#stored-body").text_content() == ""
-                assert unexpected_console_errors(errors, failed) == []
+                    assert stored_body.text_content() == ""
+                assert unexpected_console_errors(errors, failed_loads) == []
                 page.locator("nav#primary-sidebar [data-nav-page]:not([data-nav-page='widgets'])").first.click()
                 report.wait_for(state="detached")
             finally:
