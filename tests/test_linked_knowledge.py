@@ -607,29 +607,43 @@ def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, 
     assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
 
-def test_a_link_in_another_case_backlinks_the_note_only_where_the_volume_folds_case(tmp_path):
+def test_a_link_in_another_case_backlinks_the_note_only_where_the_volume_folds_case(tmp_path, monkeypatch):
     """``[the hub](Hub.md)`` beside ``hub.md``, on the global shelf and a project's: where the volume folds case,
     reading ``Hub`` or ``hub`` lists the reader under backlinks, as reads did before outgoing links took the shelf's
     spelling. On a case-sensitive volume that link names no note, so ``hub`` keeps only its exact backlink, and a
-    distinct ``Hub.md`` gets the reader."""
+    distinct ``Hub.md`` gets the reader. On the project's shelf, whose links keep their written spelling, a link to
+    its generated index in another case ahead of the hub's link neither breaks the read nor hides that backlink, and
+    the join asks the shelf about no name but the hub's."""
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    spelled, shelf_spelling = [], store.shelf_spelling
+    monkeypatch.setattr(store, "shelf_spelling", lambda where: spelled.append(where.topic) or shelf_spelling(where))
     for scope in ("global", "project:demo"):
         hub = address(tmp_path, "hub", scope)
         hub.shelf.mkdir(parents=True)
         hub.path.write_text("Hub body.\n", encoding="utf-8")
         (hub.shelf / "reader.md").write_text("[the hub](Hub.md)\n", encoding="utf-8")
         (hub.shelf / "exact.md").write_text("[the hub](hub.md)\n", encoding="utf-8")
-        exact, reader = ({"scope": scope, "topic": topic, "state": "active"} for topic in ("exact", "reader"))
+        exact, indexed, reader = ({"scope": scope, "topic": topic, "state": "active"}
+                                  for topic in ("exact", "indexed", "reader"))
+        plain = [exact]
+        if scope != "global":
+            (hub.shelf / "index-full.md").write_text("The shelf's generated index.\n", encoding="utf-8")
+            (hub.shelf / "indexed.md").write_text("See [the index](Index-Full.md) and [the hub](hub.md).\n",
+                                                  encoding="utf-8")
+            plain.append(indexed)
+        spelled.clear()
 
         def backlinks(topic):
             return _link_header(tools._knowledge_read(ctx, topic, scope=scope), "backlinks (readable shelves now)")
 
         if (hub.shelf / "HUB.md").exists():  # one file under every spelling
-            assert [backlinks("Hub"), backlinks("hub")] == [[exact, reader], [exact, reader]], scope
+            assert [backlinks("Hub"), backlinks("hub")] == [[*plain, reader]] * 2, scope
         else:
-            assert backlinks("hub") == [exact], scope
+            assert backlinks("hub") == plain, scope
             (hub.shelf / "Hub.md").write_text("A distinct hub.\n", encoding="utf-8")
-            assert [backlinks("Hub"), backlinks("hub")] == [[reader], [exact]], scope
+            assert [backlinks("Hub"), backlinks("hub")] == [[reader], plain], scope
+        if scope != "global":
+            assert {topic.casefold() for topic in spelled} == {"hub"}, spelled
 
 
 def test_backlinks_follow_source_rename_and_deletion_without_writes(tmp_path):

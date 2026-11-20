@@ -693,9 +693,14 @@ def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ..
     target = shelf_spelling(note.address)
     filename = _folded(target.path.name)
 
-    def names_target(where: dict) -> bool:
-        return where.get("scope") == target.scope and (where["topic"] == target.topic or shelf_spelling(
-            replace(target, topic=where["topic"])).topic == target.topic)
+    def names_target(where: dict) -> bool:  # only a spelling of the target's own name asks the shelf
+        if where.get("scope") != target.scope or _folded(where["topic"]) != _folded(target.topic):
+            return False
+        try:
+            return where["topic"] == target.topic or shelf_spelling(
+                replace(target, topic=where["topic"])).topic == target.topic
+        except (OSError, ValueError):  # a reserved or unresolvable spelling names no note here
+            return False
 
     rows = []
     for shelf in {item.shelf: item for item in shelves}.values():
