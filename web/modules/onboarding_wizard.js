@@ -117,6 +117,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     // owner edits leaves it, and only one still holding it takes a later proposal: saved values and blanks stay.
     const proposedModels = Object.fromEntries((INITIAL_STATE.automaticModels || []).map((key) => [key, INITIAL_STATE[key]]));
     const ours = (key) => key in proposedModels && state[key] === proposedModels[key];
+    const previewed = {};  // what a preview put into a slot: a slot still holding it is asked again, so an updated catalog proposes anew
     let connectionsEditor = null;
     let footerObserver = null;
     let compatibleCatalogs = {};
@@ -138,6 +139,12 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim }), ...keyChoices.draft() };
     }
     const openedDraft = draftSettings();  // the access the install had saved when the wizard opened
+    function previewDraft() {  // the draft a preview asks with: blank where a slot still holds the preview's own proposal
+        const draft = draftSettings();
+        if (!state.skipSubscriptionPresets) MODEL_SLOTS.filter((slot) => ours(slot.stateKey) && previewed[slot.stateKey] === state[slot.stateKey])
+            .forEach((slot) => { draft[slot.settingKey] = ''; });
+        return draft;
+    }
 
     function adoptModelSettings(settings = {}) {
         MODEL_SLOTS.forEach((slot) => {
@@ -209,7 +216,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             const previous = JSON.stringify(draftSettings());
             MODEL_SLOTS.filter((slot) => slot.settingKey in response.model_settings && ours(slot.stateKey))
                 .forEach((slot) => {
-                    state[slot.stateKey] = proposedModels[slot.stateKey] = response.model_settings[slot.settingKey];
+                    const value = response.model_settings[slot.settingKey];
+                    if (value !== state[slot.stateKey]) previewed[slot.stateKey] = value;
+                    state[slot.stateKey] = proposedModels[slot.stateKey] = value;
                 });
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
         }
@@ -770,7 +779,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     void refreshModelSources({ asked: false });
                     syncCurrentStepActionState();
                 },
-                previewPayload: draftSettings,
+                previewPayload: previewDraft,
                 providerProfiles: PROVIDER_PROFILES,
                 onSubagentsChange: (setting) => { state.availableSubagents = setting; },
                 onSetupPreview: applySetupPreview,

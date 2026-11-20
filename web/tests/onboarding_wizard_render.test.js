@@ -871,6 +871,53 @@ test('Summary says what an exhausted subscription quota does, with and without a
     assert.match(partial.budget, /id="budget-gaps"[^>]*>Partly counted: all model roles \(text only, off-peak, USD only\); Web search \(USD only\)\.<\/div>/);
 });
 
+// Review r1 (Astra M1): pressing Update on Accounts can bring a catalog row the first preview did not have (Luna). A
+// slot still holding what an earlier preview proposed is asked again, blank, so the next preview proposes from the new
+// catalog and Light moves to Luna; a Main the owner set is sent as set, and nothing is proposed beside it.
+test('a slot still holding a preview\'s proposal takes the proposal of a changed catalog; a Main the owner set is kept', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const [TEST, LUNA] = ['claudexor::codex=gpt-test', 'claudexor::codex=gpt-6-luna'];
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const location = { origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding', replace() {} };
+    const finish = async (query, initial) => {
+        const previews = [], posted = [];
+        const fetch = async (url, init = {}) => {
+            let body = {};
+            if (String(url) === '/api/onboarding/complete') {
+                posted.push(JSON.parse(init.body));
+                body = { ok: true, runtime_mode: 'advanced', restart_required: false };
+            } else if (String(url) === '/api/onboarding/model-catalog') body = subscription.catalog;
+            else if (String(url) === '/api/claudexor/status') body = subscription.status;
+            else if (String(url) === '/api/onboarding/subagents/preview') {
+                const payload = JSON.parse(init.body);
+                previews.push(payload);
+                // As compile_model_settings: proposals only beside a Main awaiting one; Luna once the catalog lists it.
+                const proposes = !payload.OUROBOROS_MODEL || payload.OUROBOROS_MODEL === BOOTSTRAP.initialState.mainModel;
+                body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: [], partly_counted_spend: [],
+                    model_settings: proposes ? { OUROBOROS_MODEL: TEST, OUROBOROS_MODEL_LIGHT: previews.length > 1 ? LUNA : TEST } : {} };
+            }
+            return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+        };
+        const bootstrap = { ...BOOTSTRAP, freshInstall: true, initialState: { ...BOOTSTRAP.initialState, ...initial } };
+        await withWizard(bootstrap, query, async ({ doc }) => {
+            await settle();
+            for (let step = 0; step < 6; step += 1) { doc.getElementById('next-btn').fire('click'); await settle(); }
+        }, { fetch, location });
+        assert.equal(posted.length, 1, 'the walk reached the completion POST');
+        return { body: posted[0], previews };
+    };
+    const proposed = await finish('light-reproposed', {});
+    assert.ok(proposed.previews.length > 1, 'a later preview was asked');
+    const last = proposed.previews.at(-1);
+    assert.deepEqual([last.OUROBOROS_MODEL, last.OUROBOROS_MODEL_LIGHT], ['', ''], 'the preview\'s own proposals are asked again');
+    assert.deepEqual([proposed.body.OUROBOROS_MODEL, proposed.body.OUROBOROS_MODEL_LIGHT], [TEST, LUNA]);
+    const automaticModels = BOOTSTRAP.initialState.automaticModels.filter((key) => key !== 'mainModel');
+    const kept = await finish('owner-main-kept', { mainModel: TEST, automaticModels });
+    assert.ok(kept.previews.length > 0 && kept.previews.every((draft) => draft.OUROBOROS_MODEL === TEST), 'a set Main is sent as set');
+    assert.equal(kept.body.OUROBOROS_MODEL, TEST);
+    assert.notEqual(kept.body.OUROBOROS_MODEL_LIGHT, LUNA, 'nothing is proposed beside a Main the owner set');
+});
+
 // A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
 // answer (the list of a key since replaced) must not land. This stand-in DOM paints no model list, so the test reads
 // what a landed answer changes on the wire: the wizard would hold the replaced key's list as the one read whole and
