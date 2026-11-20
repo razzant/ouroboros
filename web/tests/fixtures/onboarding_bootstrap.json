@@ -398,6 +398,7 @@
         "value": "cyber_pro"
       }
     ],
+    "scopedModelCatalogs": true,
     "steps": [
       {
         "copy": "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.",

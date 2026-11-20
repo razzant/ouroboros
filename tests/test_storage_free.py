@@ -987,8 +987,9 @@ def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_
     sw.capture_result_commit("snap-w", patch, data_dir=root)
     assert sw.release_snapshot_checkout("snap-w", worktree_root=wtroot, data_dir=root)
     seed_result(root, "writer", document("writer", "completed"))
-    custody.record_started(root, custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id="snap-w",
-                                                    execution_root=handle.path))
+    entry = custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id=handle.snapshot_id,
+                               execution_root=handle.path, baseline_sha=handle.baseline_sha)
+    assert custody.record_started(root, entry)
     _fake_sizer(monkeypatch)
     owner = _owner({})
     view = _preview(owner, root, tmp_path)
@@ -1003,9 +1004,9 @@ def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_
     record = sw.find_execution_snapshot("snap-w", root)
     assert record["pins_released"] and not {"baseline_ref", "result_ref", "result_sha"} & set(record)
     assert "changed by the writer" in patch.read_text(encoding="utf-8")
-    entry = SimpleNamespace(snapshot_id="snap-w", patch_disposed=False, execution_root=handle.path, baseline_sha="b",
-                            run_id="run-w")
-    assert _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))[0] is None
+    snapshot, refusal, detail = _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))
+    assert snapshot is None and refusal == "continuation_snapshot_missing"
+    assert "integrate_delegated_patch" in detail
     assert _group(_preview(owner, root, tmp_path), "result_pins")["count"] == 0, "nothing left to offer"
 
 

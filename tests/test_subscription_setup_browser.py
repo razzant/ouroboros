@@ -45,6 +45,40 @@ def status_answer(route, status):
     route.fulfill(json=passive_status(status) if passive else status)
 
 
+def scoped_catalog_answer(url, catalog, harnesses):
+    """Serve the models and account evidence belonging to the requested source."""
+    query = parse_qs(urlparse(url).query)
+    pin = query.get("credential_profile_id", [""])[0]
+    if query.get("view") == ["sources"]:
+        return {"items": [], "errors": [], "model_sources": catalog.get("model_sources", [])}
+    if harness := query.get("harness_id"):
+        source = next((row for row in harnesses if row["id"] == harness[0]), {"id": harness[0], "models": []})
+        native = copy.deepcopy(source)
+        if pin:
+            native["models"] = [item for item in native.get("models", []) if item.get("credential_profile_id") == pin]
+            if native.get("model_catalog"):
+                native["model_catalog"]["accounts"] = [a for a in native["model_catalog"]["accounts"] if a["credentialProfileId"] == pin]
+                native["model_catalog"]["partial"] = any(a.get("catalog") is None for a in native["model_catalog"]["accounts"])
+        return {"items": [], "model_sources": [], "errors": [], "session_catalog": native, "partial": bool(native.get("model_catalog", {}).get("partial"))}
+    if source := query.get("source_id"):
+        source_id = source[0]
+        accounts = [{**env, "accounts": [a for a in env["accounts"] if not pin or a.get("credentialProfileId") == pin]}
+                    for env in catalog.get("account_catalogs", []) if env["source"] == source_id]
+        if pin:
+            for env in accounts:
+                env["partial"] = any(a.get("catalog") is None for a in env["accounts"])
+        return {**catalog, "model_sources": [s for s in catalog.get("model_sources", []) if s["id"] == source_id],
+                "items": [item for item in catalog.get("items", [])
+                          if (item.get("source_id") == source_id or item.get("value", "").startswith(f"claudexor::{source_id}="))
+                          and (not pin or item.get("credential_profile_id") == pin)],
+                "account_catalogs": accounts, "partial": any(env.get("partial") for env in accounts),
+                "errors": [error for error in catalog.get("errors", []) if not pin or error.get("credential_profile_id", pin) == pin]}
+    if provider := query.get("provider_id"):
+        return {**catalog, "model_sources": [], "account_catalogs": [], "items": [item for item in catalog.get("items", [])
+                if item.get("value", "").startswith(provider[0] + "::") or provider == ["openrouter"] and "::" not in item.get("value", "")]}
+    return catalog
+
+
 @pytest.fixture
 def subscription_ui():
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
@@ -204,9 +238,7 @@ def subscription_ui():
             if backend.get("catalog_status"):
                 route.fulfill(status=backend["catalog_status"], content_type="application/json", body=json.dumps(body))
                 return
-            profile = parse_qs(urlparse(request.url).query).get("credential_profile_id", [""])[0]
-            if profile == "work":
-                body["items"][0].update(credential_profile_id="work", max_context_window=500000)
+            body = scoped_catalog_answer(request.url, body, fixture["status"]["harnesses"])
         elif path == "/api/onboarding":
             route.fulfill(status=204)
             return
@@ -364,7 +396,7 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": credential_harness},
     ]
-    with page.expect_response("**/api/onboarding/model-catalog"):
+    with page.expect_response("**/api/model-catalog?view=sources"):
         page.goto(ui["url"] + "/onboarding")
     page.wait_for_function(
         "expected => document.querySelector('#quick-start-btn').hidden !== expected", arg=expected)
@@ -503,7 +535,7 @@ def test_settings_accounts_and_model_roles_use_the_same_compact_components(subsc
     main = role.locator('[data-model-role="main"]')
     main.locator('[data-model-role-model]').wait_for(state='visible')
     main.locator('[data-model-role-account]').select_option('work')
-    controls = main.locator('.model-role-controls input, .model-role-controls select')
+    controls = main.locator('.model-role-controls input, .model-role-controls select:not([data-model-role-source]), .model-role-controls [data-source-picker]')
     shapes = controls.evaluate_all("""(els) => els.filter((el) => !el.hidden && el.getClientRects().length).map((el) => ({
         font: getComputedStyle(el).fontSize, height: Math.round(el.getBoundingClientRect().height) }))""")
     assert len(shapes) >= 3, shapes  # source, model and account at least
@@ -763,7 +795,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     ui, page = subscription_ui, subscription_ui['page']
     ui['backend']['preview_error'] = 'Agent inventory unavailable.'
     held = []
-    page.route('**/api/onboarding/model-catalog', lambda route: held.append(route))
+    page.route('**/api/model-catalog?view=sources', lambda route: held.append(route))
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Checking model sources')")
     assert held
@@ -772,7 +804,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
-    page.unroute('**/api/onboarding/model-catalog')
+    page.unroute('**/api/model-catalog?view=sources')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
 

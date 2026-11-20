@@ -8,6 +8,10 @@ the one read a wake makes, and ``held_run`` gives the run the custody facts the 
 """
 from __future__ import annotations
 
+import json
+
+import pytest
+
 
 def held_run(root, run_id, task_id, *, ended="", asks="", **facts):
     """A run ``task_id`` started (its STARTED custody row), optionally ended (``ended``: the terminal state the
@@ -85,3 +89,72 @@ def wake_now(ctx, run_id, wait_once=None, *, woke_by="", since_seq=None, checkpo
         return ds._publish(ctx, descriptor, woke_by)
     finally:
         delegate._read_run = saved
+
+
+_NANNY = "nanny"
+
+
+def _run(root, run_id, task_id=_NANNY):
+    from ouroboros import delegate_custody as custody, delegate_custody_current as current
+
+    assert custody.emit(root, custody.STARTED, {
+        "run_id": run_id, "invocation_id": f"invoke-{run_id}", "task_id": task_id, "root_task_id": task_id,
+        "route": "route", "source": "delegate_start", "access": "readonly"})
+    return current.run(root, run_id)
+
+
+def _ended(root, run_id, state="succeeded"):
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.delegate_collection import observe_run
+
+    assert observe_run(root, current.run(root, run_id), {"summary": {"runId": run_id, "state": state}, "lastSeq": 9})
+
+
+def _asks(root, run_id, question="q1"):
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.delegate_collection import observe_run
+
+    assert observe_run(root, current.run(root, run_id), {"summary": {"runId": run_id, "state": "running"}, "lastSeq": 3,
+        "pendingInteractions": [{"interactionId": question, "questions": [{"id": "pick", "question": "Which?"}]}]})
+
+
+def _nanny(root, task_id=_NANNY):
+    from ouroboros.task_results import write_task_result
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    write_task_result(root, task_id, "running", root_task_id=task_id, chat_id=0)
+    ctx, limit = _loop_ctx(root, task_id)
+    ctx.task_metadata, ctx._loop_mailbox_seen_ids = {"root_task_id": task_id}, set()
+    limit.tool_schemas, limit.round_idx, limit.llm_trace = [], 2, {"tool_calls": []}
+    (root / "logs").mkdir(exist_ok=True)
+    return ctx, limit
+
+
+@pytest.fixture
+def reads(monkeypatch):
+    """The one addressed read a wake makes: a terminal for an ended run, its question set, else a quiet state."""
+    from ouroboros import delegate_custody_current as current
+
+    made = []
+
+    def observe(ctx, run_id, since_seq, gateway=None):
+        made.append((run_id, since_seq))
+        run = current.run(ctx.drive_root, run_id)
+        if run is not None and run.terminal_state:
+            return json.dumps({"status": "terminal", "run_id": run_id, "state": run.terminal_state, "last_seq": 9})
+        if run is not None and run.pending_interaction_ids:
+            return json.dumps({"status": "waiting_on_user", "run_id": run_id, "state": "running", "last_seq": 3,
+                               "pending_interactions": [{"interaction_id": iid, "questions": [{"id": "pick"}]}
+                                                        for iid in run.pending_interaction_ids]})
+        return json.dumps({"status": "no_progress", "run_id": run_id, "state": "running", "last_seq": since_seq})
+
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", observe)
+    return made
+
+
+def _notices(limit):
+    return [row["content"] for row in limit.messages if "[BEGIN_TASK_WAIT_OUTPUT]" in str(row.get("content"))]
+
+
+def _body(notice):
+    return json.loads(notice.split("[BEGIN_TASK_WAIT_OUTPUT]\n", 1)[1].rsplit("\n[END_TASK_WAIT_OUTPUT]", 1)[0])

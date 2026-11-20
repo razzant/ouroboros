@@ -1013,7 +1013,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 478 -> 479: the evidence index's damage mark ``observability/packs/.index.sqlite.damaged``, left by a read
 # that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
 # ``DAMAGED_MARK``); the existing evidence-pack row names it.
-EXPECTED_SCAN_PATHS = 479
+# 479 -> 480: the capture reader also names the existing task artifact workspace.patch.
+EXPECTED_SCAN_PATHS = 480
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

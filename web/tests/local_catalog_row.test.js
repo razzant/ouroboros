@@ -13,6 +13,7 @@ import { createModelRolesEditor } from '../modules/model_roles.js';
 import { modelSuggestions } from '../modules/place_sheet.js';
 import { routeModelInputHtml, routeModelSuggestions } from '../modules/route_editor_primitives.js';
 import { mountPair } from './composer_controls_fixture.js';
+import { domDouble } from './dom_double.js';
 
 // The row exactly as the server writes it for LOCAL_MODEL_SOURCE=~/models/qwen3.gguf.
 const LOCAL = { provider_id: 'local', provider: 'Local', source: 'Local', id: 'qwen3.gguf', name: 'qwen3.gguf',
@@ -35,60 +36,10 @@ const isLocal = (text) => /qwen3|local::|\bLocal\b/.test(text);
 /* The editor rendered into a host that keeps each role row's real chooser: the editor binds the field and fills it
    through model_chooser.js as in a page, and focusing the field shows what it offers. */
 function rolesEditor({ settings, slots, options = {}, adopt = (editor, catalog) => editor.adoptCatalog(catalog) }) {
-    const inert = () => new Proxy(function () {}, {
-        get: (target, key) => (key === Symbol.iterator ? function* () {} : key === Symbol.toPrimitive ? () => ''
-            : key === 'then' ? undefined : key in target ? target[key] : inert()),
-        set: (target, key, value) => { target[key] = value; return true; },
-        apply: () => inert(),
-    });
-    const win = { addEventListener() {}, removeEventListener() {} };
-    const lists = new Map();
-    const fields = new Map();  // role row id → its chooser's field
-    const doc = { defaultView: win, addEventListener() {}, removeEventListener() {},
-        body: { appendChild(node) { node.parentElement = doc.body; } },
-        getElementById: (id) => (id === 'roles' ? host : lists.get(id) || inert()) };
-    const field = (rowId, listId) => {
-        const attrs = new Map([['aria-controls', listId]]);
-        const listeners = new Map();
-        // The list and its non-option footer share the chooser's portalled popup.
-        const footer = { hidden: true, innerHTML: '', contains: () => false, addEventListener() {}, removeEventListener() {} };
-        const owner = { querySelector: (selector) => selector === '[data-model-footer]' ? footer : null,
-            appendChild(node) { node.parentElement = owner; } };
-        const popup = { ownerDocument: doc, parentElement: owner, hidden: true, isConnected: false,
-            addEventListener() {}, removeEventListener() {}, contains: (node) => node === list || node === footer };
-        const list = { id: listId, ownerDocument: doc, parentElement: popup, innerHTML: '', closest: () => popup,
-            setAttribute() {}, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, contains: () => false };
-        lists.set(listId, list);
-        return { rowId, list, listeners, ownerDocument: doc, value: '', disabled: false, dataset: {}, closest: () => null,
-            getAttribute: (key) => attrs.get(key) ?? null, setAttribute: (key, value) => attrs.set(key, value),
-            removeAttribute: (key) => attrs.delete(key), addEventListener: (type, fn) => listeners.set(type, fn),
-            removeEventListener() {}, focus() {}, dispatchEvent() {} };
-    };
-    const host = new Proxy(function () {}, {
-        get(target, key) {
-            if (key === 'querySelectorAll') return (selector) => (selector === '[data-model-chooser]' ? [...fields.values()] : []);
-            if (key === 'querySelector') return (selector) => {
-                const rowId = /^\[data-model-role="([^"]+)"\]$/.exec(selector)?.[1];
-                if (!rowId) return selector === '[data-global-processing]' ? null : inert();
-                const row = inert();
-                return new Proxy(row, { get: (_row, name) => (name === 'querySelector'
-                    ? (inner) => (inner === '[data-model-role-model]' ? fields.get(rowId) : inert()) : row[name]) });
-            };
-            return key in target ? target[key] : inert();
-        },
-        set(target, key, value) {
-            if (key === 'innerHTML') {
-                // A new paint replaces the rows: each row's field is the one its markup names.
-                fields.clear();
-                for (const [, rowId, rest] of String(value).matchAll(/data-model-role="([^"]+)"([\s\S]*?)(?=data-model-role="|$)/g)) {
-                    const listId = /aria-controls="([^"]+)"/.exec(rest)?.[1];
-                    if (listId) fields.set(rowId, field(rowId, listId));
-                }
-            }
-            target[key] = value;
-            return true;
-        },
-    });
+    const { doc } = domDouble({ parseHtml: true });
+    const host = doc.createElement('div');
+    host.id = 'roles';
+    doc.body.appendChild(host);
     const editor = createModelRolesEditor({ hostId: 'roles', doc: () => doc, store: { snapshot: {}, accountsKnown: false },
         // The source-scoped read answers as the server does: that subscription's own models, nothing else.
         catalogFetch: async () => ({ items: CATALOG.items.filter((item) => item.source_id === 'codex'), model_sources: CATALOG.model_sources }),
@@ -101,9 +52,14 @@ function rolesEditor({ settings, slots, options = {}, adopt = (editor, catalog) 
         async offered() {
             await new Promise((resolve) => setImmediate(resolve));
             const out = {};
-            for (const [rowId, made] of fields) {
-                made.listeners.get('focus')();
-                out[rowId] = [...made.list.innerHTML.matchAll(/data-model-value="([^"]*)" aria-selected="false">([^<]*)</g)].map(([, value, label]) => [value, label]);
+            for (const row of host.querySelectorAll('[data-model-role]')) {
+                const field = row.querySelector('[data-model-role-model]');
+                field.value = '';  // Show every suggestion, including any Local row this source leaked.
+                field.emit('focus');
+                const list = doc.getElementById(field.getAttribute('aria-controls'));
+                out[row.dataset.modelRole] = [...list.querySelectorAll('[role="option"]')]
+                    .map(option => [option.dataset.modelValue, option.textContent]);
+                field.emit('blur');
             }
             editor.destroy();
             return out;

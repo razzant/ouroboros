@@ -19,9 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.testclient import TestClient
+from tests._task_file_http import task_file_client as _client
 
 from ouroboros import artifacts, headless
 from ouroboros.gateway import task_archive
@@ -49,17 +47,6 @@ def _split_child(tmp_path, *, status="completed"):
                       parent_task_id="parent1", root_task_id="parent1")
     (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
     return data, child, store
-
-
-def _client(data):
-    from ouroboros.gateway.tasks import api_task_artifact, api_task_get
-
-    app = Starlette(routes=[
-        Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
-        Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET", "HEAD"]),
-    ])
-    app.state.drive_root = data
-    return TestClient(app)
 
 
 def _zip(response):

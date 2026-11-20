@@ -19,7 +19,9 @@ import {
     tierPriced, withoutPrice } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
-import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
+import { createAgentModelCatalog } from './agent_model_catalog.js';
+import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
+import { bindSourcePickers } from './source_picker.js';
 import {
     harnessMap, lastReviewRunText, modelTariffText, reviewCostText, reviewMoneyLine, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
     sessionRouteVerdict,
@@ -273,7 +275,8 @@ function reviewCost(row, state, { line = false } = {}) {
     const cost = state.reviewCosts?.get(reviewCostKey(row, state.processingPreference)) || null;
     return line ? reviewMoneyLine(row, cost, modelTariff(row, state)) : reviewCostText(row, cost);
 }
-const modelTariff = (row, state) => modelTariffText(row, state.modelCatalog || {}, state.processingPreference);
+const catalogForRow = (row, state) => state.rowCatalog?.(row) ?? state.modelCatalog;
+const modelTariff = (row, state) => modelTariffText(row, catalogForRow(row, state) || {}, state.processingPreference);
 // The delivery line shows the tariff: composed words the translation overlay leaves alone.
 const tariffMark = (row, state) => (modelTariff(row, state) && reviewCost(row, state, { line: true }) === modelTariff(row, state)
     ? ' data-i18n-fmt="model price"' : '');
@@ -443,7 +446,7 @@ function focusSnapshot(host, doc) {
     if (!active || !host?.contains?.(active)) return null;
     const row = active.closest?.('[data-subagent-row]');
     return {
-        rowId: row?.dataset?.subagentRow || '', field: active.dataset?.subagentField || '',
+        rowId: row?.dataset?.subagentRow || '', field: active.matches?.('[data-source-picker]') ? 'route' : active.dataset?.subagentField || '',
         summary: active.tagName === 'SUMMARY' ? disclosureKind(active.parentElement) : '',
         start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
         end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
@@ -559,14 +562,17 @@ function subagentFormParts(row, state, index) {
     const session = row.route.kind === ROUTE_KIND_AGENT_SESSION;
     const split = routeModelFields(row.route, state.modelSources);
     const harnesses = harnessMap(state.snapshot);
+    const catalog = catalogForRow(row, state), items = catalog?.items ?? state.apiModels;
     const routeGroups = routeChoiceGroups({
         harnesses: state.catalogKnown ? (state.snapshot?.harnesses || []) : [],
         modelSources: state.modelSources, providers: state.providers, connections: state.connections,
         providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row),
         catalogKnown: state.catalogKnown, accountsKnown: state.accountsKnown,
+        sourcesKnown: state.sourcesKnown, hasConfiguredAccounts: accountRows(state.snapshot || {}).length > 0,
     });
     // Only a confirmed Accounts read narrows the catalog's carriers; the catalog read still labels the model.
-    const modelOptions = sessionModelOptions(accountScopedModelCatalog(harnesses[split.harness], row.route.credential_profile_id), split.model,
+    const native = session && (state.sessionCatalog?.(row) || harnesses[split.harness]);
+    const modelOptions = sessionModelOptions(accountScopedModelCatalog(native, row.route.credential_profile_id), split.model,
         { catalogKnown: state.catalogKnown, snapshot: state.accountsKnown ? state.snapshot : null, pin: row.route.credential_profile_id });
     const profileOptions = profileOptionsFor((indexProfilesByHarness(state.snapshot)[split.harness]) || [], row.route.credential_profile_id || '',
         { accountsKnown: state.accountsKnown && Boolean(split.harness), labelled: true });
@@ -576,9 +582,9 @@ function subagentFormParts(row, state, index) {
         route: `<div class="available-subagent-route">
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
-                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
+                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(native, {harness: split.harness, profile: row.route.credential_profile_id}) })
                     : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
-                        ? state.apiModels.map((item) => withoutPrice(item, { tiered: true })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                        ? items.map((item) => withoutPrice(item, { tiered: true })) : items, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(catalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -687,7 +693,7 @@ export function createAvailableSubagentsEditor({
     onChange = () => {},
     previewGenerated = null,
     baseline = 'saved',
-    page = null,
+    page = null, readApiCatalog, apiCatalogAllowed = () => true, supportsScopes,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const getWin = typeof win === 'function' ? win : () => win;
@@ -698,10 +704,10 @@ export function createAvailableSubagentsEditor({
         loaded: false, destroyed: false, parseError: '', setting: { enabled: true, items: [] }, source: '', diagnostics: [],
         dirty: false, saveAttempted: false, baseline: baseline === 'generated' ? 'generated' : 'saved', automatic: false,
         statusError: '', catalogKnown: false, accountsKnown: false, quotaKnown: false, snapshot: null,
-        apiModels: [], modelSources: [], modelCatalogNote: '', processingPreference: '',
+        apiModels: [], modelSources: [], sourcesKnown: false, sourceProblem: '', modelCatalogNote: '', processingPreference: '',
         // Sources with a stored key, and every connection for a saved one's label (setSourceContext).
         providers: [], connections: [], providerProfiles: {},
-        signature: '', statusDisposer: null, catalogDisposer: null, previewSignature: '', previewGeneration: 0,
+        signature: '', statusDisposer: null, previewSignature: '', previewGeneration: 0,
         // GET /api/review-pool facts about the SAVED catalog; prices are keyed by
         // the loaded route so an edited row never shows its old route's price.
         reviewPool: null, reviewCosts: new Map(), loadedItems: [], loadedFingerprint: '', allowEmptyReviewPool: false,
@@ -712,6 +718,29 @@ export function createAvailableSubagentsEditor({
         filter: FILTERS.some(([key]) => key === page?.filter) ? page.filter : 'all', tickCaption: '', entryId: '', unsavedId: '', result: null,
     };
     const listView = Boolean(page) && !page.entry;
+    function adoptSources(data) {
+        state.sourcesKnown = data.sources_read_state === 'ok';
+        state.modelSources = data.model_sources || [];
+        state.sourceProblem = ['failed', 'transport'].includes(data.sources_read_state) ? 'Subscription sources could not be read.' : '';
+        state.signature = ''; paint({ discoveryOnly: true });
+    }
+    const hasScopes = () => supportsScopes?.() ?? Boolean(state.supportsScopes);
+    const scoped = createAgentModelCatalog({ state, saved: Boolean(page), readApiCatalog, apiCatalogAllowed, supportsScopes: hasScopes,
+        readLegacySessions: () => store.refresh({ includeModels: true }),
+        rows: () => page?.entry ? [current()].filter(Boolean) : state.setting.items,
+        changed: () => { state.signature = ''; paint({ discoveryOnly: true }); }, adoptSources });
+    state.rowCatalog = row => scoped.get(row);
+    state.sessionCatalog = row => {
+        const harness = harnessMap(state.snapshot)[routeModelFields(row.route).harness];
+        if (!hasScopes() || !harness) return harness;
+        const selected = scoped.session(row);
+        return selected ? { ...harness, ...selected, model_catalog: selected.model_catalog, models_error: selected.models_error }
+            : { ...harness, models: [], model_catalog: undefined, models_error: 'Session model catalog not read.' };
+    };
+    const onMaintenance = event => {
+        const shown = page?.shown ? page.shown() : host()?.offsetParent != null;
+        if (shown) scoped.refresh({ harness: event.detail?.harness, sessionsOnly: listView });
+    };
     const current = () => state.setting.items.find((row) => row.subagent_id === state.entryId) || null;
     // In Settings a saved agent's on/off and marks write at once; an unsaved one keeps them as fields of its form.
     const live = (row) => Boolean(page) && row.subagent_id !== state.unsavedId;
@@ -940,6 +969,7 @@ export function createAvailableSubagentsEditor({
             const row = state.setting.items.find((item) => (item._uiKey || item.subagent_id) === rowElement.dataset.subagentRow);
             if (!row) return;
             const open = () => page.ctx.openSettings(`agents/${row.subagent_id}`);
+            rowElement.querySelector('[data-subagent-field="model"]')?.addEventListener('model-chooser:opened', () => scoped.open(row));
             rowElement.querySelector('[data-subagent-field="open"]')?.addEventListener('click', open);
             if (listView) rowElement.addEventListener('click', (event) => { if (!event.target.closest?.('button, .ui-switch')) open(); });
             rowElement.querySelector('[data-subagent-field="recommended_use"]')?.addEventListener('input', (event) => {
@@ -976,6 +1006,7 @@ export function createAvailableSubagentsEditor({
                 row.route = changeRouteChoice(row.route, event.target.value);
                 if (row.route.kind !== ROUTE_KIND_AGENT_SESSION) delete row.access;
                 if (namedRowEffort(row)) delete row.effort;  // the owner's pick of a named model retires the pin
+                scoped.read(row);
                 markDirty({ structural: true });
                 paint();
             });
@@ -992,6 +1023,7 @@ export function createAvailableSubagentsEditor({
                 const pin = String(event.target.value || '');
                 if (pin) row.route.credential_profile_id = pin;
                 else delete row.route.credential_profile_id;
+                scoped.read(row);
                 markDirty({ structural: true });
                 paint();
             });
@@ -1051,7 +1083,9 @@ export function createAvailableSubagentsEditor({
         const errors = validationErrors();
         const diagnostics = diagnosticsText(state.diagnostics);
         const readProblem = [state.statusError
-            ? 'Live agent availability could not be read. Saved rows remain unchanged.' : '', state.modelCatalogNote].filter(Boolean).join(' ');
+            ? 'Live agent availability could not be read. Saved rows remain unchanged.' : '',
+            state.sourceProblem,
+            page?.entry && current() && state.rowCatalog(current()) ? catalogReadNote(state.rowCatalog(current())) : state.modelCatalogNote].filter(Boolean).join(' ');
         if (discoveryOnly && container.querySelector('.agent-page, .available-subagents-toolbar')) {
             state.setting.items.forEach((row, index) => {
                 const el = container.querySelector(`[data-subagent-row="${row._uiKey || row.subagent_id}"]`);
@@ -1182,7 +1216,8 @@ export function createAvailableSubagentsEditor({
         });
         if (scroller) scroller.scrollTop = top;
         bindRows(container);
-        disposeChoosers = bindModelChoosers(container);
+        const disposeModels = bindModelChoosers(container), disposeSources = bindSourcePickers(container);
+        disposeChoosers = () => { disposeModels(); disposeSources(); };
         bindFullHints(container);
         restoreFocus(container, focused);
         renderValidation();
@@ -1284,7 +1319,7 @@ export function createAvailableSubagentsEditor({
     }
 
     async function reloadStatus() {
-        await boundedStatusRefresh(store);
+        await boundedStatusRefresh(store, { includeModels: false });
         adoptStatus();
         paint({ discoveryOnly: true });
         // Generated rows are enrichment, never a second unbounded gate on the
@@ -1316,9 +1351,8 @@ export function createAvailableSubagentsEditor({
     function adoptCatalog(data) {
         const catalog = mergeModelCatalog(state.modelCatalog || {items: state.apiModels, model_sources: state.modelSources}, data);
         state.modelCatalog = catalog;
-        state.modelSources = catalog.model_sources;
         state.apiModels = catalog.items;
-        state.modelCatalogNote = catalogReadNote(catalog);
+        state.modelCatalogNote = catalog.read_state === 'not_read' ? '' : catalogReadNote(catalog);
         state.signature = '';
         paint({discoveryOnly: true});
     }
@@ -1328,20 +1362,15 @@ export function createAvailableSubagentsEditor({
 
     function mount({ bindStatus = true } = {}) {
         getWin()?.addEventListener?.('ouro:language-changed', onLanguageChanged);
+        getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenance);
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
-            state.statusDisposer = bindStatusSurface(store, { elementId: hostId, includeModels: true, doc: getDoc, win: getWin,
+            state.statusDisposer = bindStatusSurface(store, { elementId: hostId, doc: getDoc, win: getWin,
                 listener: () => {
                     adoptStatus();
                     paint({ discoveryOnly: true });
                     void maybeRefreshGeneratedPreview();
                 } });
-        }
-        if (!state.catalogDisposer) {
-            const target = getDoc();
-            const onCatalog = (event) => adoptCatalog(event?.detail);
-            target?.addEventListener?.('settings-model-catalog:updated', onCatalog);
-            state.catalogDisposer = () => target?.removeEventListener?.('settings-model-catalog:updated', onCatalog);
         }
         state.signature = '';
         paint();
@@ -1351,10 +1380,12 @@ export function createAvailableSubagentsEditor({
         // An agent page that is left keeps its unsaved form for the next opening; a clean one keeps nothing.
         if (page?.entry) { if (state.dirty && current()) DRAFTS.set(page.entry, current()); else DRAFTS.delete(page.entry); }
         Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
+        scoped.reset();
+        getDoc()?.removeEventListener?.('harness-maintenance:settled', onMaintenance);
         getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         disposeChoosers();
         disposeHints();
-        for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
+        state.statusDisposer?.(); state.statusDisposer = null;
     }
 
     function setSourceContext({ settings = {}, providerProfiles = {} } = {}) {
@@ -1383,13 +1414,16 @@ export function createAvailableSubagentsEditor({
         /** Settings: the document just read. A never-saved roster shows the candidate the server proposes. */
         adopt(settings) {
             const meta = settings?._meta?.available_subagents || {};
+            state.supportsScopes = settings?._meta?.setup_contract?.scopedModelCatalogs === true;
             state.processingPreference = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
             state.tickCaption = reviewerTickCaption(settings?.OUROBOROS_RUNTIME_MODE);
             setSourceContext({ settings, providerProfiles: settings?._meta?.setup_contract?.providerProfiles });
             return load(availableSubagentsLoadValue(settings), {
                 source: String(meta.source || 'configured'), diagnostics: meta.diagnostics || meta.diagnostic || [], automatic: meta.automatic === true });
         },
-        setPreviewFailure, adoptCatalog,
+        setPreviewFailure, adoptCatalog, adoptSources,
+        refreshCatalogs(options) { scoped.refresh({ ...options, sessionsOnly: listView }); },
+        resetCatalogs() { scoped.reset(); },
         validate: validationErrors,
         noteSaveAttempt,
         /** Adopt GET /api/review-pool for the catalog loaded last. */
@@ -1495,13 +1529,15 @@ function mountAgents(container, { path, view = '', ctx }) {
         // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
         try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) { editor.load(undefined); paintSwitch(); } return; }
         adopt(settings);
+        editor.refreshCatalogs({ descriptors: Boolean(entry) });
         void readReviewPool().then((payload) => editor.setReviewPool(payload));
         void editor.reloadStatus().then(() => accountCatalog?.arm());
     };
     // One read at a time: opening a page and the shell's "shown" for it are one read.
     const reload = () => (reading ||= read().finally(() => { reading = null; }));
+    const shown = () => !ctx.state || (ctx.state.activePage === 'settings' && ctx.state.settingsPath === path);
     const editor = createAvailableSubagentsEditor({
-        hostId, page: { entry, ctx, reload, filter: view },
+        hostId, page: { entry, ctx, reload, shown, filter: view },
         previewGenerated: entry ? null : ({ subscriptionsConnected }) => apiClient.previewOnboardingSubagents({ subscriptionsConnected }),
     });
     delegation?.addEventListener('change', async () => {
@@ -1509,19 +1545,15 @@ function mountAgents(container, { path, view = '', ctx }) {
         const outcome = await editor.write('', () => null, { busy: delegation, quiet: true, edit: (roster) => ({ ...roster, enabled }) });
         setResult(roster.querySelector('[data-setting-result]'), rosterResult(outcome));
     });
-    // The model chooser of an agent's form: its catalogue is read when the form opens and whenever it is shown again.
-    let catching = null;
-    const catchUp = () => { if (entry) catching ||= refreshModelCatalog().finally(() => { catching = null; }); };
-    const onShown = (event) => { if (event.detail?.path === path) { void reload(); catchUp(); } };
+    const onShown = (event) => { if (event.detail?.path === path) void reload(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
     follow();  // the last read at once, else the switch says it is reading; this page's own read follows
     const offRead = paintWithRow(KEY, follow);
     // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
     // armed by the form's first account read, so the answer the form opened with is not a change.
-    const accountCatalog = entry ? watchAccountModelCatalog() : null;
+    const accountCatalog = watchAccountModelCatalog(() => { if (shown()) editor.refreshCatalogs({ descriptors: Boolean(entry), accounts: true }); });
     void reload();
-    catchUp();
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
         accountCatalog?.dispose();

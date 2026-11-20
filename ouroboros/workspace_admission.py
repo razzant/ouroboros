@@ -55,6 +55,20 @@ def has_git_metadata(root: pathlib.Path) -> bool:
     return False
 
 
+def _git_root_probe_failure(result: subprocess.CompletedProcess[str]) -> str:
+    if result.returncode == 0:
+        return "git rev-parse did not report a worktree root"
+    from ouroboros.redaction import redact_projection
+
+    # Redact before clipping, so the clip does not turn a whole secret into an unmatched fragment.
+    redacted = redact_projection(result.stderr or "").value
+    detail = " ".join(redacted.split())
+    detail = "".join(char for char in detail if char.isprintable())
+    if len(detail) > 600:
+        detail = detail[:600] + "…"
+    return f"git rev-parse exited {result.returncode}" + (f": {detail}" if detail else "")
+
+
 def validate_workspace_root(
     value: Any,
     *,
@@ -82,7 +96,15 @@ def validate_workspace_root(
             text=True,
             timeout=5,
         )
-    except Exception:
+    except FileNotFoundError:
+        res, failure = None, "could not start git: executable or working directory not found"
+    except subprocess.TimeoutExpired:
+        res, failure = None, "git rev-parse timed out after 5 seconds"
+    except OSError as exc:
+        errno_info = f", errno {exc.errno}" if exc.errno is not None else ""
+        res, failure = None, f"could not start git ({type(exc).__name__}{errno_info})"
+    except (subprocess.SubprocessError, UnicodeError) as exc:
+        failure = f"git rev-parse could not complete ({type(exc).__name__})"
         res = None
     output = (res.stdout or "").strip() if res is not None else ""
     if output.splitlines()[:1] == ["true"]:
@@ -93,7 +115,8 @@ def validate_workspace_root(
         # A failed probe must not reclassify an existing/broken Git worktree
         # as an ordinary folder (including linked worktrees with a .git file).
         if has_git_metadata(root):
-            raise WorkspaceRootError("workspace_root Git worktree could not be resolved")
+            reason = _git_root_probe_failure(res) if res is not None else failure
+            raise WorkspaceRootError(f"workspace_root Git worktree could not be resolved: {reason}")
         return root
     if git_root != root:
         raise WorkspaceRootError(f"workspace_root must be the git worktree root: {git_root}")

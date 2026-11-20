@@ -420,7 +420,7 @@ test('session status never calls a missing model or failed pin available', () =>
             }],
             profiles: { harnessAccounts: [], profiles: [{
                 profile: { harness_id: 'codex', profile_id: 'koshak', enabled: true },
-                status: { verification: 'failed' },
+                status: { verification: 'passed' },
             }] },
             quota: [],
         },
@@ -429,6 +429,9 @@ test('session status never calls a missing model or failed pin available', () =>
     assert.match(missingModel, /selected model gpt-5\.6-sol-high currently unavailable/);
     assert.doesNotMatch(missingModel, /available now/);
 
+    state.snapshot.profiles.profiles[0].status.verification = 'failed';
+    assert.match(availableSubagentRowMarkup(sessionRow(), state), /pinned account koshak currently unavailable/,
+        'a failed pin is the named cause even when the model is absent too');
     state.snapshot.harnesses[0].models = [{ id: 'gpt-5.6-sol-high' }];
     const failedPin = availableSubagentRowMarkup(sessionRow(), state);
     assert.match(failedPin, /pinned account koshak currently unavailable/);

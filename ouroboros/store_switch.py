@@ -12,7 +12,9 @@ preflight (nothing moves on failure; a refusal is a normal restart on the curren
 plus a reason for the owner) -> phase ``exporting`` in every store -> facts
 (``store_import.export_facts`` per root) -> money (``usage_store.export_journal`` when the
 target lacks ``usage_store.py``), idempotent through the switch receipt -> handles (the packing stage
-restores every retained checkpoint prefix) -> fsync -> ``export.status=completed``
+restores every retained checkpoint prefix) -> threads, dialogue and wake transitions (each step only for a
+target without that reader; ``wake_transitions`` writes the accepted wake chain in the form an older body
+reads) -> fsync -> ``export.status=completed``
 + receipt -> the intent is CONSUMED -> the stores are retired -> the SAME switching owner
 the door used to call runs (``switching_owner``, bound to the intent's target and reason;
 HEAD is verified against the target after it returns) -> the caller exits 42 or re-execs. A

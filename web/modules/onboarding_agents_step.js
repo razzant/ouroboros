@@ -635,7 +635,7 @@ export function createAgentsStep({
     onChange = () => {},
     previewPayload = () => ({}),
     previewTransport = (payload) => apiClient.previewOnboardingSubagents(payload),
-    onSubagentsChange = () => {},
+    onSubagentsChange = () => {}, readApiCatalog, apiCatalogAllowed, supportsScopes,
     providerProfiles = {},
     onSetupPreview = () => {},
     onPreviewStatus = () => {},
@@ -693,6 +693,7 @@ export function createAgentsStep({
         win: () => getDoc()?.defaultView,
         store,
         onChange: onSubagentsChange,
+        readApiCatalog, apiCatalogAllowed, supportsScopes,
         baseline: 'generated',
     });
 
@@ -828,8 +829,8 @@ export function createAgentsStep({
         state.connected = next;
         programs.observe();
         paint();
-        onStatus();
         if (changed) onChange([...state.connected]);
+        onStatus({ catalogChanged: changed || statusChanged });
         if (changed || statusChanged) refreshSubagentsPreview({ force: statusChanged });
     }
 
@@ -947,7 +948,8 @@ export function createAgentsStep({
         get accountsKnown() { return accountsKnown(); },
         get reads() { return store.reads; },
         refreshStatus() { return store.refresh(); },
-        adoptCatalog(data) { subagents.adoptCatalog(data); },
+        adoptCatalog: subagents.adoptCatalog, adoptSources: subagents.adoptSources, refreshCatalogs: subagents.refreshCatalogs,
+        resetCatalogs() { subagents.resetCatalogs(); },
         get availableSubagents() { return subagents.setting; },
         get allowEmptyReviewPool() { return subagents.allowEmptyReviewPool; },
         setProcessingPreference(value) { subagents.setProcessingPreference(value); },
