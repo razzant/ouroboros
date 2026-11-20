@@ -189,9 +189,11 @@ def test_a_failed_sign_in_and_the_update_offer_share_the_viewport(wizard, size, 
     page.wait_for_selector(PROGRAM_LINE)
     page.click('[data-agent-connect="codex"]')
     page.wait_for_selector("[data-login-verdict]")
-    # Scrolled just far enough that the verdict clears the pinned footer (WebKit's own reveal ignores its clearance).
-    page.locator("[data-login-verdict]").evaluate("""el => window.scrollBy({behavior: 'instant', top: Math.max(0,
-        el.getBoundingClientRect().bottom - document.querySelector('.wizard-footer').getBoundingClientRect().top + 4)})""")
+    # Scrolled just far enough that the verdict clears the pinned footer (WebKit's own reveal ignores its clearance),
+    # again on each frame until the card and the rows have settled: a late reflow can move the verdict after one scroll.
+    page.wait_for_function("""() => { const over = document.querySelector('[data-login-verdict]').getBoundingClientRect().bottom
+        - document.querySelector('.wizard-footer').getBoundingClientRect().top;
+        if (over > 0) window.scrollBy({behavior: 'instant', top: over + 4}); return over <= 0; }""", polling="raf")
     page.screenshot(path=str(evidence / f"failed-sign-in-{size[0]}x{size[1]}.png"), animations="disabled")
     assert _in_view(page, "[data-login-verdict]") and _in_view(page, f"{PROGRAM_LINE} [data-program-action]")
     _assert_way_forward(_facts(page))
