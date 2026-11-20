@@ -234,7 +234,9 @@ only; nothing decides by them.
 
 - `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
   the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
-  of shared parts the CAS stored for the first time (`observability.write_parts`).
+  of shared parts the CAS stored for the first time (`observability.write_parts`);
+  `packed_reads`, blob reads an evidence pack answered (`evidence_packs.blob_bytes`),
+  none where the loose file did.
   R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
   any start size. A scan is keyed by the part's own key order and the CAS by its
   sorted bytes, so a part met in two orders is scanned twice and stored once.
@@ -242,8 +244,8 @@ only; nothing decides by them.
   (the batch's end to the model call), `model_call` (to the first record),
   `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
   (CPU null: it ends on the model sender's thread).
-- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
-  `lock_wait` and `manifest_write`; `context_facts`;
+- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs` and
+  `manifest_write` (a manifest waits on no lock); `context_facts`;
   `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window);
   `prologue` and `prologue.*`: host work measured before the window opened and
   carried once, a start's restore, route rebind and tools, a retained answer's

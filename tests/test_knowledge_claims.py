@@ -451,6 +451,11 @@ def test_a_yaml_only_edit_is_revision_checked_keeps_the_archive_field_and_takes_
 
 
 HELD_HEAD = "A held head takes its space ahead of the memory of other rooms and yields to the window last."
+# A head only a link holds in every present situation, or only in some of them, yields before every claimed head there.
+CARRIED_HEAD = ("A head a held head links takes its space ahead of the memory of other rooms and yields to the window "
+                "before every claimed head.")
+MIXED_HEAD = ("A held head takes its space ahead of the memory of other rooms and yields to the window last; where only "
+              "a link holds it, before every claimed head.")
 
 
 def test_a_write_of_a_held_note_says_what_its_head_costs(tmp_path):
@@ -515,7 +520,143 @@ def test_a_write_of_a_held_note_says_what_its_head_costs(tmp_path):
     assert cleared.startswith("✅") and REMOVED in cleared and said(cleared) == ["Present situations holding this note: none"]
 
 
+def test_a_write_names_the_heads_a_held_head_newly_carries_or_releases_and_where_a_carried_note_stands(tmp_path,
+                                                                                                    monkeypatch):
+    """A held note's head links bring the heads they link: its write lists each one newly carried or released with
+    its head size, the total and where they stand, and the links that hold nothing, and its totals count the heads
+    it carries. A carried note's own write says where it stands, with those totals and by which carrier, then how
+    large its head is and what that head takes. A note neither claimed nor carried hears none of it."""
+    registry = _registry(tmp_path)
+    prefixes = ("Newly carried", "Released", "Linked from this head", "Present situations", "Held head", HELD_HEAD,
+                CARRIED_HEAD, MIXED_HEAD)
+
+    def said(receipt):
+        assert receipt.startswith("✅"), receipt
+        return [line for line in receipt.splitlines() if line.startswith(prefixes)]
+
+    def write(address, content, **kwargs):
+        revision = knowledge.read_knowledge_note(address).revision
+        return registry.execute("knowledge_write", {"topic": address.topic, "scope": address.scope, "mode": "overwrite",
+                                                    "content": content, "expected_revision": revision, **kwargs})
+
+    sasha, tools, nova, plain = (knowledge.resolve_knowledge_address(tmp_path, topic, "global")
+                                 for topic in ("people/sasha", "tools", "work/nova", "plain"))
+    head = "How to work with Sasha.\n\n"
+    assert not said(_write(registry, sasha, "---\ntype: note\n---\n" + head + "## History\n\nOlder words.\n"))
+    assert not said(_write(registry, tools, "---\ntype: note\n---\nThe instruments.\n"))
+    links = "Nova. [Sasha](../people/sasha.md) [Tools](../tools.md) [gone](../gone.md)\n"
+    # room:1 holds this head (20 tokens) and the two it carries: sasha's (8) and tools' (5).
+    assert said(_write(registry, nova, _markdown(["room:1"], links))) == [
+        "Present situations holding this note: room:1 holds 3 heads, 33 tokens",
+        f"Newly carried by this head: people/sasha ({len(head)} characters), tools (17 characters; no `## ` line: the "
+        f"whole body); {len(head) + 17} characters in all, standing where this note's own names hold it: room:1.",
+        "Linked from this head, not held: memory/knowledge/gone.md (no such note).",
+        f"Held head: {len(links)} characters, 20 tokens: this note has no `## ` line, so its whole body is the head.",
+        HELD_HEAD]
+
+    edited = write(sasha, "---\ntype: note\n---\n" + head + "More.\n\n## History\n\nOlder words.\n")
+    assert said(edited) == ["Present situations holding this note: room:1 holds 3 heads, 35 tokens (carried by "
+                            "work/nova)",
+                            f"Held head: {len(head) + 7} characters, 10 tokens, the body above the first `## ` line.",
+                            CARRIED_HEAD]  # only a link holds it: it yields before every claimed head
+    claimed = write(tools, _markdown(["room:1"], "The instruments.\n"))  # its own name and nova's link: one head
+    assert said(claimed)[0] == ("Present situations holding this note: room:1 holds 3 heads, 35 tokens "
+                                "(also carried by work/nova)")
+    assert said(claimed)[-1] == HELD_HEAD  # its own name holds it where a link does too: it yields last
+    assert not said(_write(registry, plain, "---\ntype: note\n---\nNeither claimed nor carried.\n"))
+
+    dropped = write(nova, _markdown(["room:1"], "Nova. [Tools](../tools.md)\n"))
+    assert said(dropped) == ["Present situations holding this note: room:1 holds 2 heads, 13 tokens",
+                             f"Released by this head: people/sasha ({len(head) + 7} characters; now held: none); "
+                             f"{len(head) + 7} characters in all.",
+                             "Held head: 27 characters, 8 tokens: this note has no `## ` line, so its whole body is the "
+                             "head.", HELD_HEAD]
+    assert not said(write(sasha, "---\ntype: note\n---\nNo longer carried.\n"))
+
+    def unreadable(*_args, **_kwargs):  # the journal cannot give the version the write replaced
+        raise knowledge_versions.VersionUnavailable("no row holds it")
+
+    monkeypatch.setattr(knowledge_versions, "find_version", unreadable)
+    unknown = write(nova, _markdown(["room:1"], "Nova. [Sasha](../people/sasha.md)\n"))
+    assert "What this head carried before the write is unknown: no row holds it." in unknown
+    assert not any(line.startswith(("Newly carried", "Released")) for line in said(unknown))
+
+
+def test_one_present_line_names_why_a_note_stands_in_each_situation_and_the_shelf_is_read_once(tmp_path, monkeypatch):
+    """One line names every present situation where a note stands, by its own names or carried by the held heads that
+    link it, each once: the totals count every head standing there, and situations alike in heads and in why are
+    named together. Where no present situation holds a carried note it says none and names the carriers, with no
+    size. Who holds what is read once per write, never before a claim was recorded; a note neither claimed nor
+    carried gets nothing after its situation line."""
+    from ouroboros import held_notes
+    from ouroboros.projects_registry import create_project
+
+    registry = _registry(tmp_path)
+    rooms = ["room:1", f"room:{create_project(tmp_path, 'writer', name='Writer')['chat_id']}"]
+    both = ", ".join(rooms)
+    reads, standing = [], held_notes.standing
+    monkeypatch.setattr(held_notes, "standing", lambda root: reads.append(root) or standing(root))
+
+    def write(address, content):
+        """The lines after the situation line, and how many times this write read who holds what."""
+        current = {"expected_revision": knowledge.read_knowledge_note(address).revision} if address.path.is_file() else {}
+        receipt = registry.execute("knowledge_write", {"topic": address.topic, "scope": address.scope,
+                                                       "mode": "overwrite", "content": content, **current})
+        assert receipt.startswith("✅") and receipt.splitlines()[2] == "This situation's names: room:1 (Main)", receipt
+        said, count = receipt.splitlines()[3:], len(reads)
+        reads.clear()
+        return said, count
+
+    sasha, tools, nova, aika, far, lena, plain, ivan = (
+        knowledge.resolve_knowledge_address(tmp_path, topic, "global")
+        for topic in ("people/sasha", "tools", "work/nova", "work/aika", "far", "people/lena", "plain", "people/ivan"))
+    head, all_head = "How to work with Sasha.\n\n", "this note has no `## ` line, so its whole body is the head."
+    # Before any claim was recorded on the shelf: nothing is read and nothing is said.
+    assert write(sasha, "---\ntype: note\n---\n" + head + "## History\n\nOlder words.\n") == ([], 0)
+    assert write(tools, "---\ntype: note\n---\nThe instruments.\n") == ([], 0)
+    assert not knowledge_versions.claim_record_path(nova.shelf, nova.topic).parent.exists()
+
+    # Both rooms hold nova's head and the two it carries; then aika's, which carries sasha too: still one sasha.
+    assert write(nova, _markdown(rooms, "Nova. [Sasha](../people/sasha.md) [Tools](../tools.md)\n")) == ([
+        f"Present situations holding this note: {both} each hold 3 heads, 28 tokens",
+        f"Newly carried by this head: people/sasha (25 characters), tools (17 characters; no `## ` line: the whole "
+        f"body); 42 characters in all, standing where this note's own names hold it: {both}.",
+        f"Held head: 55 characters, 15 tokens: {all_head}", HELD_HEAD], 1)
+    assert write(aika, _markdown(rooms, "Aika. [Sasha](../people/sasha.md)\n"))[0][0] == (
+        f"Present situations holding this note: {both} each hold 4 heads, 38 tokens")
+    assert write(sasha, "---\ntype: note\n---\n" + head + "More.\n\n## History\n\nOlder words.\n") == ([
+        f"Present situations holding this note: {both} each hold 4 heads, 40 tokens (carried by work/aika, work/nova)",
+        "Held head: 32 characters, 10 tokens, the body above the first `## ` line.", CARRIED_HEAD], 1)
+
+    # Its own names and a link: one head per situation, the reason once per group; a group per distinct reason. Where
+    # its own names hold it in every present situation it yields last; where only the link holds it, first.
+    tools_head = f"Held head: 17 characters, 5 tokens: {all_head}"
+    assert write(tools, _markdown(rooms, "The instruments.\n")) == ([
+        f"Present situations holding this note: {both} each hold 4 heads, 40 tokens (also carried by work/nova)",
+        tools_head, HELD_HEAD], 1)
+    assert write(tools, _markdown(["room:1"], "The instruments.\n")) == ([
+        "Present situations holding this note: room:1 holds 4 heads, 40 tokens (also carried by work/nova); "
+        f"{rooms[1]} holds 4 heads, 40 tokens (carried by work/nova)", REMOVED, tools_head, MIXED_HEAD], 1)
+    # The heads its own head links stand only where its own names hold it, not where a link holds it (one hop).
+    assert write(ivan, "---\ntype: note\n---\nIvan.\n") == ([], 1)
+    linking = write(tools, _markdown(["room:1"], "The instruments. [Ivan](people/ivan.md)\n"))[0]
+    assert rooms[1] in linking[0] and linking[1] == (
+        "Newly carried by this head: people/ivan (6 characters; no `## ` line: the whole body); 6 characters in all, "
+        "standing where this note's own names hold it: room:1.")
+
+    # A carrier whose names match no present situation: none, with its carrier named, and no size.
+    assert write(lena, "---\ntype: note\n---\nLena.\n") == ([], 1)
+    assert write(far, _markdown(["room:99999"], "Far. [Lena](people/lena.md)\n")) == ([
+        "Claims with no matching situation found: 'room:99999'", "Present situations holding this note: none",
+        "Newly carried by this head: people/lena (6 characters; no `## ` line: the whole body); 6 characters in all, "
+        "standing where this note's own names hold it: none."], 1)
+    assert write(lena, "---\ntype: note\n---\nLena, again.\n") == (
+        ["Present situations holding this note: none (carried by far)"], 1)
+    assert write(plain, "---\ntype: note\n---\nNeither claimed nor carried.\n") == ([], 1)
+
+
 def test_history_readers_skip_only_claim_commits_and_keep_the_index_backup_row(tmp_path, monkeypatch):
+
     from ouroboros import return_facts
     from ouroboros.projects_registry import create_project
 

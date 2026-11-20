@@ -112,6 +112,8 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
             status = link["status"]
             if status == "external":
                 links[status] = links.get(status, 0) + 1
+            elif status == "unavailable":
+                links.setdefault(status, link["error"])
             else:
                 target = link.get("address", note.address.as_dict() if status == "same_source" else {})
                 links.setdefault(status, []).append(
@@ -398,17 +400,31 @@ def _holds_names(result: knowledge_store.KnowledgeWriteResult) -> bool:
                 and note.source is not None and note.address.topic != OVERVIEW_TOPIC)
 
 
-def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: SituationReceipt,
-                 root: Path | None = None) -> list[str]:
-    """What a write that sets or changes names says of them; with ``root`` (the note holds names, ``_holds_names``)
-    every write of it also says what its head costs: per present situation holding it, the heads that situation
-    holds and their tokens (``held_notes.standing_heads``), and how large a head this write leaves."""
+# Where a head yields to the physical window (``memory_floor._held_note_steps``), keyed by how the present situations
+# holding the note hold it: by its own names (True) it yields last; only by a link (False), before every claimed head.
+_YIELDS = {
+    frozenset({True}): "A held head takes its space ahead of the memory of other rooms and yields to the window last.",
+    frozenset({True, False}): ("A held head takes its space ahead of the memory of other rooms and yields to the window "
+                               "last; where only a link holds it, before every claimed head."),
+    frozenset({False}): ("A head a held head links takes its space ahead of the memory of other rooms and yields to the "
+                         "window before every claimed head."),
+}
+
+
+def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: SituationReceipt, root: Path,
+                 holding: dict[str, dict[str, list[str]]]) -> tuple[list[str], frozenset[bool]]:
+    """What a write says of where this note stands: on a write that sets or changes names, what became of them
+    (ignored entries, names no present situation matches or whose evidence was unreadable, a removed name); on every
+    write of a note that holds names (``_holds_names``) or that a held head links (``holding``,
+    ``held_notes.standing``), one line naming each present situation where it stands, by its own names or carried,
+    with the heads standing there and their tokens (``held_notes.standing_heads``), situations alike in both and in
+    why named together. Beside the lines, how each present situation holding the head holds it (``_YIELDS``): empty
+    where none does, so the head's size and where it yields are said only where one does."""
     from ouroboros.held_notes import standing_heads
 
-    claims, note = result.claims, result.current
-    lines, heads = [], {}
-    matching, unverified = situation.matching(claims.written)
-    if claims.report:
+    claims, note, lines, heads, own = result.claims, result.current, [], {}, []
+    matching, unverified = situation.matching(claims.written) if claims is not None else (set(), set())
+    if claims is not None and claims.report:
         if claims.ignored:
             lines.append("Ignored claims entries (expected a list of strings): " + ", ".join(claims.ignored))
         names = dict.fromkeys(claims.written)
@@ -419,28 +435,36 @@ def _claim_lines(result: knowledge_store.KnowledgeWriteResult, situation: Situat
     if note.address.scope != "global":
         lines.append("Claims on a project-shelf note hold nowhere.")
     else:
-        active = claims.active if note.state == "active" else []
-        held = [name for name in active if name in matching]
-        heads = standing_heads(root, held, written=note) if root is not None and held else {}
-        alike: dict[tuple[int, int], list[str]] = {}  # situations holding the same heads are named together
-        for name, total in heads.items():
-            alike.setdefault(total, []).append(name)
-        lines.append("Present situations holding this note: " + (
-            "; ".join(f"{', '.join(names)} {'each hold' if len(names) > 1 else 'holds'} {count} head{'s' * (count != 1)}, "
-                      f"{tokens:,} tokens" for (count, tokens), names in alike.items())
-            or ", ".join(held) or ("unverified" if unverified.intersection(active) else "none")))
-    if claims.report and claims.removed:
+        active = claims.active if claims is not None and note.state == "active" else []
+        carriers = [(by, names) for by, names in sorted(holding.get(note.address.topic, {}).items()) if by]
+        reached, doubtful = situation.matching([name for _, names in carriers for name in names]) if carriers else ((), ())
+        own = [name for name in active if name in matching]  # own names first, then each carrier's, in that order
+        where = list(dict.fromkeys([*own, *(name for _, names in carriers for name in names if name in reached)]))
+        if where and note.state == "active" and note.source is not None and note.address.topic != OVERVIEW_TOPIC:
+            heads = standing_heads(root, where, written=note, holding=holding)  # the overview stands only by name
+        alike: dict[tuple, list[str]] = {}  # situations holding the same heads for the same reasons are named together
+        for name in where:
+            reasons = (name in own, tuple(by for by, names in carriers if name in names))
+            alike.setdefault((heads.get(name), *reasons), []).append(name)
+        parts = []
+        for (total, mine, by), names in alike.items():
+            size = (f" {'each hold' if len(names) > 1 else 'holds'} {total[0]} head{'s' * (total[0] != 1)}, "
+                    f"{total[1]:,} tokens" if total else "")
+            why = f" ({'also ' if mine else ''}carried by {', '.join(by)})" if by else ""
+            parts.append(", ".join(names) + size + why)
+        carried = f" (carried by {', '.join(by for by, _ in carriers)})" if carriers else ""
+        nowhere = ("unverified" if unverified.intersection(active) or doubtful else "none") + carried
+        lines.append("Present situations holding this note: " + ("; ".join(parts) or nowhere))
+    if claims is not None and claims.report and claims.removed:
         lines.append("A removed name stops holding this head in works that start from now on; a work already running "
                      "keeps the heads it started with.")
-    if heads:  # a size is said only where a present situation holds the head
-        lines += [_head_line(note), "A held head takes its space ahead of the memory of other rooms and yields to the "
-                                    "window last."]
-    return lines
+    return lines, frozenset(name in own for name in heads)  # only where a present situation holds the head
 
 
 def _head_line(note: knowledge_store.KnowledgeNote) -> str:
-    """How large a head this write leaves where a present situation holds the note: there it stands whole, and a note
-    with no `## ` line is all head; in characters and in host tokens (``memory_floor.view_tokens``)."""
+    """How large a head this write leaves where a present situation holds the note, by its own names or carried by a
+    held head: there it stands whole, and a note with no `## ` line is all head; in characters and in host tokens
+    (``memory_floor.view_tokens``)."""
     from ouroboros.held_notes import note_head
     from ouroboros.memory_floor import view_tokens
 
@@ -449,6 +473,55 @@ def _head_line(note: knowledge_store.KnowledgeNote) -> str:
     if len(head.encode("utf-8")) < body.end_byte - body.start_byte:
         return f"Held head: {size}, the body above the first `## ` line."
     return f"Held head: {size}: this note has no `## ` line, so its whole body is the head."
+
+
+def _link_lines(result: knowledge_store.KnowledgeWriteResult, holding: dict[str, dict[str, list[str]]],
+                evidence: SituationReceipt) -> list[str]:
+    """Where this note's own head carried or carries notes, beside who holds each after the write (``holding``,
+    ``held_notes.standing``): each one newly carried or released with its head size, and its head links held
+    nowhere. Facts only: no limit and no choice."""
+    from ouroboros.held_notes import linked_heads, note_head
+
+    note, claims, lines = result.current, result.claims, []
+    topic = note.address.topic
+
+    def present(names) -> str:
+        matching, unverified = evidence.matching(list(names))
+        return ", ".join(name for name in dict.fromkeys(names) if name in matching) or ("unverified" if unverified else "none")
+
+    def carries(version, names) -> tuple[dict, list]:
+        held = version.source is not None and version.state == "active" and names and topic != OVERVIEW_TOPIC
+        return linked_heads(version) if held else ({}, [])
+
+    def listed(targets, names, where=lambda _name: "") -> str:
+        parts, total = [], 0
+        for name in names:
+            head, body = note_head(targets[name].source), targets[name].source.body_span
+            whole = "; no `## ` line: the whole body" if len(head.encode("utf-8")) >= body.end_byte - body.start_byte else ""
+            parts.append(f"{name} ({len(head):,} characters{whole}{where(name)})")
+            total += len(head)
+        return f"{', '.join(parts)}; {total:,} characters in all"
+
+    own = claims.active if claims is not None else []
+    after, unheld = carries(note, own)
+    before = {}
+    if claims is not None and claims.recorded and result.previous_revision:
+        try:
+            old = note if result.previous_revision == note.revision else knowledge_store._note(note.address, (
+                knowledge_versions.find_version(note.address, result.previous_revision, note.text)[0].encode("utf-8")))
+            before = carries(old, set(claims.recorded) & set(knowledge_versions.claim_names(old.metadata.get("claims"))))[0]
+        except (knowledge_versions.VersionUnavailable, OSError) as exc:
+            before = None
+            lines.append(f"What this head carried before the write is unknown: {exc}.")
+    if before is not None and (newly := [name for name in after if name not in before]):
+        lines.append(f"Newly carried by this head: {listed(after, newly)}, standing where this note's own names hold it: "
+                     f"{present(own)}.")  # one hop: where a link holds this note, its links hold nothing
+    if before is not None and (released := [name for name in before if name not in after]):
+        lines.append("Released by this head: " + listed(before, released, lambda name: "; now held: " + present(
+            [held for names in holding.get(name, {}).values() for held in names])) + ".")
+    if unheld:
+        lines.append(f"Linked from this head, not held: {', '.join(unheld)}.")
+    return lines
 
 
 def _knowledge_write(
@@ -530,12 +603,24 @@ def _knowledge_write(
         outline = meta.get("knowledge_outline")
         published = _bound_delta_meta(meta)
         text = f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True)
-        claim_lines = []
-        held = _holds_names(result)
-        if result.claims is not None and (result.claims.report or held):
+        from ouroboros.held_notes import standing
+
+        claim_lines, link_lines, held, head = [], [], frozenset(), []
+        note = result.current  # links hold only once some claim was recorded on this shelf
+        linked = (note is not None and note.address.scope == "global"
+                  and knowledge_versions.claim_record_path(note.address.shelf, note.address.topic).parent.is_dir())
+        holding = standing(root) if linked else {}  # who holds each note, read once for every line below
+        carried = linked and any(carrier for carrier in holding.get(note.address.topic, {}))
+        named = carried or result.claims is not None and (result.claims.report or _holds_names(result))
+        if named or linked:
             evidence = situation or receipt_situation(ctx, root, claims_written=True)
-            claim_lines = _claim_lines(result, evidence, root if held else None)
-        text = _with_lines(text, situation_line, *claim_lines)
+            if named:
+                claim_lines, held = _claim_lines(result, evidence, root, holding)
+            if linked:
+                link_lines = _link_lines(result, holding, evidence)
+        if held:  # a size and where it yields are said only where a present situation holds the head
+            head = [_head_line(note), _YIELDS[held]]
+        text = _with_lines(text, situation_line, *claim_lines, *link_lines, *head)
         if isinstance(outline, str) and not isinstance(meta["knowledge_outline"], str):
             # The bare appender's only look at the note: an outline the meta cannot hold follows
             # the JSON line whole; the meta keeps its pointer (size, sha256, the read).

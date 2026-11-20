@@ -50,7 +50,8 @@ def _result(root, task_id, status="completed", **fields):
 
 
 def _task(root, task_id, *, status="completed", blobs=3, payloads=None, handle=b"# focus\n" + b"y" * 3000, **fields):
-    """A settled-shaped task: manifests referencing gzip blobs plus one context-checkpoint handle."""
+    """A settled-shaped task: manifests referencing gzip blobs plus one context-checkpoint handle
+    (``status=None``: the evidence folder alone, of a task the store has no row for)."""
     calls = root / "observability" / "calls" / task_id
     calls.mkdir(parents=True, exist_ok=True)
     refs = []
@@ -61,7 +62,8 @@ def _task(root, task_id, *, status="completed", blobs=3, payloads=None, handle=b
         refs.append(ref)
     handle_ref = store_actor_source_bytes(root, task_id, category="context_checkpoints",
                                           source_id=f"focus_source_{task_id}", data=handle, extension="md")
-    _result(root, task_id, status, **fields)
+    if status is not None:
+        _result(root, task_id, status, **fields)
     return refs, handle_ref
 
 
@@ -168,6 +170,22 @@ def test_readers_resolve_loose_then_pack_and_blob_shared_with_active_task_stays_
     extent = {}
     assert _read_source_text(store_dir / pathlib.PurePosixPath(handle_a["path"]).name, extent).startswith("# focus")
     assert extent["source_revision"] == handle_a["sha256"] and _handle_path(root, "task-a", handle_a).exists()
+
+
+def test_a_read_a_pack_answers_counts_in_its_window_and_a_loose_read_does_not(root):
+    """``packed_reads`` in a measured window's ``work`` (a round receipt's): a blob read a pack answered counts once;
+    a read of the loose file adds no key."""
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    refs, _ = _task(root, "task-a", blobs=1)
+    with measured_sections():
+        assert packs.blob_bytes(root, refs[0])
+        loose = section_spans()["work"]
+    _run(root)
+    with measured_sections():
+        assert packs.blob_bytes(root, refs[0])
+        packed = section_spans()["work"]
+    assert "packed_reads" not in loose and packed.get("packed_reads") == 1, (loose, packed)
 
 
 def test_salvage_and_task_finalization_selectors_read_packed_evidence(root):
@@ -356,6 +374,23 @@ def test_no_unlink_before_on_disk_reverify(root, monkeypatch):
     assert report["faults"] == 1 and _loose(refs2[0]) and _handle_path(root, "task-b", handle2).exists()
 
 
+@pytest.mark.parametrize("row", ["running", "absent"])
+def test_a_direct_pack_of_a_task_whose_row_is_live_or_absent_unlinks_nothing(root, row):
+    """``pack_task`` called for a task no pass would pick packs it and unlinks nothing. A live row: its own blobs
+    are in the keep-set and its handle has a barrier of its own. No row: its blobs are in no keep-set, so the
+    candidate's one check alone holds them. Once the row is terminal, the same call unlinks them."""
+    _result(root, "other")  # the store is published
+    refs, handle = _task(root, "t", status="running" if row == "running" else None, blobs=2)
+    first = packs.pack_task(root, "t")
+    assert (first["generation"], first["unlinked"], first["deferred"]) == (1, 0, 1)
+    assert all(_loose(ref) for ref in refs) and _handle_path(root, "t", handle).exists()
+    _result(root, "t")
+    second = packs.pack_task(root, "t")
+    assert (second["unlinked"], second["deferred"]) == (3, 0) and not any(_loose(ref) for ref in refs)
+    assert not _handle_path(root, "t", handle).exists()
+    assert read_actor_source_bytes(root, "t", handle) == b"# focus\n" + b"y" * 3000
+
+
 @pytest.mark.parametrize("step", ["pack_published", "sidecar_published", "indexed"])
 def test_kill_at_each_packer_step_leaves_readable_state_and_rerun_completes(root, monkeypatch, step):
     refs, handle = _task(root, "task-a", blobs=2)
@@ -380,7 +415,7 @@ def test_kill_at_each_packer_step_leaves_readable_state_and_rerun_completes(root
         if step == "indexed":
             patch.setattr(packs, "index_upsert", upsert)
         with pytest.raises(KeyboardInterrupt):
-            packs.pack_task(root, "task-a", keep_shas=set())
+            packs.pack_task(root, "task-a")
     packs._READERS.clear()
     # loose files are still there (nothing unlinked before the verified index), every reader works
     assert all(_loose(ref) for ref in refs) and _handle_path(root, "task-a", handle).exists()
