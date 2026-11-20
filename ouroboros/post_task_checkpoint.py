@@ -28,6 +28,7 @@ from ouroboros.cost_projection import (
     with_cost_aliases,
 )
 from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.install_identity import TASK_ROOT_FIELDS
 from ouroboros.task_results import (
     TASK_COST_META_FIELDS,
     STATUS_COMPLETED,
@@ -245,10 +246,9 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
     return counts
 
 
-# Local custody rows are written only by their owners and the retirement writers on the canonical
-# result (``tool_custody``, ``local_custody_repair``); a child's replica carries results, not custody.
+# A replica carries results, not canonical drive placement, copy-back provenance or local custody.
 CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers",
-                          "native_capture_pending", "received_file_outputs")
+                            "native_capture_pending", "received_file_outputs", *TASK_ROOT_FIELDS)
 
 
 def canonical_name_fields(canonical_fields: Dict[str, Any]) -> tuple:
@@ -293,6 +293,16 @@ def project_replica_task_result_fields(
     overlay.pop("pause_notices", None)  # confirmed host transitions alone own pending chat disclosure
     for field in CANONICAL_CUSTODY_FIELDS:  # a replica never revives a retired claim nor erases a live one
         overlay.pop(field, None)
+    if "metadata" in overlay:
+        # Legacy placement readers consult metadata too. Keep CURRENT's placement (including absence)
+        # without dropping other replica metadata, such as the execution's outcome references.
+        canonical_meta = canonical_fields.get("metadata")
+        replica_meta = overlay["metadata"]
+        roots = {k: canonical_meta[k] for k in TASK_ROOT_FIELDS if k in canonical_meta} if isinstance(canonical_meta, dict) else {}
+        if isinstance(replica_meta, dict):
+            overlay["metadata"] = {**{k: v for k, v in replica_meta.items() if k not in TASK_ROOT_FIELDS}, **roots}
+        elif roots:
+            overlay.pop("metadata")
     for field in canonical_name_fields(canonical_fields):
         overlay.pop(field, None)
     # Unread-mail custody is a union: a stale replica never drops a canonical row.

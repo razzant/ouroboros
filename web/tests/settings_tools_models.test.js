@@ -47,7 +47,7 @@ function fakeServer(routes, values = {}) {
     server.document = () => ({ ...structuredClone(server.values), _meta: {
         effects: Object.fromEntries(Object.keys(server.values).map((key) => [key, EFFECT_OF(key)])),
         tokens: Object.fromEntries(Object.keys(server.values).map((key) => [key, token(key)])),
-        setup_contract: { modelSlots: contract.modelSlots } } });
+        setup_contract: { scopedModelCatalogs: true, modelSlots: contract.modelSlots } } });
     const write = (settings, precondition = {}) => {
         const stale = Object.entries(precondition || {}).find(([key, held]) => held !== token(key));
         if (stale) return response({ saved: false, code: 'settings_changed_elsewhere', error: `${stale[0]} changed` }, 409);
@@ -273,7 +273,7 @@ test('a role\'s page reads the catalogue when it opens and when it is shown agai
     fakeServer(env.routes);
     const path = 'models/role/main';
     const ctx = { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: path }, ask: async () => true };
-    const reads = () => env.calls.filter((url) => url === '/api/model-catalog').length;
+    const reads = () => env.calls.filter((url) => url === '/api/model-catalog?view=sources').length;
     const shown = (to) => env.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: to } });
     const handle = await settingsPageFor(path).mount(new NodeStub(), { path, row: '', ctx });
     t.after(() => handle?.unmount?.());
@@ -286,6 +286,16 @@ test('a role\'s page reads the catalogue when it opens and when it is shown agai
     shown(path);
     await settle();
     assert.equal(reads(), 2, 'shown again (a return, a reconnect), the page catches the catalogue up');
+    let release;
+    env.routes.set('/api/model-catalog?view=sources', () => new Promise(resolve => { release = resolve; }));
+    shown(path);
+    await settle();
+    const settingsReads = () => env.calls.filter(url => url === '/api/settings').length;
+    const before = settingsReads();
+    shown(path);
+    await settle();
+    assert.ok(settingsReads() > before, 'a pending descriptor cannot block the new settings document');
+    release(response({ items: [], model_sources: [], errors: [] }));
     assert.equal(handle.unsaved(), false, 'nothing is typed: the shell lets the page go when it is left');
 });
 
@@ -451,30 +461,20 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     const limit = page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent;
     assert.match(limit, /waits in line until a slot frees.*never sent elsewhere for waiting/s);
     assert.doesNotMatch(limit, /waits up to|\{wait\}/);
-    // The catalogue is an action of its row, with its own result beside it; it is read at the owner's first touch of
-    // the page after each showing of its own path, never because the page was merely shown (Settings lands on Models).
+    // A visit, even via keyboard or touch, does not start the all-provider read. Its explicit action still does.
     const catalogue = page.container.querySelector('[data-setting-row="models:catalogue"]');
-    assert.equal(inside(catalogue, '#btn-refresh-model-catalog').textContent, 'Read again');
+    const refresh = inside(catalogue, '#btn-refresh-model-catalog');
+    assert.equal(refresh.textContent, 'Read again');
     assert.ok(inside(catalogue, '#settings-model-catalog-status'));
     const catalogueReads = () => page.calls.filter((url) => url === '/api/model-catalog').length;
-    assert.equal(catalogueReads(), 0, 'not read before the page is shown');
     page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
-    await settle();
-    assert.equal(catalogueReads(), 0, 'a page merely shown reads nothing but settings');
     await page.container.fire('pointerdown', { target: catalogue });
     await page.container.fire('focusin', { target: catalogue });
     await settle();
-    assert.equal(catalogueReads(), 1, 'read once at the first touch');
-    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'tools' } });
+    assert.equal(catalogueReads(), 0);
+    await page.container.fire('click', { target: refresh });
     await settle();
-    await page.container.fire('pointerdown', { target: catalogue });
-    await settle();
-    assert.equal(catalogueReads(), 1, 'another page being shown is not a new showing of this one');
-    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
-    await settle();
-    await page.container.fire('focusin', { target: catalogue });
-    await settle();
-    assert.equal(catalogueReads(), 2, 'read again at the first touch after its own path is shown again');
+    assert.equal(catalogueReads(), 1);
     // The door shows the install's Context and leads to Main; it never writes it.
     const door = page.container.querySelector('[data-setting-row="models:context"]');
     assert.deepEqual([rowById('models:context').keys, rowById('models:context').control], [[], { kind: 'door', to: 'main:context' }]);

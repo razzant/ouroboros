@@ -654,7 +654,7 @@ function undiscoveredLabel(value, known) {
  */
 export function routeChoiceGroups({
     harnesses = [], modelSources = [], providers = [], connections = [], currentChoice = '',
-    catalogKnown = true, accountsKnown = true, includeSessions = true,
+    catalogKnown = true, sourcesKnown = catalogKnown, accountsKnown = true, includeSessions = true,
     includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false,
 } = {}) {
     const sessionValues = (harnesses || [])
@@ -695,11 +695,11 @@ export function routeChoiceGroups({
     return [
         ...(includeSubscriptions ? [{ label: 'Subscriptions · models', options: modelValues.length
             ? modelValues
-            : [{ value: '', disabled: true, label: catalogKnown && accountsKnown
+            : [{ value: '', disabled: true, label: sourcesKnown && accountsKnown
                 ? (hasConfiguredAccounts
                     ? 'No model sources listed: press Read again in Models'
                     : 'No model sources listed: connect one in Accounts')
-                : catalogKnown ? 'No model sources listed; accounts have not been checked'
+                : sourcesKnown ? 'No model sources listed; accounts have not been checked'
                     : 'Model sources not read yet: press Read again in Models' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
@@ -751,7 +751,7 @@ export function accountScopedModelCatalog(harness, pin = '') {
     const error = gaps.map((account) => account.problem?.message || 'Account model list could not be read').join('; ')
         || ((!pin || !accounts.length) && envelope.partial ? 'Some account model lists could not be read' : '');
     return { ...harness, models: (harness.models || []).filter((item) => !pin || item.credential_profile_id === pin),
-        models_error: error };
+        models_error: harness.models_error || error };
 }
 
 export function harnessModelsKnown(harness, catalogKnown = true) {

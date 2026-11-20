@@ -97,12 +97,12 @@ def _canonical_root(ctx: Any) -> pathlib.Path:
 
 
 def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = None, services: Any = None,
-              wake_at: Any = None, wake_after_sec: Any = None, reviewers: Any = None) -> Dict[str, Any]:
+              wake_at: Any = None, wake_after_sec: Any = None, reviewers: Any = None, selected_runs: list | None = None) -> Dict[str, Any]:
     """Validate the selected sources; ``ValueError`` names the first bad one.
 
     Senders and tasks must be tasks this installation knows (a readable result);
     runs must be delegated runs THIS task owns (its custody rows); services must be
-    this task's own, each pinned to the start it has NOW (``_service_pins``).
+    this task's own, pinned to their current start. ``selected_runs`` receives checked custody, not part of the sleep.
     """
     from ouroboros.task_results import load_task_result, validate_task_id
 
@@ -120,6 +120,8 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
         missing = [run_id for run_id in chosen["runs"] if run_id not in owned]
         if missing:
             raise ValueError(f"runs: {', '.join(missing)} are not delegated runs of this task")
+        if selected_runs is not None:
+            selected_runs.extend(owned[run_id] for run_id in chosen["runs"])
     pins = _service_pins(ctx, _ids(services, "services"))
     if pins:  # absent otherwise: a sleep without services keeps its existing shape
         chosen["services"] = pins

@@ -46,14 +46,13 @@ nothing is captured, applied or rejected, undo is through Git, the receipt and
 Ordinary folders use the separate supported direct/copy work-product shape in
 `delegate_directory.py`.
 
-One start provisions nothing: a continuation (`continue_from` on `delegate_start`,
-`delegate_continuation.py`) of a run whose private snapshot is still undisposed
-runs in THAT snapshot, with the same execution root, baseline and binding (a
-checkout released after its capture is restored at the hand-over: the captured
-files with HEAD at the baseline), and
-takes its custody over, so the earlier work is captured once in the successor's
-cumulative patch. A predecessor whose patch was already applied or rejected is
-continued from a fresh snapshot of the target. The admission floors are unchanged:
+`delegate_start(continue_from=...)` reuses an undisposed private snapshot with
+the same root, baseline and binding. A released checkout is restored at handover
+(captured files, HEAD at the baseline); only the successor's cumulative patch
+is owed. For ordinary Git, a disposed patch means a fresh snapshot. For skill
+payloads, omit the selector or assert the recorded bucket/name; a writer needs
+the original snapshot and live baseline. Start fresh explicitly after disposition
+or drift. The admission floors are unchanged:
 omitted access keeps the run's narrower profile; explicit access never widens it.
 A writable-to-readonly continuation replaces inherited execution with the ordinary
 nondelegated envelope, no workspace override, and an empty auxiliary-roots list where

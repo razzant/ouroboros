@@ -1,82 +1,15 @@
 """Task-owned current-tree copies across source identity and both apply levels."""
 from pathlib import Path
 from types import SimpleNamespace
-import subprocess
 
 import pytest
 
 from ouroboros import subagent_worktrees as trees
 from ouroboros.artifacts import task_artifact_dir_path
-from ouroboros.task_results import write_task_result
-from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.subagent_integration import _integrate_subagent_patch
-from ouroboros.workspace_copies import admitted_copy_metadata, is_system_copy
-from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
-from supervisor.events_subagent_admission import _resolve_subagent_constraint
-
-
-def git(root, *args):
-    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
-
-
-def repo(path, files):
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "config", "user.name", "Fixture")
-    git(path, "config", "user.email", "fixture@example.invalid")
-    for name, content in files.items():
-        (path / name).write_bytes(content)
-    git(path, "add", "-A")
-    git(path, "commit", "-qm", "fixture")
-    return path
-
-
-@pytest.fixture
-def case(tmp_path, monkeypatch):
-    system = repo(tmp_path / "system", {"system.txt": b"own body\n"})
-    source = repo(tmp_path / "project", {"a.txt": b"base\n", "BIBLE.md": b"project docs\n"})
-    data, copies = tmp_path / "data", tmp_path / "copies"
-    data.mkdir()
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(copies))
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.delenv("OUROBOROS_BOOT_RUNTIME_MODE", raising=False)
-    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "")
-    return system, source, data, copies
-
-
-def admit(case, task_id, parent_id, source=None):
-    system, project, data, _ = case
-    source = source or project
-    constraint, folder, mode, error = _resolve_subagent_constraint(
-        SimpleNamespace(REPO_DIR=system, DRIVE_ROOT=data), tid=task_id,
-        requested_constraint={"mode": "acting_subagent", "surface": "self_worktree"},
-        workspace_root=str(source), workspace_mode="external", base_sha="", parent_task_id=parent_id)
-    assert not error, error
-    binding = admitted_copy_metadata(folder)
-    task = {"id": task_id, "parent_task_id": parent_id,
-            "workspace_root": folder, "workspace_mode": mode,
-            "task_constraint": constraint, "workspace_copy": binding,
-            "metadata": {"workspace_copy": binding}}
-    return Path(folder), task
-
-
-def capture(case, folder, task):
-    data = case[2]
-    artifacts = task_artifact_dir_path(data, task["id"])
-    artifacts.mkdir(parents=True, exist_ok=True)
-    _, manifest = write_workspace_patch_artifacts(folder, artifacts, task=task)
-    write_task_result(data, task["id"], "completed", **{k: v for k, v in task.items() if k != "id"})
-    return artifacts, manifest
-
-
-def parent_context(case, task_id="parent", source=None, task=None):
-    system, project, data, _ = case
-    return ToolContext(repo_dir=system, drive_root=data, task_id=task_id,
-                       workspace_root=source or project,
-                       workspace_mode=task["workspace_mode"] if task else "external",
-                       task_constraint=task["task_constraint"] if task else None,
-                       task_metadata=task["metadata"] if task else {})
+from ouroboros.workspace_copies import is_system_copy
+from tests._isolated_copy_shared import admit, case as case, parent_context
+from tests._workspace_git import git, publish_capture
 
 
 def test_current_staged_unstaged_new_and_binary_inputs_return_only_child_delta(case):
@@ -99,7 +32,7 @@ def test_current_staged_unstaged_new_and_binary_inputs_return_only_child_delta(c
     assert folder.exists()  # task-owned copy is never delegated-run garbage
     (folder / "a.txt").write_bytes((folder / "a.txt").read_bytes() + b"child\n")
     (folder / "picture.bin").write_bytes(b"child\x00image")
-    artifacts, manifest = capture(case, folder, task)
+    artifacts, manifest = publish_capture(case[2], task)
     patch = (artifacts / "workspace.patch").read_text(encoding="utf-8")
     assert "+child" in patch and "+parent staged" not in patch and "+parent unstaged" not in patch
     assert "new.txt" not in manifest["untracked_included"]
@@ -120,12 +53,12 @@ def test_nested_copy_sees_parent_work_and_bubbles_child_delta(case):
     grand, grand_task = admit(case, "grand", "child", child)
     assert (grand / "a.txt").read_bytes() == b"base\nchild\n"
     (grand / "a.txt").write_bytes(b"base\nchild\ngrand\n")
-    capture(case, grand, grand_task)
+    publish_capture(case[2], grand_task)
     child_ctx = parent_context(case, "child", child, child_task)
     out = _integrate_subagent_patch(child_ctx, task_id="grand")
     assert "✅ Integrated" in out, out
     assert (source / "a.txt").read_bytes() == b"base\n"
-    capture(case, child, child_task)
+    publish_capture(case[2], child_task)
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "✅ Integrated" in out, out
     assert (source / "a.txt").read_bytes() == b"base\nchild\ngrand\n"
@@ -155,7 +88,7 @@ def test_foreign_copy_uses_foreign_policy_in_every_mode(case, monkeypatch, mode)
         assert "WORKSPACE_GIT_BLOCKED" in str(blocked), blocked
     binding = build_resolved_resource_binding(child_ctx, root="active_workspace", path=".", operation="shell")
     assert _surface_for(child_ctx, binding, normalize_task_constraint(task["task_constraint"])) == "external_workspace"
-    capture(case, folder, task)
+    publish_capture(case[2], task)
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "✅ Integrated" in out, out
 
@@ -165,7 +98,7 @@ def test_source_drift_and_wrong_parent_keep_captured_copy(case):
     (source / "a.txt").write_bytes(b"parent uncommitted\n")
     folder, task = admit(case, "child", "parent")
     (folder / "a.txt").write_bytes(b"child\n")
-    artifacts, _ = capture(case, folder, task)
+    artifacts, _ = publish_capture(case[2], task)
     (source / "a.txt").write_bytes(b"concurrent parent\n")
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "INTEGRATE_CONFLICT" in out and "changed since copy" in out
@@ -259,7 +192,7 @@ def test_apply_exception_is_unknown_and_keeps_copy(case, monkeypatch):
     import ouroboros.tools.subagent_integration as integration
     folder, task = admit(case, "child", "parent")
     (folder / "a.txt").write_bytes(b"changed\n")
-    artifacts, _ = capture(case, folder, task)
+    artifacts, _ = publish_capture(case[2], task)
     def broken(*a, **kw):
         raise OSError("lost filesystem answer")
     monkeypatch.setattr(integration, "_locked_apply", broken)
@@ -274,7 +207,7 @@ def test_a_busy_target_is_not_started_and_the_same_result_integrates_later(case,
     import ouroboros.tools.subagent_integration as integration
     folder, task = admit(case, "child", "parent")
     (folder / "a.txt").write_bytes(b"changed\n")
-    artifacts, _ = capture(case, folder, task)
+    artifacts, _ = publish_capture(case[2], task)
     real = integration._locked_apply
     monkeypatch.setattr(integration, "_locked_apply", lambda *a, **kw: {"lock_error": "TimeoutError: held by task other"})
     out = integration._integrate_subagent_patch(parent_context(case), task_id="child")
@@ -325,7 +258,7 @@ def test_ignored_paths_are_delivered_and_staged_by_index_membership(case, dirty,
         (child / rel).parent.mkdir(parents=True, exist_ok=True)
         (child / rel).write_bytes(b"captured contribution\n")
         git(child, "add", "-f", "--", rel)
-    _, manifest = capture(case, child, task)
+    _, manifest = publish_capture(case[2], task)
     assert manifest["status"] == "ready_with_changes", manifest
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "✅ Integrated" in out, out
@@ -384,7 +317,7 @@ def test_a_genuine_index_failure_reverses_the_tree_and_restores_only_its_own_ent
     (child / "new.txt").write_bytes(b"child's new file\n")
     if held:
         (child / held).write_bytes(b"edited by the child\n")
-    _, manifest = capture(case, child, task)
+    _, manifest = publish_capture(case[2], task)
     assert not held or held in manifest["tracked_changed"] + manifest["untracked_included"], manifest
     os.utime(source / ".gitignore", (946684800, 946684800))  # unrelated, stale in the stat cache: never refreshed
     assert b".gitignore" in git(source, "diff-files", "--name-only").split()
@@ -431,7 +364,7 @@ def test_a_flagged_entry_really_stages_and_keeps_its_flag(case, dirty, flag, abs
     child, task = admit(case, "child", "parent")
     (child / "BIBLE.md").write_bytes(b"edited by the child\n")
     (child / "README.txt").write_bytes(b"ordinary\n")
-    capture(case, child, task)
+    publish_capture(case[2], task)
     before = index_state(source)
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert git(source, "ls-files", "-v", "--", "BIBLE.md")[:1] == tag
@@ -456,7 +389,7 @@ def test_a_hidden_local_edit_stages_with_the_entry_the_child_edited(case):
     (source / "BIBLE.md").write_bytes(b"project docs\nhidden local edit\n")
     child, task = admit(case, "child", "parent")
     (child / "BIBLE.md").write_bytes((child / "BIBLE.md").read_bytes() + b"child line\n")
-    capture(case, child, task)
+    publish_capture(case[2], task)
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "✅ Integrated" in out and "1 file(s), staged)" in out, out
     assert git(source, "show", ":BIBLE.md") == b"project docs\nhidden local edit\nchild line\n"
@@ -480,7 +413,7 @@ def test_the_ignore_rules_the_apply_leaves_decide_for_new_paths(case, dirty):
         (child / rel).parent.mkdir()
         (child / rel).write_bytes(b"contribution\n")
     git(child, "add", "-f", "--", "added-rule/a.bin")
-    capture(case, child, task)
+    publish_capture(case[2], task)
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "✅ Integrated" in out and "3 file(s), 2 staged)" in out and "added-rule/a.bin" in out, out
     assert git(source, "show", ":.gitignore") == b"added-rule/\n"
@@ -507,7 +440,7 @@ def test_odd_names_reach_git_literally(case):
     for name in (*staged, ":ignored.txt"):
         (child / name).write_bytes(b"contribution\n")
     git(child, "--literal-pathspecs", "add", "-f", "--", ":ignored.txt")
-    capture(case, child, task)
+    publish_capture(case[2], task)
     out = _integrate_subagent_patch(parent_context(case), task_id="child")
     assert "✅ Integrated" in out and "4 file(s), 3 staged)" in out, out
     listed = git(source, "ls-files", "-z").split(b"\0")
@@ -584,7 +517,7 @@ def test_real_leaf_start_capture_child_apply_parent_apply(case, monkeypatch, own
     assert "✅ Integrated" in out, out
     assert (folder / source_name).read_bytes() == b"session contribution\n"
     assert not execution.exists() and folder.exists()
-    capture(case, folder, task)
+    publish_capture(case[2], task)
     parent = parent_context(case, source=source)
     if own_body:
         parent.workspace_root = None

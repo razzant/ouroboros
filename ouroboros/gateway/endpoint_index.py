@@ -267,7 +267,7 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:OnboardingSubagentsPreviewResponse 400,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
         note="read-only actor draft for the same payload completion would save"),
     "POST /api/onboarding/model-catalog": Shape(
-        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest",
+        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
         note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",
@@ -338,7 +338,7 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200,400,404,409,503:SkillPublishPreflightResponse", "SkillPublishPreflightRequest",
         note="read-only; every status carries the same shape; state hard_block is a refusal; destination "
              "{source_id, mode} picks where it would go (default: the skill's origin, else the hub)"),
-    "GET /api/model-catalog": Shape("200:ModelCatalogResponse 400:ErrorResponse", query="source_id credential_profile_id",
+    "GET /api/model-catalog": Shape("200:ModelCatalogResponse 400:ErrorResponse", query="view provider_id source_id harness_id credential_profile_id",
                                     note="read-only; a provider that failed is an errors row, not a failed read"),
     "POST /api/providers/test": Shape("200:ProviderTestResponse 400:ErrorResponse", "ProviderTestRequest",
                                       note="a failed probe is 200 with ok false; nothing is saved"),

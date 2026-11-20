@@ -95,7 +95,7 @@ def metadata_engine(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("provisioned", [False, True])
-@pytest.mark.parametrize("query", ["", "?source_id=codex&credential_profile_id=account-a"])
+@pytest.mark.parametrize("query", ["", "?view=sources", "?source_id=codex&credential_profile_id=account-a"])
 def test_catalog_get_cold_or_stopped_never_starts_engine(metadata_engine, monkeypatch, query, provisioned):
     from ouroboros.gateway import models
 
@@ -109,13 +109,33 @@ def test_catalog_get_cold_or_stopped_never_starts_engine(metadata_engine, monkey
     with TestClient(app) as client:
         payload = client.get("/api/model-catalog" + query).json()
     assert payload["items"] == [] and payload["model_sources"] == []
-    if provisioned or query:
+    if provisioned or "source_id" in query:
         assert payload["errors"][0]["code"] == (
             "daemon_unreachable" if provisioned else "daemon_not_discovered")
     else:
         assert payload["errors"] == [] and calls == []
     assert sorted(str(path) for path in config_dir.rglob("*")) == before
     assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("accounts_view", [False, True])
+def test_source_choices_read_only_the_engines_declared_transports(metadata_engine, monkeypatch, accounts_view):
+    from ouroboros.gateway import models
+
+    state, calls, _, provision, _ = metadata_engine
+    provision()
+    state["accounts_view"] = accounts_view
+    source = {"id": "raw-models", "label": "Subscription", "credentialHarness": "codex"}
+    state["responses"] = {"/v2/model-sources": {"sources": [source]}}
+    monkeypatch.setattr(models, "load_settings", lambda: pytest.fail("source choices must not load API providers"))
+    app = Starlette(routes=[Route("/api/model-catalog", api_model_catalog)])
+    with TestClient(app) as client:
+        response = client.get("/api/model-catalog?view=sources")
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "errors": [], "model_sources": [source]}
+        assert client.get("/api/model-catalog?view=sources&source_id=raw-models").status_code == 400
+    assert calls == [("POST", "/v2/handshake", {}), ("GET", "/v2/operations", {}),
+                     ("GET", "/v2/model-sources", {"view": "accounts"} if accounts_view else {})]
 
 
 def test_warm_owned_metadata_preserves_models_profiles_and_closes(metadata_engine):
@@ -135,6 +155,39 @@ def test_warm_owned_metadata_preserves_models_profiles_and_closes(metadata_engin
     assert calls[-1][2] == {"credentialProfileId": "account-a", "requestedModel": "exact-model"}
     assert sum(path == "/v2/handshake" for _, path, _ in calls) == 3
     assert len(clients) == 3 and all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("pin", ["", "account-b"])
+@pytest.mark.parametrize("account_view", [False, True])
+def test_selected_session_catalog_reads_just_its_harness_and_pin(metadata_engine, account_view, pin):
+    state, calls, clients, provision, _ = metadata_engine
+    provision()
+    state["accounts_view"] = account_view
+    route = "/v2/harnesses/other/models"
+    profiles = [pin] if pin else ["account-a", "account-b"]
+    envelope = {"harnessId": "other", "partial": False, "accounts": [
+        {"credentialProfileId": profile, "availability": "available", "catalog": {
+            "models": [{"id": profile + "-only"}], "sourceProgram": {"version": "2"}}} for profile in profiles]}
+    state["responses"] = {route: envelope if account_view else {"models": [{"id": "legacy"}]}}
+    app = Starlette(routes=[Route("/api/model-catalog", api_model_catalog)])
+    with TestClient(app) as client:
+        response = client.get("/api/model-catalog", params={"harness_id": "other",
+                              **({"credential_profile_id": pin} if pin else {})})
+    body = response.json()
+    row = body["session_catalog"]
+    assert response.status_code == 200 and row["id"] == "other" and body["items"] == [] and body["model_sources"] == []
+    reads = [call for call in calls if call[1] not in ("/v2/handshake", "/v2/operations")]
+    if pin and not account_view:
+        assert reads == [] and row["models"] == [] and body["errors"][0]["code"] == "profile_catalog_unsupported"
+    else:
+        query = {"view": "accounts", **({"credentialProfileId": pin} if pin else {})} if account_view else {}
+        assert reads == [("GET", route, query)] and not body["errors"]
+        if account_view:
+            assert row["model_catalog"] == envelope
+            assert [m["credential_profile_id"] for m in row["models"]] == profiles
+        else:
+            assert row["models"] == [{"id": "legacy"}]
+    assert all(client.is_closed for client in clients)
 
 
 def test_account_catalog_view_reaches_raw_http_without_affecting_execution_discovery(metadata_engine):
