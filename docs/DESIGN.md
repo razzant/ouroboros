@@ -2768,8 +2768,7 @@ cards keep their edges rather than taking the shared fade.
   order. Its one neutral button stands after the cards and the board's save note, and opens or
   closes its opaque frame in place below itself; the header keeps no controls. The owner's
   arrangement comes first and a rarely used tool last (§5 "Order by importance and expected use").
-  The frame takes the card's palette at every theme change. No translation memory reaches it, so
-  its page stays English, and its dates follow the device's locale.
+  The frame takes the card's palette at every theme change.
 
 ### Storage
 
