@@ -610,11 +610,16 @@ def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newe
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_latest_waiting_for_history_yields_to_reading_inside_a_box(direct_server_with_data, browser_engine, tmp_path):
-    """#1347 A: ↓ waits for an older read in flight; reading on inside a full output meanwhile keeps the place."""
+def test_latest_does_not_wait_for_a_held_older_read_whose_late_page_moves_no_one(
+        direct_server_with_data, browser_engine, tmp_path):
+    """↓ reaches the loaded present at once while an older page is still being read; that read yields, and its
+    late answer neither pulls the reader back nor moves a full output's own place (#3601; DESIGN "History edges":
+    ↓ "immediately reaches retained messages' end", "Older loading yields"). Before #3601 ↓ waited for the
+    older read (#1347 A); a reading gesture still supersedes a ↓ that is reading (web/tests/chat_history_integration)."""
     from playwright.sync_api import sync_playwright
 
     project = _nested_full_output_history(direct_server_with_data['data_dir'])
+    newest = 'Nested context 199'
     with sync_playwright() as pw:
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
@@ -628,27 +633,21 @@ def test_latest_waiting_for_history_yields_to_reading_inside_a_box(direct_server
             page.evaluate("() => { window.__historyFault = 'hold'; }")
             root.evaluate("feed => feed.dispatchEvent(new WheelEvent('wheel', {deltaY: -1}))")
             page.wait_for_function('() => Boolean(window.__heldHistory)')
-            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
-            rect, frame = body.bounding_box(), root.bounding_box()
-            page.mouse.move(rect['x'] + rect['width'] / 2, max(rect['y'], frame['y']) + 40)
-            page.wait_for_timeout(300)  # a new wheel burst, not the tail of the edge gesture
             before = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_OFFSET)}
-            page.mouse.wheel(0, 240)
-            page.wait_for_timeout(300)
-            page.evaluate(_FRAMES)
-            read = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_OFFSET)}
-            assert read['body'] > before['body'] and abs(read['line'] - before['line']) <= 1, (before, read)
+            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
+            page.wait_for_function(f"feed => ({_AT_NEWEST})(feed).gap <= 8", arg=feed, timeout=5_000)
+            assert page.evaluate('() => !window.__heldHistory.done'), 'the present is reached while the older read is held'
+            moved = _assert_at_newest(page, feed, newest)
             page.evaluate('() => window.__releaseHistory()')
             _idle(page, feed)
             page.wait_for_timeout(200)
             page.evaluate(_FRAMES)
-            after = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_OFFSET),
-                     'gap': root.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')}
+            after = _assert_at_newest(page, feed, newest)
+            box = body.evaluate('n => n.scrollTop')
             (tmp_path / f'latest-yields-{browser_engine}.json').write_text(
-                json.dumps({'before': before, 'read': read, 'after': after}, indent=2))
-            _screenshot(page, tmp_path, f'latest-yields-to-box-{browser_engine}')
-            assert after['gap'] > 200, ('the superseded ↓ must not pull the reader to the present', after)
-            assert abs(after['line'] - read['line']) <= 8 and abs(after['body'] - read['body']) <= 2, (read, after)
+                json.dumps({'before': before, 'moved': moved, 'after': after, 'box': box}, indent=2), encoding='utf-8')
+            _screenshot(page, tmp_path, f'latest-moves-at-once-{browser_engine}')
+            assert abs(box - before['body']) <= 2, ('the late older page leaves the full output where it was', before, box)
         finally:
             browser.close()
 
