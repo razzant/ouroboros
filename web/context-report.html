@@ -68,7 +68,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 <div class="open"><span class="pick"><input type="file" id="report-file" accept=".json,application/json"><label class="button" for="report-file">Open local report</label></span>
 <span id="report-status" role="status"></span></div>
 <details id="report-help"><summary>How to make a report</summary><ol>
-<li>Take the full ID of the task itself. A Context Lens chart is named by a hash; that hash is not a task ID.</li>
+<li>Take the task's full ID from Dashboard › Logs: open the task's entry, then one of its events. The record under the event shows it as <code>subagent_task_id</code> when the event has one, else as <code>task_id</code>. The ID beside a Logs entry is cut to 8 characters, and a Context Lens chart is named by a hash; neither is a full task ID.</li>
 <li>In a terminal, from a separate source checkout of this version (never the running one), list that task's attempts, newest first: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID</code>, where DATA is this installation's data folder.</li>
 <li>Write one attempt's report into a private folder that is not synced: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID --attempt ATTEMPT_ID --report &gt; report.json</code></li>
 <li>Open that file here. Each attempt has its own report, also when two attempts sent the same request.</li>
