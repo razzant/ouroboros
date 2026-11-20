@@ -33,7 +33,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import truncate_review_artifact
 from ouroboros.work_stop import stop_for_reader, task_current_stop
 from ouroboros.cost_projection import current_cost, current_costs
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read, publish_no_effect
 
 
 def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1038,13 +1038,17 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
 
         if conflict := armed_conflict(ctx):  # an owed native task wait is never overwritten
             raise ValueError(conflict)
-        selected = model_sleep.selectors(ctx, **chosen)
+        selected_runs = []
+        selected = model_sleep.selectors(ctx, selected_runs=selected_runs, **chosen)
+        if review_runs := [run for run in selected_runs if run.review_owned]:
+            from ouroboros.review_waiting import review_wait_refusal
+
+            return _publish_tool_result(ctx, review_wait_refusal(ctx, "await_messages", review_runs))
         outcome = (model_sleep.request_default_sleep(ctx, selected) if mode == "default"
                    else model_sleep.request_sleep(ctx, selected, mode))
     except (TypeError, ValueError) as exc:
-        return _publish_tool_result(ctx, ToolResult(
-            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}",
-            meta={"operation_outcome": "completed_no_effect"}))
+        return publish_no_effect(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR (await_messages): {exc}"))
     held, withdrawn = hold_notice(ctx, outcome["held"]) if outcome.get("held") else ({}, "")
     if withdrawn:
         outcome["note"] += withdrawn
@@ -1069,7 +1073,8 @@ def await_messages_entry() -> ToolEntry:
             "unknown, never as success). A place event the host marks as a wake wakes any wait past its selectors; one "
             "marked as context ends none and stays unread for your next round. The owner's messages, controls and "
             "typed descendant escalations always wake you; other unselected mail waits unread. A new question from any "
-            "ordinary run you own also wakes you, even if not selected; reviewer runs stay with their panel. Question "
+            "ordinary run you own also wakes you, even if not selected. Selecting a reviewer run refuses the whole wait "
+            "and points to its review surface. Question "
             "sources are delivered, not answered. mode=warm keeps your process and browser; mode=cold saves your "
             "continuation and releases the process only after the body accepts custody of your bound external runs "
             "(its wake re-reads everything past the leading system items; local services need warm). Retained "
@@ -1095,7 +1100,7 @@ def await_messages_entry() -> ToolEntry:
                       "description": "Sleep: task ids whose terminal (any settled status), "
                                      "or a host silence notice about them or a descendant, wakes you."},
             "runs": {"type": "array", "items": {"type": "string"},
-                     "description": "Sleep: your delegated run ids whose terminal wakes you."},
+                     "description": "Sleep: ordinary delegated run ids you own; reviewer runs do not belong here."},
             "services": {"type": "array", "items": {"type": "string"},
                          "description": "Warm sleep: names of your own running services whose exit wakes you."},
             "wake_at": {"type": "string", "description": "Sleep: an absolute ISO-8601 wake time (with timezone). A time your human names for this work's return belongs here."},

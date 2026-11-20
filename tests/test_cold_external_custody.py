@@ -76,8 +76,34 @@ def _park(env, tmp_path, monkeypatch, *, direct=False, selected=None):
     return bp.budget_pause_row(tmp_path, "sleeper")
 
 
+def _resume_transport(monkeypatch):
+    """Log real observer transport calls without a daemon. A requested stop does not settle either run."""
+    from ouroboros.gateways import claudexor
+
+    calls = []
+
+    class Gateway:
+        def handshake(self):
+            return {"compatible": True}
+
+        def cancel_run(self, rid, reason=""):
+            calls.append(("cancel", rid))
+            return {"accepted": True, "status": "accepted"}
+
+        def get_run(self, rid):
+            calls.append(("get", rid))
+            return {"summary": {"state": "running"}}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
+    return calls
+
+
 @pytest.mark.parametrize(("terminal", "direct"), [(False, False), (True, True)])
-def test_exact_cold_transfer_park_wake_and_same_author_restore(tmp_path, monkeypatch, direct, terminal):
+@pytest.mark.parametrize("door", ["wake", "explicit"])
+def test_exact_cold_transfer_park_wake_and_same_author_restore(tmp_path, monkeypatch, direct, terminal, door):
     from ouroboros import budget_pause as bp, delegate_custody_current as current, owner_wait
     from ouroboros.owner_mailbox import write_owner_message
     from ouroboros.project_lease import candidate_is_leasable, lane_holders
@@ -99,10 +125,26 @@ def test_exact_cold_transfer_park_wake_and_same_author_restore(tmp_path, monkeyp
         monkeypatch.setattr(current, "_decode", lambda raw: _terminal(original(raw)))
     else:
         assert write_owner_message(tmp_path, "come back", "sleeper", msg_id="owner-wake")
-    out = wake_ready_sleepers(env.q)
-    assert out[0]["ok"], out
-    assert out[0]["ready"]["reason"] == ("run:run-one" if terminal else "owner_text")
+    if door == "explicit":
+        from supervisor.restart_retention import HOLD_SAVED_SLEEP_RECOVERY, hold_after_stop
+
+        hold_after_stop(task, tmp_path, HOLD_SAVED_SLEEP_RECOVERY)
+        assert task["_budget_pause_hold"] and not wake_ready_sleepers(env.q)[0]["ok"]
+        controls = _resume_transport(monkeypatch)
+        env.runtime.active = False
+        refused = env.q.resume_budget_paused_task("sleeper")
+        assert refused["error"] == "external_runs_unsettled" and not controls, refused
+        assert "_budget_pause_resume" not in task and not current.run(tmp_path, "run-one").settled
+        env.runtime.active = True  # the same binding comes back under body responsibility
+        resumed = env.q.resume_budget_paused_task("sleeper")
+        assert resumed["ok"] and not controls, (resumed, controls)
+    else:
+        out = wake_ready_sleepers(env.q)
+        assert out[0]["ok"], out
+        assert out[0]["ready"]["reason"] == ("run:run-one" if terminal else "owner_text")
     handoff = task["_budget_pause_resume"]
+    assert handoff["authority"] == ("sleep_readiness" if door == "wake" else "explicit_resume")
+    assert handoff["external_runs"]["body_custody"]["runs"] == [["run-one", "invoke-one"]]
     fresh_ctx, _ = _loop_ctx(tmp_path, "sleeper", direct=direct)
     fresh_ctx.budget_pause_resume = handoff
     saved = bp.load_budget_pause(fresh_ctx)
@@ -117,6 +159,57 @@ def test_exact_cold_transfer_park_wake_and_same_author_restore(tmp_path, monkeyp
     assert bp.budget_pause_row(tmp_path, "sleeper")["grant"]["consumed_at"]
     assert "body retained your exact external runs" in messages[-1]["content"]
     assert not current.run(tmp_path, "run-one").settled, "return never invents collection or stop"
+
+
+@pytest.mark.parametrize("case", ["warm_with_writer", "warm_independent_only", "money"])
+def test_explicit_resume_of_saved_sleep_observes_while_money_still_requests_stops(tmp_path, monkeypatch, case):
+    from ouroboros import budget_pause as bp, delegate_custody as custody, model_sleep, owner_wait
+    from ouroboros.delegate_custody_current import run
+    from supervisor.restart_retention import park_saved_pause
+    from tests._budget_pause_exact_helpers import _parked
+
+    if case == "money":
+        q, state, workers = _install_queue(tmp_path, monkeypatch)
+        monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+        with monkeypatch.context() as initial_park:
+            task, _ = _parked(tmp_path, initial_park, task_id="sleeper")
+        held = {"task_id": "sleeper", "root_task_id": "sleeper", "route": "route"}
+        assert custody.emit(tmp_path, custody.STARTED, {**held, "run_id": "run-one", "invocation_id": "invoke-one",
+                                                       "source": "delegate_start", "access": "workspace_write"})
+    else:
+        env = _setup(tmp_path, monkeypatch)
+        q, workers = env.q, env.workers
+        assert model_sleep.request_sleep(env.ctx, model_sleep.selectors(env.ctx), "warm")["reason"] == "sleep_armed"
+        model_sleep.begin(env.ctx)
+        saved = owner_wait.checkpoint_owner_wait(env.ctx, env.limit.messages, {}, {}, 1, [], set())
+        owner_wait.set_owner_wait(tmp_path, "sleeper", {**saved, "state": "waiting"})
+        task = park_saved_pause(env.task, 1, tmp_path, pause_source="test_kept_sleep")
+        assert task["_budget_pause"]["reason"] == "sleep" and task["_budget_pause_hold"]
+        assert not bp.budget_pause_row(tmp_path, "sleeper").get("external_custody"), "warm sleep did not transfer"
+        workers.RUNNING.pop("sleeper")
+        workers.PENDING.append(task)
+
+    assert custody.emit(tmp_path, custody.STARTED, {"run_id": "panel-run", "invocation_id": "invoke-panel",
+        "task_id": "sleeper", "root_task_id": "sleeper", "route": "route", "source": "review_substrate",
+        "authority_source": "readonly", "access": "readonly"})
+    if case == "warm_independent_only":
+        assert custody.emit(tmp_path, custody.SETTLED, {"run_id": "run-one", "task_id": "sleeper", "state": "succeeded"})
+
+    transport = _resume_transport(monkeypatch)
+    result = q.resume_budget_paused_task("sleeper")
+    if case == "money":
+        assert result["error"] == "external_runs_unsettled" and "_budget_pause_resume" not in task, result
+        assert sorted(transport) == [("cancel", "panel-run"), ("cancel", "run-one"),
+                                     ("get", "panel-run"), ("get", "run-one")]
+    else:
+        assert transport == [], "the sleep return neither cancels nor becomes a second review observer"
+        if case == "warm_with_writer":
+            assert result["error"] == "external_runs_unsettled", result
+            assert result["action"] == "wait_for_delegated_runs_to_settle" and not result.get("acceptable_unknown")
+            assert [item["run_id"] for item in result["runs"]] == ["run-one"] and "_budget_pause_resume" not in task
+        else:
+            assert result["ok"] and task["_budget_pause_resume"]["authority"] == "explicit_resume", result
+    assert run(tmp_path, "panel-run").review_owned and not run(tmp_path, "panel-run").settled
 
 
 def _terminal(run):

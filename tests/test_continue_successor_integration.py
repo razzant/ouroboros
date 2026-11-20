@@ -1063,6 +1063,42 @@ def test_a_cancelled_child_is_decided_only_from_a_ready_capture_and_with_a_reaso
     assert result_signature(world.data, "child") == signature
 
 
+@pytest.mark.parametrize("conflict", ["other", "workspace_patch"])
+def test_a_cancelled_childs_retained_capture_is_judged_by_its_own_files(world, conflict):
+    from ouroboros.artifacts import artifact_record
+    from tests._store_shared import add_artifact_conflict
+
+    interrupted_root(world.data)
+    cancel_after_capture(world, running_child(world))
+    child = read_result(world.data, "child")
+    if conflict == "other":
+        path = task_artifact_dir_path(world.data, "child") / "recipe.md"
+        path.write_text("verification recipe\n", encoding="utf-8")
+        record = artifact_record(path)
+    else:
+        record = next(row for row in child["artifacts"] if row["kind"] == "workspace_patch")
+    identities = add_artifact_conflict(world.data, "child", record)
+    successor = continue_from(world.data)
+    effective = load_effective_task_result(world.data, "child")
+    assert effective["artifact_status"] == "failed"
+    assert effective["workspace_capture"]["status"] == "ready_with_changes"
+    signature = result_signature(world.data, "child")
+
+    out = _integrate_subagent_patch(successor_ctx(world), task_id="child", reason="take the retained edit")
+
+    assert record["name"] in out and all(digest in out for digest in identities), out
+    if conflict == "other":
+        assert "✅ Integrated" in out and "child stays cancelled" in out
+        assert git(world.project, "show", ":a.txt") == (world.project / "a.txt").read_bytes() == b"base\nchild\n"
+        assert verdict(world, successor, "child")["child_cancelled"]["status"] == "cancelled"
+    else:
+        assert "INTEGRATE_NATIVE_CANCELLED" in out
+        assert git(world.project, "status", "--porcelain") == b""
+        assert not (task_artifact_dir_path(world.data, successor) / "subagent_patch_verdict_child.json").exists()
+    assert result_signature(world.data, "child") == signature
+    assert load_effective_task_result(world.data, "child")["status"] == "cancelled"
+
+
 def test_a_cancelled_copy_meets_the_ordinary_integrity_and_target_checks_and_decides_once(world):
     """Deciding a cancelled child's capture adds no right: a foreign target, a tampered capture and a moved source
     refuse as for any child, the conflict keeps the cancellation beside it, and the corrected retry decides once."""

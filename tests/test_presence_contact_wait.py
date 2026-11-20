@@ -266,7 +266,10 @@ def test_inline_controls_keep_their_existing_capability_boundary(contact_runtime
         assert not load_task_result(ctx.drive_root, ctx.task_id).get("budget_pause")
         assert arm_detach(ctx, "continue elsewhere")["error"] == "no_continuation_owner"
         for mode in ("warm", "cold"):
+            ctx._active_builtin_tool_result = None  # a direct handler call publishes its typed result here
             assert "no continuation owner" in _await_as_sleep(ctx, mode, wake_after_sec=5)
+            refused = ctx._active_builtin_tool_result
+            assert (refused.code, refused.meta.get("operation_outcome")) == ("TOOL_ARG_ERROR", "completed_no_effect")
         assert not getattr(ctx, "_model_sleep", None)
 
     _run(contact_runtime, during)

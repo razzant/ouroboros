@@ -322,6 +322,50 @@ def test_last_answer_replaces_prior_rounds_without_cross_thread_leaks(tmp_path):
     assert obs.task_timing() is None
 
 
+def test_log_scope_does_not_read_or_fill_the_finalization_children_cache(tmp_path):
+    from unittest.mock import patch
+
+    from ouroboros import task_status
+    from ouroboros.finalization_timing import finalization_child_scope
+    from ouroboros.gateway.logs import _scope
+    from ouroboros.task_reads import TaskReads
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_status import find_child_tasks
+    from ouroboros.utils import utc_now_iso
+    from tests._shared import write_queue_document
+
+    def add(child, status="completed"):
+        write_task_result(tmp_path, child, status, parent_task_id="boss", root_task_id="boss",
+                          delegation_role="subagent")
+
+    def finalizing():
+        return {row["task_id"] for row in find_child_tasks(
+            tmp_path, parent_task_id="boss", root_task_id="boss", materialize_artifacts=False)}
+
+    def log_children():
+        # Membership discovery and the running child's reconciliation share one physical
+        # queue-document read. A fresh Logs request gets its own observation.
+        with (patch.object(task_status, "load_queue_document", wraps=task_status.load_queue_document) as load,
+              patch.object(TaskReads, "queue_snapshot", autospec=True, side_effect=TaskReads.queue_snapshot) as lookup):
+            children = _scope(tmp_path, "boss")[1]
+        reader = lookup.call_args_list[0].args[0]
+        assert [call.args for call in lookup.call_args_list] == [(reader, tmp_path.resolve())] * 2
+        load.assert_called_once_with(tmp_path.resolve())
+        return children
+
+    add("first", "running")
+    write_queue_document(tmp_path / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": []})
+    with finalization_child_scope():
+        assert finalizing() == {"first"}
+        add("second")
+        assert log_children() == {"boss", "first", "second"}
+        assert finalizing() == {"first"}
+    with finalization_child_scope():
+        assert log_children() == {"boss", "first", "second"}
+        add("third")
+        assert finalizing() == {"first", "second", "third"}
+
+
 def test_phase_seconds_ignore_wall_clock_reversal_and_preserve_exceptions(monkeypatch):
     from ouroboros import finalization_timing, observability as obs
 

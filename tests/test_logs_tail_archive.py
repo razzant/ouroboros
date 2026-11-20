@@ -255,3 +255,44 @@ def test_logs_tail_task_discovery_does_zero_artifact_work(tmp_path, monkeypatch)
 
     assert [row["content"] for row in payload["entries"]] == ["row"]
     assert calls == []
+
+
+def test_log_filter_uses_effective_queue_ids_and_missing_document_fallback(tmp_path, monkeypatch):
+    from ouroboros import task_store
+    from ouroboros.utils import utc_now_iso
+    from tests._logs_raw_shared import client, preview, read, write
+    from tests._shared import write_queue_document
+
+    lineage = {"parent_task_id": "parent", "delegation_role": "subagent"}
+    seed_result(tmp_path, "old", {"status": "failed", "retry_task_id": "retry"})
+    seed_result(tmp_path, "retry", {"status": "completed"})
+    seed_result(tmp_path, "retired", {"status": "completed", **lineage})
+    outside = tmp_path / "unadmitted"
+    seed_result(tmp_path, "child", {"status": "completed", "child_drive_root": str(outside), **lineage})
+    seed_result(outside, "child", {"status": "completed"})
+    write(outside, {"task_id": "child", "type": "outside"})
+    # The row retired between lineage selection and the canonical display read.
+    display = task_store.display_documents
+
+    sources = []
+
+    def current(root, *args, **kwargs):
+        sources.append(root)
+        found = display(root, *args, **kwargs)
+        found.pop("retired", None)
+        return found
+
+    monkeypatch.setattr(task_store, "display_documents", current)
+    write_queue_document(tmp_path / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [
+        {"id": "old", "task": lineage},
+        {"task_id": "queue-only", "task": dict(lineage, id="inner-id", task_id="inner-task-id")},
+    ], "running": []})
+    chunks = {tid: write(tmp_path, {"task_id": tid, "type": "log"}, append=True)
+              for tid in ("old", "retry", "queue-only", "inner-id", "inner-task-id", "retired")}
+    http = client(tmp_path)
+    full = http.get("/api/logs/events?task_id=parent").json()["entries"]
+    compact = preview(http, task_id="parent")
+    assert [row["task_id"] for row in full] == [row["task_id"] for row in compact] == ["retry", "queue-only"]
+    for row in compact:
+        assert read(http, row, download=1).content == chunks[row["task_id"]]
+    assert set(sources) == {tmp_path}

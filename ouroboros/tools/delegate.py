@@ -119,7 +119,7 @@ from ouroboros.delegate_shared import (  # noqa: F401
 # `_fail` is NOT re-imported from it — the one shared refusal author is
 # `delegate_shared._fail`, which delegate_integration itself imports.
 from ouroboros.engine_facts import engine_pool_line
-from ouroboros.delegate_continuation import NO_CONTINUATION, start_binding, with_run_binding
+from ouroboros.delegate_continuation import NO_CONTINUATION, payload_predecessor, start_binding, with_run_binding
 from ouroboros.tools.delegate_integration import (  # noqa: F401
     _CAPTURE_DELEGATED_SNAPSHOT,
     _capture_block,
@@ -330,8 +330,8 @@ def _processing_start_request(request, actor, gateway, route):
 
 def _start_argument_refusal(ctx: ToolContext, text: str, selector_root: str, retry_of: Any,
                             bucket: Any, skill_name: Any, continue_from: Any,
-                            continue_carrier: Any = None, mode=None, override_plan_readiness=None) -> Tuple[str, Optional[ToolResult]]:
-    """``(continuation_token, refusal)``: every refusal a start's ARGUMENTS earn before
+                            continue_carrier: Any = None, mode=None, override_plan_readiness=None):
+    """``(continuation_token, payload_predecessor, refusal)``: argument and selector checks before
     the daemon is touched, in their historical order. Each is a definite no-run: an
     empty prompt (a continuation may carry none: the engine resumes the stopped work
     and the host states the facts), a malformed exact-resource selector, a deadline
@@ -341,23 +341,23 @@ def _start_argument_refusal(ctx: ToolContext, text: str, selector_root: str, ret
     intention over a finished run, and a skill-payload selector run keeps its own
     target semantics."""
     if mode not in (None, "ask", "plan", "agent") or (override_plan_readiness is not None and type(override_plan_readiness) is not bool):
-        return "", _fail("delegate_start", "mode_invalid", "mode must be ask, plan or agent; override_plan_readiness must be boolean.", definitely_unrun=True)
+        return "", None, _fail("delegate_start", "mode_invalid", "mode must be ask, plan or agent; override_plan_readiness must be boolean.", definitely_unrun=True)
     if retry_of and (mode is not None or override_plan_readiness is not None):
-        return "", _fail("delegate_start", "retry_selector_conflict", "Replay the recorded mode and readiness choice; omit overrides.", definitely_unrun=True)
+        return "", None, _fail("delegate_start", "retry_selector_conflict", "Replay the recorded mode and readiness choice; omit overrides.", definitely_unrun=True)
     if override_plan_readiness is not None and (mode != "agent" or not continue_from):
-        return "", _fail("delegate_start", "plan_override_conflict", "override_plan_readiness requires continue_from and mode=agent.", definitely_unrun=True)
+        return "", None, _fail("delegate_start", "plan_override_conflict", "override_plan_readiness requires continue_from and mode=agent.", definitely_unrun=True)
     if not text.strip() and not str(continue_from or "").strip() and not str(retry_of or "").strip():
-        return "", _fail("delegate_start", "empty_prompt", "prompt is required")
+        return "", None, _fail("delegate_start", "empty_prompt", "prompt is required")
     if continue_carrier is not None and (not str(continue_from or "").strip()
                                          or continue_carrier not in ("auto", "packet")):
-        return "", _fail("delegate_start", "continuation_carrier_invalid",
+        return "", None, _fail("delegate_start", "continuation_carrier_invalid",
                          "continue_carrier is 'auto' or 'packet' and applies only with continue_from.",
                          definitely_unrun=True)
     refusal = _payload_selector_refusal(selector_root, retry_of, bucket, skill_name)
     if refusal:
-        return "", refusal
+        return "", None, refusal
     if deadline_expired(ctx):
-        return "", _fail(
+        return "", None, _fail(
             "delegate_start", "task_deadline_expired",
             "This task's deadline has already passed, so a delegated run started now "
             "would outlive it by design. Finalize with what you have — do not start "
@@ -365,15 +365,11 @@ def _start_argument_refusal(ctx: ToolContext, text: str, selector_root: str, ret
         )
     token = str(continue_from or "").strip()
     if token and str(retry_of or "").strip():
-        return token, _fail("delegate_start", "continuation_selector_conflict",
+        return token, None, _fail("delegate_start", "continuation_selector_conflict",
                             "continue_from starts a NEW run bound to a finished predecessor; retry_of replays a "
                             "pending invocation. Supply one of them.", definitely_unrun=True)
-    from ouroboros.delegate_plan import payload_continuation
-
-    if token and str(selector_root or "").strip() and not payload_continuation(ctx, token):
-        return token, _fail("delegate_start", "continuation_resource_conflict",
-                            "A payload selector can continue its plan thread; ordinary payload runs start fresh.", definitely_unrun=True)
-    return token, None
+    prior, refusal = payload_predecessor(ctx, custody.custody_root(ctx), token, selector_root, bucket, skill_name) if token else (None, None)
+    return token, prior, refusal
 
 
 def _start_actor_binding(ctx, drive, retry_token, continuation_token, text, canonical, source_request):
@@ -415,7 +411,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     from ouroboros.delegate_plan import bind_start, plan_facts
     text = str(prompt or "")
     selector_root = str(root or "").strip()
-    continuation_token, argument_refusal = _start_argument_refusal(
+    continuation_token, prior, argument_refusal = _start_argument_refusal(
         ctx, text, selector_root, retry_of, bucket, skill_name, continue_from, continue_carrier, mode, override_plan_readiness)
     if argument_refusal:
         # This argument boundary precedes daemon access, provisioning and any start.
@@ -454,9 +450,9 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
     else:
         route, row_processing = actor["route"], actor.get("row_processing")  # the row's own tier: custody, never the request
-        if selector_root:
+        if selector_root := ("skill_payload" if prior else selector_root):
             authority, payload_auth, payload_error = _payload_mutation_authority(
-                ctx, drive, bucket, skill_name, _resolved_binding, actor.get("access", "workspace_write"))
+                ctx, drive, bucket, skill_name, _resolved_binding, actor.get("access", "workspace_write"), prior=prior)
             if payload_error:
                 return payload_error
         else:
@@ -468,15 +464,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                    or in_place_refusal(authority, selector_root, workspace, mode, directory_strategy, scope_paths)):
         return refusal
     ceiling_authority = authority
-    if not recovering and mode is not None:
-        authority = delegated_run_shape(not authority.investigation, authority.access, mode)
     if not recovering:
+        if mode is not None:
+            authority = delegated_run_shape(not authority.investigation, authority.access, mode)
         assignment = "" if bool(actor.get("compiled_work_order")) else _assignment_instructions(ctx)
-        payload_skill = str(((payload_auth or {}).get("resource_ref") or {}).get("skill_name") or "")
+        payload_skill = (payload_auth or {}).get("resource_ref", {}).get("skill_name", "") if ceiling_authority.access != "readonly" and authority.mode != "ask" else ""
         instructions = _host_instructions(
             authority, assignment, payload_skill=payload_skill, coordination_context="" if continuation_token else _coordination_context,
         )
-    access = authority.access
     start_attempted = recovering  # Recovery may already own a physical run.
     try:  # a retry or continuation keeps its recorded engine; a fresh start the domain's (``execution_domain``)
         engine, gateway = start_engine(drive, retry_token, continuation_token)
@@ -525,8 +520,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     override_plan_readiness=override_plan_readiness, plan_answers=_plan_answers)
                 if refusal:
                     return refusal
-            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs,  # read-only runs
-                                           thread_folder=continuation.folder if continuation.request.get("_thread_id") else None)
+            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs, thread_folder=continuation.folder)
             if refusal:
                 return refusal
             readonly_root, root, instructions = inputs.scope_root, inputs.scope_root or root, instructions + inputs.instruction
@@ -558,6 +552,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 if snapshot is not None:
                     snapshot_id, baseline_sha, root = snapshot.snapshot_id, snapshot.baseline_sha, snapshot.path
                     resource_ref = dict(continuation.facts.get("resource_ref") or record_auth.get("resource_ref") or {})
+            elif payload_auth is not None:
+                target_root, authority_source, resource_ref = record_auth["target_root"], "readonly", record_auth["resource_ref"]
             if authority.mode == "plan":
                 target_root, authority_source = record_auth["target_root"], "readonly"
             execution_root = (root if directory_options.get("isolation") == "live" else "") if directory_options else delegated_execution_workspace_root(gateway, authority, root)
@@ -592,7 +588,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             ttl_info = _prompt_cache_ttl_request(request_body, route, gateway, drive, continuation_token)
             history_facts["access"] = request_body["access"]
             key = custody.idempotency_key(getattr(ctx, "task_id", ""), route.route_id,
-                                          access, authority.mode, authority.isolation,
+                                          authority.access, authority.mode, authority.isolation,
                                           root, request_body["prompt"], request_body["instructions"])
         lineage = getattr(ctx, "task_metadata", {}) or {}
         lineage = lineage if isinstance(lineage, dict) else {}
@@ -676,7 +672,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     # is live and only THIS process knows it exists (the uncustodied-run leak). A read that bound it first keeps its name.
     run_id, durable = record_started_custody(
         drive, run_id, ctx, route, authority,
-        key=key, access=access, root=root, seconds=seconds,
+        key=key, access=authority.access, root=root, seconds=seconds,
         invocation_id=invocation_id, project_id=project_id, daemon_store_id=custody.admitted_store_id(handle),
         project_owned=bool(owned_project_id), project_persistent=project_persistent,
         **actor_facts, **{k: v for k, v in snapshot_facts.items() if k not in plan_facts(snapshot_facts)},
@@ -688,7 +684,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     )
     from ouroboros.tools.control import maybe_emit_delegated_run_fanout
     maybe_emit_delegated_run_fanout(ctx, run_id=run_id, route_id=route.route_id, objective=text, durable=durable)
-    return _started_payload(handle, run_id, route, access, authority, root,
+    return _started_payload(handle, run_id, route, authority.access, authority, root,
                             durable=durable, recovering=recovering, invocation_id=invocation_id,
                             snapshot_id=snapshot_id, target_root=target_root, baseline_sha=baseline_sha,
                             resource_ref=resource_ref, processing=processing_info, prompt_cache_ttl=ttl_info,
@@ -1293,7 +1289,8 @@ def get_tools() -> List[ToolEntry]:
                     "retry predecessor's, or the predecessor's task tree in an owner-created Continue root. "
                     "The engine reuses the session where possible, else briefs a new one with retained evidence; "
                     "some work may need repeating. A writer keeps its undisposed private snapshot as one cumulative "
-                    "patch, superseding the old capture. prompt carries only new work/answers/corrections and may "
+                    "patch, superseding the old capture. Payload continuations keep the original target and baseline; omit "
+                    "the selector or repeat its exact bucket and name. prompt carries only new work/answers/corrections and may "
                     "be empty. For resumable pool_exhausted or a limit with resetsAt, use "
                     "await_messages(wake_at=resetsAt) before continuing. Needs an observed terminal (not settled "
                     "money), not superseded, no ambiguous apply. Ordinary continuations never widen; plan implementation requires the starter's recorded ceiling. "
@@ -1317,7 +1314,8 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("delegate_wait", {
             "name": "delegate_wait",
             "description": (
-                "Sleep on delegated runs until one ends, asks a question or needs you. What is already there (its "
+                "Sleep on ordinary delegated runs until one ends, asks a question or needs you. Selecting a reviewer run "
+                "refuses the whole wait and points to its review surface. What is already there (its "
                 "terminal, a new question, an unacknowledged earlier wake) answers in this result at once; mail ends "
                 "it at once too and reaches your next request as its sender's own row, not inside this result. "
                 "Otherwise a sleep returns sleep_armed: it starts after this tool batch and yields acting capacity; "
@@ -1356,7 +1354,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "run_id": {"type": "string", "description": "One run id; exclusive with runs."},
-                "runs": {"type": "array", "items": {"type": "string"}, "description": "Run ids to supervise; wake on any selected run. Exclusive with run_id."},
+                "runs": {"type": "array", "items": {"type": "string"}, "description": "Ordinary run ids to supervise; wake on any. Exclusive with run_id."},
                 "since_seq": {"type": "integer", "description": "Event cursor: advances past it are recorded as progress."},
                 "checkpoint_after_sec": {"type": "integer", "description":
                     "Optional one-shot future inspection time. Requires checkpoint_reason; "
