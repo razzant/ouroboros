@@ -465,8 +465,7 @@ textarea::placeholder {
 
 /* Choice-card chip: neutral by default, so no chip renders as bare white text. A setting's value is never
    amber, so Advisory keeps the neutral chip; only Blocking declares a pair. */
-.wizard-choice .tone,
-.consciousness-step-on .tone {
+.wizard-choice .tone {
   display: inline-flex;
   margin-bottom: 10px;
   padding: 4px 8px;
@@ -479,8 +478,7 @@ textarea::placeholder {
   letter-spacing: 0.02em;
 }
 
-.wizard-choice.blocking .tone,
-.consciousness-step-on .tone {
+.wizard-choice.blocking .tone {
   background: var(--status-ok-bg);
   color: var(--status-ok-fg);
 }
@@ -1482,14 +1480,13 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
    depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
-/* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
 .skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
 .skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 .skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-/* The Consciousness step: the switch as the wizard's two choices, then what they mean, its limits and its door. */
+/* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
+   subscription pays with, its limits and its door. */
 .consciousness-step { display: grid; gap: var(--space-2); }
 .consciousness-step .wizard-choice-grid { margin-bottom: var(--space-1); }
-.consciousness-step-on { padding: 14px; border-radius: var(--radius-inner); background: var(--surface-tray); }
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;

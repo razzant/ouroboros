@@ -159,11 +159,12 @@ class SetupInitialState(TypedDict):
 class SetupConsciousnessOffer(TypedDict):
     """``settings_setup_contract.consciousness_offer``: the setup's Consciousness step (its words: ``first_run_words``)."""
 
-    offered: bool  # setup never completed here and the state is not unreadable; else no step (``stepOrder`` omits it)
-    enabled: Optional[bool]  # the control as the state shows it; null = no state yet, the switch starts on
+    offered: bool  # the next boot mints a first state and setup never completed here; else no step (``stepOrder``)
+    enabled: Optional[bool]  # the control as a state shows it; null on an offered step (the switch starts on) or unknown
     autonomy: Literal["observe", "act", "full"]
     dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
     maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
+    words: Dict[str, str]  # gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
 
 
 class SetupBootstrap(TypedDict):
@@ -321,8 +322,7 @@ class AuthLoginResponse(TypedDict):
 
 
 class ContractBody(TypedDict):
-    """One request or response body: its media type and the ``schemas`` names it may take
-    (empty = the shape is not published)."""
+    """One request or response body: its media type and the ``schemas`` it may take (none: unpublished)."""
 
     content_type: str
     schemas: List[str]

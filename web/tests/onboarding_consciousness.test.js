@@ -1,8 +1,7 @@
-// The setup's Consciousness step (owner decision 2026-11-20): offered by the server, on by default with no state yet,
-// off when a state says off, On already when it says on. Its position rides the completion request as `consciousness`;
-// the page sends no command (the builtin page's only consciousness write is that field).
+// The setup's Consciousness step (owner decision 2026-11-20): offered by the server only before a first state exists,
+// on by default. Its position rides the completion request as `consciousness`; no command is sent (the browser
+// witness, tests/test_onboarding_consciousness_browser.py, records every request of the ordinary path).
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { createConsciousnessStep, limitPhrases, normalizeOffer, stepHtml } from '../modules/onboarding_consciousness.js';
@@ -33,8 +32,8 @@ test('an older bootstrap offers nothing and sends nothing; values keep unknown a
     const step = createConsciousnessStep(undefined);
     assert.deepEqual(step.payload(), {});
     assert.deepEqual(step.summaryRows(), []);
-    const facts = normalizeOffer({ offered: true, enabled: 'yes', autonomy: 'act', dailyUsd: '', maxTasks: 'x' });
-    assert.deepEqual([facts.enabled, facts.dailyUsd, facts.maxTasks], [null, null, null]);
+    const facts = normalizeOffer({ offered: true, autonomy: 'act', dailyUsd: '', maxTasks: 'x' });
+    assert.deepEqual([facts.dailyUsd, facts.maxTasks], [null, null]);
 });
 
 test('no state yet: the switch starts on, its field says true, and Summary reads it', () => {
@@ -50,38 +49,34 @@ test('no state yet: the switch starts on, its field says true, and Summary reads
     assert.deepEqual(step.payload(), { consciousness: true });
 });
 
-test('a state that says off shows off and stays off unless the owner turns it; one already on sends nothing', () => {
-    const { step, on } = boundStep({ ...DEFAULTS, enabled: false });
-    assert.deepEqual([step.on(), step.payload()], [false, { consciousness: false }]);
-    on.click();
-    assert.deepEqual(step.payload(), { consciousness: true });
-    const already = createConsciousnessStep({ ...DEFAULTS, enabled: true });
-    assert.deepEqual(already.payload(), {}, 'the wizard never turns it off, and an on needs no start');
-    assert.deepEqual(already.summaryRows(), [['Consciousness', 'On already']]);
-    assert.doesNotMatch(already.html(), /data-consciousness-choice/);
-    assert.match(text(already.html()), /On already Also on its own/);
-    assert.deepEqual(createConsciousnessStep({ ...DEFAULTS, offered: false }).payload(), {});
+test('a step the server does not offer (a state exists, whatever it says) shows and sends nothing', () => {
+    for (const enabled of [false, true, null]) {
+        const step = createConsciousnessStep({ ...DEFAULTS, offered: false, enabled });
+        assert.deepEqual([step.payload(), step.summaryRows()], [{}, []], String(enabled));
+    }
 });
 
-test('the step: title, the two positions, what they mean, the limits and the door; a subscription alone names its quota', () => {
+test('the step: title, what the positions mean as its lead, the two positions, the limits and the door', () => {
     const facts = normalizeOffer(DEFAULTS);
     const html = stepHtml(facts, true);
     assert.match(html, /class="wizard-choice active" data-consciousness-choice="on" aria-pressed="true"/);
     assert.match(html, /class="wizard-choice " data-consciousness-choice="off" aria-pressed="false"/);
-    assert.equal(text(html), `Consciousness When it acts. Off Only when you write On Also on its own Off: only when asked. On: also on its own. ${LIMITS} Change it later in Dashboard.`);
-    assert.match(text(stepHtml(facts, true, { subscriptionOnly: true })), /also on its own\. A subscription pays with its quota\. Autonomy/);
+    assert.match(html, /<p class="step-copy">Off: only when asked\. On: also on its own\.<\/p>/, 'the meaning leads at body size');
+    assert.match(html, /role="group" aria-label="When it acts\."/);
+    assert.equal(text(html), `Consciousness Off: only when asked. On: also on its own. Off Only when you write On Also on its own ${LIMITS} Change it later in Dashboard.`);
+});
+
+test('a subscription alone names its quota once; a $0.00 allowance says it does not wake', () => {
+    const facts = normalizeOffer(DEFAULTS);
+    const paid = text(stepHtml(facts, true, { subscriptionOnly: true }));
+    assert.match(paid, /Also on its own A subscription pays with its quota\. Autonomy/);
+    assert.equal(paid.match(/quota/g).length, 1, 'the limits leave the quota to the subscription sentence');
+    assert.match(paid, /Up to \$20\.00 a day in recorded spending\. At most 2/);
     assert.deepEqual(limitPhrases(normalizeOffer({ ...DEFAULTS, autonomy: 'observe', dailyUsd: 5, maxTasks: 0 })), [
         'Autonomy: Advises. On its own it studies, keeps its memory and tells you; it changes nothing outside.',
         'Up to $5.00 a day in recorded spending. Subscription quota is separate.', 'It starts no tasks of its own.']);
-    assert.deepEqual(limitPhrases(normalizeOffer({ ...DEFAULTS, autonomy: 'full', dailyUsd: 0, maxTasks: 1 })).slice(1), [
-        'Daily allowance $0.00: it may not spend.', 'At most 1 of its own tasks at once.']);
+    assert.deepEqual(limitPhrases(normalizeOffer({ ...DEFAULTS, autonomy: 'full', dailyUsd: 0, maxTasks: 1 }), { subscriptionOnly: true }).slice(1), [
+        'Daily allowance $0.00: it does not wake on its own.', 'At most 1 of its own tasks at once.']);
     assert.deepEqual(limitPhrases(normalizeOffer({ offered: true })), [
         'Autonomy unknown.', 'Daily allowance unknown.', 'Its own-task limit is unknown.']);
-});
-
-test('the builtin page composes no consciousness command', () => {
-    for (const file of ['../modules/onboarding_consciousness.js', '../modules/onboarding_wizard.js']) {
-        const source = readFileSync(new URL(file, import.meta.url), 'utf8');
-        assert.doesNotMatch(source, /\/bg|\/api\/command/, file);
-    }
 });

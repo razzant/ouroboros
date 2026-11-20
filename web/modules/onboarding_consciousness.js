@@ -1,10 +1,9 @@
 // The first-run wizard's Consciousness step (owner decision 2026-11-20): one two-position switch between Choose access
-// and Review limits, on by default for an install that has no state yet. The server offers it while setup has never
-// completed here and the state is not unreadable (`bootstrap.consciousnessOffer`; `stepOrder` omits it otherwise), with
-// the limits consciousness runs under now and the host's words (consciousness_view.first_run_words). The position rides
-// the one completion request as `consciousness` and is applied by the server (the first state is born with it, or the
-// owner's start where a state exists): no command is sent and Main shows no row. A switch that starts off stays off
-// unless the owner turns it; one already on reads On already and sends nothing; this step never turns it off.
+// and Review limits, on by default. The server offers it only while the next boot mints a first state and setup has
+// never completed here (`bootstrap.consciousnessOffer`; `stepOrder` omits it otherwise): where any state exists the
+// step is absent and Dashboard › Consciousness changes it. It shows the limits consciousness runs under now and the
+// host's words (consciousness_view.first_run_words). The position rides the one completion request as `consciousness`
+// and the first state is born with it: no command is sent and Main shows no row.
 import { escapeHtmlAttr as escapeHtml, formatUsd2 } from './utils.js';
 import { autonomyOf } from './consciousness_autonomy.js';
 
@@ -15,7 +14,6 @@ export function normalizeOffer(offer) {
     const words = value.words && typeof value.words === 'object' ? value.words : {};
     return {
         offered: value.offered === true,
-        enabled: typeof value.enabled === 'boolean' ? value.enabled : null,
         autonomy: String(value.autonomy || ''),
         dailyUsd: number(value.dailyUsd),
         maxTasks: number(value.maxTasks),
@@ -25,13 +23,14 @@ export function normalizeOffer(offer) {
     };
 }
 
-/** The limits consciousness runs under now, one phrase each, in the words Settings and Costs use. */
-export function limitPhrases(facts) {
+/** The limits consciousness runs under now, one phrase each, in the words Settings and Costs use. A subscription's
+ * quota is said once, by the step's subscription sentence where a subscription alone pays (`subscriptionOnly`). */
+export function limitPhrases(facts, { subscriptionOnly = false } = {}) {
     const level = autonomyOf(facts.autonomy);
     const autonomy = level ? `Autonomy: ${level.label}. ${level.note}` : 'Autonomy unknown.';
     const allowance = facts.dailyUsd === null ? 'Daily allowance unknown.'
-        : facts.dailyUsd === 0 ? 'Daily allowance $0.00: it may not spend.'
-            : `Up to ${formatUsd2(facts.dailyUsd)} a day in recorded spending. Subscription quota is separate.`;
+        : facts.dailyUsd === 0 ? 'Daily allowance $0.00: it does not wake on its own.'
+            : `Up to ${formatUsd2(facts.dailyUsd)} a day in recorded spending.${subscriptionOnly ? '' : ' Subscription quota is separate.'}`;
     const tasks = facts.maxTasks === null ? 'Its own-task limit is unknown.'
         : facts.maxTasks === 0 ? 'It starts no tasks of its own.'
             : `At most ${facts.maxTasks} of its own tasks at once.`;
@@ -40,7 +39,7 @@ export function limitPhrases(facts) {
 
 const note = (text) => (text ? `<p class="consciousness-step-note">${escapeHtml(text)}</p>` : '');
 
-/** The step: its title, the switch (or On already), what the positions mean, its limits and where to change it later.
+/** The step: its title, what the positions mean as its lead copy, the switch, its limits and where to change it later.
  * `subscriptionOnly`: the draft reaches models through a subscription alone, so the wakes spend its quota. */
 export function stepHtml(facts, on, { title = 'Consciousness', subscriptionOnly = false } = {}) {
     const { words } = facts;
@@ -48,19 +47,15 @@ export function stepHtml(facts, on, { title = 'Consciousness', subscriptionOnly 
                 <button type="button" class="wizard-choice ${on === value ? 'active' : ''}" data-consciousness-choice="${value ? 'on' : 'off'}" aria-pressed="${on === value}">
                     <span class="tone">${word}</span><h3>${escapeHtml(label)}</h3>
                 </button>`;
-    const control = facts.enabled === true
-        ? `<div class="consciousness-step-on"><span class="tone">On already</span><h3>${escapeHtml(words.on)}</h3></div>`
-        : `<div class="wizard-choice-grid two" role="group" aria-label="${escapeHtml(words.gloss || title)}">${position(false, words.off, 'Off')}${position(true, words.on, 'On')}</div>`;
     return `
             <div class="step-header"><div>
                 <h2 class="step-title">${escapeHtml(title)}</h2>
-                ${words.gloss ? `<p class="step-copy">${escapeHtml(words.gloss)}</p>` : ''}
+                ${words.meaning ? `<p class="step-copy">${escapeHtml(words.meaning)}</p>` : ''}
             </div></div>
             <div class="panel-card consciousness-step" data-consciousness-step>
-                ${control}
-                ${note(words.meaning)}
+                <div class="wizard-choice-grid two" role="group" aria-label="${escapeHtml(words.gloss || title)}">${position(false, words.off, 'Off')}${position(true, words.on, 'On')}</div>
                 ${note(subscriptionOnly ? words.subscriptionCost : '')}
-                ${note(limitPhrases(facts).join(' '))}
+                ${note(limitPhrases(facts, { subscriptionOnly }).join(' '))}
                 ${note(words.door)}
             </div>`;
 }
@@ -68,7 +63,7 @@ export function stepHtml(facts, on, { title = 'Consciousness', subscriptionOnly 
 /** The step's state across renders: the switch's position, its Summary row and its field in the completion request. */
 export function createConsciousnessStep(offer) {
     const facts = normalizeOffer(offer);
-    let on = facts.enabled !== false;  // no state yet: on; a state that says off: off until the owner turns it
+    let on = true;  // offered only before a first state exists: on unless the owner turns it off
     const step = {
         offered: () => facts.offered,
         on: () => on,
@@ -85,10 +80,10 @@ export function createConsciousnessStep(offer) {
             }));
         },
         /** Summary's read-only row; none when the step is not offered. */
-        summaryRows: () => (!facts.offered ? [] : [['Consciousness', facts.enabled === true ? 'On already'
-            : [on ? 'On' : 'Off', on ? facts.words.on : facts.words.off].filter(Boolean).join(' · ')]]),
-        /** The completion request's field: only for a switch the owner could set (absent changes nothing). */
-        payload: () => (facts.offered && facts.enabled !== true ? { consciousness: on } : {}),
+        summaryRows: () => (!facts.offered ? [] : [['Consciousness',
+            [on ? 'On' : 'Off', on ? facts.words.on : facts.words.off].filter(Boolean).join(' · ')]]),
+        /** The completion request's field, only from an offered step (absent changes nothing). */
+        payload: () => (facts.offered ? { consciousness: on } : {}),
     };
     return step;
 }

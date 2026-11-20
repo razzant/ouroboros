@@ -291,7 +291,8 @@ ONBOARDING_COMPLETED_KEY = "OUROBOROS_ONBOARDING_COMPLETED_AT"
 ONBOARDING_ATTEMPT_KEY = "OUROBOROS_ONBOARDING_ATTEMPT_ID"
 ATTEMPT_ID_FIELD = "attempt_id"
 # The setup's Consciousness switch (owner decision 2026-11-20): the optional completion field, and the completion fact
-# that carries "on" into the first state a mint creates (``state_initialization.first_state``). Off writes nothing.
+# that carries "on" into the first state a mint creates (``state_initialization.first_state``). It counts only while
+# that first state is still to come; afterwards the state's flag alone decides and the fact is history.
 CONSCIOUSNESS_CHOICE_FIELD = "consciousness"
 ONBOARDING_CONSCIOUSNESS_KEY = "OUROBOROS_ONBOARDING_CONSCIOUSNESS"
 _ATTEMPT_ID = re.compile(r"[A-Za-z0-9_-]{16,128}")
@@ -457,14 +458,17 @@ def parse_completion_attempt(data: Any) -> Tuple[str, str]:
     return "", "attempt_id must be 16-128 letters, digits, '-' or '_'."
 
 
-def completion_facts(data: dict, attempt_id: str) -> dict:
+def completion_facts(data: dict, attempt_id: str, *, first_state_pending: bool) -> dict:
     """The onboarding completion facts one completion writes in its single settings write: when, which client attempt,
-    and the setup's Consciousness switch when the owner left it on (``true``; ``false`` and absence add nothing)."""
+    and the setup's Consciousness switch. The switch counts only when ``first_state_pending`` (decided before this
+    write): then it is the first state's pending choice, ``true`` writing "on" and ``false`` clearing an earlier
+    attempt's "on". Where a state exists the field changes nothing, so setup never lifts an owner or Panic stop."""
     from ouroboros.utils import utc_now_iso
 
-    on = data.get(CONSCIOUSNESS_CHOICE_FIELD) is True
+    choice = data.get(CONSCIOUSNESS_CHOICE_FIELD)
     return {ONBOARDING_COMPLETED_KEY: utc_now_iso(), ONBOARDING_ATTEMPT_KEY: attempt_id,
-            **({ONBOARDING_CONSCIOUSNESS_KEY: "on"} if on else {})}
+            **({ONBOARDING_CONSCIOUSNESS_KEY: "on" if choice else ""}
+               if first_state_pending and isinstance(choice, bool) else {})}
 
 
 def build_initial_setup_state(settings: dict, host_mode: str = "desktop", document: Optional[dict] = None) -> dict:
@@ -540,31 +544,33 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop", docume
     return state
 
 
-def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None, readable: bool = True) -> dict:
-    """The setup's Consciousness step. It is offered while setup has never completed here and the control is not
-    unreadable; a completed setup neither shows nor repeats it. ``enabled`` is the control as the state shows it:
-    ``None`` with ``readable`` means no state yet (the first state is minted after this setup, and the switch starts
-    on); ``readable=False`` is a state that exists but cannot be read. The limits are the ones consciousness runs
-    under now, as the runtime's own readers report them; the words are the host's (``first_run_words``)."""
+def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None, first_state: bool = True) -> dict:
+    """The setup's Consciousness step. It is offered only while the next boot mints a first state (``first_state``:
+    ``state_initialization.first_state_pending``) and setup has never completed here; where any state exists the step
+    is absent, whatever the state says, and Dashboard › Consciousness changes it. ``enabled`` is the control as the
+    state shows it, ``None`` on an offered step (no state yet: the switch starts on) and when unknown. The limits are
+    the ones consciousness runs under now, as the runtime's own readers report them; the words are the host's
+    (``first_run_words``)."""
     from ouroboros.runtime_limits import (
         get_consciousness_autonomy, get_consciousness_daily_usd, get_consciousness_max_tasks,
     )
 
     from ouroboros.consciousness_view import first_run_words
 
-    return {"offered": readable and not _string(settings.get(ONBOARDING_COMPLETED_KEY)),
-            "enabled": enabled if isinstance(enabled, bool) else None,
+    offered = first_state and not _string(settings.get(ONBOARDING_COMPLETED_KEY))
+    return {"offered": offered,
+            "enabled": enabled if isinstance(enabled, bool) and not offered else None,
             "autonomy": get_consciousness_autonomy(), "dailyUsd": get_consciousness_daily_usd(),
             "maxTasks": get_consciousness_max_tasks(), "words": first_run_words(get_consciousness_autonomy())}
 
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
-                          consciousness_enabled: Optional[bool] = None, consciousness_readable: bool = True,
+                          consciousness_enabled: Optional[bool] = None, consciousness_first_state: bool = True,
                           document: Optional[dict] = None) -> dict:
     from ouroboros.deployment_policy import policy_state
 
     normalized_host = "web" if host_mode == "web" else "desktop"
-    offer = consciousness_offer(settings, enabled=consciousness_enabled, readable=consciousness_readable)
+    offer = consciousness_offer(settings, enabled=consciousness_enabled, first_state=consciousness_first_state)
     return {
         "hostMode": normalized_host,
         # Display provenance only; completion re-proves install eligibility.

@@ -2977,14 +2977,15 @@ optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled. When a subscription serves a model, Summary says
 what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
-Before the first completion, Consciousness is its own step (owner decision 2026-11-20, replacing the unchecked
-Summary offer of 2026-11-04): one large switch of the wizard's two choices, its positions in Dashboard ›
-Consciousness words, on where no state exists yet. A state that says off shows off and stays off unless the owner
-turns it; one already on reads On already; the wizard never turns it off, and clicking through lifts no owner or
-Panic stop. Beneath: what the positions mean, the autonomy, allowance and own-task limit it runs under now, on a
-subscription alone that its wakes use the quota, and where to change it later. Review & start lands on it; its
-Continue goes to Summary, one row there. The choice rides the one save: no command, no row in Main. Summary labels
-the model row Consciousness model, so it does not read as this choice.
+Consciousness is its own step only before a first state exists, on a new data root or after an owner Reset (owner
+decision 2026-11-20, replacing the unchecked Summary offer of 2026-11-04): one large switch of the wizard's two
+choices, its positions in Dashboard › Consciousness words, starting on. Where any state exists the step is absent,
+whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
+Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
+switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
+own-task limit it runs under now, and where to change it later. Review & start lands on it; its Continue goes to
+Summary, one row there. The choice rides the one save: no command, no row in Main. Summary labels the model row
+Consciousness model, so it does not read as this choice.
 
 The first-run wizard is compact; the step rail alone says which step this is. An
 ordinary Accounts state, blank or connected, and the Consciousness step fit a 980×752 client viewport

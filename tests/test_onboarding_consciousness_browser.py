@@ -4,8 +4,8 @@ A contained candidate checkout serves each case over its own data root, with the
 provider and a skill-source list naming only the built-in source, so no hub is fetched. Every claim is read back from
 the server: the completion request carries the switch's position, the page sends no command, the first state is born
 with consciousness on, and Main holds no System row after a first message and a restart; a later Stop wins across a
-restart. An older install whose state says off shows the switch off and stays off when clicked through, and a completed
-setup shows no step. Screenshots go to ``OUROBOROS_UI_EVIDENCE_DIR`` when a launcher names one, else to the test's own
+restart. An older install that already has a state shows no step and stays as its state says, and a completed setup
+shows no step. Screenshots go to ``OUROBOROS_UI_EVIDENCE_DIR`` when a launcher names one, else to the test's own
 temporary directory.
 """
 
@@ -33,7 +33,7 @@ from tests.test_ui_smoke_playwright import (
 from tests.ui_console_errors import PageErrors
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import keep_startup_log
-from ouroboros.consciousness_view import FIRST_RUN, first_run_words
+from ouroboros.consciousness_view import FIRST_RUN
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -49,9 +49,8 @@ STEP = "[data-consciousness-step]"
 LIMITS = ("Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not "
           "change itself. Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
           "tasks at once.")
-# The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A).
-STEP_TEXT = (f"Off {FIRST_RUN['off']} On {FIRST_RUN['on']} {FIRST_RUN['meaning']} {LIMITS} {FIRST_RUN['door']}")
-_ADVISES = first_run_words("observe")
+# The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A); the meaning leads as its copy.
+STEP_TEXT = f"Off {FIRST_RUN['off']} On {FIRST_RUN['on']} {LIMITS} {FIRST_RUN['door']}"
 
 
 def _provider(llm_url: str) -> dict:
@@ -264,6 +263,7 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
             page.goto(srv.url + "/onboarding", wait_until="networkidle", timeout=60_000)
             _fresh_accounts_and_models(page, srv.llm_url)
             assert page.locator(".step-title").inner_text() == "Consciousness"
+            assert _text(page, ".step-copy") == FIRST_RUN["meaning"]
             assert _text(page, STEP) == STEP_TEXT
             assert page.locator('[data-consciousness-choice="on"]').get_attribute("aria-pressed") == "true"
             page.screenshot(path=str(out / "first-setup-consciousness-step-webkit-light.png"), full_page=True)
@@ -311,16 +311,15 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
     assert _control(srv.url) is False
 
 
-def test_an_older_install_shows_the_switch_off_and_stays_off_when_clicked_through(setup_server, tmp_path):
-    """Settings present, a provider ready, setup never completed (a markerless older install whose state says off):
-    the step shows off with this install's limits; Finish sends `consciousness: false` and no command, and it stays
-    off; the completed setup shows no step."""
+def test_an_older_install_with_a_state_shows_no_step_and_stays_as_its_state_says(setup_server, tmp_path):
+    """Settings present, a provider ready, setup never completed, and a state that says off (a markerless older
+    install): the wizard has no Consciousness step, Finish sends no field and no command, and consciousness stays
+    off; Dashboard › Consciousness is where it changes."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 
-    srv, out = setup_server, _shots(tmp_path)
-    srv.seed({**OFFLINE, **_provider(srv.llm_url), "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "observe",
-              "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 5, "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 1})
+    srv = setup_server
+    srv.seed({**OFFLINE, **_provider(srv.llm_url)})
     srv.start(supervisor=True)
     assert _control(srv.url) is False
     with sync_playwright() as pw:
@@ -328,27 +327,16 @@ def test_an_older_install_shows_the_switch_off_and_stays_off_when_clicked_throug
         try:
             seen = _record(page)
             page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
-            page.wait_for_selector(".wizard-step", timeout=60_000)
-            _next(page, 3)  # Accounts → Models → Access → Consciousness
-            page.wait_for_selector(STEP)
-            assert page.locator('[data-consciousness-choice="off"]').get_attribute("aria-pressed") == "true"
-            assert _text(page, STEP) == (
-                f"Off {_ADVISES['off']} On {_ADVISES['on']} {_ADVISES['meaning']} Autonomy: Advises. On its own it studies, "
-                "keeps its memory and tells you; it changes nothing outside. Up to $5.00 a day in recorded spending. "
-                f"Subscription quota is separate. At most 1 of its own tasks at once. {_ADVISES['door']}")
-            page.screenshot(path=str(out / "older-install-consciousness-off-webkit-light.png"), full_page=True)
-            _next(page, 2)
+            _to_summary(page, pro=False)
+            assert page.locator(".wizard-step").count() == 5 and page.locator(STEP).count() == 0
+            assert page.locator(".summary-kv").filter(has=page.get_by_text("Consciousness", exact=True)).count() == 0
             seen["errors"].watch(page)
             _finish(page)
             page.wait_for_url(srv.url + "/", timeout=120_000)
             assert seen["commands"] == [], "nothing is sent"
-            assert len(seen["completions"]) == 1 and seen["completions"][0]["consciousness"] is False
+            assert len(seen["completions"]) == 1 and "consciousness" not in seen["completions"][0]
             time.sleep(3)
             assert _control(srv.url) is False
-            # The completed setup re-entering the wizard: no step, so no old choice can be repeated.
-            page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
-            _to_summary(page, pro=False)
-            assert page.locator(".wizard-step").count() == 5 and page.locator(STEP).count() == 0
             assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()

@@ -68,7 +68,7 @@ from ouroboros.gateway.onboarding_host import recorded_attempt
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 from ouroboros.skill_starter import after_onboarding, onboarding_skill_choices
 from ouroboros.settings_setup_contract import (
-    ONBOARDING_COMPLETED_KEY, ONBOARDING_CONSCIOUSNESS_KEY, completion_facts,
+    ONBOARDING_COMPLETED_KEY, completion_facts,
     parse_completion_attempt, parse_subscription_intent,
 )
 from ouroboros.subscription_install_presets import (
@@ -776,7 +776,7 @@ async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
 
 def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, Any],
              pending_mode: str, safety_light: bool, install_preset_applied: bool,
-             boundary: CommitBoundary, read_fingerprint: str, consciousness_on: bool) -> None:
+             boundary: CommitBoundary, read_fingerprint: str) -> None:
     """The ONE write, plus the established post-save seams.
 
     ``boundary`` is committed the instant the bytes land, so the endpoint can
@@ -784,7 +784,6 @@ def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, 
     a later step failed" — two facts that were previously both reported as
     ``saved=False``."""
     from ouroboros.config import apply_settings_to_env, get_runtime_mode
-    from ouroboros.consciousness import setup_start
     from ouroboros.gateway.settings import (
         _apply_settings_save_side_effects,
         _start_supervisor_if_needed_for_request,
@@ -828,14 +827,12 @@ def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, 
             if str(current.get(key, "") or "") != str(old_settings.get(key, "") or "")
         ]
         _apply_settings_save_side_effects(request, current, old_settings, changed)
-    if consciousness_on:  # setup's switch where a state exists: the owner's start, no command, no chat row
-        boundary.at("consciousness start")
-        setup_start(request_drive_root(request))
 
 
 async def api_onboarding_complete(request: Request) -> JSONResponse:
     """POST /api/onboarding/complete — finish onboarding in ONE transaction."""
     from ouroboros.config import get_runtime_mode, normalize_runtime_mode
+    from supervisor.state_initialization import first_state_pending as first_state_due
 
     try:
         body = await request.json()
@@ -916,9 +913,9 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
     if current.get(SUBAGENTS_SETTING):
         current.pop(REVIEW_LANES_KEY, None)
 
-    # The durable completion facts (when, the client's attempt id or "", setup's Consciousness switch left on) ride in
-    # the SAME write, whatever the preset did: a completion that connected nothing must still close the window.
-    current.update(facts := completion_facts(body, attempt_id))
+    # The completion facts ride in the SAME write, whatever the preset did (a completion that connected nothing still
+    # closes the window); whether a first state is to come is read before this write and the supervisor it starts.
+    current.update(completion_facts(body, attempt_id, first_state_pending=first_state_due(request_drive_root(request))))
     pending_mode = normalize_runtime_mode(current.get("OUROBOROS_RUNTIME_MODE"))
     active_mode = get_runtime_mode()
     boundary = CommitBoundary()
@@ -935,8 +932,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
         # is left to the seam, which answers the same 503 ``settings_busy``
         # this endpoint used to map itself (issue #464's second half).
         try:
-            _persist(request, old_settings, current, pending_mode, safety_light, install_preset_applied, boundary,
-                     read_fingerprint, ONBOARDING_CONSCIOUSNESS_KEY in facts)
+            _persist(
+                request, old_settings, current, pending_mode, safety_light,
+                install_preset_applied, boundary, read_fingerprint,
+            )
         except SettingsDocumentBusy:
             raise
         except Exception as exc:
@@ -994,6 +993,7 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
 
 __all__ = [
     "PRESET_UNVERIFIED_MESSAGE", "PresetFailure", "api_onboarding_complete", "api_onboarding_model_catalog",
-    "api_onboarding_subagents_preview", "install_is_unconfigured", "preset_eligible", "resolve_install_preset", "subscription_routable_harnesses",
+    "api_onboarding_subagents_preview",
+    "install_is_unconfigured", "preset_eligible", "resolve_install_preset", "subscription_routable_harnesses",
     "verified_harness_discoveries",
 ]

@@ -357,17 +357,16 @@ def connect_note(switch: str) -> str:
 
 def first_run_words(autonomy: str = "act") -> dict:
     """The setup step's words, true for the autonomy the offer names (Advises answers nowhere): the gloss, the two
-    positions (an install being set up holds no place yet), what they mean, what a subscription alone pays with (the
-    limits name the API allowance) and where to change it later. ``choice`` is the on position a page built before
-    the step names (kept for such pages)."""
+    positions (an install being set up holds no place yet), what they mean, what a subscription alone pays with (said
+    once: the step's limits leave it out there) and where to change it later. ``choice`` is the on position a page
+    built before the step names (kept for such pages)."""
     places = ("reads and thinks in places you make Active; what it would say waits for you" if autonomy == "observe"
               else "answers in places you make Active")
     return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True], "off": POSITION_WORDS[False],
             "on": ON_WITHOUT_PLACES,
             "meaning": ("Off: it works only when you write to it, and places you connect are heard, not answered. On: it "
                         f"also wakes between your messages and {places}."),
-            "subscriptionCost": ("On a subscription alone its wakes use the subscription's quota between your messages; "
-                                 "the daily allowance bounds API spending only."),
+            "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
             "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs."}
 
 

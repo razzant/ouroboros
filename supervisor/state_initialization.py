@@ -118,15 +118,35 @@ def initialization_decision(drive_root: Any, *, origin: str = "first_boot") -> D
     return {"create": True, "initialization_id": initialization_id}
 
 
+def pending_reset_identity(drive_root: Any) -> "str | None":
+    """The identity an owner Reset's ``pending`` witness names, else ``None``. Under it boot sets aside every state copy
+    ``reset_sets_aside`` names (``state._set_aside_copies_older_than_a_reset``) and mints that identity."""
+    status, witness = read_witness(drive_root)
+    if status == "ok" and witness.get("phase") == "pending" and witness.get("origin") == "owner_reset":
+        return str(witness.get("initialization_id") or "")
+    return None
+
+
+def reset_sets_aside(status: str, copy: Any, identity: str) -> bool:
+    """Is a state copy read as ``(status, copy)`` older than the pending Reset of ``identity``? Every present copy but one
+    of that identity; boot refuses an ``unreadable`` one instead of moving it."""
+    return status != "missing" and not (status == "ok" and copy.get("initialization_id") == identity)
+
+
 def first_state_pending(drive_root: Any) -> bool:
-    """Would the next ``init_state`` CREATE a first state here? Both copies positively absent and the decision above,
-    read without writing anything (the setup bootstrap and completion ask it). A completed witness whose copies are
-    lost, or a copy that cannot be read, is not a first state: no."""
+    """Would the next ``init_state`` CREATE a first state here? The same decision boot makes, read without writing
+    anything (the setup bootstrap and completion ask it): both copies absent once a pending owner Reset has set aside
+    the older ones, and the decision above. A completed witness whose copies are lost, a copy boot would adopt and a
+    copy that cannot be read are not a first state: no."""
     from supervisor.state import read_state_copy
 
     root = pathlib.Path(drive_root)
-    if any(read_state_copy(root / "state" / name)[0] != "missing" for name in ("state.json", "state.last_good.json")):
-        return False
+    identity = pending_reset_identity(root)
+    for name in ("state.json", "state.last_good.json"):
+        status, copy, _detail = read_state_copy(root / "state" / name)
+        if status != "missing" and (identity is None or status == "unreadable"
+                                    or not reset_sets_aside(status, copy, identity)):
+            return False
     return bool(_decide(root)["create"])
 
 

@@ -59,17 +59,19 @@ _NO_STORE = {"Cache-Control": "no-store"}
 
 
 def _consciousness_control(request: Request) -> "tuple[bool | None, bool]":
-    """``(enabled, readable)``: the consciousness control as the state shows it, read without writing. No state yet
-    (the next boot mints a first state, ``state_initialization.first_state_pending``) is ``(None, True)``; a state that
-    exists but cannot be read, or whose control is unknown, is ``(None, False)``."""
+    """``(enabled, first_state)``: the consciousness control as the state shows it, read without writing, and whether
+    the next boot mints a first state (``state_initialization.first_state_pending``), the one case setup offers its
+    Consciousness step. A state that exists but cannot be read, or whose control is unknown, is ``(None, False)``."""
     try:
         from ouroboros.gateway._helpers import request_drive_root
         from supervisor.state import control_value, read_state
         from supervisor.state_initialization import first_state_pending
 
         root = request_drive_root(request)
+        if first_state_pending(root):  # before reading a copy a pending owner Reset sets aside
+            return None, True
         known, value = control_value(read_state(root).projection(), "bg_consciousness_enabled")
-        return (bool(value), True) if known else (None, first_state_pending(root))
+        return (bool(value) if known else None), False
     except Exception:
         return None, False
 
@@ -80,9 +82,9 @@ def _live_setup(request: Request) -> tuple[dict, dict]:
     from ouroboros.config import SETTINGS_PATH
 
     settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
-    enabled, readable = _consciousness_control(request)
+    enabled, first_state = _consciousness_control(request)
     return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists(),
-                                           consciousness_enabled=enabled, consciousness_readable=readable,
+                                           consciousness_enabled=enabled, consciousness_first_state=first_state,
                                            document=_owner_settings_document())
 
 

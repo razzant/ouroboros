@@ -177,11 +177,12 @@
 /**
  * `settings_setup_contract.consciousness_offer`: the setup's Consciousness step (its words: `first_run_words`).
  * @typedef {Object} SetupConsciousnessOffer
- * @property {boolean} offered  // setup never completed here and the state is not unreadable; else no step (`stepOrder` omits it)
- * @property {?boolean} enabled  // the control as the state shows it; null = no state yet, the switch starts on
+ * @property {boolean} offered  // the next boot mints a first state and setup never completed here; else no step (`stepOrder`)
+ * @property {?boolean} enabled  // the control as a state shows it; null on an offered step (the switch starts on) or unknown
  * @property {'observe'|'act'|'full'} autonomy
  * @property {number} dailyUsd  // rolling-24h recorded-spend allowance; subscription quota is separate
  * @property {number} maxTasks  // how many of its own tasks may run at once; 0 = it starts none
+ * @property {Object.<string,string>} words  // gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
  */
 
 /**

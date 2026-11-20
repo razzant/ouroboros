@@ -12,7 +12,7 @@
       "meaning": "Off: it works only when you write to it, and places you connect are heard, not answered. On: it also wakes between your messages and answers in places you make Active.",
       "off": "Only when you write to it",
       "on": "Also on its own",
-      "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages; the daily allowance bounds API spending only."
+      "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages."
     }
   },
   "contract": {
