@@ -262,6 +262,25 @@ def test_a_failed_preparation_of_the_correlated_send_stays_that_failure(replay, 
     assert isinstance(raised.value.__cause__, OSError) and len(f.uploads) == 1
 
 
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_a_helper_send_without_a_physical_context_reads_no_witness_and_is_served(replay, monkeypatch, asynchronous):
+    """A helper's engine send binds no physical context (``llm_helper_window`` keeps no window for Claudexor): each
+    accounted request carries None, and its witness reads as None through ``getattr``'s default, never an error."""
+    from ouroboros import observability
+
+    f = replay("serve")
+    original, seen = observability.persist_physical_candidate, []
+
+    def persist(*args, **kwargs):
+        seen.append((kwargs["candidate_facts"]["physical_context"], kwargs["candidate_facts"]["file_witness"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(observability, "persist_physical_candidate", persist)
+    assert ua.current_physical_attempt_context() is None
+    answer, _ = call(f, asynchronous)
+    assert answer["content"] == "served by b" and len(seen) == len(f.uploads) == 2 and set(seen) == {(None, None)}
+
+
 @pytest.mark.parametrize("scenario", ["continuation", "preferred", "returns"])
 def test_real_wire_engine_stories(replay, monkeypatch, scenario):
     from tests import test_claudexor_capability_engine as engine
