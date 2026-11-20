@@ -542,9 +542,11 @@ def test_read_shows_outgoing_link_facts_and_keeps_unlinked_notes_identical(tmp_p
     assert set(tmp_path.rglob("*")) == {target.shelf.parent, target.shelf, *before, plain.path}
 
 
-def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unresolvable_names(tmp_path):
+def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unresolvable_names(tmp_path, monkeypatch):
     """Range pages after the first carry no link lines; an entity- or backslash-spelled link still joins as a
-    backlink; a link whose resolution raises an OS error names its outgoing links unavailable, never fails the read."""
+    backlink; a link whose resolution raises an OS error names its outgoing links unavailable, never fails the read.
+    A name longer than a volume allows raises on POSIX (ENAMETOOLONG); Windows calls such a name no file, so there
+    the link is a gap. The OS error itself is then pinned on every OS by a resolution that raises."""
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     target = address(tmp_path, "a&b")
     target.shelf.mkdir(parents=True)
@@ -560,7 +562,22 @@ def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unr
     long_name = address(tmp_path, "long-link")
     long_name.path.write_text("[far](" + "n" * 300 + ".md)\nBody kept.\n", encoding="utf-8")
     reply = tools._knowledge_read(ctx, "long-link")
-    assert reply.endswith(long_name.path.read_text(encoding="utf-8")) and '"unavailable": "OSError"' in reply
+    source = long_name.path.read_bytes().decode("utf-8")  # the bytes on disk: Windows text mode wrote CRLF
+    links = _link_header(reply, "links")
+    os_errors = {"OSError", *(kind.__name__ for kind in OSError.__subclasses__())}
+    assert reply.endswith(source), reply[-200:]
+    assert (set(links) == {"unavailable"} and links["unavailable"] in os_errors
+            or set(links) == {"unwritten"} and len(links["unwritten"]) == 1), links
+    real_resolve = Path.resolve
+
+    def resolve_raises(path, strict=False):
+        if len(path.name) > 255:
+            raise OSError("File name too long")
+        return real_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve_raises)
+    reply = tools._knowledge_read(ctx, "long-link")
+    assert reply.endswith(source) and _link_header(reply, "links") == {"unavailable": "OSError"}, reply[-400:]
 
 
 def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, monkeypatch):
@@ -600,7 +617,9 @@ def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, 
         {"scope": "project:shelf-call", "topic": "from-call", "state": "active"},
     ]
     assert hidden.path not in read_paths and unrelated.path not in parsed
-    assert "[Knowledge links]" not in reply and reply.endswith(target.path.read_text(encoding="utf-8"))
+    assert "[Knowledge links]" not in reply, reply.splitlines()[:4]
+    # The bytes on disk, not read_text's newlines: Windows text mode wrote the fixture with CRLF.
+    assert reply.endswith(target.path.read_bytes().decode("utf-8")), reply[-200:]
     global_read = tools._knowledge_read(ctx, topic, scope="global")
     assert _link_header(global_read, "backlinks (readable shelves now)") == [
         {"scope": "project:shelf-call", "topic": "other-scope", "state": "active"}]
@@ -690,12 +709,13 @@ def test_unresolvable_links_do_not_hide_the_note_or_other_backlinks(tmp_path):
     (target.shelf / "valid.md").write_text("[Target](target.md)\n", encoding="utf-8")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     reply = tools._knowledge_read(ctx, "broken")
-    assert reply.endswith(broken.read_text(encoding="utf-8"))
+    # The bytes on disk, not read_text's newlines: Windows text mode wrote the fixtures with CRLF.
+    assert reply.endswith(broken.read_bytes().decode("utf-8")), reply[-200:]
     assert _link_header(reply, "links") == {
         "unavailable": "ValueError", "present": [{"scope": "global", "topic": "target"}],
     }
     reply = tools._knowledge_read(ctx, "target")
-    assert reply.endswith("Exact target.\n")
+    assert reply.endswith(target.path.read_bytes().decode("utf-8")), reply[-200:]
     assert _link_header(reply, "backlinks (readable shelves now)") == [
         {"scope": "global", "topic": name, "state": "active"} for name in ("broken", "valid")]
     assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
