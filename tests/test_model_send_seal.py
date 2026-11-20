@@ -316,7 +316,8 @@ def test_local_request_reader_names_an_oversized_sealed_record_and_reads_it_on_r
     facts = json.loads(gap.out)['facts']
     assert (facts['body'], facts['recorded_bytes'], facts['max_bytes'], facts['retry_max_bytes']) == (
         'manifest_over_limit', size, 2 * 1024 * 1024, size)
-    assert f'manifest_over_limit; --max-bytes {size} admits it' in gap.err
+    assert facts['file_trace'] == 'not_read'  # the trace lies in the record this run did not open
+    assert f'manifest_over_limit; --max-bytes {size} opens the record, and a request larger than it' in gap.err
     assert main([*args, '--max-bytes', str(size)]) == 0
     assert 'example.test' in capsys.readouterr().out
     raw = record.read_bytes()
@@ -376,11 +377,15 @@ def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_comm
         data_root, capsys, monkeypatch):
     """Beautiful Context opens no report over its limit, so a request that would make one is reported as that gap:
     a bounded record of the attempt, never its exclusion list, which grows with every masked secret (16,000 here make
-    the full report several times the request), its sizes and the one --max-bytes admitting the request and its
-    sealed record. The command the terminal gives with it writes the request."""
+    the full report several times the request); a failure's type and the file trace are kept. The gap names the
+    request's size, the report's (exact when it was built, else a floor: a request over the page is never built into
+    a report) and the one --max-bytes admitting the request and its sealed record; the command the terminal gives with
+    it writes the request."""
+    import hashlib
     import shlex
 
     from ouroboros import context_attempt_reader as reader
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
     parse = _windows_argv if os.name == 'nt' else shlex.split
     payload = _payload()
@@ -390,29 +395,57 @@ def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_comm
     smaller_payload = _payload()
     smaller_payload['messages'].append({'role': 'user', 'content': 'tide table ' * 300})  # larger than its gap report
     small = _dispatch(data_root, 'page-reader-test', payload=smaller_payload)
+    # A refused send of a Main capture: its failure and file trace belong to its gap as well.
+    prompt = 'You answer from the tide table.'
+    digest = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+    physical = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False,
+                                      base_prompt_source=('prompts/SYSTEM.md', digest, len(prompt), digest))
+    with ua.bind_physical_attempt_context(physical):
+        failed, _answered = _rejected_then_answered(data_root, 'page-reader-test', monkeypatch, payload={
+            'model': 'gpt-x', 'messages': [{'role': 'system', 'content': prompt},
+                                            {'role': 'user', 'content': 'tide table ' * 300}], 'max_tokens': 32})
     body, record = _manifest(attempt)['redacted_projection_ref']['size'], pathlib.Path(
         attempt['candidate_manifest_ref']['path']).stat().st_size
     assert record > 2 * 1024 * 1024 > body
     kept = {'task_id', 'attempt_id', 'ledger_state', 'provider_body', 'transport_observation', 'model', 'provider',
-            'ts_reserved', 'ts_dispatched', 'ts_final', 'settle_reason', 'sha256', 'redacted_ref', 'body',
-            'recorded_bytes', 'page_limit_bytes', 'retry_max_bytes'}
+            'ts_reserved', 'ts_dispatched', 'ts_final', 'settle_reason', 'failure', 'file_trace', 'sha256',
+            'redacted_ref', 'body', 'recorded_bytes', 'report_bytes', 'report_bytes_at_least', 'page_limit_bytes',
+            'retry_max_bytes'}
     args = ['--data-root', str(data_root), 'page-reader-test', '--attempt']
-    # Read whole but too large for the page; and over this export's bound as well as over the page's.
     small_body = _manifest(small)['redacted_projection_ref']['size']
-    for chosen, limit, smaller, allowance, size, said in ((attempt, body, None, record, body, 'example.test'),
-                                                          (small, small_body - 1, 1, small_body, small_body, 'tide')):
+    failed_body = _manifest(next(row for row in _rows(data_root) if row['attempt_id'] == failed))[
+        'redacted_projection_ref']['size']
+    trace = [{'source_path': 'prompts/SYSTEM.md', 'source_sha256': digest, 'contribution': 'leading_system_prefix',
+              'text_sha256': digest}]
+    # Read whole, its report too large for the page; over this export's bound as well as over the page's; and read
+    # whole but itself over the page, so its report is never built.
+    for chosen, limit, smaller, allowance, size, report, said, life in (
+            (attempt['attempt_id'], body, None, record, body, 'report_bytes', 'example.test', 'not_recorded'),
+            (small['attempt_id'], small_body - 1, 1, small_body, small_body, 'report_bytes_at_least', 'tide',
+             'not_recorded'),
+            (failed, failed_body - 1, None, failed_body, failed_body, 'report_bytes_at_least', 'tide', trace)):
+        built = []
         with monkeypatch.context() as patch:
             patch.setattr(reader, 'PAGE_LIMIT', limit)
+            patch.setattr(reader, '_document', lambda facts, stored, real=reader._document: built.append(
+                stored is not None) or real(facts, stored))
             if smaller:
                 patch.setattr(reader, '_BODY_LIMIT', smaller)
-            extra = ['--max-bytes', str(record)] if chosen is attempt else []
-            assert reader.main([*args, chosen['attempt_id'], *extra, '--report']) == 0
+            extra = ['--max-bytes', str(record)] if chosen == attempt['attempt_id'] else []
+            assert reader.main([*args, chosen, *extra, '--report']) == 0
             gap = capsys.readouterr()
         document = json.loads(gap.out)
         facts = document['facts']
         assert len(gap.out.encode('utf-8')) <= limit and document['stored_json'] is None and set(facts) <= kept
         assert (facts['body'], facts['recorded_bytes'], facts['page_limit_bytes'], facts['retry_max_bytes']) == (
             'over_page_limit', size, limit, allowance)
+        assert facts['file_trace'] == life and (chosen != failed or facts['failure']['exception_type'] == '_Rejected')
+        if report == 'report_bytes':  # the report was built with the request, and measured
+            assert built == [True, False] and facts['report_bytes'] > limit and 'report_bytes_at_least' not in facts
+            assert f"its report would be {facts['report_bytes']} bytes" in gap.err
+        else:
+            assert True not in built and facts['report_bytes_at_least'] == size and 'report_bytes' not in facts
+            assert f'its report would be at least {size} bytes' in gap.err
         assert reader.main(parse(_printed_command(gap.err))[3:]) == 0
         assert said in capsys.readouterr().out
 

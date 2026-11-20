@@ -22,9 +22,12 @@ _FAILURE_FACTS = ("stage", "exception_type", "provider_status_code", "provider_c
 # The selected row by the store's own page columns and one-attempt rule; the list and its cursor are the store's page.
 _ROW_SQL = (f"SELECT {usage_store.TASK_PAGE_COLUMNS}, {usage_store.ATTEMPT_ROW} AS one_attempt FROM attempts "
             "WHERE attempt_id=? AND task_id=?")
-# What a report too large for the page keeps: the attempt's identity, ledger state and recorded life, and its sizes.
+# What a report too large for the page keeps: the attempt's identity, ledger state and recorded life (a failure's five
+# short facts at most), its file trace (the seal's one entry) and its sizes.
 _PAGE_GAP_FACTS = ("task_id", "attempt_id", "ledger_state", "provider_body", "transport_observation", "model",
-                   "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason", "sha256", "redacted_ref")
+                   "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason", "failure", "file_trace",
+                   "sha256", "redacted_ref")
+_FACT_CHARS = 200  # a failure's fact is a type or code: a longer one is free text, never carried
 _CMD_PLAIN = re.compile(r"[A-Za-z0-9_.:\\/+-]+")  # what cmd.exe and the Windows argument parser pass on unquoted
 
 
@@ -89,8 +92,8 @@ def _recorded_life(row: dict, lifecycle: dict) -> dict:
     facts = {key: value for key in ("model", "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason")
              if isinstance(value := lifecycle.get(key), str) and value}
     failure = row.get("physical_failure")
-    failure = {key: value for key in _FAILURE_FACTS
-               if type(value := failure.get(key)) in (str, int) and value != ""} if isinstance(failure, dict) else {}
+    failure = {key: value for key in _FAILURE_FACTS if type(value := failure.get(key)) is int
+               or type(value) is str and 0 < len(value) <= _FACT_CHARS} if isinstance(failure, dict) else {}
     return {"transport_observation": _transport_observation(row), **facts, **({"failure": failure} if failure else {})}
 
 
@@ -117,8 +120,9 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
     if not row or life is None or row.get("task_id") != task_id:
         raise ValueError("Attempt does not belong to this task")
     state = row.get("state")
+    # The file trace lives in the sealed record: ``not_read`` until this read opens it, ``not_recorded`` without one.
     facts = {"task_id": task_id, "attempt_id": attempt_id, "ledger_state": state,
-             "provider_body": "not_observed", "file_trace": "not_recorded"}
+             "provider_body": "not_observed", "file_trace": "not_read"}
     if not life["one_attempt"]:  # a session, an unmetered dispatch or history may stand for many sends, or none
         return {"task_id": task_id, "attempt_id": attempt_id, "ledger_kind": row.get("kind"),
                 "provider_body": "not_observed", "file_trace": "not_recorded", "body": "not_one_attempt"}, None
@@ -129,7 +133,7 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
         # A row written from usage reported once the work was under way (a live conversation's) never had a request
         # saved; any other row may have lost its producer after sealing but before linking.
         receipt = row.get("reservation_basis") == "receipt_already_received"
-        return {**facts, "body": "receipt_only" if receipt else "not_linked"}, None
+        return {**facts, "file_trace": "not_recorded", "body": "receipt_only" if receipt else "not_linked"}, None
     if ref.get("model_send_seal_version") != SEAL_VERSION:
         return {**facts, "body": "not_recorded"}, None
     if ref.get("call_id") != attempt_id:
@@ -148,13 +152,13 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
                 or (seal.get("pre_redaction_sha256"), seal.get("size_bytes"), seal.get("canonical_basis"))
                 != (digest, size, basis)):
             raise ValueError("Attempt and model send seal differ")
+        facts["file_trace"] = manifest.get("file_trace", "not_recorded")
         projection = manifest.get("redacted_projection_ref")
         if not isinstance(projection, dict) or not projection:
             return {**facts, "body": "not_recorded"}, None
         if manifest.get("full_payload_redacted") is not True or projection != manifest.get("full_payload_ref"):
             raise ValueError("Not a sealed redacted physical request")
-        facts.update(host_exclusions=seal.get("exclusions"), file_trace=manifest.get("file_trace", "not_recorded"),
-                     record_bytes=len(record))
+        facts.update(host_exclusions=seal.get("exclusions"), record_bytes=len(record))
         recorded_size = projection.get("size")
         if type(recorded_size) is not int or recorded_size < 0:
             raise ValueError("Redacted request has no recorded size")
@@ -181,16 +185,20 @@ def _document(facts: dict, stored: str | None) -> bytes:
 
 
 def report_document(facts: dict, raw: bytes | None) -> tuple[dict, bytes]:
-    """The ``--report`` document. A request Beautiful Context could not open (``PAGE_LIMIT``), read or over this
-    export's bound, is reported as that gap: a bounded record of the attempt (``_PAGE_GAP_FACTS``), its sizes and the
-    one ``--max-bytes`` with which the reader without ``--report`` writes it. Any other gap keeps its own facts, its
-    exclusions too while they fit; the document is measured before it is returned."""
-    if raw is not None and len(document := _document(facts, raw.decode("utf-8"))) <= PAGE_LIMIT:
-        return facts, document
+    """The ``--report`` document. A request whose report Beautiful Context could not open (``PAGE_LIMIT``), read or
+    over this export's bound, is reported as that gap: a bounded record of the attempt (``_PAGE_GAP_FACTS``), the
+    request's size, the report's (``report_bytes``, else ``report_bytes_at_least``: a request over the page is never
+    built into one) and the one ``--max-bytes`` with which the reader without ``--report`` writes the request. Any
+    other gap keeps its own facts, its exclusions too while they fit; the document is measured before it is returned."""
+    document = None
+    if raw is not None and len(raw) <= PAGE_LIMIT:
+        if len(document := _document(facts, raw.decode("utf-8"))) <= PAGE_LIMIT:
+            return facts, document
     if raw is not None or (facts["body"] == "over_limit" and facts["recorded_bytes"] > PAGE_LIMIT):
         recorded = len(raw) if raw is not None else facts["recorded_bytes"]
+        report = {"report_bytes": len(document)} if document is not None else {"report_bytes_at_least": recorded}
         facts = {**{key: facts[key] for key in _PAGE_GAP_FACTS if key in facts}, "body": "over_page_limit",
-                 "recorded_bytes": recorded, "page_limit_bytes": PAGE_LIMIT,
+                 "recorded_bytes": recorded, **report, "page_limit_bytes": PAGE_LIMIT,
                  "retry_max_bytes": facts.get("retry_max_bytes") or _allowance(recorded, facts.get("record_bytes", 0))}
     elif len(_document(facts, None)) > PAGE_LIMIT:  # the exclusions are what can grow without bound
         facts = {key: value for key, value in facts.items() if key != "host_exclusions"}
@@ -224,11 +232,15 @@ def _retry_command(args: argparse.Namespace, allowance: int) -> str:
 def _gap_words(facts: dict, args: argparse.Namespace) -> str:
     """The terminal's line for a report without a body: the gap and what admits the request, if anything does."""
     body, allowance = facts["body"], facts.get("retry_max_bytes") or facts.get("recorded_bytes")
-    if body in ("over_limit", "manifest_over_limit"):
+    if body == "over_limit":
         return f"{body}; --max-bytes {allowance} admits it"
+    if body == "manifest_over_limit":  # the request's size lies in that record: a larger request names its own then
+        return f"{body}; --max-bytes {allowance} opens the record, and a request larger than it then names its own"
     if body == "over_page_limit":
-        return (f"{body}: the request is {facts['recorded_bytes']} bytes and Beautiful Context opens at most "
-                f"{PAGE_LIMIT}; write it for another tool without --report: {_retry_command(args, allowance)}")
+        report = (f"its report would be {facts['report_bytes']}" if "report_bytes" in facts
+                  else f"its report would be at least {facts.get('report_bytes_at_least', facts['recorded_bytes'])}")
+        return (f"{body}: the request is {facts['recorded_bytes']} bytes, {report} bytes, and Beautiful Context opens "
+                f"at most {PAGE_LIMIT}; write it for another tool without --report: {_retry_command(args, allowance)}")
     if body == "evidence_unavailable":
         return f"{body}: the packed record could not be located now ({facts['evidence_reason']}); run again later"
     return body
