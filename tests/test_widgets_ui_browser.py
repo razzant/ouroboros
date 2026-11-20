@@ -1140,7 +1140,14 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     assert inside == host and host[0] == scheme, (scheme, host, inside)
                     assert first in facts.inner_text() and stored_body.text_content() == stored and rows.count() == 4
                     expect(frame.locator("#report-result")).to_be_visible()
+                    # Its one pressable control stands on the rest shadow in either theme (DESIGN principle 4).
+                    assert frame.locator(".button").evaluate("(node) => getComputedStyle(node).boxShadow") != "none"
                     shoot(f"{step}-{scheme}-switched")
+                (inner,) = [each for each in page.frames if each.url.endswith("/static/context-report.html")]
+                inner.evaluate("""() => window.postMessage({type: 'ouro-context-report-theme', name: 'light',
+                                                           tokens: {'--ouro-text': 'rgb(255, 0, 0)'}}, '*')""")
+                page.wait_for_timeout(300)  # a message the frame would apply is applied within one task
+                assert inks()[1] == host, "a palette message not from the parent window must change nothing"
                 asked = rows.nth(1)
                 assert "secret masked" in asked.locator("summary").inner_text()
                 assert "calls inspect" in rows.nth(2).locator("summary").inner_text()
@@ -1178,6 +1185,15 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     words = facts.inner_text()
                     assert words_of_state in words and "Transport returned an error reply" in words
                     assert "no outcome" not in words and "does not know how" not in words
+                # An opened tool call shows its recorded arguments to the digit: no number is parsed and written again.
+                exact = {"model": "gpt-x", "messages": [{"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call_9", "type": "function",
+                     "function": {"name": "find", "arguments": '{"record": 9007199254740993, "fresh": []}'}}]}]}
+                choose(json.dumps({"format": "ouroboros.context-report/1", "stored_json": json.dumps(exact), "facts": {
+                    "task_id": "report-task", "attempt_id": "exact-attempt", "body": "redacted_host_candidate"}}).encode(
+                    "utf-8"), "exact-attempt", "#attempt-facts")
+                rows.first.locator("summary").click()
+                assert '"record": 9007199254740993' in rows.first.locator(".part pre").inner_text()
                 # A report of a gap says which gap at the top; an earlier /1 report without the later facts opens.
                 choose(reports["over_limit"], "larger than this report", "#headline")
                 gap_reads_without_opening(f"--max-bytes {len(stored.encode('utf-8'))}")
@@ -1191,17 +1207,28 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
                 for facts_of_gap, headline, words in (
-                        ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152},
-                         "sealed record is larger", "--max-bytes 2258277 to include it"),
+                        ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152,
+                          "retry_max_bytes": 2258277}, "sealed record is larger", "--max-bytes 2258277 to include it"),
                         ({"body": "evidence_unavailable", "evidence_reason": "busy"}, "could not be located just now",
                          "run the reader again later"),
-                        ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648},
-                         "larger than this page opens", "python -m ouroboros.context_attempt_reader --data-root DATA "
-                         "report-task --attempt earlier-attempt --max-bytes 52428800 > request.json"),
+                        ({"body": "receipt_only"}, "a receipt with no saved request", "prepared and saved no request"),
+                        # The allowance admits the request and its sealed record: the larger of the two.
+                        ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648,
+                          "retry_max_bytes": 60000000}, "larger than this page opens",
+                         "python -m ouroboros.context_attempt_reader --data-root DATA report-task --attempt "
+                         "earlier-attempt --max-bytes 60000000 > request.json"),
+                        # IDs that are no plain word never enter the command; the facts still show them as text.
+                        ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648,
+                          "retry_max_bytes": 52428800, "task_id": "x; rm -rf ~", "attempt_id": "-x $(id)"},
+                         "larger than this page opens", "--data-root DATA TASK_ID --attempt ATTEMPT_ID --max-bytes "
+                         "52428800 > request.json"),
                         ({"body": "not_one_attempt", "ledger_kind": "subscription_session"},
                          "names no single model request", "List the task’s attempts")):
                     choose(gap(**facts_of_gap), headline, "#headline")
                     gap_reads_without_opening(words)
+                    if facts_of_gap.get("task_id"):
+                        assert "rm -rf" not in frame.locator("#explain").inner_text()
+                        assert "x; rm -rf ~" in facts.inner_text() and "-x $(id)" in facts.inner_text()
                 assert "Ledger row" in facts.inner_text() and "subscription_session" in facts.inner_text()
                 assert "Ledger state" not in facts.inner_text() and "Transport" not in facts.inner_text()
                 # A file the page cannot open says how to read that request elsewhere, not only that it is too large.

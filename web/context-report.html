@@ -1,19 +1,24 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-6jBTMq/sSrR4HIc4nMXbWqYjYRzJ4SnYRZIk/aYSX/4='; style-src 'sha256-/vUsxd6I/5ZzNr83y5nZjWQgpOe2k77bp1Z6Mkvf27U='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ssz/GB7TI0r4CuuR97oyM736SxeYY43YB2NM68VbYKg='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
 /* An opaque frame inherits no host token. The host names its scheme in the frame's name (ouro-theme:light or
    ouro-theme:dark) for the first paint, then tells it, one way, the theme and the --ouro-* colours of the card it lies
-   on, at load and at every change; without them the device's scheme and these fallbacks paint. Sizes, radii and
-   spacing are the design book's. */
+   on, at load and at every change; without them the device's scheme and these fallbacks paint. Sizes, radii,
+   spacing and the neutral capsule on its rest shadow (ui.css .btn-default) are the design book's. */
 :root { color-scheme: light dark; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-  --warn: #805000; --bad: #b52b3b; --focus: #bf2f40; }
+  --warn: #805000; --bad: #b52b3b; --focus: #bf2f40; --capsule: #ffffff; --capsule-hover: #f5f6f8;
+  --press: brightness(0.95); --rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06); }
 :root[data-theme="light"] { color-scheme: light; }
-:root[data-theme="dark"] { color-scheme: dark; --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; }
+:root[data-theme="dark"] { color-scheme: dark; --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85;
+  --capsule: rgba(255, 255, 255, 0.09); --capsule-hover: rgba(255, 255, 255, 0.135); --press: brightness(1.12);
+  --rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28); }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) { --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; }
+  :root:not([data-theme]) { --warn: #f7cb58; --bad: #fe9498; --focus: #fe7d85; --capsule: rgba(255, 255, 255, 0.09);
+    --capsule-hover: rgba(255, 255, 255, 0.135); --press: brightness(1.12);
+    --rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28); }
 }
 body { margin: 0; padding: 16px; color: var(--ouro-text, CanvasText); overflow-wrap: anywhere;
   --meta: var(--ouro-text-meta, color-mix(in srgb, CanvasText 70%, Canvas));
@@ -25,9 +30,10 @@ h2 small, .meta, dt, #report-help, .note { font-size: 12px; line-height: 1.35; f
 #lead { margin-block: 4px 12px; color: var(--meta); }
 .open { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .pick { position: relative; display: inline-flex; }
-.button { padding: 6px 16px; border-radius: 999px; background: var(--tray); font-weight: 600; }
-.pick:hover .button { background: color-mix(in srgb, CanvasText 11%, transparent); }
-#report-file { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
+.button { padding: 6px 16px; border-radius: 999px; background: var(--capsule); box-shadow: var(--rest); font-weight: 600; }
+.pick:hover .button { background: var(--capsule-hover); }
+.pick:active .button { filter: var(--press); }
+#report-file { position: absolute; z-index: 1; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
 #report-file:focus-visible + .button, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #report-status[data-tone="bad"] { color: var(--ouro-error, var(--bad)); }
 #report-help { margin-block-start: 12px; }
@@ -146,6 +152,8 @@ const ABSENT = new Map([
     'Its ledger row accounts for a delegated session, a dispatch outside Ouroboros’s metering or imported history, which may stand for many requests, so no saved request belongs to it. List the task’s attempts and choose one of them.']],
   ['evidence_unavailable', ['The saved request could not be located just now',
     'Its record lies in a packed archive, and the index that says where could not answer. Nothing is known to be lost: run the reader again later.']],
+  ['receipt_only', ['This attempt is a receipt with no saved request',
+    'The ledger recorded its usage as a receipt that arrived already billed, as a live conversation records its sends; this computer prepared and saved no request for it.']],
 ]);
 // A ledger state is accounting. The report carries no money field, so these words name what the ledger
 // recorded about the attempt's record and never a price, a charge or a delivery.
@@ -201,9 +209,37 @@ function parts(content, out = [], under = '') {
   }
   return out;
 }
+// Indents JSON text without parsing its values, so a number keeps every digit it was sent with.
+function indentJson(source) {
+  let out = '';
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  const line = () => `\n${'  '.repeat(depth)}`;
+  for (let at = 0; at < source.length; at += 1) {
+    const ch = source[at];
+    if (quoted) {
+      out += ch;
+      if (escaped) escaped = false; else if (ch === '\\') escaped = true; else if (ch === '"') quoted = false;
+    } else if (ch === '"') {
+      quoted = true;
+      out += ch;
+    } else if (ch === '{' || ch === '[') {
+      let next = at + 1;
+      while (next < source.length && /\s/.test(source[next])) next += 1;
+      if (source[next] === (ch === '{' ? '}' : ']')) { out += ch + source[next]; at = next; } else { depth += 1; out += ch + line(); }
+    } else if (ch === '}' || ch === ']') {
+      depth -= 1;
+      out += line() + ch;
+    } else if (ch === ',') out += ch + line();
+    else if (ch === ':') out += ': ';
+    else if (!/\s/.test(ch)) out += ch;
+  }
+  return out;
+}
 function argumentsText(value) {
   if (typeof value !== 'string') return pretty(value ?? {});
-  try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? pretty(parsed) : value; } catch { return value; }
+  try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? indentJson(value) : value; } catch { return value; }
 }
 // A message, an input item or a tool, whole: what no rule names is shown as indented JSON under "Other fields".
 function readable(item, key) {
@@ -293,15 +329,19 @@ function add(label, value) {
 const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
   ['tools', 'Tools'], ['functions', 'Functions']];
 // The reader's own command that writes a request this page cannot open to a file for another tool.
+// An ID from the opened file enters that command only as a plain word, never as shell syntax or an option.
+const word = (value, placeholder) => (typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(value) ? value : placeholder);
 const elsewhere = (task, attempt, admits) => 'Write the request itself to a file for another tool with the reader '
-  + `without --report: python -m ouroboros.context_attempt_reader --data-root DATA ${task} --attempt ${attempt} `
-  + `--max-bytes ${admits} > request.json`;
+  + `without --report: python -m ouroboros.context_attempt_reader --data-root DATA ${word(task, 'TASK_ID')} `
+  + `--attempt ${word(attempt, 'ATTEMPT_ID')} --max-bytes ${admits} > request.json`;
 // A gap's headline and explanation; one that something can admit says what does.
 function gapWords(facts) {
   const recorded = Number.isInteger(facts.recorded_bytes) ? facts.recorded_bytes : 0;
   const shown = recorded ? bytes(recorded) : 'larger';
   const bound = (value) => (Number.isInteger(value) ? bytes(value) : 'less');
-  const again = `Run the reader again with --max-bytes ${recorded || 'N'} to include it.`;
+  // The one allowance that admits the request and its sealed record (an earlier report names the size alone).
+  const allowance = (Number.isInteger(facts.retry_max_bytes) ? facts.retry_max_bytes : recorded) || 'N';
+  const again = `Run the reader again with --max-bytes ${allowance} to include it.`;
   if (facts.body === 'over_limit') {
     return ['The saved request is larger than this report’s limit', `It is ${shown}; this export allowed ${bound(facts.max_bytes)}. ${again}`];
   }
@@ -311,7 +351,7 @@ function gapWords(facts) {
   }
   if (facts.body === 'over_page_limit') {
     return ['The saved request is larger than this page opens', `It is ${shown}; Beautiful Context opens reports of at most `
-      + `${bound(facts.page_limit_bytes)}. ${elsewhere(text(facts.task_id), text(facts.attempt_id), recorded || 'N')}`];
+      + `${bound(facts.page_limit_bytes)}. ${elsewhere(facts.task_id, facts.attempt_id, allowance)}`];
   }
   return ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`];
 }
