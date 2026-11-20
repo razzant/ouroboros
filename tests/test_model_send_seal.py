@@ -165,6 +165,16 @@ def test_local_request_reader_declines_export_without_store_handoff(data_root, c
         assert not failed.out and 'UsageExportInProgress' in failed.err
 
 
+def test_usage_inspection_hold_refuses_to_write_migrate_or_export_before_opening_the_store(data_root):
+    from ouroboros import usage_store
+
+    for unsafe in ({}, {'write': False}, {'migrate': False}, {'write': False, 'migrate': False, 'exporting': True}):
+        with pytest.raises(ValueError, match='cannot write, migrate or export'):
+            with usage_store.hold(data_root, inspect_only=True, **unsafe):
+                pytest.fail('an inspection hold must refuse before it opens the store')
+    assert not (data_root / usage_store.STORE_REL).exists()
+
+
 def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_root, capsys):
     from ouroboros.context_attempt_reader import main
     from ouroboros.evidence_packs import shared_placement_path

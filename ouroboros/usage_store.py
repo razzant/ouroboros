@@ -864,14 +864,14 @@ def _sha256_file(path: pathlib.Path) -> Optional[str]:
 @contextlib.contextmanager
 def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SEC,
          write: bool = True, migrate: bool = True, exporting: bool = False, remaining_sec=None,
-         inspect_only: bool = False) -> Iterator[Txn]:  # an offline read, refused while exporting, never in its handoff
-    """Bounded money acquisition (``_usage_wait``); timeout raises UsageLockUnavailable.
-    Writes use BEGIN IMMEDIATE and wait for readers at COMMIT. An export mark
-    refuses writes with UsageExportInProgress; only export/abandonment use exporting=True.
-    Receipt callbacks run after the transaction and name lock have closed.
-    ``remaining_sec`` optionally narrows each acquisition to a caller's one deadline
-    (query_data SQL); it never enlarges a wait or changes other callers' defaults.
-    """
+         inspect_only: bool = False) -> Iterator[Txn]:
+    """Bounded money acquisition (``_usage_wait``); timeout raises UsageLockUnavailable. Writes use BEGIN IMMEDIATE and
+    wait for readers at COMMIT. An export mark refuses writes with UsageExportInProgress; only export/abandonment use
+    exporting=True. Receipt callbacks run after the transaction and name lock have closed. ``remaining_sec`` optionally
+    narrows each acquisition to a caller's one deadline (query_data SQL); it never enlarges a wait or changes other
+    callers' defaults. ``inspect_only`` (an offline read) is refused while exporting, never in its handoff."""
+    if inspect_only and (write or migrate or exporting):
+        raise ValueError("usage inspection cannot write, migrate or export")
     root = pathlib.Path(root)
     tier = store_tier(root, wait_sec=timeout_sec, migrate=migrate, remaining_sec=remaining_sec)
     with contextlib.ExitStack() as stack:
