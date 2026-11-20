@@ -607,6 +607,31 @@ def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, 
     assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
 
+def test_a_link_in_another_case_backlinks_the_note_only_where_the_volume_folds_case(tmp_path):
+    """``[the hub](Hub.md)`` beside ``hub.md``, on the global shelf and a project's: where the volume folds case,
+    reading ``Hub`` or ``hub`` lists the reader under backlinks, as reads did before outgoing links took the shelf's
+    spelling. On a case-sensitive volume that link names no note, so ``hub`` keeps only its exact backlink, and a
+    distinct ``Hub.md`` gets the reader."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    for scope in ("global", "project:demo"):
+        hub = address(tmp_path, "hub", scope)
+        hub.shelf.mkdir(parents=True)
+        hub.path.write_text("Hub body.\n", encoding="utf-8")
+        (hub.shelf / "reader.md").write_text("[the hub](Hub.md)\n", encoding="utf-8")
+        (hub.shelf / "exact.md").write_text("[the hub](hub.md)\n", encoding="utf-8")
+        exact, reader = ({"scope": scope, "topic": topic, "state": "active"} for topic in ("exact", "reader"))
+
+        def backlinks(topic):
+            return _link_header(tools._knowledge_read(ctx, topic, scope=scope), "backlinks (readable shelves now)")
+
+        if (hub.shelf / "HUB.md").exists():  # one file under every spelling
+            assert [backlinks("Hub"), backlinks("hub")] == [[exact, reader], [exact, reader]], scope
+        else:
+            assert backlinks("hub") == [exact], scope
+            (hub.shelf / "Hub.md").write_text("A distinct hub.\n", encoding="utf-8")
+            assert [backlinks("Hub"), backlinks("hub")] == [[reader], [exact]], scope
+
+
 def test_backlinks_follow_source_rename_and_deletion_without_writes(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     target = address(tmp_path, "target")

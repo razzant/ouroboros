@@ -197,6 +197,10 @@ def resolve_knowledge_address(
     return address
 
 
+def _folded(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 def shelf_spelling(address: KnowledgeAddress) -> KnowledgeAddress:
     """Keep the directory-entry spelling when it can be read."""
     parent = address.shelf
@@ -208,8 +212,8 @@ def shelf_spelling(address: KnowledgeAddress) -> KnowledgeAddress:
                 continue
             entries = os.listdir(parent)
             if part not in entries:
-                folded = unicodedata.normalize("NFC", part).casefold()
-                part = next((name for name in entries if unicodedata.normalize("NFC", name).casefold() == folded
+                wanted = _folded(part)
+                part = next((name for name in entries if _folded(name) == wanted
                              and requested.samefile(parent / name)), part)
         except OSError:
             return address
@@ -680,27 +684,35 @@ def knowledge_links(note: KnowledgeNote, *, before_byte: int | None = None) -> t
 
 
 def knowledge_backlinks(note: KnowledgeNote, shelves: tuple[KnowledgeAddress, ...]) -> tuple[dict[str, Any], ...]:
-    """Current sources on the readable shelves, joined by resolved scope and topic.
+    """Current sources on the readable shelves, joined by resolved scope and topic, both in the shelf's spelling
+    (``shelf_spelling``): ``Hub.md`` names ``hub.md`` only on a volume that folds case.
 
-    File-name bytes (also percent-encoded) only select candidates to parse; the
+    File-name text in any case (also percent-encoded) only selects candidates to parse; the
     existing Markdown resolver decides identity. No graph or disk index is kept.
     """
-    filename = note.address.path.name.encode("utf-8")
+    target = shelf_spelling(note.address)
+    filename = _folded(target.path.name)
+
+    def names_target(where: dict) -> bool:
+        return where.get("scope") == target.scope and (where["topic"] == target.topic or shelf_spelling(
+            replace(target, topic=where["topic"])).topic == target.topic)
+
     rows = []
     for shelf in {item.shelf: item for item in shelves}.values():
         for row in inventory_knowledge(shelf, navigation=True):
             address = replace(shelf, topic=row["topic"])
             try:
                 raw = address.path.read_bytes()
-                spelled = unquote(html.unescape(raw.decode("utf-8", "replace")).replace("\\", "")).encode("utf-8")
-                if filename not in raw and filename not in unquote_to_bytes(raw) and filename not in spelled:
+                text = raw.decode("utf-8", "replace")
+                spelled = (text, unquote_to_bytes(raw).decode("utf-8", "replace"),
+                           unquote(html.unescape(text).replace("\\", "")))
+                if not any(filename in _folded(form) for form in spelled):
                     continue  # also entity- or backslash-spelled names, as the Markdown parser reads them
                 source = _note(address, raw)
                 links = knowledge_links(source)
             except (OSError, UnicodeDecodeError, ValueError):
                 continue  # Unreadable sources or unresolvable URLs supply no link facts.
-            if any(link.get("address", {}).get("scope") == note.address.scope
-                   and link["address"]["topic"] == note.address.topic for link in links):
+            if any(names_target(link.get("address", {})) for link in links):
                 rows.append({"scope": address.scope, "topic": address.topic, "state": source.state})
     return tuple(rows)
 
