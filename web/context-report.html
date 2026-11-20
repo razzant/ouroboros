@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-2jna4zdTxfJZQIr3Q/e2icXkxo6A2pC7Yajg5HQ80Mc='; style-src 'sha256-f/pvUT3AyGTaU1UNYOl8WzyOV3eeglhoA+StwvJw6NI='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-YCEKmHhh9UsDZkYxBzYB+GofqXj6AyQTKEsGwDFkRTc='; style-src 'sha256-f/pvUT3AyGTaU1UNYOl8WzyOV3eeglhoA+StwvJw6NI='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -115,20 +115,35 @@ function when(value) {
 
 // The words of a report: what the host ledger recorded, never a claim about the provider's copy.
 const ABSENT = new Map([
-  ['not_linked', ['No request was recorded for this attempt',
+  ['not_linked', ['No saved request is linked to this attempt',
     'Its ledger row links no saved request. Preparation may have ended before that link was written; a copy left on disk without it is not read.']],
   ['not_recorded', ['This attempt has no readable request record',
     'It was saved without a sealed redacted copy this reader understands, as attempts of older versions were.']],
-  ['unavailable', ['The saved request is no longer on disk',
+  ['unavailable', ['The saved request was not found',
     'The attempt links a record whose file was not found in the data folder the reader was given. Retention may have removed it.']],
 ]);
+// A ledger state is accounting. The report carries no money field, so these words name what the ledger
+// recorded about the attempt's record and never a price, a charge or a delivery.
 const STATES = new Map([
-  ['reserved', 'Reserved — money was set aside; no dispatch is recorded'],
-  ['released', 'Released — the host withdrew this attempt and returned its reservation'],
-  ['dispatched', 'Dispatched — handed to the transport; no outcome is recorded yet'],
-  ['settled', 'Settled — the charge is final in the host ledger'],
-  ['unresolved', 'Unresolved — the host does not know how this send ended'],
+  ['reserved', 'Reserved — the ledger opened this attempt; no dispatch is recorded'],
+  ['released', 'Released — the ledger closed this attempt as not dispatched'],
+  ['dispatched', 'Dispatched — the ledger marked this send as started and recorded no outcome'],
+  ['settled', 'Settled — the ledger closed this attempt’s accounting record'],
+  ['unresolved', 'Unresolved — the ledger does not know how this send ended'],
 ]);
+// Why a record was closed, in words for the reasons the ledger writes; any other reason is shown as recorded.
+const SETTLED = new Map([
+  ['abandoned', 'without a receipt (abandoned)'],
+  ['late_receipt', 'on a receipt that arrived late'],
+  ['pre_routing_rejection', 'as rejected before routing'],
+  ['tos_rejection', 'as rejected under the provider’s terms'],
+]);
+function stateWords(facts) {
+  const words = STATES.get(facts.ledger_state) || text(facts.ledger_state);
+  const reason = typeof facts.settle_reason === 'string' ? facts.settle_reason : '';
+  if (!reason) return words;
+  return `${words} ${(facts.ledger_state === 'settled' && SETTLED.get(reason)) || `(recorded reason: ${reason})`}`;
+}
 const TRANSPORT = new Map([
   ['not_started', 'Not started at the last recorded state'],
   ['ledger_released', 'Released in the host ledger; transport receipt not confirmed'],
@@ -269,9 +284,8 @@ function show(facts, name) {
   add('Requested model', [facts.model, facts.provider].filter((value) => typeof value === 'string' && value).join(' via ') || 'Not recorded');
   add('Reserved', when(facts.ts_reserved));
   add('Dispatched', when(facts.ts_dispatched));
-  add('Finished', when(facts.ts_final));
-  add('Ledger state', (STATES.get(facts.ledger_state) || text(facts.ledger_state))
-    + (typeof facts.settle_reason === 'string' && facts.settle_reason ? ` (${facts.settle_reason})` : ''));
+  add('Last state recorded', when(facts.ts_final));
+  add('Ledger state', stateWords(facts));
   add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
   add('Failure', failureWords(facts.failure));
   byId('privacy').hidden = absent;

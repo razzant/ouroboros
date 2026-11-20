@@ -158,9 +158,9 @@ def test_local_request_reader_selects_one_sealed_attempt(data_root, capsys):
     assert not failed.out and 'unavailable' in failed.err
 
 
-def test_local_request_report_names_a_failure_by_type_never_by_its_words(data_root, monkeypatch):
-    """A failed send's report carries what the ledger typed about it; a provider's words stay in private evidence."""
-    from ouroboros.context_attempt_reader import list_attempts, read_attempt
+def _rejected_then_answered(root: pathlib.Path, task_id: str, monkeypatch, payload=None):
+    """One call whose first send the provider rejects and whose retry is answered: the two attempt ids, failed first."""
+    from ouroboros.context_attempt_reader import list_attempts
 
     client = LLMClient(api_key="unused")
 
@@ -177,13 +177,49 @@ def test_local_request_report_names_a_failure_by_type_never_by_its_words(data_ro
         return reply
 
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *args: None)
-    with ua.usage_scope(_scope(data_root, "failed-reader-test")):
-        client._create_chat_completion_with_retries(create, {**_payload(), "temperature": 0.7}, _target())
-    answered, failed = (read_attempt(data_root, "failed-reader-test", row["attempt_id"], report_facts=True)[0]
-                        for row in list_attempts(data_root, "failed-reader-test")["attempts"])
+    with ua.usage_scope(_scope(root, task_id)):
+        client._create_chat_completion_with_retries(
+            create, {**(payload if payload is not None else _payload()), "temperature": 0.7}, _target())
+    answered, failed = (row["attempt_id"] for row in list_attempts(root, task_id)["attempts"][:2])
+    return failed, answered
+
+
+def _settle_abandoned(root: pathlib.Path, attempt_id: str) -> Dict[str, Any]:
+    """Close an open attempt as its task's end does: settled with no receipt, its price unknown."""
+    row = next(row for row in _rows(root) if row["attempt_id"] == attempt_id)
+    reservation = ua.AttemptReservation(attempt_id, root, row["model"], row["provider"],
+                                        row.get("reservation_upper_bound_usd"))
+    assert ua.terminalize_abandoned_attempt(reservation, reason="owner_task_terminal") == "settled"
+    return next(row for row in _rows(root) if row["attempt_id"] == attempt_id)
+
+
+def test_local_request_report_names_a_failure_by_type_never_by_its_words(data_root, monkeypatch):
+    """A failed send's report carries what the ledger typed about it; a provider's words stay in private evidence."""
+    from ouroboros.context_attempt_reader import read_attempt
+
+    failed, answered = (read_attempt(data_root, "failed-reader-test", attempt, report_facts=True)[0]
+                        for attempt in _rejected_then_answered(data_root, "failed-reader-test", monkeypatch))
     assert failed["failure"] == {"stage": "raised_exception", "exception_type": "_Rejected", "provider_status_code": 400}
     assert "private words" not in json.dumps(failed) and "evidence_ref" not in json.dumps(failed)
     assert "failure" not in answered and answered["attempt_id"] != failed["attempt_id"]
+
+
+def test_local_request_report_of_an_abandoned_settlement_names_no_money(data_root, monkeypatch):
+    """A rejected send whose task ended is settled with no receipt and an unknown price.
+
+    Its report says how the ledger closed the record and keeps the request it sent; it carries no cost, price or
+    usage field, so nothing downstream can read "settled" as a final charge."""
+    from ouroboros.context_attempt_reader import read_attempt
+
+    failed, _answered = _rejected_then_answered(data_root, "abandoned-reader-test", monkeypatch)
+    row = _settle_abandoned(data_root, failed)
+    assert (row["state"], row["settle_reason"], row["cost_usd"], row["cost_final"]) == ("settled", "abandoned", None, False)
+    facts, body = read_attempt(data_root, "abandoned-reader-test", failed, report_facts=True)
+    assert body and b"summarize this" in body
+    assert (facts["ledger_state"], facts["settle_reason"], facts["transport_observation"]) == (
+        "settled", "abandoned", "not_confirmed")
+    assert facts["failure"]["exception_type"] == "_Rejected"
+    assert not [key for key in facts if any(word in key for word in ("cost", "usd", "price", "token", "usage"))]
 
 
 def test_local_request_reader_declines_export_without_store_handoff(data_root, capsys, monkeypatch):
