@@ -41,7 +41,6 @@ from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_custody import child_drive_candidates
 from ouroboros.task_reads import TaskReads
 from ouroboros.task_results import validate_task_id
-from ouroboros.task_store import select_lineage
 from ouroboros.utils import JsonlChainUnreadable
 
 _ALLOWED_LOGS = {
@@ -214,38 +213,24 @@ def _scope(root: pathlib.Path, task_id: str) -> tuple[dict, set]:
     """Re-discover admitted placements per request; client root/path hints confer no authority.
 
     Full, compact and Raw share this retry projection over canonical lineage and queue facts.
-    Custody then admits their recorded execution placements, including a retry
-    occupying its predecessor's drive, before any child metadata or log read.
+    Custody admits the effective task's recorded placement before any child metadata or log read.
     """
     configured, spellings = root, root_spellings(root)
     root = spellings[0]
     placements, ids = {"canonical": root}, {task_id} if task_id else set()
     if task_id:
         validate_task_id(task_id)
+        from ouroboros.task_status import find_child_tasks
+
         reads = _CanonicalLogReads(root)
-        snapshot = reads.queue_snapshot(root)
-        queued = [dict(item.get("task") or {}, task_id=item.get("id") or item.get("task_id") or (item.get("task") or {}).get("id"))
-                  for group in ("pending", "running") for item in snapshot.get(group) or []
-                  if isinstance(item, dict) and isinstance(item.get("task"), dict)]
-        def belongs(row):
-            return row.get("delegation_role") == "subagent" and any(
-                str(row.get(key) or "") == task_id for key in ("parent_task_id", "root_task_id"))
-        queued = [row for row in queued if belongs(row)]
-        children = select_lineage(root, task_id, task_id, queue_members=[row["task_id"] for row in queued])
-        selected = [reads.effective(task_id)]
-        for candidate in children:
-            row = reads.effective(str(candidate.get("task_id") or ""))
-            if belongs(row):
-                selected.append(row)
-                ids.add(str(row.get("task_id") or ""))
-        for candidate in queued:
-            row = reads.effective(str(candidate.get("task_id") or "")) or candidate
-            selected.append(row)
-            ids.add(str(row.get("task_id") or ""))
-        ids.discard("")
-        for row in selected:
-            identity = str(row.get("task_id") or "")
-            recorded = (reads.load(root, identity) or {}) if identity else {}
+        children = find_child_tasks(root, parent_task_id=task_id, root_task_id=task_id,
+                                    materialize_artifacts=False, placement_reads=reads)
+        child_ids = {str(row["task_id"]) for row in children}
+        ids.update(child_ids)
+        # A root retry contributes its placement; matching its unlinked rows still requires child membership.
+        selected = child_ids | {str(reads.effective(task_id).get("task_id") or "")}
+        for identity in sorted(filter(None, selected)):
+            recorded = reads.load(root, identity) or {}
             for path in child_drive_candidates(recorded):
                 child = physical_path(spellings, path)
                 if retained_child_root(configured, child, identity):

@@ -1349,15 +1349,22 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
             "(0 with an empty reason also means none).",
         )
     run_ids = list(dict.fromkeys(run_id if isinstance(run_id, list) else [str(run_id)]))
-    root, in_process = custody.custody_root(ctx), []
+    root, in_process, review_runs = custody.custody_root(ctx), [], []
     for selected in run_ids:
-        ownership, _entry = custody.lookup(root, str(ctx.task_id), selected)
+        ownership, entry = custody.lookup(root, str(ctx.task_id), selected)
         if ownership == custody.FOREIGN:
             from ouroboros.tools.delegate_terminal_evidence import retry_terminal_result
 
             return retry_terminal_result(ctx, selected)
-        if ownership == custody.OWNED and current_run(root, selected) is None:
-            in_process.append(selected)  # owned through this process's memo alone (``custody.lookup``)
+        if ownership == custody.OWNED:
+            if entry.review_owned:
+                review_runs.append(entry)
+            elif current_run(root, selected) is None:
+                in_process.append(selected)  # owned through this process's memo alone (``custody.lookup``)
+    if review_runs:
+        from ouroboros.review_waiting import review_wait_refusal
+
+        return review_wait_refusal(ctx, "delegate_wait", review_runs)
     from ouroboros.delegate_recovery import restore_bound_handoff
 
     try:

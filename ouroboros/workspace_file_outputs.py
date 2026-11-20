@@ -95,7 +95,7 @@ def _validate_side(side):
             raise ValueError("file-result symlink identity mismatch")
 
 
-def _archive_files(records, cap_dir):
+def _archive_files(records, cap_dir, locations=None):
     """Resolve relocated artifact records by their capture-local names and identities."""
     from ouroboros.artifacts import stream_artifact_file
     files = {}
@@ -104,7 +104,9 @@ def _archive_files(records, cap_dir):
         name = record.get("name", "")
         if Path(name).name != name or not name:
             raise ValueError("file-result artifact has an invalid name")
-        artifact = _path(cap_dir, name)
+        artifact = _path(cap_dir, name) if locations is None else locations[name]
+        if locations is not None and artifact.resolve(strict=False) != artifact:
+            raise ValueError("verified file-result placement changed")
         if artifact.is_symlink() or not record.get("sha256") or "size" not in record:
             raise ValueError("file-result artifact has no exact capture identity")
         stream_artifact_file(artifact, expected=record)
@@ -166,9 +168,9 @@ def capture_file_output_changes(root, base_ref, paths, records, cap_dir, *, file
     return changes
 
 
-def file_output_changes(manifest, cap_dir):
+def file_output_changes(manifest, cap_dir, *, locations=None):
     """Load complete, verifiable rows; old captures without preimages need recapture."""
-    files = _archive_files(manifest.get("file_outputs") or [], cap_dir)
+    files = _archive_files(manifest.get("file_outputs") or [], cap_dir, locations)
     rows = manifest.get("file_output_changes")
     excluded = {row["path"] for row in manifest.get("tracked_excluded", [])
                 if row.get("reason") == "captured as file-reference artifact"}
