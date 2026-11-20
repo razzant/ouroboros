@@ -660,9 +660,14 @@ def test_a_linked_head_without_a_summary_still_yields_before_the_claimed_head(wo
 
 
 def test_a_linked_head_whose_summary_saves_no_room_keeps_only_its_reader_before_the_claimed_head(world):
-    """Two heads only a link holds: `y`, whose authored summary is short, steps to it; `z`, whose summary is as long
-    as its head, keeps only its exact reader, marked with why, before the claimed `a` steps."""
-    _write(world, "a", "Head a. " * 5_000 + "\n\nIt links [y](y.md) and [z](z.md).\n", summary="Authored telling of a.")
+    """Three heads only a link holds: `y`, whose authored summary is short, steps to it; `x`, whose summary is shorter
+    than its head but whose summary form (the summary beside its own marker) is not, and `z`, whose summary is as
+    long as its head, keep only their exact readers, marked with why, before the claimed `a` steps."""
+    shorter = ("Telling of x. " * 3_000)[:39_960]
+    assert len(shorter) < len("Head x. " * 5_000)
+    _write(world, "a", "Head a. " * 5_000 + "\n\nIt links [x](x.md), [y](y.md) and [z](z.md).\n",
+           summary="Authored telling of a.")
+    _write(world, "x", "Head x. " * 5_000, claims=(), summary=shorter)
     _write(world, "y", "Head y. " * 5_000, claims=(), summary="Authored telling of y.")
     _write(world, "z", "Head z. " * 5_000, claims=(), summary="Telling of z, as long as its head. " * 1_150)
     _write(world, "ordinary", "An unclaimed note.", claims=(), summary="Whole index only. " * 8_000)
@@ -671,11 +676,12 @@ def test_a_linked_head_whose_summary_saves_no_room_keeps_only_its_reader_before_
         plan = _plan(world, window, core=captured)
         seen.setdefault(tuple(_cuts(plan)), plan)
     order = list(seen)
-    assert order[1:4] == [(("y", "summary"),), (("y", "summary"), ("z", "reader")),
-                          (("y", "summary"), ("z", "reader"), ("a", "summary"))], order
-    held = _held(seen[order[2]])
-    assert "Head a. " * 5_000 in held and "Head z. Head z." not in held and "Telling of z" not in held
-    assert "\n\n[Head omitted for the physical window: its authored summary is no shorter than the head.]" in held
+    steps = [("x", "reader"), ("y", "summary"), ("z", "reader"), ("a", "summary")]
+    assert order[1:5] == [tuple(steps[:count]) for count in range(1, 5)], order
+    held = _held(seen[order[3]])
+    assert "Head a. " * 5_000 in held and "Head x. Head x." not in held and "Head z. Head z." not in held
+    assert "Telling of x" not in held and "Telling of z" not in held
+    assert held.count("\n\n[Head omitted: its summary form saves no room.]") == 2
 
 
 def _index(plan, mode=None):
