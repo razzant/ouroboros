@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-+oBZ/0zowsG7U5CDuz9Um84Fc8Obp7QHxyRh8Vitzes='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-s6NSl6qhwXf2HGWii+Hpood2U+Z9yBLn42aqKNsEEFE='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -192,21 +192,22 @@ function failureWords(failure) {
     .filter(Boolean).join(' · ');
 }
 
-// Readable parts of one stored value, each a title (empty for plain text) and its whole text.
+// Readable parts of one stored value, each a title (empty for plain text) and its whole text, or what draws that text
+// when the row opens: a closed row formats no JSON.
 function parts(content, out = [], under = '') {
   const push = (title, value) => out.push([[under, title].filter(Boolean).join(' · '), value]);
   if (typeof content === 'string') { if (content) push('', content); return out; }
   if (content === null || content === undefined) return out;
-  if (!Array.isArray(content)) { push('Content', pretty(content)); return out; }
-  for (const part of content) {
+  if (!Array.isArray(content)) { push('Content', () => exactOf(content)); return out; }
+  content.forEach((part, index) => {
     if (typeof part === 'string') push('', part);
-    else if (!isRecord(part)) push('Part', pretty(part));
-    else if (part.type === 'tool_use') push(['Tool call', part.name, part.id].filter(Boolean).join(' · '), pretty(part.input ?? {}));
+    else if (!isRecord(part)) push('Part', () => memberOf(content, index));
+    else if (part.type === 'tool_use') push(['Tool call', part.name, part.id].filter(Boolean).join(' · '), () => memberOf(part, 'input', {}));
     else if (part.type === 'tool_result') parts(part.content, out, ['Tool result', part.tool_use_id].filter(Boolean).join(' · '));
     else if (/image/.test(String(part.type))) push('Image', `${size(JSON.stringify(part).length)} of image data, kept in the stored JSON.`);
     else if (typeof part.text === 'string') push(/^(input_|output_)?text$/.test(String(part.type)) ? '' : text(part.type), part.text);
-    else push(text(part.type), pretty(part));
-  }
+    else push(text(part.type), () => exactOf(part));
+  });
   return out;
 }
 // Indents JSON text without parsing its values, so a number keeps every digit it was sent with.
@@ -237,8 +238,69 @@ function indentJson(source) {
   }
   return out;
 }
-function argumentsText(value) {
-  if (typeof value !== 'string') return pretty(value ?? {});
+// Where each value of the stored JSON lies in its text, keyed by the value JSON.parse built of it: an opened row shows
+// that text, so a number keeps every digit JSON.parse rounds (9007199254740993). One pass over the text, at most once.
+let spans = null;
+function sourceSpans() {
+  if (spans) return spans;
+  spans = new WeakMap();
+  let at = 0;
+  const blank = () => { while (at < source.length && ' \t\n\r'.includes(source[at])) at += 1; };
+  const string = () => {
+    let end = at;
+    for (let slashes = 1; slashes % 2;) {
+      end = source.indexOf('"', end + 1);
+      for (slashes = 0; source[end - 1 - slashes] === '\\';) slashes += 1;
+    }
+    const quoted = source.slice(at, end + 1);
+    at = end + 1;
+    return quoted;
+  };
+  const walk = (node) => {
+    const start = at;
+    const open = source[at];
+    if (open === '{' || open === '[') {
+      const members = new Map();
+      at += 1;
+      blank();
+      for (let index = 0; source[at] !== (open === '{' ? '}' : ']'); index += 1) {
+        const key = open === '{' ? JSON.parse(string()) : index;
+        if (open === '{') { blank(); at += 1; blank(); }
+        const from = at;
+        walk(node !== null && typeof node === 'object' ? node[key] : undefined);
+        members.set(key, [from, at]);
+        blank();
+        if (source[at] === ',') { at += 1; blank(); }
+      }
+      at += 1;
+      if (node !== null && typeof node === 'object') spans.set(node, { at: [start, at], members });
+    } else if (open === '"') string();
+    else while (at < source.length && !',]} \t\n\r'.includes(source[at])) at += 1;
+  };
+  try { blank(); walk(body); } catch { spans = new WeakMap(); }  // without spans a value is shown as parsed
+  return spans;
+}
+const rawMember = (holder, key) => {
+  const at = holder !== null && typeof holder === 'object' ? sourceSpans().get(holder)?.members.get(key) : null;
+  return at ? source.slice(...at) : null;
+};
+const asRecorded = (raw, value) => (raw === null ? pretty(value) : /^[{[]/.test(raw) ? indentJson(raw) : raw);
+// A value as recorded: an object or array re-indented from its own text; a member, from its holder's.
+function exactOf(value) {
+  const at = value !== null && typeof value === 'object' ? sourceSpans().get(value)?.at : null;
+  return at ? indentJson(source.slice(...at)) : pretty(value);
+}
+const memberOf = (holder, key, absent) => (holder?.[key] === undefined && absent !== undefined ? pretty(absent)
+  : asRecorded(rawMember(holder, key), holder?.[key]));
+function exactRest(object, omit) {
+  const names = Object.keys(object).filter((name) => !omit.has(name));
+  const raws = names.map((name) => rawMember(object, name));
+  if (raws.includes(null)) return pretty(Object.fromEntries(names.map((name) => [name, object[name]])));
+  return indentJson(`{${names.map((name, index) => `${JSON.stringify(name)}:${raws[index]}`).join(',')}}`);
+}
+function argumentsText(holder, key) {
+  const value = holder?.[key];
+  if (typeof value !== 'string') return memberOf(holder, key, {});
   try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? indentJson(value) : value; } catch { return value; }
 }
 // A message, an input item or a tool, whole: what no rule names is shown as indented JSON under "Other fields".
@@ -247,12 +309,12 @@ function readable(item, key) {
   const used = new Set(['role', 'tool_call_id', 'call_id']);
   const out = [];
   if (key === 'tools' || key === 'functions') {
-    const { description, ...definition } = isRecord(item.function) ? item.function : item;
-    if (typeof description === 'string' && description) out.push(['', description]);
-    out.push(['Definition', pretty(definition)]);
+    const tool = isRecord(item.function) ? item.function : item;
+    if (typeof tool.description === 'string' && tool.description) out.push(['', tool.description]);
+    out.push(['Definition', () => exactRest(tool, new Set(['description']))]);
     for (const name of isRecord(item.function) ? ['function', 'type'] : Object.keys(item)) used.add(name);
   } else if (item.type === 'function_call') {
-    out.push([['Tool call', item.name, item.call_id].filter(Boolean).join(' · '), argumentsText(item.arguments)]);
+    out.push([['Tool call', item.name, item.call_id].filter(Boolean).join(' · '), () => argumentsText(item, 'arguments')]);
     for (const name of ['type', 'name', 'arguments']) used.add(name);
   } else if (item.type === 'function_call_output') {
     parts(item.output, out);
@@ -264,21 +326,21 @@ function readable(item, key) {
     parts(item.content, out);
     for (const call of Array.isArray(item.tool_calls) ? item.tool_calls : []) {
       const fn = isRecord(call) && isRecord(call.function) ? call.function : call;
-      out.push([['Tool call', fn && fn.name, call && call.id].filter(Boolean).join(' · '), argumentsText(fn && fn.arguments)]);
+      out.push([['Tool call', fn && fn.name, call && call.id].filter(Boolean).join(' · '), () => argumentsText(fn, 'arguments')]);
     }
     used.add('content').add('tool_calls');
   }
-  const rest = Object.fromEntries(Object.entries(item).filter(([name]) => !used.has(name)));
-  if (Object.keys(rest).length) out.push(['Other fields', pretty(rest)]);
+  if (Object.keys(item).some((name) => !used.has(name))) out.push(['Other fields', () => exactRest(item, used)]);
   return out;
 }
 function rowWords(item, key) {
-  if (!isRecord(item)) return [key, typeof item === 'string' ? item : pretty(item)];
+  if (!isRecord(item)) return [key, typeof item === 'string' ? item : JSON.stringify(item)];
   const entries = readable(item, key);
   if (key === 'tools' || key === 'functions') return [text((isRecord(item.function) ? item.function : item).name), entries[0][0] ? '' : entries[0][1]];
-  const plain = entries.find(([title, value]) => !title && value.trim());
+  const plain = entries.find(([title, value]) => !title && typeof value === 'string' && value.trim());
   const calls = entries.filter(([title]) => title.startsWith('Tool call')).map(([title]) => title.split(' · ')[1]);
-  const said = plain ? plain[1] : calls.length ? `calls ${calls.join(', ')}` : entries.length ? entries[0][1] : '';
+  const said = plain ? plain[1] : calls.length ? `calls ${calls.join(', ')}`
+    : entries.length ? (typeof entries[0][1] === 'string' ? entries[0][1] : entries[0][0]) : '';
   const id = [item.tool_call_id, item.call_id].find((value) => typeof value === 'string' && value);
   return [text(item.role || item.type), (id && !calls.length ? `result of ${id}: ` : '') + said.trim()];
 }
@@ -308,7 +370,7 @@ function section(title, key, masked) {
       for (const [label, value] of readable(item, key)) {
         const part = element('div', 'part');
         if (label) part.append(element('span', 'meta', label));
-        part.append(element('pre', label ? '' : 'said', value));
+        part.append(element('pre', label ? '' : 'said', typeof value === 'function' ? value() : value));
         row.append(part);
       }
     });
@@ -320,6 +382,7 @@ function clear() {
   result.hidden = true;
   body = null;
   source = '';
+  spans = null;
   for (const node of [fields, request, stored, byId('stored-note'), byId('source-versions'), byId('record-body')]) node.replaceChildren();
   for (const node of result.querySelectorAll('details')) node.open = false;
 }
@@ -347,11 +410,15 @@ function gapWords(facts) {
   }
   if (facts.body === 'manifest_over_limit') {
     return ['The attempt’s sealed record is larger than this report’s limit',
-      `The record that seals the request is ${shown}; this export read at most ${bound(facts.max_bytes)} of it. ${again}`];
+      `The record that seals the request is ${shown}; this export read at most ${bound(facts.max_bytes)} of it. `
+      + `Run the reader again with --max-bytes ${allowance} to open it; if the request itself is larger, that run names the --max-bytes for it.`];
   }
   if (facts.body === 'over_page_limit') {
-    return ['The saved request is larger than this page opens', `It is ${shown}; Beautiful Context opens reports of at most `
-      + `${bound(facts.page_limit_bytes)}. ${elsewhere(facts.task_id, facts.attempt_id, allowance)}`];
+    const report = Number.isInteger(facts.report_bytes) ? `its report would be ${bytes(facts.report_bytes)}`
+      : Number.isInteger(facts.report_bytes_at_least) ? `its report would be at least ${bytes(facts.report_bytes_at_least)}`
+        : 'its report would be larger';
+    return ['This request’s report is larger than this page opens', `The request is ${shown}; ${report}, and Beautiful Context `
+      + `opens reports of at most ${bound(facts.page_limit_bytes)}. ${elsewhere(facts.task_id, facts.attempt_id, allowance)}`];
   }
   return ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`];
 }
@@ -385,7 +452,7 @@ function show(facts, name) {
     const rest = Object.entries(body).filter(([key]) => !SECTIONS.some(([known]) => known === key));
     if (rest.length) {
       const other = element('dl');
-      for (const [key, value] of rest) other.append(element('dt', '', key), element('dd', '', typeof value === 'string' ? value : JSON.stringify(value)));
+      for (const [key, value] of rest) other.append(element('dt', '', key), element('dd', '', typeof value === 'string' ? value : rawMember(body, key) ?? JSON.stringify(value)));
       request.append(element('h2', '', 'Other request fields'), other);
     }
   }
@@ -393,6 +460,7 @@ function show(facts, name) {
     && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
   byId('source-versions').textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
     'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
+    : facts.file_trace === 'not_read' ? 'Not read: this report did not open the attempt’s sealed record, so the source versions it recorded are unknown.'
     : 'No supported source versions were recorded. Other files and offsets remain unknown.';
   byId('record-body').textContent = pretty(facts);
   status.textContent = `Showing ${name}.`;

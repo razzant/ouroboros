@@ -1185,15 +1185,26 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     words = facts.inner_text()
                     assert words_of_state in words and "Transport returned an error reply" in words
                     assert "no outcome" not in words and "does not know how" not in words
-                # An opened tool call shows its recorded arguments to the digit: no number is parsed and written again.
-                exact = {"model": "gpt-x", "messages": [{"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "call_9", "type": "function",
-                     "function": {"name": "find", "arguments": '{"record": 9007199254740993, "fresh": []}'}}]}]}
+                # An opened tool call shows its recorded input to the digit, as text or as an object (Anthropic's
+                # tool_use), and so do the request's other fields: no number is parsed and written again. A closed
+                # row formats no JSON.
+                exact = {"model": "gpt-x", "messages": [
+                    {"role": "assistant", "content": None, "tool_calls": [{"id": "call_9", "type": "function", "function": {
+                        "name": "find", "arguments": '{"record": 9007199254740993, "fresh": []}'}}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_9", "name": "find",
+                                                        "input": {"record": 9007199254740993, "fresh": []}}]}],
+                    "max_tokens": 9007199254740993}
+                inner.evaluate("""() => { window.formatted = 0; const indent = window.indentJson;
+                    window.indentJson = (source) => { window.formatted += 1; return indent(source); }; }""")
                 choose(json.dumps({"format": "ouroboros.context-report/1", "stored_json": json.dumps(exact), "facts": {
                     "task_id": "report-task", "attempt_id": "exact-attempt", "body": "redacted_host_candidate"}}).encode(
                     "utf-8"), "exact-attempt", "#attempt-facts")
-                rows.first.locator("summary").click()
-                assert '"record": 9007199254740993' in rows.first.locator(".part pre").inner_text()
+                assert inner.evaluate("() => window.formatted") == 0 and rows.count() == 2
+                for index in (0, 1):
+                    rows.nth(index).locator("summary").click()
+                    assert '"record": 9007199254740993' in rows.nth(index).locator(".part pre").inner_text()
+                assert inner.evaluate("() => window.formatted") == 2
+                assert "9007199254740993" in frame.locator("#request dl").inner_text()
                 # A report of a gap says which gap at the top; an earlier /1 report without the later facts opens.
                 choose(reports["over_limit"], "larger than this report", "#headline")
                 gap_reads_without_opening(f"--max-bytes {len(stored.encode('utf-8'))}")
@@ -1208,7 +1219,8 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert "earlier-attempt" in facts.inner_text()
                 for facts_of_gap, headline, words in (
                         ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152,
-                          "retry_max_bytes": 2258277}, "sealed record is larger", "--max-bytes 2258277 to include it"),
+                          "retry_max_bytes": 2258277}, "sealed record is larger",
+                         "--max-bytes 2258277 to open it; if the request itself is larger, that run names"),
                         ({"body": "evidence_unavailable", "evidence_reason": "busy"}, "could not be located just now",
                          "run the reader again later"),
                         ({"body": "receipt_only"}, "recorded from a usage report", "No request was saved for it"),
@@ -1217,6 +1229,13 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                           "retry_max_bytes": 60000000}, "larger than this page opens",
                          "python -m ouroboros.context_attempt_reader --data-root DATA report-task --attempt "
                          "earlier-attempt --max-bytes 60000000 > request.json"),
+                        # A report too large names the request's size and the report's, or a floor when never built.
+                        ({"body": "over_page_limit", "recorded_bytes": 40000000, "report_bytes": 52500000,
+                          "page_limit_bytes": 50331648, "retry_max_bytes": 40000000}, "larger than this page opens",
+                         "The request is 38.2 MiB; its report would be 50.1 MiB, and Beautiful Context opens"),
+                        ({"body": "over_page_limit", "recorded_bytes": 52428800, "report_bytes_at_least": 52428800,
+                          "page_limit_bytes": 50331648, "retry_max_bytes": 52428800}, "larger than this page opens",
+                         "its report would be at least 50 MiB"),
                         # IDs that are no plain word never enter the command; the facts still show them as text.
                         ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648,
                           "retry_max_bytes": 52428800, "task_id": "x; echo owned", "attempt_id": "-x|cat"},
@@ -1231,6 +1250,18 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                         assert "x; echo owned" in facts.inner_text() and "-x|cat" in facts.inner_text()
                 assert "Ledger row" in facts.inner_text() and "subscription_session" in facts.inner_text()
                 assert "Ledger state" not in facts.inner_text() and "Transport" not in facts.inner_text()
+                # A gap keeps the failure's type and the file trace; a trace the reader did not open says so.
+                trace = [{"source_path": "prompts/SYSTEM.md", "source_sha256": "ab" * 32,
+                          "contribution": "leading_system_prefix", "text_sha256": "cd" * 32}]
+                choose(gap(body="over_page_limit", recorded_bytes=52428800, report_bytes_at_least=52428800,
+                           page_limit_bytes=50331648, retry_max_bytes=52428800, failure={
+                               "stage": "raised_exception", "exception_type": "_Rejected", "provider_status_code": 400},
+                           file_trace=trace), "larger than this page opens", "#headline")
+                assert "The send raised _Rejected · HTTP 400" in facts.inner_text()
+                assert frame.locator("#source-versions").text_content().startswith("prompts/SYSTEM.md\nFile SHA-256: ab")
+                choose(gap(body="manifest_over_limit", recorded_bytes=2258277, max_bytes=2097152,
+                           retry_max_bytes=2258277, file_trace="not_read"), "sealed record is larger", "#headline")
+                assert frame.locator("#source-versions").text_content().startswith("Not read: this report did not open")
                 # A file the page cannot open says how to read that request elsewhere, not only that it is too large.
                 large = tmp_path / "large-report.json"
                 with large.open("wb") as handle:
