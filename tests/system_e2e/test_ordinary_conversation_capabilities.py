@@ -21,6 +21,7 @@ import uuid
 import pytest
 
 from devtools.benchmarks.common.server_runner import _api
+from ouroboros.delivery_facts import FACTS_NOTED_LINE
 from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
 from tests.system_e2e.harness import (
     LANE_MOCK, ArtifactOracle, ModelGate, ScriptedStubModel, body_text, conversation_turn_row,
@@ -58,6 +59,40 @@ def _received_turn(oracle: ArtifactOracle, client_message_id: str) -> dict | Non
     return None
 
 
+class _TurnScripts(ScriptedStubModel):
+    """A script per turn, chosen by what the turn was asked rather than by arrival order.
+
+    A turn is named by the marker that comes last in its user rows, so Main's later turn (whose history quotes the
+    held message) reads its own script. A request no marker names fails loudly; an exhausted script answers a loud
+    final instead of borrowing another turn's step. ``served`` records ``(turn, body)`` per consumed step."""
+
+    MARKERS = {"held": "S27_HOLD", "project": "write project.txt", "main": "write main.txt"}
+
+    def __init__(self, scripts: dict, *, gate: ModelGate) -> None:
+        super().__init__(gate=gate, final_answer="S27_SCRIPT_EXHAUSTED")
+        self.scripts = {turn: list(steps) for turn, steps in scripts.items()}
+        self.served: list = []
+
+    def _turn(self, body: dict) -> str:
+        text = "\n".join(message_text(m) for m in body.get("messages") or []
+                         if isinstance(m, dict) and m.get("role") == "user")
+        turn, at = max(((turn, text.rfind(marker)) for turn, marker in self.MARKERS.items()), key=lambda row: row[1])
+        assert at >= 0, "S27: a model request no turn marker names"
+        return turn
+
+    def _next_step(self, body):
+        turn = self._turn(body)
+        queue = self.scripts[turn]
+        if not queue:
+            return None
+        self.served.append((turn, body))
+        return queue.pop(0)
+
+    def script_consumed(self) -> bool:
+        with self._lock:
+            return not any(self.scripts.values())
+
+
 @pytest.mark.integration
 def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone, tmp_path):
     require_lane(LANE_MOCK)
@@ -69,22 +104,30 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
     script.write_text(MCP_SOURCE, encoding="utf-8")
     (mcp_dir / "input.txt").write_text("S27_READ_яё𐍈🚀", encoding="utf-8")
     read_tool, write_tool = "mcp_fixture__read_note", "mcp_fixture__write_note"
-    steps = [
-        {"tool": read_tool, "arguments": {"name": "input.txt"}},
-        {"tool": write_tool, "arguments": {"name": "project.txt", "text": "S27_PROJECT_WRITE"}},
-        {"tool": "write_file", "arguments": {
-            "root": "active_workspace", "path": "room-result.txt", "content": "S27_ROOM_WRITE",
-        }},
-        {"final": "S27_PROJECT_COMPLETE"},
-        {"final": "S27_HELD_COMPLETE"},
-        {"tool": read_tool, "arguments": {"name": "input.txt"}},
-        {"tool": write_tool, "arguments": {"name": "main.txt", "text": "S27_MAIN_WRITE"}},
-        {"final": "S27_MAIN_COMPLETE"},
-    ]
+    # Each turn reads its own script (``_TurnScripts``): the product promises no order between the held Main
+    # turn and the Project turn, and the Project turn's round count is the finish door's to decide.
+    scripts = {
+        "project": [
+            {"tool": read_tool, "arguments": {"name": "input.txt"}},
+            {"tool": write_tool, "arguments": {"name": "project.txt", "text": "S27_PROJECT_WRITE"}},
+            {"tool": "write_file", "arguments": {
+                "root": "active_workspace", "path": "room-result.txt", "content": "S27_ROOM_WRITE",
+            }},
+            {"final": "S27_PROJECT_COMPLETE"},
+            # The room write meets the finish door's one notice (#3280), which leaves the next answer fresh (#3659):
+            # the turn answers once more, and that prose is delivered as written.
+            {"final": "S27_PROJECT_COMPLETE"},
+        ],
+        "held": [{"final": "S27_HELD_COMPLETE"}],
+        "main": [
+            {"tool": read_tool, "arguments": {"name": "input.txt"}},
+            {"tool": write_tool, "arguments": {"name": "main.txt", "text": "S27_MAIN_WRITE"}},
+            {"final": "S27_MAIN_COMPLETE"},
+        ],
+    }
     gate = ModelGate(lambda body: bool(body.get("tools")) and "S27_HOLD" in body_text(body),
                      timeout=300)
-    # The room write meets the finish door's one notice (#3280); the held answer is then selected.
-    with ScriptedStubModel(steps, gate=gate, select_retained=True) as stub:
+    with _TurnScripts(scripts, gate=gate) as stub:
         settings = keyless_settings(stub, MCP_ENABLED=True, MCP_SERVERS=[{
             "id": "fixture", "enabled": True, "transport": "stdio", "command": sys.executable,
             "args": [str(script)], "cwd": str(mcp_dir),
@@ -158,16 +201,18 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
             assert not [row for row in oracle._jsonl("logs/chat.jsonl")
                         if row.get("type") == "project_completion_summary"
                         and row.get("task_id") == project_id], "ordinary Project reply leaked into Main"
-            # The room write meets the finish door's one notice (#3280): the Project turn delivers its held
-            # answer through finish_task, one more agent call; the MCP-only Main turn finishes plainly.
+            # The room write meets the finish door's one notice (#3280) and the Project turn's next prose is
+            # delivered as written (#3659), with no finish_task selection; the MCP-only Main turn finishes plainly.
+            notice = [body for turn, body in stub.served if turn == "project" and FACTS_NOTED_LINE in body_text(body)]
+            assert len(notice) == 1, [turn for turn, _ in stub.served]
             for task_id, expected in ((main_id, {read_tool, write_tool}),
-                                      (project_id, {read_tool, write_tool, "write_file", "finish_task"})):
+                                      (project_id, {read_tool, write_tool, "write_file"})):
                 rows = [r for r in oracle.tools_rows() if r.get("task_id") == task_id]
                 assert {r.get("tool") for r in rows} == expected, rows
                 assert "S27_READ_яё𐍈🚀" in json.dumps(rows, ensure_ascii=False), rows
                 assert all(not r.get("is_error") for r in rows), rows
             agent_calls = [body for kind, body in stub.calls if kind == "agent"]
-            assert len(agent_calls) == 6 and stub.script_consumed(), stub.kinds()
+            assert len(agent_calls) == 5 and stub.script_consumed(), (stub.kinds(), stub.scripts)
             # An unpinned server's call schemas load on demand (#2332): every request names its tools in
             # the connections map and carries the loader; the calls above ran without loading them.
             for body in agent_calls:
