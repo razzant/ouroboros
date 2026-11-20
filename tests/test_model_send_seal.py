@@ -175,8 +175,12 @@ def test_usage_inspection_hold_refuses_to_write_migrate_or_export_before_opening
     assert not (data_root / usage_store.STORE_REL).exists()
 
 
-def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_root, capsys):
-    from ouroboros.context_attempt_reader import main
+def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_root, capsys, monkeypatch):
+    """A view's skeleton names each message by a token longer than a short message, so it can be larger than the
+    request it spells. The bound is the request's: the --max-bytes a gap names reads the request on that run."""
+    import hashlib
+
+    from ouroboros import context_attempt_reader as reader, observability
     from ouroboros.evidence_packs import shared_placement_path
 
     attempt = _dispatch(data_root, 'short-reader-test', payload={
@@ -185,8 +189,16 @@ def test_local_request_reader_logical_bound_is_not_shared_skeleton_bound(data_ro
     ref = _manifest(attempt)['redacted_projection_ref']
     placement = shared_placement_path(data_root, ref['sha256'])
     assert len(gzip.decompress(placement.read_bytes())) > ref['size']
-    assert main(['--data-root', str(data_root), 'short-reader-test', '--attempt', attempt['attempt_id'],
-                 '--max-bytes', str(ref['size'])]) == 0
+    raw = observability.read_blob_ref(data_root, ref, max_bytes=ref['size'], raw_bytes=True)
+    assert hashlib.sha256(raw).hexdigest() == ref['sha256'] and len(raw) == ref['size']
+    with pytest.raises(ValueError, match='byte limit'):
+        observability.read_blob_ref(data_root, ref, max_bytes=ref['size'] - 1, raw_bytes=True)
+    args = ['--data-root', str(data_root), 'short-reader-test', '--attempt', attempt['attempt_id']]
+    monkeypatch.setattr(reader, '_BODY_LIMIT', 1)  # the request is over this (here lowered) default
+    assert reader.main([*args, '--report']) == 0
+    named = json.loads(capsys.readouterr().out)['facts']['retry_max_bytes']
+    assert named == ref['size']
+    assert reader.main([*args, '--max-bytes', str(named)]) == 0
     assert 'go' in capsys.readouterr().out
 
 

@@ -118,6 +118,26 @@ def test_splice_reproduces_the_encoder_bytes_for_random_documents(subtests):
             assert shared_documents > 200
 
 
+def test_a_skeleton_read_in_chunks_splices_the_same_whole_and_bounds_only_the_whole(subtests):
+    """``splice_chunks`` splices what ``splice`` does wherever a chunk's end cuts a token, in both token spellings. A
+    skeleton longer than its whole (short elements behind longer tokens) is read by the whole's own size and refused
+    one byte under it."""
+    document = {"messages": [{"role": "user", "content": "go"}, {"role": "assistant", "content": "ok"}],
+                "tools": [{"name": "x"}], "model": "m"}
+    for name in sorted(ENCODERS):
+        tokenized = sv.tokenize(document, ENCODERS[name][0])
+        if tokenized is None:
+            continue
+        with subtests.test(name=name):
+            skeleton, whole = tokenized.skeleton, tokenized.whole()
+            assert len(skeleton) > len(whole)
+            for size in range(1, len(skeleton) + 1):
+                chunks = (skeleton[at:at + size] for at in range(0, len(skeleton), size))
+                assert sv.splice_chunks(chunks, tokenized.parts, limit=len(whole)) == whole
+            with pytest.raises(ValueError, match="byte limit"):
+                sv.splice_chunks(iter([skeleton]), tokenized.parts, limit=len(whole) - 1)
+
+
 def test_elements_are_the_outermost_dicts_of_lists_reached_through_dicts():
     document = {
         "messages": [{"role": "user", "content": [{"type": "text", "text": "inner block stays inside"}]},
