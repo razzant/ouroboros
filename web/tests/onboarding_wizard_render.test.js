@@ -248,7 +248,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
     const catalogReads = [];
     const fetch = (url, init) => {
         // The Models step reads the catalog of the draft's own access: the key typed here, which no saved file holds.
-        if (String(url) === '/api/onboarding/model-catalog') {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
             catalogReads.push(JSON.parse(init.body));
             const body = { items: [], model_sources: [], errors: [] };
             return Promise.resolve({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
@@ -813,7 +813,7 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/onboarding/model-catalog') body = subscription.catalog;
+        if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
@@ -892,7 +892,7 @@ test('a slot still holding a preview\'s proposal takes the proposal of a changed
             if (String(url) === '/api/onboarding/complete') {
                 posted.push(JSON.parse(init.body));
                 body = { ok: true, runtime_mode: 'advanced', restart_required: false };
-            } else if (String(url) === '/api/onboarding/model-catalog') body = subscription.catalog;
+            } else if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) body = subscription.catalog;
             else if (String(url) === '/api/claudexor/status') body = subscription.status;
             else if (String(url) === '/api/onboarding/subagents/preview') {
                 const payload = JSON.parse(init.body);
@@ -941,12 +941,9 @@ test('a slot still holding a preview\'s proposal takes the proposal of a changed
         [TEST, TEST, OWNER_VISION], 'nothing is adopted over an edited Models step: Light stays as shown, Vision is the owner\'s');
 });
 
-// A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
-// answer (the list of a key since replaced) must not land. This stand-in DOM paints no model list, so the test reads
-// what a landed answer changes on the wire: the wizard would hold the replaced key's list as the one read whole and
-// ask again for the first key's when Models reopens. No account is connected until the end, so until then nothing
-// but the owner's own asks reads the catalog; the account that connects then reads with the key he last asked with.
-// And the limits line speaks only for an answered preview.
+// A full Retry with the second key is still in flight when Models reopens with the first key. Models reads only
+// that provider once under the restored key. Subsequent opens reuse it. A later account change reads descriptors
+// independently, and the limits line still speaks only for an answered preview.
 test('a replaced key\'s catalog never lands late, the key asked again stays the asked one, and a failed preview leaves the limits line unsaid', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const held = [];
@@ -956,12 +953,13 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
     const answer = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
     const listed = (id) => ({ items: [{ provider_id: 'openrouter', id, value: id, name: id }], model_sources: [], errors: [] });
     const fetch = async (url, init = {}) => {
-        if (String(url) === '/api/onboarding/model-catalog') {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
             const typed = JSON.parse(init.body).OPENROUTER_API_KEY;
             reads.push(typed.split('-')[3]);
             if (typed !== 'sk-or-v1-second-not-a-secret') return answer(listed('first/model'));
             return new Promise((resolve) => held.push(() => resolve(answer(listed('late/from-replaced-key')))));
         }
+        if (String(url) === '/api/model-catalog?view=sources') return answer(subscription.catalog);
         if (String(url) === '/api/claudexor/status') {
             return answer({ ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: subscription.status.profiles.profiles.slice(0, accounts) } });
@@ -979,18 +977,18 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         const type = (value) => { const key = doc.getElementById('openrouter-key'); key.value = value; key.fire('input'); };
         const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
         type('sk-or-v1-first-not-a-secret');
-        await click('next-btn');                                        // Accounts → Models: this access is read whole
+        await click('next-btn');                                        // Accounts → Models: this provider is read
         await click('back-btn');
         type('sk-or-v1-second-not-a-secret');
         await click('onboarding-access-retry');                         // the owner asks again: a read with the second key, held
         assert.equal(held.length, 1);
         type('sk-or-v1-first-not-a-secret');                            // back to the key already read
-        await click('next-btn');                                        // Models opens: nothing to read, the held read is dropped
+        await click('next-btn');                                        // Models opens: read the restored key, retire the held Retry
         held.forEach((release) => release());
         await settle();
         await click('back-btn');
-        await click('next-btn');                                        // Models again, same key: still the list read whole
-        assert.deepEqual(reads, ['first', 'second'], 'the late answer did not become the list read whole');
+        await click('next-btn');                                        // Models again: reuse the list for this key
+        assert.deepEqual(reads, ['first', 'second', 'first'], 'return to the changed access reads it once and discards the late answer');
         await click('next-btn');                                        // Models → Access
         await click('next-btn');                                        // Access → Consciousness
         await click('next-btn');                                        // Consciousness → limits: the answered preview's line
@@ -1014,27 +1012,27 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         await click('next-btn');                                        // a forced preview that fails
         const line = doc.getElementById('budget-gaps');
         assert.deepEqual([line.hidden, line.textContent], [true, ''], 'no answered preview of this draft: nothing is claimed');
-        // Going back to the first key and opening Models reused its list, and was still his ask: an account that
-        // connects now reads with that key, not with the access the wizard opened with.
+        // An account that connects now acquires subscription evidence independently.
         const asked = reads.length;
         accounts = 1;
         await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads.slice(asked), ['first'], 'the unasked read sends the key he last asked with');
+        assert.deepEqual(reads.slice(asked), [], 'account discovery reads its own subscription sources without sending a provider key');
     }, { fetch });
 });
 
-// A key or an address being typed leaves the page only when the owner asks for the list (the Models step, Retry). A
-// read he did not ask for (an account connecting meanwhile) sends the access the wizard opened with, and it is made
-// for every such change: a second account of a family already connected is read too.
+// An account changing on the Accounts step reads subscription sources. Only the Models step or an explicit
+// Retry can send the typed key to a provider for discovery.
 test('an account that connects while a key is being typed never sends that key; opening Models does', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     let accounts = 0;
     const reads = [];
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/onboarding/model-catalog') {
+        if (String(url).startsWith('/api/onboarding/model-catalog')) {
             reads.push(JSON.parse(init.body).OPENROUTER_API_KEY);
+            body = subscription.catalog;
+        } else if (String(url) === '/api/model-catalog?view=sources') {
             body = subscription.catalog;
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
@@ -1054,14 +1052,14 @@ test('an account that connects while a key is being typed never sends that key; 
         accounts = 1;
         await claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads, [''], 'the unasked read carries the access the wizard opened with');
+        assert.deepEqual(reads, [], 'subscription discovery never posts a draft API key');
         accounts = 2;                                    // a second account of the same family
         await claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads, ['', ''], 'its list is read too, still without the key being typed');
+        assert.deepEqual(reads, [], 'account changes do not ask a provider while the key is being typed');
         doc.getElementById('next-btn').fire('click');   // Accounts → Models: the owner asks for the list
         await settle();
-        assert.deepEqual(reads, ['', '', 'sk-or-v1-typed-not-a-secret']);
+        assert.deepEqual(reads, ['sk-or-v1-typed-not-a-secret']);
         doc.getElementById('back-btn').fire('click');
         await settle();
         const asked = reads.length;                      // while the draft is the one he asked with, it may be read again
@@ -1070,7 +1068,7 @@ test('an account that connects while a key is being typed never sends that key; 
         accounts = 1;                                    // and an account leaves meanwhile
         await claudexorStatus.refresh();
         await settle();
-        assert.deepEqual(reads.slice(asked), [''], 'a key deleted since he last asked is not sent again');
+        assert.deepEqual(reads.slice(asked), [], 'a key deleted since he last asked is not sent again');
     }, { fetch });
 });
 
@@ -1082,7 +1080,7 @@ test('an account that connects while a key is being typed never sends that key; 
 test('a key typed on a fresh install carries Responses and its profile in the draft; a configured key keeps its API and its models', async () => {
     const reads = [];
     const fetch = async (url, init = {}) => {
-        const catalog = String(url) === '/api/onboarding/model-catalog';
+        const catalog = String(url).startsWith('/api/onboarding/model-catalog');
         if (catalog) reads.push(JSON.parse(init.body));
         const body = catalog ? { items: [], model_sources: [], errors: [] } : {};
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
@@ -1192,7 +1190,7 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: connected ? subscription.status.profiles.profiles : [] } };
-        } else if (String(url) === '/api/onboarding/model-catalog') {
+        } else if (String(url) === '/api/model-catalog?view=sources' || String(url).startsWith('/api/onboarding/model-catalog')) {
             body = subscription.catalog;
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };

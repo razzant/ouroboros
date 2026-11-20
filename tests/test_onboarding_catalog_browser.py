@@ -13,6 +13,40 @@ from tests.test_subscription_setup_browser import subscription_ui as subscriptio
 pytestmark = [pytest.mark.ui_browser]
 
 
+def test_wizard_lists_a_subscription_while_the_selected_draft_provider_is_slow(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    ui["bootstrap"]["initialState"].update(
+        mainModel="openai::saved", automaticModels=[], lightModel="", fallbackModel="",
+        visionModel="", safetyModel="", consciousnessModel="")
+    ui["fixture"]["preview"]["model_settings"] = {}
+    pending = []
+    page.route("**/api/onboarding/model-catalog?provider_id=openai", lambda route: pending.append(route))
+    page.goto(ui["url"] + "/onboarding")
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator("#openai-key").fill("openai-draft-test-credential")
+    page.locator("#openrouter-key").fill("openrouter-unselected-test-credential")
+    with page.expect_request("**/api/onboarding/model-catalog?provider_id=openai"):
+        page.click("#next-btn")
+    main = page.locator('[data-model-role="main"]')
+    expect(main.locator("[data-model-role-model]")).to_have_value("saved")
+    main.locator("[data-source-picker]").click()
+    page.get_by_role("option", name="Codex (model)", exact=True).click()
+    model = main.locator("[data-model-role-model]")
+    model.fill("gpt")
+    page.locator(f'#{model.get_attribute("aria-controls")} [data-model-value="gpt-test"]').click()
+    assert pending and pending[0].request.method == "POST"
+    assert pending[0].request.post_data_json["OPENAI_API_KEY"] == "openai-draft-test-credential"
+    for route in pending:
+        route.fulfill(json={"items": [{"value": "openai::a-late-model"}], "errors": [], "model_sources": []})
+    expect(model).to_have_value("gpt-test")
+    expect(main.locator("[data-model-role-source]")).to_have_value("subscription:codex")
+    assert not any(url.endswith(("/api/onboarding/model-catalog", "/api/model-catalog",
+                                 "provider_id=openrouter")) for url in ui["reads"])
+    assert not any("/api/model-catalog?provider_id=" in url for url in ui["reads"]), "draft keys read only the setup endpoint"
+
+
 @pytest.mark.parametrize("viewport", [(980, 780), (900, 900), (390, 844), (1360, 900)])
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscription_ui, viewport, theme, tmp_path):

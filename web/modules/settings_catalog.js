@@ -27,7 +27,7 @@ export function accountCatalogRefreshKey(view) {
 }
 
 /** Own the Accounts subscription beside catalog refresh; never reload Settings. */
-export function watchAccountModelCatalog() {
+export function watchAccountModelCatalog(refresh = refreshModelCatalog) {
     let ready = false;
     let lastKey = null;
     const dispose = claudexorStatus.subscribe((view) => {
@@ -40,7 +40,7 @@ export function watchAccountModelCatalog() {
         }
         if (next === lastKey) return;
         lastKey = next;
-        void refreshModelCatalog();
+        void refresh();
     });
     return {
         arm() {
@@ -88,6 +88,56 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
         errors: incoming.errors || (incoming.error ? [{ error: incoming.error }] : []),
         items: merge('items', (item) => JSON.stringify([item.value || item.id, item.credential_profile_id || ''])),
         model_sources: merge('model_sources', (source) => source.id),
+    };
+}
+
+/** Address one model inventory. Subscription ids and API connections are distinct namespaces. */
+export function modelSlotCatalogQuery(source, profile = '') {
+    if (!source || source === 'inherit') return '';
+    const subscription = source.startsWith('subscription:');
+    const query = new URLSearchParams(subscription ? { source_id: source.slice(13) } : { provider_id: source });
+    if (subscription && profile) query.set('credential_profile_id', profile);
+    return query.toString();
+}
+
+/** The catalogs read by one editor. Only an answer for the same source/account can replace its evidence.
+ * A superseding refresh or a discarded draft retires its in-flight reads. Nothing here publishes a whole catalog. */
+export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = () => {} } = {}) {
+    const snapshots = new Map();
+    const requests = new Map();
+    function reset() {
+        for (const { controller } of requests.values()) controller.abort();
+        requests.clear();
+        snapshots.clear();
+    }
+    return {
+        get(query) { return snapshots.get(String(query)); },
+        read(query, { force = false } = {}) {
+            const key = String(query);
+            const pending = requests.get(key);
+            if (!force && pending) return pending.promise;
+            if (!force && snapshots.has(key)) return Promise.resolve(snapshots.get(key));
+            pending?.controller.abort();
+            const controller = new AbortController();
+            const promise = Promise.resolve().then(() => fetchCatalog(`/api/model-catalog?${key}`,
+                { cache: 'no-store', signal: controller.signal })).then(data => {
+                const field = key === 'view=sources' ? 'model_sources' : 'items';
+                if (!Array.isArray(data?.[field])) throw new Error(data?.error || 'Model catalog response is unreadable.');
+                return data;
+            }).catch(error => ({ read_state: 'transport', errors: [{ error: error.message || String(error) }] }))
+                .then(data => {
+                    if (controller.signal.aborted) return;
+                    requests.delete(key);
+                    const merged = mergeModelCatalog(snapshots.get(key), data);
+                    snapshots.set(key, merged);
+                    onUpdate(key, merged);
+                    return merged;
+                });
+            requests.set(key, { controller, promise });
+            return promise;
+        },
+        reset,
+        dispose: reset,
     };
 }
 

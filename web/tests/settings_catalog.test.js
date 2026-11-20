@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { createScopedModelCatalog, modelSlotCatalogQuery, catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
 import { claudexorStatus } from '../modules/claudexor_status_store.js';
 
 const first = {
@@ -8,6 +8,35 @@ const first = {
     model_sources: [{ id: 'opaque', label: 'Model service', credentialHarness: 'codex' }],
     observed_at: 'earlier', errors: [],
 };
+
+test('an editor coalesces identical reads and publishes only current evidence for each scope', async () => {
+    const replies = [];
+    const catalog = createScopedModelCatalog({ fetchCatalog: (url, init) => new Promise(resolve => replies.push({ url, resolve, signal: init.signal })) });
+    const api = modelSlotCatalogQuery('openrouter@team', 'ignored');
+    const subscription = modelSlotCatalogQuery('subscription:opaque/source', 'my account');
+    assert.equal(api, 'provider_id=openrouter%40team');
+    assert.equal(subscription, 'source_id=opaque%2Fsource&credential_profile_id=my+account');
+    const previous = catalog.read('view=sources');
+    assert.equal(catalog.read('view=sources'), previous);
+    const newer = catalog.read('view=sources', { force: true });
+    const apiRead = catalog.read(api);
+    await Promise.resolve();
+    replies[1].resolve(first);
+    await newer;
+    replies[0].resolve({ items: [], model_sources: [] });
+    await previous;
+    replies[2].resolve({ items: [{ value: 'openrouter@team::model' }], model_sources: [] });
+    await apiRead;
+    assert.deepEqual(catalog.get('view=sources').model_sources, first.model_sources);
+    assert.equal(catalog.get(api).items.length, 1);
+    const pending = catalog.read(subscription);
+    await Promise.resolve();
+    catalog.dispose();
+    replies[3].resolve(first);
+    await pending;
+    assert.equal(catalog.get(subscription), undefined);
+    assert.equal(catalog.get(api), undefined);
+});
 
 test('failed settlement reads stay retryable; successful receipts refresh once', async (t) => {
     const previousDocument = globalThis.document, previousFetch = globalThis.fetch;

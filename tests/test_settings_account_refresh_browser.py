@@ -48,16 +48,16 @@ def test_confirmed_accounts_refresh_models_without_replacing_draft(subscription_
         refresh_accounts()
     ui["fixture"]["status"] = connected
     ui["fixture"]["catalog"] = catalog
-    with page.expect_response(lambda response: response.url.endswith("/api/model-catalog"), timeout=5000):
+    with page.expect_response(lambda response: response.url.endswith("/api/model-catalog?view=sources"), timeout=5000):
         refresh_accounts()
     expect(source.locator('option[value="subscription:codex"]')).to_have_text("Codex (model)")
     expect(model).to_have_value("owner-unsaved-model")
     assert model.evaluate("e => e === window.ownerDraftNode && document.activeElement === e")
     assert model.evaluate("e => [e.selectionStart, e.selectionEnd]") == [4, 9]
     assert sum(url.endswith("/api/settings") for url in ui["reads"]) == settings_reads
-    reads = sum(url.endswith("/api/model-catalog") for url in ui["reads"])
+    reads = sum(url.endswith("/api/model-catalog?view=sources") for url in ui["reads"])
     refresh_accounts()
-    assert sum(url.endswith("/api/model-catalog") for url in ui["reads"]) == reads
+    assert sum(url.endswith("/api/model-catalog?view=sources") for url in ui["reads"]) == reads
     assert not ui["posts"], "discovery cannot save or replace the owner's draft"
     capture(page, f"settings-account-{transition}")
 

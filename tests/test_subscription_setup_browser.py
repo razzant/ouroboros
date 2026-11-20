@@ -364,7 +364,7 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": credential_harness},
     ]
-    with page.expect_response("**/api/onboarding/model-catalog"):
+    with page.expect_response("**/api/model-catalog?view=sources"):
         page.goto(ui["url"] + "/onboarding")
     page.wait_for_function(
         "expected => document.querySelector('#quick-start-btn').hidden !== expected", arg=expected)
@@ -763,7 +763,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     ui, page = subscription_ui, subscription_ui['page']
     ui['backend']['preview_error'] = 'Agent inventory unavailable.'
     held = []
-    page.route('**/api/onboarding/model-catalog', lambda route: held.append(route))
+    page.route('**/api/model-catalog?view=sources', lambda route: held.append(route))
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Checking model sources')")
     assert held
@@ -772,7 +772,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
-    page.unroute('**/api/onboarding/model-catalog')
+    page.unroute('**/api/model-catalog?view=sources')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
 

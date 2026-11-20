@@ -933,9 +933,9 @@ class ModelCatalogItem(TypedDict, total=False):
 
 
 class ModelCatalogResponse(TypedDict, total=False):
-    """``GET /api/model-catalog``: with ``source_id`` (and optionally ``credential_profile_id``) one
-    agent account's models only; otherwise every configured provider's, each fetched with its own
-    20-second bound. A provider that failed is an ``errors`` row and the read is still 200: absent
+    """``GET /api/model-catalog``: ``view=sources`` reads subscription descriptors with empty ``items``.
+    ``source_id`` and optional ``credential_profile_id`` select subscription models. ``provider_id`` reads one
+    API connection or the configured local model. The full catalog collects subscriptions and API connections concurrently with a 20-second limit per read. A provider that failed is an ``errors`` row and the read is still 200: absent
     models are unknown, not proof of none. ``model_sources`` and ``account_catalogs`` are the
     engine's model-source and per-account catalog objects, passed through; ``partial`` marks an
     incomplete account view."""

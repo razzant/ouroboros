@@ -295,6 +295,7 @@ def _provider_specs(
     settings: dict,
     *,
     record_image_input: bool = False,
+    provider_id: str | None = None,
 ) -> list[tuple[str, Callable[[httpx.AsyncClient], Awaitable[list[dict[str, str]]]]]]:
     """One catalog read per connection that can serve (built-in and named), keyed by its source id."""
     from ouroboros.llm_attempt import ConnectionUnavailable
@@ -307,13 +308,16 @@ def _provider_specs(
     specs = []
     for route in connection_routes(rows):
         kind, name = route.kind, route.connection
+        source = connection_id(kind, name)
+        if provider_id is not None and provider_id != source:
+            continue
         try:
-            target = resolve_target(f"{connection_id(kind, name)}::catalog", settings)
+            target = resolve_target(f"{source}::catalog", settings)
         except ConnectionUnavailable:
             continue
         # A compatible endpoint lists its models with or without a key (the legacy base too).
         if target.get("base_url") if kind == "openai-compatible" else connection_configured(route, settings.get, rows):
-            specs.append((connection_id(kind, name), _labelled_loader(
+            specs.append((source, _labelled_loader(
                 _connection_loader(kind, target, record_image_input, cache_ttl), kind, name, connection_display(kind, name, rows))))
     return specs
 
@@ -334,7 +338,7 @@ def _local_model_entry(settings: dict) -> dict | None:
 
 
 def _catalog_error_stage(exc: Exception) -> str:
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
         return "timeout"
     if isinstance(exc, httpx.ConnectError):
         return "connect"
@@ -356,7 +360,7 @@ async def _load_provider(
     started = time.perf_counter()
     log.info("model_catalog provider=%s stage=start", provider_id)
     try:
-        items = await loader(client)
+        items = await asyncio.wait_for(loader(client), timeout=_CATALOG_HTTP_TIMEOUT_SEC)
         duration_ms = int((time.perf_counter() - started) * 1000)
         log.info(
             "model_catalog provider=%s stage=success duration_ms=%s item_count=%s",
@@ -368,14 +372,15 @@ async def _load_provider(
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
         stage = _catalog_error_stage(exc)
+        message = str(exc) or (f"Catalog read exceeded {_CATALOG_HTTP_TIMEOUT_SEC:g}s" if stage == "timeout" else type(exc).__name__)
         log.warning(
             "model_catalog provider=%s stage=%s duration_ms=%s error=%s",
             provider_id,
             stage,
             duration_ms,
-            exc,
+            message,
         )
-        return [], {"provider_id": provider_id, "error": str(exc), "stage": stage, "duration_ms": duration_ms}
+        return [], {"provider_id": provider_id, "error": message, "stage": stage, "duration_ms": duration_ms}
 
 
 def account_catalog_supported(operations: list[dict], path: str) -> bool:
@@ -399,7 +404,7 @@ def account_catalog_models(envelope: dict):
                     yield account, catalog, model
 
 
-def _subscription_model_catalog(source_id: str = "", profile_id: str = "") -> dict:
+def _subscription_model_catalog(source_id: str = "", profile_id: str = "", *, sources_only: bool = False) -> dict:
     """Read raw transport catalogs from the owned engine, never CLI model inventory.
 
     Account-view engines enumerate every enabled account, retaining independent
@@ -420,9 +425,11 @@ def _subscription_model_catalog(source_id: str = "", profile_id: str = "") -> di
             account_view = account_catalog_supported(operations, "/v2/model-sources/:id/models")
             source_view = account_catalog_supported(operations, "/v2/model-sources")
             sources = gateway.list_model_sources(**({"view": "accounts"} if source_view else {})).get("sources", [])
+            result["model_sources"] = sources
+            if sources_only:
+                return result
             if account_view:
                 result.update(account_catalogs=[], partial=False)
-            result["model_sources"] = sources
             for source in sources:
                 identifier = str(source.get("id") or "")
                 if source_id and identifier != source_id:
@@ -492,20 +499,27 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     query = _request.query_params if _request is not None else {}
     source_id = str(query.get("source_id") or "").strip()
     profile_id = str(query.get("credential_profile_id") or "").strip()
+    if query.get("view") == "sources":
+        if source_id or profile_id or "provider_id" in query:
+            return json_error("view=sources cannot be combined with a source, profile or provider selector", 400)
+        return JSONResponse(await asyncio.to_thread(_subscription_model_catalog, sources_only=True))
+    if "provider_id" in query:
+        provider_id = query["provider_id"].strip()
+        if not provider_id or source_id or profile_id:
+            return json_error("provider_id must name one connection without a subscription selector", 400)
+        return JSONResponse(await catalog_payload(load_settings(), provider_id=provider_id))
     if profile_id and not source_id:
         return json_error("credential_profile_id requires source_id", 400)
-    subscription = await asyncio.to_thread(_subscription_model_catalog, source_id, profile_id)
     if source_id:
-        return JSONResponse(subscription)
-    return JSONResponse(await catalog_payload(load_settings(), subscription))
+        return JSONResponse(await asyncio.to_thread(_subscription_model_catalog, source_id, profile_id))
+    return JSONResponse(await catalog_payload(load_settings()))
 
 
-async def draft_catalog(saved: dict, draft: dict, typed: set) -> dict:
+async def draft_catalog(saved: dict, draft: dict, typed: set, *, provider_id: str | None = None) -> dict:
     """The catalog of an unsaved settings draft (the setup wizard's): ``catalog_payload`` over ``draft``, recording
     no capability evidence. A connection whose kept secret the draft would send somewhere it was not saved for is
     not asked: its reason is its error row (``_saved_secret_moved``; ``typed`` is what the draft's author typed)."""
-    subscription = await asyncio.to_thread(_subscription_model_catalog)
-    return await catalog_payload(draft, subscription, refused=lambda source_id: _saved_secret_moved(
+    return await catalog_payload(draft, provider_id=provider_id, refused=lambda source_id: _saved_secret_moved(
         source_id, *_kept_binding(source_id, saved, draft), typed))
 
 
@@ -534,17 +548,40 @@ def _kept_binding(source_id: str, saved: dict, draft: dict) -> tuple[dict, dict]
     return next((pair for pair in pairs if reached(pair[1]) and reached(pair[1]) == reached(draft)), (saved, draft))
 
 
-async def catalog_payload(settings: dict, subscription: dict, *, refused: Callable[[str], str] | None = None) -> dict:
-    """The catalog of ``settings``: the engine's rows (``subscription``), every API connection that can serve and
-    the local model. ``refused`` (a draft read) names why a connection is not asked, and nothing is recorded."""
-    items = list(subscription["items"])
-    errors = list(subscription["errors"])
+async def catalog_payload(settings: dict, *, provider_id: str | None = None,
+                          refused: Callable[[str], str] | None = None) -> dict:
+    """Read independent inventories together. A selected API connection needs no subscription read.
+    A draft names refused connections and records no capability evidence."""
+    if provider_id is not None:
+        return await _api_catalog(settings, provider_id, refused)
+    # A whole-list client has one response budget. Slow subscription discovery must not consume
+    # the API connections' time before they even start, or discard their already returned models.
+    async def subscriptions():
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_subscription_model_catalog), _CATALOG_HTTP_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            return {"model_sources": [], "items": [], "errors": [{"provider_id": "claudexor", "stage": "timeout",
+                    "error": "Subscription catalogs did not answer in time."}]}
+    engine, api = await asyncio.gather(subscriptions(), _api_catalog(settings, None, refused))
+    items = sorted(engine["items"] + api["items"], key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
+    return {**engine, "items": items, "errors": engine["errors"] + api["errors"]}
+
+
+async def _api_catalog(settings, provider_id, refused):
+    result = {"items": [], "errors": [], "model_sources": []}
+    if provider_id == "local":
+        return {**result, "items": list(filter(None, [_local_model_entry(settings)]))}
+    items = result["items"]
+    errors = result["errors"]
     kept_at: dict[str, int] = {}
-    specs = _provider_specs(settings, record_image_input=refused is None)
-    for provider_id, reason in [(spec[0], refused(spec[0])) for spec in specs] if refused else ():
+    specs = _provider_specs(settings, record_image_input=refused is None, provider_id=provider_id)
+    if provider_id is not None and not specs:
+        return {**result, "errors": [{"provider_id": provider_id, "stage": "configuration",
+                                            "error": "This connection has no configured model catalog."}]}
+    for source, reason in [(spec[0], refused(spec[0])) for spec in specs] if refused else ():
         if reason:
-            errors.append({"provider_id": provider_id, "error": reason, "stage": "kept_key", "duration_ms": 0})
-            specs = [spec for spec in specs if spec[0] != provider_id]
+            errors.append({"provider_id": source, "error": reason, "stage": "kept_key", "duration_ms": 0})
+            specs = [spec for spec in specs if spec[0] != source]
 
     timeout = httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)
     try:
@@ -552,7 +589,7 @@ async def catalog_payload(settings: dict, subscription: dict, *, refused: Callab
     except ExtraCaBundleError as exc:
         # A misconfigured trust bundle is a fact for the owner to read, not a bare 500:
         # keep the engine catalog, name the setting, skip the API providers this turn.
-        errors.append({"provider_id": "extra_ca_bundle", "error": str(exc), "stage": "trust", "duration_ms": 0})
+        errors.append({"provider_id": provider_id or "extra_ca_bundle", "error": str(exc), "stage": "trust", "duration_ms": 0})
         results = []
     else:
         async with httpx.AsyncClient(timeout=timeout, **verify) as client:
@@ -578,9 +615,10 @@ async def catalog_payload(settings: dict, subscription: dict, *, refused: Callab
                 kept_at[value] = len(items)
                 items.append(item)
 
-    items.extend(filter(None, [_local_model_entry(settings)]))
+    if provider_id is None:
+        items.extend(filter(None, [_local_model_entry(settings)]))
     items.sort(key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
-    return {**subscription, "items": items, "errors": errors}
+    return {**result, "items": items, "errors": errors}
 
 
 async def api_local_model_start(request: Request) -> JSONResponse:

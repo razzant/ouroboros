@@ -360,7 +360,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
             const id = view.editorId;
             onDomWrite(() => {
                 view.sharedFallbackLocal = settings.USE_LOCAL_FALLBACK === true || settings.USE_LOCAL_FALLBACK === 'true';
-                view.editor = createModelRolesEditor({ hostId: id, store, doc: getDoc, showContext: false,
+                view.editor = createModelRolesEditor({ hostId: id, store, doc: getDoc, catalogFetch: read, readApiCatalog: read, showContext: false,
                     onChange: () => onDomWrite(() => paint(taskId)) });
                 // The picker offers the same configured API providers as Models,
                 // so the wait panel needs this document's credential fields too.
@@ -373,8 +373,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
                 return true;
             });
             onDomWrite(() => paint(taskId));
-            const catalog = await read('/api/model-catalog', { cache: 'no-store', signal: readAbort.signal });
-            if (!destroyed && view.node.isConnected) onDomWrite(() => { view.editor?.adoptCatalog(catalog); return true; });
+            await view.editor?.refreshCatalogs({ force: false });
         } catch (error) {
             if (!destroyed) { view.error = String(error?.message || error); onDomWrite(() => paint(taskId)); }
         } finally { view.loading = false; }

@@ -123,11 +123,16 @@ def suggestions(page, field, expected=None):
 
 
 def refresh(ui):
-    ui["page"].evaluate("""async () => {
+    """An account read recovers while the owner is typing. The open form renews its scoped inventory."""
+    status = ui["fixture"]["status"]
+    request = """async () => {
         const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
         await claudexorStatus.refresh({includeModels:true});
-        await (await import('/static/modules/settings_catalog.js')).refreshModelCatalog();
-    }""")
+    }"""
+    status["reads"]["accounts"] = "failed"
+    ui["page"].evaluate(request)
+    status["reads"]["accounts"] = "ok"
+    ui["page"].evaluate(request)
 
 
 def assert_saved(ui, consumer, model, pin):

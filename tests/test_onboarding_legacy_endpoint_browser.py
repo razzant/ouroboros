@@ -192,7 +192,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
 
         # Models: the legacy server is a usable source with its own discovery; official OpenAI stays a choice. The step
         # opens with its own read of the draft's catalog, which lists that server once with the key saved for it.
-        with page.expect_response('**/api/onboarding/model-catalog') as step_read:
+        with page.expect_response('**/api/onboarding/model-catalog?provider_id=openai-compatible') as step_read:
             page.click('#next-btn')
         assert step_read.value.status == 200, step_read.value.text()
         assert [call["authorization"] for call in _listed(legacy_calls)] == [f"Bearer {LEGACY_KEY}"]
@@ -300,7 +300,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         expect(meta).to_contain_text(legacy_url)
         base.fill(dedicated_url)
         expect(status).to_have_text('Not saved')
-        with page.expect_response('**/api/onboarding/model-catalog') as step_read:
+        with page.expect_response('**/api/onboarding/model-catalog?provider_id=openai-compatible') as step_read:
             page.click('#next-btn')
         assert step_read.value.status == 200, step_read.value.text()
         listed_before, dedicated_before = len(_listed(legacy_calls)), len(_listed(dedicated_calls))
