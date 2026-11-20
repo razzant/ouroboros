@@ -67,7 +67,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         currentStep: STEP_ORDER[0],
         error: '',
         saving: false,
-        modelsDirty: false,
         modelAccounts: {},
         modelContextWindows: {},
         apiAccessOpen: false,
@@ -118,6 +117,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const proposedModels = Object.fromEntries((INITIAL_STATE.automaticModels || []).map((key) => [key, INITIAL_STATE[key]]));
     const ours = (key) => key in proposedModels && state[key] === proposedModels[key];
     const previewed = {};  // what a preview put into a slot: a slot still holding it is asked again, so an updated catalog proposes anew
+    const asked = (slot) => ours(slot.stateKey) && previewed[slot.stateKey] === state[slot.stateKey];
     let connectionsEditor = null;
     let footerObserver = null;
     let compatibleCatalogs = {};
@@ -127,7 +127,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
         delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
-        state.modelsDirty = true;
         markStepEdited();
     } });
 
@@ -139,10 +138,11 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim }), ...keyChoices.draft() };
     }
     const openedDraft = draftSettings();  // the access the install had saved when the wizard opened
-    function previewDraft() {  // the draft a preview asks with: blank where a slot still holds the preview's own proposal
-        const draft = draftSettings();
-        if (!state.skipSubscriptionPresets) MODEL_SLOTS.filter((slot) => ours(slot.stateKey) && previewed[slot.stateKey] === state[slot.stateKey])
-            .forEach((slot) => { draft[slot.settingKey] = ''; });
+    function previewDraft() {  // blank where a slot is asked again, only beside a Main asked again or blank (the server proposes only there)
+        const draft = draftSettings(), main = MODEL_SLOTS.find((slot) => slot.slot === 'main');
+        if (!state.skipSubscriptionPresets && main && (!draft[main.settingKey] || asked(main))) {
+            MODEL_SLOTS.filter(asked).forEach((slot) => { draft[slot.settingKey] = ''; });
+        }
         return draft;
     }
 
@@ -212,7 +212,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     // in a slot still ours, and stays ours: a saved or edited slot, blank included, is kept (#2969).
     function applySetupPreview(response) {
         if (!state.skipSubscriptionPresets) state.presetFailure = null;
-        if (!state.modelsDirty && response.model_settings) {
+        if (response.model_settings) {  // per slot: one the owner edited is his, an untouched one takes the new proposal
             const previous = JSON.stringify(draftSettings());
             MODEL_SLOTS.filter((slot) => slot.settingKey in response.model_settings && ours(slot.stateKey))
                 .forEach((slot) => {

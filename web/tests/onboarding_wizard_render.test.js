@@ -874,13 +874,18 @@ test('Summary says what an exhausted subscription quota does, with and without a
 // Review r1 (Astra M1): pressing Update on Accounts can bring a catalog row the first preview did not have (Luna). A
 // slot still holding what an earlier preview proposed is asked again, blank, so the next preview proposes from the new
 // catalog and Light moves to Luna; a Main the owner set is sent as set, and nothing is proposed beside it.
+// Review r2 (Carbon R2-MAJOR-1, Astra R2-4): slots are blanked only beside a Main that is itself asked again or blank
+// (the server proposes nothing beside the owner's Main, so the limits must be computed for the slots as held), and an
+// edit of another role keeps only that role: an untouched Light still takes the new proposal.
 test('a slot still holding a preview\'s proposal takes the proposal of a changed catalog; a Main the owner set is kept', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const [TEST, LUNA] = ['claudexor::codex=gpt-test', 'claudexor::codex=gpt-6-luna'];
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     const location = { origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding', replace() {} };
-    const finish = async (query, initial) => {
+    let catalogChanged = false;  // the catalog lists Luna (pressed Update) from the next preview on
+    const finish = async (query, initial, onModels = null) => {
         const previews = [], posted = [];
+        catalogChanged = !onModels;
         const fetch = async (url, init = {}) => {
             let body = {};
             if (String(url) === '/api/onboarding/complete') {
@@ -894,14 +899,17 @@ test('a slot still holding a preview\'s proposal takes the proposal of a changed
                 // As compile_model_settings: proposals only beside a Main awaiting one; Luna once the catalog lists it.
                 const proposes = !payload.OUROBOROS_MODEL || payload.OUROBOROS_MODEL === BOOTSTRAP.initialState.mainModel;
                 body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: [], partly_counted_spend: [],
-                    model_settings: proposes ? { OUROBOROS_MODEL: TEST, OUROBOROS_MODEL_LIGHT: previews.length > 1 ? LUNA : TEST } : {} };
+                    model_settings: proposes ? { OUROBOROS_MODEL: TEST, OUROBOROS_MODEL_LIGHT: catalogChanged && previews.length > 1 ? LUNA : TEST } : {} };
             }
             return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
         };
         const bootstrap = { ...BOOTSTRAP, freshInstall: true, initialState: { ...BOOTSTRAP.initialState, ...initial } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
-            for (let step = 0; step < 6; step += 1) { doc.getElementById('next-btn').fire('click'); await settle(); }
+            for (let step = 0; step < 6; step += 1) {
+                doc.getElementById('next-btn').fire('click'); await settle();
+                if (step === 0 && onModels) { await onModels(doc); catalogChanged = true; await settle(); }
+            }
         }, { fetch, location });
         assert.equal(posted.length, 1, 'the walk reached the completion POST');
         return { body: posted[0], previews };
@@ -916,6 +924,18 @@ test('a slot still holding a preview\'s proposal takes the proposal of a changed
     assert.ok(kept.previews.length > 0 && kept.previews.every((draft) => draft.OUROBOROS_MODEL === TEST), 'a set Main is sent as set');
     assert.equal(kept.body.OUROBOROS_MODEL, TEST);
     assert.notEqual(kept.body.OUROBOROS_MODEL_LIGHT, LUNA, 'nothing is proposed beside a Main the owner set');
+    // The roles editor's own input: the stand-in keeps one element per id, so the listener it bound is the one fired.
+    const edit = (id, value) => async (doc) => { const input = doc.getElementById(id); input.value = value; input.fire('input'); };
+    const OWNER_MAIN = 'claudexor::codex=main-owner', OWNER_VISION = 'claudexor::codex=vision-owner';
+    const mainEdited = await finish('owner-main-edited', {}, edit('main-model', OWNER_MAIN));
+    const asked = mainEdited.previews.filter((draft) => draft.OUROBOROS_MODEL === OWNER_MAIN);
+    assert.ok(asked.length > 0, 'a preview was asked after Main was edited');
+    assert.ok(asked.every((draft) => draft.OUROBOROS_MODEL_LIGHT === TEST), 'beside the owner\'s Main, Light is asked as held');
+    assert.deepEqual([mainEdited.body.OUROBOROS_MODEL, mainEdited.body.OUROBOROS_MODEL_LIGHT], [OWNER_MAIN, TEST]);
+    const visionEdited = await finish('owner-vision-edited', {}, edit('vision-model', OWNER_VISION));
+    assert.equal(visionEdited.previews.at(-1).OUROBOROS_MODEL_VISION, OWNER_VISION, 'the edited role is asked as set');
+    assert.deepEqual([visionEdited.body.OUROBOROS_MODEL, visionEdited.body.OUROBOROS_MODEL_LIGHT, visionEdited.body.OUROBOROS_MODEL_VISION],
+        [TEST, LUNA, OWNER_VISION], 'an untouched Light takes the new proposal; the edited Vision keeps the owner\'s value');
 });
 
 // A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
