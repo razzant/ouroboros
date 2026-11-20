@@ -71,8 +71,11 @@ def capture_reply_targets(rooms: Any, read: Callable[[], Any]) -> Any:
     """Batch a pure whole-view membership pass, not a transaction around its Python work.
 
     Take version marks lazily so a pass with no unstamped target costs nothing.
-    If a source changes during the pass, discard the projection and use ordinary
-    live resolution once. The closure returns its own facts, never writes them.
+    A store identity or chat text revision that moved during the pass makes its answers
+    stale: read again once, ordinary live resolution. A row appended meanwhile restarts
+    no grouping (this pass's own list of rows is fixed), and a target that stays
+    unresolved is decided again, under fresh marks, by the next read. The closure
+    returns its own facts, never writes them.
     """
     capture = {"rooms": rooms}
     token = _CAPTURED_TARGETS.set(capture)
@@ -82,8 +85,7 @@ def capture_reply_targets(rooms: Any, read: Callable[[], Any]) -> Any:
         _CAPTURED_TARGETS.reset(token)
     if "version" in capture:
         root = rooms.root
-        if (capture["version"] != (_store_identity(root), _text_revision(root))
-                or capture.get("used_unresolved") and capture["ends"] != _stream_ends(root)):
+        if capture["version"] != (_store_identity(root), _text_revision(root)):
             return read()
     return result
 
@@ -151,8 +153,6 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
             capture["ends"] = _stream_ends(root)
         ends = capture["ends"]
     if held is not None and held[1:] == (identity, revision, ends):
-        if capture is not None:
-            capture["used_unresolved"] = True
         return held[0][0], str(ref.get("task_id") or ""), _ref_chat(ref), False
     from ouroboros import dialogue_positions as dp
     from ouroboros.chat_chain import _row_chat_id, resolve_row
@@ -174,8 +174,6 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
         decision, ends = (reply_target_home(target), str(target.get("task_id") or ""), _row_chat_id(target),
                           private_main_row(dict(target))), None
     else:
-        if capture is not None:
-            capture["used_unresolved"] = True
         decision = (TARGET_UNKNOWN if statuses & {"row_unreadable", "row_ambiguous"} else TARGET_ABSENT,
                     "", 0, False)
     if identity is not None:

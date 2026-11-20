@@ -883,6 +883,76 @@ def test_memory_uses_one_reply_version_for_many_legacy_targets_and_rechecks_a_ra
     assert len(raced) == 1
 
 
+def test_an_append_during_a_missed_pass_costs_no_second_read_and_a_late_target_joins_the_next_one(
+        tmp_path, monkeypatch):
+    """A row appended during a whole-view pass is not that read's: the pass's own list is fixed,
+    so an unrelated append costs no second read, and only a moved store identity or chat text
+    revision re-reads a pass once it has answered. A miss is remembered under the stream ends it
+    was read with, so the next read decides it again: a target stored meanwhile joins its work's
+    Project then, never a stale absence."""
+    from ouroboros import memory_inventory as mi, room_membership as membership
+    from ouroboros.chronicle_store import ChronicleStore
+
+    nova = _project(tmp_path, "nova")
+    _born_in(tmp_path, "nova-root", nova)
+    ChronicleStore(tmp_path).ensure_activated()
+    missing = {**_SUMMARY, "ts": "2026-10-01T04:00:00Z", "text": "Initially absent target."}
+    legacy, reply = _legacy_reply(missing, "2026-10-01T07:00:00Z", "torn")
+    ds.append(tmp_path, "chat", reply, appearances=None)
+
+    def view():
+        gaps, quiet = {}, {}
+        return mi.open_rows_by_room(tmp_path, gaps=gaps, quiet=quiet), gaps, quiet
+
+    passes = 0
+    capture = membership.capture_reply_targets
+
+    def counted_capture(rooms, read):
+        def counted():
+            nonlocal passes
+            passes += 1
+            return read()
+        return capture(rooms, counted)
+
+    monkeypatch.setattr(membership, "capture_reply_targets", counted_capture)
+    lookup, missed, appended = membership._target_facts, [], []
+
+    def progress_after_miss(rooms, ref):
+        result = lookup(rooms, ref)
+        if ref.get("address") == legacy["address"]:  # strictly the missed ref's own address
+            missed.append(result[0])
+            if not appended:
+                appended.append(ds.append(tmp_path, "progress", {
+                    "ts": "2026-10-01T06:59:00Z", "chat_id": 1, "text": "Unrelated progress.",
+                }))
+        return result
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(membership, "_target_facts", progress_after_miss)
+        cold = view()
+    assert len(appended) == 1 and passes == 1  # one read call: an append is not this read's
+    assert set(missed) == {membership.TARGET_ABSENT}  # the proven miss, at its exact address
+    warm = view()
+    assert warm == cold and passes == 2  # the warm repeat: the same rows, gaps and quiet
+
+    created = []
+
+    def create_after_miss(rooms, ref):
+        result = lookup(rooms, ref)
+        if ref.get("address") == legacy["address"] and not created:
+            created.append(ds.append(tmp_path, "chat", missing, appearances=None))
+        return result
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(membership, "_target_facts", create_after_miss)
+        assert view() == cold and passes == 3  # the stored target is no same-read promise
+    fresh = view()
+    assert passes == 4 and fresh[1] == {}  # the next read decides the miss under the moved ends
+    assert "torn" in {meta.get("client_message_id") for _a, meta, _p in fresh[0][str(nova)]}
+    facts = mi.membership_facts(tmp_path)
+    assert membership._target_facts(facts.rooms, legacy)[0] == membership.TARGET_WORK
+
+
 def test_an_unreadable_target_is_a_gap_of_its_projects_memory_and_evidence_reads(tmp_path):
     """History, room reads, evidence and the memory view name the same gap for the Projects the Reply could
     join, and only for them; rows not derived yet are a gap of the indexed reads too."""
