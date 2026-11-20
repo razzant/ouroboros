@@ -1,0 +1,142 @@
+# QA-only: copy this to .github/workflows/p05-t3-qa.yml, never to the product branch.
+name: Presence and Mini App — exact isolated QA
+'on':
+  push:
+    branches: ['qa/presence-miniapp-t3']
+permissions:
+  contents: read
+
+jobs:
+  exact-subject:
+    if: ${{ github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/presence-miniapp-t3' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind exact wrapper, reviewed product and its parent
+        id: pins
+        shell: bash
+        run: |
+          /usr/bin/python3 -I -S -B .github/p05-t3-qa/p05_subject.py verify "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.pins.outputs.candidate }}
+          fetch-depth: 2
+          path: qa-sources/candidate
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.pins.outputs.base }}
+          fetch-depth: 2
+          path: qa-sources/base
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.pins.outputs.old }}
+          fetch-depth: 1
+          path: qa-sources/old
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.12.1'
+          enable-cache: false
+          activate-environment: false
+      - name: Stage public Git trees and pinned dependencies
+        id: stage
+        shell: bash
+        timeout-minutes: 23
+        run: |
+          set -euo pipefail
+          [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]
+          [[ "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+-[0-9]+$ ]]
+          root="/var/lib/p05-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          [[ ! -e "$root" && ! -L "$root" ]]
+          sudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$root"
+          /usr/bin/python3 -I -S -B .github/p05-t3-qa/p05_subject.py stage "$GITHUB_WORKSPACE" "$GITHUB_SHA" "$root"
+          bootstrap="$root/bootstrap"
+          mkdir "$bootstrap/home" "$bootstrap/temp" "$root/venvs"
+          clean=(/usr/bin/env -i "HOME=$bootstrap/home" "TMPDIR=$bootstrap/temp" "PATH=$PATH" LANG=C.UTF-8)
+          (
+            cd "$bootstrap"
+            "${clean[@]}" "PYTHON_STANDALONE_DEST=$root/python" PYTHON_STANDALONE_INTERPRETER_ONLY=1 \
+              /bin/bash scripts/download_python_standalone.sh
+            for role in base candidate old; do
+              "${clean[@]}" "UV_PROJECT_ENVIRONMENT=$root/venvs/$role" UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
+                uv sync --locked --no-build --extra browser --group dev --no-install-project --python "$root/python/bin/python3"
+            done
+            "${clean[@]}" "PLAYWRIGHT_BROWSERS_PATH=$root/browsers" "$root/python/bin/python3" -I -S -B \
+              scripts/ci_browser_install.py --python "$root/venvs/base/bin/python" --pinned-node --attempt-seconds 180 chromium webkit
+            mv node-standalone "$root/node-standalone"
+          )
+          sudo -n useradd --system --user-group --no-create-home --shell /usr/sbin/nologin p05qa
+          sudo -n chown -hR p05qa:p05qa "$root/candidate" "$root/base" "$root/old"
+          sudo -n install -d -m 0755 "$root/work"
+          sudo -n install -d -m 0700 -o p05qa -g p05qa "$root/work/home" "$root/work/raw" "$root/work/proof"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Test exact subjects and collect bounded public proof
+        id: proof
+        shell: bash
+        timeout-minutes: 70
+        env:
+          QA_STAGE: ${{ steps.stage.outputs.root }}
+        run: |
+          set -euo pipefail
+          root=$QA_STAGE
+          [[ "$root" == "/var/lib/p05-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]
+          unit="p05-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          private="$RUNNER_TEMP/p05-proof-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 0700 "$private"
+          umask 077
+          # Same user, mounts, and network policy for running and collecting; only test gets write access to work/.
+          unit_args=(--quiet --wait --pipe --service-type=exec
+            -p User=p05qa -p Group=p05qa -p UMask=0077 -p PrivateNetwork=yes -p PrivateTmp=yes
+            -p PrivateDevices=yes -p PrivatePIDs=yes -p ProtectProc=noaccess -p ProtectHome=yes -p ProtectSystem=strict
+            -p 'TemporaryFileSystem=/run:rw,nosuid,nodev,noexec,size=16M' -p 'InaccessiblePaths=-/etc/resolv.conf'
+            -p ProtectControlGroups=yes -p ProtectKernelModules=yes -p ProtectKernelTunables=yes
+            -p RestrictSUIDSGID=yes -p NoNewPrivileges=yes -p CapabilityBoundingSet=
+            -p 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' -p KillMode=control-group
+            -p Slice=system.slice -p TimeoutStopSec=15s -p TasksMax=384)
+          # The UID can enumerate its own nondumpable fixtures, but never processes outside this unit.
+          outer_pid_ns=$(readlink /proc/self/ns/pid)
+          env_args=(/usr/bin/env -i "P05_OUTER_PID_NS=$outer_pid_ns" "HOME=$root/work/home" TMPDIR=/tmp LANG=C.UTF-8
+            "PATH=$root/node-standalone/bin:/usr/bin:/bin" "PLAYWRIGHT_BROWSERS_PATH=$root/browsers"
+            "PLAYWRIGHT_NODEJS_PATH=$root/node-standalone/bin/node" GIT_CONFIG_NOSYSTEM=1
+            GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0)
+          run_rc=0
+          sudo -n systemd-run "${unit_args[@]}" --unit="$unit" -p RuntimeMaxSec=3900s \
+            -p "ReadWritePaths=$root/work" -p "WorkingDirectory=$root/candidate" \
+            "${env_args[@]}" /bin/bash "$root/harness/run.sh" "$root" \
+            </dev/null >"$private/test.out" 2>"$private/test.err" || run_rc=$?
+          # systemd-run's synchronous exit is authoritative. An inactive successful transient unit may already be gone.
+          active=$(systemctl show --property=ActiveState --value "$unit.service")
+          [[ "$active" == inactive || "$active" == failed ]]
+          test -r /sys/fs/cgroup/cgroup.controllers
+          events="/sys/fs/cgroup/system.slice/$unit.service/cgroup.events"
+          if test -e "$events"; then grep -qx 'populated 0' "$events"; fi
+          pack_rc=0
+          sudo -n systemd-run "${unit_args[@]}" --unit="p05-proof-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            -p RuntimeMaxSec=65s -p "WorkingDirectory=$root/harness" \
+            "${env_args[@]}" /usr/bin/python3 -I -S -B "$root/harness/p05_proof.py" pack "$root" "$run_rc" \
+            </dev/null >"$private/proof.part" 2>"$private/pack.err" || pack_rc=$?
+          if ((pack_rc != 0)); then
+            echo 'No safe bounded proof could be packaged.' >&2
+            exit 1
+          fi
+          readback_rc=0
+          /usr/bin/python3 -I -S -B "$root/harness/p05_proof.py" check-archive "$root" "$private/proof.part" "$run_rc" || readback_rc=$?
+          # Only a valid complete (0) or partial (3) archive may be uploaded.
+          ((readback_rc == 0 || readback_rc == 3))
+          mv "$private/proof.part" "$private/proof.zip"
+          printf 'archive=%s\n' "$private/proof.zip" >> "$GITHUB_OUTPUT"
+          ((run_rc == 0 && readback_rc == 0))
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.proof.outputs.archive != '' }}
+        with:
+          name: p05-qa-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.proof.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 7
