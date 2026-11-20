@@ -1219,7 +1219,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                          "earlier-attempt --max-bytes 60000000 > request.json"),
                         # IDs that are no plain word never enter the command; the facts still show them as text.
                         ({"body": "over_page_limit", "recorded_bytes": 52428800, "page_limit_bytes": 50331648,
-                          "retry_max_bytes": 52428800, "task_id": "x; rm -rf ~", "attempt_id": "-x $(id)"},
+                          "retry_max_bytes": 52428800, "task_id": "x; echo owned", "attempt_id": "-x|cat"},
                          "larger than this page opens", "--data-root DATA TASK_ID --attempt ATTEMPT_ID --max-bytes "
                          "52428800 > request.json"),
                         ({"body": "not_one_attempt", "ledger_kind": "subscription_session"},
@@ -1227,8 +1227,8 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     choose(gap(**facts_of_gap), headline, "#headline")
                     gap_reads_without_opening(words)
                     if facts_of_gap.get("task_id"):
-                        assert "rm -rf" not in frame.locator("#explain").inner_text()
-                        assert "x; rm -rf ~" in facts.inner_text() and "-x $(id)" in facts.inner_text()
+                        assert "echo owned" not in frame.locator("#explain").inner_text()
+                        assert "x; echo owned" in facts.inner_text() and "-x|cat" in facts.inner_text()
                 assert "Ledger row" in facts.inner_text() and "subscription_session" in facts.inner_text()
                 assert "Ledger state" not in facts.inner_text() and "Transport" not in facts.inner_text()
                 # A file the page cannot open says how to read that request elsewhere, not only that it is too large.
