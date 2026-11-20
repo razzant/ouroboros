@@ -64,11 +64,11 @@ function pageTemplate() {
             <div class="widgets-scroll">
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
+                <div class="widgets-arrange-status ui-status" data-tone="neutral" data-widget-arrange-status role="status" aria-live="polite"></div>
                 <div class="widgets-context-tools">
                     <button type="button" class="btn btn-default" data-context-report aria-expanded="false" aria-controls="widgets-context-report">Beautiful Context</button>
                     <section id="widgets-context-report" class="ui-card widgets-context-report" data-context-report-mount hidden></section>
                 </div>
-                <div class="widgets-arrange-status ui-status" data-tone="neutral" data-widget-arrange-status role="status" aria-live="polite"></div>
             </div>
         </section>
     `;
