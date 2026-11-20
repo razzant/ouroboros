@@ -96,6 +96,10 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         expect(meanings.nth(index)).to_be_visible()
     expect(page.locator('#next-btn')).to_be_in_viewport()
     page.click("#next-btn")
+    # Consciousness, its own step between Access and Review limits: both positions and Continue reachable.
+    expect(page.locator('[data-consciousness-choice]')).to_have_count(2)
+    expect(page.locator('#next-btn')).to_be_in_viewport()
+    page.click("#next-btn")
     budget = page.locator('[data-collapse="api-budget"]')
     if not budget.evaluate("el => el.open"):
         budget.locator("summary").click()
