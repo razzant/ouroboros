@@ -38,7 +38,7 @@ def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[D
         return body, {}
     try:
         exact = {**body, "instructions": _splice(instructions, lambda sha, size: texts[sha, size])} == body
-    except KeyError:  # a reference-shaped text names no head this start sent
+    except (KeyError, ValueError):  # reference-shaped text that names no head this start sent, or no int() size
         exact = False
     if exact:
         return {**body, "instructions": instructions}, {"held_heads": facts}

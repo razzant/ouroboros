@@ -524,7 +524,8 @@ def test_a_session_start_keeps_its_held_heads_by_address_and_revision_and_replay
 def test_a_stored_session_request_always_splices_back_to_its_original_envelope(tmp_path):
     """A start's stored envelope names its held heads by reference only where putting them back gives the original
     envelope. A head whose text stands inside an earlier head's reference (``size=``), or prose shaped like a
-    reference, stores the envelope whole and the row says so; every replay reads the original request either way."""
+    reference (its size past what ``int()`` reads included), stores the envelope whole and the row says so; the
+    start records, and every replay reads the original request either way."""
     from ouroboros import delegate_custody as custody
     from ouroboros.delegate_invocation import invocation_record
     from ouroboros.delegate_pending import pending_invocations, request_body
@@ -539,8 +540,10 @@ def test_a_stored_session_request_always_splices_back_to_its_original_envelope(t
         return {"prompt": "Build", "instructions": prose + "## Held knowledge notes\n\n" + notes + "[Host: ...]"}, heads
 
     manifest, april = "Use the manifest for the current format.\n", "Keep the April figures.\n"
+    quoted = "A mark quotes \x00held head x@r sha256=" + "b" * 64 + " size={}\x00.\n\n"
     starts = {"inv-ordinary": start(manifest, april), "inv-inside": start(manifest, "size="),
-              "inv-prose": start(april, prose="A mark quotes \x00held head x@r sha256=" + "b" * 64 + " size=5\x00.\n\n")}
+              "inv-prose": start(april, prose=quoted.format("5")),
+              "inv-digits": start(april, prose=quoted.format("0" * 4_300 + "5"))}  # 4,301 digits
     for invocation, (body, heads) in starts.items():
         assert custody.record_start_requested(
             tmp_path, run_id="", task_id="nanny", invocation_id=invocation, idempotency_key=invocation,
@@ -548,8 +551,8 @@ def test_a_stored_session_request_always_splices_back_to_its_original_envelope(t
     rows = {row["invocation_id"]: row for row in custody.custody_rows(tmp_path) if row.get("type") == custody.START_REQUESTED}
     stored = {key: read_blob_ref(tmp_path, row["request_ref"], expected_kind="json") for key, row in rows.items()}
     assert manifest not in stored["inv-ordinary"]["instructions"] and "held_heads_inline" not in rows["inv-ordinary"]
-    assert [(stored[key], rows[key]["held_heads_inline"]) for key in ("inv-inside", "inv-prose")] == [
-        (starts["inv-inside"][0], True), (starts["inv-prose"][0], True)]
+    inline = ("inv-inside", "inv-prose", "inv-digits")
+    assert [(stored[key], rows[key]["held_heads_inline"]) for key in inline] == [(starts[key][0], True) for key in inline]
     assert {key: row["held_heads"] for key, row in rows.items()} == {key: [
         {name: head[name] for name in ("topic", "revision", "chars")} for head in heads] for key, (_, heads) in starts.items()}
     original = {key: body for key, (body, _heads) in starts.items()}
