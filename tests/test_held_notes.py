@@ -318,6 +318,39 @@ def test_a_declared_start_whose_shelf_cannot_be_listed_names_no_omission_and_kee
     assert "because its input is declared" not in delivery and "could not be read here" not in delivery
 
 
+def test_a_zero_character_head_reaches_the_parents_receipt_and_the_overview_reference_does_not(world):
+    """A claimed note that starts with `## Details` holds a zero-character head: its session start names its title
+    and revision, and its start row and the run's terminal receipt name it as ``{topic, revision, chars: 0}`` beside
+    a head with text, with no empty blob and no reference for it; the overview's reference is no sent head."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_invocation import invocation_record
+    from ouroboros.delegate_terminal import terminal_custody_disclosure
+    from ouroboros.subagent_work_order import session_memory_references
+
+    root = world[0].drive_root
+    details = _write(world, "details", "## Details\n\nBelow the head.\n", title="Details page")
+    plain = _write(world, "plain", "Plain head.\n\n## More\n")
+    _write(world, knowledge.OVERVIEW_TOPIC, "The shared understanding.")
+    session = _scheduler(world, "session", {CARRIED_NAMES: ["room:1"]})
+    body = {"prompt": "Build", "instructions": session_memory_references(session)}
+    assert "### Details page\n" in body["instructions"] and "Shared understanding reference." in body["instructions"]
+    facts = [{"topic": "details", "revision": details.revision, "chars": 0},
+             {"topic": "plain", "revision": plain.revision, "chars": len("Plain head.\n\n")}]
+    assert [{key: head[key] for key in ("topic", "revision", "chars")} for head in session._session_held_heads] == facts
+    custody._CUSTODY.clear()
+    assert custody.record_start_requested(root, run_id="", task_id="session", invocation_id="inv", idempotency_key="inv",
+                                          max_seconds=60, request=body, project_id="", project_owned=False,
+                                          route="codex", held_heads=session._session_held_heads)
+    assert custody.record_started(root, custody.RunCustody(run_id="run", task_id="session", route_id="codex",
+                                                           invocation_id="inv"))
+    assert custody.emit(root, custody.SETTLED, {"run_id": "run", "task_id": "session", "state": "succeeded"})
+    (row,) = [row for row in custody.custody_rows(root) if row.get("type") == custody.START_REQUESTED]
+    receipt = terminal_custody_disclosure(root, "session")["terminal_runs"][0]
+    assert row["held_heads"] == receipt["held_heads"] == facts and invocation_record(root, "inv")["request"] == body
+    assert len(list((root / "observability" / "blobs").glob("*.txt.gz"))) == 1  # the plain head's text alone
+    custody._CUSTODY.clear()
+
+
 def test_with_no_recorded_claim_helpers_start_and_are_scheduled_as_before(world, actors, monkeypatch):
     """No claim on the install: nothing is carried, said or held, and a helper's start is byte-equal to one built
     without held heads at all, for a child and a nanny, in a Project room and in a place turn's room."""

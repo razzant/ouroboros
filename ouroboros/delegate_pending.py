@@ -27,11 +27,13 @@ def stored_request(drive_root: Any, body: Dict[str, Any], heads: Any) -> Tuple[D
 
     instructions, facts, texts = str(body.get("instructions") or ""), [], {}
     for head in heads or ():
+        facts.append({key: head[key] for key in ("topic", "revision", "chars")})
+        if not head["text"]:  # a zero-character head: its fact alone, no blob and no reference
+            continue
         ref = write_blob(pathlib.Path(drive_root), head["text"], kind="txt")
         texts[ref["sha256"], ref["size"]] = head["text"]
         token = f"\x00held head {head['topic']}@{head['revision']} sha256={ref['sha256']} size={ref['size']}\x00"
         instructions = instructions.replace(head["text"], token, 1)
-        facts.append({key: head[key] for key in ("topic", "revision", "chars")})
     if not facts:
         return body, {}
     try:

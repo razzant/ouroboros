@@ -206,10 +206,14 @@ def carried_situation(ctx: Any, root: Path, *, declared: bool) -> tuple[dict, st
 
 
 def sent_heads(entries: list[HeldNoteSection]) -> list[dict]:
-    """Each head an external session receives whole (its reader ``EXTERNAL_READER``), by address and revision."""
-    line = _reader_line("", EXTERNAL_READER) + "\n\n"
-    return [{"topic": part.topic, "revision": part.revision, "chars": len(head), "text": head}
-            for part in entries if (head := part.full_text.partition(line)[2])]
+    """Each head an external session receives whole (its reader ``EXTERNAL_READER``), by address and revision, a
+    zero-character one (a note that starts with ``## ``) included; the overview stands as a reference, no head."""
+    line, heads = _reader_line("", EXTERNAL_READER) + "\n\n", []
+    for part in entries:
+        _label, after_reader, head = part.full_text.partition(line)
+        if after_reader:
+            heads.append({"topic": part.topic, "revision": part.revision, "chars": len(head), "text": head})
+    return heads
 
 
 def note_head(source: MarkdownSource) -> str:
