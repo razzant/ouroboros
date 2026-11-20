@@ -607,7 +607,7 @@ def session_memory_references(ctx: Any) -> str:
         marks = tuple(_capture_marks(store, spec, room_labeler(root))) if store.log_path.exists() else ()
         marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
         if task_input_sources(task) == "declared":
-            if topics := held_notes.claimed_topics(root, navigation["names"], navigation.get("inventory")):
+            if topics := held_notes.claimed_topics(root, navigation["names"], navigation.get("inventory", ())):
                 held = ("[Host: the heads of the knowledge notes that claim this work's room, and of the notes their "
                         "heads link, are not in this start, because its input is declared: " + ", ".join(topics) + ".]")
         elif entries := held_notes.turn_sections(root, task, spec, navigation, ctx=SimpleNamespace(

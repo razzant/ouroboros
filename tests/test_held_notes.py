@@ -283,6 +283,41 @@ def test_a_declared_child_holds_no_head_and_its_receipt_names_the_omission_only_
     assert "Nova working head." in _held(_plan(world, task=shared))
 
 
+def test_a_declared_start_whose_shelf_cannot_be_listed_names_no_omission_and_keeps_the_rest(world, monkeypatch):
+    """A declared helper's start lists the global shelf once. Listed, its native receipt and its session's memory
+    delivery name the heads it leaves out; unlisted (EIO), the native request still builds and the delivery keeps
+    its marks, naming no omission, as starts did before helpers held heads."""
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.subagent_work_order import session_memory_references
+    from tests._memory_inventory_shared import MIND
+
+    _write(world, "main-page", "Main working head.")
+    store = ChronicleStore(world[0].drive_root)
+    assert store.ensure_activated()["kind"] == "activation"
+    store.mark({"kind": "task", "task_id": "x"}, "Keep the local time zone", MIND, room_id="1")
+    contract = {"objective": "Judge the release", "input_sources": "declared"}
+    native = {**TASK, "id": "declared-child", "delegation_role": "subagent", "task_contract": contract,
+              "configured_subagent": {"route": {"kind": "api_model"}}, "metadata": {CARRIED_NAMES: ["room:1"]}}
+    session = _scheduler(world, "declared-session", {CARRIED_NAMES: ["room:1"]}, contract=contract)
+
+    def starts():
+        plan = _plan(world, task=native)
+        return json.dumps(plan.messages_for(plan.initial_mode)), session_memory_references(session)
+
+    request, delivery = starts()
+    assert "which a shared child holds: main-page" in request
+    assert "because its input is declared: main-page.]" in delivery and "Keep the local time zone" in delivery
+
+    def unlisted(*_args, **_kwargs):
+        raise OSError(errno.EIO, "the shelf listing failed")
+
+    monkeypatch.setattr(knowledge, "inventory_knowledge", unlisted)
+    request, delivery = starts()
+    assert "Knowledge navigation unavailable: OSError" in request and "which a shared child holds" not in request
+    assert "Knowledge navigation unavailable: OSError" in delivery and "Keep the local time zone" in delivery
+    assert "because its input is declared" not in delivery and "could not be read here" not in delivery
+
+
 def test_with_no_recorded_claim_helpers_start_and_are_scheduled_as_before(world, actors, monkeypatch):
     """No claim on the install: nothing is carried, said or held, and a helper's start is byte-equal to one built
     without held heads at all, for a child and a nanny, in a Project room and in a place turn's room."""
