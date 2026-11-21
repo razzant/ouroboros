@@ -142,7 +142,7 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
   - `localRoutingModes`.
   - `budgetFields`: with defaults and minimums.
   - `subscriptionFields`: declarations the setup call accepts, not settings.
-  - the step texts.
+  - the step texts: `title` heads a step, the one-word `railTitle` names it in the rail.
 - **`deployment`**: what a deployment policy fixes (`_meta.policy_state.deployment` of `GET /api/settings`), `null` without one.
 - **`initialState`**, the starting values:
   - one key per row `stateKey`;

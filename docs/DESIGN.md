@@ -2993,18 +2993,24 @@ model row Consciousness model, so it does not read as this choice.
 Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
 списком, но юзер может поснимать галочки», which revises his 4A of 2026-10-17, a Summary row), offered only where Finish
 honors its ticks: a data root whose starter list never ran. Elsewhere the step is absent and the Skills page is where
-skills change, so no tick is shown that Finish would ignore. One list of cards by category, built-ins first: each card
-its human title, one line of what it gives (an author's longer description falls back there, clipped by the box, never
-by code), its Built in or Official mark and, where the catalog says one, the prerequisite in words; the maintainer's
-recommended skills are ticked. Tick all and Untick all head the list; an empty choice installs nothing. How the hub's
-skills install is one quiet line under the list, opening to its two choices. What is still being read stands under the
-list too, where the hub's skills join it, so their arrival moves no card; a refresh keeps the ticks, focus and the card
-being read. Entering the step, the cards arrive once in a short sequence, the owner's «анимированный список»: each a
+skills change, so no tick is shown that Finish would ignore. One list of cards by category, built-ins first (his 7A of
+2026-10-17): each card its human title, one line of what it gives (an author's longer description falls back there and
+wraps whole) and, quieter in the meta ink, the prerequisite in words where the catalog says one; the maintainer's
+recommended skills are ticked. A ticked card keeps the neutral body and its box is the chosen thing, so a long list of
+ticks stays light. Where the skills come from is said once per source, never on a card: the built-in group's head, and
+one line over the hub's groups that they are Official when all of them are. Inside a group what works at once leads,
+recommended first, and what needs a key or an account comes last; the hub's category order stays. Tick all and Untick
+all head the list; an empty choice installs nothing. How the hub's skills install is one plain line under the list
+(official ones without a review, the community's reviewed first), its two choices per source behind it in Settings'
+words. What is still being read stands under the list too, where the hub's skills join it, so their arrival moves no
+card; a refresh keeps the ticks, focus and the card being read. Entering the step, the cards arrive once in a short sequence, the owner's «анимированный список»: each a
 surface that comes on `--motion-open` by position and opacity, a beat after the one before, the whole under a second;
 the boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows
 the list as it ends. Review & start passes it; Summary keeps one row back to it. Nothing installs before Start.
 
-The first-run wizard is compact; the step rail alone says which step this is. An
+The first-run wizard is compact; the step rail alone says which step this is. It names each step by one short word
+(`railTitle`), so seven pills keep one line where the window allows; a phone's rail shows the current pill alone, its
+number of all and its name, never a clipped neighbour. An
 ordinary Accounts state, blank or connected, and the Consciousness step fit a 980×752 client viewport
 with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,
