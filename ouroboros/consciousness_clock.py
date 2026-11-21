@@ -1,4 +1,5 @@
-"""The own clock's named time beside the alarm: a time the mind named for its next wake.
+"""The own clock's two facts beside the alarm: a time the mind named for its next wake, and my human's last
+reported time zone.
 
 The named time is one overwritten state record (``WAKE_TARGET_STATE_KEY``) that ``set_next_wakeup(at=…)``
 writes through ``store_choice``: the instant as given (ISO 8601 with an explicit UTC offset or ``Z``; ``named_time``
@@ -12,17 +13,24 @@ meanwhile stays. The wake that stood appointed when it was stored, pending or ru
 time is consumed by one wake that started with it stored, and a passed one never adds a wake. With consciousness on,
 a time at or before the pending appointment is refused: that wake keeps its time (owner 12.10, #1603), and
 ``schedule_followup(run_at=…)`` serves work at that moment.
+
+My human's last reported zone (``OWNER_ZONE_STATE_KEY``) is overwritten at owner ingress (``note_owner_zone``) from
+their own message whose client reported a valid IANA zone; any other message leaves the dated fact as it is.
+
+``own_clock_lines`` renders both for a wake with its appointment and the owner's bounds: facts with their meanings,
+no instruction and no cause beyond them (P5).
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from ouroboros.deadline_utils import naive_instant, parse_deadline_ts
+from ouroboros.deadline_utils import naive_instant, parse_deadline_ts, span_text, utc_offset_text
 
 WAKE_TARGET_STATE_KEY = "consciousness_wake_target"  # {at, stored_at, standing_appointment}; one overwritten record
+OWNER_ZONE_STATE_KEY = "owner_last_reported_zone"  # {zone, at, message}; overwritten by my human's zoned messages
 _EXAMPLE = "2026-11-21T09:00:00+03:00"
 
 
@@ -140,3 +148,53 @@ def choice_receipt(seen: Dict[str, Any], *, interval: Optional[int], clamp_note:
              "after now that ends at or after it consumes it. seconds leaves it standing; a later at replaces it.")
     return text + (f" The wake-up interval is now {interval} s{clamp_note}." if interval is not None else "")
 
+
+def note_owner_zone(live: Dict[str, Any], metadata: Any, *, own: bool, message: Any, at: str) -> None:
+    """At owner ingress, inside the write that stamps their activity: my human's own message (``own``) whose client
+    reported a valid IANA zone overwrites the one dated fact; any other message leaves it as it is."""
+    from ouroboros.client_surface import normalize_timezone_name
+
+    surface = metadata.get("client_surface") if own and isinstance(metadata, dict) else None
+    zone = normalize_timezone_name(surface.get("timezone")) if isinstance(surface, dict) else ""
+    if zone:
+        live[OWNER_ZONE_STATE_KEY] = {"zone": zone, "at": at,
+                                      **({"message": dict(message)} if isinstance(message, dict) else {})}
+
+
+def _zone_line(fact: Any, *, now: float) -> str:
+    from zoneinfo import ZoneInfo
+
+    from ouroboros.client_surface import normalize_timezone_name
+
+    zone = normalize_timezone_name(fact.get("zone")) if isinstance(fact, dict) else ""
+    if not zone:
+        return "- my human's last reported time zone: unknown"
+    offset = utc_offset_text(_dt.datetime.fromtimestamp(now, ZoneInfo(zone)))
+    reported = parse_deadline_ts(fact.get("at"))
+    at = reported.strftime("%Y-%m-%dT%H:%M:%SZ") if reported is not None else str(fact.get("at"))
+    return f"- my human's last reported time zone: {zone} ({offset} now), from their message at {at}"
+
+
+def own_clock_lines(state: Mapping[str, Any], *, now: float, floor: int, ceiling: int) -> List[str]:
+    """The "Own clock" facts of a wake from the runtime state it was prepared with: the named time if one stands,
+    how far ahead and whether this wake's end consumes it; this wake's appointment (the reason line says whether it
+    came on time); the owner's MIN and MAX; my human's last reported zone with its UTC offset now."""
+    from ouroboros.consciousness import APPOINTMENT_STATE_KEY
+
+    appointment = _seconds(state.get(APPOINTMENT_STATE_KEY))
+    record = state.get(WAKE_TARGET_STATE_KEY)
+    target = target_ts(record)
+    if target is None:
+        lines = ["- named next wake-up time: none; the interval alone sets the next wake-up"]
+    else:
+        when = f"in {span_text(target - now)}" if target > now else f"passed {span_text(now - target)} ago"
+        stood = bool(appointment) and _seconds(record.get("standing_appointment")) == appointment
+        lines = [f"- named next wake-up time: {record['at']}, {when}; the settlement of a wake-up appointed after it was "
+                 "stored consumes it once that wake-up ends at or after it"
+                 + ("; this wake was appointed before it was stored, so its end does not" if stood else "")]
+    if appointment:
+        lines.append(f"- this wake's appointment: {_utc(appointment)} (whether it came on time: the reason line)")
+    lines.append(f"- each next wake-up: no sooner than MIN {floor} s and no later than MAX {ceiling} s after a wake-up "
+                 "ends (owner settings); a named time beyond MAX is reached through intermediate wake-ups")
+    lines.append(_zone_line(state.get(OWNER_ZONE_STATE_KEY), now=now))
+    return lines

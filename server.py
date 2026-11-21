@@ -37,7 +37,7 @@ from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
                                          shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, consciousness_clock, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -383,6 +383,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 live["owner_id"] = user_id
                 live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
+            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_pair == (user_id, chat_id), message=origin_message_ref, at=now_iso)
 
         try:
             ctx.update_state(_stamp_owner_activity)
