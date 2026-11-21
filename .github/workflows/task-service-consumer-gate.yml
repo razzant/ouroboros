@@ -1,0 +1,374 @@
+# Temporary QA workflow for one task-service candidate (#1868). Trusted, reviewed QA commit only:
+# never add this file or .github/qa/task_service_consumer.py to the product branch.
+#
+# Publisher recipe: the QA commit's ONLY parent is the reviewed product commit and its delta is exactly these two
+# files; its trailers name the subject (QA-Product: <product sha>, QA-Tree: <product tree>, QA-Base: <comparison
+# base, the fixed direct parent below>). The diagnostic control is this candidate's unchanged comparison base.
+# A later rebase requires repinning the control and product together. Push that one commit to
+#   qa/task-service-gate        the narrow mandatory consumer gate: Linux and Windows are independent legs
+#   qa/task-service-diagnostic  only on request - DIAGNOSTIC, never a gate: a serial --tb=long leg and base/candidate
+#                               parity legs; the gate's list is never widened to hold them
+# Both modes read the one witness table below. Nothing is chosen from the diff at run time: a listed id that does
+# not exist is a pytest usage error, an unlisted node is refused, a skip is not a pass, and a new case whose exact
+# id is not yet written below is an UNKNOWN row that keeps the gate NOT QUALIFIED. Nothing reads an earlier CI
+# aggregate: serial and full-suite health are not asserted by this run.
+name: Task service consumer gate (temporary)
+run-name: ${{ endsWith(github.ref, 'qa/task-service-diagnostic') && 'DIAGNOSTIC (not a gate) - task service' || 'Task service consumer gate' }}
+
+on:
+  push:
+    branches: [qa/task-service-gate, qa/task-service-diagnostic]
+
+permissions:
+  contents: read
+
+env:
+  QA_R6_BASE: 9430de8dd9c3c1b0a95360a32c5739752977e9eb
+  QA_R6_BASE_TREE: 69c7274a65c4006c7de8265df3d5f351858f4a61
+  QA_R6_TREE: 5d54b04cf5855906a04f58ed99709e808c647938
+  QA_CONTROL_COMMIT: 9430de8dd9c3c1b0a95360a32c5739752977e9eb
+  QA_CONTROL_TREE: 69c7274a65c4006c7de8265df3d5f351858f4a61
+  # The dedicated real-Docker witness image (the digest the earlier one-off qualification already used).
+  QA_SERVICE_IMAGE: ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956
+
+  # ======================= the fixed witness table: the only place a test id is named =======================
+  # A function id runs all of its parameters; a module id runs the module. Product ids are bound to QA_R6_TREE;
+  # diagnostic parity and known ids also exist at QA_CONTROL_COMMIT.
+  #
+  # Both systems, real processes and real file handles: two launches of one name sharing report.txt (each keeps its
+  # log, the openable file is the newest, one immutable version per earlier launch); stop finalization of a real
+  # service with declared outputs, the output missing in one variant, finalized once; a closed log that cannot be
+  # safely archived kept apart from the published record (synthetic benign text; private-store refusal on a store
+  # without a verified owner-only identity); an observation that cannot be made (log metadata refused, output capture
+  # unconfirmed) reported as unknown, never as saved or absent, with no private value in the answer.
+  W_BOTH: |
+    tests/test_workspace_executor_services.py::test_same_name_restarts_preserve_each_log_and_its_declared_output
+    tests/test_workspace_executor_services.py::test_automatic_local_executor_stop_finalizes_declared_outputs
+    tests/test_services_tool_v2.py::test_deferred_masked_archive_uses_the_existing_private_file
+    tests/test_services_tool_v2.py::test_only_the_ended_service_log_survives_drive_release
+    tests/test_services_tool_v2.py::test_private_open_refuses_an_unverified_existing_store
+    tests/test_service_finalization_failure.py::test_an_ended_service_whose_log_cannot_be_read_stays_recorded_with_its_outputs
+    tests/test_service_finalization_failure.py::test_stop_tool_reports_unconfirmed_output_capture_without_diagnostics
+    tests/test_services_tool_v2.py::test_ordinary_no_outputs_checkpoint_survives_separate_drive_release
+    tests/test_kept_service_release.py::test_ordinary_launch_outputs_are_prepared_and_recovered_after_worker_loss
+  # Windows only: the native rule for reopening a closed log while its writer handle is still open (skips on POSIX).
+  W_WINDOWS: |
+    tests/test_services_tool_v2.py::test_windows_closed_read_waits_for_the_log_handle
+  # Linux only: the POSIX measured stop (that module skips on Windows), the in-process finalization, replacement,
+  # retained-log and card-row consumers, and - candidate only, never paired with the base - the three modules whose
+  # TypeError regression was traced to ouroboros/confined_files.py plus the scratch-nonce consumer. To widen
+  # Windows, move a line to W_BOTH (a POSIX-only test there would need its id in NA_WINDOWS).
+  W_LINUX: |
+    tests/test_launch_stop_finalization.py
+    tests/test_store_wal_index.py
+    tests/test_logs_raw.py
+    tests/test_task_source_confined_qa.py
+    tests/test_session_scratch_nonce.py
+    tests/test_services_tool_v2.py::test_private_open_does_not_replace_an_existing_launch
+    tests/test_services_tool_v2.py::test_deferred_log_capture_requires_this_launch_to_allow_standard_masking
+    tests/test_services_tool_v2.py::test_retirement_keeps_the_launch_log_until_its_own_archive_receipt_exists
+    tests/test_services_tool_v2.py::test_stop_releases_original_only_after_a_canonical_launch_receipt
+    tests/test_service_finalization_failure.py::test_each_output_version_is_readable_after_unchanged_reuse_and_copyback
+    tests/test_service_finalization_failure.py::test_each_replacement_stop_reaches_the_ordinary_author
+    tests/test_service_finalization_failure.py::test_a_confirmed_launch_changes_the_stop_evidence_only_once
+    tests/test_service_finalization_failure.py::test_retained_status_fault_does_not_drop_the_preceding_stop
+    tests/test_service_finalization_failure.py::test_masked_tail_is_not_inline_when_its_source_cannot_be_stored
+    tests/test_service_finalization_failure.py::test_the_card_of_a_finished_task_reads_the_service_row_after_reload_and_reconnect
+    tests/test_kept_service_release.py::test_a_true_new_launch_captures_the_owed_bytes_before_its_writer_starts
+    tests/test_kept_service_release.py::test_replacement_waits_for_activity_capture_before_the_new_writer
+    tests/test_kept_service_release.py::test_a_retained_launch_says_its_end_once_and_then_only_changed_files
+    tests/test_kept_service_release.py::test_a_stop_whose_capture_cannot_confirm_the_end_is_not_reported_stopped
+    tests/test_file_resource_consistency.py::test_private_service_diagnostics_are_not_bound_for_file_mutation
+  # Linux, real Chromium and WebKit: two launches of one name, two separate rows in the card live, after reload and
+  # in Logs, each output saved and readable, one log retained, three synthetic 1280x900 frames per engine.
+  W_BROWSER: |
+    tests/test_verification_check_row_browser.py::test_unsaved_service_log_row_live_finished_replayed_and_in_logs[chromium]
+    tests/test_verification_check_row_browser.py::test_unsaved_service_log_row_live_finished_replayed_and_in_logs[webkit]
+  # Linux: the Node renderers of the stop row.
+  W_NODE: |
+    web/tests/host_lifecycle_rows.test.js
+    web/tests/chat_activity_block.test.js
+    web/tests/service_row_child_card.test.js
+  # Linux: the module-handle, domain-manifest and doc-structure witnesses of a refactor that adds modules.
+  W_STRUCTURE: |
+    tests/test_domain_manifest.py
+    tests/test_domain_report.py
+    tests/test_architecture_facts.py
+    tests/test_generated_inventories.py
+    tests/test_docs_sync.py
+    tests/test_module_handle_extraction.py
+    tests/test_loop_owner_facades.py
+    tests/test_persistence_lifetimes.py
+  # A known earlier message, not a candidate gate: it still runs and is reported by name, never removed.
+  K_STRUCTURE: |
+    tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module
+  # Linux: collect exactly the seven marked gates from their three known modules against QA_R6_BASE.
+  W_SIZE_REQUIRED: |
+    tests/test_smoke.py::test_no_oversized_modules
+    tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree
+    tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base
+    tests/test_smoke.py::test_no_extremely_oversized_functions
+    tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact
+    tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book
+    tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts
+  # ---- Focused R6 cases: an exact id on the owning lane, or UNKNOWN when there is no matching witness. ----
+  # Real-Docker cases must be a distinct function in the QA driver. No mocked product pytest case fills that slot.
+  # worker_change_same_report: two launches of one name declaring the same report.txt, the second started by a
+  #   different worker than the first; each launch keeps its own immutable bytes, the one openable file is the newest,
+  #   each launch keeps its own row and log. Linux and Windows.
+  P_WORKER_CHANGE: ''
+  # durable_row_after_failed_delivery: one confirmed stop, exactly one simulated failure of delivering its row, no
+  #   second stop_service; the row is durably readable once and a later replay shows it. Linux and Windows.
+  P_DURABLE_ROW: |
+    tests/test_service_finalization_failure.py::test_dialogue_success_logs_refusal_recovers_same_checkpoint_without_stop[saved]
+    tests/test_service_finalization_failure.py::test_dialogue_success_logs_refusal_recovers_same_checkpoint_without_stop[missing_hint]
+  # docker_per_output_normal: Docker, declared outputs [present, absent neighbour]; the present file is saved
+  #   (ordinary file plus immutable version), the neighbour is reported absent, the stop is recorded once. Linux.
+  P_DOCKER_PER_OUTPUT: ''
+  # Ordinary and private log path boundaries on both product platforms.
+  P_PRIVATE_LOG_PATHS: |
+    tests/test_private_service_log_ordinary_paths.py
+  # An explicit service stop must not rewrite the evidence of a later answer; both delivered parameters.
+  P_TASK_SUMMARY_GUARD: |
+    tests/test_service_finalization_failure.py::test_a_stop_its_own_result_showed_does_not_change_the_evidence_of_the_answer_after_it[True]
+    tests/test_service_finalization_failure.py::test_a_stop_its_own_result_showed_does_not_change_the_evidence_of_the_answer_after_it[False]
+  # ---- Skips this system legitimately cannot run (a platform skipif that fires): exact node ids, reported as
+  # not_applicable - never a pass. Any other skip, xfail or unreported case fails its gate lane.
+  NA_LINUX: |
+    tests/test_store_wal_index.py::test_windows_asks_the_index_by_attribute_only_handles
+  NA_WINDOWS: ''
+  # ---- Diagnostic mode only (branch qa/task-service-diagnostic). Reported, never a gate. ----
+  # One serial (single process) --tb=long run on the candidate; the published extract holds no runtime value.
+  D_SERIAL_TB: |
+    tests/test_kept_service_release.py
+    tests/test_service_finalization_failure.py
+    tests/test_launch_stop.py
+    tests/test_builtin_effective_outcomes.py
+    tests/test_process_environment.py
+    tests/test_operation_refusal_truth.py
+    tests/test_workspace_executor_install_identity.py
+  # Parity: only these six modules, the same command, on the fixed diagnostic control and on the candidate.
+  # A matching failed_sha256 shows the same projected failures, not the same root cause.
+  D_PARITY: |
+    tests/test_startup_current_state.py
+    tests/test_server_maintenance_housekeeping.py
+    tests/test_service_sleep.py
+    tests/test_cost_contract.py
+    tests/test_worker_crash_retry.py
+    tests/test_task_summary.py
+  # Earlier known messages, reported apart on both subjects and never a candidate gate.
+  D_KNOWN: |
+    tests/test_tool_classification_differential.py
+    tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module
+    tests/test_linked_knowledge.py
+    tests/test_llm_provider_routing.py
+
+jobs:
+  plan:
+    if: ${{ github.repository == 'razzant/ouroboros' && !github.event.deleted && github.sha == github.event.after }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      legs: ${{ steps.plan.outputs.legs }}
+    steps:
+      - name: Name this mode's legs by the pushed branch
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/qa/task-service-gate)
+              legs='[{"leg":"linux","os":"ubuntu-24.04","mode":"gate","subject":"candidate","lanes":" size node structure consumers docker browser ","timeout":300},{"leg":"windows","os":"windows-latest","mode":"gate","subject":"candidate","lanes":" consumers ","timeout":110}]' ;;
+            refs/heads/qa/task-service-diagnostic)
+              legs='[{"leg":"serial-tb","os":"ubuntu-24.04","mode":"diagnostic","subject":"candidate","lanes":" serial_tb ","timeout":130},{"leg":"parity-control-linux","os":"ubuntu-24.04","mode":"diagnostic","subject":"control","lanes":" parity known ","timeout":160},{"leg":"parity-candidate-linux","os":"ubuntu-24.04","mode":"diagnostic","subject":"candidate","lanes":" parity known ","timeout":160},{"leg":"parity-control-windows","os":"windows-latest","mode":"diagnostic","subject":"control","lanes":" parity known ","timeout":170},{"leg":"parity-candidate-windows","os":"windows-latest","mode":"diagnostic","subject":"candidate","lanes":" parity known ","timeout":170}]' ;;
+            *) echo "Unexpected branch for this temporary workflow" >&2; exit 1 ;;
+          esac
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: ${{ matrix.mode }} / ${{ matrix.leg }}
+    needs: plan
+    strategy:
+      fail-fast: false  # Linux and Windows, base and candidate: each leg reports on its own.
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.legs) }}
+    runs-on: ${{ matrix.os }}
+    # Above the sum of the step ceilings: a step ceiling fails its step and the report still runs.
+    timeout-minutes: ${{ matrix.timeout }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        timeout-minutes: 8
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Take the QA driver out of the QA commit
+        id: driver
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qa" "$RUNNER_TEMP/qa-private" "$RUNNER_TEMP/qa-public"
+          git cat-file blob "$GITHUB_SHA:.github/qa/task_service_consumer.py" > "$RUNNER_TEMP/qa/task_service_consumer.py"
+
+      - name: Bind the QA commit, the product, the tree and the comparison base
+        id: subject
+        timeout-minutes: 3
+        env:
+          SUBJECT: ${{ matrix.subject }}
+          LEG: ${{ matrix.leg }}
+          MODE: ${{ matrix.mode }}
+          LANES: ${{ matrix.lanes }}
+        run: |
+          set -euo pipefail
+          priv="$RUNNER_TEMP/qa-private"
+          reject() { printf '%s' "$1" > "$priv/reject.txt"; echo "::error title=Subject binding::$1"; exit 1; }
+          [ "$RUNNER_OS" != Linux ] || test "$(id -u)" != 0 || reject root_runner
+          test "$(git rev-parse --is-shallow-repository)" = false || reject shallow_checkout
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" && test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA" \
+            || reject event_or_workflow_mismatch
+          read -ra parents <<< "$(git show -s --format=%P "$GITHUB_SHA")"
+          test "${#parents[@]}" = 1 || reject qa_parent_count
+          product=${parents[0]}
+          driver=.github/qa/task_service_consumer.py
+          workflow=.github/workflows/task-service-consumer-gate.yml
+          test "$(git diff --name-status --no-renames "$product" "$GITHUB_SHA")" = "$(printf 'A\t%s\n' "$driver" "$workflow")" \
+            || reject qa_delta_mismatch
+          for path in "$driver" "$workflow"; do
+            test "$(git ls-tree "$GITHUB_SHA" -- "$path" | cut -d ' ' -f1,2)" = '100644 blob' || reject qa_blob_mode
+          done
+          trailer() { git show -s --format="%(trailers:key=$1,valueonly)" "$GITHUB_SHA" | tr -d '\r\n'; }
+          base=$QA_R6_BASE
+          control=$QA_CONTROL_COMMIT
+          test "$(git rev-parse --verify "$base^{tree}")" = "$QA_R6_BASE_TREE" || reject fixed_base_unavailable
+          test "$(git rev-parse --verify "$control^{tree}")" = "$QA_CONTROL_TREE" || reject fixed_control_unavailable
+          test "$(git show -s --format=%P "$product")" = "$base" || reject product_not_single_commit_on_fixed_base
+          test "$control" = "$base" || reject control_not_comparison_base
+          tree=$(git rev-parse "$product^{tree}")
+          test "$tree" = "$QA_R6_TREE" || reject bound_r6_tree_mismatch
+          test "$(trailer QA-Product)" = "$product" || reject reviewed_product_mismatch
+          test "$(trailer QA-Tree)" = "$tree" || reject reviewed_tree_mismatch
+          test "$(trailer QA-Base)" = "$base" || reject reviewed_base_mismatch
+          case "$SUBJECT" in candidate) subject=$product ;; control) subject=$control ;; *) reject unknown_subject ;; esac
+          git -c advice.detachedHead=false switch --detach "$subject" >/dev/null 2>&1 || reject subject_checkout_failed
+          subject_tree=$(git rev-parse 'HEAD^{tree}')
+          if test "$SUBJECT" = control; then expected_tree=$QA_CONTROL_TREE; else expected_tree=$QA_R6_TREE; fi
+          test "$subject_tree" = "$expected_tree" || reject subject_tree_mismatch
+          test "$(git rev-parse HEAD)" = "$subject" && test -z "$(git status --porcelain=v1 --untracked-files=all)" \
+            || reject subject_checkout_mismatch
+          printf '{"mode":"%s","leg":"%s","lanes":"%s","subject":"%s","subject_commit":"%s","subject_tree":"%s","product":"%s","tree":"%s","base":"%s","base_tree":"%s","diagnostic_control":"%s","diagnostic_control_tree":"%s","qa_commit":"%s","driver_blob":"%s","workflow_blob":"%s"}\n' \
+            "$MODE" "$LEG" "$LANES" "$SUBJECT" "$subject" "$subject_tree" "$product" "$tree" "$base" "$QA_R6_BASE_TREE" "$control" "$QA_CONTROL_TREE" "$GITHUB_SHA" \
+            "$(git rev-parse "$GITHUB_SHA:$driver")" "$(git rev-parse "$GITHUB_SHA:$workflow")" > "$priv/subject.json"
+
+      # Test temp on the runner's work disk (D:), as ci.yml's Windows legs put it.
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      # The reviewed lock and the shipped interpreter, from the checked-out subject (product or base), without the
+      # project installed: an installed checkout could import code of another commit.
+      - uses: ./.github/actions/setup-python-env
+        id: python
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        timeout-minutes: 25
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+
+      # The reviewed Node, Playwright's packages, Chromium and WebKit, every download bounded (as ui-browser-push.yml).
+      - name: Install the pinned Node, Chromium and WebKit
+        id: browsers
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && runner.os == 'Linux' && (contains(matrix.lanes, ' browser ') || contains(matrix.lanes, ' node ')) }}
+        timeout-minutes: 70
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+
+      - name: Fetch the dedicated service test image
+        id: image
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' && contains(matrix.lanes, ' docker ') }}
+        timeout-minutes: 8
+        run: docker pull "$QA_SERVICE_IMAGE" >/dev/null 2>&1
+
+      - name: Lane size (reference books and module sizes against the comparison base)
+        id: size
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' size ') }}
+        timeout-minutes: 16
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane size
+
+      # The lane itself confirms the staged Node against the runtime pin, so it does not wait for the browser packages.
+      - name: Lane node (the stop-row renderers)
+        id: node
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' node ') }}
+        timeout-minutes: 10
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane node
+
+      - name: Lane structure (modules, handles, manifest, docs)
+        id: structure
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' structure ') }}
+        timeout-minutes: 30
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane structure
+
+      - name: Lane consumers (fixed witness ids of this system)
+        id: consumers
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' consumers ') }}
+        timeout-minutes: 50
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane consumers
+
+      - name: Lane docker (the real-Docker witness)
+        id: docker
+        if: ${{ !cancelled() && steps.image.outcome == 'success' && steps.python.outcome == 'success' && contains(matrix.lanes, ' docker ') }}
+        timeout-minutes: 12
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane docker
+
+      - name: Lane browser (Chromium and WebKit, live, reload and Logs)
+        id: browser
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' && contains(matrix.lanes, ' browser ') }}
+        timeout-minutes: 40
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane browser
+
+      - name: DIAGNOSTIC lane serial_tb (one serial run, --tb=long, scrubbed extract)
+        id: serial_tb
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' serial_tb ') }}
+        timeout-minutes: 70
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane serial_tb
+
+      - name: DIAGNOSTIC lane parity (the same modules on the fixed control and candidate)
+        id: parity
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' parity ') }}
+        timeout-minutes: 70
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane parity
+
+      - name: DIAGNOSTIC lane known (earlier known messages, reported apart)
+        id: known
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && contains(matrix.lanes, ' known ') }}
+        timeout-minutes: 35
+        run: python -I "$RUNNER_TEMP/qa/task_service_consumer.py" lane known
+
+      # Last: every planned lane and every UNKNOWN row. A gate leg is red unless every row passed; a diagnostic
+      # leg is red only when its evidence is incomplete. Standard library only, so it runs even when setup failed.
+      - name: Report every lane and every UNKNOWN row (an UNKNOWN is not a pass)
+        id: report
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        env:
+          QA_SETUP: python=${{ steps.python.outcome }} browsers=${{ steps.browsers.outcome }} image=${{ steps.image.outcome }}
+        run: |
+          py=$(command -v python || command -v python3) || { echo "::error::no interpreter for the report"; exit 1; }
+          "$py" -I -S "$RUNNER_TEMP/qa/task_service_consumer.py" report
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        with:
+          name: qa-${{ matrix.mode }}-${{ matrix.leg }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/qa-public/
