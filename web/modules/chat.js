@@ -1,4 +1,5 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
+import { tr } from './i18n.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
 import { clearReloadParams } from './layers.js';
