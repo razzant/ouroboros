@@ -19,7 +19,7 @@ from ouroboros.config import (
 )
 from ouroboros.settings_scales import (
     EFFORT_FORMAT_KEY, MODEL_CAP_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, OWNER_CAP_KEY, SUBAGENT_CAP_FORMAT_KEY,
-    normalize_effort_document, optional_bound_value,
+    document_optional_value, normalize_effort_document, optional_bound_value,
 )
 from ouroboros.update_channels import get_managed_update_fetch_timeout_sec, normalize_update_channel
 from ouroboros.utils import atomic_write_json, write_text_atomic
@@ -140,7 +140,7 @@ def build_colab_settings(
     total_budget: Optional[float] = None,
     runtime_mode: Optional[str] = None,
     max_workers: Optional[int] = None,
-    max_active_subagents_per_root: Optional[int] = None,
+    max_active_subagents_per_root: Optional[Any] = None,
     models: Dict[str, str] | None = None,
     network_password: str = "",
     existing: Optional[Dict[str, Any]] = None,
@@ -192,8 +192,9 @@ def build_colab_settings(
         ("TOTAL_BUDGET", None if total_budget is None else float(total_budget)),
         ("OUROBOROS_RUNTIME_MODE", runtime_mode),
         ("OUROBOROS_MAX_WORKERS", None if max_workers is None else int(max_workers)),
-        ("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
-         None if max_active_subagents_per_root is None else int(max_active_subagents_per_root)),
+        # Spelled as the settings document spells it: blank or "unlimited" is no number, a typo the finite 6.
+        ("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", None if max_active_subagents_per_root is None else
+         document_optional_value("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", max_active_subagents_per_root)),
     ):
         if explicit is not None:
             settings[key] = explicit

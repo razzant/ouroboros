@@ -165,6 +165,11 @@ def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, e
     ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "3"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 3),
     ({}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 8),  # not explicit: what Drive saved stays
     ({}, {}, ""),  # neither: the shipped no number
+    # Spelled as the settings document reads it: blank or an unlimited word is no number, a typo the finite 6.
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": ""}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, ""),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "unlimited"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, ""),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "\u221e"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, ""),
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "six"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 6),
 ])
 def test_notebook_launch_passes_an_explicit_per_root_subagent_number_like_the_worker_cap(
         monkeypatch, environment, drive, expected):
