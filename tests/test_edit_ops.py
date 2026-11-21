@@ -648,6 +648,36 @@ def test_repo_batch_tool_protected_name_depends_on_physical_target(
     assert (system / "BIBLE.md").read_text(encoding="utf-8") == "SYSTEM = 1\n"
 
 
+def test_edit_batch_shared_path_reaches_every_write_guard(tmp_path, monkeypatch):
+    """A top-level path is outside edit_batch's schema. Dispatch gives it to each edit that names none
+    BEFORE the write guards collect their targets, so a protected file or a path outside the root is
+    refused exactly as when each edit names it; an allowed shared path runs and the result says so."""
+    registry, _ctx, system, project = _workspace_guard_registry(tmp_path, monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    (system / "BIBLE.md").write_text("SYSTEM = 1\n", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("OUT = 1\n", encoding="utf-8")
+    (project / "mod.py").write_text("A = 1\nB = 1\n", encoding="utf-8")
+    (project / "other.py").write_text("C = 1\n", encoding="utf-8")
+    for root, path, edit, refused in (
+            ("system_repo", "BIBLE.md", ("SYSTEM = 1", "SYSTEM = 2"), "CORE_PROTECTION_BLOCKED"),
+            ("active_workspace", "../outside.txt", ("OUT = 1", "OUT = 2"), "Path traversal")):
+        item = {"old_str": edit[0], "new_str": edit[1]}
+        shared = registry.execute("edit_batch", {"root": root, "path": path, "edits": [item]})
+        assert refused in shared, shared
+        assert shared == registry.execute("edit_batch", {"root": root, "edits": [{"path": path, **item}]})
+    allowed = registry.execute("edit_batch", {"path": "mod.py", "edits": [
+        {"old_str": "A = 1", "new_str": "A = 2"}, {"path": "other.py", "old_str": "C = 1", "new_str": "C = 2"},
+        {"old_str": "B = 1", "new_str": "B = 2"}]})
+    assert allowed.startswith("✅") and "path='mod.py' named each edit that had no path" in allowed, allowed
+    own = registry.execute("edit_batch", {"path": "mod.py", "edits": [
+        {"path": "other.py", "old_str": "C = 2", "new_str": "C = 3"}]})
+    assert own.startswith("✅") and "path='mod.py' ignored: every edit names its own path" in own, own
+    assert (system / "BIBLE.md").read_text(encoding="utf-8") == "SYSTEM = 1\n"
+    assert (tmp_path / "outside.txt").read_text(encoding="utf-8") == "OUT = 1\n"
+    assert (project / "mod.py").read_text(encoding="utf-8") == "A = 2\nB = 2\n"
+    assert (project / "other.py").read_text(encoding="utf-8") == "C = 3\n"
+
+
 @pytest.mark.parametrize("tool", ["write_file", "apply_patch", "edit_batch"])
 def test_acting_subagent_without_workspace_cannot_touch_the_live_repo(tmp_path, tool):
     """An acting child with no isolated workspace must not reach the live repo.

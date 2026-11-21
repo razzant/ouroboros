@@ -91,10 +91,11 @@ host-authored recovery workflow: return a typed, redacted result naming the fail
 stage, the completed external effects and a repair hint, and let the model decide; host
 code owns deterministic integrity, authority boundaries and truthful receipts only.
 Naming a documented default is never a different request: a value that means what
-omission means takes the omitted path, disclosed in the result; a value that genuinely
-asks for something is refused typed, at the earliest layer with authority to judge it,
-naming field, value and repair in one reply, because restated rules invite unchanged
-retries (`tools/arg_feedback`).
+omission means, or a key outside the schema with one meaning, takes that meaning with
+the schema unchanged, disclosed in the result; a value that genuinely asks for
+something, or a key with two readings, is refused typed, at the earliest layer with
+authority to judge it, naming field, value and repair in one reply, because restated
+rules invite unchanged retries (`tools/arg_feedback`).
 
 A producer that knows its call failed publishes that fact typed
 (`tool_result._publish_tool_result`, or a first-line `⚠️ IDENTIFIER`): identifier-less

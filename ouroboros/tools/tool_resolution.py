@@ -477,6 +477,12 @@ def _normalize_tool_call_args(entry: "ToolEntry", args: dict[str, Any]) -> None:
         # #1304: the schema's documented default IS omission (the #882 rule), removed
         # before the configured-session selector check and the payload binder read it.
         args.pop("root")
+    shared = args.get("path") if tool_name == "edit_batch" and isinstance(args.get("edits"), list) else None
+    if isinstance(shared, str) and shared.strip():
+        # A shared path names each edit that has none, here, before any write guard collects the targets;
+        # the handler names the acceptance in its result.
+        args["edits"] = [{**item, "path": shared} if isinstance(item, dict) and item.get("path") in (None, "")
+                         else item for item in args["edits"]]
 
 
 def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> str:
