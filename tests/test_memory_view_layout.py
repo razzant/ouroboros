@@ -8,6 +8,10 @@ a new page changes B and never A' or D. Anthropic keeps the message seal and giv
 slot to C before schemas. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
 read only inside the leading system group, by prefix: measured 2026-10-03); the view fact of
 the first send reaches the cap info, the task context, one event and the trace.
+Between two works on one memory, mode, authority, catalogue and route, a clock, a restart, the queue, money, review
+records, route health, registration order, the actor's drive or the assignment's size moves neither the schemas (on
+the Claudexor wire and sorted), A', D nor B; each leak still open is a strict xfail on its own tracker item, and a new
+page moves only the story after B's shared head.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
 """
 from __future__ import annotations
@@ -121,7 +125,8 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
     """A' and B are bytes of their sources alone (DEVELOPMENT "Cache-friendliness invariant"): another task, another
     owner message and ``time.time`` three days on, at one state of memory, change only C. A paid route writes its
     whole start again whenever these bytes move, so a capture fact in them is paid by every task that follows.
-    A stamp taken through ``datetime.now`` is not moved here (WORLD's dated measured block is such a line)."""
+    A stamp taken through ``datetime.now`` is not moved here (WORLD's dated measured block is such a line); the
+    sibling below moves every clock and the live state one at a time."""
     import time
 
     env, memory, _rooms = world(tmp_path)
@@ -131,6 +136,334 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
     second = blocks(env, memory, {"id": "another-task", "chat_id": 1, "text": "a different owner message, much later"})
     assert second[0] == first[0] and second[1] == first[1]
     assert second[2] != first[2]  # the changing context is the capture's own
+
+
+_REAL_CLOCKS = {}  # filled on first use: the process's own clocks, before any case moves them
+
+
+class KnownLeak(AssertionError):
+    """Only the parts a case's strict xfail names moved; any other moved part fails the case outright."""
+
+
+class _CalendarMeta(type):
+    def __instancecheck__(cls, value):
+        return isinstance(value, _REAL_CLOCKS["datetime"])
+
+    def __subclasscheck__(cls, other):
+        return issubclass(other, _REAL_CLOCKS["datetime"])
+
+
+def _set_clocks(monkeypatch, *, wall: float, calendar: float) -> None:
+    """Read ``time.time`` (with ``time_ns`` and the no-argument ``gmtime``/``localtime``/``strftime``) ``wall``
+    seconds on, and every ``datetime.now``/``utcnow``/``today`` ``calendar`` seconds on: the ``datetime`` module's
+    class and each loaded ``ouroboros``/``supervisor`` module's own ``from datetime import datetime`` name
+    (``utc_now_iso`` and every clock helper read one of these)."""
+    import datetime as dt
+    import sys
+    import time
+
+    if not _REAL_CLOCKS:
+        _REAL_CLOCKS.update(time=time.time, time_ns=time.time_ns, gmtime=time.gmtime, localtime=time.localtime,
+                            strftime=time.strftime, datetime=dt.datetime)
+    real = _REAL_CLOCKS
+    monkeypatch.setattr(time, "time", lambda: real["time"]() + wall)
+    monkeypatch.setattr(time, "time_ns", lambda: real["time_ns"]() + int(wall * 1e9))
+    monkeypatch.setattr(time, "gmtime", lambda secs=None: real["gmtime"](time.time() if secs is None else secs))
+    monkeypatch.setattr(time, "localtime", lambda secs=None: real["localtime"](time.time() if secs is None else secs))
+    monkeypatch.setattr(time, "strftime", lambda fmt, at=None: real["strftime"](fmt, time.localtime() if at is None else at))
+    delta = dt.timedelta(seconds=calendar)
+
+    class Later(real["datetime"], metaclass=_CalendarMeta):
+        _moved_by = delta
+
+        @classmethod
+        def now(cls, tz=None):
+            return real["datetime"].now(tz) + delta
+
+        @classmethod
+        def utcnow(cls):
+            return real["datetime"].utcnow() + delta
+
+        @classmethod
+        def today(cls):
+            return real["datetime"].today() + delta
+
+    monkeypatch.setattr(dt, "datetime", Later)
+    for name, module in list(sys.modules.items()):
+        held = vars(module).get("datetime") if name.split(".")[0] in ("ouroboros", "supervisor") else None
+        if held is real["datetime"] or getattr(held, "_moved_by", None) is not None:
+            monkeypatch.setattr(module, "datetime", Later)
+
+
+def _calendar_offsets():
+    """``(base, later)`` seconds past the real clock: noon UTC tomorrow, so no case depends on the hour it runs, and
+    noon UTC on the 4th of the month after it (at least four days on, across a month boundary)."""
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    base = (now + dt.timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    later = (base.replace(day=1) + dt.timedelta(days=32)).replace(day=4)
+    return (base - now).total_seconds(), (later - now).total_seconds()
+
+
+def _start(env, memory, task, *, ctx, restart=False, reversed_registration=False, bare_build=False,
+           window=400_000):
+    """What one work sends before its transcript on one model route: the schemas as the Claudexor transport puts them
+    on the wire (``llm_claudexor._request``: the registry's order) and as every other transport does
+    (``sanitize_function_tools``: sorted), and the system blocks A', D, B and C. ``restart`` first runs the startup's
+    WORLD refresh (``agent_startup_checks``), as a work after a host restart follows one; ``bare_build`` builds the
+    context without a tool context (the registry keeps ``ctx``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_claudexor import _request
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.world_profiler import refresh_world_profile
+
+    if restart:
+        refresh_world_profile(str(memory.world_path()), str(env.repo_dir), str(env.drive_root))
+    registry = ToolRegistry(env.repo_dir, env.drive_root)
+    if reversed_registration:  # the same entries, registered in the opposite order
+        registry._entries = dict(reversed(list(registry._entries.items())))
+    if ctx is not None:
+        registry.set_context(ctx)
+    schemas = initial_tool_schemas(registry, context_mode="max")
+    route = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=window)
+    messages, cap = _messages(env, memory, task, ctx=None if bare_build else ctx, tool_schemas=schemas, tool_registry=registry,
+                               route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, route))
+    content = messages[0]["content"]
+    a, b, c = content[0], content[-2], content[-1]
+    d = "".join(block["text"] for block in content[1:-2] if block["text"].startswith("## DEVELOPMENT.md\n"))
+    wire = _request({"source": "codex", "resolved_model": "exact-model"}, messages, schemas, {})["tools"]
+    return {"schemas (Claudexor wire)": json.dumps(wire, ensure_ascii=False),
+            "schemas (sorted)": json.dumps(LLMClient._sanitize_chat_completion_tools(schemas), ensure_ascii=False),
+            "A'": a["text"], "D": d, "B": b["text"], "head": b["text"][:b[SHARED_HEAD_KEY]["chars"]],
+            "C": c["text"], "registry order": [schema["function"]["name"] for schema in schemas],
+            "mode": cap["context_fit"]["initial_mode"]}
+
+
+def _moved(first, second):
+    """The labels of the shared start's parts that differ: each schema form, A', D and each ``## `` section of B."""
+    moved = [part for part in ("mode", "schemas (Claudexor wire)", "schemas (sorted)", "A'", "D")
+             if first[part] != second[part]]
+    old, new = (re.split(r"(?m)^(?=## )", start["B"]) for start in (first, second))
+    if len(old) != len(new):
+        was, now = ([part.split("\n", 1)[0][:80] for part in parts] for parts in (old, new))
+        return moved + [f"B sections: gone {[h for h in was if h not in now]}, new {[h for h in now if h not in was]}"]
+    return moved + ["B " + before.split("\n", 1)[0][:80] for before, after in zip(old, new) if before != after]
+
+
+def _queue(env, tasks=()):
+    """The supervisor's two published documents: the queue (``tasks`` pending and running) and its dispatch facts."""
+    from ouroboros.utils import atomic_write_json, utc_now_iso
+    from tests._shared import write_queue_document
+
+    state = env.drive_root / "state"
+    write_queue_document(state / "queue_snapshot.json", {
+        "ts": utc_now_iso(), "pending": [{"id": f"{task}-pending", "task": {"id": f"{task}-pending", "type": "task"}}
+                                         for task in tasks],
+        "running": [{"id": f"{task}-running", "task": {"id": f"{task}-running", "type": "task"}} for task in tasks]})
+    atomic_write_json(state / "queue_dispatch.json", {"generation": "fixture-generation", "budget_root_fences": [],
+                                                      "members": {}})
+
+
+def _age(text):
+    found = re.search(r'"age_sec":([0-9.]+)', text)
+    return float(found.group(1)) if found else None
+
+
+def _vary_queue(env, monkeypatch, **_kw):
+    _queue(env, ("other-a", "other-b", "other-c"))
+    return lambda first, second: '"pending_count":3' in second["C"] and '"pending_count":3' not in first["C"]
+
+
+def _vary_budget(env, monkeypatch, **_kw):
+    from tests._scale_root import money
+
+    monkeypatch.setenv("TOTAL_BUDGET", "250")
+    money(env.drive_root, "other-task", cost=3.21, limit=250.0)
+    return lambda first, second: '"spent_usd":3.21' in second["C"] and '"spent_usd":3.21' not in first["C"]
+
+
+def _vary_reviews(env, monkeypatch, **_kw):
+    from ouroboros import review_ledger, review_price, reviewer_slot_config
+
+    settled = {"review-1": {"status": "ok", "ts": "2026-10-29T08:00:00+00:00", "cost_usd": 0.4321}}
+    price = review_price.ReviewPrice(usd=0.4321, reviews=2, low=0.21, high=0.65)
+    monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda: settled)
+    monkeypatch.setattr(review_price, "review_price", lambda *_a, **_kw: price)
+    for task in ("another-task", "other-task"):
+        review_ledger.write_record(env.drive_root, {"record_id": f"rv-{task}", "state": "settled", "task_id": task,
+                                                    "root_task_id": task, "surface": "commit_gate",
+                                                    "verdict": {"aggregate": "PASS"}})
+    return lambda first, second: all(word in second["C"] and word not in first["C"] for word in ("rv-another-task", "0.4321"))
+
+
+def _vary_accounts(env, monkeypatch, **_kw):
+    from ouroboros.claudexor_exit_facts import record_route_health
+
+    assert record_route_health(env.drive_root, {
+        "window_days": 7, "complete": True, "generated_at": "2026-11-20T10:00:00+00:00",
+        "routes": [{"harness": "codex", "access": "full", "runs": 40, "failed": 9,
+                    "top_failures": [{"category": "quota", "code": "quota_exhausted", "count": 9}]},
+                   {"harness": "claude", "access": "readonly", "runs": 12, "failed": 0, "top_failures": []}]})
+    return lambda first, second: "codex full 9/40" in second["C"] and "codex full 9/40" not in first["C"]
+
+
+def _vary_time(env, monkeypatch, *, base, later, **_kw):
+    _set_clocks(monkeypatch, wall=later, calendar=base)
+    return lambda first, second: _age(second["C"]) > 3 * 86_400 > _age(first["C"])
+
+
+def _date_reached(first, second):
+    import datetime as dt
+
+    today = '"context_captured_at":"' + dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    return today in second["C"] and today not in first["C"]
+
+
+def _vary_datetime(env, monkeypatch, *, base, later, **_kw):
+    _set_clocks(monkeypatch, wall=base, calendar=later)
+    return _date_reached
+
+
+def _vary_restart(env, monkeypatch, *, base, later, start, **_kw):
+    _set_clocks(monkeypatch, wall=later, calendar=later)
+    start["restart"] = True
+    return _date_reached
+
+
+def _vary_registration(env, monkeypatch, *, start, **_kw):
+    start["reversed_registration"] = True
+    return lambda first, second: second["registry order"] == first["registry order"][::-1]
+
+
+def _vary_fork(env, monkeypatch, *, start, **_kw):
+    from ouroboros.tools.registry import ToolContext
+
+    fork = env.drive_root.parent / "fork"
+    fork.mkdir()
+    start["ctx"] = ToolContext(repo_dir=env.repo_dir, drive_root=fork, task_id="another-task", current_chat_id=1)
+    relative = "path='memory/identity.md'"
+    return lambda first, second: relative in first["B"] and relative not in second["B"]
+
+
+def _vary_no_context(env, monkeypatch, *, start, **_kw):
+    start["bare_build"] = True
+    return lambda first, second: "no tool context here" in second["B"] and "no tool context here" not in first["B"]
+
+
+def _vary_assignment_size(env, monkeypatch, *, task, **_kw):
+    task["text"] = "A long assignment, pasted whole. " * 4_500  # about 150k characters: the same mode on this route
+    return lambda first, second: second["text_chars"] > 100_000
+
+
+def _vary_frame(env, monkeypatch, *, start, task, **_kw):
+    """A large map (the same bytes in both works) on a smaller window, and an assignment large enough that the view
+    is framed by a different budget at the same mode."""
+    start["window"] = 300_000
+    task["text"] = "A long assignment, pasted whole. " * 9_100  # about 300k characters
+    return lambda first, second: second["text_chars"] > 250_000
+
+
+_VARY = {"time_time": _vary_time, "datetime": _vary_datetime, "restart": _vary_restart, "queue": _vary_queue,
+         "budget": _vary_budget, "review_records": _vary_reviews, "accounts": _vary_accounts,
+         "tool_order": _vary_registration, "actor_fork": _vary_fork, "actor_no_context": _vary_no_context,
+         "assignment_size": _vary_assignment_size, "frame_budget": _vary_frame}
+
+
+def _leak(item, what, *known):
+    return {"marks": pytest.mark.xfail(strict=True, raises=KnownLeak, reason=f"razzant/ouroboros#3231 item {item}: {what}"),
+            "known": known}
+
+
+_CLAUDEXOR_ORDER = pytest.mark.xfail(strict=True, raises=KnownLeak, reason=(
+    "razzant/ouroboros#NEW-claudexor-tool-order: llm_claudexor.py:339 sends the schemas in the registry's order "
+    "(registry_core.py:749-797, built-ins then extensions then MCP rows as registered); the other transports sort them "
+    "(openai_chat_dispatch.py:106)"))
+
+
+def _case(fact, item=None, what="", *known, marks=()):
+    leak = _leak(item, what, *known) if item else {"marks": marks, "known": known}
+    return pytest.param(fact, leak["known"], id=fact, marks=leak["marks"])
+
+
+@pytest.mark.parametrize("fact,known", [
+    _case("time_time"),
+    _case("datetime"),
+    _case("restart", 6, "WORLD's measured block is restamped with the startup date (world_profiler.py:143-146, "
+          ":310-321), and the map's revision line under it follows", "B ## System (measured at startup",
+          "B ## What lives here"),
+    _case("queue"),
+    _case("budget"),
+    _case("review_records"),
+    _case("accounts"),
+    _case("tool_order", None, "", "schemas (Claudexor wire)", marks=_CLAUDEXOR_ORDER),
+    _case("actor_fork", 4, "identity's reader address is relative on the canonical drive, absolute on a fork "
+          "(tool_access_reads.py:30-34, context.py:693)", "B ## Identity"),
+    _case("actor_no_context", 4, "without a tool context identity's reader is a third spelling "
+          "(tool_access_reads.py:30-31, context.py:693)", "B ## Identity"),
+    _case("assignment_size"),
+    _case("frame_budget", 3, "at one mode and window a larger assignment frames WORLD as headings only "
+          "(the map's whole form becomes its operative view)", "B sections", "B ## My World"),
+])
+def test_another_day_and_other_live_state_keep_the_shared_start(tmp_path, monkeypatch, fact, known):
+    """Two works on one memory, mode, authority, catalogue and model route, one fact apart: a clock (``time.time``,
+    every ``datetime`` reader, or both with the startup's WORLD refresh: a restart), across a month boundary; the
+    queue; money; review records; the engine's route health; the tools' registration order; the actor's drive (a fork,
+    or no tool context); the assignment's size. The schemas, A', D and all of B keep their bytes, and the fact is
+    checked to have reached the request, so a case never passes on a fact that went nowhere. A case whose start
+    still moves holds a strict xfail bound to its tracker item, and fails outright when anything else moves."""
+    from ouroboros import config
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "drive")  # one data root, as an install has
+    base, later = _calendar_offsets()
+    _set_clocks(monkeypatch, wall=base, calendar=base)
+    env, memory, _rooms = world(tmp_path)
+    _queue(env)
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    window = 400_000
+    if fact == "frame_budget":  # memory held equal, only larger: a map the window must frame
+        memory.ensure_files()  # the generated map, then my own text in it
+        world_path = memory.world_path()
+        world_path.write_text(world_path.read_text(encoding="utf-8") + "\n" + "".join(
+            f"\n## Place {index}\n\n" + "A host I reach, how, and what worked there. " * 60 for index in range(120)),
+            encoding="utf-8")
+        window = 300_000
+    canonical = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id="tmain", current_chat_id=1)
+    first = _start(env, memory, dict(MAIN), ctx=canonical, restart=True, window=window)
+    task = {"id": "another-task", "chat_id": 1, "text": "a different owner message, later"}
+    start = {"ctx": ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id="another-task",
+                                current_chat_id=1)}
+    reached = _VARY[fact](env, monkeypatch, base=base, later=later, start=start, task=task)
+    second = {**_start(env, memory, task, **start), "text_chars": len(task["text"])}
+    assert reached(first, second), f"the {fact} fact never reached the request"
+    moved = _moved(first, second)
+    unexplained = [label for label in moved if not label.startswith(known or ("\0",))]
+    assert not unexplained, f"{fact}: the shared start moved in {unexplained}"
+    if moved:
+        raise KnownLeak(f"{fact}: only the named leak moved: {moved}")
+
+
+def test_a_new_page_moves_only_the_story_after_the_head_every_work_shares(tmp_path, monkeypatch):
+    """The other side of the family (#3373): with memory changed by a new page of my story, the head of B that all
+    works share (``SHARED_HEAD_KEY``) keeps its bytes and only the story after it moves; schemas, A' and D stay."""
+    from ouroboros import config
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_memory_view_story import _page
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "drive")
+    env, memory, _rooms = world(tmp_path)
+    _queue(env)
+    ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id="tmain", current_chat_id=1)
+    first = _start(env, memory, dict(MAIN), ctx=ctx, restart=True)
+    _page(memory.drive_root, "1", 11, 12, text="My page about the next request.")
+    second = _start(env, memory, {"id": "another-task", "chat_id": 1, "text": "later"}, ctx=ctx)
+    assert "My page about the next request." in second["B"] and second["head"] == first["head"]
+    assert _moved(first, second) == ["B ## My story"]
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
