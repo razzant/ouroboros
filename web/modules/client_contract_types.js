@@ -482,6 +482,7 @@
  * @property {ChatHistoryQuiz=} quiz
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
+ * @property {boolean=} schedule_report_only  // terminal card links to a saved report, not a transcript message
  * @property {Object=} historical_terminal
  * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
  * @property {Object=} model_waits

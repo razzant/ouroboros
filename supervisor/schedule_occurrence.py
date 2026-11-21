@@ -474,7 +474,9 @@ def _prepare(claimed: Dict[str, Any]) -> Dict[str, Any]:
     }
     previous_id = str(record.get("last_task_id") or "")
     if previous_id:
-        outcome = record.get("last_outcome") or {}
+        from supervisor.schedule_view import visible_last_outcome
+
+        outcome = visible_last_outcome(record)
         task["metadata"]["schedule_occurrence"].update(
             previous_task_id=previous_id,
             previous=(copy.deepcopy(outcome) if outcome.get("task_id") == previous_id

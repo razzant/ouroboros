@@ -107,7 +107,30 @@ def terminal_custody_notice_text(result: Dict[str, Any]) -> str:
 
 def quiet_finish(row: Dict[str, Any]) -> bool:
     """A silent finish is quiet only when neither the mind nor the host sent a message."""
-    return row.get("wake_silent") is True and not row.get("owner_message_sent") and not terminal_host_notice_text(row)
+    return ((row.get("wake_silent") is True or schedule_report_run(row))
+            and not row.get("owner_message_sent") and not terminal_host_notice_text(row))
+
+
+def schedule_report_run(row: Dict[str, Any]) -> bool:
+    """A run of an older schedule that still carries its frozen Presence ceiling and speaker (#3687): its report is
+    its record (``loop_completion_schema``), so no room shows an excerpt of it, a salvage receipt included. The one
+    classifier: a live run marks its delivery candidate and ``wake_silent`` from it once, and every reader that holds
+    only the stored row (a replay, an outbox row's task, a preview) asks it of that row."""
+    metadata = row.get("metadata") if isinstance(row, dict) and isinstance(row.get("metadata"), dict) else {}
+    contract = row.get("task_contract") if isinstance(row, dict) and isinstance(row.get("task_contract"), dict) else {}
+    return all(isinstance(value, dict) for value in (
+        metadata.get("presence"), metadata.get("schedule_occurrence"), contract.get("capability_ceiling")))
+
+
+def schedule_report_ctx(ctx: Any) -> bool:
+    """``schedule_report_run`` of a live tool context's own task facts."""
+    return schedule_report_run({"metadata": getattr(ctx, "task_metadata", None) or {},
+                                "task_contract": getattr(ctx, "task_contract", None) or {}})
+
+
+def schedule_report_fields(row: Dict[str, Any]) -> Dict[str, bool]:
+    """The card has a saved report reader without a result excerpt."""
+    return {"schedule_report_only": True} if schedule_report_run(row) else {}
 
 
 def work_label(*rows: Any) -> Dict[str, str]:

@@ -1223,6 +1223,20 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
               if key in {"_acceptance_pending_review_choice", "_left_review_wait", *_RESULT_REVIEW_SHOWN}}
     for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
+    from ouroboros.task_finalization import schedule_report_ctx
+
+    schedule_report = schedule_report_ctx(ctx)
+    if schedule_report:
+        # Pre-upgrade rows had no wake_silent/quiet facts. The geometry is enough to keep the report a record.
+        for name in ("_completion_request", "_completion_selected"):
+            request = getattr(ctx, name, None)
+            if isinstance(request, dict) and request.get("source") == "presence_finish":
+                request["wake_silent"] = True
+        completion = getattr(ctx, "_presence_completion", None)
+        if isinstance(completion, dict):
+            completion["quiet"] = True
+            if completion.get("outcome") in {"message", "deferred"}:
+                completion["outcome"] = "silent"
     if "_completion_request" in state["delivery"] and "_completion_conflict" not in state["delivery"]:
         ctx._completion_conflict = None  # saved before this fact rode beside its request: unknown, not "no conflict"
     from ouroboros.route_choice import restored_choice
@@ -1237,6 +1251,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
+    if ctx._delivery_candidate is not None and schedule_report:
+        ctx._delivery_candidate.quiet = True  # a pre-upgrade report, selected or not, stays a record on every place state
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
         if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:

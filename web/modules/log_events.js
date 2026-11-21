@@ -1158,9 +1158,8 @@ export function taskTerminalSummary(evt = {}) {
         && (evt.outcome_final === true || evt.system_type === 'task_summary'
             || taskDoneIsTerminal(evt));
     const outcome = taskTerminalPhase(evt);
-    // Terminality and outcome knowledge are two facts (#1110): the lifecycle status
-    // can settle while post-task finalization still runs. Painting the whole frame
-    // 'error' put Failed where only a terminal frame may, so the title carried it.
+    // Outcome and terminality differ (#1110): a known failure belongs in the title
+    // while post-task finalization still runs, not in the frame's phase.
     // The stamp (`task_terminal_status`/`status`) is the producer's word; a row
     // that carries only the canonical axes still knows its lifecycle, so a
     // settled `outcome_axes.lifecycle.status` counts too (as taskOutcomeSeverity
@@ -1184,6 +1183,7 @@ export function taskTerminalSummary(evt = {}) {
             ...(cause ? { activityPreview: cause } : {}),
         }),
         ...(observedOutcome ? { observedOutcome } : {}),
+        ...(terminal && evt.schedule_report_only === true && evt.task_id && { fullRef: String(evt.task_id), truncated: true, fullField: 'schedule_report' }),
         ...(typeof evt.quiet_effective === 'boolean' ? { quietEffective: evt.quiet_effective } : {}),
         ...(evt.model_execution && typeof evt.model_execution === 'object'
             ? { modelExecution: evt.model_execution } : {}),

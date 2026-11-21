@@ -50,7 +50,7 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, terminal_result_fields
+from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, schedule_report_run, terminal_result_fields
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -940,27 +940,23 @@ class OuroborosAgent:
         task_id = str(task.get("id") or "")
         task_meta = subagent_message_meta(self._current_task_metadata, task_id=task_id, event="progress")
         task_meta.update(initiator_meta(self._current_task_metadata))
-        return self._bind_task_progress(
-            task_id, self._current_chat_id, task_meta, task.get("_attempt"),
-        )
+        return self._bind_task_progress(task_id, self._current_chat_id, task_meta, task.get("_attempt"),
+                                        record_only=schedule_report_run(task))
 
     def _bind_task_progress(
         self, task_id: str, chat_id: Optional[int], progress_meta: Optional[Dict[str, Any]] = None,
-        task_attempt: Any = None,
+        task_attempt: Any = None, record_only: bool = False,
     ) -> Callable[[str], Any]:
-        """Keep a task's progress address stable after its worker turn ends."""
+        """Keep a task's progress address stable after its worker turn ends. ``record_only`` is the originating
+        task's own fact (``schedule_report_run``): an older schedule's held report is its record, never narration."""
         def emit_task_progress(text: str, **kwargs: Any) -> None:
+            if record_only and kwargs.get("narration"):
+                return
             # A producer can attach per-row facts; the callback's frozen task provenance still wins after this worker changes tasks.
             meta = dict(kwargs.pop("_progress_meta_override", None) or {})
             meta.update(progress_meta or {})
-            self._emit_progress(
-                text,
-                _task_id_override=task_id,
-                _chat_id_override=chat_id,
-                _progress_meta_override=meta,
-                _task_attempt_override=task_attempt,
-                **kwargs,
-            )
+            self._emit_progress(text, _task_id_override=task_id, _chat_id_override=chat_id, _progress_meta_override=meta,
+                                _task_attempt_override=task_attempt, **kwargs)
 
         return emit_task_progress
 

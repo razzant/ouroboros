@@ -1043,11 +1043,12 @@ def mirrored_answer(result: Any, phase: str) -> Dict[str, str]:
     salvage, internal quiet results and host notices are not published answers; a row sent while the
     task still reads ``working`` is frozen by the outbox and must stay a pointer.
     """
-    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL, schedule_report_run
 
     row = result if isinstance(result, dict) else {}
     answer = row["result"].strip() if isinstance(row.get("result"), str) else ""
-    if (str(row.get("terminal_origin") or "") != TERMINAL_ORIGIN_MODEL_FINAL
+    if (schedule_report_run(row)
+            or str(row.get("terminal_origin") or "") != TERMINAL_ORIGIN_MODEL_FINAL
             or row.get("wake_silent") is True
             or str(phase or "") not in _TERMINAL_MIRROR_PHASES
             or not answer or len(answer) > MIRRORED_ANSWER_MAX_CHARS):

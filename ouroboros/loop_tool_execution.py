@@ -75,6 +75,10 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     tool_ctx = getattr(tools, "_ctx", None)
     event_queue = getattr(tool_ctx, "event_queue", None)
     enriched = dict(payload)
+    from ouroboros.task_finalization import schedule_report_ctx
+    if enriched.get("tool") == "presence_finish" and schedule_report_ctx(tool_ctx):
+        enriched.pop("args", None)  # the exact call remains in the task's own retained evidence
+        enriched.pop("result_preview", None)
     meta = _tool_task_metadata(tools)
     for key in ("parent_task_id", "root_task_id"):
         if meta.get(key) and not enriched.get(key):

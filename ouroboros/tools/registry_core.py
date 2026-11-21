@@ -380,6 +380,34 @@ class ToolRegistry:
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
+        self._bind_schedule_door()
+
+    def _bind_schedule_door(self) -> None:
+        """Each task binding drops this registry's own adapter and binds it again only for a run of an older schedule
+        its receipt confirms (``loop_completion_schema.schedule_door``). A frozen registry's door keeps its name."""
+        from ouroboros.loop_completion_schema import SCHEDULE_DOOR, schedule_door_entry, schedule_finish
+
+        entry = self._scoped_entries.get(SCHEDULE_DOOR)
+        if entry is not None and entry.handler is schedule_finish:
+            for table in (self._entries, self._scoped_entries, self._entry_origins):
+                table.pop(SCHEDULE_DOOR, None)
+        if SCHEDULE_DOOR not in self._entries and (door := schedule_door_entry(self._ctx)) is not None:
+            self.register(door, origin="ouroboros.loop_completion_schema.schedule_door_entry")
+
+    def _retry_schedule_door(self) -> bool:
+        """A busy first receipt read is not a lifetime unbind: catalog reads and dispatch read it again (no-op once bound,
+        and for any task without a frozen ceiling). True when the adapter is bound now."""
+        from ouroboros.loop_completion_schema import SCHEDULE_DOOR, schedule_door_entry
+
+        ctx = getattr(self, "_ctx", None)
+        if SCHEDULE_DOOR in self._entries:
+            return bool(getattr(ctx, "_schedule_door", None))
+        if ctx is None or not (getattr(ctx, "task_contract", {}) or {}).get("capability_ceiling"):
+            return False
+        if (door := schedule_door_entry(ctx)) is None:
+            return False
+        self.register(door, origin="ouroboros.loop_completion_schema.schedule_door_entry")
+        return True
 
     def copy_for(self, ctx: ToolContext) -> "ToolRegistry":
         """This catalog bound to ``ctx``; handlers the copy rebinds (``override_handler``) stay its own."""
@@ -729,6 +757,7 @@ class ToolRegistry:
         return rows
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+        self._retry_schedule_door()
         acting_subagent = self._is_acting_subagent()
         local_readonly_subagent = self._is_local_readonly_subagent()
         # Dispatch-only policy (В31=B): a consciousness-origin task is filtered by nothing here and
@@ -870,6 +899,8 @@ class ToolRegistry:
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
+        if requested == "presence_finish":
+            self._retry_schedule_door()
         acting_subagent = self._is_acting_subagent()
         acting_grants = self._acting_tool_grants() if acting_subagent else set()
         local_readonly_subagent = self._is_local_readonly_subagent()
@@ -1199,6 +1230,10 @@ class ToolRegistry:
     def _execute_admitted_text(self, name: str, args: Dict[str, Any],
                                handoff: Optional[Dict[str, Any]] = None) -> str | ToolResult:
         name = str(name or "").strip()
+        if name == "presence_finish" and (getattr(self._ctx, "_schedule_door", None) or self._retry_schedule_door()):
+            from ouroboros.loop_completion_schema import fixed_refusal
+            if (refusal := fixed_refusal(self._ctx)) is not None:  # a frozen outcome is applied below, never refused
+                return refusal
         args, presence_arg_error = _presence_bound_args(self._ctx, name, args)
         if presence_arg_error:
             return presence_arg_error
