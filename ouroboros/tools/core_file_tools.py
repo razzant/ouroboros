@@ -21,6 +21,7 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint, resol
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
 from ouroboros.project_facts import project_store_access_block as _project_store_access_block
 from ouroboros.protected_artifacts import block_reason_for_path
+from ouroboros.tool_access_paths import is_private_service_log_path
 from ouroboros import store, work_domain
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -56,20 +57,17 @@ def _skill_owner_state_read_allowed(ctx: ToolContext) -> bool:
 def _runtime_data_read_check(ctx: ToolContext, *, listing: bool = False, root: str = "") -> Callable[[pathlib.Path], str]:
     """Prepare the parent's runtime rules once for this read/list/search call."""
     from ouroboros.tools.core_secret_paths import runtime_data_roots
-
-    # Explicit user_files uses its own per-mode runtime-overlap policy. Cyber
-    # parents already read those files there; child parity must not narrow it.
-    roots = [] if root == "user_files" else runtime_data_roots(ctx)
+    roots = runtime_data_roots(ctx)
     owner_state_blocked = not listing and not _skill_owner_state_read_allowed(ctx)
 
     def check(target: pathlib.Path) -> str:
         target = pathlib.Path(target).resolve(strict=False)
         for data_root in roots:
-            try:
-                relative = target.relative_to(data_root).as_posix()
-            except ValueError:
-                continue
-            if reason := _project_store_access_block(relative):
+            if is_private_service_log_path(target, data_root):
+                return "⚠️ DATA_READ_BLOCKED: private service diagnostics are available only on the local filesystem."
+            if root == "user_files" or not target.is_relative_to(data_root):
+                continue  # Cyber parents already read the overlap under user_files' own policy. Children keep parity.
+            if reason := _project_store_access_block(target.relative_to(data_root).as_posix()):
                 return str(reason)
             if (owner_state_blocked and _is_skill_owner_state_target(target, data_root)
                     and target.name.lower() != "review.json"):
@@ -359,7 +357,7 @@ class _ListingMiss(_ListingFailure):
     marked refusal to list, never an error string inside an ok-shaped listing."""
 
 
-def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
+def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500, *, data_root=None) -> List[str]:
     work = work_domain.is_work(root)  # a work folder by its spelling: listed from held descriptors, never followed
     target = work_domain.settle(root / safe_relpath(rel))
     # CONFINE to the root before any iterdir: a resolved target that escapes (e.g. an
@@ -383,6 +381,8 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     present = {entry.name for entry in entries}
     entries += [target / name for name in ([] if work else packed_handle_names_at(target)) if name not in present]
     for entry in sorted(entries):
+        if not work and is_private_service_log_path(entry, data_root):
+            continue
         if len(items) >= max_entries:
             items.append(f"...(truncated at {max_entries})")
             break
@@ -405,7 +405,7 @@ def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.P
         # operation="list" (capinv-447 / В23=A): the root principal's listing no
         # longer hides credential-SHAPED names — only control-plane/outside-home
         # entries stay omitted (and counted in the marker below).
-        if user_files_path_block_reason(ctx, entry, operation="list"):
+        if user_files_path_block_reason(ctx, entry, operation="list") or is_private_service_log_path(entry, ctx.drive_root):
             hidden += 1
             continue
         if len(items) >= max_entries:
@@ -702,7 +702,7 @@ def _data_list(
                 code="DATA_BLOCKED",
                 text="⚠️ DATA_LIST_BLOCKED: resolved target escapes runtime_data root.",
             ))
-        items = _filter_out_project_store(norm_dir, _list_dir(root, rel, max_entries))
+        items = _filter_out_project_store(norm_dir, _list_dir(root, rel, max_entries, data_root=root))
         return json.dumps(items, ensure_ascii=False, indent=2)
     if task_constraint and task_constraint.has_selected_skill and task_constraint.payload_root:
         try:
@@ -713,8 +713,8 @@ def _data_list(
             ))
         items = _list_dir(root, ".", max_entries)
         return json.dumps(items, ensure_ascii=False, indent=2)
-    # Drop any projects/<id> entry so a generic root listing never exposes the store.
-    items = _filter_out_project_store(_normalize_data_read_path(ctx, dir), _list_dir(ctx.drive_root, dir, max_entries))
+    items = _filter_out_project_store(_normalize_data_read_path(ctx, dir),
+                                      _list_dir(ctx.drive_root, dir, max_entries, data_root=ctx.drive_root))
     return json.dumps(items, ensure_ascii=False, indent=2)
 
 
@@ -975,7 +975,7 @@ def _list_files(
             items = _list_user_files_dir(ctx, binding.base_path, binding.target_path, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
         rel = binding.target_path.relative_to(binding.base_path).as_posix() or "."
-        items = _list_dir(binding.base_path, rel, max_entries)
+        items = _list_dir(binding.base_path, rel, max_entries, data_root=ctx.drive_root if normalized == "task_drive" else None)
         return json.dumps(items, ensure_ascii=False, indent=2)
     except _ListingMiss as exc:
         # A miss is discovery, not a failed tool: the same warning severity the

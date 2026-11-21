@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
+import json
 import logging
 import mimetypes
 import os
@@ -47,18 +49,21 @@ import tempfile
 import time
 import zipfile
 from email.utils import formatdate
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import quote
 
 import anyio
+from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 from ouroboros import artifacts as artifact_store
 from ouroboros.confined_files import (DIR_FLAGS, CONFINED_OPEN_AVAILABLE, IS_WINDOWS, confined_directory,
                                      lexical_relative, open_regular_at, relative_parts, root_spellings)
-from ouroboros.gateway._helpers import json_error
+from ouroboros.gateway._helpers import json_error, request_drive_root
 from ouroboros.task_custody import task_artifact_stores
 from ouroboros.task_status import load_effective_task_result
+from ouroboros.utils import machine_json
 
 log = logging.getLogger(__name__)
 ARCHIVE_SUFFIX = ".zip"
@@ -71,7 +76,9 @@ _MEMBER_GONE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EMLINK
 CONFINED, _DIR_FLAGS = CONFINED_OPEN_AVAILABLE, DIR_FLAGS
 _CHAT_MEDIA_DIGEST_RE = re.compile(r"chat-media-([0-9a-f]{64})\.[a-z0-9]+")
 _DELEGATED_SOURCE_RE = re.compile(r"source_handles/delegated_activity/([A-Za-z0-9][A-Za-z0-9_.-]*-([0-9a-f]{64})\.jsonl)")
+_SERVICE_LOG_RE = re.compile(r"source_handles/tool_results/(service-log-(tail|[0-9a-f]{16})-([0-9a-f]{64})\.txt)")
 _ACCEPTANCE_SOURCE_RE = re.compile(r"source_handles/context_checkpoints/(acceptance-([0-9a-f]{64})\.json)")
+VERIFICATION_LEDGER_NAME = "verification_ledger.json"
 # An SVG is an image a browser also runs as a document. Its exact bytes, type and static
 # view stay; opened directly it gets the chat-upload inline policy (gateway/files.py):
 # no script or application origin, no sniffing. Other types keep their headers.
@@ -356,8 +363,10 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
     A delegated run's retained journal range (``delegate_activity``) is content-addressed
     like chat media: only ``source_handles/delegated_activity/<id>-<sha256>.jsonl`` whose
     basename is ``name`` qualifies, read from the task's own stores (canonical first)
-    through the confined descent and verified against the digest its name carries. Any
-    other path must be a source the task result publishes, returned as its verified JSON,
+    through the confined descent and verified against the digest its name carries.
+    Masked service logs and immutable output versions likewise use task-owned digest addresses;
+    only an explicit request may recover a published full legacy log from its masked archive.
+    Any other path must be a source the task result publishes, returned as its verified JSON,
     or this author's own host acceptance record (history: the retired task acceptance
     wrote it) named by its digest: an old late notice keeps linking the record it was
     sent with after a newer publication replaced its panel's ref (#1369), resolved by
@@ -376,6 +385,24 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
                 pathlib.Path(drive_root).resolve(), store, source)) is not None]
         return serve_task_file(drive_root, (present or stores)[0], source, name, {"sha256": match.group(2)},
                                task_id=task_id)
+    if match := _SERVICE_LOG_RE.fullmatch(source):
+        if match[1] != name:
+            return json_error("source must end in the requested name", 400, reason_code="task_source_invalid",
+                              task_id=task_id, artifact=name)
+        if match[2] in ("tail", match[3][:16]):
+            return _serve_service_log_source(drive_root, stores, result, task_id, name, source, match[3],
+                                             full=match[2] != "tail")
+        return json_error("task source is unavailable or does not match its recorded identity", 404)
+    if digest := artifact_store.service_output_version_digest(source):
+        if source.rsplit("/", 1)[1] != name:
+            return json_error("source must end in the requested name", 400, reason_code="task_source_invalid",
+                              task_id=task_id, artifact=name)
+        try:
+            if response := _serve_digest_source(drive_root, stores, name, source, digest):
+                return response
+        except OSError:
+            pass
+        return json_error("task source is unavailable or does not match its recorded identity", 404)
     try:
         return Response(artifact_store.read_task_result_source_bytes(drive_root, result, name, source),
                         media_type="application/json", headers={"Content-Disposition": _disposition("inline", name)})
@@ -393,6 +420,103 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
     return json_error("task source is unavailable or does not match its recorded identity", 404)
 
 
+def _serve_digest_source(drive_root: Any, stores: List[pathlib.Path], name: str, source: str, digest: str,
+                         *, media_type: Optional[str] = None) -> Optional[Response]:
+    for store in stores:
+        try:
+            handle, observed = _open_task_file(drive_root, store, source, {"sha256": digest})
+        except FileNotFoundError:
+            continue  # a missing placement alone may look in the next admitted store
+        svg = (media_type or mimetypes.guess_type(name)[0]) == "image/svg+xml"
+        return DescriptorResponse(handle, name, observed, digest, media_type=media_type, headers=_SVG_POLICY if svg else None)
+    return None
+
+
+def _serve_service_log_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[str, Any], task_id: str,
+                              name: str, source: str, digest: str, *, full: bool) -> Response:
+    """Only a verified own-store handle, or an exact, explicitly requested archived masked log."""
+    try:
+        if response := _serve_digest_source(drive_root, stores, name, source, digest, media_type="text/plain"):
+            return response
+        from ouroboros.service_outcomes import ensure_legacy_masked_source
+
+        if full:
+            for document in _ledger_documents(drive_root, stores, result):
+                entries = document.get("entries") if isinstance(document, dict) else None
+                if isinstance(entries, list):
+                    raw = ensure_legacy_masked_source(drive_root, stores, task_id, entries, source)
+                    if raw is not None:
+                        return _projected_response(raw, name, media_type="text/plain")
+    except (OSError, ValueError, RuntimeError):
+        pass  # a broken source is not permission to try an unverified one
+    return json_error("task source is unavailable or does not match its recorded identity", 404)
+
+
+def _ledger_artifact(drive_root: Any, stores: List[pathlib.Path], result: Dict[str, Any]) -> Optional[tuple]:
+    """The dated host capture, selected by its recorded role and root-relative address, not its name alone."""
+    spellings = root_spellings(drive_root)
+    for row in result.get("artifacts") or ():
+        if (not isinstance(row, dict) or row.get("kind") != "verification_ledger" or
+                not (at := task_artifact_location(stores, row.get("path"), spellings)) or at[2] != VERIFICATION_LEDGER_NAME):
+            continue
+        if _eligible(row) and (expected := recorded_identity(row)):
+            return stores[at[0]], expected
+        raise OSError("the recorded verification ledger identity is unavailable")
+    return None
+
+
+def _load_ledger(handle: Any) -> Dict[str, Any]:
+    handle.seek(0)
+    value = json.load(handle)
+    if not isinstance(value, dict) or not isinstance(value.get("entries"), list):
+        raise ValueError("not a complete verification ledger")
+    return value
+
+
+def _ledger_documents(drive_root: Any, stores: List[pathlib.Path], result: Dict[str, Any]) -> Iterator[Any]:
+    yield result.get("verification_ledger")
+    if selected := _ledger_artifact(drive_root, stores, result):
+        handle, _ = _open_task_file(drive_root, selected[0], VERIFICATION_LEDGER_NAME, selected[1])
+        with handle:
+            ledger = _load_ledger(handle)
+        yield ledger
+
+
+def _projected_response(raw: bytes, name: str, *, media_type: str, mtime: float = 0) -> Response:
+    digest = hashlib.sha256(raw).hexdigest()
+    return DescriptorResponse(io.BytesIO(raw), name, SimpleNamespace(st_size=len(raw), st_mtime=mtime),
+                              digest, media_type=media_type, headers={"etag": f'"{digest}"'})
+
+
+def serve_projected_verification_ledger(request: Request, task_id: str) -> Response:
+    """Download the service-safe view of the verified host capture, never its unprojected legacy bytes."""
+    from ouroboros.service_finalization import public_event
+
+    drive_root = request_drive_root(request)
+    result = load_effective_task_result(drive_root, task_id) or {}
+    name = VERIFICATION_LEDGER_NAME
+    try:
+        stores = task_artifact_stores(drive_root, task_id)
+        if selected := _ledger_artifact(drive_root, stores, result):
+            handle, observed = _open_task_file(drive_root, selected[0], name, selected[1])
+            try:
+                ledger = _load_ledger(handle)
+                entries = [public_event(entry) if isinstance(entry, dict) else entry for entry in ledger["entries"]]
+                if entries == ledger["entries"]:
+                    digest = selected[1]["sha256"]
+                    return DescriptorResponse(handle, name, observed, digest, headers={"etag": f'"{digest}"'})
+                raw = (machine_json({**ledger, "entries": entries}) + "\n").encode("utf-8")
+            except BaseException:
+                handle.close()
+                raise
+            handle.close()  # the verified original is never served under the projection's identity
+            return _projected_response(raw, name, media_type="application/json", mtime=observed.st_mtime)
+    except (OSError, ValueError):
+        pass
+    return json_error("verification ledger is missing, changed while read, or failed verification",
+                      404, reason_code="artifact_unverified", task_id=task_id, artifact=name)
+
+
 class DescriptorResponse(Response):
     """The bytes of ONE already-open binary handle: GET/HEAD, ``Accept-Ranges`` and a single
     ``Range`` (206; an unsatisfiable one 416; several are served whole), headers from the fstat
@@ -405,7 +529,8 @@ class DescriptorResponse(Response):
                          or "application/octet-stream", headers=headers)
         self._handle, self._size = handle, observed.st_size
         etag = hashlib.md5(f"{observed.st_mtime}-{observed.st_size}".encode(), usedforsecurity=False).hexdigest()
-        self.headers.update({"content-length": str(self._size), "accept-ranges": "bytes", "etag": f'"{etag}"',
+        self.headers.setdefault("etag", f'"{etag}"')
+        self.headers.update({"content-length": str(self._size), "accept-ranges": "bytes",
                              "last-modified": formatdate(observed.st_mtime, usegmt=True),
                              "x-ouroboros-artifact-identity": "verified" if verified else "unmeasured"})
         if verified:
@@ -453,6 +578,35 @@ class DescriptorResponse(Response):
             self._handle.close()
 
 
+def _open_task_file(drive_root: Any, store: pathlib.Path, relpath: str, expected: Optional[Dict[str, Any]], *,
+                    head_only: bool = False) -> tuple:
+    if not CONFINED:
+        raise OSError(errno.ENOTSUP, "confined file open unavailable (issue #1297)")
+    route = _route(pathlib.Path(drive_root).resolve(strict=False), store, relpath)
+    if route is None:
+        raise OSError("artifact relpath is not plain segments")
+    with _Parents() as parents:
+        handle, observed = _open_member(parents, route)
+    if expected is None:
+        return handle, observed
+    spool = None
+    try:
+        if not head_only:
+            spool = tempfile.TemporaryFile()
+        measured = artifact_store.stream_artifact_file(handle, spool, expected=expected)
+        if measured["size"] != observed.st_size:
+            raise OSError("task file changed between its open and its verification")
+    except BaseException:
+        handle.close()
+        if spool is not None:
+            spool.close()
+        raise
+    if spool is not None:
+        handle.close()
+        handle = spool
+    return handle, observed
+
+
 def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: str,
                     expected: Optional[Dict[str, Any]], *, task_id: str, mutable: bool = False,
                     head_only: bool = False) -> Response:
@@ -464,29 +618,7 @@ def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: st
     that did not verify) or 503 ``artifact_unavailable`` (including a platform without
     confinement, issue #1297)."""
     try:
-        if not CONFINED:
-            raise OSError(errno.ENOTSUP, "confined file open unavailable (issue #1297)")
-        route = _route(pathlib.Path(drive_root).resolve(strict=False), store, relpath)
-        if route is None:
-            raise OSError("artifact relpath is not plain segments")
-        with _Parents() as parents:
-            handle, observed = _open_member(parents, route)
-        if expected is not None:
-            spool = None
-            try:
-                if not head_only:
-                    spool = tempfile.TemporaryFile()
-                measured = artifact_store.stream_artifact_file(handle, spool, expected=expected)
-                if measured["size"] != observed.st_size:
-                    raise OSError("task file changed between its open and its verification")
-            except BaseException:
-                handle.close()
-                if spool is not None:
-                    spool.close()
-                raise
-            if spool is not None:
-                handle.close()
-                handle = spool
+        handle, observed = _open_task_file(drive_root, store, relpath, expected, head_only=head_only)
     except OSError as exc:
         if mutable and exc.errno is None and expected and "verification" in str(exc):
             return json_error("artifact bytes no longer match the identity the task result records for this file",

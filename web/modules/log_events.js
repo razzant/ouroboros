@@ -1094,6 +1094,7 @@ function chatView({
     hostRefusedStep = false,
     toolCall = null,
     waitEpisode = null,
+    cardRowRevision,  // a host-keyed row's source order (`card_row_revision`): only a higher one revises it
 } = {}) {
     const out = { phase, headline, body, visible, promote, terminal, human, dedupeKey };
     // Receipt rows render inside existing blocks but cannot create one.
@@ -1101,6 +1102,7 @@ function chatView({
     if (hostRefusedStep) out.hostRefusedStep = true;
     if (toolCall) out.toolCall = toolCall;  // folded into the block's one evidence row
     if (waitEpisode) out.waitEpisode = waitEpisode;  // folded into the block's one row per wait kind
+    if (Number.isSafeInteger(cardRowRevision)) out.cardRowRevision = cardRowRevision;
     if (fullBody) out.fullBody = fullBody;
     if (fullHeadline) out.fullHeadline = fullHeadline;
     // Explicit emptiness is part of the presentation contract: a review-only
@@ -1431,8 +1433,8 @@ function summarizeChatLiveEventView(evt) {
             phase: lowRetry || evt.checkpoint_kind === 'service_finalization_error' ? 'warn' : 'thinking',
             headline: taskCheckpointLabel(evt),
             visible: !checkpointHasProgressRow(evt) && !(evt.checkpoint_kind === 'prompt_prefix_break' && evt.reasoning_retired),
-            dedupeKey: wait ? key('wait', wait.kind) : key(evt.checkpoint_kind || '', taskCheckpointIdentity(evt)),
-            receipt: Boolean(wait), waitEpisode: wait,
+            dedupeKey: wait ? key('wait', wait.kind) : taskCheckpointIdentity(evt, key),
+            receipt: Boolean(wait), waitEpisode: wait, cardRowRevision: evt.card_row_revision,  // a launch's row, live or replayed
         });
     }
 

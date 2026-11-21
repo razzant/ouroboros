@@ -73,6 +73,7 @@ def _consumers(tmp_path, registry, queue, workers, held):
 def _docker(monkeypatch, *, code=0, backend="completed", no_start=False, timeout=False):
     """Only Docker argv are simulated; every accidental Docker call fails closed."""
     from ouroboros import workspace_executor as executor
+    from ouroboros import workspace_executor_paths as paths
 
     real_popen, real_run = subprocess.Popen, subprocess.run
     calls = []
@@ -107,6 +108,8 @@ def _docker(monkeypatch, *, code=0, backend="completed", no_start=False, timeout
     monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(executor, "_process_command_sha256", lambda _pid: "")
+    # A service without declared outputs pins its container first; the simulated one answers by its own name.
+    monkeypatch.setattr(paths, "pinned_container", lambda ref: ref)
     return calls
 
 

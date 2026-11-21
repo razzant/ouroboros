@@ -16,6 +16,7 @@ from ouroboros.contracts.skill_payload_policy import (
     is_skill_owner_state_target as _is_skill_owner_state_target,
 )
 from ouroboros.credential_shapes import RUNTIME_SECRET_FILE_NAMES
+from ouroboros.tool_access_paths import runtime_data_roots as runtime_data_roots
 
 if TYPE_CHECKING:  # pragma: no cover
     from ouroboros.tools.registry import ToolContext
@@ -80,35 +81,6 @@ def _is_runtime_secret_repo_path(norm: str, *, credential_names: bool = True) ->
     if name.startswith(".env") or name.endswith(".env") or ".env." in name:
         return not name.endswith((".example", ".sample", ".template", ".dist"))
     return False
-
-
-def runtime_data_roots(ctx: ToolContext) -> list[pathlib.Path]:
-    """All runtime roots used by file admission, including a forked child's parent.
-
-    The root set comes from the existing vision/file parity owner: child drive,
-    canonical budget drive, and configured runtime admission root. A child's
-    isolated drive must not hide canonical owner state nested in its repository.
-    """
-    from ouroboros.tool_access import canonical_data_root
-    from ouroboros.config import DATA_DIR
-
-    values = [getattr(ctx, "drive_root", "")]
-    try:
-        values.append(canonical_data_root(ctx))
-    except Exception:
-        pass
-    values.append(DATA_DIR)
-    roots = []
-    for value in values:
-        if not str(value or "").strip():
-            continue
-        try:
-            root = pathlib.Path(value).expanduser().resolve(strict=False)
-        except (OSError, ValueError, RuntimeError):
-            continue
-        if root not in roots:
-            roots.append(root)
-    return roots
 
 
 def is_runtime_secret_target(

@@ -191,5 +191,5 @@
  * @property {string=} detail
  * @property {string=} log_path
  * @property {string=} stopped_at
- * @property {Object=} outputs  // {task_id, state: captured|incomplete|none_declared|unavailable|not_attempted, detail}
+ * @property {Object=} outputs  // {task_id, state: captured|incomplete|missing|none_declared|unavailable|not_attempted, detail}
  */

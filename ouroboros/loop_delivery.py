@@ -24,7 +24,7 @@ import queue
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from ouroboros import working_checkpoint
+from ouroboros import service_finalization, working_checkpoint
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.delivery_facts import FACTS_NOTED_CONTROL, note_delivery_facts as _note_delivery_facts
@@ -318,7 +318,7 @@ def delivery_evidence_fingerprint(
         # surface an output-finalization failure. Those facts arise outside an
         # ordinary tool call, so bind their stable projection explicitly; else
         # a result review could judge the pre-teardown state.
-        "service_finalization": _loop()._service_finalization_evidence(llm_trace),
+        "service_finalization": service_finalization.evidence(llm_trace),
     }
     return hashlib.sha256(json.dumps(
         evidence,
@@ -1309,16 +1309,7 @@ def _no_tool_final_answer(
     # Declared service outputs and teardown failures are evidence of the result:
     # finalize them before its review and, when that changes evidence,
     # require one replacement answer bound to the new revision (idempotent helper).
-    service_exit_ctx = _loop()._LoopExitContext(
-        tools=tools,
-        drive_root=limit_ctx.drive_root,
-        task_id=limit_ctx.task_id,
-        event_queue=limit_ctx.event_queue,
-        drive_logs=limit_ctx.drive_logs,
-        accumulated_usage=limit_ctx.accumulated_usage,
-        llm_trace=llm_trace,
-    )
-    services_finalized = _loop()._finalize_task_services(service_exit_ctx)
+    services_finalized = service_finalization.finalize(limit_ctx, llm_trace, tools)
     with finalization_child_scope():  # the stopped services' facts, up to the result review
         if services_finalized and not stopping:
             evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)

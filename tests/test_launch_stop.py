@@ -147,7 +147,7 @@ def test_a_denied_member_keeps_record_log_and_outputs_refuses_replacement_and_a_
     while not (task_drive / "report.txt").exists():  # written just before READY
         assert time.monotonic() < deadline
         time.sleep(0.02)
-    log = tmp_path / "data" / "services" / "stop-task" / "demo.log"
+    log = Path(started["log_path"])
     artifact = tmp_path / "data" / "task_results" / "artifacts" / "stop-task" / "report.txt"
     try:
         allow = _deny_signals_to(monkeypatch, {pid})
@@ -178,7 +178,7 @@ def test_a_denied_member_keeps_record_log_and_outputs_refuses_replacement_and_a_
         assert stopped["process_cleanup"]["exit_confirmed"] is True and pid in stopped["process_cleanup"]["ended"]
         assert "cannot be ruled out" in stopped["process_cleanup"]["residual"], "its leader ended in the first attempt"
         assert started["pid"] not in stopped["process_cleanup"]["ended"]  # it ended in the first attempt
-        assert "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"] and artifact.read_text(encoding="utf-8") == "generated"
+        assert stopped["output_outcomes"][0]["status"] == "saved" and artifact.read_text(encoding="utf-8") == "generated"
         assert stopped["log_finalization"]["deleted_live_log"] is True and not log.exists()
         assert json.loads(registry.execute("start_service", {
             "name": "demo", "cmd": _runner_cmd(scripts, tmp_path / "replacement.port"),
@@ -954,12 +954,12 @@ def test_a_kept_service_is_listed_after_its_task_and_one_reasoned_stop_ends_only
     from ouroboros.tools.services import stop_task_services
 
     registry = _registry(tmp_path, monkeypatch, task_id="producer")
-    _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
+    preview_start = _start(registry, scripts, tmp_path / "kept.port", "preview", keep_alive=True)
     _start(registry, scripts, tmp_path / "other.port", "sidecar", keep_alive=True)
     _start(registry, scripts, tmp_path / "plain.port", "plain")
     servers = {name: _server(tmp_path / f"{name}.port") for name in ("kept", "other", "plain")}
     drive = tmp_path / "data"
-    log = drive / "services" / "producer" / "preview.log"
+    log = Path(preview_start["log_path"])
     with log.open("a", encoding="utf-8") as handle:
         handle.write("  Local:   http://127.0.0.1:4173/?token=secret\n")
     try:
@@ -1047,17 +1047,17 @@ def test_a_root_task_stops_only_a_finished_producers_kept_service_and_a_delegate
 
         _queue_view(drive)
         unknown = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
-        assert unknown["outcome"] == "refused" and "no result recorded" in unknown["detail"], unknown  # unverified
+        assert (unknown["outcome"], unknown["refusal"]) == ("refused", "producer_unfinished"), unknown  # unverified
         write_task_result(drive, "producer", "running")
         live = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
-        assert live["outcome"] == "refused" and "has not finished (running)" in live["detail"], live
+        assert (live["outcome"], live["refusal"]) == ("refused", "producer_unfinished"), live
         write_task_result(drive, "producer", "completed")
         _queue_view(drive, running=("producer",))  # its result is written, but its worker still runs it
         winding = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
-        assert winding["outcome"] == "refused" and "may still run" in winding["detail"], winding
+        assert (winding["outcome"], winding["refusal"]) == ("refused", "producer_unfinished"), winding
         (drive / "state" / "queue.alive").unlink()  # no fresh queue view: its finish is not proven
         unproven = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
-        assert unproven["outcome"] == "refused" and "may still run" in unproven["detail"], unproven
+        assert (unproven["outcome"], unproven["refusal"]) == ("refused", "producer_unfinished"), unproven
         assert _answers(port) and _same_process_alive(pid, birth), "a refusal signals nothing"
         assert _kept_view(drive)["services"][0]["state"] == "running"
 
@@ -1171,7 +1171,8 @@ def test_a_kept_services_output_written_after_its_task_ended_is_captured_into_th
         (captured,) = [row for row in events if row.get("type") == "kept_service_outputs"]
         assert (captured["task_id"], captured["launch_id"], captured["actor"], captured["reason"], captured["state"]) == (
             "producer", service["launch_id"], "agent:integrator", "the report server is no longer needed", "captured")
-        assert captured["declaration"]["outputs"] == ["report.txt"] and captured["declaration"]["context"]["tool_profile"]
+        assert "declaration" not in captured, "the consumed declaration's paths do not ride the event row"
+        assert [(row["index"], row["status"]) for row in captured["output_outcomes"]] == [(1, "saved")]
 
         report = prune_service_logs(drive, retention_days=0, now=time.time() + 60)  # ordinary retention, later
         assert report["archived_files"] == 1 and not (drive / "services" / "producer").exists(), report
@@ -1206,7 +1207,7 @@ def test_a_kept_start_without_its_declaration_says_its_outputs_were_not_captured
     monkeypatch.setattr(utils, "atomic_write_json", real_write)
     drive = tmp_path / "data"
     try:
-        assert "disk full" in started["kept_declaration_problem"], started
+        assert started["kept_declaration_problem"] == "OSError", started
         (tmp_path / "go").write_text("go", encoding="utf-8")
         deadline = time.monotonic() + _PATIENCE
         while not (task_drive / "report.txt").exists():

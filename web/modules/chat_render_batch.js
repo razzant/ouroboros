@@ -970,6 +970,20 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     return { timelineUpdate, patchIndex };
 }
 
+/** The host's own row id of a summary when the row has one: its key IS that id
+ * (``taskCheckpoints.taskCheckpointIdentity``; the same marker ``mergeHistoricalTimelineItem``
+ * keeps as ONE row across live delivery and replay). Such a row is a fact of the card's record,
+ * not progress. */
+export const isHostKeyedRow = (summary) => String(summary?.dedupeKey || '').startsWith('cardrow|');
+
+/** A host-keyed row still registers on a finished card: one item, by its own key, its own headline
+ * and body — never a phase, a title or another row's counters. False when nothing was written. */
+export function registerHostRow(record, summary, ts, rawTs) {
+    if (!record || summary?.visible === false || !isHostKeyedRow(summary)) return false;
+    return updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKey: summary.dedupeKey,
+        headline: summary.headline, inPlaceByKey: true }).timelineUpdate !== 'duplicate-skip';
+}
+
 /** The block's folded tool evidence row. Live frames and the host's metrics
  * reach it through the same keyed in-place upsert, so neither route can mint a
  * second row, and the row keeps the position and timestamp of its first frame.

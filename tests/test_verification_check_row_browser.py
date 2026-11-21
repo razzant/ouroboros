@@ -42,50 +42,50 @@ MARKER = "CHECK-1585"
 CRITERION = "report-final"
 
 
+def _script_main(monkeypatch, marker, answer):
+    """Drive just the marked Main task. Setup, naming and other helper requests get the ordinary mock reply."""
+    from tests import fixtures_mock_llm
+    from tests.test_batch4_owner_controls_browser import _reply, _user_text
+
+    lock, turn = threading.Lock(), 0
+
+    def post(handler):
+        nonlocal turn
+        payload = json.loads(handler.rfile.read(int(handler.headers.get("Content-Length", 0))) or b"{}")
+        messages = [m for m in payload.get("messages", []) if isinstance(m, dict)]
+        users = [_user_text(m) for m in messages if m.get("role") == "user"]
+        if payload.get("tools") and users and users[0].startswith(marker):
+            with lock:
+                turn += 1
+                n = turn
+            name, arguments = answer(n, messages, users)
+            message = {"role": "assistant", "content": "", "tool_calls": [{"id": f"call_{n}", "type": "function",
+                       "function": {"name": name, "arguments": json.dumps(arguments)}}]}
+            _reply(handler, payload, message, "tool_calls")
+        else:
+            _reply(handler, payload, {"role": "assistant", "content": "OK"}, "stop")
+
+    monkeypatch.setattr(fixtures_mock_llm._Handler, "do_POST", post)
+
+
 class _CheckModel:
-    """Main-model answers in order: failing check, (held) fix, passing check, finish."""
+    """First fail a real check, then fix the file and run that check again."""
 
     def __init__(self, monkeypatch, report: pathlib.Path):
-        from tests import fixtures_mock_llm
-
-        self.report = report
         self.held, self.release = threading.Event(), threading.Event()
-        self.lock = threading.Lock()
-        self.main = 0
-        monkeypatch.setattr(fixtures_mock_llm._Handler, "do_POST", lambda handler: self.handle(handler))
 
-    def _call(self, name, arguments):
-        return {"role": "assistant", "content": "", "tool_calls": [{
-            "id": f"call_{self.main}", "type": "function",
-            "function": {"name": name, "arguments": json.dumps(arguments)}}]}, "tool_calls"
-
-    def handle(self, handler):
-        from tests.test_batch4_owner_controls_browser import _reply, _user_text
-
-        length = int(handler.headers.get("Content-Length", 0) or 0)
-        payload = json.loads(handler.rfile.read(length) or b"{}")
-        users = [_user_text(m) for m in payload.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"]
-        message, finish = {"role": "assistant", "content": "OK"}, "stop"
-        # The task's own conversation opens with the owner's words; review agents and
-        # other helpers quote them inside their own prompts and keep the stock answer.
-        if payload.get("tools") and users and users[0].startswith(MARKER):
-            with self.lock:
-                self.main += 1
-                ordinal = self.main
-            check = {"contract_kind": "explicit_command", "check": ["cat", str(self.report)],
-                     "expected": "status: final", "criterion_id": CRITERION, "criterion_source": "task_stated"}
-            if ordinal in (1, 3):
-                message, finish = self._call("verify_and_record", check)
-            elif ordinal == 2:
+        def answer(n, _messages, _users):
+            if n in (1, 3):
+                return "verify_and_record", {"contract_kind": "explicit_command", "check": ["cat", str(report)],
+                    "expected": "status: final", "criterion_id": CRITERION, "criterion_source": "task_stated"}
+            if n == 2:
                 self.held.set()
                 self.release.wait(240)
-                message, finish = self._call("run_command", {
-                    "cmd": ["sh", "-c", "printf 'status: final\\n' > report.txt"],
-                    "cwd": str(self.report.parent), "outputs": ["report.txt"]})
-            else:  # every later turn (e.g. after the acceptance review) selects completion again
-                message, finish = self._call("finish_task", {
-                    "action": "finish", "answer": "The report now says final; the check passed."})
-        _reply(handler, payload, message, finish)
+                return "run_command", {"cmd": ["sh", "-c", "printf 'status: final\\n' > report.txt"],
+                                       "cwd": str(report.parent), "outputs": ["report.txt"]}
+            return "finish_task", {"action": "finish", "answer": "The report now says final; the check passed."}
+
+        _script_main(monkeypatch, MARKER, answer)
 
 
 def _launch(pw, engine):
@@ -534,3 +534,197 @@ def test_compound_card_child_check_late_frames_thresholds_and_replay(wait_clone,
         finally:
             script.release.set()
             server.stop()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_unsaved_service_log_row_live_finished_replayed_and_in_logs(direct_server_with_data, monkeypatch, engine):
+    """A manual stop and task-end stop of the same name each deliver their own file and log outcome."""
+    from playwright.sync_api import expect, sync_playwright
+
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.tools.services import _MAX_SERVICE_LOG_BLOB_BYTES
+
+    fixture = direct_server_with_data
+    data, url = fixture["data_dir"], fixture["url"]
+    work = data.parent / "home" / "paper-preview"
+    work.mkdir(parents=True, exist_ok=True)
+    outputs = (("first-preview.txt", b"First preview output\n"), ("Résumé final.txt", b"Second preview output\n"))
+    first_log, second_log = "First preview closed\n", "PREVIEW-READY\n"
+    marker = "PAPER-PREVIEW"
+    text = "Both previews ended and saved their outputs. The second log was too large to archive."
+    started, finish, disclosed, release = (threading.Event() for _ in range(4))
+    starts, observed = [], {}
+
+    def disclosed_events(value):
+        body = value.split("[SERVICE_FINALIZATION_EVIDENCE]", 1)[1]
+        return json.JSONDecoder().raw_decode(body[body.index("[{"):])[0]
+
+    def answer(n, messages, users):
+        if n in (2, 4):
+            starts.append(next((m["content"] for m in reversed(messages) if m.get("role") == "tool"), ""))
+        if n == 2:
+            return "stop_service", {"name": "paper"}
+        if n in (1, 3):
+            index = n // 2
+            name, content = outputs[index]
+            log_text = (first_log, second_log)[index]
+            body = f"from pathlib import Path; Path({name!r}).write_bytes({content!r})"
+            if n == 3:
+                body += f"; print('x' * {_MAX_SERVICE_LOG_BLOB_BYTES}, flush=True)"
+            body += f"; print({log_text!r}, end='', flush=True)"
+            if n == 3:
+                body += "; import time; time.sleep(600)"  # The task's finalizer must end this service.
+            # The first service never prints the marker, so readiness waits for its natural exit.
+            return "start_service", {"name": "paper", "cwd": str(work), "outputs": [name],
+                "readiness": {"log_contains": second_log.strip(), "timeout_sec": 20},
+                "cmd": [smoke._fixture_python(), "-I", "-c", body]}
+        if n == 4:
+            started.set()
+            finish.wait(240)
+        elif observed.get("log_read_issued") and "log_read" not in observed:
+            observed["log_read"] = next((m["content"] for m in reversed(messages) if m.get("role") == "tool"), "")
+        elif not disclosed.is_set():
+            disclosure = next((t for t in reversed(users) if "[SERVICE_FINALIZATION_EVIDENCE]" in t), "")
+            if disclosure:
+                observed["disclosure"] = disclosure
+                disclosed.set()
+                release.wait(240)
+                first_stop = disclosed_events(disclosure)[0]["services"][0]
+                recipe = first_stop["log_finalization"]["source_ref"]["read"]
+                observed["log_read_issued"] = True
+                return recipe["tool"], recipe["arguments"]
+        return "finish_task", {"action": "finish", "answer": text}
+
+    fixture["stop_server"]()
+    settings = data / "settings.json"
+    settings.write_text(json.dumps({**json.loads(settings.read_text()), "OUROBOROS_SAFETY_MODE": "off",
+                                    "OUROBOROS_TASK_REVIEW_MODE": "off"}), encoding="utf-8")
+    _script_main(monkeypatch, marker, answer)
+    fixture["start_server"]()
+    shots = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data.parent))) / "service-finalization"
+    shots.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        browser = _launch(pw, engine)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900}, color_scheme="light")
+            page.goto(url, wait_until="domcontentloaded")
+            page.fill("#chat-input", f"{marker}: run the paper preview twice, then finish.")
+            page.click("#chat-send")
+            assert started.wait(150), "start_service did not answer the scripted model"
+            launches = []
+            for result in starts:
+                if isinstance(result, list):
+                    result = "".join(part.get("text", "") for part in result if isinstance(part, dict))
+                assert "{" in result, result
+                payload, _ = json.JSONDecoder().raw_decode(result[result.index("{"):])
+                launches.append(payload)
+            first, second = launches
+            task_id = first["task_id"]
+            assert first["state"] == "exited" and first["returncode"] == 0, first
+            assert second["state"] == "running" and second["ready"] is True, second
+            assert first["service_id"] == second["service_id"]
+            launch_ids = [launch["launch_id"] for launch in launches]
+            assert all(launch_ids) and len(set(launch_ids)) == 2, launches
+            for launch, (name, _) in zip(launches, outputs, strict=True):
+                assert (launch["task_id"], launch["name"], launch["outputs"]) == (task_id, "paper", [name]), launch
+            first_label, second_label = (launch.removeprefix("launch-")[:10] for launch in launch_ids)
+            clean = (f"Background service stopped: paper ({first_label}) · requested stop · log saved"
+                     f" · output 1 saved: {outputs[0][0]}")
+            line = (f"Background service stopped: paper ({second_label}) · at task end"
+                    " · log retained in place (too large to archive)"
+                    f" · output 1 saved: {outputs[1][0]}")
+            finish.set()
+            assert disclosed.wait(150), "the author did not receive service evidence"
+            events = disclosed_events(observed["disclosure"])
+            assert [event["kind"] for event in events] == ["services_stopped"] * 2
+            [first_stop], [second_stop] = (event["services"] for event in events)
+            stopped = [first_stop, second_stop]
+            assert [row["launch_id"] for row in stopped] == launch_ids, events
+            assert [row["stop_source"] for row in stopped] == ["explicit", "task_end"]
+            assert [row["log_outcome"] for row in stopped] == ["saved", "retained"]
+            for row, (name, expected) in zip(stopped, outputs, strict=True):
+                assert row["lifecycle"] == "stopped" and row["state"] == "exited", row
+                assert row["process_cleanup"]["exit_confirmed"] is True and not row.get("stop_failed"), row
+                assert row["artifact_output_failed"] is False and not row.get("artifact_output_unknown"), row
+                # Read the registered capture, not the process's input/output directory or a success sentence.
+                artifact = registered_task_artifact(data, task_id, name)
+                assert artifact and artifact["kind"] == "process_output", (row, artifact)
+                assert pathlib.Path(artifact["source_path"]) == (work / name).resolve(), artifact
+                captured = data.resolve() / "task_results" / "artifacts" / task_id / name
+                assert pathlib.Path(artifact["path"]).resolve() == captured and captured.read_bytes() == expected, artifact
+                [outcome] = row["output_outcomes"]
+                [file] = outcome["artifacts"]
+                assert outcome == {"index": 1, "status": "saved", "registered": True, "artifacts": [file]}, row
+                version_ref = file["version_ref"]
+                assert file == {"name": name, "sha256": artifact["sha256"], "version_ref": version_ref}
+                assert version_ref["root"] == "artifact_store" and version_ref["sha256"] == file["sha256"]
+                assert not pathlib.Path(version_ref["path"]).is_absolute()
+                assert (captured.parent / version_ref["path"]).read_bytes() == expected
+            saved, retained = (row["log_finalization"] for row in stopped)
+            assert saved["archive_outcome"] == "saved" and saved["deleted_live_log"] is True
+            assert saved["source_scope"] == "full" and saved["source_ref"]["size"] == len(first_log.encode())
+            assert saved["source_ref"]["read"]["tool"] == "read_file"
+            assert saved["source_ref"]["read"]["arguments"]["root"] == "artifact_store"
+            assert retained == {"archive_outcome": "retained", "deleted_live_log": False, "live_log": "retained",
+                                "source_unavailable": "tail_masking_unverified"}
+            assert not {"errors", "tail", "full_log_ref", "source_unavailable"} & saved.keys()
+            card = page.locator(f'.chat-live-card[data-task-id="{task_id}"]')
+
+            def capture(stage, first, second):
+                second.scroll_into_view_if_needed()
+                expect(first).to_be_in_viewport()
+                expect(second).to_be_in_viewport()
+                page.screenshot(path=str(shots / f"{engine}-light-1280-{stage}.png"), scale="css")
+
+            def check_row(stage):
+                _open(card)
+                first = card.locator(".chat-live-line", has=page.get_by_text(clean, exact=True))
+                expect(first).to_have_count(1, timeout=60_000)
+                expect(first).to_be_visible()
+                row = card.locator(".chat-live-line", has=page.get_by_text(line, exact=True))
+                expect(row).to_have_count(1, timeout=60_000)
+                expect(row).to_be_visible()
+                assert not set((row.get_attribute("class") or "").split()) & {"warn", "error"}
+                assert all(s not in row.inner_text() for s in (str(data), second_log.strip()))
+                capture(stage, first, row)
+
+            check_row("live")
+            _assert_running(card)
+            release.set()
+            expect(card).to_have_attribute("data-finished", "1", timeout=180_000)
+            # Same task read the advertised source through the product's registered file reader, not raw storage.
+            readback = observed["log_read"]
+            if isinstance(readback, list):
+                readback = "".join(part.get("text", "") for part in readback if isinstance(part, dict))
+            assert "lines 1–1 of 1" in readback and f"1\t{first_log.strip()}" in readback, readback
+            page.close()
+            replay = browser.new_context(viewport={"width": 1280, "height": 900}, color_scheme="light")
+            page = replay.new_page()
+            card = page.locator(f'.chat-live-card[data-task-id="{task_id}"]')
+            with page.expect_response(lambda response: response.url.split("?", 1)[0] == f"{url}/api/chat/history") as fetched:
+                page.goto(url, wait_until="domcontentloaded")
+            assert fetched.value.ok
+            history = fetched.value.json()["messages"]
+            stops = [r for r in history if r.get("task_id") == task_id and r.get("checkpoint_kind") == "services_stopped"]
+            assert [r.get("text") or r.get("content") for r in stops] == [clean, line]
+            assert len({r["card_row_id"] for r in stops}) == 2
+            assert all(s not in json.dumps(stops) for s in (str(data), "log_finalization", first_log.strip(), second_log.strip()))
+            check_row("reloaded")
+            expect(card.locator("[data-live-phase]").first).to_have_text("Done")
+            assert not card.locator("[data-cancel-run], [data-resume-run]").count()
+            page.locator('[data-nav-page="dashboard"]').click()
+            page.locator('[data-dashboard-tab="logs"]').click()
+            group = page.locator(f'#log-entries .log-task-card[data-task-group="{task_id}"]')
+            group.wait_for(state="visible", timeout=30_000)
+            if group.get_attribute("open") is None:
+                group.locator(":scope > summary").click()
+            first, row = group.get_by_text(clean, exact=True), group.get_by_text(line, exact=True)
+            for stop in (first, row):
+                expect(stop).to_have_count(1, timeout=30_000)
+                expect(stop).to_be_visible()
+            capture("logs", first, row)
+            replay.close()
+        finally:
+            finish.set()
+            release.set()
+            browser.close()

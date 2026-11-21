@@ -19,8 +19,11 @@ def fake_docker_cli(monkeypatch, script, *, docker_popen=None, on_docker_stop=No
     Short calls and process submissions take their result from the same script.
     A timeout test supplies its fake process and observes its stop without using host process control.
     Other commands and other modules use their normal subprocess implementation.
+    The container pin of a service without declared outputs (``workspace_executor_paths.pinned_container``)
+    answers the scripted container's own name: the host's Docker is never consulted, and the script's calls
+    stay the executor's own. A test of the pin itself restores it after this call.
     """
-    from ouroboros import workspace_executor
+    from ouroboros import workspace_executor, workspace_executor_paths
 
     class DockerCli:
         pid = None  # No OS process exists for a scripted call.
@@ -63,6 +66,7 @@ def fake_docker_cli(monkeypatch, script, *, docker_popen=None, on_docker_stop=No
     cli.run, cli.Popen = run, popen
     monkeypatch.setattr(workspace_executor, "subprocess", cli)
     monkeypatch.setattr(workspace_executor, "kill_process_tree", stop)
+    monkeypatch.setattr(workspace_executor_paths, "pinned_container", lambda executor: executor)
 
 
 def _init_repo(path: Path) -> None:

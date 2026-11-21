@@ -102,8 +102,10 @@ import {
     createLiveCardTimelineRenderer,
     createTimelineAnchors,
     insertTimelineNode,
+    isHostKeyedRow,
     liveCardProjectionChanged,
     keepSelection,
+    registerHostRow,
     replayedEvidenceTs,
     syncLiveCardToggle,
     timelineScroll,
@@ -1609,7 +1611,7 @@ export function createChatInstance({
         const nextPhase = summary.phase || '';
         const closedPhase = record.finished && !isTerminalTaskPhase(nextPhase, summary.terminal) ? replayTerminalPhase(record) : '';
         const initialContent = record.finished && (!record.updates || (summary.human && !record.lastHumanHeadline));
-        // A closed card drops a late live row (below); saved narration joins its timeline and may name it.
+        // A closed card drops a late live row (below); saved narration joins its timeline.
         const newest = (!closedPhase || initialContent || _historyRow?.history_id) && reconcileAuthoredHeadline(record, summary, rawTs);
         if (_historyRow?.history_id && record.updates > 0 && !initialContent && !summary.terminal
                 && (record.finished || _historyAppending
@@ -1626,8 +1628,9 @@ export function createChatInstance({
             summary = { ...summary, visible: false }; // wait history remains in the fold
         }
         if (closedPhase && !initialContent) {
-            if (foldView) {
-                upsertToolFoldRow(record, foldView, ts, rawTs);
+            // A host-keyed row still registers once on a closed card, by its own key.
+            if (foldView || registerHostRow(record, summary, ts, rawTs)) {
+                if (foldView) upsertToolFoldRow(record, foldView, ts, rawTs);
                 if (summary.dedupeKey?.endsWith(':check') || summary.hostRefusedStep) placeCheckRow(record, summary, ts, rawTs);
                 renderLiveCardTimeline(record);
                 updateLiveCardCount(record);
@@ -1659,8 +1662,8 @@ export function createChatInstance({
         const headline = summary.headline || record.lastHumanHeadline || '';
         const syntheticKey = summary.dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const isLegacyParentSubagentKey = syntheticKey.startsWith('parent-subagent:');
-        // Failure/timeout update one row; success feeds the fold.
-        const inPlaceByKey = isLegacyParentSubagentKey
+        // Failure/timeout and a host-keyed row update one row, open as closed; success feeds the fold.
+        const inPlaceByKey = isLegacyParentSubagentKey || isHostKeyedRow(summary)
             || ['subagent-lifecycle:', 'subagent-progress:', 'subagent-result:', 'task_done|', 'tool:']
                 .some((prefix) => syntheticKey.startsWith(prefix));
         if (!isLegacyParentSubagentKey) {
@@ -2062,11 +2065,12 @@ export function createChatInstance({
         // Skill lifecycle belongs to its explicit owner.
         const review = attachReviewFromRow(evt, rawTs);
         if (review !== undefined) return review;
+        const summary = summarizeChatLiveEvent(evt);
+        if (isHostKeyedRow(summary)) learnSubagentLineage(evt);  // its lineage places it: never a helper's words
         const childInfo = subagentChildParents.get(taskId);
         if (childInfo && (late || eventType === 'task_done')) return routeSubagentTerminalToCard(taskId, { ...evt, ...late, ts: rawTs });
-        const summary = summarizeChatLiveEvent(evt);
-        // Finished children still receive settled costs.
-        if (childInfo && subagentTerminalChildren.has(taskId) && !summary?.toolCall && eventType !== 'task_cost_finalized') return false;
+        // Finished children still receive settled costs and host-keyed rows.
+        if (childInfo && subagentTerminalChildren.has(taskId) && !isHostKeyedRow(summary) && !summary?.toolCall && eventType !== 'task_cost_finalized') return false;
         // Root/child fold: metrics, terminal and replay.
         let changed = evt.tool_evidence || Number.isInteger(evt.rounds) || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)
             ? noteToolMetrics(taskId, evt, rawTs) : false;

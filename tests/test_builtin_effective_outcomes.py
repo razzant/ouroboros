@@ -139,21 +139,22 @@ def test_existing_service_refuses_new_start_without_releasing_prior_custody(invo
 def _restart(invoke, monkeypatch, tmp_path, *, measured=None, **fields):
     """A start finds the exited host record of its own name. Only the process-table measurement and the new
     process's launch are replaced; the stop, the start, their publication and the consumers below are real."""
-    from ouroboros import process_scope
+    from ouroboros import process_scope, workspace_executor
     from ouroboros.tools import services
+
+    from tests._launch_stop_shared import _launch_log
 
     invoke.ctx.task_id = "service-owner"
     key = services._service_key(invoke.ctx, "demo")
-    log = tmp_path / "services" / "demo.log"
-    log.parent.mkdir(parents=True)
-    log.write_text("previous start\n", encoding="utf-8")
+    # A launch's own log address: only that is archived and released (launch_custody.open_service_log_source).
+    log = _launch_log(tmp_path / "data" / "services" / "service-owner", "demo", b"previous start\n")
     record = services.ServiceRecord(name="demo", service_id=key, task_id="service-owner", cmd=["previous"],
                                     cwd=str(tmp_path), log_path=log, proc=SimpleNamespace(poll=lambda: 0, pid=4242), **fields)
     launched = []
     monkeypatch.setattr(services, "_SERVICES", {key: record})
     monkeypatch.setattr(services, "_panic_requested", False)
     monkeypatch.setattr(services, "_executor_can_run_cwd", lambda *_a: True)
-    monkeypatch.setattr(services, "executor_start_service", lambda ctx, **kw: launched.append(kw["name"]) or {"state": "running"})
+    monkeypatch.setattr(workspace_executor, "_launch_service", lambda ctx, **kw: launched.append(kw["name"]) or {"state": "running"})
     monkeypatch.setattr("ouroboros.process_custody.spawn_supervised", lambda *a, **k: launched.append("host"))
     if measured is not None:  # what the stop's one process-table pass answers for this launch
         facts = {"exit_confirmed": True} if measured else {"exit_confirmed": False, "survivors": [{"pid": 4343, "birth": "b"}]}
@@ -220,8 +221,9 @@ def test_restart_refusal_keeps_the_prior_launch_and_says_why_with_or_without_a_r
 @pytest.mark.parametrize("output_failure", [False, True])
 def test_restart_proceeds_once_the_prior_launch_is_confirmed_ended_even_if_its_outputs_failed(
         invoke, monkeypatch, tmp_path, output_failure):
-    """Over-refusal control: the stop's own error status is not the unconfirmed-end fact. A confirmed stop whose
-    declared outputs could not be registered frees the name, and the new start goes ahead."""
+    """Over-refusal control: the stop's own error status is not the unconfirmed-end fact. A confirmed stop with no
+    file left to capture frees the name and the new start goes ahead. One whose declared file could not be read at
+    all still owes that capture, so the new writer waits for it (``KeptNamesake`` owed) and is told what ended."""
     from ouroboros.tools import shell
 
     services, key, record, log, launched = _restart(invoke, monkeypatch, tmp_path, measured=True,
@@ -232,49 +234,65 @@ def test_restart_proceeds_once_the_prior_launch_is_confirmed_ended_even_if_its_o
         monkeypatch.setattr(shell, "_register_process_outputs", unregistrable)
     result = invoke(services._start_service, name="demo", cmd=["new"])
 
-    assert launched == ["demo"] and not log.exists() and key not in services._SERVICES
-    assert (result.status, result.code) == ("ok", "OK") and json.loads(result.text)["state"] == "running"
+    assert not log.exists(), "the confirmed end archived and released the previous log either way"
+    if output_failure:
+        # Its declared file may still hold bytes no capture took: the new writer waits (KeptNamesake "owed"),
+        # and the refusal still says this call ended the previous launch.
+        assert launched == [] and services._SERVICES[key] is record
+        assert "SERVICE_START_ERROR" in result.text and "uncaptured outputs" in result.text
+        assert "finalized the previous same-named launch" in result.text
+        said = json.JSONDecoder().raw_decode(result.text[result.text.index("{"):])[0]["previous_service"]
+        assert said["state"] == "stopped" and said["artifact_output_unknown"] is True
+    else:
+        assert launched == ["demo"] and key not in services._SERVICES
+        started = json.loads(result.text)
+        assert (result.status, result.code) == ("ok", "OK") and started["state"] == "running"
+        assert "previous_service" not in started
 
 
-@pytest.mark.parametrize(("executor_answer", "route"), [
-    ("unconfirmed", "registry"),
-    ("confirmed", "direct"),
-    ("confirmed_outputs_failed", "direct"),
-])
-def test_restart_follows_the_stops_own_answer_when_another_stop_retired_the_record(
-        invoke, monkeypatch, tmp_path, route, executor_answer):
-    """Another stop retires the host record between the start's read and its retire, so the retire reaches an executor
-    service of that name and no record holds the name any more. The start follows what that stop returned: refused
-    while the executor cannot confirm its processes ended (a reading of the name alone would launch beside them),
-    launched once it confirms, also when the confirmed stop's declared outputs failed. The answer is the stop's
-    return value, so a direct call has it as the registry does."""
-    answers = {"unconfirmed": {"stop_failed": True, "state": "running"},
-               "confirmed": {"stop_failed": False, "state": "stopped", "artifact_output_failed": False},
-               "confirmed_outputs_failed": {"stop_failed": False, "state": "stopped", "artifact_output_failed": True}}
+@pytest.mark.parametrize("route", ["registry", "direct"])
+def test_restart_can_proceed_with_a_prior_log_whose_presence_cannot_be_read(invoke, monkeypatch, tmp_path, route):
+    """An unreadable log survives a restart. Its capture gap is reported beside the new launch."""
+    import errno
+    import pathlib
+
+    services, key, _record, log, launched = _restart(invoke, monkeypatch, tmp_path, measured=True)
+    stat = pathlib.Path.stat
+
+    def refused(self, *args, **kwargs):
+        if self == log:
+            raise PermissionError(errno.EACCES, "injected metadata refusal", str(self))
+        return stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", refused)
+    text, result = _start_by(route, invoke, services)
+
+    assert json.loads(text)["previous_service"] == {"state": "stopped", "log_not_saved": True}
+    assert launched == ["demo"] and key not in services._SERVICES
+    assert log.read_bytes() == b"previous start\n"
+    assert result is None or (result.status, result.code) == ("ok", "OK")
+
+
+@pytest.mark.parametrize("route", ["registry", "direct"])
+def test_restart_retires_only_the_host_record_it_selected(invoke, monkeypatch, tmp_path, route):
+    """Another call retired the host record. Its late stop cannot be redirected to an executor by name."""
     services, key, record, _log, launched = _restart(invoke, monkeypatch, tmp_path)
     monkeypatch.setattr(services, "_SERVICES", _RetiredBetweenReads({key: record}))
-    monkeypatch.setattr(services, "executor_stop_service", lambda ctx, name, finish=None: dict(answers[executor_answer]))
+    monkeypatch.setattr(services, "executor_stop_service", lambda *a, **k: pytest.fail("stopped another launch"))
     text, result = _start_by(route, invoke, services)
 
     assert key not in services._SERVICES
-    if executor_answer == "unconfirmed":
-        cause, _, tail = text.partition("\n\n")
-        assert cause.startswith("⚠️ SERVICE_ALREADY_RUNNING: demo: processes of its previous start are not confirmed ended")
-        assert json.loads(tail)["stop_failed"] is True and launched == []
-        assert result is None or (result.status, result.code, dict(result.meta)) == (
-            "blocked", "LEGACY_BLOCKED", {"process_not_started": True})
-    else:
-        assert launched == ["demo"] and json.loads(text)["state"] == "running"
-        assert result is None or (result.status, result.code) == ("ok", "OK")
+    assert launched == ["demo"] and json.loads(text)["state"] == "running"
+    assert result is None or (result.status, result.code) == ("ok", "OK")
 
 
-def test_unconfirmed_stop_service_is_still_classified_from_its_text(invoke, monkeypatch, tmp_path):
-    """The stop publishes no typed claim of its own: the registry reads its text exactly as the adapter does, so what a
-    restart takes from the stop's return adds nothing to what stop_service reports."""
+def test_unconfirmed_stop_service_preserves_legacy_classification(invoke, monkeypatch, tmp_path):
+    """The producer publishes the same code a legacy reader of the old text gets, without inferring no effect."""
     services, key, record, log, _launched = _restart(invoke, monkeypatch, tmp_path, measured=False)
     result = invoke(services._stop_service, name="demo")
 
     assert result.text.startswith("⚠️ SERVICE_STOP_ERROR (stop_service)") and dict(result.meta) == {}
+    assert json.loads(result.text.partition("\n\n")[2])["lifecycle"] == "cleanup_pending"
     adapted = LegacyTextResultAdapter.from_text("stop_service", result.text)
     assert (result.status, result.code) == (adapted.status, adapted.code) == ("error", "LEGACY_TOOL_ERROR")
     typed, replay = _consumers("stop_service", result)

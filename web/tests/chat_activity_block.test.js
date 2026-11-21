@@ -17,7 +17,7 @@ import {
 import { upsertToolFoldRow } from '../modules/chat_render_batch.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { clock } from '../modules/work_status.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, parseRowMarkup, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
 
 // The folded row a sequence of observations produces, with no DOM in the way.
@@ -41,24 +41,8 @@ ElementStub.prototype.querySelector = function (selector) {
     return null;
 };
 
-// The flat fixture parses markup into bare children; give each parsed child
-// the markup from its own tag onward so a rendered row's text is assertable.
-const innerHTMLDescriptor = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
-Object.defineProperty(ElementStub.prototype, 'innerHTML', {
-    configurable: true,
-    get() { return innerHTMLDescriptor.get.call(this); },
-    set(value) {
-        innerHTMLDescriptor.set.call(this, value);
-        const html = String(value || '');
-        let cursor = 0;
-        for (const child of this.children) {
-            const index = html.indexOf(`<${child.tagName.toLowerCase()}`, cursor);
-            if (index < 0) continue;
-            child._innerHTML = html.slice(index);
-            cursor = index + 1;
-        }
-    },
-});
+// A rendered row's text is assertable: each parsed child keeps its own markup.
+parseRowMarkup();
 
 const TS = '2026-09-15T12:00:00Z';
 const TASK = 'turn-a';
@@ -247,6 +231,67 @@ test('reload and reconnect keep a bounded card counted while a seen start stays 
             assert.doesNotMatch(archived, /outcome unknown|error/);
             assert.match(f.meta('archived-run'), /14 tool calls/);
             assert.match(f.rows('started-run').map(row => row.innerHTML).join(' '), /1 tool call · outcome unknown/);
+        }
+        assert.ok(f.historyReads() >= 2, 'the real reconnect handler refetched history');
+    } finally { f.close(); }
+});
+
+// Two launches of one name share a stop time; each is its own row, said in its producer's own sentence
+// (`service_finalization._launch_line`). The companion Python test supplies the real room history response.
+test('a finished task reads its service row after reload and reconnect', async () => {
+    const produced = process.env.OURO_TEST_SERVICE_HISTORY;
+    const task = 'svc-task';
+    const history = produced ? JSON.parse(readFileSync(produced, 'utf8')).messages : [
+        { task_id: task, role: 'system', system_type: 'task_evidence', text: '', ts: '2026-11-18T07:00:00Z', chat_id: 1,
+            narration: false, task_terminal_status: 'completed', tool_evidence: { observations: [
+                { key: `tool:${task}:start-1`, tool: 'start_service', fact: 'settled', status: 'ok' }] } },
+        ...['aaaaaaaaaa', 'bbbbbbbbbb'].map((launch, i) => ({ task_id: task, role: 'system', is_progress: true,
+            system_type: 'task_checkpoint', checkpoint_kind: 'services_stopped', ts: '2026-11-18T07:00:05Z', chat_id: 1,
+            text: `Background service stopped: paper (${launch}) · at task end · log capture unconfirmed`,
+            card_row_id: `service:launch-${launch}`, card_row_revision: 1,
+            history_id: `progress:${i + 1}`, history_position: { source: 'progress', offset: i + 1 } })),
+        { task_id: task, role: 'assistant', text: 'The preview ran; its log could not be read.',
+            ts: '2026-11-18T07:00:09Z', chat_id: 1 },
+        { task_id: task, role: 'system', system_type: 'task_summary', text: 'Preview checked.', tool_calls: 1,
+            tool_errors: 0, ts: '2026-11-18T07:00:09Z', chat_id: 1 },
+    ];
+    // Each launch's row as the producer stored it, and the live frame it sent for that row.
+    const launches = history.filter(row => row.checkpoint_kind === 'services_stopped');
+    assert.equal(new Set(launches.map(row => row.card_row_id)).size, 2, 'two launches are two host rows');
+    assert.equal(new Set(launches.map(row => row.text)).size, 2, 'each launch says its own sentence');
+    const frames = launches.map(({ ts, text, task_id, card_row_id, card_row_revision, checkpoint_kind }) =>
+        ({ type: 'task_checkpoint', role: 'system', system_type: 'task_checkpoint', ts, text, task_id, card_row_id,
+            checkpoint_kind, ...(card_row_revision === undefined ? {} : { card_row_revision }) }));
+    // Every card row that says a launch, and how many rows say each launch (by its row, in its order).
+    const serviceRows = f => f.rows(task).filter(row => launches.some(({ text }) => row.innerHTML.includes(text)));
+    const said = f => launches.map(({ text }) => f.rows(task).filter(row => row.innerHTML.includes(text)).length);
+    // A reloaded card row names its stored source: each launch's row is drawn once, saying its own sentence alone.
+    const told = f => launches.map(({ history_id }) => serviceRows(f).filter(row => row.dataset.sourceHistoryId === history_id)
+        .map(row => launches.filter(({ text }) => row.innerHTML.includes(text)).map(({ card_row_id }) => card_row_id)));
+    const live = fixture(history);
+    try {
+        live.log({ task_id: task, type: 'tool_call_started', tool: 'start_service', tool_call_id: 'start-1' });
+        [...frames, ...frames].forEach(frame => live.log(frame));
+        assert.deepEqual(said(live), [1, 1], 'each live launch appears once before history arrives');
+        assert.equal(serviceRows(live).length, 2);
+        await live.instance.refreshHistory({ revision: 1 });
+        assert.deepEqual(said(live), [1, 1], 'the room history adopts both live rows');
+        assert.equal(serviceRows(live).length, 2);
+    } finally { live.close(); }
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        for (const reconnect of [false, true]) {
+            if (reconnect) { f.emit('open', { previouslyConnected: true }); await new Promise(setImmediate); }
+            frames.forEach(frame => f.log(frame));
+            assert.deepEqual(said(f), [1, 1], f.rows(task).map(row => row.innerHTML).join('\n'));
+            assert.equal(serviceRows(f).length, 2);
+            assert.deepEqual(told(f), launches.map(({ card_row_id }) => [[card_row_id]]), 'each row id with its own sentence');
+            assert.ok(serviceRows(f).every(row => row.classList.contains('thinking') && !row.classList.contains('warn')));
+            assert.equal(f.card(task).dataset.finished, '1');
+            assert.equal(f.card(task).querySelector('[data-live-phase]').textContent, 'Done', 'no status of its own');
+            const [title, meta] = [f.card(task).querySelector('[data-live-title]').textContent, f.meta(task)];
+            assert.ok(launches.every(({ text }) => !title.includes(text) && !meta.includes(text)), 'nor a title or meta');
         }
         assert.ok(f.historyReads() >= 2, 'the real reconnect handler refetched history');
     } finally { f.close(); }

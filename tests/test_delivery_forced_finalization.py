@@ -188,7 +188,7 @@ def test_post_round_finalize_control_binds_its_grace_deadline(tmp_path, monkeypa
     monkeypatch.setattr(loop, "_enforce_plan_gate", lambda *_args: False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_args: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda *_args: False)
+    monkeypatch.setattr("ouroboros.service_finalization.finalize", lambda *_args: False)
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_args: False)
     monkeypatch.setattr(
         loop,
@@ -892,7 +892,7 @@ def test_forced_finalization_stops_services_before_model_and_binds_evidence(
     assert order == ["services", "model"]
     assert "SERVICE_FINALIZATION_EVIDENCE" in captured[0]
     assert "artifact_output_failed" in captured[0]
-    assert "report.html is missing: " + ("x" * 9000) in captured[0]
+    assert "report.html is missing: " not in captured[0]  # arbitrary diagnostics stay out of the model's view
     assert text == "Answer disclosing the missing report."
     assert returned_trace["forced_finalization"]["source"] == "model"
     assert text == registry._ctx._delivery_candidate.full_text
@@ -1265,7 +1265,7 @@ def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_r
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review_then_deliver)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda *_a, **_k: False)
+    monkeypatch.setattr("ouroboros.service_finalization.finalize", lambda *_a, **_k: False)
 
     first = loop._no_tool_final_answer("Answer based on child result v1.", ctx, trace, registry,
                                        queue.Queue(), set(), lambda _text: None)

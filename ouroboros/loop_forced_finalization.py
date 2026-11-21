@@ -19,13 +19,13 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import pathlib
 import queue
 import time
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from ouroboros import service_finalization
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros.loop_llm_call import (
@@ -713,67 +713,18 @@ def _finalize_forced_services(
     tools = getattr(ctx, "tools", None)
     if tools is None:
         return
-    _loop()._finalize_task_services(_loop()._LoopExitContext(
-        tools=tools,
-        drive_root=ctx.drive_root,
-        task_id=ctx.task_id,
-        event_queue=ctx.event_queue,
-        drive_logs=ctx.drive_logs,
-        accumulated_usage=ctx.accumulated_usage,
-        llm_trace=llm_trace,
-    ))
+    service_finalization.finalize(ctx, llm_trace)
     _loop()._delivery_evidence_state(tools, ctx, llm_trace)
     _loop()._disclose_service_finalization(ctx, llm_trace)
 
 
-def _service_finalization_projection(
-    llm_trace: Dict[str, Any], *, drive_root: Any = None, task_id: str = "",
-) -> List[Dict[str, Any]]:
-    """Complete redacted task-local service facts, shared by author and panel.
-
-    Per-field summaries remain marked, but no whole service row may disappear.
-    A complete log becomes this task's readable text source (``source_ref``) and
-    replaces its tail. Existing context/packet delivery owns fitting.
-    """
-    projection = _loop()._service_finalization_evidence(llm_trace)
-    if not projection:
-        return []
-    from ouroboros.observability import redact_projection
-    from ouroboros.tools.services import retained_log_display
-
-    shown = [{**row, "services": [retained_log_display(service, drive_root=drive_root, task_id=task_id)
-                                  for service in row["services"]]} for row in projection]
-    return redact_projection(shown).value
-
-
-def _service_finalization_text(llm_trace: Dict[str, Any], *, drive_root: Any = None, task_id: str = "") -> str:
-    shown = _service_finalization_projection(llm_trace, drive_root=drive_root, task_id=task_id)
-    return json.dumps(shown, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) if shown else ""
-
-
 def _disclose_service_finalization(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> None:
-    """Show the author that projection once per change, on forced and ordinary rails.
-
-    cleanup_pending/stop_error facts become readable; disclosure only, no veto.
-    """
-    # Identity belongs to the full stable projection, not its display: two
-    # changes hidden by a compact tail can have identical visible bytes.
-    projection = _loop()._service_finalization_evidence(llm_trace)
-    if not projection:
-        return
-    payload = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    if ctx.forced_service_evidence_fingerprint == fingerprint:
-        return
-    ctx.forced_service_evidence_fingerprint = fingerprint
-    safe_payload = _service_finalization_text(
-        llm_trace, drive_root=getattr(ctx, "drive_root", None), task_id=str(getattr(ctx, "task_id", "") or ""))
-    _loop()._append_or_merge_user_message(
-        ctx.messages,
-        "[SERVICE_FINALIZATION_EVIDENCE]\n"
-        "Task services were finalized before completion. Incorporate this "
-        f"evidence and disclose any failure honestly:\n{safe_payload}",
-    )
+    """Show the author the service evidence once per change (``service_finalization.disclosure``), on forced and
+    ordinary rails; cleanup_pending/stop_error facts become readable; disclosure only, no veto."""
+    ctx.forced_service_evidence_fingerprint, message = service_finalization.disclosure(
+        llm_trace, shown=ctx.forced_service_evidence_fingerprint)
+    if message:
+        _loop()._append_or_merge_user_message(ctx.messages, message)
 
 
 def _close_forced_intake(ctx: _RoundLimitContext) -> None:

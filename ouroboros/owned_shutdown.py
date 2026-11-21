@@ -528,11 +528,13 @@ def _stop_executor_record(root: Any, entry: Dict[str, Any], deadline: float, ret
     from ouroboros import workspace_executor as executor
 
     path = pathlib.Path(entry["record_path"])
-    record = executor._load_process_record(path)
-    if record is None:
-        _forget(root, [entry["record_id"]])  # the custody record is gone: nothing left to stop
-        return True
-    if not executor._valid_process_record(path, record, check_identity=False):
+    try:
+        record = executor._load_process_record(path, strict=True)
+    except FileNotFoundError:
+        return _forget(root, [entry["record_id"]])  # gone, not unreadable
+    except (OSError, ValueError):
+        return False
+    if not record or not executor._valid_process_record(path, record, check_identity=False):
         return False  # never acted on; stays recorded
     if executor._recorded_launch(record):
         # It ends everything that identity reaches, leader alive, gone or its pid reused, in its launch's one
@@ -555,8 +557,7 @@ def _stop_executor_record(root: Any, entry: Dict[str, Any], deadline: float, ret
                         "recorded": {"cmd_sha256": expected}, "measured": {"cmd_sha256": measured},
                         "mismatches": ["cmd_sha256"],
                     }, lock_timeout_sec=max(0.0, min(2.0, deadline - time.monotonic()))):
-                        executor._forget_process(path)
-                        return not path.exists()
+                        return executor._forget_process(path)
                 return False  # alive under an identity the record cannot prove: no right to signal
             executor._kill_host_pid(pid)
             while not _exit_proven(pid):
@@ -565,8 +566,7 @@ def _stop_executor_record(root: Any, entry: Dict[str, Any], deadline: float, ret
                 time.sleep(_POLL_SEC)
     elif not executor._stop_record_process(path, record, wait=True):
         return False  # Docker: the backend receipt is the proof
-    executor._forget_process(path)
-    return True
+    return executor._retire_stopped_record(path, record)
 
 
 def _stop_ledgered(root: Any, entry: Dict[str, Any], deadline: float, retained: set,

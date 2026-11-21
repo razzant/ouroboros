@@ -1,13 +1,11 @@
 """Selected process configuration keeps values, source secrecy and actor authority."""
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import os
 import sys
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -174,6 +172,8 @@ def test_acting_service_literal_environment_still_runs(process_context, monkeypa
 
 
 def test_service_replacement_keeps_uncertain_record_and_returns_start_error(process_context, monkeypatch):
+    """An executor namesake whose state cannot be read holds its name: nothing is signalled, nothing new starts, and
+    the answer is the one held-name refusal both backends give (``services._admit_named_start`` -> ``_name_held``)."""
     from ouroboros import workspace_executor
 
     registry, ctx, workspace, _data = process_context
@@ -182,11 +182,11 @@ def test_service_replacement_keeps_uncertain_record_and_returns_start_error(proc
     record = object()
     monkeypatch.setattr(workspace_executor, '_SERVICES', {key: record})
     monkeypatch.setattr(workspace_executor, '_service_state', lambda item: 'unknown')
-    monkeypatch.setattr(workspace_executor, '_stop_service_record', lambda *a, **k: {'stop_failed': True, 'stop_error': 'unknown'})
+    monkeypatch.setattr(workspace_executor, '_stop_service_record', lambda *a, **k: pytest.fail('an unknown state admits no signal'))
     monkeypatch.setattr('ouroboros.process_custody.spawn_supervised', lambda *a, **k: pytest.fail('must not spawn a duplicate'))
     try:
         result = registry.execute('start_service', {'cmd': [sys.executable], 'cwd': str(workspace)})
-        assert 'SERVICE_START_ERROR' in result and 'not confirmed' in result
+        assert result.startswith('⚠️ SERVICE_ALREADY_RUNNING: service: ') and 'not confirmed; nothing was signalled' in result
         assert workspace_executor._SERVICES[key] is record
     finally:
         workspace_executor._SERVICES.pop(key, None)
@@ -194,6 +194,8 @@ def test_service_replacement_keeps_uncertain_record_and_returns_start_error(proc
 
 @pytest.mark.parametrize('cleanup', ['stop', 'task', 'global_nowait'])
 def test_local_executor_finalizes_secret_log_before_forgetting_record(process_context, monkeypatch, cleanup):
+    from ouroboros.artifacts import read_actor_source_bytes
+
     registry, ctx, workspace, data = process_context
     ctx.executor_ref = {'type': 'local', 'workspace_host_path': str(workspace), 'workspace_backend_path': '/workspace'}
     secret = 'synthetic-finalization-canary'
@@ -225,8 +227,8 @@ def test_local_executor_finalizes_secret_log_before_forgetting_record(process_co
         payload = next(item for item in services.kill_all_services(data) if item.get('name') == 'service')
     assert payload['state'] == 'stopped' and not payload.get('stop_failed')
     final = payload['log_finalization']
-    assert final['deleted_live_log'] and not final['errors']
-    text = gzip.decompress(Path(final['full_log_ref']['path']).read_bytes()).decode()
+    assert final['deleted_live_log'] and final['source_scope'] == 'full' and not final.get('error_count')
+    text = read_actor_source_bytes(data, ctx.task_id, final['source_ref']).decode()
     assert secret not in text and 'port=8080' in text and '***' in text
     assert not list(durable.glob('*.json'))
     assert services.prune_service_logs(data, retention_days=0)['archived_files'] == 0
@@ -276,6 +278,7 @@ for line in sys.stdin:
 @pytest.mark.parametrize('local_executor', [False, True])
 def test_replacing_exited_service_finalizes_each_environment_revision(process_context, monkeypatch, local_executor):
     from ouroboros import config, workspace_executor
+    from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
 
     registry, ctx, workspace, _data = process_context
@@ -310,8 +313,8 @@ def test_replacing_exited_service_finalizes_each_environment_revision(process_co
     registry.execute('stop_service', {})
     assert len(finalized) == 2
     for result in finalized:
-        assert result['deleted_live_log'] and not result['errors']
-        text = gzip.decompress(Path(result['full_log_ref']['path']).read_bytes()).decode()
+        assert result['deleted_live_log'] and result['source_scope'] == 'full' and not result.get('error_count')
+        text = read_actor_source_bytes(ctx.drive_root, ctx.task_id, result['source_ref']).decode()
         assert 'synthetic-first-environment' not in text and 'synthetic-second-environment' not in text
         assert '***' in text
 

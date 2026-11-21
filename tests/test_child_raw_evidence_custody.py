@@ -127,6 +127,34 @@ def _index_row(world) -> dict:
                 if row["name"] == "nanny-integrity.json")
 
 
+@pytest.mark.parametrize("damaged", [False, True], ids=["copy-back-and-retire", "conflict-keeps-child"])
+def test_service_output_version_remains_evidence_through_settlement(world, damaged):
+    from ouroboros.tools.shell_outputs import _with_immutable_version
+
+    store = _store(world.drive, create=True)
+    report = store / "report.txt"
+    report.write_bytes(b"first revision")
+    ctx = ToolContext(repo_dir=world.repo, drive_root=world.drive, task_id=CHILD)
+    old = _with_immutable_version(ctx, artifacts.artifact_record(report), required=True)["version_ref"]
+    report.write_bytes(b"second revision")
+    current = _with_immutable_version(ctx, artifacts.artifact_record(report), required=True)["version_ref"]
+    assert old["path"] != current["path"]
+    if damaged:
+        blocked = world.canonical / old["path"]
+        blocked.parent.mkdir(parents=True)
+        blocked.write_bytes(b"inconsistent canonical evidence")
+    _complete(world)
+    settled = _retry_and_settle(world)
+    assert {row["name"] for row in load_effective_task_result(world.data, CHILD)["artifacts"]} == {report.name}
+    assert (world.canonical / current["path"]).read_bytes() == b"second revision"
+    if damaged:
+        assert settled["status"] == "retained" and (store / old["path"]).read_bytes() == b"first revision"
+        assert blocked.read_bytes() == b"inconsistent canonical evidence"
+    else:
+        assert settled["status"] == "removed" and not world.drive.exists()
+        assert (world.canonical / old["path"]).read_bytes() == b"first revision"
+
+
 def _assert_every_indexed_byte_resolves(world, index: dict) -> None:
     """The address an index names resolves beside the index the parent received, to the exact bytes."""
     row = _index_row(world)

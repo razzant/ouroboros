@@ -87,6 +87,9 @@ HOT_CODE_PATHS = frozenset({
     # join_ledger received the direct-child reads of the hot forced-finalization
     # leaf: the label follows the moved body.
     "ouroboros/tools/join_ledger.py",
+    # The launch evidence, its identity and display came from the hot finalization leaves.
+    "ouroboros/service_finalization.py",
+    "ouroboros/service_outcomes.py",
 })
 
 

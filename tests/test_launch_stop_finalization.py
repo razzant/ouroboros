@@ -1,7 +1,7 @@
 """One finalization per launch, by the stop that won it, with the service's name held until it is done.
 
 Overlapping stops of one service each measure the same end. Only one of them finalizes: the first to claim that exact
-record object. The name stays taken while it does, because the log path and the outputs are reused by a new start of
+record object. The name stays taken while it does, because the declared files can be reused by a new start of
 the same task and name; once a newer service holds the name, a late stop of the old object touches nothing of it. No
 lock is held across a process wait. Real services, real stops; a gate at the finalization a late stop would reach.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -74,7 +75,7 @@ def _new_log_has_output(log) -> bool:
 @pytest.mark.parametrize("backend", list(BACKENDS))
 def test_a_late_stop_of_the_old_object_leaves_the_newer_service_alone(tmp_path, monkeypatch, scripts, backend):
     """Stops A and B both confirm the end of the same old record. B wins: it finalizes and frees the name. A new service
-    starts under that task and name, reusing the log path. A resumes: it must neither finalize the path nor remove the
+    starts under that task and name with its own log. A resumes: it must neither finalize the path nor remove the
     new record. The newer service stays registered with its live log, and its own stop later works."""
     from ouroboros import process_scope
     from ouroboros.tools import services
@@ -113,14 +114,15 @@ def test_a_late_stop_of_the_old_object_leaves_the_newer_service_alone(tmp_path, 
         newer = registry[record.service_id]
         assert newer is not record and started["state"] == "running", started
         new_identity = _server(tmp_path / "new.port")
-        assert _new_log_has_output(log), "the new service writes the same log path"
+        new_log = Path(started.get("log_path") or started["backend_log_path"])
+        assert new_log != log and _new_log_has_output(new_log)
 
         go_a.set()
         late_a.join(_PATIENCE)
         assert not late_a.is_alive()
 
         assert registry.get(record.service_id) is newer, "the late stop removed the newer service's record"
-        assert _new_log_has_output(log), "the late stop finalized the newer service's live log"
+        assert _new_log_has_output(new_log), "the late stop finalized the newer service's live log"
         assert finalized_by == [me], f"finalized twice: {finalized_by}"
         assert _proc(newer).poll() is None and _answers(new_identity[0])
         assert results["a"] == "⚠️ SERVICE_NOT_FOUND: a", results["a"]
@@ -238,7 +240,8 @@ def test_the_name_stays_held_until_the_winner_finished_finalizing(tmp_path, monk
         started = json.loads(_restart(ctx, tmp_path, scripts, backend, tmp_path / "new.port"))
         assert started["state"] == "running" and registry[record.service_id] is not record, started
         new_identity = _server(tmp_path / "new.port")
-        assert _new_log_has_output(log) and _answers(new_identity[0])
+        new_log = Path(started.get("log_path") or started["backend_log_path"])
+        assert new_log != log and _new_log_has_output(new_log) and _answers(new_identity[0])
     finally:
         go.set()
         winner.join(_PATIENCE)
@@ -277,18 +280,31 @@ def test_a_second_stop_during_the_winners_finalization_finds_nothing_to_do(tmp_p
 
 @pytest.mark.parametrize("backend", list(BACKENDS))
 def test_the_name_is_released_when_finalization_fails(tmp_path, monkeypatch, scripts, backend):
-    """A winner whose finalization raises still frees the name: a held name must not outlive its stop."""
-    from ouroboros.tools import services
+    """A winner whose log finalization raises still ends as a stop: its declared output registers with the name still
+    held, the log's fate is unknown (its live log stays), and the name is freed: a held name must not outlive its stop."""
+    from ouroboros.tools import services, shell
 
-    ctx, record, registry, _log, _leader, (_port, pid, birth) = BACKENDS[backend](tmp_path, monkeypatch, scripts)
+    ctx, record, registry, log, _leader, (_port, pid, birth) = BACKENDS[backend](tmp_path, monkeypatch, scripts)
+    record.outputs = ["out.txt"]
+    seen = []
 
     def boom(*_args, **_kwargs):
         raise OSError("the disk answered oddly")
 
+    def outputs(*_args, **_kwargs):
+        seen.append(registry.get(record.service_id) is record)
+        return "", False, True
+
     monkeypatch.setattr(services, "_finalize_service_log_for_drive", boom)
+    monkeypatch.setattr(shell, "_register_process_outputs", outputs)
+    monkeypatch.setattr(services, "_working_tree_changes", lambda cwd: set())
     try:
-        with pytest.raises(OSError):
-            services._stop_service(ctx, name="a")
+        stopped = _payload(services._stop_service(ctx, name="a"))
+        assert stopped["process_cleanup"]["exit_confirmed"] is True and "stop_failed" not in stopped, stopped
+        assert stopped["log_finalization"] == {"archive_outcome": "unconfirmed", "deleted_live_log": False,
+            "live_log": "unknown", "error_count": 1, "source_unavailable": "masked_source_not_verified"}
+        assert log.exists() and "the disk answered oddly" not in json.dumps(stopped)
+        assert stopped["artifact_output_failed"] is False and seen == [True], (stopped, seen)
         assert record.service_id not in registry
     finally:
         _settle(_proc(record), identities=[(pid, birth)])

@@ -306,6 +306,8 @@ def _blob_ref_path(drive_root: pathlib.Path, ref: dict) -> pathlib.Path:
     blob_relative = pathlib.Path("blobs") / f"{digest}.{kind}.gz"
     root = (pathlib.Path(drive_root) / OBSERVABILITY_DIR).resolve(strict=False)
     local = root / blob_relative
+    if pathlib.Path(str(ref.get("path") or "")) == pathlib.Path(OBSERVABILITY_DIR) / blob_relative:
+        ref = {**ref, "path": str(local)}  # portable CAS address, relative to this store only
     if local.is_file():
         resolved = local.resolve(strict=True)
         if not resolved.is_relative_to(root):
@@ -619,6 +621,12 @@ def _rewrite_service_result(
         if isinstance(carrier, dict) and _is_blob_ref(carrier.get("full_log_ref")):
             carrier["full_log_ref"] = _promote_known_observability_ref(
                 parent_root, child_root, task_id, carrier["full_log_ref"], state, carrier="response_ref")
+    log = parsed.get("log_finalization")
+    if isinstance(log, dict) and _is_task_source_ref(source := log.get("source_ref")):
+        digest = str(source.get("sha256") or "")
+        source_id = "service-log-tail" if log.get("source_scope") == "tail" else f"service-log-{digest[:16]}"
+        if source.get("path") == f"source_handles/tool_results/{source_id}-{digest}.txt":
+            _promote_task_source_ref(parent_root, child_root, task_id, source, state)
     from ouroboros.source_retention import active_walk
     walk = active_walk()
     return text if walk is not None and walk.discovering else prefix + json.dumps(parsed, ensure_ascii=False, indent=2)

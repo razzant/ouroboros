@@ -81,6 +81,21 @@ def test_external_absolute_does_not_read_or_create_a_repo_mirror(environment):
         ctx.repo_path(str(outside))
 
 
+@pytest.mark.parametrize('operation', ['write', 'edit'])
+@pytest.mark.parametrize('path', ['private_service_logs/fixture/main.log', 'services/fixture/main.log'])
+def test_private_service_diagnostics_are_not_bound_for_file_mutation(environment, monkeypatch, operation, path):
+    from ouroboros import config
+
+    _reg, ctx, _home, work, data = environment
+    monkeypatch.setattr(config, 'DATA_DIR', data)
+
+    with pytest.raises(ValueError, match='private service diagnostics are not writable through file tools'):
+        build_resolved_resource_binding(ctx, root='runtime_data', operation=operation, path=path)
+
+    binding = build_resolved_resource_binding(ctx, root='active_workspace', operation=operation, path=path)
+    assert binding.target_path == (work / path).resolve()
+
+
 def test_runtime_prefix_requires_a_path_boundary(environment):
     _reg, ctx, _home, _work, data = environment
     with pytest.raises(ValueError, match='outside selected root'):

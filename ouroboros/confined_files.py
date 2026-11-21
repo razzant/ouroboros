@@ -68,6 +68,11 @@ _WINDOWS_DEVICE_NAMES = frozenset({"con", "prn", "aux", "nul", "conin$", "conout
                                    *(f"com{i}" for i in "0123456789¹²³"), *(f"lpt{i}" for i in "0123456789¹²³")})
 
 
+def _require_private_mode(observed: os.stat_result) -> None:
+    if observed.st_uid != os.geteuid() or observed.st_mode & 0o077:
+        raise OSError(errno.EACCES, "expected a file or directory private to this account")
+
+
 def relative_parts(value: Any) -> list[str]:
     """Lexical store selector. Windows names cannot address devices or alternate streams."""
     text = str(value or "")
@@ -126,13 +131,22 @@ class ConfinedDirectory:
     search descriptor, Windows by a handle without ``FILE_LIST_DIRECTORY`` (``_Win32Files.open_root``).
     """
 
-    def __init__(self, root: Any = None, *, search_only: bool = False, _parent: Any = None, _name: str = "") -> None:
+    def __init__(self, root: Any = None, *, search_only: bool = False, _parent: Any = None, _name: str = "",
+                 _private: bool = False, _create: bool = False) -> None:
         self.api = _parent.api if _parent is not None else (_Win32Files.load() if IS_WINDOWS else None)
         self.handle = None
         if _parent is not None and not native_name(_name):
             raise OSError(errno.EINVAL, "not a plain directory component")
         if self.api:
-            handle = (self.api.open_relative(_parent.handle, _name, directory=True) if _parent is not None
+            # An ordinary descendant keeps the pre-extension bare call: only a private
+            # open asks the native API for its service-log keywords (#1868).
+            asked: dict = {}
+            if _private:
+                asked["private"] = True
+            if _create:
+                asked["create"] = True
+            handle = (self.api.open_relative(_parent.handle, _name, directory=True, **asked)
+                      if _parent is not None
                       else self.api.open_root(str(root), search_only=search_only))
         elif POSIX_CONFINED:
             # Only the configured root may follow a link, never a descendant.
@@ -141,6 +155,12 @@ class ConfinedDirectory:
         else:
             raise OSError(errno.ENOTSUP, "confined directory reads unavailable")
         self.handle = handle
+        if _private and not self.api:
+            try:
+                _require_private_mode(os.fstat(handle))
+            except OSError:
+                os.close(handle)
+                raise
 
     def __enter__(self) -> "ConfinedDirectory":
         return self
@@ -153,6 +173,38 @@ class ConfinedDirectory:
     def child(self, name: str) -> "ConfinedDirectory":
         return ConfinedDirectory(_parent=self, _name=name)
 
+    def private_child(self, name: str, *, create: bool = False) -> "ConfinedDirectory":
+        """Open or create one owner-private directory. Never change an existing directory's permissions."""
+        if not native_name(name):
+            raise OSError(errno.EINVAL, "not a plain directory component")
+        if create and not self.api:
+            try:
+                os.mkdir(name, 0o700, dir_fd=self.handle)
+            except FileExistsError:
+                pass
+        return ConfinedDirectory(_parent=self, _name=name, _private=True, _create=create)
+
+    def create_private_file(self, name: str) -> BinaryIO:
+        """Create exclusively with private permissions before the first byte can be written."""
+        if not native_name(name):
+            raise OSError(errno.EINVAL, "not a plain file component")
+        if self.api:
+            handle = self.api.open_relative(self.handle, name, directory=False, private=True, create=True)
+            try:
+                fd = self.api.to_fd(handle, flags=os.O_WRONLY)
+            except BaseException:
+                self.api.close(handle)
+                raise
+        else:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.handle)
+        try:
+            if not self.api:
+                _require_private_mode(os.fstat(fd))
+            return os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+
     def revision(self) -> tuple:
         """Held directory identity/mtime for read caches; never stat its pathname again."""
         if self.api:
@@ -160,12 +212,25 @@ class ConfinedDirectory:
         observed = os.fstat(self.handle)
         return observed.st_dev, observed.st_ino, observed.st_mtime_ns
 
-    def open(self, name: str) -> Tuple[BinaryIO, os.stat_result]:
+    def open(self, name: str, *, private: bool = False, quiescent: bool = False) -> Tuple[BinaryIO, os.stat_result]:
+        """A quiescent Windows read excludes open data writers; POSIX callers need separate writer evidence."""
         if not native_name(name):
             raise OSError(errno.EINVAL, "not a plain file component")
         if not self.api:
-            return open_regular_at(self.handle, name)
-        handle = self.api.open_relative(self.handle, name, directory=False)
+            raw, observed = open_regular_at(self.handle, name)
+            if private:
+                try:
+                    _require_private_mode(observed)
+                except OSError:
+                    raw.close()
+                    raise
+            return raw, observed
+        asked: dict = {}  # an ordinary read keeps the bare call; the extension is opt-in
+        if private:
+            asked["private"] = True
+        if quiescent:
+            asked["quiescent"] = True
+        handle = self.api.open_relative(self.handle, name, directory=False, **asked)
         try:
             fd = self.api.to_fd(handle)
         except BaseException:
@@ -252,12 +317,14 @@ def confined_directory(root: Any, parts: Any = ()):
         yield directory
 
 
-def open_confined_file(root: Any, parts: Any) -> Tuple[BinaryIO, os.stat_result]:
+def open_confined_file(root: Any, parts: Any, *, quiescent: bool = False) -> Tuple[BinaryIO, os.stat_result]:
     parts = list(parts)
     if not parts or not all(native_name(part) for part in parts):
         raise OSError(errno.EINVAL, "invalid confined file selector")
     with confined_directory(root, parts[:-1]) as directory:
-        return directory.open(parts[-1])
+        # An ordinary read keeps the historical bare ``open`` call shape; only a
+        # quiescent read asks for the service-log extension.
+        return directory.open(parts[-1], quiescent=True) if quiescent else directory.open(parts[-1])
 
 
 def read_confined_json(root: Any, parts: Any, *, strict: bool = False) -> dict | None:
@@ -368,7 +435,8 @@ class _Win32Files:
     ATTRIBUTE_DIRECTORY = 0x10
     ATTRIBUTE_REPARSE_POINT = 0x400
     FILE_TYPE_DISK = 1
-    _ERRNO = {2: errno.ENOENT, 3: errno.ENOENT, 5: errno.EACCES, 32: errno.EACCES, 123: errno.EINVAL}
+    _ERRNO = {2: errno.ENOENT, 3: errno.ENOENT, 5: errno.EACCES, 32: errno.EACCES,
+              80: errno.EEXIST, 123: errno.EINVAL, 183: errno.EEXIST}
 
     @classmethod
     def load(cls) -> "_Win32Files":
@@ -389,6 +457,7 @@ class _Win32Files:
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._ctypes, self._msvcrt, self._info_type = ctypes, msvcrt, _Info
+        self._private_security = None
         self._create = kernel32.CreateFileW
         self._create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
@@ -466,7 +535,8 @@ class _Win32Files:
             self.close(handle)
             raise
 
-    def open_relative(self, parent: int, name: str, *, directory: bool, metadata: bool = False) -> int:
+    def open_relative(self, parent: int, name: str, *, directory: bool, metadata: bool = False,
+                      private: bool = False, create: bool = False, quiescent: bool = False) -> int:
         """``metadata``: no data access, so the handle reads no byte and NT checks no share mode."""
         if not native_name(name):
             raise OSError(errno.EINVAL, "not a plain Windows component")
@@ -475,18 +545,27 @@ class _Win32Files:
         buffer = ctypes.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le", "surrogatepass"))
         text = self._unicode(length, length + 2, ctypes.cast(buffer, ctypes.c_wchar_p))
-        attributes = self._attributes(ctypes.sizeof(self._attributes), parent, ctypes.pointer(text),
-                                      0x40 | 0x1000, None, None)  # CASE_INSENSITIVE | DONT_REPARSE
+        if private and self._private_security is None:
+            self._private_security = _Win32PrivateSecurity()
+        security = self._private_security if private else None
+        descriptor = security.descriptor() if security and create else contextlib.nullcontext()
         handle, io = ctypes.c_void_p(), self._io_status()
         access = 0x100000 | 0x80 | (0 if metadata else 0x1)  # SYNCHRONIZE | READ_ATTRIBUTES [| READ_DATA]
-        status = self._nt_create(ctypes.byref(handle), access, ctypes.byref(attributes),
-                                 ctypes.byref(io), None, 0, self.SHARE_READ | self.SHARE_WRITE | self.SHARE_DELETE,
-                                 1, 0x20 | 0x200000 | (0x1 if directory else 0x40), None, 0)
-        # FILE_OPEN, SYNCHRONOUS_IO_NONALERT, OPEN_REPARSE_POINT, DIRECTORY/NON_DIRECTORY_FILE.
+        access |= (0x20000 if private else 0) | (0x40000000 if create and not directory else 0)
+        share = self.SHARE_READ | self.SHARE_DELETE | (0 if quiescent else self.SHARE_WRITE)
+        disposition = (3 if directory else 2) if create else 1  # FILE_OPEN_IF / FILE_CREATE / FILE_OPEN
+        with descriptor as sd:
+            attributes = self._attributes(ctypes.sizeof(self._attributes), parent, ctypes.pointer(text),
+                                          0x40 | 0x1000, sd, None)  # CASE_INSENSITIVE | DONT_REPARSE
+            status = self._nt_create(ctypes.byref(handle), access, ctypes.byref(attributes), ctypes.byref(io),
+                                     None, 0, share, disposition, 0x20 | 0x200000 | (0x1 if directory else 0x40), None, 0)
+        # SYNCHRONOUS_IO_NONALERT, OPEN_REPARSE_POINT, DIRECTORY/NON_DIRECTORY_FILE.
         if status < 0:
             raise self._status_error(status)
         try:
             self.require_plain(handle.value, directory=directory)
+            if security:
+                security.require(handle.value)
             return handle.value
         except BaseException:
             self.close(handle.value)
@@ -582,8 +661,105 @@ class _Win32Files:
                 return buffer.value
             size = length + 1
 
-    def to_fd(self, handle: int) -> int:
-        return self._msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    def to_fd(self, handle: int, *, flags: int = os.O_RDONLY) -> int:
+        return self._msvcrt.open_osfhandle(handle, flags | os.O_BINARY)
 
     def close(self, handle: int) -> None:
         self._close(handle)
+
+
+class _Win32PrivateSecurity:
+    """A create-time protected DACL; verify the same account and ACL on the opened object.
+
+    NT applies the descriptor at creation. Check it on the object we opened: a directory's
+    creation mode does not tell us the DACL of an existing file. Never change an existing
+    descriptor or accept inherited or extra ACEs.
+    """
+
+    _OWNER_AND_DACL = 0x1 | 0x4
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        security = ctypes.WinDLL("advapi32", use_last_error=True)
+        p = ctypes.POINTER(wintypes.LPVOID)
+        d = ctypes.POINTER(wintypes.DWORD)
+
+        def bind(dll, name, result, *arguments):
+            call = getattr(dll, name)
+            call.restype, call.argtypes = result, arguments
+            return call
+
+        current = bind(kernel, "GetCurrentProcess", wintypes.HANDLE)
+        close = bind(kernel, "CloseHandle", wintypes.BOOL, wintypes.HANDLE)
+        self._free = bind(kernel, "LocalFree", wintypes.HANDLE, wintypes.HANDLE)
+        open_token = bind(security, "OpenProcessToken", wintypes.BOOL, wintypes.HANDLE, wintypes.DWORD, p)
+        token_info = bind(security, "GetTokenInformation", wintypes.BOOL, wintypes.HANDLE, ctypes.c_int,
+                          wintypes.LPVOID, wintypes.DWORD, d)
+        sid_text = bind(security, "ConvertSidToStringSidW", wintypes.BOOL, wintypes.LPVOID, p)
+        self._from_sddl = bind(security, "ConvertStringSecurityDescriptorToSecurityDescriptorW", wintypes.BOOL,
+                               wintypes.LPCWSTR, wintypes.DWORD, p, d)
+        self._to_sddl = bind(security, "ConvertSecurityDescriptorToStringSecurityDescriptorW", wintypes.BOOL,
+                             wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, p, d)
+        self._get_security = bind(security, "GetSecurityInfo", wintypes.DWORD, wintypes.HANDLE, ctypes.c_int,
+                                  wintypes.DWORD, p, p, p, p, p)
+
+        token, size, text = ctypes.c_void_p(), wintypes.DWORD(), ctypes.c_void_p()
+        with contextlib.ExitStack() as held:
+            if not open_token(current(), 0x8, ctypes.byref(token)):  # TOKEN_QUERY
+                raise ctypes.WinError(ctypes.get_last_error())
+            held.callback(close, token)
+            token_info(token, 1, None, 0, ctypes.byref(size))  # TokenUser: size, then TOKEN_USER
+            if not size.value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            identity = ctypes.create_string_buffer(size.value)
+            if not token_info(token, 1, identity, size.value, ctypes.byref(size)) or not sid_text(
+                ctypes.cast(identity, p)[0], ctypes.byref(text)  # TOKEN_USER begins with the SID pointer
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            held.callback(self._free, text)
+            owner = ctypes.wstring_at(text)
+        principals = dict.fromkeys((owner, "S-1-5-18", "S-1-5-32-544"))  # owner, SYSTEM, Administrators
+        self._sddl = f"O:{owner}D:P" + "".join(f"(A;;FA;;;{sid})" for sid in principals)
+        with self.descriptor() as descriptor:
+            self._expected = self._shape(descriptor)
+
+    @contextlib.contextmanager
+    def descriptor(self):
+        ctypes = self._ctypes
+        descriptor = ctypes.c_void_p()
+        if not self._from_sddl(self._sddl, 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield descriptor
+        finally:
+            self._free(descriptor)
+
+    def _shape(self, descriptor: Any) -> tuple:
+        ctypes = self._ctypes
+        text = ctypes.c_void_p()
+        if not self._to_sddl(descriptor, 1, self._OWNER_AND_DACL, ctypes.byref(text), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            owner, _, dacl = ctypes.wstring_at(text).partition("D:")
+        finally:
+            self._free(text)
+        flags, _, aces = dacl.partition("(")
+        if not owner.startswith("O:") or "P" not in flags or not aces:
+            raise OSError(errno.EACCES, "private owner and protected DACL could not be verified")
+        return owner, sorted(aces.removesuffix(")").split(")("))  # exact allow-only ACEs; order is immaterial
+
+    def require(self, handle: int) -> None:
+        ctypes = self._ctypes
+        descriptor = ctypes.c_void_p()
+        error = self._get_security(handle, 1, self._OWNER_AND_DACL, None, None, None, None, ctypes.byref(descriptor))
+        if error:  # SE_FILE_OBJECT
+            raise ctypes.WinError(error)
+        try:
+            if self._shape(descriptor) != self._expected:
+                raise OSError(errno.EACCES, "unexpected owner or DACL for private local content")
+        finally:
+            self._free(descriptor)

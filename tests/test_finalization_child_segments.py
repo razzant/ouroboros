@@ -15,6 +15,8 @@ import queue
 
 import pytest
 
+from ouroboros import service_finalization
+
 CHILDREN = ("child1", "child2", "child3", "child4")
 
 
@@ -234,7 +236,7 @@ def test_a_child_change_between_or_inside_segments_holds_the_retained_answer(tre
                                 for row in _load_direct_child_results(root, "parent1", "parent1")})
 
     if boundary == "services":
-        done = _inject_once(monkeypatch, loop, "_finalize_task_services", act)
+        done = _inject_once(monkeypatch, service_finalization, "finalize", act)
     elif boundary == "review":
         done = _inject_once(monkeypatch, review_result, "result_review_at_delivery", act)
     elif boundary == "drain":
@@ -291,13 +293,12 @@ def test_an_ordinary_round_reads_no_child_result_whatever_the_number_of_children
 
 
 def test_a_content_only_change_keeps_the_childs_identity_and_delivers(tree, monkeypatch):
-    import ouroboros.loop as loop
     from ouroboros.tools.join_ledger import _child_result_sha256, _load_direct_child_results
 
     root, stores = tree
     holds = _holds(monkeypatch)
     before = {row["task_id"]: _child_result_sha256(row) for row in _load_direct_child_results(root, "parent1", "parent1")}
-    done = _inject_once(monkeypatch, loop, "_finalize_task_services", lambda: _change(root, stores, "content_only"))
+    done = _inject_once(monkeypatch, service_finalization, "finalize", lambda: _change(root, stores, "content_only"))
     gate = run_gate(root, monkeypatch, ["First answer."])
     after = {row["task_id"]: _child_result_sha256(row) for row in _load_direct_child_results(root, "parent1", "parent1")}
     assert done and after == before

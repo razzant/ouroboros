@@ -59,13 +59,22 @@ def prepare_result_retention(parent: Path, child: Path, task_id: str,
 
 
 def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str, Any]) -> int:
-    """Carry a child-local ``source_handles/test-evidence`` to the same canonical relpaths; files placed.
+    """Carry child-local evidence families with no deliverable row at their canonical relpaths."""
+    from ouroboros.artifacts import SERVICE_OUTPUT_VERSIONS
+
+    return sum(_carry_evidence_family(parent, child, task_id, state, family, kind) for family, kind in (
+        ("test-evidence", _EVIDENCE_GAP_KIND), (SERVICE_OUTPUT_VERSIONS, "service_output_version")))
+
+
+def _carry_evidence_family(parent: Path, child: Path, task_id: str, state: dict[str, Any],
+                           family: str, kind: str) -> int:
+    """Carry one child-local family of exact sources to the same canonical relpaths; files placed.
 
     A context-aware gate writes this family canonical-first, but ``safe_test --evidence-dir`` may select the
     execution drive's copy, which no row, typed reference or store listing carries: an authored index could
     outlive the only files it names. Copy-back, its retry and settlement therefore carry this one writer's
-    family, under the task's custody lock and without a row per stream; the other reserved families keep their
-    owners, and the index is neither read nor rewritten. Identical bytes are already delivered. Other bytes at
+    family under the task's custody lock; the index is neither read nor rewritten. Service output versions
+    use the same carry without becoming deliverables; their filenames bind the expected digest. Other bytes at
     the address, a family or folder custody cannot read (a link at or above the family included), an unreadable
     file or a refused placement become a pending fact in ``state``: its original holds the drive
     (``task_custody._pending_refs_under``), the parent reads ``raw_evidence_notice``, and nothing is placed beside
@@ -75,7 +84,7 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
     import os
     import stat
 
-    from ouroboros.artifacts import copy_artifact_file, stream_artifact_file, task_artifact_dir_path
+    from ouroboros.artifacts import copy_artifact_file, service_output_version_digest, stream_artifact_file, task_artifact_dir_path
     from ouroboros.observability import _append_promotion_fact, _promotion_fact
     from ouroboros.store import is_wal_index
     from ouroboros.task_custody import _STAGING_DIR, PublicationClosed, _publish, _Retained, _verified
@@ -84,11 +93,12 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
     if root == drive:
         return 0  # one store: nothing to carry
     store = task_artifact_dir_path(drive, task_id, create=False)
-    source = store / "source_handles" / "test-evidence"  # the path ``test_evidence.evidence_directory`` writes
+    source = store / "source_handles" / family
+    versioned = family != "test-evidence"
 
     def gap(path: Any, reason: Any, **facts: Any) -> dict[str, Any]:
         text = reason if isinstance(reason, str) else f"{type(reason).__name__}: {reason}"
-        return _promotion_fact({"kind": _EVIDENCE_GAP_KIND, "path": str(path), **facts}, text)
+        return _promotion_fact({"kind": kind, "path": str(path), **facts}, text)
 
     gaps: list[dict[str, Any]] = []
     members: list[Path] = []
@@ -136,12 +146,16 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
     try:
         for path in members:
             rel = path.relative_to(store).as_posix()
+            digest = service_output_version_digest(rel)
+            if versioned and not digest:
+                continue  # an interrupted temporary write has no published version
+            options = {"expected": {"sha256": digest}} if digest else {}
             dest = target.joinpath(*rel.split("/"))
             try:
                 if dest.parent.resolve(strict=False) != dest.parent or dest.is_symlink():
                     raise _Retained("canonical_store_unsafe")  # a linked component would redirect or fake it
                 if dest.exists():
-                    observed = stream_artifact_file(path)
+                    observed = stream_artifact_file(path, **options)
                     if _verified(dest, observed) is None:
                         # Deterministic (``source_retention.InvalidRetainedSource``): retried once a file changes.
                         gaps.append({**gap(path, _EVIDENCE_COLLISION, **observed),
@@ -149,7 +163,7 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
                     continue
                 staged = staging / str(placed)
                 staged.parent.mkdir(parents=True, exist_ok=True)
-                copy_artifact_file(path, staged)
+                copy_artifact_file(path, staged, **options)
                 _publish(root, task_id, [{"rel": rel, "staged": staged, "dest_identity": None}])
                 placed += 1
             except PublicationClosed:
@@ -166,7 +180,8 @@ def carry_raw_evidence(parent: Path, child: Path, task_id: str, state: dict[str,
         if fact.get("failure_kind") == "invalid_source" or transient <= _EVIDENCE_GAP_ROWS:
             _append_promotion_fact(state["pending_refs"], fact)
     if transient > _EVIDENCE_GAP_ROWS:
-        _append_promotion_fact(state["pending_refs"], gap(source, f"{transient - _EVIDENCE_GAP_ROWS} more raw test "
+        label = "service output version" if versioned else "raw test"
+        _append_promotion_fact(state["pending_refs"], gap(source, f"{transient - _EVIDENCE_GAP_ROWS} more {label} "
                                                           "evidence facts; every original is under this folder"))
     state["promoted_source_handle_count"] = state.get("promoted_source_handle_count", 0) + placed
     return placed

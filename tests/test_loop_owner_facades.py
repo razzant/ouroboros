@@ -52,8 +52,8 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
     "loop_budget": (
         "_server_web_allowed_by_task _check_budget_limits _resolve_task_cost_ceiling _TREE_ACCOUNTING_MAX_STALE_SEC "
         "_loop_tree_accounting _soft_land_exhausted_ceiling "
-        "_service_finalization_evidence _LoopExitContext _handle_budget_exceeded "
-        "_cleanup_loop_resources _service_identity_projection _finalize_task_services "
+        "_LoopExitContext _handle_budget_exceeded "
+        "_cleanup_loop_resources "
         "_prepare_post_tool_budget_context"
     ),
     "loop_delivery": (
@@ -87,6 +87,13 @@ LOOP_LEAF_REEXPORTS: dict[str, tuple[str, str]] = {
     "loop_forced_finalization": ("ouroboros.tools.join_ledger", "_load_direct_child_results _child_disposition_state"),
 }
 
+# Owners outside the loop family that received a leaf's body without a loop binding: every
+# reader reads the owner itself, and no name of it is left on ``ouroboros.loop``.
+LOOP_BODY_OWNERS: dict[str, str] = {
+    "ouroboros.service_finalization": "_service_finalization_evidence _service_identity_projection "
+                                      "_service_finalization_projection _service_finalization_text _finalize_task_services",
+}
+
 
 def test_loop_owner_facades_preserve_identity():
     import ouroboros.loop as loop
@@ -106,6 +113,17 @@ def test_loop_leaf_reexports_bind_their_owners_object():
             assert getattr(loop, name) is getattr(module, name) is getattr(source, name), f"{leaf}.{name}"
 
 
+def test_moved_bodies_have_one_address_at_their_owner():
+    """A body that left the loop family is read where it lives: neither the loop nor a leaf keeps its old name."""
+    import ouroboros.loop as loop
+
+    for owner, retired in LOOP_BODY_OWNERS.items():
+        importlib.import_module(owner)
+        for name in retired.split():
+            for module in (loop, *(importlib.import_module(f"ouroboros.{leaf}") for leaf in LOOP_LEAF_OWNERS)):
+                assert not hasattr(module, name), f"{module.__name__}.{name} is a second address of {owner}"
+
+
 def test_loop_leaves_keep_the_hot_code_label():
     """Managed-update conflict labelling names ``ouroboros/loop.py``; the split
     must not silently downgrade the label for code that merely moved."""
@@ -114,5 +132,6 @@ def test_loop_leaves_keep_the_hot_code_label():
     assert "ouroboros/loop.py" in HOT_CODE_PATHS
     for leaf in (*LOOP_LEAF_OWNERS, "route_choice", "owner_model"):
         assert f"ouroboros/{leaf}.py" in HOT_CODE_PATHS, leaf
-    for owner, _names in LOOP_LEAF_REEXPORTS.values():  # the label follows a moved body to its owner
+    owners = [owner for owner, _names in LOOP_LEAF_REEXPORTS.values()] + list(LOOP_BODY_OWNERS)
+    for owner in owners:  # the label follows a moved body to its owner
         assert owner.replace(".", "/") + ".py" in HOT_CODE_PATHS, owner

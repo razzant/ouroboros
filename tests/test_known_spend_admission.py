@@ -234,7 +234,7 @@ def test_an_ineligible_actor_is_stopped_by_the_fence_with_no_funded_recap(data_r
     exit_ctx = loop._LoopExitContext(
         tools=SimpleNamespace(_ctx=tool_ctx), drive_root=data_root, task_id="ineligible", event_queue=None,
         drive_logs=tmp_path, accumulated_usage=usage, llm_trace={})
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda _ctx: None)
+    monkeypatch.setattr("ouroboros.service_finalization.finalize", lambda *_args: None)
     text, terminal, trace = loop._handle_budget_exceeded(
         ua.BudgetExceeded("root model budget exhausted", limit_scope="root", root_task_id="ineligible"),
         exit_ctx)
@@ -279,7 +279,7 @@ def test_an_ordinary_ineligible_actor_meets_only_the_real_cap_with_no_funded_rec
     exit_ctx = loop._LoopExitContext(
         tools=SimpleNamespace(_ctx=tool_ctx), drive_root=data_root, task_id="ordinary", event_queue=None,
         drive_logs=tmp_path, accumulated_usage=args["ctx"].accumulated_usage, llm_trace={})
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda _ctx: None)
+    monkeypatch.setattr("ouroboros.service_finalization.finalize", lambda *_args: None)
     text, terminal, trace = loop._handle_budget_exceeded(refused.value, exit_ctx)
     assert terminal["execution_status"] == "failed" and terminal["reason_code"] == "budget_exhausted"
     assert trace["resource_limit"]["scope"] == "root" and trace["resource_limit"]["auto_resume"] is False

@@ -21,6 +21,7 @@ from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SC
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
 from ouroboros.task_results import validate_task_id
+from ouroboros.tool_access_paths import is_private_service_log_path
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +70,10 @@ _MAX_SCRATCH_PATHS = 1000
 _ATTACHMENTS_SUBDIR = "attachments"
 _CHAT_MEDIA_SUBDIR = "chat_media"
 _SOURCE_HANDLES_SUBDIR = "source_handles"
-_SOURCE_HANDLE_CATEGORIES = frozenset({"tool_results", "context_checkpoints", "delegated_activity"})
+SERVICE_OUTPUT_VERSIONS = "service_outputs"
+_SOURCE_HANDLE_CATEGORIES = frozenset({"tool_results", "context_checkpoints", "delegated_activity", SERVICE_OUTPUT_VERSIONS})
+_SERVICE_OUTPUT_VERSION = re.compile(rf"{_SOURCE_HANDLES_SUBDIR}/{SERVICE_OUTPUT_VERSIONS}/"
+                                     r"service-output-([0-9a-f]{64})\.[A-Za-z0-9]{1,12}")
 _LEGACY_TOOL_RESULT_TRUNCATION_RE = re.compile(
     r"\n\.\.\. \(truncated from (?P<original>[1-9][0-9]*) chars, "
     r"limit=(?P<limit>[1-9][0-9]*)\)"
@@ -252,6 +256,9 @@ def stage_task_attachments(
             continue
         try:
             source = pathlib.Path(raw_path).expanduser().resolve(strict=False)
+            if is_private_service_log_path(source, pathlib.Path(drive_root)):
+                manifest.append(_rejected(ordinal, f"attachment {ordinal + 1}", "private_service_log"))
+                continue
             if not source.exists():
                 manifest.append(_rejected(ordinal, label, "source_missing"))
                 continue
@@ -854,6 +861,44 @@ def read_actor_source_bytes(
     return raw
 
 
+def service_output_version_digest(path: Any) -> str:
+    """The self-authenticating path of a receipt's service-output evidence, not a deliverable name."""
+    match = _SERVICE_OUTPUT_VERSION.fullmatch(path) if isinstance(path, str) else None
+    return match[1] if match else ""
+
+
+def retain_service_output_version(ctx: Any, record: dict) -> dict:
+    """Pin a measured current output without publishing another logical result file."""
+    from ouroboros.confined_files import lexical_relative, open_confined_file, root_spellings
+
+    spellings = root_spellings(ctx.drive_root)
+    anchor = spellings[0]
+    task_id = task_id_for_artifacts(ctx)
+    store = task_artifact_dir_path(anchor, task_id)
+    relpath = lexical_relative(store, record["path"], spellings)
+    if not relpath:
+        raise OSError("service output was not recorded in its task's own store")
+    extension = pathlib.PurePosixPath(relpath).suffix or "bin"
+    fields = {"category": SERVICE_OUTPUT_VERSIONS, "source_id": "service-output", "extension": extension}
+    expected = {key: record[key] for key in ("size", "sha256")}
+    ref = actor_source_reference(data=b"", measured=expected, **fields)
+    prefix = store.relative_to(anchor).parts
+    try:
+        handle, _ = open_confined_file(anchor, (*prefix, *ref["path"].split("/")))
+        with handle:
+            stream_artifact_file(handle, expected=expected)
+        return ref
+    except (FileNotFoundError, ArtifactIdentityError):
+        pass  # absent/damaged exact address: make a verified copy, never reuse the damaged bytes
+
+    def fill(sink: Any) -> None:
+        handle, _ = open_confined_file(anchor, (*prefix, *relpath.split("/")))
+        with handle:
+            stream_artifact_file(handle, sink, expected=expected)
+
+    return stream_actor_source(anchor, task_id, fill=fill, expected=expected, **fields)
+
+
 def read_task_result_source_bytes(
     drive_root: Any, result: Dict[str, Any], name: str, source_path: str,
 ) -> bytes:
@@ -1387,7 +1432,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         return None
     task_id = task_id_for_artifacts(ctx)
     drive_root = pathlib.Path(getattr(ctx, "drive_root"))
-    if is_verification_receipts_path(drive_root, task_id, source):
+    if is_private_service_log_path(source, drive_root) or is_verification_receipts_path(drive_root, task_id, source):
         return None
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
@@ -1445,7 +1490,8 @@ def collect_task_artifact_records(
     drive_root: Union[pathlib.Path, str], task_id: str, *, measure: bool = True, strict: bool = False,
     require_registered: bool = False, anchor: Any = None,
 ) -> List[Dict[str, Any]]:
-    """List deliverables by handle, excluding metadata, inputs and SQLite WAL indexes (refused unread:
+    """List deliverables by handle, excluding source handles (including immutable service versions), metadata,
+    inputs and SQLite WAL indexes (refused unread:
     ``ConfinedDirectory.open_for_read``). Unmeasured rows keep registered identities; measurement
     hashes the open file. Strict reads raise on unreadable files/metadata; ``anchor`` confines child stores."""
     from ouroboros.confined_files import confined_directory, read_confined_json

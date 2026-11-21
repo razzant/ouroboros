@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import tempfile
 import zipfile
 from hashlib import sha256
@@ -43,10 +44,12 @@ def iter_artifact_entries(root: pathlib.Path, mounts: tuple[tuple[str, pathlib.P
     def failed(exc: OSError) -> None:
         raise exc
     for prefix, base in (("", root), *mounts):
+        mode = base.lstat().st_mode
         if prefix:
-            base.lstat()
             yield prefix, base
-        if not base.is_dir() or base.is_symlink():
+        elif not stat.S_ISDIR(mode):
+            raise NotADirectoryError(f"declared directory changed during capture: {base}")
+        if not stat.S_ISDIR(mode):
             continue
         covered = {name for name, _ in mounts if name != prefix}
         for directory, dirs, files in os.walk(base, onerror=failed, followlinks=False):
