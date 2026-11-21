@@ -2986,27 +2986,42 @@ choices, its positions in Dashboard › Consciousness words, starting on. Where 
 whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
 Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
 switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
-own-task limit it runs under now, and where to change it later. Review & start lands on it; its Continue goes on
+own-task limit it runs under now, and where to change it later. The copy says that, on, its wakes go on within the
+allowance even before the first reply, and that Start begins the first conversation in either position (owner
+2026-11-21). Review & start lands on it; its Continue goes on
 (Skills, then Summary), one row there. The choice rides the one save: no command, no row in Main. Summary labels the
 model row Consciousness model, so it does not read as this choice.
 
 Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
 списком, но юзер может поснимать галочки», which revises his 4A of 2026-10-17, a Summary row), offered only where Finish
 honors its ticks: a data root whose starter list never ran. Elsewhere the step is absent and the Skills page is where
-skills change, so no tick is shown that Finish would ignore. One list of cards by category, built-ins first (his 7A of
-2026-10-17): each card its human title, one line of what it gives (an author's longer description falls back there and
-wraps whole) and, quieter in the meta ink, the prerequisite in words where the catalog says one; the maintainer's
-recommended skills are ticked. A ticked card keeps the neutral body and its box is the chosen thing, so a long list of
-ticks stays light. Where the skills come from is said once per source, never on a card: the built-in group's head, and
-one line over the hub's groups that they are Official when all of them are. Inside a group what works at once leads,
-recommended first, and what needs a key or an account comes last; the hub's category order stays. Tick all and Untick
-all head the list; an empty choice installs nothing. How the hub's skills install is one plain line under the list
-(official ones without a review, the community's reviewed first), its two choices per source behind it in Settings'
-words. What is still being read stands under the list too, where the hub's skills join it, so their arrival moves no
-card; a refresh keeps the ticks, focus and the card being read. Entering the step, the cards arrive once in a short sequence, the owner's «анимированный список»: each a
-surface that comes on `--motion-open` by position and opacity, a beat after the one before, the whole under a second;
-the boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows
-the list as it ends. Review & start passes it; Summary keeps one row back to it. Nothing installs before Start.
+skills change, so no tick is shown that Finish would ignore. It is a list, not cards (his «слишком крупные карточки»
+of the same day): one row per skill with no surface of its own, its box, its human title and, muted on the same line,
+what it gives (an author's longer description falls back there) and, quieter, what it needs first where the catalog
+says so; a row wraps whole under its title where the line is short, never cut. The groups, by category with built-ins
+first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each group whole in its column, and one
+column below that and on a phone; a group's head is its name and count. The maintainer's recommended skills are
+ticked; the box is the chosen thing. Inside a group what works at once leads, recommended first, and what needs a key
+or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
+installs nothing. Where the hub's skills come from and how they install is one small sentence under the list (Official
+skills from the hub without a review, the community's reviewed first), its two choices per source behind it in
+Settings' words. What is still being read stands under the list too, where the hub's skills join it, so their arrival
+moves no row; a refresh keeps the ticks, focus and the row being read. Entering the step, the rows arrive once in a
+short sequence, the owner's «анимированный список»: each comes on `--motion-open` by position and opacity, a beat after
+the one before, the whole under a second; the boxes answer from the first frame, a repaint or the hub's late list never
+plays it again, and reduced motion shows the list as it ends. Review & start passes it; Summary keeps one row back to
+it. Nothing installs before Start.
+
+A skill that declares a connection card stands first in the step as that card (the Telegram skill's «Phone via
+Telegram»; owner 2026-11-21, 3A: the QR right in the wizard), its box the skill's tick, with Connect. Open, it shows the
+skill's own steps to get a token, the token field and, once the host's identity check names the account, a QR of the
+skill's link with a one-time code made in the page, the account's @name, the same link for this device and the skill's
+options (Telegram's «Send results and errors of work here», on for a new connection). The QR is drawn on the device by
+the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token. A failed check
+says only its own cause («Could not reach Telegram from here», «Telegram did not accept this token») and blocks neither
+Continue nor Finish; a refused token is not saved, an unchecked one is. The code is made once per card and kept until
+Finish, which carries the token, the code and the options; Summary shows the card's row when a token will be saved. The
+card's words, steps, link and options are the skill's declaration: nothing in the step is a service's own.
 
 The first-run wizard is compact; the step rail alone says which step this is. It names each step by one short word
 (`railTitle`), so seven pills keep one line where the window allows; a phone's rail shows the current pill alone, its
