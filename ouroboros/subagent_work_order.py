@@ -13,6 +13,9 @@ log = logging.getLogger(__name__)
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
 # and with it the work-order bytes and fingerprint its recovery and source-range reads check.
 DECLARED_WORDS_FACT = "declared_inputs_carry_owner_words"
+# An immutable scheduling fact, not a migration: records without it must
+# reconstruct the original canonical bytes for source reads and handoff recovery.
+ORIGINAL_INPUTS_FACT = "work_order_input_files_original_only"
 
 
 def declared_words_fact(contract: Mapping[str, Any]) -> dict[str, bool]:
@@ -121,11 +124,19 @@ def _selected_input_files(task: Mapping[str, Any]) -> str:
     rows = task.get("prepared_input_files")
     if not isinstance(rows, list) or not rows:
         return ""
-    return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
-            "this task. The first start of this work order verifies those copies against these digests and its "
-            "instructions name where this run reads them; a later start copies only what its own request selects.\n"
-            + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
-                        for row in rows if isinstance(row, dict)))
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    if task.get(ORIGINAL_INPUTS_FACT, metadata.get(ORIGINAL_INPUTS_FACT)) is not True:
+        return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+                "this task. The first start of this work order verifies those copies against these digests and its "
+                "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+                + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
+                            for row in rows if isinstance(row, dict)))
+    from ouroboros.delegate_readonly_inputs import selection_label
+
+    return ("Original schedule-time selection (input_files). Follow this start's SELECTED INPUT FILES instructions "
+            "for effective copies. Without them there are no explicit copies for this run. A replacement, including [], "
+            "supersedes these rows.\n"
+            + "\n".join(f"- {selection_label(row)} (sha256 {row['sha256']}, {row['size']} bytes)" for row in rows))
 
 
 def _text(value: Any) -> str:
