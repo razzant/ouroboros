@@ -751,3 +751,24 @@ def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(si
         thread.join(20)
     assert not thread.is_alive() and not failures
     assert _complete(new_cfg, returned)["ok"] is True
+
+
+def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_starts_anew(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    times = iter(["2026-11-19T09:50:00+00:00", "2026-11-19T21:07:00+00:00", "2026-11-20T08:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    challenge = lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"})  # noqa: E731
+    _bearer_call(cfg, challenge)
+    assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "not_signed_in",
+                                     "since": "2026-11-19T09:50:00+00:00"}
+    _bearer_call(cfg, challenge)  # still not signed in: the open state's start survives the repeat
+    assert _file(cfg)["sign_in"]["since"] == "2026-11-19T09:50:00+00:00"
+    mcp_oauth._save(cfg, {**_file(cfg), "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
+                          "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"},
+                          "sign_in": {"state": "signed_in", "since": "2026-11-19T21:47:00+00:00"}})
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
+    with pytest.raises(mcp_oauth.MCPAuthRequired):
+        asyncio.run(mcp_oauth.current_token(cfg))
+    assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "refresh_rejected",
+                                     "since": "2026-11-19T21:07:00+00:00"}  # a new state after the sign-in: its own start
