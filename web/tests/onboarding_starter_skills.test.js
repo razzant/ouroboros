@@ -63,12 +63,15 @@ test('the step: the contract’s header over one list of cards with titles, pitc
     assert.match(text(html), /^6 of 10 ticked Tick all · Untick all Built in — comes with the app 2/);
     assert.match(html, /<h3 style="--arrive: 0">Built in — comes with the app<span>2<\/span><\/h3>/);
     // The catalog's words translate; a slug and an author's description keep their own words.
-    assert.match(cardOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong>[\s\S]*Built in[\s\S]*data-mark="official"[\s\S]*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>[\s\S]*<span class="skills-starter-needs">Needs a Telegram bot token<\/span>/);
+    assert.match(cardOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong>[\s\S]*Built in[\s\S]*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>[\s\S]*<span class="skills-starter-needs">Needs a Telegram bot token<\/span>/);
     assert.match(cardOf(html, 'builtin/unix_computer_use'), /<strong data-i18n-authored>unix_computer_use<\/strong>[\s\S]*<span class="skills-starter-pitch" data-i18n-authored>Desktop control: screenshots/);
     assert.doesNotMatch(cardOf(html, 'ouroboros/keenable'), /skills-starter-needs/, 'its key is optional: no line');
     assert.match(cardOf(html, 'ouroboros/slack-bridge'), /<span class="skills-starter-needs" data-i18n-authored>Uses your Slack bot token and 1 more setting<\/span>/);
     assert.match(cardOf(html, 'ouroboros/duckduckgo'), /class="wizard-choice skills-starter-card active"[\s\S]*data-starter-item="ouroboros\/duckduckgo" checked/);
-    assert.equal((html.match(/data-mark="official"/g) || []).length, 10, 'built-in and hub cards alike carry the Official mark');
+    // One mark per card says where it comes from: Built in for the app's own, Official for the hub's vouched ones.
+    assert.equal((html.match(/>Built in<\/span>/g) || []).length, 2);
+    assert.equal((html.match(/data-mark="official"/g) || []).length, 8);
+    assert.doesNotMatch(cardOf(html, 'builtin/telegram'), /data-mark="official"/);
     // One quiet line says how the hub's skills install; its choices open in place.
     assert.match(text(html), /They install without review — you trust Ouroboros\. Skills that need a key wait for it\. Change$/);
     assert.doesNotMatch(html, /data-starter-trust="/);

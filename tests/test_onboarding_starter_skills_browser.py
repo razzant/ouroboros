@@ -204,7 +204,8 @@ def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, w
     top = page.evaluate("() => document.querySelector('[data-starter-card=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
     assert abs(top - anchor) <= 1, (anchor, top)
     assert page.locator('.skills-starter-list[data-arrive]').count() == 0, 'the hub brings no second entrance'
-    assert _card(page, 'builtin/telegram').locator('[data-mark="official"]').count() == 1
+    assert _card(page, 'builtin/telegram').locator('[data-mark="official"]').count() == 0  # one mark: Built in
+    assert _card(page, 'ouroboros/duckduckgo').locator('[data-mark="official"]').count() == 1
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     capture(page, f'skills-{engine}-{width}-{theme}-ready')
     page.click('#next-btn')

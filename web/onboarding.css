@@ -1481,7 +1481,8 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
 [data-starter-skills]:empty { display: none; }
 .skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+/* Summary's row reads as its neighbours do: the value at their size. */
+.skills-starter-value { color: var(--text-primary); }
 .skills-starter-sub { display: block; margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
    subscription pays with, its limits and its door. */

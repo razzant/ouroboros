@@ -117,8 +117,9 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
 
     function cardHtml(item, order) {
         const on = state.ticked.has(item.id);
-        const marks = (item.builtin ? '<span class="ui-chip skills-chip" data-tone="neutral">Built in</span>' : '')
-            + (item.official ? officialMarkHtml({ control: false }) : '');
+        // One mark says where it comes from: the app itself, or the hub's maintainer vouching for this release.
+        const marks = item.builtin ? '<span class="ui-chip skills-chip" data-tone="neutral">Built in</span>'
+            : item.official ? officialMarkHtml({ control: false }) : '';
         const title = String(item.title || '').trim();
         const pitch = String(item.pitch || '').trim();
         const needs = needsText(item, keyLabels);
