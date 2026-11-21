@@ -327,6 +327,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
     server["stop_server"]()
     now = time.time()
     leaves = _seed_spend(data_dir, now)
+    settings = _settings(data_dir)  # this test's own limit: its numbers never follow the factory default
+    (data_dir / "settings.json").write_text(json.dumps({**settings, KEY: 20}), encoding="utf-8")
     server["start_server"]()
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
