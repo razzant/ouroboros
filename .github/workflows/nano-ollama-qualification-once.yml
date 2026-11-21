@@ -1,0 +1,354 @@
+# Validation-branch only. The workflow commit itself is not a test subject. Each job uploads whatever it could project, always:
+# a projection that fails or a step that is cancelled still leaves a report with an explicit `outcome`, never no artifact.
+# Two parallel jobs on one frozen pair: `qualification` (paired HTTP controls, critical witnesses, context gate, size
+# lane, selected default tests) and `observation` (Settings unit tests, and the Settings states and one first-run journey
+# in real Chromium on synthetic data). Each keeps its own bounded report; neither is release proof. Only the six paired
+# controls run on the base: a red anywhere else is reported as unattributed. A failed or killed phase never strands a later
+# head phase on another checkout: each binds the head anew with one plain `git switch --detach` (never a reset or a clean).
+name: Nano Ollama qualification (one freeze)
+'on':
+  push:
+    branches: ['qa/nano-ollama-5da279252564']
+    paths: ['.github/workflows/nano-ollama-qualification-once.yml']
+permissions:
+  contents: read
+jobs:
+  qualification:
+    if: ${{ github.repository == 'razzant/ouroboros' }}
+    runs-on: ubuntu-latest
+    # Allow setup overhead and always-run projection/upload after the test-step ceilings.
+    timeout-minutes: 130
+    defaults:
+      run:
+        shell: bash
+    env:
+      FROZEN_HEAD: '5da279252564b7bf9455393e0e4931efe15dcc1f'
+      FROZEN_HEAD_TREE: 'a5e5c777ae31a697cba4b64ad38528ded5724fb1'
+      FROZEN_BASE: '82fa6e154fcd16ed5daefa99bde3ac100756484a'
+      FROZEN_BASE_TREE: '2f6ab00c72e44321e684c07e36393c9e19d6e43d'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and retain the four-file QA overlay recipe
+        id: recipe
+        env:
+          QA_PLAN_SHA256: 'cc9d06d045575fe69882b2a5d8e50c6231e35879b87bc82f4df8604552dcdd6d'
+          QA_EVIDENCE_SHA256: '2e630d9d375d199a1c2d59d83001a1cd671e3a942ae963b00d37a8ca98a6d457'
+          QA_OBSERVATION_SHA256: '60e5e6193b8cb27f7cb7cfeb1eb3ab2c82471ebcdde55d950071a145b53049df'
+        run: |
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REF" = 'refs/heads/qa/nano-ollama-5da279252564'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$FROZEN_HEAD"
+          test "$(git diff --name-status --no-renames "$FROZEN_HEAD" "$GITHUB_SHA" | LC_ALL=C sort)" = $'A\t.github/nano-qualification/evidence.py\nA\t.github/nano-qualification/observation_test.py\nA\t.github/nano-qualification/plan.json\nA\t.github/workflows/nano-ollama-qualification-once.yml'
+          for file in .github/nano-qualification/evidence.py .github/nano-qualification/observation_test.py .github/nano-qualification/plan.json .github/workflows/nano-ollama-qualification-once.yml; do
+            test "$(git ls-tree --format='%(objectmode)' "$GITHUB_SHA" -- "$file")" = 100644
+          done
+          ready="$RUNNER_TEMP/nano-qualification"
+          test ! -e "$ready"
+          test ! -L "$ready"
+          staged=$(mktemp -d "$RUNNER_TEMP/nano-qualification-input.XXXXXX")
+          for file in evidence.py observation_test.py plan.json; do
+            git cat-file blob "$GITHUB_SHA:.github/nano-qualification/$file" > "$staged/$file"
+          done
+          printf '%s  %s\n' "$QA_PLAN_SHA256" "$staged/plan.json" "$QA_EVIDENCE_SHA256" "$staged/evidence.py" "$QA_OBSERVATION_SHA256" "$staged/observation_test.py" |
+            sha256sum --check --strict --status
+          mv -T -- "$staged" "$ready"
+      - name: Bind overlay, tested head and comparison base
+        id: bind
+        run: |
+          test "$(git rev-parse "$FROZEN_HEAD^{tree}")" = "$FROZEN_HEAD_TREE"
+          test "$(git rev-parse "$FROZEN_BASE^{tree}")" = "$FROZEN_BASE_TREE"
+          test "$(git show -s --format=%P "$FROZEN_HEAD")" = "$FROZEN_BASE"
+          git diff --quiet "$FROZEN_BASE" "$FROZEN_HEAD" -- pyproject.toml uv.lock requirements-runtime.lock
+          git switch --detach "$FROZEN_HEAD" >/dev/null 2>&1
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'QA_PYTHON=%s/nano-venv/bin/python\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: python
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        id: uv
+        with:
+          version: '0.12.1'
+          enable-cache: false
+          activate-environment: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: node
+        with:
+          node-version: '22'
+      - name: Locked dependencies only
+        id: dependencies
+        timeout-minutes: 8
+        env:
+          UV_NO_CACHE: '1'
+        run: |
+          test "$(git rev-parse HEAD)" = "$FROZEN_HEAD"
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/nano-venv" uv sync --locked --extra browser --group dev --no-install-project --python "$(command -v python)" > "$RUNNER_TEMP/nano-qualification/dependencies.log" 2>&1
+          "$QA_PYTHON" -c 'import platform, sqlite3, sys, pytest, httpx, openai; print(platform.system(), sys.version.split()[0], sqlite3.sqlite_version, pytest.__version__, httpx.__version__, openai.__version__)'
+          node --version
+      - name: Required native regression witnesses (prior program and the G7 gateway)
+        id: critical
+        timeout-minutes: 9
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" critical'
+      - name: Paired unchanged HTTP SDK and Git mapping controls (same single case on both trees)
+        id: paired
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 20
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" paired'
+      - name: Repository context gate (including its retry policy)
+        id: context
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 12
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" context'
+      - name: Official size-ratchet lane against the exact base
+        id: size
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 10
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" size'
+      - name: Collect the frozen default test selection
+        id: collection
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 7
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" collection'
+      - name: Selected structural, FLOOR and consumer regressions (parallel and exclusive)
+        id: selected
+        if: ${{ !cancelled() && steps.collection.outcome == 'success' }}
+        timeout-minutes: 41
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" selected'
+      - name: Verify the tested checkout remained the frozen subject
+        id: final_checkout
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          test "$(git rev-parse HEAD 'HEAD^{tree}')" = "$(printf '%s\n%s' "$FROZEN_HEAD" "$FROZEN_HEAD_TREE")"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Project bounded evidence (including failed or interrupted phases)
+        id: project
+        if: ${{ always() }}
+        timeout-minutes: 2
+        env:
+          OUT_RECIPE: ${{ steps.recipe.outcome }}
+          OUT_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUT_BIND: ${{ steps.bind.outcome }}
+          OUT_PYTHON: ${{ steps.python.outcome }}
+          OUT_UV: ${{ steps.uv.outcome }}
+          OUT_NODE: ${{ steps.node.outcome }}
+          OUT_DEPENDENCIES: ${{ steps.dependencies.outcome }}
+          OUT_CRITICAL: ${{ steps.critical.outcome }}
+          OUT_PAIRED: ${{ steps.paired.outcome }}
+          OUT_CONTEXT: ${{ steps.context.outcome }}
+          OUT_SIZE: ${{ steps.size.outcome }}
+          OUT_COLLECTION: ${{ steps.collection.outcome }}
+          OUT_SELECTED: ${{ steps.selected.outcome }}
+          OUT_FINAL_CHECKOUT: ${{ steps.final_checkout.outcome }}
+        run: |
+          if [ "$OUT_RECIPE" = success ]; then
+            python3 -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" report
+          else
+            # No verified overlay program exists. Publish only bounded host-step facts.
+            python3 -I -B -S - <<'NANO_BOOTSTRAP_REPORT'
+          import json, os, re
+          from pathlib import Path
+          names = 'recipe checkout bind python uv node dependencies critical paired context size collection selected final_checkout'.split()
+          valid = {'success', 'failure', 'cancelled', 'skipped'}
+          def fact(name, pattern):
+              value = os.environ.get('GITHUB_' + name.upper(), '')
+              return value if re.fullmatch(pattern, value) else None
+          steps = {name: os.environ.get('OUT_' + name.upper(), '') for name in names}
+          steps = {name: raw if raw in valid else 'unknown' for name, raw in steps.items()}
+          report = {'format': 2, 'outcome': 'recipe_unverified', 'scope': 'selected_linux_qualification_not_release_proof',
+                    'sha': fact('sha', r'[0-9a-f]{40}'), 'run_id': fact('run_id', r'[0-9]{1,20}'),
+                    'run_attempt': fact('run_attempt', r'[0-9]{1,20}'), 'platform': None,
+                    'steps': steps, 'phases': {}, 'selected_coverage': 'unknown',
+                    'report_gap': 'verified_overlay_recipe_not_available'}
+          out = Path(os.environ['RUNNER_TEMP']) / 'nano-qualification.json'
+          with out.open('x', encoding='utf-8') as f:
+              json.dump(report, f, indent=2, sort_keys=True)
+              f.write('\n')
+          NANO_BOOTSTRAP_REPORT
+          fi
+      - name: Retain only the projected report
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nano-ollama-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nano-qualification.json
+          if-no-files-found: error
+          retention-days: 14
+  observation:
+    if: ${{ github.repository == 'razzant/ouroboros' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 160
+    defaults:
+      run:
+        shell: bash
+    env:
+      FROZEN_HEAD: '5da279252564b7bf9455393e0e4931efe15dcc1f'
+      FROZEN_HEAD_TREE: 'a5e5c777ae31a697cba4b64ad38528ded5724fb1'
+      FROZEN_BASE: '82fa6e154fcd16ed5daefa99bde3ac100756484a'
+      FROZEN_BASE_TREE: '2f6ab00c72e44321e684c07e36393c9e19d6e43d'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and retain the four-file QA overlay recipe
+        id: recipe
+        env:
+          QA_PLAN_SHA256: 'cc9d06d045575fe69882b2a5d8e50c6231e35879b87bc82f4df8604552dcdd6d'
+          QA_EVIDENCE_SHA256: '2e630d9d375d199a1c2d59d83001a1cd671e3a942ae963b00d37a8ca98a6d457'
+          QA_OBSERVATION_SHA256: '60e5e6193b8cb27f7cb7cfeb1eb3ab2c82471ebcdde55d950071a145b53049df'
+        run: |
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REF" = 'refs/heads/qa/nano-ollama-5da279252564'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P "$GITHUB_SHA")" = "$FROZEN_HEAD"
+          test "$(git diff --name-status --no-renames "$FROZEN_HEAD" "$GITHUB_SHA" | LC_ALL=C sort)" = $'A\t.github/nano-qualification/evidence.py\nA\t.github/nano-qualification/observation_test.py\nA\t.github/nano-qualification/plan.json\nA\t.github/workflows/nano-ollama-qualification-once.yml'
+          for file in .github/nano-qualification/evidence.py .github/nano-qualification/observation_test.py .github/nano-qualification/plan.json .github/workflows/nano-ollama-qualification-once.yml; do
+            test "$(git ls-tree --format='%(objectmode)' "$GITHUB_SHA" -- "$file")" = 100644
+          done
+          ready="$RUNNER_TEMP/nano-qualification"
+          test ! -e "$ready"
+          test ! -L "$ready"
+          staged=$(mktemp -d "$RUNNER_TEMP/nano-qualification-input.XXXXXX")
+          for file in evidence.py observation_test.py plan.json; do
+            git cat-file blob "$GITHUB_SHA:.github/nano-qualification/$file" > "$staged/$file"
+          done
+          printf '%s  %s\n' "$QA_PLAN_SHA256" "$staged/plan.json" "$QA_EVIDENCE_SHA256" "$staged/evidence.py" "$QA_OBSERVATION_SHA256" "$staged/observation_test.py" |
+            sha256sum --check --strict --status
+          mv -T -- "$staged" "$ready"
+      - name: Bind overlay and tested head
+        id: bind
+        run: |
+          test "$(git rev-parse "$FROZEN_HEAD^{tree}")" = "$FROZEN_HEAD_TREE"
+          test "$(git rev-parse "$FROZEN_BASE^{tree}")" = "$FROZEN_BASE_TREE"
+          test "$(git show -s --format=%P "$FROZEN_HEAD")" = "$FROZEN_BASE"
+          git diff --quiet "$FROZEN_BASE" "$FROZEN_HEAD" -- pyproject.toml uv.lock requirements-runtime.lock
+          git switch --detach "$FROZEN_HEAD" >/dev/null 2>&1
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'QA_PYTHON=%s/nano-venv/bin/python\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: python
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        id: uv
+        with:
+          version: '0.12.1'
+          enable-cache: false
+          activate-environment: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: node
+        with:
+          node-version: '22'
+      - name: Locked dependencies only
+        id: dependencies
+        timeout-minutes: 8
+        env:
+          UV_NO_CACHE: '1'
+        run: |
+          test "$(git rev-parse HEAD)" = "$FROZEN_HEAD"
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/nano-venv" uv sync --locked --extra browser --group dev --no-install-project --python "$(command -v python)" > "$RUNNER_TEMP/nano-qualification/dependencies.log" 2>&1
+          "$QA_PYTHON" -c 'import platform, sys, pytest, playwright; print(platform.system(), sys.version.split()[0], pytest.__version__)'
+          node --version
+      - name: Settings browser-module unit tests (node --test)
+        id: jsunit
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 15
+        run: '"$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" jsunit'
+      - name: Install Chromium with the product lane's own installer
+        id: install_browsers
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        timeout-minutes: 40
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: '"$QA_PYTHON" -I -S scripts/ci_browser_install.py --python "$QA_PYTHON" --pinned-node --pinned-chromium chromium'
+      # The runner's security policy stays exactly as the image ships it, and nothing here sets a browser launch flag:
+      # the product's own Settings fixtures start Chromium themselves. Whether Chromium ran inside its own sandbox is
+      # therefore not observed by this recipe (the "not checked" list of G7-RENDER.md names this gap).
+      - name: Settings states of an unidentified compatible server in Chromium (synthetic data)
+        id: browser
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 20
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: 'xvfb-run -a "$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" browser'
+      - name: Existing compatible-server browser suites on Chromium
+        id: existing
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 45
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: 'xvfb-run -a "$QA_PYTHON" -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" existing'
+      - name: Verify the tested checkout remained the frozen subject
+        id: final_checkout
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          test "$(git rev-parse HEAD 'HEAD^{tree}')" = "$(printf '%s\n%s' "$FROZEN_HEAD" "$FROZEN_HEAD_TREE")"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Project bounded evidence (including failed or interrupted phases)
+        id: project
+        if: ${{ always() }}
+        timeout-minutes: 2
+        env:
+          OUT_RECIPE: ${{ steps.recipe.outcome }}
+          OUT_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUT_BIND: ${{ steps.bind.outcome }}
+          OUT_PYTHON: ${{ steps.python.outcome }}
+          OUT_UV: ${{ steps.uv.outcome }}
+          OUT_NODE: ${{ steps.node.outcome }}
+          OUT_DEPENDENCIES: ${{ steps.dependencies.outcome }}
+          OUT_INSTALL_BROWSERS: ${{ steps.install_browsers.outcome }}
+          OUT_JSUNIT: ${{ steps.jsunit.outcome }}
+          OUT_BROWSER: ${{ steps.browser.outcome }}
+          OUT_EXISTING: ${{ steps.existing.outcome }}
+          OUT_FINAL_CHECKOUT: ${{ steps.final_checkout.outcome }}
+        run: |
+          if [ "$OUT_RECIPE" = success ]; then
+            python3 -I -B -S "$RUNNER_TEMP/nano-qualification/evidence.py" report --scope browser
+          else
+            # No verified overlay program exists. Publish only bounded host-step facts.
+            python3 -I -B -S - <<'NANO_BOOTSTRAP_REPORT'
+          import json, os, re
+          from pathlib import Path
+          names = 'recipe checkout bind python uv node dependencies install_browsers jsunit browser existing final_checkout'.split()
+          valid = {'success', 'failure', 'cancelled', 'skipped'}
+          def fact(name, pattern):
+              value = os.environ.get('GITHUB_' + name.upper(), '')
+              return value if re.fullmatch(pattern, value) else None
+          steps = {name: os.environ.get('OUT_' + name.upper(), '') for name in names}
+          steps = {name: raw if raw in valid else 'unknown' for name, raw in steps.items()}
+          report = {'format': 2, 'outcome': 'recipe_unverified', 'scope': 'selected_linux_browser_observation_not_release_proof',
+                    'sha': fact('sha', r'[0-9a-f]{40}'), 'run_id': fact('run_id', r'[0-9]{1,20}'),
+                    'run_attempt': fact('run_attempt', r'[0-9]{1,20}'), 'platform': None,
+                    'steps': steps, 'phases': {}, 'report_gap': 'verified_overlay_recipe_not_available'}
+          shelf = Path(os.environ['RUNNER_TEMP']) / 'nano-qualification-public'
+          shelf.mkdir()
+          with (shelf / 'nano-qualification-browser.json').open('x', encoding='utf-8') as f:
+              json.dump(report, f, indent=2, sort_keys=True)
+              f.write('\n')
+          NANO_BOOTSTRAP_REPORT
+          fi
+      # One folder, written by the projection alone: the report and the allowlisted, digest-verified screenshots. The
+      # observation's own folder (receipts, half-written files, consoles) is never uploaded.
+      - name: Retain the projected report and the allowlisted screenshots
+        if: ${{ always() }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nano-ollama-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nano-qualification-public
+          if-no-files-found: error
+          retention-days: 14
