@@ -25,9 +25,10 @@ wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup(second
 ``consciousness_next_interval_sec``) or ``WAKE_DEFAULT_SEC``, clamped into the owner's
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
 wake succeeds. A time the mind named (``set_next_wakeup(at)``, ``consciousness_clock``) makes it
-sooner while it lies strictly ahead, never below min nor above max after that finish; the settlement
-of a wake appointed after it was stored consumes it once that wake ends at or after it, deciding on the
-state its own write holds (``_next_delay``). The persisted own actor id and cause fence completion; a carrier handoff
+sooner while it lies strictly ahead, never below min nor above max after that finish (and turning
+consciousness on comes first at one still ahead); the settlement of a wake appointed after it was
+stored consumes it once that wake ends at or after it, deciding on the state its own write holds
+(``_next_delay``). The persisted own actor id and cause fence completion; a carrier handoff
 does not finish the logical wake, and repeated terminal callbacks do not advance it twice.
 A wake a pending Restart refuses before its start stays a refusal, like every closed door:
 no failure, no row, no owner and no observation (``handle_wake_direct``). A pooled terminal
@@ -697,8 +698,13 @@ class BackgroundConsciousness:
             if self._enabled:
                 return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
-            # The clock did not advance while disabled: never announce a wake in the past.
-            self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
+            # The clock did not advance while disabled: never announce a wake in the past. A named time still ahead
+            # (one stored while off, ``set_next_wakeup(at)``) comes first, no sooner than MIN after the last wake or boot.
+            now = time.time()
+            due, named = max(self._next_wake_at, now), target_ts(self._read_state().get(WAKE_TARGET_STATE_KEY))
+            if named is not None and named > now:
+                due = min(due, max(named, self._last_wake_at + self.floor, self._booted_at + self.floor))
+            self._set_next_wake(due, appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
         from ouroboros.consciousness_view import on_sentence
         try:  # where it may speak now: one read that never holds the start (the words 15.11, 5A)

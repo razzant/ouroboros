@@ -140,6 +140,32 @@ def test_a_newer_named_time_written_during_a_settlement_survives_and_sets_the_ne
     assert clock.clock.next_wake_at == clock.store[NEXT_WAKE_STATE_KEY] == target + 60 + min(ahead, DEFAULT)
 
 
+def test_turning_consciousness_on_comes_first_at_a_time_named_while_it_was_off(clock, monkeypatch):
+    """"Stored for when it is enabled": a named time still ahead comes before the appointment the stop left, never
+    sooner than MIN after the last wake; one after that appointment leaves it, and its own wake consumes it."""
+    from ouroboros.consciousness import APPOINTMENT_STATE_KEY
+
+    start = T0 + FLOOR + 1
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60)
+    end, kept = start + 60, clock.clock.next_wake_at
+
+    def turned_on(named):
+        clock.clock.stop(source=clock_module.OWNER_STOP)  # the owner's door saves the stop the tool reads
+        clock.clock._next_wake_at = kept  # the appointment the stop left, each time
+        clock.store.pop(WAKE_TARGET_STATE_KEY, None)
+        if named is not None:
+            receipt = _call_clock_tool(monkeypatch, now=end + 60, at=named)
+            assert "Consciousness is off: it is stored for when it is enabled." in receipt
+        clock.clock.start()
+        return clock.clock.next_wake_at
+
+    for named, due in ((end + 1500, end + 1500), (kept + 600, kept), (end + 120, end + FLOOR), (None, kept)):
+        assert turned_on(named) == clock.store[APPOINTMENT_STATE_KEY] == due, (named, due)
+    turned_on(end + 1500)
+    _wake(clock, monkeypatch, "wake0002", start=end + 1500, end=end + 1560)
+    assert WAKE_TARGET_STATE_KEY not in clock.store, "the wake it appointed consumes it"
+
+
 def test_a_restart_keeps_the_named_time_and_the_appointment_that_stood_when_it_was_stored(clock, monkeypatch):
     start = T0 + FLOOR + 1
     _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60)
