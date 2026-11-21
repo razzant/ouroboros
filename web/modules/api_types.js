@@ -1,19 +1,6 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, a skill's Connect tools in ./skill_mcp_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js. */
-/** @typedef {Object} CostPresentation
- * @property {'own'|'root_tree'} scope
- * @property {?number} tracked_amount
- * @property {boolean} has_unpriced
- * @property {boolean} tracked_final
- * @property {boolean} accounting_open
- * @property {boolean} has_rows
- */
-/** @typedef {Object} CostCustody
- * @property {'available'|'unavailable'} status
- * @property {Array<string>} open_run_ids
- * @property {Array<string>} unrecorded_run_ids
- * @property {Array<string>=} closed_unrecorded_run_ids
- * @property {Array<string>} pending_invocation_ids
- */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, a skill's Connect tools in ./skill_mcp_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js, the task cost envelopes (`CostPresentation`, `CostCustody`) in ./cost_types.js. */
+/** @typedef {import('./cost_types.js').CostPresentation} CostPresentation */
+/** @typedef {import('./cost_types.js').CostCustody} CostCustody */
 /** @typedef {Object} StateResponse
  * @property {number} uptime
  * @property {number} workers_alive  // live worker slots of both lanes; inline carriers may be thread-backed
