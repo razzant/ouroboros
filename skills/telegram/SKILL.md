@@ -243,7 +243,7 @@ the host's compact cause projection retain their original reason text when On.
 The Mini App exposes the Ouroboros SPA through the owner-authenticated sidecar
 and a pinned Cloudflare Quick Tunnel. The sidecar relays WebSocket failure codes
 without private exception text, within its 8 MiB message limit. Every answer is
-`no-store` except a builtin `/static` file fetched in the owner's session, which
+`no-store` except a builtin `/static` file fetched by GET in the owner's session, which
 keeps the core's `private, no-cache` revalidation (ETag, 304), so reopening the
 app downloads only what changed; bodies, gzip included, pass raw. Requests wait
 for an upstream socket with no pool timeout (32 connections, 8 kept alive). An

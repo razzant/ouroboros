@@ -105,19 +105,37 @@ class NoCacheStaticFiles:
             await self._app(scope, receive, send)
 
 
-class GzipText:
-    """gzip a 200 text answer of 1 KiB or more for a client that accepts it, with ``Vary: Accept-Encoding``.
+def _accepts_gzip(headers: Headers) -> bool:
+    """A ``gzip`` token in any ``Accept-Encoding`` line, any case, whose weight is not zero (RFC 9110 12.5.3)."""
+    for item in ",".join(headers.getlist("accept-encoding")).split(","):
+        name, _, params = item.partition(";")
+        if name.strip().lower() == "gzip":
+            pairs = (param.partition("=") for param in params.split(";"))
+            weight = next((value for key, _, value in pairs if key.strip().lower() == "q"), "1")
+            try:
+                return float(weight) > 0
+            except ValueError:
+                return False
+    return False
 
-    Sockets, event streams and other types, downloads (``Content-Disposition``) and encoded bodies pass
-    untouched; a streamed text body is flushed per chunk, so compression never holds back what was sent."""
+
+class GzipText:
+    """gzip a GET's 200 text answer of 1 KiB or more for a client that accepts it, as nginx does: the
+    compressed variant's ETag turns weak and its ``Accept-Ranges`` goes, and every 200 of such a type and
+    every 304 says ``Vary: Accept-Encoding``. HEAD, sockets, event streams and other types, downloads
+    (``Content-Disposition``), encoded bodies and stored files outside the interface's own trees (an answer
+    offering ``Accept-Ranges``) pass untouched. A declared length decides the threshold, else the first
+    chunk; a streamed body is flushed per chunk, so compression never holds back what was sent."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or "gzip" not in Headers(scope=scope).get("accept-encoding", ""):
+        if scope["type"] != "http" or scope["method"] != "GET":
             await self.app(scope, receive, send)
             return
+        wants = _accepts_gzip(Headers(scope=scope))
+        interface_file = str(scope.get("path") or "").startswith(tuple(p + "/" for p in ServedUI.STATIC_PREFIXES))
         start: dict | None = None
         gzip: Any = None
 
@@ -128,34 +146,43 @@ class GzipText:
 
         async def send_gzip(message):
             nonlocal start, gzip
-            if message["type"] == "http.response.start":
+            kind = message["type"]
+            if kind == "http.response.start":
                 headers = Headers(raw=message["headers"])
-                if (message["status"] == 200 and "content-encoding" not in headers
-                        and "content-disposition" not in headers
-                        and headers.get("content-type", "").partition(";")[0].strip().lower() in _GZIP_TYPES):
-                    # Held until the first body shows whether it is worth compressing; edited as a copy,
-                    # never the response object's own header list.
-                    start = {**message, "headers": list(message["headers"])}
-                    return
-            elif message["type"] == "http.response.body" and start is not None:
-                body, more = message.get("body", b""), message.get("more_body", False)
-                if gzip is None:
-                    headers = MutableHeaders(raw=start["headers"])
-                    headers.add_vary_header("Accept-Encoding")
-                    if not more and len(body) < _GZIP_MIN_BYTES:
-                        start, held = None, start
-                        await send(held)
-                        await send(message)
+                eligible = (message["status"] == 200 and "content-encoding" not in headers
+                            and "content-disposition" not in headers
+                            and (interface_file or "accept-ranges" not in headers)
+                            and headers.get("content-type", "").partition(";")[0].strip().lower() in _GZIP_TYPES)
+                if eligible or message["status"] == 304:
+                    # Edited as a copy, never the response object's own header list.
+                    edit = MutableHeaders(raw=list(message["headers"]))
+                    edit.add_vary_header("Accept-Encoding")
+                    message = {**message, "headers": edit.raw}
+                    length = headers.get("content-length", "")
+                    if eligible and wants and not (length.isdigit() and int(length) < _GZIP_MIN_BYTES):
+                        start = message  # held until the first body: a single message gets its own length
                         return
+            elif kind == "http.response.pathsend" and start is not None:
+                start, held = None, start
+                await send(held)
+            elif kind == "http.response.body" and gzip is not None:
+                message = {**message, "body": await deflate(message.get("body", b""), not message.get("more_body"))}
+            elif kind == "http.response.body" and start is not None:
+                body, more = message.get("body", b""), message.get("more_body", False)
+                start, held = None, start
+                edit = MutableHeaders(raw=held["headers"])
+                if "content-length" in edit or len(body) >= _GZIP_MIN_BYTES:
                     gzip = zlib.compressobj(6, zlib.DEFLATED, 31)
-                    headers["Content-Encoding"] = "gzip"
-                    del headers["Content-Length"]
+                    edit["Content-Encoding"] = "gzip"
+                    del edit["Content-Length"]
+                    del edit["Accept-Ranges"]
+                    etag = edit.get("etag", "")
+                    if etag and not etag.startswith("W/"):
+                        edit["ETag"] = "W/" + etag
                     message = {**message, "body": await deflate(body, not more)}
                     if not more:
-                        headers["Content-Length"] = str(len(message["body"]))
-                    await send(start)
-                else:
-                    message = {**message, "body": await deflate(body, not more)}
+                        edit["Content-Length"] = str(len(message["body"]))
+                await send(held)
             await send(message)
 
         await self.app(scope, receive, send_gzip)
@@ -300,12 +327,16 @@ class ServedUI:
         scope = appearance_scope(current.drive_root)
         return f'<meta name="{APPEARANCE_SCOPE_META}" content="{scope}">' if scope else ""
 
+    # The interface's own file trees, the only stored files ``GzipText`` compresses.
+    STATIC_PREFIXES = ("/onboarding/static", "/static")
+
     def mounts(self) -> list[Mount]:
         """Public selected login assets, builtin recovery resources, then selected main assets."""
+        onboarding, main = self.STATIC_PREFIXES
         return [
             Mount("/auth", app=self.auth_assets, name="auth_assets"),
-            Mount("/onboarding/static", app=self._builtin_static, name="onboarding_static"),
-            Mount("/static", app=self.static, name="static"),
+            Mount(onboarding, app=self._builtin_static, name="onboarding_static"),
+            Mount(main, app=self.static, name="static"),
         ]
 
     def apply(self, app: Any, settings: Mapping[str, Any]) -> UiSelection:

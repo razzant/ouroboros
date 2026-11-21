@@ -420,7 +420,7 @@ def _response_headers(
     public_origin: str,
     revalidated_static: bool = False,
 ) -> list[tuple[bytes, bytes]]:
-    """Every answer is ``no-store`` except an owner's builtin ``/static`` file that the core marks
+    """Every answer is ``no-store`` except an owner's GET of a builtin ``/static`` file that the core marks
     ``_BUILTIN_STATIC_CACHE``: that one keeps its revalidation (ETag, 304) and no shared cache may hold it."""
     raw_headers = list(headers)
     blocked = _RESPONSE_BLOCKED_HEADERS | _connection_tokens(raw_headers)
@@ -910,7 +910,7 @@ class TelegramProxySidecar:
                 upstream.headers.raw,
                 core_origin=self._core_origin,
                 public_origin=public_origin,
-                revalidated_static=upstream_request.method in {"GET", "HEAD"}
+                revalidated_static=upstream_request.method == "GET"  # HEAD describes the uncompressed variant
                 and upstream.status_code in {200, 304}
                 and str(scope.get("path") or "").startswith("/static/"),
             ),
