@@ -16,9 +16,12 @@ binds that module). Counted per file and side:
 - in a test source (under a ``tests`` directory): each patch of a name in a product module's
   namespace (``monkeypatch.setattr``/``delattr`` or ``mock.patch`` with a dotted string, or with
   an object that resolves to such a name, a module or a class, and ``patch.object``), and each
-  call site that runs ``git init``: a ``subprocess`` call or ``os.system`` given
-  ``["git", ..., "init"]`` or a ``git init`` command string, or a Git helper given ``"init"``
-  (one the module defines around ``["git", *args]``, or an imported one named for git).
+  call site that runs ``git init``: a command runner (a ``subprocess`` call, ``os.system``, or a
+  function the module defines that hands its first parameter to one) given
+  ``["git", ..., "init"]`` or a ``git init`` command string; a Git helper given ``"init"`` (one
+  the module defines around ``["git", *args]``, or any callable named for git); a ``for`` over
+  literal argument lists that a runner takes, once per list that makes ``git init``. Test data
+  (``pytest.param(["git", "init"])``) is never a run.
 
 A side that does not parse, or was not read, leaves its file unknown, never zero.
 """
