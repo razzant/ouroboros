@@ -1214,9 +1214,10 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert record == json.loads(reports["over_limit"])["facts"]["redacted_ref"]
                 assert record["path"].startswith("observability/blobs/")
                 assert {"sha256", "size", "kind", "encoding"} <= set(record)
-                choose(gap(body="not_linked"), "No saved request is linked", "#headline")
+                choose(gap(body="not_linked", file_trace="not_read"), "No saved request is linked", "#headline")
                 gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
+                assert frame.locator("#source-versions").text_content().startswith("Not read: this report did not open")
                 for facts_of_gap, headline, words in (
                         ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152,
                           "retry_max_bytes": 2258277}, "sealed record is larger",

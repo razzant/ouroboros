@@ -131,9 +131,11 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
     ref = row.get("candidate_manifest_ref")
     if not isinstance(ref, dict) or not ref:
         # A row written from usage reported once the work was under way (a live conversation's) never had a request
-        # saved; any other row may have lost its producer after sealing but before linking.
-        receipt = row.get("reservation_basis") == "receipt_already_received"
-        return {**facts, "file_trace": "not_recorded", "body": "receipt_only" if receipt else "not_linked"}, None
+        # saved, so no trace was recorded. Any other row may have lost its producer after sealing but before linking:
+        # a record sealed by then holds its trace, which this read does not open (``not_read``).
+        if row.get("reservation_basis") == "receipt_already_received":
+            return {**facts, "file_trace": "not_recorded", "body": "receipt_only"}, None
+        return {**facts, "body": "not_linked"}, None
     if ref.get("model_send_seal_version") != SEAL_VERSION:
         return {**facts, "body": "not_recorded"}, None
     if ref.get("call_id") != attempt_id:

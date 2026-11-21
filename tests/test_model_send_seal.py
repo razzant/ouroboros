@@ -286,7 +286,9 @@ def test_local_request_reader_lists_and_reads_only_physical_attempts(data_root, 
         assert main([*args, '--after', cursor]) == 2
         assert not capsys.readouterr().out
     assert list_attempts(data_root, task, after=sent['attempt_id'])['attempts'][0]['attempt_id'] == 'kindless'
-    assert read_attempt(data_root, task, 'kindless')[0]['body'] == 'not_linked'
+    unlinked = read_attempt(data_root, task, 'kindless')[0]
+    # No record is opened for a row without a link, so its trace is unread, not unrecorded.
+    assert (unlinked['body'], unlinked['file_trace']) == ('not_linked', 'not_read')
     for one, kind in (('session-run', 'subscription_session'), ('folded-group', 'usage_baseline_group')):
         facts, body = read_attempt(data_root, task, one, report_facts=True)
         assert (facts['body'], facts['ledger_kind'], body) == ('not_one_attempt', kind, None)
@@ -496,7 +498,8 @@ def test_local_request_reader_names_a_receipt_recorded_without_a_request(data_ro
         receipt.attempt_id]
     assert main(['--data-root', str(data_root), 'live-reader-test', '--attempt', receipt.attempt_id, '--report']) == 0
     gap = capsys.readouterr()
-    assert json.loads(gap.out)['facts']['body'] == 'receipt_only' and '(receipt_only)' in gap.err
+    facts = json.loads(gap.out)['facts']
+    assert (facts['body'], facts['file_trace']) == ('receipt_only', 'not_recorded') and '(receipt_only)' in gap.err
 
 
 def test_local_request_reader_names_a_data_root_without_a_usage_store(tmp_path, capsys):
