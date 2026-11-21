@@ -5,7 +5,7 @@ import pytest
 
 from ouroboros.tools.query_code import _query_code
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 
 @pytest.fixture

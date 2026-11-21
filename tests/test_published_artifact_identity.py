@@ -24,7 +24,7 @@ from ouroboros.tools.control_task_results import _get_task_result
 from ouroboros.tools.join_ledger import _child_result_sha256, _current_child_result_disposition
 from ouroboros.tools.recent_tasks import _handle_recent_tasks
 from ouroboros.tools.task_tree import _tree_note
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 PARENT, CHILD = "parent1", "child1"
 HOST_KINDS = {"workspace_patch_manifest", "memory_export", "deliverable_manifest"}

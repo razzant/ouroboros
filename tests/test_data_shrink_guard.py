@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from ouroboros.tools.core import _check_data_shrink_guard, _edit_text, _write_file
 from ouroboros.tools.registry import ToolContext
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 
 def _ctx(tmp_path):

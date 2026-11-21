@@ -16,7 +16,7 @@ from ouroboros.tools.edit_ops import (
     _parse_patch,
     _syntax_check,
 )
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 
 SAMPLE = "\n".join([

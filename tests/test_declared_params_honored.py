@@ -29,7 +29,7 @@ import pytest
 from ouroboros.tools.core import _data_read, _read_file, _write_file
 from ouroboros.tools.edit_ops import _edit_batch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 
 def _ctx(tmp_path):

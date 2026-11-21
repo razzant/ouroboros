@@ -1,7 +1,7 @@
 from __future__ import annotations
 import subprocess
 
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 def _init_repo(path):
     git_repository(path, unborn=True)

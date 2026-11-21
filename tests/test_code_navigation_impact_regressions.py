@@ -3,7 +3,7 @@
 import pytest
 
 from ouroboros.tools.registry import ToolRegistry
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 
 @pytest.fixture

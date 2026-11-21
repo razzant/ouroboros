@@ -1,5 +1,5 @@
-"""Shared worlds (tests/_worlds.py): built once per run, cloned private, refused when they know their own path. Beside
-them, the whole-tree scans' parse (tests/_source_scan.py).
+"""Shared worlds (tests/_worlds.py, the Git ones in tests/_workspace_git.py): built once per run, cloned private,
+refused when they know their own path. Beside them, the whole-tree scans' parse (tests/_source_scan.py).
 """
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ from tests import _contributor_packet_shared as shared
 from tests import _worlds
 from tests._live_world import _own_installation, installation_template
 from tests._source_scan import parse
-from tests._worlds import clone, git_repository, run_folder, world
+from tests._workspace_git import git_repository
+from tests._worlds import clone, run_folder, world
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 RACERS = 3
@@ -217,10 +218,17 @@ def test_a_cloned_checkout_is_stat_clean_and_its_own_repository(run_root, tmp_pa
     assert shared.git(sibling, "status", "--porcelain") == ""
 
 
-def test_a_git_world_is_a_private_repository_on_its_branch_whatever_git_state_its_first_test_set(
+def test_a_git_world_is_a_private_repository_whatever_git_state_its_first_test_set_and_never_an_empty_folder(
         run_root, tmp_path, monkeypatch):
     def unset(repo, *args):
         return subprocess.run(["git", *args], cwd=repo, capture_output=True).returncode != 0
+
+    template = run_folder("worlds") / "git-base"
+    with monkeypatch.context() as stand_in:  # the first consumer's own stub of git, in place before it builds the world
+        stand_in.setattr(subprocess, "run", lambda args, **_options: subprocess.CompletedProcess(args, 0, b"", b""))
+        with pytest.raises(RuntimeError, match="no repository was laid"):
+            git_repository(tmp_path / "stood-in")
+    assert not template.exists() and not (tmp_path / "stood-in").exists()
 
     elsewhere = tmp_path / "elsewhere.git"
     monkeypatch.setenv("GIT_DIR", str(elsewhere))  # the first consumer's own Git, set before it builds the world
@@ -228,7 +236,6 @@ def test_a_git_world_is_a_private_repository_on_its_branch_whatever_git_state_it
     first = git_repository(tmp_path / "first")
     monkeypatch.delenv("GIT_DIR")
     monkeypatch.delenv("GIT_AUTHOR_NAME")
-    template = run_folder("worlds") / "git-base-master"
     second = git_repository(tmp_path / "second")
     assert not elsewhere.exists()
     for repo in (first, second, template):  # the template is only read: a status could refresh its index
@@ -250,10 +257,15 @@ def test_a_git_world_is_a_private_repository_on_its_branch_whatever_git_state_it
     assert shared.git(second, "status", "--porcelain") == ""
     assert shared.git(template, "rev-list", "--count", "HEAD") == "1"
 
-    unborn = git_repository(tmp_path / "unborn", unborn=True, branch="main", identity=True)
-    assert shared.git(unborn, "symbolic-ref", "HEAD") == "refs/heads/main"
-    assert unset(unborn, "rev-parse", "-q", "--verify", "HEAD")
-    assert shared.git(unborn, "config", "--local", "user.email") == "fixture@example.invalid"
+    for unborn in (False, True):  # every kind in one run, and none stands in for another
+        for identity in (False, True):
+            repo = git_repository(tmp_path / f"unborn-{unborn}-identity-{identity}", unborn=unborn, identity=identity)
+            assert shared.git(repo, "symbolic-ref", "HEAD") == "refs/heads/master"
+            assert unset(repo, "rev-parse", "-q", "--verify", "HEAD") == unborn
+            if identity:
+                assert shared.git(repo, "config", "--local", "user.email") == "fixture@example.invalid"
+            else:
+                assert unset(repo, "config", "--local", "--get", "user.email")
 
     os.replace(template, tmp_path / "gone")  # a template that is gone is built again
     rebuilt = git_repository(tmp_path / "rebuilt")

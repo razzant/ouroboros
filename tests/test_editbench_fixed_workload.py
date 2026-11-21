@@ -22,7 +22,7 @@ import pytest
 
 from devtools.benchmarks.editbench import run_editbench
 from tests._cases import case_folders
-from tests._worlds import git_repository
+from tests._workspace_git import git_repository
 
 # The very module objects the runner imported (it puts the editbench dir on sys.path),
 # so a pin patched here is the pin the runner checks.
