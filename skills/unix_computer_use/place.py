@@ -24,7 +24,7 @@ import re
 import time
 from typing import Any
 
-from .mac_input import REFUSES_BEFORE_POSTING, permission_refusal
+from .mac_input import REFUSES_BEFORE_POSTING, permission_refusal, with_refusal
 from .macos_native import parse_info
 
 _UNREAD = object()  # "read the front yourself" marker for _finish
@@ -662,7 +662,7 @@ class PlaceMixin:
                             failed[key] = tree[key]
                 if until_text and "until_text" not in failed:
                     failed["until_text"] = {"status": "unknown", "reason": failed["reason"], "reads": 0}
-                return self._json_text(failed)
+                return self._json_text(with_refusal(failed))
             tree.update({"platform": plat, "app": target, "coordinate_note": "node and mark coordinates are INPUT-space "
                          "(macOS logical points): click them with raw=true; a mark is a position, not proof the element reacts"})
             return self._json_text(tree)
@@ -747,4 +747,6 @@ class PlaceMixin:
         if until_text and "observation" not in out:
             out["observation"] = {"ok": False, "reason": "no_read",
                                   "until_text": {"status": "unknown", "reason": "no_read", "reads": 0}}
-        return self._json_text(out)
+        if isinstance(out.get("observation"), dict):
+            out["observation"] = with_refusal(out["observation"])
+        return self._json_text(with_refusal(out))

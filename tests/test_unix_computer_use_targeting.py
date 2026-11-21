@@ -99,6 +99,48 @@ def test_a_refused_input_is_an_honest_failure(tmp_path, monkeypatch):
     assert out["ok"] is True and out["observed_effect"] is True and out["helper_stderr"] == "some note" and "refusal" not in out
 
 
+def test_a_text_that_posts_nothing_has_no_mark_and_one_stopped_part_way_keeps_its_count(tmp_path, monkeypatch):
+    empty = '{"posted":0,"method":"unicode_events","chars_total":0,"chars_sent":0,"override_only":0}\n'
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, empty, ""))
+    out = receipt(api.tools["type_text"](text=""))
+    assert out["ok"] is True and "observed_effect" not in out and out["posted"] == 0 and "posted nothing" in out["note"], out
+    stopped = ("typed 2 of 9 character(s)\n__POSTED__ "
+               '{"posted":4,"method":"unicode_events","chars_total":9,"chars_sent":2,"override_only":0}\n'
+               "execution error: Error: the input program reached its own deadline (8000 ms) after 4 event(s) (-2700)\n")
+    module, api, state = mac(tmp_path, monkeypatch, events=(1, "", stopped))
+    cut = receipt(api.tools["type_text"](text="Привет мир"))
+    assert cut["ok"] is False and cut["observed_effect"] is True and (cut["chars_sent"], cut["chars_total"]) == (2, 9), cut
+    assert cut["posted"] == 4 and "4 event(s) (2 of 9 characters)" in cut["note"] and "deadline" in cut["error"]
+    # The receipt shows what was typed as typed, not as a six-times-longer escaped spec (REVP1 P18).
+    module, api, state = mac(tmp_path, monkeypatch)
+    sent = receipt(api.tools["type_text"](text="Привет " * 80))
+    assert "Привет" in sent["cmd"][-1] and "\\u" not in sent["cmd"][-1] and len(sent["cmd"][-1]) < 700, sent["cmd"][-1][:200]
+
+
+def test_a_sequence_with_a_character_no_key_gives_sends_no_step_and_switches_nothing(tmp_path, monkeypatch):
+    """key("return Ж") on ABC used to press Return (a form could go) and then refuse Ж: now every character of the
+    sequence is looked up first, in one call that posts nothing, before any switch or step."""
+    missing = (0, '{"layout":"com.apple.keylayout.ABC","missing":["Ж"],"missing_command":[]}\n', "")
+    module, api, state = mac(tmp_path, monkeypatch, resolved=missing)
+    out = receipt(api.tools["key"](keys="return Ж", app="Keynote"))
+    assert out["ok"] is False and out["reason"] == "untypable_characters" and out["untyped"] == ["Ж"], out
+    assert out["dispatched"] is False and out["steps_done"] == 0 and inputs(state) == [] and state["helper"] == [], state
+    assert state["resolved"] == [{"op": "resolve", "chars": ["Ж"], "command_chars": []}]
+    module, api, state = mac(tmp_path, monkeypatch)
+    whole = receipt(api.tools["key"](keys="return Ж", app="Keynote"))
+    assert whole["ok"] is True and inputs(state) == [[RETURN], [key(None, char="Ж")]], (whole, inputs(state))
+
+
+def test_an_element_act_without_accessibility_carries_the_one_refusal_field(tmp_path, monkeypatch):
+    def helper(args, state):
+        if args[0] == "element":
+            return {"ok": False, "reason": "accessibility_untrusted", "dispatched": False, "target": app_dict(KEYNOTE)}
+        return {"ok": False, "error": "no fake"}
+    module, api, state = mac(tmp_path, monkeypatch, helper=helper)
+    out = receipt(api.tools["element_act"](app="Keynote", do="press", select={"identifier": "qa.commit"}))
+    assert out["ok"] is False and out["dispatched"] is False and out["refusal"]["grant"] == "accessibility", out
+
+
 def test_text_goes_in_any_layout_and_a_key_the_layout_lacks_is_an_honest_refusal(tmp_path, monkeypatch):
     """Measured on the live probe (27.10.2026): under a Cyrillic layout the former typing helper typed none of
     'ouroboros probe'. Text now goes as Unicode key events (#63), so no layout refuses it; the receipt says how many

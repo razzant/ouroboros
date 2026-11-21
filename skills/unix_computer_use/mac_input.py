@@ -31,13 +31,18 @@ KEY_CODES = {
     "num-enter": 76, "num-decimal": 65,
     **{f"num-{n}": code for n, code in enumerate((82, 83, 84, 85, 86, 87, 88, 89, 91, 92))},
     **{f"f{n}": code for n, code in enumerate(_FKEYS, 1)},
-    **{name: code for name, code in (("cmd", 55), ("shift", 56), ("alt", 58), ("ctrl", 59), ("fn", 63))},
 }
+# System keys: NX key types of the NSSystemDefined events (subtype 8) a keyboard's media keys send, the names the
+# former helper (cliclick) took for them.
+SYSTEM_KEYS = {"volume-up": 0, "volume-down": 1, "brightness-up": 2, "brightness-down": 3, "mute": 7, "play-pause": 16,
+               "play-next": 17, "play-previous": 18, "keys-light-up": 21, "keys-light-down": 22, "keys-light-toggle": 23}
 
 # The one place the refusal's field names live (a later contract may rename them).
 _REFUSAL_FIELD = "refusal"
 _GRANT_PANES = {"accessibility": "Accessibility", "post_events": "Accessibility",
                 "screen_recording": "Screen & System Audio Recording"}
+# The reasons the native helpers already give a missing grant (macos_native, macos_capture, macos_stream).
+_GRANT_REASONS = {"accessibility_untrusted": "accessibility", "screen_recording_denied": "screen_recording"}
 
 
 def permission_refusal(grant: str) -> dict[str, Any]:
@@ -45,6 +50,12 @@ def permission_refusal(grant: str) -> dict[str, Any]:
     can give it (System Settings; nothing here asks the system to prompt)."""
     return {_REFUSAL_FIELD: {"kind": "permission", "grant": grant, "fixable_by": "owner",
                              "where": f"System Settings > Privacy & Security > {_GRANT_PANES[grant]}"}}
+
+
+def with_refusal(payload: dict[str, Any]) -> dict[str, Any]:
+    """``payload`` with the structured refusal field when its reason is a missing grant (the same field everywhere)."""
+    grant = _GRANT_REASONS.get(str(payload.get("reason") or ""))
+    return {**payload, **permission_refusal(grant)} if grant else payload
 
 
 def argv(ops: list[dict[str, Any]], *, remote: bool = False, budget_ms: int = 8000) -> list[str]:
@@ -72,16 +83,95 @@ def method_of(ops: list[dict[str, Any]]) -> str:
     return "unicode_events" if any(op.get("op") == "type" for op in ops) else "cg_events"
 
 
-def answer_fields(stdout: str) -> dict[str, Any]:
-    """What the program reports about typed text (``chars_sent``, ``chars_total``, ``override_only``), else nothing."""
-    for line in reversed(str(stdout or "").strip().splitlines()):
+def shown(cmd: list[str]) -> list[str]:
+    """An input program argv as a receipt shows it: the spec readable (the text as typed, not escaped six times
+    longer), the program's source over SSH named rather than repeated."""
+    ops = ops_of(cmd)
+    if ops is None:
+        return cmd
+    spec = json.loads(cmd[-1])
+    return [*cmd[:3], cmd[3] if cmd[3] != "-e" else "-e input_events.js", json.dumps(spec, ensure_ascii=False)]
+
+
+def answer_fields(stdout: str, stderr: str = "") -> dict[str, Any]:
+    """What the program reports it posted: ``posted`` events and, for text, ``chars_sent``, ``chars_total`` and
+    ``override_only``; its answer on success (stdout), its ``__POSTED__`` line when it stopped on an error (stderr)."""
+    lines = [line.partition("__POSTED__ ")[2] for line in str(stderr or "").splitlines() if line.startswith("__POSTED__ ")]
+    for line in [*lines, *reversed(str(stdout or "").strip().splitlines())]:
         try:
             answer = json.loads(line)
         except ValueError:
             continue
         if isinstance(answer, dict):
-            return {k: answer[k] for k in ("chars_sent", "chars_total", "override_only") if isinstance(answer.get(k), int)}
+            return {k: answer[k] for k in ("posted", "chars_sent", "chars_total", "override_only") if isinstance(answer.get(k), int)}
     return {}
+
+
+def resolve_argv(prepared: list[Any], *, remote: bool = False) -> tuple[list[str] | None, list[str], list[str]]:
+    """For a key sequence: one ``resolve`` call (posts nothing) that finds every character its steps name before the
+    first step is sent, and which steps those are; (argv or None when no step names a character, chars, command chars).
+    A Command chord step (the chord program's argv) names its character as its last word."""
+    chars, command = [], []
+    for cmd in prepared:
+        for op in ops_of(cmd) or []:
+            if isinstance(op.get("char"), str):
+                chars.append(op["char"])
+        if isinstance(cmd, list) and ops_of(cmd) is None and cmd[:3] == ["osascript", "-l", "JavaScript"] and len(cmd[-1]) == 1:
+            command.append(cmd[-1])
+    if not chars and not command:
+        return None, [], []
+    return argv([{"op": "resolve", "chars": chars, "command_chars": command}], remote=remote), chars, command
+
+
+def position_of(output: Any) -> dict[str, Any]:
+    """The pointer the program read (``{"x":..,"y":..}`` on its last line) as receipt fields, else nothing."""
+    try:
+        at = json.loads(str(output or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+    if not (isinstance(at, dict) and all(type(at.get(k)) is int for k in ("x", "y"))):
+        return {}
+    return {"x": at["x"], "y": at["y"], "coordinate_space": "input (macOS logical points)"}
+
+
+def resolve_refusal(rc: int, stdout: str, stderr: str) -> dict[str, Any] | None:
+    """The ``resolve`` answer as a refusal of the whole key sequence when some character has no key, else None (an
+    unread answer refuses nothing: each step still refuses its own character before posting)."""
+    try:
+        answer = json.loads(stdout.strip().splitlines()[-1]) if rc == 0 else None
+    except (ValueError, IndexError):
+        answer = None
+    if not isinstance(answer, dict) or not (answer.get("missing") or answer.get("missing_command")):
+        return None
+    missing, command = list(answer.get("missing") or []), list(answer.get("missing_command") or [])
+    layout = answer.get("layout") or "the active keyboard layout"
+    return {"ok": False, "reason": "untypable_characters", "untyped": (missing + command)[:20], "dispatched": False,
+            "note": "the input was not sent",
+            "error": (f"no key of {layout} gives {', '.join(missing + command)}"
+                      + (" (alone or with Shift or Option)" if missing else "") + (" under Command" if command else "")
+                      + ", so no step of the sequence was sent: switch the layout, name the shortcut by its character "
+                        "under Command, type the text with type_text, or use the app's own commands")}
+
+
+def posted_effect(payload: dict[str, Any]) -> dict[str, Any]:
+    """What the input program said it posted decides the input's mark: an answer that posted nothing (an empty text)
+    carries no input mark, and one that stopped after posting some keeps the mark and says how much went out. An
+    answer that never came back (a lost SSH reply) has no count and is left as it is: unknown, never "not sent"."""
+    posted = payload.get("posted")
+    if not isinstance(posted, int):
+        return payload
+    if payload.get("ok") and posted == 0:
+        payload.pop("observed_effect", None)
+        payload["note"] = "the input program posted nothing (there was nothing to type): no input reached the screen"
+    elif not payload.get("ok") and posted > 0:
+        payload["observed_effect"] = True
+        typed = f" ({payload['chars_sent']} of {payload.get('chars_total')} characters)" if "chars_sent" in payload else ""
+        payload["note"] = f"the input program posted {posted} event(s){typed} before it stopped (see error); the rest was not sent"
+    else:
+        return payload
+    if (payload.get("target") or {}).get("activated"):
+        payload.update(observed_effect=True, activation_done=True)  # the switch before it is an effect of its own
+    return payload
 
 
 def key_op(mods: list[str], base: str, *, hold_ms: int | None = None) -> dict[str, Any]:
@@ -92,13 +182,15 @@ def key_op(mods: list[str], base: str, *, hold_ms: int | None = None) -> dict[st
     op: dict[str, Any] = {"op": "hold" if hold_ms is not None else "keys", "mods": list(mods)}
     if hold_ms is not None:
         op["ms"] = int(hold_ms)
-        if base in MODIFIERS:
-            op["mods"].append(base)  # a pure-modifier hold
-            return op
+    if base in MODIFIERS:
+        op["mods"].append(base)  # a modifier alone: pressed as a modifier, its flag on the way down
+        return op
     if len(base) == 1 and base.isprintable() and not base.isspace():
         op["char"] = base
     elif base.lower() in KEY_CODES:
         op["code"] = KEY_CODES[base.lower()]
+    elif base.lower() in SYSTEM_KEYS:
+        op["system"] = SYSTEM_KEYS[base.lower()]
     else:
         raise ValueError(f"unknown macOS key {base!r}")
     return op

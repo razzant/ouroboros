@@ -4,25 +4,41 @@
    (Accessibility; no Automation grant). The spec is JSON {"ops": [...], "budget_ms": n} built by mac_input.py:
      click {x, y, button: left|right|middle, count: 1..3}  move {x, y}  drag {from: [x, y], to: [x, y], button}
      button {down: bool, button, x?, y?}  scroll {dy, dx} (wheel lines; positive dy = up, positive dx = left)
-     position {}  type {text, interval_ms}  keys {mods, code | char}  hold {mods, code? | char?, ms}
-   Every event carries the skill's mark in kCGEventSourceUserData (field 42), so a receiver can tell them apart.
-   Refusals use the words the receipt composer (place._finish) reads, and nothing is posted after either: a key
-   character no key of the active layout gives (alone or with Shift) -> "Unable to get key code for <character>"; no
-   right to post -> "Accessibility privileges not enabled". All events of the call exist before the first is posted, so
-   one the system cannot make fails the call with nothing sent. An error once something went down, or the program's own
-   deadline (budget_ms, below the caller's timeout), lets up every key and button it holds and ends with that error:
-   osascript exits 1, never an ok receipt. A finished mouse button "down" stays down: that is what it was asked for.
-   Text goes one grapheme per key-down/up pair (a surrogate pair in one event; a grapheme over 20 UTF-16 units as its
-   code points) with CGEventKeyboardSetUnicodeString, on the key that gives the character in the active layout when
-   one does (an application that ignores the event's string still reads that key), else on a neutral key, counted as
-   override_only. Every function is bound here with its C signature; CGPoint (two doubles) is passed as two doubles,
-   which is the same call on arm64 and x86_64. The answer on stdout is one JSON object. */
+     position {}  resolve {chars, command_chars}  type {text, interval_ms}
+     keys {mods, code | char | system}  hold {mods, code? | char? | system?, ms}
+   position and resolve post nothing and need no grant. Everything else first checks the right to post input events
+   ("Accessibility privileges not enabled" and nothing posted when it is missing), then finds every character a chord
+   names in the active layout, alone or with Shift, Option or both, dead keys excluded ("Unable to get key code for
+   <character>" and nothing posted when none gives it): those are the words the receipt composer (place._finish)
+   reads. resolve answers which characters no key gives (typing plane, and Command plane as paste_chord.js finds it), so
+   a key sequence is refused before its first step. A system key (play, volume, brightness, keyboard light) is the
+   NSSystemDefined event (subtype 8) a keyboard's media keys send. Every event carries the skill's mark in
+   kCGEventSourceUserData (field 42); a key keeps the class bits a keyboard gives it (arrows Fn and NumericPad, F-keys
+   and Home/End/Page/forward delete Fn, the keypad NumericPad), never a modifier the person happens to hold. All events
+   of the call exist before the first is posted, each press beside its release, so one the system cannot make fails
+   the call with nothing sent. An error once something went down, or the program's own deadline (budget_ms, below the
+   caller's timeout), posts the prepared release of every key and button still down (in its catch, last pressed
+   first), prints "__POSTED__ <json>" (how many events and characters went out) and ends with that error: osascript
+   exits 1, never an ok receipt. A finished mouse button "down" stays down: that is what it was asked for.
+   Text goes one grapheme per key-down/up pair (a surrogate pair in one event; CRLF is one line break; a grapheme over
+   20 UTF-16 units as its code points) with CGEventKeyboardSetUnicodeString, on the key that gives the character in
+   the active layout when one does (an application that ignores the event's string still reads that key), else on a
+   neutral key, counted as override_only. Every C function is bound here with its C signature; CGPoint (two doubles)
+   is passed as two doubles, the same call on arm64 and x86_64. The answer on stdout is one JSON object. */
 ObjC.import("Foundation"); ObjC.import("AppKit"); ObjC.import("Carbon"); ObjC.import("CoreServices"); ObjC.import("CoreGraphics");
 var TAG = 0x4f55524f; /* "OURO": the skill's mark on every event (kCGEventSourceUserData) */
 var NEUTRAL_KEY = 0x5a; /* kVK_F20: gives no character, so it carries a string no key of the layout gives */
 var MODS = {cmd: [55, 0x100000], shift: [56, 0x20000], alt: [58, 0x80000], ctrl: [59, 0x40000], fn: [63, 0x800000]};
 var BUTTONS = {left: [0, 1, 2, 6], right: [1, 3, 4, 7], middle: [2, 25, 26, 27]}; /* number, down, up, dragged */
-var MOVED = 5, SESSION_TAP = 1, HID_TAP = 0, LINE = 1;
+var MOVED = 5, SESSION_TAP = 1, HID_TAP = 0, LINE = 1, SYSTEM_DEFINED = 14;
+var CLASS_BITS = (function () { /* kCGEventFlagMaskNumericPad 0x200000, kCGEventFlagMaskSecondaryFn 0x800000 */
+  var bits = {};
+  [123, 124, 125, 126].forEach(function (c) { bits[c] = 0xa00000; });
+  [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 115, 119, 116, 121, 117, 114]
+    .forEach(function (c) { bits[c] = 0x800000; });
+  [65, 67, 69, 71, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92].forEach(function (c) { bits[c] = 0x200000; });
+  return bits;
+})();
 function run(argv) {
   var spec = JSON.parse(argv && argv.length === 1 ? String(argv[0]) : "null");
   if (!spec || !Array.isArray(spec.ops) || !spec.ops.length) {
@@ -46,58 +62,94 @@ function run(argv) {
     var at = $.NSEvent.mouseLocation, primary = $.NSScreen.screens.objectAtIndex(0).frame;
     return [Math.round(at.x), Math.round(primary.size.height - at.y)];
   }
+  var layoutId = "", planes = {};
+  function typed(layout, code, state, options) { /* the key's characters at a modifier state, else "" */
+    var dead = $.NSMutableData.dataWithLength(4), count = $.NSMutableData.dataWithLength(8), text = $.NSMutableData.dataWithLength(8);
+    if ($.UCKeyTranslate(layout, code, 0, state, $.LMGetKbdType(), options, dead.mutableBytes, 4, count.mutableBytes, text.mutableBytes) !== 0) { return ""; }
+    return ObjC.unwrap($.NSString.alloc.initWithDataEncoding(text, $.NSUTF16LittleEndianStringEncoding)).replace(/\u0000+$/, "");
+  }
+  function plane(state, options) { /* {chars: {character: lowest code}, codes: [character by code]}, read once */
+    var name = state + ":" + options;
+    if (planes[name]) { return planes[name]; }
+    var found = {chars: {}, codes: []}, source = $.TISCopyCurrentKeyboardLayoutInputSource(), data = null;
+    try {
+      if (source) {
+        var id = $.TISGetInputSourceProperty(source, $("TISPropertyInputSourceID"));
+        layoutId = id ? ObjC.unwrap(ObjC.castRefToObject(id)) : "";
+        data = $.TISGetInputSourceProperty(source, $("TISPropertyUnicodeKeyLayoutData"));
+      }
+      var layout = data ? $.CFDataGetBytePtr(data) : null;
+      for (var code = 0; layout && code < 128; code++) {
+        var ch = typed(layout, code, state, options);
+        found.codes[code] = ch;
+        if (ch && !Object.prototype.hasOwnProperty.call(found.chars, ch)) { found.chars[ch] = code; }
+      }
+    } finally {
+      if (source) { $.CFRelease(source); }
+    }
+    planes[name] = found;
+    return found;
+  }
+  /* Typing planes: none, Shift, Option, Shift+Option (state = modifier >> 8). Options 0 keeps dead keys out: a dead
+     key types nothing on its own, so an application that reads key codes would start a composition on it. */
+  var STATES = [[0, []], [2, ["shift"]], [8, ["alt"]], [10, ["shift", "alt"]]];
+  function keyFor(ch) { /* {code, mods} of the key giving ch, else null */
+    for (var i = 0; i < STATES.length; i++) {
+      var chars = plane(STATES[i][0], 0).chars;
+      if (Object.prototype.hasOwnProperty.call(chars, ch)) { return {code: chars[ch], mods: STATES[i][1]}; }
+    }
+    return null;
+  }
+  function commandKey(ch) { /* as paste_chord.js finds a Command shortcut's key: Command, else Command+Shift */
+    var cmd = plane(1, 1).codes, both = plane(3, 1).codes, shifted = plane(2, 1).codes;
+    for (var code = 0; code < 128; code++) {
+      if (cmd[code] === ch || (both[code] && both[code] === cmd[code] ? shifted[code] : both[code]) === ch) { return true; }
+    }
+    return false;
+  }
   if (spec.ops.length === 1 && spec.ops[0].op === "position") {
     var now = where();
     return JSON.stringify({x: now[0], y: now[1]});
   }
-  var keys = null, layoutId = "";
-  function keyFor(ch) { /* [code, needs Shift] of the key giving ch alone or with Shift alone, else null */
-    if (keys === null) { keys = readLayout(); }
-    return Object.prototype.hasOwnProperty.call(keys, ch) ? keys[ch] : null;
-  }
-  function readLayout() {
-    var found = {}, source = $.TISCopyCurrentKeyboardLayoutInputSource(), data = null;
-    if (source) {
-      var name = $.TISGetInputSourceProperty(source, $("TISPropertyInputSourceID"));
-      layoutId = name ? ObjC.unwrap(ObjC.castRefToObject(name)) : "";
-      data = $.TISGetInputSourceProperty(source, $("TISPropertyUnicodeKeyLayoutData"));
-    }
-    var layout = data ? $.CFDataGetBytePtr(data) : null;
-    for (var state = 0; layout && state <= 2; state += 2) { /* 0 no modifier, 2 shiftKey >> 8; the lowest code wins */
-      for (var code = 0; code < 128; code++) {
-        var dead = $.NSMutableData.dataWithLength(4), count = $.NSMutableData.dataWithLength(8), text = $.NSMutableData.dataWithLength(8);
-        if ($.UCKeyTranslate(layout, code, 0, state, $.LMGetKbdType(), 1, dead.mutableBytes, 4, count.mutableBytes, text.mutableBytes) !== 0) { continue; }
-        var ch = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(text, $.NSUTF16LittleEndianStringEncoding)).replace(/\u0000+$/, "");
-        if (ch && !Object.prototype.hasOwnProperty.call(found, ch)) { found[ch] = [code, state === 2]; }
-      }
-    }
-    if (source) { $.CFRelease(source); }
-    return found;
-  }
-  var chordKeys = [];
-  for (var i = 0; i < spec.ops.length; i++) { /* every key named by its character is found before anything is posted */
-    var op = spec.ops[i], key = null;
-    if ((op.op === "keys" || op.op === "hold") && typeof op.code === "number") { key = [op.code, false]; }
-    if ((op.op === "keys" || op.op === "hold") && typeof op.char === "string" && !(key = keyFor(op.char))) {
-      console.log("Unable to get key code for " + op.char + " (no key of " + (layoutId || "the active keyboard layout") +
-                  " gives " + op.char + " alone or with Shift); nothing was sent");
-      return "";
-    }
-    chordKeys.push(key);
+  if (spec.ops.length === 1 && spec.ops[0].op === "resolve") {
+    var r = spec.ops[0];
+    return JSON.stringify({layout: (plane(0, 0), layoutId),
+                           missing: (r.chars || []).filter(function (ch) { return !keyFor(ch); }),
+                           missing_command: (r.command_chars || []).filter(function (ch) { return !commandKey(ch); })});
   }
   if (!$.CGPreflightPostEventAccess()) {
     console.log("WARNING: Accessibility privileges not enabled (no right to post input events); nothing was sent");
     return "";
   }
-  var events = $.CGEventSourceCreate(1), made = [], plan = [], held = {}, last = null, answer = {posted: 0};
+  var chordKeys = [];
+  for (var i = 0; i < spec.ops.length; i++) { /* every key named by its character is found before anything is posted */
+    var op = spec.ops[i], key = null;
+    if (op.op === "keys" || op.op === "hold") {
+      if (typeof op.code === "number") { key = {code: op.code, mods: []}; }
+      if (typeof op.system === "number") { key = {system: op.system, mods: []}; }
+      if (typeof op.char === "string" && !(key = keyFor(op.char))) {
+        console.log("Unable to get key code for " + op.char + " (no key of " + (layoutId || "the active keyboard layout") +
+                    " gives " + op.char + " alone or with Shift or Option); nothing was sent");
+        return "";
+      }
+    }
+    chordKeys.push(key);
+  }
+  var events = $.CGEventSourceCreate(1), made = [], kept = [], plan = [], held = {}, ups = {}, last = null;
+  var answer = {posted: 0};
   function own(event, what) {
     if (!event) { throw new Error("the system made no " + what + " event; nothing was sent"); }
     made.push(event);
     $.CGEventSetIntegerValueField(event, 42, TAG);
     return event;
   }
-  /* A step: the event, its tap, the pause after it, and what it presses (down: [name, value]) or lets up (up: name). */
-  function step(event, tap, wait, fields) { plan.push(Object.assign({event: event, tap: tap, wait: wait}, fields || {})); }
+  /* A step: the event, its tap, the pause after it, what it presses (down: [name, value]) or lets up (up: name). A
+     release is registered as the prepared event that lets that key or button up. */
+  function step(event, tap, wait, fields) {
+    var s = Object.assign({event: event, tap: tap, wait: wait}, fields || {});
+    if (s.up) { ups[s.up] = s; }
+    plan.push(s);
+  }
   function mouse(button, kind, x, y, clicks) { /* kind: 1 down, 2 up, 3 dragged, 0 moved */
     var b = BUTTONS[button];
     if (!b) { throw new Error("unknown mouse button " + JSON.stringify(button) + "; nothing was sent"); }
@@ -107,25 +159,39 @@ function run(argv) {
   }
   function keyEvent(code, down, flags, text) {
     var event = own($.CGEventCreateKeyboardEvent(events, code, down), "key");
-    $.CGEventSetFlags(event, flags); /* exactly these flags: what the keyboard holds never rides along */
+    /* exactly these flags and the key's own class bits: what the keyboard holds never rides along */
+    $.CGEventSetFlags(event, flags | (CLASS_BITS[code] || 0));
     if (text !== undefined) {
       var units = $.NSMutableData.dataWithData($.NSString.alloc.initWithString(text).dataUsingEncoding($.NSUTF16LittleEndianStringEncoding));
       $.CGEventKeyboardSetUnicodeString(event, text.length, units.mutableBytes);
     }
     return event;
   }
+  function systemEvent(n, down) { /* NX key type n as a keyboard's media key sends it; the NSEvent owns its CGEvent */
+    var ns = $.NSEvent.otherEventWithTypeLocationModifierFlagsTimestampWindowNumberContextSubtypeData1Data2(
+      SYSTEM_DEFINED, {x: 0, y: 0}, down ? 0xa00 : 0xb00, 0, 0, null, 8, (n << 16) | ((down ? 0xa : 0xb) << 8), -1);
+    var ref = ns ? ns.CGEvent : null;
+    if (!ref) { throw new Error("the system made no system key event; nothing was sent"); }
+    kept.push(ns);
+    $.CGEventSetIntegerValueField(ref, 42, TAG);
+    return ref;
+  }
   function chord(mods, key, holdMs) { /* modifiers down in order, the key down and up with all their flags, modifiers up */
     var flags = 0, names = mods.slice();
-    if (key && key[1] && names.indexOf("shift") < 0) { names.push("shift"); }
+    (key && key.mods || []).forEach(function (m) { if (names.indexOf(m) < 0) { names.push(m); } });
     names.forEach(function (m) {
       if (!MODS[m]) { throw new Error("unknown modifier " + JSON.stringify(m) + "; nothing was sent"); }
       flags |= MODS[m][1];
       step(keyEvent(MODS[m][0], true, flags), SESSION_TAP, 0.01, {down: ["k" + MODS[m][0], MODS[m][0]]});
     });
-    if (key) {
-      step(keyEvent(key[0], true, flags), SESSION_TAP, holdMs === undefined ? 0.02 : holdMs / 1000, {down: ["k" + key[0], key[0]]});
-      step(keyEvent(key[0], false, flags), SESSION_TAP, 0.01, {up: "k" + key[0]});
-    } else if (holdMs !== undefined && plan.length) { plan[plan.length - 1].wait = holdMs / 1000; }
+    var wait = holdMs === undefined ? 0.02 : holdMs / 1000;
+    if (key && key.system !== undefined) {
+      step(systemEvent(key.system, true), HID_TAP, wait, {down: ["s" + key.system, key.system]});
+      step(systemEvent(key.system, false), HID_TAP, 0.01, {up: "s" + key.system});
+    } else if (key) {
+      step(keyEvent(key.code, true, flags), SESSION_TAP, wait, {down: ["k" + key.code, key.code]});
+      step(keyEvent(key.code, false, flags), SESSION_TAP, 0.01, {up: "k" + key.code});
+    } else if (holdMs !== undefined && plan.length) { plan[plan.length - 1].wait = wait; }
     names.slice().reverse().forEach(function (m) {
       flags &= ~MODS[m][1];
       step(keyEvent(MODS[m][0], false, flags), SESSION_TAP, 0.01, {up: "k" + MODS[m][0]});
@@ -171,9 +237,11 @@ function run(argv) {
         var parts = pieces(String(op.text || "")), wait = Math.max(0.004, (op.interval_ms || 0) / 1000);
         answer = {posted: 0, method: "unicode_events", chars_total: parts.length, chars_sent: 0, override_only: 0};
         parts.forEach(function (piece) {
-          var ch = piece === "\n" ? "\r" : piece, key = ch === "\r" ? [36, false] : (ch === "\t" ? [48, false] : keyFor(ch));
+          var ch = piece === "\n" || piece === "\r\n" ? "\r" : piece;
+          var key = ch === "\r" ? {code: 36, mods: []} : (ch === "\t" ? {code: 48, mods: []} : keyFor(ch));
           if (!key) { answer.override_only++; }
-          var code = key ? key[0] : NEUTRAL_KEY, flags = key && key[1] ? MODS.shift[1] : 0;
+          var code = key ? key.code : NEUTRAL_KEY, flags = 0;
+          (key ? key.mods : []).forEach(function (m) { flags |= MODS[m][1]; });
           step(keyEvent(code, true, flags, ch), SESSION_TAP, 0.002, {down: ["k" + code, code]});
           step(keyEvent(code, false, flags, ch), SESSION_TAP, wait, {up: "k" + code, typed: true});
         });
@@ -188,6 +256,7 @@ function run(argv) {
       if (Date.now() - started >= budget) { throw deadline(); }
       $.CGEventPost(s.tap, s.event);
       answer.posted++;
+      s.posted = true;
       if (s.at) { last = s.at; }
       if (s.down) { held[s.down[0]] = s.down[1]; }
       if (s.up) { delete held[s.up]; }
@@ -198,12 +267,17 @@ function run(argv) {
   } catch (error) {
     Object.keys(held).reverse().forEach(function (name) { /* let up what went down, last first; the error is rethrown */
       try {
-        var up = name[0] === "k" ? keyEvent(held[name], false, 0) :
-          own($.CGEventCreateMouseEvent(events, BUTTONS[held[name]][2], last[0], last[1], BUTTONS[held[name]][0]), "mouse");
-        $.CGEventPost(name[0] === "k" ? SESSION_TAP : HID_TAP, up);
+        var prepared = ups[name];
+        if (prepared && !prepared.posted) {
+          $.CGEventPost(prepared.tap, prepared.event);
+        } else if (name[0] === "k") {
+          $.CGEventPost(SESSION_TAP, keyEvent(held[name], false, 0));
+        } else if (name[0] === "b") {
+          $.CGEventPost(HID_TAP, own($.CGEventCreateMouseEvent(events, BUTTONS[held[name]][2], last[0], last[1], BUTTONS[held[name]][0]), "mouse"));
+        }
       } catch (ignored) { /* nothing more can be done from here */ }
     });
-    if (answer.method) { console.log("typed " + answer.chars_sent + " of " + answer.chars_total + " character(s) before the error"); }
+    console.log("__POSTED__ " + JSON.stringify(answer));
     throw error;
   } finally {
     made.forEach(function (event) { $.CFRelease(event); });

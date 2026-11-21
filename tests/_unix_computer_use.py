@@ -73,7 +73,8 @@ def observing(helper):
 
 def is_input(argv: list[str]) -> bool:
     """A call of the macOS input program (``osascript -l JavaScript input_events.js '<spec>'``)."""
-    return argv[:3] == ["osascript", "-l", "JavaScript"] and len(argv) == 5 and argv[3].endswith("input_events.js")
+    return (argv[:3] == ["osascript", "-l", "JavaScript"] and len(argv) == 5 and argv[3].endswith("input_events.js")
+            and json.loads(argv[-1])["ops"][0]["op"] != "resolve")  # a lookup that posts nothing is not an input
 
 
 def ops(argv: list[str]) -> list[dict]:
@@ -87,10 +88,12 @@ def key(code: int | None = None, *mods: str, char: str | None = None) -> dict:
 
 
 DOWN, RIGHT, RETURN, TAB = key(125), key(124), key(36), key(48)
+# The resolve answer of a layout that gives every character a key sequence names (the program's own words).
+RESOLVED_ALL = '{"layout":"com.apple.keylayout.ABC","missing":[],"missing_command":[]}\n'
 
 
 def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, "", ""), lsappinfo=True, on_input=None,
-        chord=(0, "", CHORD_POSTED)):
+        chord=(0, "", CHORD_POSTED), resolved=None):
     """A faked local Mac: lsappinfo reports ``state['front']``; the native helper answers through ``helper(args, state)``;
     ``on_input(argv, state)`` runs when the input program is called (a key that moves the front, for instance) and it
     answers ``events`` (exit code, stdout, stderr); the paste chord program answers ``chord``."""
@@ -100,7 +103,7 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, "", ""),
     tools = {"screencapture", "osascript", "pbcopy"} | ({"lsappinfo"} if lsappinfo else set())
     monkeypatch.setattr(module, "_which", lambda name: f"/usr/bin/{name}" if name in tools else "")
     monkeypatch.setattr(module.time, "sleep", lambda _s: None)
-    state = {"front": front, "calls": [], "helper": [], "clipboard": None, "chords": []}
+    state = {"front": front, "calls": [], "helper": [], "clipboard": None, "chords": [], "resolved": []}
 
     def default_helper(args, state):
         op = args[0]
@@ -160,6 +163,9 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, "", ""),
             state["helper"].append(args)
             out = answer(args, state)
             return subprocess.CompletedProcess(argv, 0 if out.get("ok") else 1, json.dumps(out) + "\n", "")
+        if argv[:3] == ["osascript", "-l", "JavaScript"] and argv[3].endswith("input_events.js") and not is_input(argv):
+            state["resolved"].append(ops(argv)[0])  # a key sequence's lookup of its characters: posts nothing
+            return subprocess.CompletedProcess(argv, *(resolved or (0, RESOLVED_ALL, "")))
         if is_input(argv):
             if on_input:
                 on_input(argv, state)

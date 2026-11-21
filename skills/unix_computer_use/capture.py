@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any
 
-from .mac_input import permission_refusal
+from .mac_input import permission_refusal, with_refusal
 from .macos_capture import window_selector
 
 _WINDOW_TIMEOUT_MS = 5000  # both ScreenCaptureKit completion handlers together (macos_capture.SPEC)
@@ -121,7 +121,7 @@ class CaptureMixin:
         if rc != 0 or not answer or answer.get("ok") is not True:
             self._discard_window_output(out_path)
             if rc == 1 and answer and answer.get("ok") is False:
-                return self._json_text(answer)  # the helper's own refusal: it ended normally and says why
+                return self._json_text(with_refusal(answer))  # the helper's own refusal: it ended normally and says why
             return refuse("helper_failed", f"the capture helper ended with exit {rc} without a complete answer "
                           f"({(err or out).strip()[-300:] or 'no output'})")
         return self._accept_window_capture(answer, out_path, max_width=max_width, max_height=max_height)

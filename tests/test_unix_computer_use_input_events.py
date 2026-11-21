@@ -22,7 +22,11 @@ PROGRAM = Path(__file__).resolve().parents[1] / "skills" / "unix_computer_use" /
 INERT = Path(__file__).resolve().parent / "fixtures" / "input_events_inert.cjs"
 TAG = 0x4F55524F
 SHIFT, COMMAND = 0x20000, 0x100000
-ABC = {"id": "com.apple.keylayout.ABC", "planes": {0: {0: "a", 4: "h", 34: "i", 49: " ", 1: "s"}, 2: {0: "A", 4: "H"}}}
+ABC = {"id": "com.apple.keylayout.ABC", "planes": {0: {0: "a", 4: "h", 34: "i", 49: " ", 1: "s"}, 2: {0: "A", 4: "H"},
+                                                  8: {0: "å", 1: "ß"}, 10: {0: "Å"}, 1: {5: "g", 9: "v"}}}
+# US International: the apostrophe key is dead (it starts a composition), so it never stands for "'".
+US_INTL = {"id": "com.apple.keylayout.USInternational-PC", "planes": {0: {39: "'", 0: "a"}, 2: {39: '"'}}, "dead": {0: [39], 2: [39]}}
+NUMERIC_PAD, SECONDARY_FN, CTRL, OPTION = 0x200000, 0x800000, 0x40000, 0x80000
 RUSSIAN = {"id": "com.apple.keylayout.Russian", "planes": {0: {4: "р", 34: "ш"}, 2: {4: "Р"}}}
 
 
@@ -107,10 +111,83 @@ def test_a_chord_finds_its_key_in_the_layout_or_refuses_before_posting():
         (59, True, 0x40000), (56, True, 0x60000), (0, True, 0x60000), (0, False, 0x60000), (56, False, 0x40000), (59, False, 0)]
     assert missing["posted"] == [] and "CGEventPost" not in missing["calls"] and missing["returned"] == ""
     assert missing["log"] == ["Unable to get key code for c (no key of com.apple.keylayout.Russian gives c alone or with "
-                              "Shift); nothing was sent"], "the words the receipt composer reads"
-    assert "CGPreflightPostEventAccess" not in missing["calls"], "found before the right to post is even read"
+                              "Shift or Option); nothing was sent"], "the words the receipt composer reads"
+    # The right to post is read first: without it the answer is the grant, not a layout hint (#REVP1 P8).
+    denied, = runs({"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "c"}), "layout": RUSSIAN, "post": False})
+    assert denied["posted"] == [] and denied["log"] == [
+        "WARNING: Accessibility privileges not enabled (no right to post input events); nothing was sent"], denied
     clean(named)
     assert [r["key"] for r in named["posted"]] == [55, 58, 36, 36, 58, 55] and named["posted"][2]["flags"] == COMMAND | 0x80000
+
+
+def test_a_key_keeps_its_class_flags_and_never_a_held_modifier():
+    """A keyboard puts Fn and NumericPad on an arrow, Fn on the F-keys and the navigation block, NumericPad on the
+    keypad; macOS ignores Ctrl+arrow without them. The stand-in's new key events carry those bits and the Option the
+    keyboard holds: the program keeps the first and drops the second."""
+    arrow, function, keypad, letter = runs(*({"spec": spec({"op": "keys", "mods": ["ctrl"], "code": code})} for code in (123, 96, 83)),
+                                           {"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "a"}), "layout": ABC})
+    for run, bits in ((arrow, NUMERIC_PAD | SECONDARY_FN), (function, SECONDARY_FN), (keypad, NUMERIC_PAD), (letter, 0)):
+        clean(run)
+        key = [r for r in run["posted"] if r["key"] not in (59,)]
+        assert [r["flags"] for r in key] == [CTRL | bits] * 2, run["posted"]
+        assert all(not r["flags"] & OPTION for r in run["posted"]), "the held Option never rides along"
+    assert [r["flags"] for r in arrow["posted"] if r["key"] == 59] == [CTRL, 0], "the modifier itself carries no class bit"
+
+
+def test_a_modifier_alone_is_pressed_as_a_modifier():
+    alone, = runs({"spec": spec({"op": "keys", "mods": ["shift"]})})
+    clean(alone)
+    assert [(r["key"], r["down"], r["flags"]) for r in alone["posted"]] == [(56, True, SHIFT), (56, False, 0)]
+
+
+def test_system_keys_and_option_characters_are_keys_again():
+    """The former helper took media names (NSSystemDefined, subtype 8, data1 = key type << 16 | state << 8) and found
+    characters under Option; both are back. The system event belongs to its NSEvent: the program never releases it."""
+    play, held, option = runs({"spec": spec({"op": "keys", "mods": [], "system": 16})},
+                              {"spec": spec({"op": "hold", "mods": [], "system": 0, "ms": 150})},
+                              {"spec": spec({"op": "keys", "mods": ["cmd"], "char": "Å"}), "layout": ABC})
+    for run in (play, held, option):
+        clean(run)
+    assert [(r["system"], r["down"], r["flags"], r["subtype"], r["tap"], r["tag"]) for r in play["posted"]] == [
+        (16, True, 0xa00, 8, 0, TAG), (16, False, 0xb00, 8, 0, TAG)]
+    assert [r["system"] for r in held["posted"]] == [0, 0] and 0.15 in held["delays"]
+    assert [(r["key"], r["down"]) for r in option["posted"]] == [(55, True), (56, True), (58, True), (0, True), (0, False),
+                                                                 (58, False), (56, False), (55, False)]
+    assert option["posted"][3]["flags"] == COMMAND | SHIFT | OPTION
+
+
+def test_a_dead_key_never_stands_for_its_character_and_a_crlf_is_one_return():
+    typed, chord, crlf = runs({"spec": spec({"op": "type", "text": "a'"}), "layout": US_INTL},
+                              {"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "'"}), "layout": US_INTL},
+                              {"spec": spec({"op": "type", "text": "a\r\nb\r\n"}), "layout": ABC})
+    clean(typed)
+    clean(crlf)
+    downs = [r for r in typed["posted"] if r["down"]]
+    assert [(r["key"], r["unicode"]) for r in downs] == [(0, "a"), (0x5A, "'")] and json.loads(typed["returned"])["override_only"] == 1
+    assert chord["posted"] == [] and chord["log"][0].startswith("Unable to get key code for '"), chord
+    assert [(r["key"], r["unicode"]) for r in crlf["posted"] if r["down"]] == [(0, "a"), (36, "\r"), (0x5A, "b"), (36, "\r")]
+    assert json.loads(crlf["returned"])["chars_total"] == 4
+
+
+def test_the_counts_of_what_went_out_survive_an_empty_text_and_a_stop_mid_text():
+    empty, stopped = runs({"spec": spec({"op": "type", "text": ""})},
+                          {"spec": spec({"op": "type", "text": "hih", "interval_ms": 300}, budget_ms=500), "layout": ABC})
+    clean(empty)
+    assert json.loads(empty["returned"]) == {"posted": 0, "method": "unicode_events", "chars_total": 0, "chars_sent": 0,
+                                             "override_only": 0}
+    assert "own deadline" in stopped["error"] and stopped["held"] == [] and stopped["leaked"] == []
+    line = next(entry for entry in stopped["log"] if entry.startswith("__POSTED__ "))
+    report = json.loads(line.split(" ", 1)[1])
+    assert report["chars_sent"] == len([r for r in stopped["posted"] if not r["down"]]) and 0 < report["chars_sent"] < 3, report
+    assert report["chars_total"] == 3 and report["posted"] == len(stopped["posted"]), report
+
+
+def test_a_sequence_resolves_its_characters_without_the_right_to_post_and_posts_nothing():
+    found, = runs({"spec": spec({"op": "resolve", "chars": ["å", "Ж", "a"], "command_chars": ["g", "п"]}), "layout": ABC,
+                   "post": False})
+    assert found["posted"] == [] and found["error"] is None and found["leaked"] == []
+    assert json.loads(found["returned"]) == {"layout": "com.apple.keylayout.ABC", "missing": ["Ж"], "missing_command": ["п"]}
+    assert "CGPreflightPostEventAccess" not in found["calls"] and "CGEventSourceCreate" not in found["calls"]
 
 
 def test_without_the_right_to_post_nothing_is_posted_and_reading_the_pointer_needs_no_right():
@@ -146,6 +223,14 @@ def test_a_hold_lets_up_what_it_pressed_on_error_and_at_its_own_deadline():
     assert not any(r["key"] == 36 for r in late["posted"]), "nothing after the deadline but the release"
 
 
+def test_a_release_after_an_error_is_the_prepared_event_even_when_the_system_makes_no_more():
+    """The key up fails to post and no further event can be made: the release already built goes out, so nothing
+    stays down (a second fault no longer leaves the key pressed)."""
+    broken, = runs({"spec": spec({"op": "hold", "mods": ["cmd"], "code": 36, "ms": 50}), "fail": ["post:2", "event:4", "event:5"]})
+    assert broken["error"] == "injected post failure" and broken["held"] == [] and broken["leaked"] == [], broken
+    assert [(r["key"], r["down"]) for r in broken["posted"]] == [(55, True), (36, True), (36, False), (55, False)]
+
+
 def test_events_the_system_cannot_make_fail_the_call_with_nothing_sent():
     unmade, bad = runs({"spec": spec({"op": "click", "x": 1, "y": 1}, {"op": "keys", "mods": [], "code": 36}), "fail": "event:3"},
                        {"argv": []})
@@ -171,8 +256,16 @@ def test_the_argv_hands_one_ascii_spec_locally_and_the_source_over_ssh():
     assert mac_input.ops_of(["osascript", "-l", "JavaScript", "paste_chord.js"]) is None and mac_input.ops_of(["xdotool"]) is None
     assert mac_input.method_of(mac_input.ops_of(local)) == "unicode_events" and mac_input.method_of([{"op": "move"}]) == "cg_events"
     assert mac_input.answer_fields('{"posted":4,"chars_sent":2,"chars_total":2,"override_only":1}\n') == {
-        "chars_sent": 2, "chars_total": 2, "override_only": 1}
-    assert mac_input.answer_fields("") == {} and mac_input.answer_fields('{"posted":3}') == {}
+        "posted": 4, "chars_sent": 2, "chars_total": 2, "override_only": 1}
+    assert mac_input.answer_fields("") == {} and mac_input.answer_fields('{"posted":3}') == {"posted": 3}
+    stopped = 'typed\n__POSTED__ {"posted":3,"method":"unicode_events","chars_total":9,"chars_sent":1,"override_only":0}\n'
+    assert mac_input.answer_fields("", stopped) == {"posted": 3, "chars_sent": 1, "chars_total": 9, "override_only": 0}
+    # The receipt shows the operations readable: the text as typed, the SSH source named, not repeated.
+    shown = mac_input.shown(local)
+    assert shown[:4] == local[:4] and "Привет" in shown[-1] and "\\u" not in shown[-1] and len(shown[-1]) < len(local[-1])
+    assert mac_input.shown(remote)[3] == "-e input_events.js" and mac_input.shown(["xdotool", "key"]) == ["xdotool", "key"]
+    assert mac_input.position_of('{"x":3,"y":-4}\n') == {"x": 3, "y": -4, "coordinate_space": "input (macOS logical points)"}
+    assert mac_input.position_of("pos 3 4") == {} and mac_input.position_of(None) == {}
 
 
 def test_the_remote_snippets_translate_to_the_same_operations():
@@ -201,3 +294,31 @@ def test_a_grant_refusal_is_one_structured_field():
         "kind": "permission", "grant": "screen_recording", "fixable_by": "owner",
         "where": "System Settings > Privacy & Security > Screen & System Audio Recording"}}
     assert set(mac_input.permission_refusal("accessibility")) == {"refusal"}
+    # The native helpers' own reasons for a missing grant gain the same field; any other reason stays as it was.
+    for reason, grant in (("accessibility_untrusted", "accessibility"), ("screen_recording_denied", "screen_recording")):
+        assert mac_input.with_refusal({"ok": False, "reason": reason})["refusal"]["grant"] == grant
+    assert mac_input.with_refusal({"ok": False, "reason": "no_window"}) == {"ok": False, "reason": "no_window"}
+
+
+def test_a_sequence_with_a_character_no_key_gives_is_refused_whole_and_an_unread_lookup_refuses_nothing():
+    steps = [mac_input.argv([{"op": "keys", "mods": [], "code": 36}]), mac_input.argv([{"op": "keys", "mods": [], "char": "Ж"}]),
+             ["osascript", "-l", "JavaScript", "paste_chord.js", "g"]]
+    cmd, chars, command = mac_input.resolve_argv(steps)
+    assert mac_input.ops_of(cmd) == [{"op": "resolve", "chars": ["Ж"], "command_chars": ["g"]}] and (chars, command) == (["Ж"], ["g"])
+    assert mac_input.resolve_argv(steps[:1]) == (None, [], [])
+    refusal = mac_input.resolve_refusal(0, '{"layout":"com.apple.keylayout.ABC","missing":["Ж"],"missing_command":[]}', "")
+    assert refusal["reason"] == "untypable_characters" and refusal["untyped"] == ["Ж"] and refusal["dispatched"] is False
+    assert "ABC" in refusal["error"] and "no step" in refusal["error"]
+    assert mac_input.resolve_refusal(0, '{"missing":[],"missing_command":[]}', "") is None
+    assert mac_input.resolve_refusal(1, "", "boom") is None and mac_input.resolve_refusal(0, "", "") is None
+
+
+def test_what_was_posted_decides_the_mark():
+    empty = mac_input.posted_effect({"ok": True, "observed_effect": True, "posted": 0})
+    assert "observed_effect" not in empty and "nothing" in empty["note"]
+    switched = mac_input.posted_effect({"ok": True, "observed_effect": True, "posted": 0, "target": {"activated": True}})
+    assert switched["observed_effect"] is True and switched["activation_done"] is True
+    partial = mac_input.posted_effect({"ok": False, "posted": 4, "chars_sent": 2, "chars_total": 9})
+    assert partial["observed_effect"] is True and "4 event(s) (2 of 9 characters)" in partial["note"]
+    assert mac_input.posted_effect({"ok": True, "observed_effect": True, "posted": 3}) == {"ok": True, "observed_effect": True, "posted": 3}
+    assert mac_input.posted_effect({"ok": False, "dispatched": None}) == {"ok": False, "dispatched": None}, "no count: unknown"

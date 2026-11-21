@@ -31,6 +31,9 @@ from . import mac_input
 from .macos_native import parse_info, parse_list, resolve
 from .place import parse_wmctrl_rows, parse_x11_front, window_id_int, x11_resolve, x11_same
 
+# The longest remote command handed to ssh as an argument: below Windows' 32,767-character command line with room
+# for the ssh words around it. A longer one goes on ssh's stdin (``_ssh_run``).
+_SSH_ARGV_CHARS = 30_000
 # Cap a remote /screenshot download (a 1920x1080 PNG is well under 10 MB).
 _MAX_REMOTE_SHOT_BYTES = 20 * 1024 * 1024
 
@@ -338,7 +341,8 @@ class RemoteBackends:
                 completed = (rc == 0 or bool(re.search(r"^__FRONT_AFTER__", stdout, re.M))) if input_effect else True
                 started = completed or bool(re.search(r"^__FRONT_BEFORE__", stdout, re.M))
                 payload = {"ok": rc == 0 and completed, "backend": backend, "returncode": rc, "output": strip_markers(stdout),
-                           "dispatched": True if completed else None, **mac_input.answer_fields(strip_markers(stdout))}
+                           "dispatched": True if completed else None,
+                           **(mac_input.answer_fields(strip_markers(stdout), stderr) if completed else {})}
                 if not completed:
                     payload.update({"transport_failed": True, "reason": "ssh_failed",
                                     "error": f"ssh ended without the wrapper's completion marker ({stderr.strip() or f'exit {rc}'}); "
@@ -379,8 +383,9 @@ class RemoteBackends:
             return failed
         if note:
             payload.update({k: v for k, v in note.items() if k not in payload})
-        if not input_effect:
-            return payload
+        if not input_effect:  # a read dispatches no input; an SSH Mac's pointer comes back as fields, as locally
+            payload.pop("dispatched", None)
+            return {**payload, **mac_input.position_of(payload.get("output"))} if backend == "ssh_macos" else payload
         if payload["ok"]:
             payload["observed_effect"] = True
         else:
@@ -392,7 +397,7 @@ class RemoteBackends:
                 payload["clipboard_done"] = True
         ctx["delivered_to"] = before
         ctx.setdefault("front_before", before)
-        payload = self._finish(payload, ctx, stderr, after=after)
+        payload = mac_input.posted_effect(self._finish(mac_input.posted_effect(payload), ctx, stderr, after=after))
         shared["front_last"] = ctx.get("front_last")  # the call's last front read, for a sequence's aggregate
         return payload
 
@@ -794,8 +799,15 @@ class RemoteBackends:
         return ["-P", str(port), src] if port != 22 else [src]
 
     def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30) -> tuple[int, str, str]:
-        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn), command]
-        return self._run_cmd(ssh_cmd, timeout=timeout)
+        """One remote command through the user's ssh. A command longer than a host's command line can carry (Windows
+        stops at 32,767 characters for the whole ssh line; the input program alone is about 15,000) goes on ssh's stdin
+        to the remote ``/bin/sh -s`` instead, the same POSIX shell words, so long text still types without the
+        clipboard."""
+        dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn)]
+        if len(command) <= _SSH_ARGV_CHARS:
+            return self._run_cmd([*dest, command], timeout=timeout)
+        proc = subprocess.run([*dest, "/bin/sh -s"], input=command, encoding="utf-8", capture_output=True, timeout=timeout)
+        return int(proc.returncode), proc.stdout or "", proc.stderr or ""
 
     def _ssh_macos_screenshot(self, conn: dict[str, Any], *, max_width: int, max_height: int,
                               connection_name: str = "") -> str:

@@ -65,6 +65,7 @@ def test_the_paste_chord_is_command_and_the_key_that_gives_v_under_command(tmp_p
         assert run["log"] == [f"paste chord: Command + key code {key} (v under Command in {layout['id']})"]
         # Exactly the Command flag: the Option the keyboard holds (each new event's own flags here) never rides along.
         assert run["posted"] == chord(key) and run["held"] == [] and run["source_state"] == 1, run  # HID system state
+        assert run["tags"] == [0x4F55524F] * 4, "every chord event carries the skill's mark, as the input program's do"
         assert [call for call in run["calls"] if call in ("CGEventPost", "delay")] == ["CGEventPost", "delay"] * 4
         # Key-down action, Command alone (cmdKey >> 8), the keyboard type in use, no dead keys; the lowest code wins.
         assert run["translated"] == [[code, 0, 1, 198, 1, 4] for code in range(key + 1)], run["translated"]
@@ -294,10 +295,12 @@ def test_an_ssh_shortcut_hands_its_character_to_the_same_program_as_a_separate_w
     out = receipt(api.tools["key"](keys=" ".join(f"cmd+{c}" for c in chars)))
     assert out["ok"] is True and out["steps"] == len(chars), out
     source = CHORD.read_text(encoding="utf-8")
-    for n, char in enumerate(chars):
-        argv = [a.decode() for a in (out_dir / str(n)).read_bytes().split(b"\0")[:-1]]
+    recorded = [[a.decode() for a in (out_dir / str(n)).read_bytes().split(b"\0")[:-1]] for n in range(len(list(out_dir.iterdir())))]
+    lookups = [argv for argv in recorded if '"op":"resolve"' in argv[-1]]  # the sequence's characters, looked up first
+    assert len(lookups) == 1 and json.loads(lookups[0][-1])["ops"][0]["command_chars"] == chars, lookups
+    for argv, char in zip([argv for argv in recorded if argv not in lookups], chars):
         assert argv == ["-l", "JavaScript", "-e", source, char], (char, argv[-1:])
-    assert all('"ops":' not in argv[-1] for argv in calls)
+    assert all('"ops":' not in argv[-1] or '"op":"resolve"' in argv[-1] for argv in calls), "no step went through the input program"
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("osacompile"), reason="JavaScript for Automation is macOS")

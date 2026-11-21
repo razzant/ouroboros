@@ -311,8 +311,10 @@ def test_local_key_commands_are_prepared_once_before_activation(desktop, monkeyp
     desktop._native = native
     desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
     out = json.loads(desktop.key(keys="down A cmd+A", app="Editor"))
-    assert out["ok"] is True and sent == [mac_input.argv([{"op": "keys", "mods": [], "code": 125}]),
-                                          mac_input.argv([{"op": "keys", "mods": [], "char": "A"}]), plugin.command_chord_argv("a")]
+    # First one lookup of every character the sequence names (typing and Command planes), posting nothing.
+    assert sent[0] == mac_input.argv([{"op": "resolve", "chars": ["A"], "command_chars": ["a"]}])
+    assert out["ok"] is True and sent[1:] == [mac_input.argv([{"op": "keys", "mods": [], "code": 125}]),
+                                              mac_input.argv([{"op": "keys", "mods": [], "char": "A"}]), plugin.command_chord_argv("a")]
     assert not hasattr(desktop, "_last_base_raw")
 
 
@@ -358,15 +360,23 @@ def test_unavailable_x11_validation_is_not_success(desktop, monkeypatch, error):
 
 def test_mac_local_and_ssh_share_real_virtual_key_codes():
     """kVK_* codes from HIToolbox Events.h (layout-independent); a character is looked up in the active layout by the
-    program itself. The media and brightness names the former helper sent as system events have no virtual key code
-    and are refused rather than claimed."""
+    program itself. The eleven media, brightness and keyboard-light names the former helper (cliclick) took are the
+    NX system key types a keyboard's media keys send; a modifier alone is pressed as a modifier (its flag on the way
+    down), not as a plain key without flags. A name no table has is still refused."""
+    systems = {"volume-up": 0, "volume-down": 1, "brightness-up": 2, "brightness-down": 3, "mute": 7, "play-pause": 16,
+               "play-next": 17, "play-previous": 18, "keys-light-up": 21, "keys-light-down": 22, "keys-light-toggle": 23}
+    for name, n in systems.items():
+        assert mac_input.key_op([], name) == {"op": "keys", "mods": [], "system": n}, name
+    assert mac_input.key_op(["shift"], "mute", hold_ms=100) == {"op": "hold", "mods": ["shift"], "ms": 100, "system": 7}
+    for alone in ("shift", "cmd", "alt", "ctrl", "fn"):
+        assert mac_input.key_op([], alone) == {"op": "keys", "mods": [alone]}, alone
     assert mac_input.key_op(["cmd"], "a") == {"op": "keys", "mods": ["cmd"], "char": "a"}
     assert mac_input.key_op([], "A") == {"op": "keys", "mods": [], "char": "A"}
     for key, code in [("num-enter", 76), ("f16", 106), ("f1", 122), ("return", 36), ("fwd-delete", 117), ("page-down", 121)]:
         assert mac_input.key_op([], key) == {"op": "keys", "mods": [], "code": code}
     assert mac_input.key_op(["cmd"], "shift", hold_ms=200) == {"op": "hold", "mods": ["cmd", "shift"], "ms": 200}
     assert mac_input.key_op([], "space", hold_ms=50) == {"op": "hold", "mods": [], "ms": 50, "code": 49}
-    for key in ["invalid-name", "f35", "XF86AudioPlay", "play-pause", "keys-light-up"]:
+    for key in ["invalid-name", "f35", "XF86AudioPlay", "play", "keys-light"]:
         with pytest.raises(ValueError):
             mac_input.key_op([], key)
 
@@ -601,7 +611,8 @@ def test_ssh_super_modifier_preserves_existing_mapping(desktop):
     desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, "", "")
     out = json.loads(desktop.key(keys="super+a meta+b"))
     assert out["ok"] is True  # both name Command: the Command chord, its program and character quoted word by word
-    for command, char in zip(commands, "ab"):
+    assert '"op":"resolve"' in commands[0] and "osascript -l JavaScript -e" in commands[0], "one lookup first, over SSH"
+    for command, char in zip(commands[1:], "ab"):
         assert shlex.join(plugin.command_chord_argv(char, remote=True)) + ";" in command and '"ops":' not in command
 
 

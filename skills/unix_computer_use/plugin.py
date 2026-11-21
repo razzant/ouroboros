@@ -1205,7 +1205,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                     # Menus match the Command plane, not the typing plane; reuse paste's layout resolver.
                     prepared.append(command_chord_argv(base, remote=backend == "ssh_macos"))
                 else:
-                    op = mac_input.key_op(held, aliases.get(low, low) if hold_ms else base, hold_ms=hold_ms)
+                    op = mac_input.key_op(held, aliases.get(low, low) if hold_ms or low in aliases else base, hold_ms=hold_ms)
                     timeout = max(12, hold_ms // 1000 + 8) if hold_ms else (30 if backend == "ssh_macos" else _TIMEOUT_SEC)
                     prepared.append(mac_input.argv([op], remote=backend == "ssh_macos", budget_ms=timeout * 1000 - 2000))
                 if name == "local" and not _which(prepared[-1][0]):
@@ -1260,6 +1260,8 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         except ValueError as exc:
             return _json({"ok": False, "reason": "invalid_key_sequence", "error": str(exc),
                           "steps_done": 0, "steps_total": len(steps), "dispatched": False, "note": "the input was not sent"})
+        if len(prepared) > 1 and (unknown := self._unresolved_keys(prepared, connection)):  # before any switch or step
+            return _json({**unknown, "steps_done": 0, "steps_total": len(steps), "keys": combo})
         # Raising the target and sending each chord are independent actions of this call.
         refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection, ask_stop=True)
         if refusal:
@@ -1316,6 +1318,17 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         if len({json.dumps(r, sort_keys=True) if isinstance(r, dict) else "unknown" for r in recipients}) > 1:
             payload["steps_delivered_to"] = recipients
         return self._key_result(payload)
+
+    def _unresolved_keys(self, prepared, connection) -> dict[str, Any] | None:
+        """A Mac key sequence's characters, all looked up in the active layout by one call that posts nothing, so a
+        character no key gives refuses the whole sequence before its first step (``mac_input.resolve_argv``)."""
+        name, conn = connection
+        cmd, _chars, _command = mac_input.resolve_argv(prepared, remote=name != "local")
+        if cmd is None:
+            return None
+        import shlex
+        rc, out, err = self._try(cmd) if name == "local" else self._ssh_run(conn, shlex.join(cmd), timeout=30)
+        return mac_input.resolve_refusal(rc, out, err)
 
     def hold_key(self, *, keys: str, duration_ms: int = 500, app: str = "", raise_policy: str = "allow") -> str:
         connection = self._connection_snapshot()
@@ -1456,8 +1469,8 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
             return stopped  # a key chord, the first included: the host's Stop, read last before its input
         rc, stdout, stderr = self._try(cmd, timeout=timeout)
         if rc != 0:
-            payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": cmd,
-                       "dispatched": rc != _NOT_LAUNCHED}
+            payload = {"ok": False, "error": stderr.strip() or stdout.strip() or f"exit {rc}", "cmd": mac_input.shown(cmd),
+                       "dispatched": rc != _NOT_LAUNCHED, **mac_input.answer_fields("", stderr)}
             if rc != _NOT_LAUNCHED:
                 payload["returncode"] = rc
             else:
@@ -1473,10 +1486,11 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                     payload["observed_effect"] = True
                     payload["clipboard_done"] = True
         else:
-            payload = {"ok": True, "cmd": cmd, "observed_effect": True, "dispatched": True, **mac_input.answer_fields(stdout)}
+            payload = {"ok": True, "cmd": mac_input.shown(cmd), "observed_effect": True, "dispatched": True,
+                       **mac_input.answer_fields(stdout)}
             if extra:
                 payload.update(extra)
-        payload = self._finish(payload, step, stderr)
+        payload = mac_input.posted_effect(self._finish(mac_input.posted_effect(payload), step, stderr))
         ctx["front_last"] = step.get("front_last")  # the call's last front read, for a sequence's aggregate
         return payload
 
@@ -1554,7 +1568,7 @@ def register(api: Any) -> None:
     api.register_tool("mouse_up", impl.mouse_up, description="Release a held mouse button at the pointer without coordinates or observation_id. With screenshot-space coordinates, observation_id is required unless raw=true. Never changes which app is in front.", schema={"type": "object", "properties": {**_xy, "button": {"type": "string", "default": "left"}}}, timeout_sec=60)
     api.register_tool("cursor_position", lambda: impl.cursor_position(), description="Report the current pointer position in native input coordinates.", schema={"type": "object", "properties": {}}, timeout_sec=10)
     api.register_tool("type_text", impl.type_text, description="Type text into the focused field of the frontmost app, or of app=. raise_policy=never requires app already in front and never activates it. On a local or SSH Mac text goes as Unicode key events in any layout (method, chars_sent, override_only say how); via=paste writes the clipboard and pastes there instead (long text, or an app that ignores typed text; the clipboard is replaced); an OSWorld guest pastes such text through its clipboard by itself.", schema={"type": "object", "properties": {"text": {"type": "string"}, "interval_ms": {"type": "integer", "default": 0}, **_input_app, "via": {"type": "string", "default": ""}}, "required": ["text"]}, timeout_sec=180)
-    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п); other combos type through the layout and may differ; all steps are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
+    api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п), other combos the key giving the character alone or with Shift/Option, media names (play-pause, volume-up, mute, brightness-up, keys-light-up, ...) the system key; all steps and their characters are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("hold_key", impl.hold_key, description="Hold a key or modifier combo for a duration (50-10000 ms). " + _targeted, schema={"type": "object", "properties": {"keys": {"type": "string"}, "duration_ms": {"type": "integer", "default": 500}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). up/down/left/right (Wayland: up/down), at the pointer on macOS. The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
     api.register_tool("wait", impl.wait, description="Sleep up to 10s so the UI can settle before the next observation.", schema={"type": "object", "properties": {"ms": {"type": "integer", "default": 500}}}, timeout_sec=12)

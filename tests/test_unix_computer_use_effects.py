@@ -57,7 +57,8 @@ def png(path: Path) -> None:
 def is_probe(argv: list[str]) -> bool:
     """A place fact the skill reads around an input (who is in front, the native helper, a window listing)."""
     return (argv[:1] == ["lsappinfo"] or argv[:2] == ["xdotool", "getactivewindow"] or argv[:2] == ["wmctrl", "-lpxG"]
-            or any(str(part).endswith("macos_native.py") for part in argv))
+            or any(str(part).endswith("macos_native.py") for part in argv)
+            or (argv[:1] == ["osascript"] and '"op":"resolve"' in argv[-1]))  # a key sequence's lookup: posts nothing
 
 
 class Transport:
@@ -143,7 +144,8 @@ def test_a_successful_mac_input_carries_the_mark(tmp_path, monkeypatch, tool, ar
     tools, transport = desktop(tmp_path, monkeypatch, "macos", tools=MAC)
     result = receipt(tools[tool](**args))
     assert result["ok"] is True and result["observed_effect"] is True and result["method"] == "cg_events", result
-    assert [posted(argv) for argv in transport.calls] == [ops] and result["cmd"] == transport.calls[0], "the receipt names what ran"
+    assert [posted(argv) for argv in transport.calls] == [ops], transport.calls
+    assert result["cmd"][:4] == transport.calls[0][:4] and json.loads(result["cmd"][-1])["ops"] == ops, "the receipt names what ran"
 
 
 @pytest.mark.parametrize("outcome", [1, TIMEOUT])

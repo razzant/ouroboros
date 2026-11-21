@@ -356,6 +356,54 @@ def test_ssh_input_refused_by_the_remote_mac_is_an_honest_failure(tmp_path, monk
     assert out["dispatched"] is False and out["refusal"]["grant"] == "post_events" and out["refusal"]["fixable_by"] == "owner"
 
 
+def test_ssh_cursor_position_answers_fields_as_locally_and_dispatches_nothing(tmp_path, monkeypatch):
+    module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (0, '{"x":140,"y":-26}\n'))
+    out = receipt(api.tools["cursor_position"]())
+    assert (out["ok"], out["x"], out["y"]) == (True, 140, -26) and out["coordinate_space"] == "input (macOS logical points)", out
+    assert "dispatched" not in out and "observed_effect" not in out and '"op":"position"' in calls[-1][-1]
+    module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (0, "not a position\n"))
+    unread = receipt(api.tools["cursor_position"]())
+    assert "x" not in unread and unread["output"] == "not a position", unread
+
+
+def test_an_ssh_text_that_posts_nothing_has_no_mark_and_one_that_posts_does(tmp_path, monkeypatch):
+    def answering(posted):
+        def script(command):
+            if "lsappinfo list" in command:
+                return 0, LISTING + "__FRONT__" + info_line(SAFARI)
+            answer = json.dumps({"posted": posted, "method": "unicode_events", "chars_total": posted // 2,
+                                 "chars_sent": posted // 2, "override_only": 0})
+            return 0, f"__FRONT_BEFORE__{info_line(SAFARI)}\n{answer}\n__FRONT_AFTER__{info_line(SAFARI)}\n"
+        return script
+    module, api, calls = ssh(tmp_path, monkeypatch, answering(0))
+    empty = receipt(api.tools["type_text"](text=""))
+    assert empty["ok"] is True and "observed_effect" not in empty and empty["posted"] == 0, empty
+    module, api, calls = ssh(tmp_path, monkeypatch, answering(4))
+    typed = receipt(api.tools["type_text"](text="hi"))
+    assert typed["observed_effect"] is True and (typed["chars_sent"], typed["method"]) == (2, "unicode_events"), typed
+
+
+def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, monkeypatch):
+    """Windows stops a whole command line at 32,767 characters and the input program alone is about 15,000: a long
+    text would never leave the host. Such a command goes to the remote /bin/sh on ssh's stdin, the same words."""
+    module = load_plugin()
+    remote = sys.modules[module.__name__ + ".remote"]
+    seen = []
+
+    def run(cmd, *a, **k):
+        seen.append((list(cmd), k.get("input")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    impl = module._ComputerUse(API(tmp_path / "state"))
+    conn = {"backend": "ssh_macos", "host": "mac.invalid", "user": "owner"}
+    impl._ssh_run(conn, "echo short")
+    long_command = "printf %s " + "x" * (remote._SSH_ARGV_CHARS + 1)
+    impl._ssh_run(conn, long_command)
+    (short_argv, short_input), (long_argv, long_input) = seen
+    assert short_argv[-1] == "echo short" and short_input is None
+    assert long_argv[-1] == "/bin/sh -s" and long_input == long_command and long_command not in long_argv
+
+
 def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI))
     out = receipt(api.tools["type_text"](text="Привет 'мир'", via="paste"))

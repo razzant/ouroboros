@@ -2,10 +2,11 @@
 /* Runs skills/unix_computer_use/input_events.js byte for byte with inert stand-ins for the parts of the JavaScript for
    Automation bridge it uses. Node has no ObjC, AppKit, Carbon or CoreGraphics: nothing here can post input, move the
    pointer or read a real keyboard layout. A scenario says what the stand-ins answer: "spec" (the one word osascript
-   hands run; "argv" overrides the whole list), "layout" ({id, planes: {state: {code: characters}}}), "post": false
+   hands run; "argv" overrides the whole list), "layout" ({id, planes: {state: {code: characters}}, dead: {state:
+   [codes]}}: a dead key answers its spacing character only when asked without dead keys), "post": false
    (no right to post), "pointer" ([x, y] in AppKit's bottom-left points) with "screen_height", "held_buttons" (button
    numbers the HID state holds), "fail" ("event:2" = the third event the system is asked for is not made, "post:1" =
-   the second CGEventPost throws), "tick_ms" (how far the clock moves per bridge call; delays move it by their length).
+   the second CGEventPost throws; a list for several), "tick_ms" (how far the clock moves per bridge call; delays move it by their length).
    The trace says what the program did: every posted event with its fields, what is still held, what leaked.
    usage: node input_events_inert.cjs <program.js> '<JSON list of scenarios>'  ->  a JSON list of traces on stdout */
 const fs = require("fs");
@@ -13,12 +14,17 @@ const vm = require("vm");
 
 const UTF16LE = 0x94000100; // NSUTF16LittleEndianStringEncoding
 const KEYBOARD_FLAGS = 0x80000; // a new key event carries what the keyboard holds; here Option is held
+// ...and, as CoreGraphics does, the class bits of its key: arrows Fn and NumericPad, F-keys and the navigation block
+// Fn, the keypad NumericPad (the program must keep these and drop the held Option).
+const CLASS = (code) => ([123, 124, 125, 126].includes(code) ? 0xa00000
+  : [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 115, 119, 116, 121, 117, 114].includes(code) ? 0x800000
+    : [65, 67, 69, 71, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92].includes(code) ? 0x200000 : 0);
 
 function trace(program, scenario) {
   const t = {calls: [], log: [], posted: [], delays: [], error: null, returned: null};
   const owned = [], held = new Set(), bound = new Set(), count = {event: 0, post: 0};
   let clock = 0;
-  const fault = (what) => scenario.fail === `${what}:${count[what]++}`;
+  const fault = (what) => [].concat(scenario.fail || []).includes(`${what}:${count[what]++}`); // one or a list
   const own = (kind, fields) => { const object = {kind, alive: true, fields: {}, ...fields}; owned.push(object); return object; };
   const live = (object, kind, use) => {
     if (!object || object.kind !== kind || !object.alive) throw new Error(`${use}: no live ${kind}`);
@@ -31,7 +37,9 @@ function trace(program, scenario) {
   const event = (fields) => (fault("event") ? null : own("CGEvent", fields));
   const deliver = (tap, e) => {
     const f = e.fields, row = {tap, tag: f[42] === undefined ? null : f[42]};
-    if (e.type === "key") {
+    if (e.type === "system") {
+      Object.assign(row, {system: e.n, down: e.down, flags: e.flags, subtype: e.subtype});
+    } else if (e.type === "key") {
       Object.assign(row, {key: e.code, down: e.down, flags: e.flags});
       if (e.unicode !== undefined) row.unicode = e.unicode;
       if (e.down) held.add(`k${e.code}`); else held.delete(`k${e.code}`);
@@ -55,8 +63,9 @@ function trace(program, scenario) {
     CFDataGetBytePtr: (data) => ({kind: "uchr", owner: live(data.owner, "TISInputSource", "CFDataGetBytePtr")}),
     LMGetKbdType: () => 198,
     UCKeyTranslate: (layout, code, action, mods, kbdType, options, dead, max, length, text) => {
-      const {planes} = live(layout.owner, "TISInputSource", "UCKeyTranslate on layout data").layout;
-      const out = ((planes[mods] || {})[code] || "").slice(0, max);
+      const {planes, dead: deadKeys} = live(layout.owner, "TISInputSource", "UCKeyTranslate on layout data").layout;
+      const isDead = options === 0 && ((deadKeys || {})[mods] || []).includes(code);
+      const out = isDead ? "" : ((planes[mods] || {})[code] || "").slice(0, max);
       Buffer.from(out, "utf16le").copy(text.bytes);
       length.bytes[0] = out.length;
       return 0;
@@ -75,7 +84,7 @@ function trace(program, scenario) {
     },
     CGEventCreateKeyboardEvent: (source, code, down) => {
       live(source, "CGEventSource", "CGEventCreateKeyboardEvent");
-      return event({type: "key", code, down, flags: KEYBOARD_FLAGS});
+      return event({type: "key", code, down, flags: KEYBOARD_FLAGS | CLASS(code)});
     },
     CGEventCreateScrollWheelEvent2: (source, units, wheels, dy, dx, dz) => {
       live(source, "CGEventSource", "CGEventCreateScrollWheelEvent2");
@@ -107,7 +116,18 @@ function trace(program, scenario) {
       initWithString: (value) => string(String(value)),
     }},
     NSUTF16LittleEndianStringEncoding: UTF16LE,
-    NSEvent: {get mouseLocation() { t.calls.push("mouseLocation"); return {x: px, y: py}; }},
+    NSEvent: {
+      get mouseLocation() { t.calls.push("mouseLocation"); return {x: px, y: py}; },
+      // A system key: the NSEvent owns its CGEvent (not the program's to release; the stand-in refuses a CFRelease).
+      otherEventWithTypeLocationModifierFlagsTimestampWindowNumberContextSubtypeData1Data2:
+        (type, at, flags, time, window, context, subtype, data1, data2) => {
+          if (type !== 14 || subtype !== 8 || data2 !== -1 || typeof at.x !== "number") throw new Error("not a system-defined key event");
+          if (fault("event")) return null;
+          const cg = {kind: "CGEvent", alive: true, fields: {}, type: "system", n: data1 >> 16, down: ((data1 >> 8) & 0xff) === 0xa,
+                      flags, subtype};
+          return {CGEvent: cg};
+        },
+    },
     NSScreen: {screens: {objectAtIndex: (i) => ({frame: {origin: {x: 0, y: 0}, size: {width: 1728, height: scenario.screen_height || 1117}}})}},
   };
   const ObjC = {

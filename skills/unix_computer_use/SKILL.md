@@ -400,14 +400,18 @@ Input receipts (the same contract on every backend):
   has `delivered_to`.
 - On a local or SSH Mac, the input program (`input_events.js`) and the paste
   chord program check before posting anything whether the process may post
-  input events (`CGPreflightPostEventAccess`, prompt-free) and whether every key
-  a chord names exists in the active keyboard layout; either refusal posts
+  input events (`CGPreflightPostEventAccess`, prompt-free; the grant first) and
+  whether every key a chord names exists in the active keyboard layout (a key
+  sequence looks all its characters up in one call that posts nothing, before
+  its first step, so `key("return Ж")` on ABC sends no Return); either refusal posts
   nothing, warns on stderr and exits 0. Such receipts are `ok: false` with
   `reason: permission_denied` / `untypable_characters`, no input mark and, for
   the input and Command chord programs, `dispatched: false` (a completed
   clipboard write or switch before it keeps its own, `clipboard_done` /
   `activation_done`); the error names what was not sent (the input, a shortcut,
-  the paste chord). A missing grant also carries one structured field,
+  the paste chord). Every refusal for a missing grant carries one structured field
+  (input, display and window screenshots, the window session, `ax_tree` and
+  `element_act` without Accessibility alike),
   `refusal`: `{"kind": "permission", "grant": "post_events" | "accessibility" |
   "screen_recording", "fixable_by": "owner", "where": "System Settings > Privacy
   & Security > …"}`. Nothing asks the system to show a grant prompt. A local
@@ -421,7 +425,11 @@ Input receipts (the same contract on every backend):
   no key of the active layout gives, sent on a neutral key with only their
   Unicode string; an application that ignores an event's string (some remote
   desktop clients, virtual machines, games) drops exactly those, so use
-  `via=paste` there.
+  `via=paste` there. Every input program receipt says how many events it
+  `posted`: one that posted nothing (an empty text) carries no input mark, and
+  one that stopped part-way (its own deadline, a failed post) keeps the mark
+  with the counts of what went out. The receipt's `cmd` shows the operations as
+  readable JSON, the text as typed.
 - A switch that happened before a failed or dropped input keeps the mark
   (`activation_done`): the front changed, which is an observed effect.
 - An input of several steps that fails after earlier steps succeeded returns
@@ -503,9 +511,11 @@ Backend matrix (honest limitations):
   `mouse_down`/`mouse_up` take any button, and a `move` while a button is held
   is a drag; `cursor_position` reads the pointer without posting anything;
   `scroll` posts wheel lines at the pointer (up/down/left/right, one line per
-  step; the window under the pointer receives them). `hold_key` holds any key
-  or modifier combo, and the program lets up everything it pressed in its
-  `finally`, under its own deadline below the helper's timeout. In `key` combos
+  step). The window under the pointer receives them, whichever application
+  `app=` verified in front: move the pointer over the window first (`move`).
+  `hold_key` holds any key or modifier combo, and on an error or at its own
+  deadline (below the helper's timeout) the program posts the prepared release
+  of everything it pressed, in its `catch`, last pressed first. In `key` combos
   the base key is tapped while modifiers are held (`cmd+s` = hold cmd, tap s).
   On a local or SSH Mac and on X11 a letter's case under a modifier adds
   no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
@@ -517,15 +527,25 @@ Backend matrix (honest limitations):
   shortcut by that character: under a Cyrillic layout `cmd+g`, while its own
   letters (`cmd+п`) are refused, never typed. A missing key or posting grant
   refuses before posting. Other combos with a character press the key that
-  gives it in the active layout alone or with Shift (Shift is then added); a
-  character the layout lacks is refused before anything is posted. Named keys
-  are layout-independent virtual key codes (`return`, `tab`, arrows, `home`,
-  `end`, `page-up`/`page-down`, `f1`–`f16`, the keypad); the media and
-  brightness keys have none and are refused.
+  gives it in the active layout alone, with Shift, with Option or with both
+  (those are then added; `å` on ABC is Option+A); a dead key is never that key,
+  and a character the layout lacks is refused before anything is posted. A
+  modifier alone (`key("shift")`) is pressed as a modifier, its flag on the way
+  down. Named keys are layout-independent virtual key codes (`return`, `tab`,
+  arrows, `home`, `end`, `page-up`/`page-down`, `f1`–`f16`, the keypad), posted
+  with the class flags a keyboard gives them (arrows Fn and NumericPad, F-keys
+  and the navigation block Fn, the keypad NumericPad), which Ctrl+arrow
+  shortcuts need, never a modifier someone holds. `mute`, `volume-up`,
+  `volume-down`, `brightness-up`, `brightness-down`, `play-pause`,
+  `play-next`, `play-previous`, `keys-light-up`, `keys-light-down` and
+  `keys-light-toggle` are the system key events a keyboard's media keys send.
   `type_text` sends each grapheme as one key-down/up pair carrying its own
   Unicode string, in any layout and script (Cyrillic under ABC, Latin under a
   Russian layout, emoji, accents), on the key that gives the character when
-  the layout has one; the receipt says how (see "Input receipts").
+  the layout has one (a dead key never is: such a character goes on the
+  neutral key with its string); a line break (`\n`, `\r` or CRLF) is Return.
+  The receipt says how (see "Input receipts"). A command too long for the
+  host's command line (Windows) reaches an SSH Mac on ssh's stdin instead.
   `key(cmd+v)` sends only the shortcut, without changing the clipboard.
   `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and

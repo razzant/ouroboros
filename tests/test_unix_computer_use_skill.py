@@ -611,6 +611,8 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", failing)
     degraded = json.loads(impl.ax_tree())
     assert degraded["ok"] is False and degraded["reason"] == "accessibility_untrusted" and "marks" not in degraded
+    assert degraded["refusal"] == {"kind": "permission", "grant": "accessibility", "fixable_by": "owner",
+                                   "where": "System Settings > Privacy & Security > Accessibility"}
 
 
 def test_coerce_point_normalizes_the_shapes_models_actually_emit():
