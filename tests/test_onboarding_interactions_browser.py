@@ -209,6 +209,7 @@ def test_wizard_saved_server_rows_bind_their_secret_controls_once(subscription_u
 
 
 def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_ui):
+    expect = pytest.importorskip("playwright.sync_api").expect
     page = _open_wizard(subscription_ui)
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('[data-collapse="local-model"] > summary').click()
@@ -247,6 +248,17 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
         assert len(strip['labels']) >= 2 and all(strip['labels']), strip
         assert strip['pressed'] == [strip['value']], strip
         assert strip['help'], strip
+        # The same group as a reader meets it: found through the accessibility tree (role lookups skip aria-hidden
+        # and visibility:hidden nodes), visible, not faded out, with each named choice reachable and one pressed.
+        holder = page.locator(f'[data-connection-choice]:has([id="{strip["id"]}"])')
+        group = holder.get_by_role("group", name=strip['name'], exact=True)
+        expect(group).to_have_count(1)
+        expect(group).to_be_visible()
+        assert group.evaluate("el => { for (let n = el; n; n = n.parentElement) "
+                              "if (Number(getComputedStyle(n).opacity) === 0) return false; return true; }"), strip
+        for label in strip['labels']:
+            expect(group.get_by_role("button", name=label, exact=True)).to_be_visible()
+        expect(group.get_by_role("button", pressed=True)).to_have_count(1)
     key.fill("")
     assert not page.evaluate(strip_shown)
     for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
