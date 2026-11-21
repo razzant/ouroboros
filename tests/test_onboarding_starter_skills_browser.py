@@ -63,17 +63,31 @@ def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscri
     heads = [text.split("\n")[0].strip() for text in page.locator(".skills-starter-group h3").all_inner_texts()]
     assert [head.rstrip("0123456789").strip() for head in heads] == [
         "Built in — comes with the app", "Messaging", "Documents", "Search & research", "About Ouroboros", "Writing & review"]
-    assert page.locator(".skills-starter-card.active").count() == 6
+    assert page.locator(".skills-starter-card input:checked").count() == 6
+    # A ticked card keeps the neutral body (the box says it), the same in both themes.
+    page.mouse.move(0, 0)  # no card under the pointer: a hover deepens one
+    assert len(set(page.locator(".skills-starter-card").evaluate_all(
+        "cards => cards.map((card) => getComputedStyle(card).backgroundColor)"))) == 1
+    # Inside a group what works at once leads; what needs a key comes last (here Telegram after Computer control).
+    assert page.locator('.skills-starter-group').first.locator('[data-starter-item]').evaluate_all(
+        "boxes => boxes.map((box) => box.dataset.starterItem)") == ["builtin/unix_computer_use", "builtin/telegram"]
     telegram = _card(page, "builtin/telegram").inner_text()
     assert "Telegram" in telegram and "Chat with Ouroboros from your phone in Telegram" in telegram
-    assert "Needs a Telegram bot token" in telegram and "Built in" in telegram
+    assert "Needs a Telegram bot token" in telegram and "Built in" not in telegram and "Official" not in telegram
+    needs = _card(page, "builtin/telegram").locator(".skills-starter-needs")
+    pitch = _card(page, "builtin/telegram").locator(".skills-starter-pitch")
+    assert needs.evaluate("el => getComputedStyle(el).color") != pitch.evaluate("el => getComputedStyle(el).color")
+    assert page.locator('[data-mark="official"], .skills-chip').count() == 0, "where a skill comes from is said once"
+    assert page.get_by_text("Official skills from the Ouroboros hub: its maintainer vouches for each release.").count() == 1
     # Without the catalog's words the card keeps the skill's name and its author's text; a key shows in words.
     assert "unix_computer_use" in _card(page, "builtin/unix_computer_use").inner_text()
     assert "Uses your OpenRouter API Key" in _card(page, "ouroboros/perplexity").inner_text()
     assert _card(page, "ouroboros/keenable").locator(".skills-starter-needs").count() == 0
     trust = page.locator(".skills-starter-trust")
-    assert trust.inner_text().startswith("They install without review — you trust Ouroboros. Skills that need a key wait for it.")
-    assert trust.locator("[data-starter-trust]").count() == 0, "how they install is one quiet line until opened"
+    assert trust.inner_text().startswith(
+        "Official skills install without a review; skills from the community are reviewed first.")
+    assert trust.locator("[data-starter-trust]").count() == 0, "how they install is one plain line until opened"
+    assert "Without review" not in page.locator(STEP).inner_text() and "Review each" not in page.locator(STEP).inner_text()
     capture(page, f"skills-step-{width}")
 
     page.locator('[data-starter-item="ouroboros/pdf_tools"]').uncheck()
@@ -105,7 +119,7 @@ def test_summary_change_returns_to_the_step_with_the_ticks_kept(subscription_ui)
     page.locator("[data-starter-change]").click()
     page.wait_for_selector(".skills-starter-card")
     assert page.locator(".step-title").inner_text() == "Skills"
-    assert page.locator(".skills-starter-card.active").count() == 0
+    assert page.locator(".skills-starter-card input:checked").count() == 0
     page.locator('[data-starter-item="ouroboros/duckduckgo"]').check()
     page.click("#next-btn")
     page.locator(ROW).wait_for()
@@ -204,8 +218,7 @@ def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, w
     top = page.evaluate("() => document.querySelector('[data-starter-card=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
     assert abs(top - anchor) <= 1, (anchor, top)
     assert page.locator('.skills-starter-list[data-arrive]').count() == 0, 'the hub brings no second entrance'
-    assert _card(page, 'builtin/telegram').locator('[data-mark="official"]').count() == 0  # one mark: Built in
-    assert _card(page, 'ouroboros/duckduckgo').locator('[data-mark="official"]').count() == 1
+    assert page.get_by_text('Official skills from the Ouroboros hub: its maintainer vouches for each release.').count() == 1
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     capture(page, f'skills-{engine}-{width}-{theme}-ready')
     page.click('#next-btn')

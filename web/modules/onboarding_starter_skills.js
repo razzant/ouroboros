@@ -1,15 +1,16 @@
 // The first-run wizard's Skills step, between Consciousness and Review limits (owner 2026-11-21: «показать что есть
 // много крутых скилов анимированным списком, но юзер может поснимать галочки»; it replaces the Summary row his 4A of
 // 2026-10-17 chose). The server offers it only where completion honors the ticks (`stepOrder`: this data root's
-// starter list never ran). One categorized list of cards, built-ins first, each card its human title, one line of
-// what it gives and the prerequisite in words; the maintainer's recommended skills are ticked. The cards arrive in
-// one short sequence on entering the step, never on a repaint (DESIGN §7). How the hub's skills install is one quiet
-// line under the list. Nothing installs here: the one atomic Finish carries the ticked ids and the trust choices,
-// and the host installs them in the background after start. Summary shows one row back to the step. A list that
-// cannot be read leaves the host's defaults in place and says so.
+// starter list never ran). One categorized list of cards, built-ins first: each card its human title, one line of
+// what it gives and the prerequisite in words; the box alone says it is ticked (the maintainer's recommended ones
+// are). Where they come from is said once per source: the built-in group's head and one line over the hub's. Inside a
+// group what works at once leads and what needs a key comes last. The cards arrive in one short sequence on entering
+// the step, never on a repaint (DESIGN §7). How the hub's skills install is one plain line under the list, its
+// choices behind it. Nothing installs here: the one atomic Finish carries the ticked ids and the trust choices, and
+// the host installs them in the background after start. Summary shows one row back to the step. A list that cannot
+// be read leaves the host's defaults in place and says so.
 import { skillSourcesApi } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-import { officialMarkHtml } from './skill_presentation.js';
 
 const BUILT_IN_TITLE = 'Built in — comes with the app';
 const ARRIVE_LAST = 12;  // cards from the twelfth on arrive together, so the whole entrance stays under a second
@@ -43,6 +44,11 @@ export function needsText(item, keyLabels = {}) {
     const more = keys.length - 1;
     return keys.length ? `Uses your ${keyLabels[keys[0]] || keyWords(keys[0])}${more ? ` and ${more} more setting${more === 1 ? '' : 's'}` : ''}` : '';
 }
+
+// How a hub row's skills are named in the trust line and behind it (Settings › Skill sources names the rows themselves).
+const SOURCE_WORDS = { official: ['Official skills', 'Official skills'], community: ['skills from the community', 'Community skills'] };
+const sourceWords = (row, inLine) => SOURCE_WORDS[row.part]?.[inLine ? 0 : 1] || `${inLine ? 'skills from ' : ''}${row.name}`;
+const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 const quote = (value) => String(value).replace(/["\\]/g, '\\$&');
 const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
@@ -115,34 +121,47 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             ${sub ? `<span class="skills-starter-sub" role="status">${escapeHtml(sub)}</span>` : ''}</span></div>`;
     }
 
+    // Inside a group: recommended skills that work at once, then the rest that do, then those that need something first.
+    const rank = (item) => (needsText(item, keyLabels) ? 2 : 0) + (item.recommended ? 0 : 1);
+    const label = (item) => String(item.title || item.name || '');
+    const shown = (group) => [...group.items].sort((a, b) => rank(a) - rank(b) || label(a).localeCompare(label(b), 'en'));
+
     function cardHtml(item, order) {
         const on = state.ticked.has(item.id);
-        // One mark says where it comes from: the app itself, or the hub's maintainer vouching for this release.
-        const marks = item.builtin ? '<span class="ui-chip skills-chip" data-tone="neutral">Built in</span>'
-            : item.official ? officialMarkHtml({ control: false }) : '';
         const title = String(item.title || '').trim();
         const pitch = String(item.pitch || '').trim();
         const needs = needsText(item, keyLabels);
         // The catalog's own words translate (the interface layer); a name, a skill author's text and a line composed
         // from setting names stay as they are.
         const authored = (own) => (own ? '' : ' data-i18n-authored');
-        return `<label class="wizard-choice skills-starter-card${on ? ' active' : ''}" data-starter-card="${escapeHtml(item.id)}" style="--arrive: ${order}">
-            <span class="skills-starter-head"><input type="checkbox" class="ui-checkbox" data-starter-item="${escapeHtml(item.id)}"${on ? ' checked' : ''}><strong${authored(title)}>${escapeHtml(title || item.name)}</strong><span class="skills-starter-marks">${marks}</span></span>
+        return `<label class="wizard-choice skills-starter-card" data-starter-card="${escapeHtml(item.id)}" style="--arrive: ${order}">
+            <span class="skills-starter-head"><input type="checkbox" class="ui-checkbox" data-starter-item="${escapeHtml(item.id)}"${on ? ' checked' : ''}><strong${authored(title)}>${escapeHtml(title || item.name)}</strong></span>
             <span class="skills-starter-pitch"${authored(pitch)}>${escapeHtml(pitch || item.description || '')}</span>
             ${needs ? `<span class="skills-starter-needs"${authored(typeof item.needs === 'string')}>${escapeHtml(needs)}</span>` : ''}
         </label>`;
     }
 
+    // The hub's rows in plain words, e.g. «Official skills install without a review; skills from the community are
+    // reviewed first»; the two choices per row (Settings' words) wait behind it.
     function trustHtml() {
         if (!state.rows.length) return '';
-        const official = state.rows.find((row) => row.part === 'official') || state.rows[0];
-        const lead = state.trust[official.id] === 'trusted'
-            ? `They install without review — you trust ${official.name || 'Ouroboros'}. Skills that need a key wait for it.`
-            : 'Ouroboros reviews each one before it runs. Skills that need a key wait for it.';
-        const rows = state.rows.map((row) => `<span class="skills-starter-trust-row"><strong>${escapeHtml(row.name)}</strong>
-            ${[['trusted', 'Without review'], ['review', 'Review each']].map(([value, label]) => `<button type="button" class="selection-pill${state.trust[row.id] === value ? ' active' : ''}" aria-pressed="${state.trust[row.id] === value ? 'true' : 'false'}" data-starter-trust="${escapeHtml(row.id)}" data-trust="${value}">${label}</button>`).join('')}</span>`).join('');
-        return `<div class="skills-starter-trust"><p class="skills-starter-sub">${escapeHtml(lead)} <button type="button" class="skills-starter-change" data-starter-trust-toggle aria-expanded="${state.trustOpen}">${state.trustOpen ? 'Hide' : 'Change'}</button></p>
+        const say = (trusted, verb) => {
+            const names = state.rows.filter((row) => (state.trust[row.id] === 'trusted') === trusted).map((row) => sourceWords(row, true));
+            return names.length ? `${names.join(' and ')} ${verb}` : '';
+        };
+        const line = capital([say(true, 'install without a review'), say(false, 'are reviewed first')].filter(Boolean).join('; ')) + '.';
+        const rows = state.rows.map((row) => `<span class="skills-starter-trust-row"><strong>${escapeHtml(sourceWords(row, false))}</strong>
+            ${[['trusted', 'Install without review'], ['review', 'Review each skill']].map(([value, choice]) => `<button type="button" class="selection-pill${state.trust[row.id] === value ? ' active' : ''}" aria-pressed="${state.trust[row.id] === value ? 'true' : 'false'}" data-starter-trust="${escapeHtml(row.id)}" data-trust="${value}">${choice}</button>`).join('')}</span>`).join('');
+        return `<div class="skills-starter-trust"><p class="skills-starter-sub">${escapeHtml(line)} <button type="button" class="skills-starter-change" data-starter-trust-toggle aria-expanded="${state.trustOpen}">${state.trustOpen ? 'Hide' : 'Change'}</button></p>
             ${state.trustOpen ? `${rows}<span class="skills-starter-sub">Suggested choices apply until you choose.</span>` : ''}</div>`;
+    }
+
+    // Said once over the hub's groups, where every skill there is Official (a build's own list may hold others).
+    function sourceLine(order) {
+        const hub = items().filter((item) => !item.builtin);
+        const official = state.rows.find((row) => row.part === 'official');
+        return hub.length && hub.every((item) => item.official)
+            ? `<p class="skills-starter-sub skills-starter-source" style="--arrive: ${order}">Official skills from the ${escapeHtml(official?.name || 'Ouroboros')} hub: its maintainer vouches for each release.</p>` : '';
     }
 
     function stepHtml(arrive) {
@@ -155,8 +174,9 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         // What is still being read stands under the list, where the hub's skills will join it: its going moves no card.
         return `<div class="skills-starter-list"${arrive ? ' data-arrive' : ''}>
             ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status">${countText()}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
-            ${state.groups.map((group) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span>${group.items.length}</span></h3>
-                <div class="wizard-choice-grid skills-starter-cards">${group.items.map((item) => cardHtml(item, Math.min(order++, ARRIVE_LAST))).join('')}</div></section>`).join('')}
+            ${state.groups.map((group, index) => `${group.category !== 'builtin' && !state.groups.slice(0, index).some((g) => g.category !== 'builtin') ? sourceLine(Math.min(order, ARRIVE_LAST)) : ''}
+                <section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span>${group.items.length}</span></h3>
+                <div class="wizard-choice-grid skills-starter-cards">${shown(group).map((item) => cardHtml(item, Math.min(order++, ARRIVE_LAST))).join('')}</div></section>`).join('')}
             ${pending ? `<p class="skills-starter-sub" role="status">${escapeHtml(pending)}</p>` : ''}
             ${trustHtml()}
         </div>`;
@@ -211,7 +231,6 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         state.ticksChanged = true;
         if (box.checked) state.ticked.add(box.dataset.starterItem);
         else state.ticked.delete(box.dataset.starterItem);
-        box.closest('.skills-starter-card')?.classList.toggle('active', box.checked);
         const count = host.querySelector('.skills-starter-count');
         if (count) count.textContent = countText();
     }

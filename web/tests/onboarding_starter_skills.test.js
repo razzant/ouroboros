@@ -63,21 +63,27 @@ test('the step: the contract’s header over one list of cards with titles, pitc
     assert.match(text(html), /^6 of 10 ticked Tick all · Untick all Built in — comes with the app 2/);
     assert.match(html, /<h3 style="--arrive: 0">Built in — comes with the app<span>2<\/span><\/h3>/);
     // The catalog's words translate; a slug and an author's description keep their own words.
-    assert.match(cardOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong>[\s\S]*Built in[\s\S]*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>[\s\S]*<span class="skills-starter-needs">Needs a Telegram bot token<\/span>/);
+    assert.match(cardOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong><\/span>\s*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>\s*<span class="skills-starter-needs">Needs a Telegram bot token<\/span>/);
     assert.match(cardOf(html, 'builtin/unix_computer_use'), /<strong data-i18n-authored>unix_computer_use<\/strong>[\s\S]*<span class="skills-starter-pitch" data-i18n-authored>Desktop control: screenshots/);
     assert.doesNotMatch(cardOf(html, 'ouroboros/keenable'), /skills-starter-needs/, 'its key is optional: no line');
     assert.match(cardOf(html, 'ouroboros/slack-bridge'), /<span class="skills-starter-needs" data-i18n-authored>Uses your Slack bot token and 1 more setting<\/span>/);
-    assert.match(cardOf(html, 'ouroboros/duckduckgo'), /class="wizard-choice skills-starter-card active"[\s\S]*data-starter-item="ouroboros\/duckduckgo" checked/);
-    // One mark per card says where it comes from: Built in for the app's own, Official for the hub's vouched ones.
-    assert.equal((html.match(/>Built in<\/span>/g) || []).length, 2);
-    assert.equal((html.match(/data-mark="official"/g) || []).length, 8);
-    assert.doesNotMatch(cardOf(html, 'builtin/telegram'), /data-mark="official"/);
-    // One quiet line says how the hub's skills install; its choices open in place.
-    assert.match(text(html), /They install without review — you trust Ouroboros\. Skills that need a key wait for it\. Change$/);
-    assert.doesNotMatch(html, /data-starter-trust="/);
+    // A ticked card keeps the neutral body; its box alone says so.
+    assert.match(cardOf(html, 'ouroboros/duckduckgo'), /^class="wizard-choice skills-starter-card"[\s\S]*data-starter-item="ouroboros\/duckduckgo" checked/);
+    assert.doesNotMatch(html, /skills-starter-card active/);
+    // Where they come from is said once per source, never per card: the built-in group's head, one line over the hub's.
+    assert.doesNotMatch(html, /data-mark="official"|skills-chip|skills-starter-marks/);
+    assert.equal((html.match(/Official skills from the Ouroboros hub: its maintainer vouches for each release\./g) || []).length, 1);
+    assert.match(text(html), /Built in — comes with the app 2 .* Official skills from the Ouroboros hub: its maintainer vouches for each release\. Messaging 1/);
+    // Inside a group what works at once leads (recommended first) and what needs something comes last.
+    const order = [...html.matchAll(/data-starter-card="([^"]+)"/g)].map((match) => match[1]);
+    assert.deepEqual(order, ['builtin/unix_computer_use', 'builtin/telegram', 'ouroboros/slack-bridge', 'ouroboros/pdf_tools',
+        'ouroboros/word_tools', 'ouroboros/duckduckgo', 'ouroboros/keenable', 'ouroboros/perplexity', 'ouroboros/memory-atlas', 'ouroboros/anti-slop']);
+    // How the hub's skills install is one line in plain words; its choices open in place, in Settings' words.
+    assert.match(text(html), /Official skills install without a review; skills from the community are reviewed first\. Change$/);
+    assert.doesNotMatch(html, /data-starter-trust="|Without review|Review each/);
     host.handlers.click({ target: target({ '[data-starter-trust-toggle]': {} }) });
     assert.match(host.innerHTML, /data-starter-trust-toggle aria-expanded="true">Hide</);
-    assert.match(host.innerHTML, /data-starter-trust="ouroboros-community" data-trust="review">Review each</);
+    assert.match(host.innerHTML, /<strong>Community skills<\/strong>[\s\S]*data-starter-trust="ouroboros-community" data-trust="review">Review each skill</);
     assert.match(text(host.innerHTML), /Suggested choices apply until you choose\.$/);
     assert.deepEqual(step.payload(), {
         starter_skills: ['builtin/telegram', 'ouroboros/pdf_tools', 'ouroboros/word_tools', 'ouroboros/duckduckgo', 'ouroboros/memory-atlas', 'ouroboros/anti-slop'],
@@ -95,14 +101,27 @@ test('Tick all, Untick all (an explicit empty choice), one box and the hub trust
     assert.match(text(host.innerHTML), /^0 of 10 ticked/);
     host.handlers.click({ target: target({ '[data-starter-all]': { dataset: { starterAll: '1' } } }) });
     assert.equal(step.payload().starter_skills.length, 10);
-    const box = { checked: false, dataset: { starterItem: 'ouroboros/keenable' }, closest: (sel) => (sel === '.skills-starter-card' ? { classList: { toggle() {} } } : null) };
+    const box = { checked: false, dataset: { starterItem: 'ouroboros/keenable' }, closest: () => null };
     host.handlers.change({ target: { closest: (sel) => (sel === '[data-starter-item]' ? box : null) } });
     assert.ok(!step.payload().starter_skills.includes('ouroboros/keenable'));
     assert.equal(host.count.textContent, '9 of 10 ticked', 'the count changes in place');
     host.handlers.click({ target: target({ '[data-starter-trust-toggle]': {} }) });
     host.handlers.click({ target: target({ '[data-starter-trust]': { dataset: { starterTrust: 'ouroboros', trust: 'review' } } }) });
     assert.equal(step.payload().skill_source_trust.ouroboros, 'review');
-    assert.match(host.innerHTML, /Ouroboros reviews each one before it runs\./);
+    assert.match(text(host.innerHTML), /Official skills and skills from the community are reviewed first\. Hide/);
+    host.handlers.click({ target: target({ '[data-starter-trust]': { dataset: { starterTrust: 'ouroboros-community', trust: 'trusted' } } }) });
+    assert.match(text(host.innerHTML), /Skills from the community install without a review; Official skills are reviewed first\./);
+});
+
+test('a list where something is not Official says nothing about Official over it', async () => {
+    const mixed = structuredClone(STARTER);
+    mixed.groups[0].items[1].official = false;  // a build's own starter id from another source
+    const step = createStarterSkillsStep({ read: async () => mixed });
+    await step.loading;
+    const host = fakeHost();
+    step.mount(host);
+    assert.doesNotMatch(host.innerHTML, /Official skills from the/);
+    assert.match(host.innerHTML, /data-starter-card="ouroboros\/slack-bridge"/);
 });
 
 test('Summary’s one row: «N will install · Change», and Change returns to the step', async () => {
@@ -129,6 +148,7 @@ test('the cards arrive once per entry: never on a re-render or a refresh, again 
     step.mount(first);
     assert.match(first.innerHTML, /<div class="skills-starter-list" data-arrive>/);
     assert.match(cardOf(first.innerHTML, 'ouroboros/anti-slop'), /style="--arrive: 9"/);
+    assert.match(first.innerHTML, /class="skills-starter-sub skills-starter-source" style="--arrive: 2"/, 'the hub line arrives before its cards');
     const rerendered = fakeHost();  // the wizard re-renders the step it is on: a new node, the same entry
     step.mount(rerendered);
     assert.match(rerendered.innerHTML, /<div class="skills-starter-list">/);
