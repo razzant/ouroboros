@@ -464,7 +464,8 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     assert text.startswith("[recovery after a server fault] The previous server generation ended at " + FAULT_ENDED_AT)
     assert "its event-bus process exited" in text and "restarted itself with the same code" in text
     assert "Tasks held with their saved state (Resume continues each from that state): held-1." in text
-    assert "cancelled by the stop or this start's restore (Continue-eligible): root-cut, root-fenced." in text
+    assert "cancelled by the stop and open to Continue: root-cut, root-fenced." in text
+    assert "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): none." in text
     assert "root-stopped" not in text and "child-cut" not in text and "plain-queued" not in text
     assert "root-owner-restart" not in text and "root-done" not in text
     assert "held-by-an-earlier-quit" not in text, "a hold older than this fault's entry is not this fault's work"
@@ -500,7 +501,54 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     write_task_result(tmp_path, "turn-2", "completed", chat_id=7, result="told the owner")
     monkeypatch.setattr(task_results, "list_task_results", lambda *_a, **_k: (_ for _ in ()).throw(OSError("gone")))
     worker_chat_lane.auto_resume_after_restart()
-    assert "(Continue-eligible): unknown, the cancelled rows could not be read." in turns[2][1]
+    assert "no saved point: unknown, the cancelled rows or cancel intents could not be read." in turns[2][1]
+
+
+def test_a_fault_boot_names_the_roots_this_starts_restore_is_cancelling(tmp_path, monkeypatch):
+    """The real start path: a root still RUNNING in the saved queue is fenced by the real
+    ``restore_pending_from_snapshot`` with a cancel INTENT (the watchdog settles it on a later tick), so the turn
+    composed next names it as being cancelled now, never a false "none". A cancel of an earlier start (its own
+    time before this stop) is not this stop's even when its row was written since; a cut root that is past its hard
+    limit or already continued is named as not open to Continue. Once the watchdog settles the intent, the next
+    turn lists the root as cancelled and open to Continue."""
+    from ouroboros.cancel_intents import active_intent
+    from ouroboros.task_results import write_task_result
+    from supervisor import worker_chat_lane
+    from supervisor.task_lifecycle import sweep_cancel_intents
+
+    queue, workers, turns = _fault_boot(tmp_path, monkeypatch)
+    task = {"id": "root-live", "type": "task", "chat_id": 7, "root_task_id": "root-live", "text": "work"}
+    write_task_result(tmp_path, "root-live", "running", chat_id=7, root_task_id="root-live")
+    workers.RUNNING["root-live"] = {"task": task, "worker_id": 0, "attempt": 1}
+    early = {"source": "snapshot_restore", "reason": "server_shutdown", "requested_at": "2025-12-01T00:00:00+00:00"}
+    write_task_result(tmp_path, "root-earlier-start", "cancelled", root_task_id="root-earlier-start",
+                      cancel_origin=early)  # written now, cancelled by an earlier start
+    write_task_result(tmp_path, "root-done-before", "cancelled", root_task_id="root-done-before",
+                      cancel_origin={"source": "server_shutdown", "reason": "fault"},
+                      continued_by={"successor_task_id": "s-1", "state": "admitted"})
+    assert queue.persist_queue_snapshot(reason="restart")
+    with queue._queue_lock:
+        workers.PENDING.clear()
+        workers.RUNNING.clear()
+    fenced = []
+    queue.restore_pending_from_snapshot(terminalized=fenced)
+    assert fenced == ["root-live"] and active_intent(tmp_path, "root-live")["source"] == "snapshot_restore"
+
+    worker_chat_lane.auto_resume_after_restart()
+    text = turns[0][1]
+    assert "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): " \
+        "root-live." in text
+    assert "open to Continue: none." in text and "root-earlier-start" not in text
+    assert "Cancelled by the stop but not open to Continue: root-done-before (already_continued)." in text
+    [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
+    assert row["cancelling"] == ["root-live"] and row["cancelled"] == []
+
+    assert sweep_cancel_intents(now=time.time() + 3600)["root-live"] == "cancelled"
+    write_task_result(tmp_path, "turn-1", "completed", chat_id=7, result="told the owner")
+    worker_chat_lane.auto_resume_after_restart()
+    assert "cancelled by the stop and open to Continue: root-live." in turns[1][1]
+    assert "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): " \
+        "none." in turns[1][1]
 
 
 def test_a_fault_boot_of_another_generation_gets_its_own_turn_and_lists_a_held_earlier_one(tmp_path, monkeypatch):

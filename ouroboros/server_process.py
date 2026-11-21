@@ -750,37 +750,6 @@ RECOVERY_TRIGGER = "core_lost"  # the ``auto_resume_triggered`` row's trigger fo
 RECOVERY_RECORD = "core_loss_recovery.json"  # state/: the admitted recovery turn and the generation that admitted it
 
 
-def _shutdown_cancel(origin: Dict[str, Any]) -> bool:
-    """A cancel the stop itself made: the teardown's ``server_shutdown`` source, or the next start's restore fence
-    (``supervisor/queue_snapshot.py``: ``source=snapshot_restore`` with ``reason=server_shutdown``). Not the whole
-    ``owner_continue.TECHNICAL_CANCEL_SOURCES`` set: it also holds ``owner_restart``, the owner's own stop."""
-    source = str(origin.get("source") or "")
-    return source == "server_shutdown" or (source == "snapshot_restore"
-                                           and str(origin.get("reason") or "") == "server_shutdown")
-
-
-def cancelled_unsaved_roots(root: pathlib.Path, since: str) -> Optional[List[str]]:
-    """Root tasks the previous generation's stop cancelled without a saved point (``_shutdown_cancel``: its
-    teardown, or this start's restore fence), Continue-eligible, written at or after that generation entered its
-    shutdown. ``None`` when the cancelled rows cannot be read: unknown, never "none". The store's status prefilter
-    bounds the read; children are their roots' business."""
-    from ouroboros.task_results import list_task_results
-
-    try:
-        rows = list_task_results(root, statuses=["cancelled"])
-    except Exception:
-        log.warning("Cancelled rows are unreadable; the recovery turn says so", exc_info=True)
-        return None
-    roots = []
-    for row in rows:
-        origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
-        task_id = str(row.get("task_id") or "")
-        if (task_id and _shutdown_cancel(origin) and str(row.get("root_task_id") or task_id) == task_id
-                and (not since or str(row.get("updated_at") or "") >= since)):
-            roots.append(task_id)
-    return sorted(roots)
-
-
 def _recovery_record_path(root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(root) / "state" / RECOVERY_RECORD
 
@@ -822,24 +791,6 @@ def open_recovery_turn(root: pathlib.Path, died_generation: str) -> str:
     return "" if str(result.get("status") or "") in terminal else task_id
 
 
-def recovery_turn_text(cause: str, ended_at: str, held: List[str], cancelled: Optional[List[str]],
-                       root: pathlib.Path) -> str:
-    """The recovery turn's message: facts, and the owner's one decision (2A: the mind decides and tells once)."""
-    from ouroboros.places import paused_places_sentence
-
-    return "\n".join(filter(None, (
-        f"[recovery after a server fault] The previous server generation ended at {ended_at or 'an unknown time'}: "
-        f"{_fault_cause_words(cause)}. This generation restarted itself with the same code.",
-        "Tasks held with their saved state (Resume continues each from that state): "
-        f"{', '.join(held) if held else 'none'}.",
-        "Interrupted roots with no saved point, cancelled by the stop or this start's restore (Continue-eligible): "
-        + ("unknown, the cancelled rows could not be read." if cancelled is None
-           else f"{', '.join(cancelled) if cancelled else 'none'}."),
-        "You decide what to resume or continue, with your Resume and Continue tools, and tell the owner once.",
-        paused_places_sentence(root),
-    )))
-
-
 def recovery_refused_row(held: List[str]) -> str:
     """Main's one row when no recovery turn was admitted: owner words, no ids, nothing written for the mind. Only a
     later fault boot admits a turn, so the row says what did not happen, never that a look is still to come."""
@@ -853,7 +804,7 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
 
     False when the previous generation did not end through the Fault door (Quit, Panic, owner Restart and
     planned restarts start nothing here). Otherwise the boot is handled here and True returns: one turn with
-    the facts (``recovery_turn_text``) is admitted unless a conversation turn is already live, or the recovery
+    the facts (``recovery_turn_facts``) is admitted unless a conversation turn is already live, or the recovery
     turn admitted in the generation that just died is not terminal yet (``open_recovery_turn``: a fault loop,
     bound by that fact, never a counter or timer). An admitted turn is recorded durably (``record_recovery_turn``)
     and journalled (``auto_resume_triggered``, ``trigger: core_lost``). The repository-writer gate (``gate``, the
@@ -876,9 +827,14 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
                                "reason": "previous_recovery_turn_open" if open_turn else "conversation_turn_live",
                                "task_id": open_turn, "cause": cause})
         return True
-    held, cancelled = held_saved_work_ids(pending, ended_at), cancelled_unsaved_roots(root, ended_at)
+    from ouroboros.recovery_turn_facts import interrupted_roots, recovery_turn_text
+
+    held, cut = held_saved_work_ids(pending, ended_at), interrupted_roots(root, ended_at)
+    cancelled = cut["cancelled"] if cut else None  # journal twins of the turn's facts; None: unknown
+    facts = {"cancelling": cut["cancelling"], "not_continuable": cut["refused"]} if cut else {}
     gate_open = bool(gate())
-    meta = admit(int(chat_id), recovery_turn_text(cause, ended_at, held, cancelled, root), None) if gate_open else None
+    text = recovery_turn_text(_fault_cause_words(cause), ended_at, held, cut, root)
+    meta = admit(int(chat_id), text, None) if gate_open else None
     task_id = str(((meta or {}).get("task") or {}).get("id") or "") if isinstance(meta, dict) else ""
     if not task_id:
         try:
@@ -888,12 +844,12 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
             log.warning("The refused recovery turn's row could not be posted in Main", exc_info=True)
         append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_skipped", "trigger": RECOVERY_TRIGGER,
                                "reason": "admission_refused" if gate_open else "repo_writer_gate_closed",
-                               "cause": cause, "ended_at": ended_at, "held": held, "cancelled": cancelled})
+                               "cause": cause, "ended_at": ended_at, "held": held, "cancelled": cancelled, **facts})
         return True
     record_recovery_turn(root, task_id, cause)
     append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_triggered", "trigger": RECOVERY_TRIGGER,
                            "task_id": task_id, "cause": cause, "ended_at": ended_at, "held": held,
-                           "cancelled": cancelled})
+                           "cancelled": cancelled, **facts})
     return True
 
 
