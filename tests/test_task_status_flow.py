@@ -2024,6 +2024,13 @@ def test_handle_schedule_task_admits_identical_siblings_without_semantic_veto(tm
 def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constraint(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_SCHEDULED
+    from ouroboros import task_tree_ledger as ledger
+    from ouroboros.tools.join_ledger import _override_delegation_constraint
+    from ouroboros.tools.task_tree import _tree_note
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setattr(ledger, "DATA_DIR", str(tmp_path))
+    root = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root123")
 
     enqueued = []
     sent = []
@@ -2047,29 +2054,37 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
         def persist_queue_snapshot(self, reason=""):
             self.snapshot_reason = reason
 
-    ev_module._handle_schedule_task(
-        {
-            "type": "schedule_subagent",
-            "task_id": "child123",
-            "objective": "Inspect scheduling",
-            "expected_output": "Findings table",
-            "constraints": "No writes",
-            "role": "reviewer",
-            "context": "Parent facts",
-            "depth": 1,
-            "parent_task_id": "parent123",
-            "root_task_id": "root123",
-            "session_id": "sess123",
-            "actor_id": "subagent:reviewer",
-            "delegation_role": "subagent",
-            "memory_mode": "forked",
-            "drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
-            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
-            "budget_drive_root": str(tmp_path),
-            "task_constraint": {"mode": "skill_repair", "allow_enable": True, "allow_review": True},
-        },
-        FakeCtx(),
-    )
+    event = {
+        "type": "schedule_subagent",
+        "task_id": "child123",
+        "objective": "Inspect scheduling",
+        "expected_output": "Findings table",
+        "constraints": "No writes",
+        "role": "reviewer",
+        "context": "Parent facts",
+        "depth": 1,
+        "parent_task_id": "parent123",
+        "root_task_id": "root123",
+        "session_id": "sess123",
+        "actor_id": "subagent:reviewer",
+        "delegation_role": "subagent",
+        "memory_mode": "forked",
+        "drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
+        "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
+        "budget_drive_root": str(tmp_path),
+        "task_constraint": {"mode": "skill_repair", "allow_enable": True, "allow_review": True},
+    }
+    assert _tree_note(root, "delegation_constraint", "Wait for the inspection",
+                      payload={"constraint_id": "hold", "directive": "halt_fanout"}).startswith("OK:")
+    held_id = "held-child"
+    held_drive = str(tmp_path / "state" / "headless_tasks" / held_id / "data")
+    ev_module._handle_schedule_task(dict(event, task_id=held_id, drive_root=held_drive,
+                                        child_drive_root=held_drive), FakeCtx())
+    assert not enqueued
+    assert "delegation_constraint_halt_fanout" in read_result(tmp_path, held_id)["result"]
+    assert _override_delegation_constraint(root, "hold", "Inspection complete").startswith("OK:")
+    sent.clear()
+    ev_module._handle_schedule_task(event, FakeCtx())
 
     assert len(enqueued) == 1
     task = enqueued[0]
@@ -3080,6 +3095,7 @@ def test_override_delegation_constraint_requires_parent_lineage(tmp_path, monkey
     child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child1", task_metadata={"root_task_id": "root1"})
     parent = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="parent1", task_metadata={"root_task_id": "root1"})
 
+    assert "non-empty reason" in _override_delegation_constraint(child, "c1", "  ")
     assert "only the parent" in _override_delegation_constraint(child, "c1", "self-clear")
     assert "only the parent" in _override_delegation_constraint(sibling, "c1", "not my constraint")
     assert _override_delegation_constraint(parent, "c1", "I gathered the evidence").startswith("OK:")

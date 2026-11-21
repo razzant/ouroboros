@@ -134,7 +134,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/desktop/autostart` | host-OS state, `owner_audit`, no settings mirror |
 | GET | `/api/desktop/background` | |
 | POST | `/api/desktop/background` | persists `OUROBOROS_DESKTOP_KEEP_RUNNING`; `owner_audit` |
-| GET | `/api/model-catalog` | |
+| GET | `/api/model-catalog` | scopes and full batch: CLIENT_CONTRACT §14 |
 | POST | `/api/openai-compatible/models` | |
 | POST | `/api/providers/test` | |
 | POST | `/api/tasks` | |

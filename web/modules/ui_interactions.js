@@ -219,6 +219,46 @@ export function bindPopoverPosition(popup, { anchor, field, point, align = 'star
     };
 }
 
+/** Commit the exact option pressed in a live list whose rows can move before release.
+ * Bind while the list is open. A pointer cancellation leaves scrolling native; an accessibility click addresses its own row. */
+export function bindOptionPress(list, selector, choose) {
+    let press = null;
+    function releasedRow(x, y) {
+        if (!press?.row || !list.contains(press.row)) return null;
+        const atStart = x >= press.bounds.left && x <= press.bounds.right && y >= press.bounds.top && y <= press.bounds.bottom;
+        const stationary = x === press.x && y === press.y;
+        return stationary || atStart || press.row.contains(list.ownerDocument.elementFromPoint(x, y)) ? press.row : null;
+    }
+    function pick(row) {
+        if (row && list.contains(row) && row.getAttribute('aria-disabled') !== 'true') choose(row);
+    }
+    const listeners = [
+        ['pointerdown', event => {
+            const row = event.target.closest(selector);
+            press = { row, bounds: row?.getBoundingClientRect(), x: event.clientX, y: event.clientY };
+            if (row) row.setPointerCapture(event.pointerId);
+        }],
+        ['pointerup', event => {
+            if (press) press.row = releasedRow(event.clientX, event.clientY);
+        }],
+        ['pointercancel', () => { press = { row: null }; }],
+        ['touchend', event => {
+            if (event.touches.length || !press?.row) return;
+            const touch = event.changedTouches[0], row = releasedRow(touch.clientX, touch.clientY);
+            // The browser's compatibility click can target the row or control now under the finger.
+            event.preventDefault(); press = null;
+            pick(row);
+        }, { passive: false }],
+        ['click', event => {
+            const row = event.detail && press ? press.row : event.target.closest(selector);
+            press = null;
+            pick(row);
+        }],
+    ];
+    for (const [type, listener, options] of listeners) list.addEventListener(type, listener, options);
+    return () => { for (const [type, listener] of listeners) list.removeEventListener(type, listener); };
+}
+
 /**
  * Bind an already mounted menu using the popup geometry above. Adapted from
  * Project row actions; close() notifies once, destroy() only cleans up.

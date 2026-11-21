@@ -81,9 +81,9 @@ brew install --cask razzant/ouroboros/ouroboros
 - On Fedora or RHEL, download the generic `.rpm` above and run `sudo dnf install ./ouroboros-*.x86_64.rpm`. RED OS 8 has its own `red80` package.
 - On another x86_64 distribution, download the AppImage, make it executable with `chmod +x Ouroboros-*.AppImage`, and run it. Git must already be installed.
 
-To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides model access, review policy, and budget setup.
+To run tasks, choose a connected Codex account as the Main model source, configure a supported remote provider API key, or use a local GGUF model. Claude Code and Cursor subscriptions can run delegated coding and review; they are not Main model sources. The first-run wizard guides accounts and models, access, background consciousness, and budget setup.
 
-Spending limits: out of the box, new paid work stops once known spend reaches $200 in total, or $50 for one task and its helpers; charges already in flight can pass a limit. Background consciousness stays off until you start it, and then has $20 for each 24 hours. Settings changes all three.
+Spending limits: out of the box, new paid work stops once known spend reaches $200 in total, or $50 for one task and its helpers; charges already in flight can pass a limit. Background consciousness starts with the setup wizard's switch, which is on unless you turn it off (without the wizard it stays off until you start it), and then has $20 for each 24 hours. Settings changes all three.
 
 <details>
 <summary>Optional CLI included with desktop downloads</summary>

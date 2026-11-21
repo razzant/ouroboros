@@ -410,6 +410,14 @@ test('every exact cause reads its own words from the one map, the same in the Fr
     assert.equal(holdsPhrase({ holds: [{ class: 'some_new_hold', count: 1 }] }, NOW), 'holding 1: 1 some new hold');
 });
 
+test('a saved state the queue holds is said true whether a work may load it or the queue could not be read', () => {
+    // saved_state_retirement holds as lent_to_receiver both a state a queued or running work may load and every state
+    // of a work while the published queue is missing, stale or unreadable.
+    const said = holdsPhrase({ holds: [{ class: 'lent_to_receiver', count: 2 }] }, NOW);
+    assert.match(said, /^holding 2: 2 a queued or running work may still load it/);
+    assert.match(said, /or the queue could not be read$/);
+});
+
 test('saved-group items the pool leaves out are counted by the saved groups, not under what cannot go', () => {
     const html = trayHtml(free('ready', { groups: saved(), pool: pool({ excluded: [{ reason: 'advanced_group', count: 43 }, { reason: 'in_use', count: 1 }] }) }), {
         ...read(), excluded: { ...EMPTY_LIST(), total: 44, complete: false, next: 1, want: 100, items: [entry('s', { group: 'review_evidence', kind: 'other', reason: 'advanced_group', bytes: null })] },

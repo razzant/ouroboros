@@ -107,7 +107,7 @@ ouroboros/ — agent core and shared runtime (§6)
   packaged_cli.py, packaged_cli_install.py — packaged desktop CLI bridge and its command-shim installer
   agent.py — task orchestrator; a loop crash is projected from captured evidence or an explicit `loop_evidence_unavailable`, never invented counters (§6 Task lifecycle)
   startup_historical_audit.py — explicit seal-audit child in its own process group (`python -m ouroboros.startup_historical_audit`; §2; docs/MODEL_SEND_OBSERVABILITY.md)
-  maintenance.py, maintenance_jobs.py, maintenance_retirement.py, plan_collection_job.py, record_compression.py, temp_sweep.py — the maintenance child's history-sized jobs and durable `job:<name>` facts (§5)
+  maintenance.py, maintenance_jobs.py, maintenance_retirement.py, plan_collection_job.py, record_compression.py, saved_state_retirement.py, temp_sweep.py — maintenance child jobs, `job:<name>` facts (§5)
   focus.py — authored focus with typed source ref; no dialogue or path escapes
   agent_startup_checks.py — agent-boot verification (warning-only health) and native-host adoption for self-restart (§2)
   agent_task_pipeline.py — task execution pipeline: result, artifacts, frozen cost snapshot, the review lens, root-only post-task work (§6 Task lifecycle)
@@ -223,7 +223,7 @@ ouroboros/ — agent core and shared runtime (§6)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — `legacy` records: one model-free import of prior dialogue memory (nominations as marks) or a transfer; what is open or folded (§6)
   consolidator.py, memory_fallback.py — Light transport, one signed draft per root with wakes OFF; no knowledge writes (§6)
   memory.py — scratchpad, identity, chat history
-  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6)
+  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, held_notes.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6); heads of the active global notes whose recorded claims meet a focus's situation names (a helper's: those its scheduler carried), and of the active global notes those heads link (one hop), captured once per work (held_notes.py)
   project_facts.py — project_id resolution and per-project knowledge under `projects/<id>/knowledge`, isolated from `memory/knowledge`
   task_tree_ledger.py — append-only `data/task_trees/<root>/blackboard.jsonl`: ephemeral swarm coordination (`tree_note`/`tree_read`), mirrored into the project journal at root completion
   projects_registry.py, project_admission.py, project_closure.py, project_folder.py — registry lifecycle, admission, reversible closure and the folder door (§6 Project registry and lease)
@@ -257,8 +257,8 @@ ouroboros/ — agent core and shared runtime (§6)
   context_runtime_facts.py, engine_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
   task_custody.py, owner_keep.py, review_thread_retention.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock; one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
-  headless_status.py — lifecycle vocabulary shared by the headless owners
-  workspace_patch_rules.py, workspace_patch_capture.py — patch-exclusion rules (env/cache, junk, lockfiles, credential-shaped names); the patch artifact and its manifest
+  headless_status.py — shared headless lifecycle states
+  workspace_patch_rules.py, workspace_patch_capture.py, workspace_capture_result.py — env/cache, junk, lockfile and credential-name exclusions; patch/manifest I/O
   workspace_copies.py — git-copy source/baseline identity and own-body policy (§6 Delegated subagents)
   coop_checkpoint.py — quiescent checkpoint commits of cooperative trees from a mutative child's `write_root`; a root mid merge/rebase/cherry-pick/revert is skipped (§5)
   delegate_output.py, delegate_directory.py, workspace_file_outputs.py — retained terminal JSON with physical-task reads; directory apply/discard and ordinary-folder results with exact before/after identities (§6 Terminal products)

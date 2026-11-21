@@ -1,6 +1,7 @@
 import asyncio
 from copy import deepcopy
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -450,7 +451,7 @@ def test_model_catalog_reports_a_bad_extra_ca_bundle_instead_of_a_bare_500(monke
 
     monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"OPENAI_API_KEY": "openai-key"})
     monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog",
-                        lambda source_id, profile_id: {"items": [{"value": "engine-model"}], "errors": []})
+                        lambda *_args: {"items": [{"value": "engine-model"}], "errors": []})
 
     def _boom():
         raise ExtraCaBundleError("OUROBOROS_EXTRA_CA_BUNDLE is not readable: /nope.pem")
@@ -612,7 +613,7 @@ def test_an_openrouter_row_shows_the_window_its_catalog_publishes():
     assert all("max_context_window" not in row for row in rows)
 
 
-def _draft_catalog(monkeypatch, tmp_path, saved, draft):
+def _draft_catalog(monkeypatch, tmp_path, saved, draft, *, provider=None):
     """POST /api/onboarding/model-catalog over a saved settings file; the provider reads are recorded, not sent."""
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -622,8 +623,10 @@ def _draft_catalog(monkeypatch, tmp_path, saved, draft):
     import ouroboros.gateway.onboarding as gw_onboarding
 
     monkeypatch.setattr(config, "load_settings", lambda: dict(saved))
-    monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog",
-                        lambda *_a: {"items": [], "errors": [], "model_sources": []})
+    def subscriptions(*_a):
+        assert provider is None, "an API connection does not require the subscription engine"
+        return {"items": [], "errors": [], "model_sources": []}
+    monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog", subscriptions)
     asked = []
 
     async def openrouter(_client, api_key, cache_ttl=""):
@@ -640,8 +643,124 @@ def _draft_catalog(monkeypatch, tmp_path, saved, draft):
     app = Starlette(routes=[Route("/api/onboarding/model-catalog", gw_onboarding.api_onboarding_model_catalog, methods=["POST"])])
     app.state.drive_root = tmp_path
     with TestClient(app) as client:
-        response = client.post("/api/onboarding/model-catalog", json=draft)
+        response = client.post("/api/onboarding/model-catalog", params={"provider_id": provider} if provider else {}, json=draft)
     return response, asked
+
+
+def test_exact_api_connection_preserves_its_price_and_leaves_other_sources_unread(monkeypatch):
+    asked = []
+
+    async def catalog(_client, key, _ttl):
+        asked.append(key)
+        return [{**model_catalog_api._build_model_catalog_entry("openrouter", "Vendor", "vendor/model", "Model"),
+                 "price": {"input": 3}, "context_window": 200_000}]
+
+    monkeypatch.setattr(model_catalog_api, "_fetch_openrouter_model_catalog", catalog)
+    monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog", lambda *_: pytest.fail("unrelated subscription read"))
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {
+        "OPENROUTER_API_KEY": "builtin", "LOCAL_MODEL_SOURCE": "local/model",
+        "OUROBOROS_CONNECTIONS": [{"kind": "openrouter", "name": "work", "api_key": "named", "enabled": True}]})
+
+    def get(**query):
+        return asyncio.run(model_catalog_api.api_model_catalog(SimpleNamespace(query_params=query)))
+
+    payload = json.loads(get(provider_id="openrouter@work").body)
+    [entry] = payload["items"]
+    assert (entry["value"], entry["price"], entry["context_window"]) == ("openrouter@work::vendor/model", {"input": 3}, 200_000)
+    assert payload["errors"] == [] and payload["model_sources"] == []
+    assert json.loads(get(provider_id="local").body)["items"][0]["use_local"]
+    missing = json.loads(get(provider_id="openrouter@removed").body)
+    assert missing["items"] == [] and missing["errors"][0]["provider_id"] == "openrouter@removed"
+    assert get(provider_id="", source_id="codex").status_code == 400 and asked == ["named"]
+
+
+@pytest.mark.parametrize("engine_slow", [False, True])
+def test_slow_connection_reaches_its_deadline_without_losing_healthy_catalogs(monkeypatch, engine_slow):
+    from contextlib import asynccontextmanager
+    from threading import Event
+
+    api_started = Event()
+
+    def engine(*_args):
+        # If discovery ran ahead of the HTTP loaders, this wait would expire before fast starts.
+        assert api_started.wait(2)
+        if engine_slow:
+            import time
+            time.sleep(0.2)
+        return {"model_sources": [{"id": "opaque"}], "items": [], "errors": []}
+
+    async def fast(_client):
+        api_started.set()
+        return [{"value": "fast::model"}]
+
+    async def slow(_client):
+        await asyncio.Event().wait()
+
+    @asynccontextmanager
+    async def client(**_kwargs):
+        yield None  # The loaders are synthetic; don't spend the 80 ms fixture deadline loading trust roots.
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", client)
+    monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog", engine)
+    monkeypatch.setattr(model_catalog_api, "_CATALOG_HTTP_TIMEOUT_SEC", 0.08)
+    sources = [{"id": "fast", "label": "Fast source", "processing_transport": ["standard"]},
+               {"id": "slow@work", "label": "Slow source", "processing_transport": ["standard", "fast"]}]
+    monkeypatch.setattr(model_catalog_api, "_provider_specs", lambda *_a, **_kw: list(zip(sources, (fast, slow))))
+    payload = asyncio.run(asyncio.wait_for(model_catalog_api.catalog_payload({}), timeout=3))
+    assert payload["items"] == [{"value": "fast::model"}]
+    expected = {"slow@work", "claudexor"} if engine_slow else {"slow@work"}
+    assert {err["provider_id"] for err in payload["errors"]} == expected
+    assert all(err["stage"] == "timeout" and err["error"] for err in payload["errors"])
+    assert payload["model_sources"] == ([] if engine_slow else [{"id": "opaque"}])
+    assert payload["api_sources"] == sources  # Transport evidence is not lost with an inventory timeout.
+
+
+@pytest.mark.parametrize("source_ids", [("slow", "quick"), ("quick", "slow")])
+def test_batch_keeps_finished_subscription_and_closes_its_gateway_after_the_late_read(monkeypatch, source_ids):
+    from threading import Event
+    from ouroboros import claudexor_daemon
+
+    release, quick, closed = Event(), Event(), Event()
+    declarations = [{"id": source} for source in source_ids]
+
+    class Gateway:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            closed.set()
+
+        def operations(self):
+            return []
+
+        def list_model_sources(self):
+            return {"sources": declarations}
+
+        def list_source_models(self, source, **_kwargs):
+            if source == "slow":
+                assert release.wait(3)
+            else:
+                quick.set()
+            assert not closed.is_set()
+            return {"models": [{"id": "one"}]}
+
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", Gateway)
+    monkeypatch.setattr(model_catalog_api, "_CATALOG_HTTP_TIMEOUT_SEC", 0.35)
+
+    async def check():
+        try:
+            payload = await model_catalog_api.catalog_payload({"LOCAL_MODEL_SOURCE": "local/model"})
+            assert quick.is_set() and not closed.is_set()
+            assert payload["model_sources"] == declarations
+            assert {row["value"] for row in payload["items"]} == {"claudexor::quick=one", "local::model"}
+            assert [(row["source_id"], row["stage"]) for row in payload["errors"]] == [("slow", "timeout")]
+        finally:
+            release.set()
+        assert await asyncio.to_thread(closed.wait, 3)
+        assert not any(row["value"] == "claudexor::slow=one" for row in payload["items"])
+
+    asyncio.run(check())
 
 
 def test_a_setup_draft_reads_the_catalog_of_its_own_access_before_anything_is_saved(monkeypatch, tmp_path):
@@ -655,13 +774,20 @@ def test_a_setup_draft_reads_the_catalog_of_its_own_access_before_anything_is_sa
     assert [(item["value"], item["price"]) for item in body["items"]] == [("vendor/model", {"input": 4.0, "output": 20.0})]
     assert body["errors"] == []
     assert not (tmp_path / "settings.json").exists()
+    # Select a named draft connection with another usable key present.
+    draft = {"OPENROUTER_API_KEY": "sk-or-v1-other", "OUROBOROS_CONNECTIONS": [
+        {"kind": "openrouter", "name": "work", "enabled": True, "api_key": "sk-or-v1-named"}]}
+    selected, asked = _draft_catalog(monkeypatch, tmp_path, {}, draft, provider="openrouter@work")
+    assert [item["value"] for item in selected.json()["items"]] == ["openrouter@work::vendor/model"]
+    assert asked == [("openrouter", "sk-or-v1-named")]
     # The saved access alone: nothing typed, nothing asked.
     response, asked = _draft_catalog(monkeypatch, tmp_path, {}, {})
     assert (response.json()["items"], asked) == ([], [])
     assert _draft_catalog(monkeypatch, tmp_path, {}, {"OPENROUTER_API_KEY": ["not", "text"]})[0].status_code == 400
 
 
-def test_a_draft_read_sends_a_kept_key_only_where_it_was_saved_for(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider", [None, "openai-compatible"])
+def test_a_draft_read_sends_a_kept_key_only_where_it_was_saved_for(monkeypatch, tmp_path, provider):
     """Provider Test's rule (`_saved_secret_moved`): a draft that keeps a saved key (its field posts the marker back)
     and moves the address would send that key to a server its author chose now. The connection is not asked and its
     error row says why; a key typed in the draft may go to the draft's address. A draft read records no evidence."""
@@ -670,20 +796,21 @@ def test_a_draft_read_sends_a_kept_key_only_where_it_was_saved_for(monkeypatch, 
     saved = {"OPENAI_COMPATIBLE_API_KEY": "sk-kept-compatible-key-123456", "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1"}
     marker = mask_settings_secret("OPENAI_COMPATIBLE_API_KEY", saved["OPENAI_COMPATIBLE_API_KEY"])
     moved = {"OPENAI_COMPATIBLE_API_KEY": marker, "OPENAI_COMPATIBLE_BASE_URL": "https://elsewhere.example/v1"}
-    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, moved)
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, moved, provider=provider)
     body = response.json()
     assert asked == [] and body["items"] == [] and body["api_sources"] == []
     assert [(row["provider_id"], row["stage"]) for row in body["errors"]] == [("openai-compatible", "kept_key")]
     # The same kept key at its saved address is asked, and so is a typed key at the new address.
-    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {**moved, "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1"})
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {**moved, "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1"}, provider=provider)
     assert asked == [("openai-compatible", "sk-kept-compatible-key-123456", "https://saved.example/v1", False)]
-    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {**moved, "OPENAI_COMPATIBLE_API_KEY": "sk-typed-now-for-elsewhere"})
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {**moved, "OPENAI_COMPATIBLE_API_KEY": "sk-typed-now-for-elsewhere"}, provider=provider)
     assert asked == [("openai-compatible", "sk-typed-now-for-elsewhere", "https://elsewhere.example/v1", False)]
     assert response.json()["errors"] == []
     # The saved catalog's own read is the one that records what it learns.
     asked.clear()
     monkeypatch.setattr(model_catalog_api, "load_settings", lambda: dict(saved))
-    asyncio.run(model_catalog_api.api_model_catalog(None))
+    request = SimpleNamespace(query_params={"provider_id": provider}) if provider else None
+    asyncio.run(model_catalog_api.api_model_catalog(request))
     assert asked == [("openai-compatible", "sk-kept-compatible-key-123456", "https://saved.example/v1", True)]
 
 

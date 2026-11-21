@@ -65,7 +65,7 @@ def _commit_source_payload(ctx: Any, ref: dict, *, manifest: bool = False) -> di
                 if record.get("call_type") != "llm_response":
                     raise ValueError("selected model response is unavailable or failed")
                 source = record["redacted_projection_ref"]
-            payload = read_blob_ref(pathlib.Path(root), source)
+            payload = read_blob_ref(pathlib.Path(root), source, task_id=ctx.task_id)
             if not isinstance(payload, dict):
                 raise ValueError("selected source is not an object")
             return payload
@@ -102,7 +102,7 @@ def capture_commit_review_evidence(ctx: Any) -> dict:
              "Coverage is only the selected records below, not the entire task or proof of visual inspection."]
     refs, responses_seen, gaps = [], set(), []
     for call in selected:
-        args, args_complete, args_gap = materialize_tool_args_source(ctx.drive_root, call)
+        args, args_complete, args_gap = materialize_tool_args_source(ctx.drive_root, call, task_id=ctx.task_id)
         result, result_complete, result_gap = materialize_tool_result_source(ctx.drive_root, ctx.task_id, call)
         trace_ref = call.get("trace_ref") or {}
         if trace_ref:

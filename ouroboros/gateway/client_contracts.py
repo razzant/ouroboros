@@ -1,9 +1,7 @@
-"""Envelopes a replaceable client needs beside ``contracts.py``: their own module, one owner each.
+"""Replaceable-client envelopes beside ``contracts.py``, mirrored in ``web/modules/client_contract_types.js``.
 
-Descriptive TypedDicts, the twin of ``web/modules/client_contract_types.js``: the main
-interface a server generation serves (``StateResponse.served_ui``), the read-only setup
-bootstrap a client renders onboarding from (``GET /api/onboarding/bootstrap``, whose rows
-mirror ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
+These TypedDicts describe the generation's interface (``StateResponse.served_ui``), read-only setup
+(``GET /api/onboarding/bootstrap`` mirrors ``settings_setup_contract``), the settings writers' durable-outcome refusal, the
 auth gate's JSON login, the derived ABI document ``GET /api/contract`` publishes, and the
 bodies of the everyday journey routes (projects, files, places, owner controls, schedules) whose
 handlers check their fields by hand.
@@ -114,6 +112,7 @@ class SetupSubscriptionField(TypedDict):
 
 
 class SetupContract(TypedDict):
+    scopedModelCatalogs: NotRequired[bool]
     version: int
     hostMode: Literal["web", "desktop"]
     steps: List[SetupStep]
@@ -160,13 +159,14 @@ class SetupInitialState(TypedDict):
 
 
 class SetupConsciousnessOffer(TypedDict):
-    """``settings_setup_contract.consciousness_offer``: the Summary's optional, unticked Consciousness row."""
+    """``settings_setup_contract.consciousness_offer``: the setup's Consciousness step (its words: ``first_run_words``)."""
 
-    offered: bool  # setup has never completed on this install; a completed setup shows no row
-    enabled: Optional[bool]  # the control as the state shows it; null = unknown
+    offered: bool  # the next boot mints a first state and setup never completed here; else no step (``stepOrder``)
+    enabled: Optional[bool]  # the control as a state shows it; null on an offered step (the switch starts on) or unknown
     autonomy: Literal["observe", "act", "full"]
     dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
     maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
+    words: Dict[str, str]  # gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
 
 
 class SetupBootstrap(TypedDict):
@@ -182,7 +182,7 @@ class SetupBootstrap(TypedDict):
     secretPlaceholder: str  # a prefilled credential that is configured holds this marker
     contract: SetupContract
     initialState: SetupInitialState
-    consciousnessOffer: SetupConsciousnessOffer  # display; a ticked row sends the ordinary Start after the save
+    consciousnessOffer: SetupConsciousnessOffer  # display; the switch's position rides the completion request
     deployment: Optional["SettingsDeploymentPolicy"]  # Settings' ``_meta.policy_state.deployment``; null unmanaged
 
 
@@ -324,8 +324,7 @@ class AuthLoginResponse(TypedDict):
 
 
 class ContractBody(TypedDict):
-    """One request or response body: its media type and the ``schemas`` names it may take
-    (empty = the shape is not published)."""
+    """One request or response body: its media type and the ``schemas`` it may take (none: unpublished)."""
 
     content_type: str
     schemas: List[str]

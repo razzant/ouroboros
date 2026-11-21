@@ -310,10 +310,12 @@ class LLMClient(
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
-        ``response_format`` (e.g. ``{"type": "json_object"}``) is optional request
-        intent on the OpenAI-compatible/OpenRouter lanes: local, Anthropic-native,
-        and GigaChat routes ignore it, and a provider rejection strips it via the
-        optional-parameter retry — callers must keep a text-parse fallback.
+        ``response_format`` (e.g. ``{"type": "json_object"}``) is request intent: the
+        OpenAI-compatible/OpenRouter lanes carry it; local, Anthropic-native and GigaChat
+        routes ignore it; Claudexor refuses any non-``None`` value before creating the
+        operation (``unsupported_parameter``). ``supports_response_format`` answers only
+        whether a route carries the field, not whether a model accepts every format.
+        Where it is not carried, omit it and ask for JSON in the prompt.
 
         ``default_temperature`` is a host hint, unlike explicit ``temperature``.
         Resolve it on this invocation's effective route after any model wait:

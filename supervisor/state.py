@@ -498,14 +498,14 @@ def update_state(mutator, *, confirm: Tuple[str, ...] = (), lock_timeout_sec: fl
 def _set_aside_copies_older_than_a_reset(witness: Any) -> None:
     """An owner Reset's ``pending`` witness is the owner's explicit fresh start: a state
     copy of another identity (a writer that raced the Reset's delete) is moved aside
-    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK."""
-    w_status, record = witness.read_witness(DRIVE_ROOT)
-    if not (w_status == "ok" and record.get("phase") == "pending" and record.get("origin") == "owner_reset"):
+    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK.
+    Which copies is the witness module's decision, so setup's ``first_state_pending`` reads the same one."""
+    identity, stamp = witness.pending_reset_identity(DRIVE_ROOT), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    if identity is None:
         return
-    identity, stamp = str(record.get("initialization_id") or ""), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     for path in (STATE_PATH, STATE_LAST_GOOD_PATH):
         status, obj, _raw, detail = _read_json_file(path)
-        if status == "missing" or (status == "ok" and obj.get("initialization_id") == identity):
+        if not witness.reset_sets_aside(status, obj, identity):
             continue
         if status == "unreadable":
             raise StateUnavailable("primary_unreadable", detail)
@@ -558,7 +558,7 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
                     raise StateUnavailable(str(decision.get("reason") or "refused"),
                                            str(decision.get("detail") or ""))
                 created = str(decision["initialization_id"])
-                st = ensure_state_defaults({"initialization_id": created})
+                st = ensure_state_defaults(witness.first_state(DRIVE_ROOT, created))
             if not created:
                 try:
                     st["initialization_id"] = witness.prepare_adoption(DRIVE_ROOT, st)

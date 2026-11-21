@@ -944,18 +944,17 @@ class ModelCatalogApiSource(TypedDict):
 
 
 class ModelCatalogResponse(TypedDict, total=False):
-    """``GET /api/model-catalog``: with ``source_id`` (and optionally ``credential_profile_id``) one
-    agent account's models only; otherwise every configured provider's, each fetched with its own
-    20-second bound. A provider that failed is an ``errors`` row and the read is still 200: absent
-    models are unknown, not proof of none. ``model_sources`` and ``account_catalogs`` are the
-    engine's model-source and per-account catalog objects, passed through; ``partial`` marks an
-    incomplete account view; ``store_id`` the engine store this read's handshake named, when it named one."""
+    """Subscription declarations (``view=sources``), raw models (``source_id``), a native agent inventory
+    (``harness_id``) or one API/local connection (``provider_id``). A whole read keeps completed results and
+    named errors at its 20-second deadline. ``account_catalogs`` retain per-account evidence;
+    ``partial`` marks an incomplete view; ``store_id`` names the store from the engine handshake."""
 
     items: Required[List[ModelCatalogItem]]
     errors: Required[List[Dict[str, Any]]]  # {provider_id, error, stage?, duration_ms?, source_id?, code?, ...}
     model_sources: Required[List[Dict[str, Any]]]
     api_sources: List[ModelCatalogApiSource]
     account_catalogs: List[Dict[str, Any]]
+    session_catalog: Dict[str, Any]  # Native harness row; distinct from subscription model transports.
     partial: bool
     store_id: str
 

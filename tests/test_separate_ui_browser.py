@@ -1006,7 +1006,8 @@ def test_a_fresh_install_is_set_up_without_a_key_through_the_proxy(tmp_path, req
             session.shot("1-setup-provider")
             wizard.locator("#next-btn").click()
             wizard.locator('[data-model-role="main"] [data-model-role-model]').fill("openai-compatible::mock-model")
-            for _step in range(3):
+            # Models to Summary: every step the rail shows after Models (Consciousness only on a root with no state).
+            for _step in range(wizard.locator(".wizard-step").count() - 2):
                 wizard.locator("#next-btn").click()
             wizard.locator(".summary-card").first.wait_for(timeout=30_000)
             session.shot("2-setup-summary")

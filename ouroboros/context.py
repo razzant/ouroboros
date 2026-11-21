@@ -905,9 +905,19 @@ def _capture_context_core(
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole
     # only where the view holds it; a child or nanny starts with its outline (every note by address
     # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
+    # A helper holds the heads its carried situation names claim (none without them); a declared one holds none.
+    from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
+    from ouroboros.memory_view_events import carried_names, situation_names
+
     project_id = resolve_project_id(task)
-    head_parts = (build_knowledge_sections(context_env, project_id=project_id) if view_spec.knowledge
-                  else helper_navigation_sections(canonical_root, project_id))
+    held_resume = getattr(ctx, "_held_note_capture", None)
+    helper = view_spec.role in DELEGATED_FOCUS_ROLES
+    names = (carried_names(task) or ()) if helper else situation_names(task, view_spec.room_id)
+    global_knowledge = {"bodies": {}, "names": names} if held_resume is None and not declared else {}
+    head_parts = (build_knowledge_sections(context_env, project_id=project_id, global_capture=global_knowledge,
+                                           held_capture=held_resume)
+                  if view_spec.knowledge else
+                  helper_navigation_sections(canonical_root, project_id, global_capture=global_knowledge))
     if design_nav:
         head_parts.append(design_nav)
 
@@ -926,7 +936,11 @@ def _capture_context_core(
     attempt_key = _attempt_key(ctx if ctx is not None else SimpleNamespace(task_attempt=task.get("_attempt")))
     health_section = "" if declared else build_health_invariants(
         context_env, task_id=str(task.get("id") or ""), active_root=active_root, attempt_key=attempt_key)
-    dynamic_parts = [declared_receipt_section(task)] if declared else [health_section] if health_section else []
+    from ouroboros import held_notes
+
+    # A shelf that could not be listed names no omission (its outline names the gap); it is never listed twice.
+    omitted = held_notes.claimed_topics(canonical_root, names, global_knowledge.get("inventory", ())) if declared else ()
+    dynamic_parts = [declared_receipt_section(task, omitted)] if declared else [health_section] if health_section else []
     dynamic_parts.extend(review_activity)
     try:
         from ouroboros.subagent_runtime import review_records_block, subagent_supervision_fact_line
@@ -1036,6 +1050,8 @@ def _capture_context_core(
         from ouroboros.return_facts import turn_sections
 
         dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
+    held = held_notes.turn_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx)
+    dynamic_parts.extend([*held, held_notes.HELPER_NOTE] if held and helper else held)
 
     return _ContextCore(
         base_prompt=base_prompt,
@@ -1059,6 +1075,7 @@ def _capture_context_core(
         memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
         connections=connections,
+        held_note_resume=held_resume,
     )
 
 

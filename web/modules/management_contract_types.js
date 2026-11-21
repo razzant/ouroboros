@@ -1113,14 +1113,17 @@
  */
 
 /**
- * `GET /api/model-catalog`: with `source_id` (and optionally `credential_profile_id`) one agent
- * account's models only; otherwise every configured provider's, a failed one as an `errors` row.
+ * `GET /api/model-catalog`: `view=sources` lists subscription descriptors with empty `items`.
+ * `source_id` and optional `credential_profile_id` select subscription models, `harness_id` selects an agent inventory, `provider_id` one API connection
+ * or the local model. The full catalog collects sources concurrently, with a 20-second limit per read,
+ * and returns the results together with failures in `errors`.
  * @typedef {Object} ModelCatalogResponse
  * @property {ModelCatalogItem[]} items
  * @property {Object[]} errors
  * @property {Object[]} model_sources
  * @property {ModelCatalogApiSource[]=} api_sources
  * @property {Object[]=} account_catalogs
+ * @property {Object=} session_catalog  // native harness row for a harness_id read
  * @property {boolean=} partial
  * @property {string=} store_id  the engine store this read's handshake named, when it named one
  */

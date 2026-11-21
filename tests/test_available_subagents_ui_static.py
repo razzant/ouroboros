@@ -121,7 +121,7 @@ def test_generated_preview_is_background_and_whole_draft_clean_gated() -> None:
 
 def test_status_refresh_and_active_task_copy_keep_the_frozen_semantics() -> None:
     editor = _read(MODULES / "subagents_settings.js")
-    assert "await boundedStatusRefresh(store);" in editor
+    assert "await boundedStatusRefresh(store, { includeModels: false });" in editor
 
 
 def test_effort_choice_mirrors_track_the_python_scale() -> None:

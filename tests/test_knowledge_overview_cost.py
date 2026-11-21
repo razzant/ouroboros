@@ -18,7 +18,7 @@ def test_overview_receipt_prices_body_before_after_and_next_capture(tmp_path):
     reply = _knowledge_write(ctx, 'overview', content='# Overview\n\nA smaller authored map.', mode='overwrite',
                              expected_revision=old.revision)
     assert reply.startswith('✅')
-    receipt = json.loads(reply.split('\n', 1)[1])
+    receipt = json.loads(reply.split('\n', 2)[1])
     current = store.read_knowledge_note(address)
     a, b = store.body_chars(old), store.body_chars(current)
     assert a != len(old.text) and b < a

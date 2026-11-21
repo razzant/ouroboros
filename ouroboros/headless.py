@@ -577,7 +577,6 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
             child_result["artifact_bundle"] = artifact_bundle_from_result(child_result)
         except Exception:
             child_result.pop("artifact_bundle", None)
-    child_result.setdefault("headless_child_drive_root", str(child_drive))
     if child_status in _FINAL_STATUSES and task_requires_workspace_capture(task):
         artifact_status = str(canonical_existing.get("artifact_status") or "").strip().lower()
         if artifact_status in ARTIFACT_TERMINAL_STATUSES | {ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING}:
@@ -638,7 +637,8 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
                 source = {**source, **project_replica_task_result_fields(source, replica)}
                 review = source.get("review_projection")
                 promotion = copy.deepcopy(replica["child_ref_promotion"])
-                patch = {"child_ref_promotion": promotion}
+                # The same publication records the drive we read, not the replica's spelling of its placement.
+                patch = {"child_ref_promotion": promotion, "headless_child_drive_root": str(child)}
                 if isinstance(review, dict):
                     patch["review_projection"] = review
                 basis = {"review_projection": review}
@@ -673,14 +673,10 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
 
 
 def _child_result_adopted(child: pathlib.Path, result: Dict[str, Any]) -> bool:
-    promotion = result.get("child_ref_promotion")
-    source = str(result.get("headless_child_drive_root") or "")
-    return bool(
-        "result" in result and isinstance(promotion, dict)
-        and type(promotion.get("schema_version")) is int and promotion["schema_version"] == 1
-        and promotion.get("status") in {"complete", "incomplete"}
-        and source and pathlib.Path(source).resolve(strict=False) == child.resolve(strict=False)
-    )
+    from ouroboros.task_custody import copied_child_drive
+
+    source = copied_child_drive(result)
+    return "result" in result and source is not None and source.resolve(strict=False) == child.resolve(strict=False)
 
 
 def terminal_task_files_ready(canonical_root: pathlib.Path, task: Dict[str, Any], result: Any) -> bool:

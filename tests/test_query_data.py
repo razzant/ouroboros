@@ -638,7 +638,10 @@ def test_money_defaults_direct_and_missing_packs_are_typed(ctx, monkeypatch):
 
 
 @pytest.mark.parametrize("cache", ["valid", "missing", "quick_check"])
-def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
+def test_pack_index_sql_answers_the_cache_the_packing_pass_rebuilds(ctx, cache):
+    """The plane reads the cache as the packing pass left it and never repairs it: a missing cache is a typed
+    ``evidence_unavailable`` refusal the pass owes a rebuild (from the sidecars, which nothing touches); damage
+    only a whole-file check sees is answered as the cache stands."""
     from ouroboros import evidence_packs as packs
     from tests.test_evidence_packs import _task
 
@@ -671,9 +674,17 @@ def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
                 PRAGMA ignore_check_constraints=OFF;
             """)
             assert conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]
-    # Cold cache recovery is the subject, not a one-second completion SLA.
-    result = call(ctx, op="sql", db="packs", query="SELECT kind, size FROM members ORDER BY kind", timeout_sec=5)
+    query = "SELECT kind, size FROM members ORDER BY kind"
+    result = call(ctx, op="sql", db="packs", query=query, timeout_sec=5)
+    if cache == "missing":
+        assert (result["status"], result["code"], result["reason"]) == ("unavailable", "evidence_unavailable", "damaged")
+        assert not path.exists() and packs.index_owed(ctx.drive_root)
+        packs.ensure_index(ctx.drive_root)  # the packing pass's builder
+        result = call(ctx, op="sql", db="packs", query=query, timeout_sec=5)
     assert result["status"] == "ok", result
+    if cache == "quick_check":  # damage only a whole-file check sees: no reader runs one, the cache answers as it stands
+        assert result["data"]["rows"] == [["json", len(raw)]], result
+        return
     assert result["data"]["rows"] == [["checkpoint", len(raw)], ["json", len(raw)]], result
     assert authority == {p: p.read_bytes() for p in authority}
     with closing(sqlite3.connect(path)) as conn:
@@ -681,10 +692,35 @@ def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
         assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (str(packs.INDEX_SCHEMA_VERSION),)
 
 
+def test_a_blob_whose_place_is_unknown_now_answers_typed_apart_from_absence_and_damage(ctx):
+    """``op=blob`` over a packed blob while the packer holds the index past the read's wait: the typed
+    ``evidence_unavailable`` answer with its reason (the address stays good; nothing is retried or read
+    from the owner plane). A sha no pack holds stays ``not_found``, a damaged pack stays an error, and once
+    the index is free the same call returns the bytes."""
+    from ouroboros import evidence_packer, evidence_packs as packs
+    from tests.test_evidence_packs import _task
+
+    refs, _ = _task(ctx.drive_root, "packed", blobs=1)
+    assert evidence_packer.run_pass(ctx.drive_root)["faults"] == 0
+    sha = refs[0]["sha256"]
+    with store.name_lock(ctx.drive_root, packs.INDEX_LOCK_NAME, timeout_sec=0), store.acquisition_budget(0.1):
+        held = call(ctx, op="blob", sha256=sha, blob_kind="json")
+    assert (held["status"], held["code"], held["reason"]) == ("unavailable", "evidence_unavailable", "busy"), held
+    answered = call(ctx, op="blob", sha256=sha, blob_kind="json")
+    assert answered["status"] == "ok" and answered["data"]["message"]["content"].startswith("answer packed"), answered
+    assert call(ctx, op="blob", sha256="0" * 64, blob_kind="json")["code"] == "not_found"
+    pack = packs.packs_dir(ctx.drive_root) / "packed.xz"
+    damaged = bytearray(pack.read_bytes())
+    damaged[len(damaged) // 2] ^= 0xFF
+    pack.write_bytes(bytes(damaged))
+    packs._READERS.clear()
+    broken = call(ctx, op="blob", sha256=sha, blob_kind="json")
+    assert (broken["status"], broken["code"]) == ("error", "query_failed") and "evidence_corrupt" in broken["message"]
+
+
 def test_no_packs_depends_on_sidecars_not_an_empty_cache(ctx):
     from ouroboros import evidence_packs as packs
-    with packs.open_index(ctx.drive_root):
-        pass
+    packs.ensure_index(ctx.drive_root)
     result = call(ctx, op="sql", db="packs", query="SELECT count(*) FROM members")
     assert result["status"] == "unavailable" and result["code"] == "no_packs", result
 

@@ -142,6 +142,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_SUBAGENT_PRESET_RECEIPT | "" | Install-preset receipt; likewise |
 | OUROBOROS_ONBOARDING_COMPLETED_AT | "" | Onboarding completion fact; likewise |
 | OUROBOROS_ONBOARDING_ATTEMPT_ID | "" | Client attempt that wrote it (§2); likewise |
+| OUROBOROS_ONBOARDING_CONSCIOUSNESS | "" | Setup's switch for a first state (PERSISTENCE); likewise |
 | OUROBOROS_TASK_REVIEW_MODE | auto | Result review mode `auto`/`required`/`off` (§6 Result review) |
 | OUROBOROS_SAFETY_MODE | full | Safety supervision mode; a fresh desktop wizard may author `light`; lowering is owner-guarded (§6 Safety and runtime mode) |
 | OUROBOROS_CONSCIOUSNESS_SAFETY_MODE | full | Coverage for consciousness work (own wakes, places, what they start); existing installs copy the saved Safety level once |

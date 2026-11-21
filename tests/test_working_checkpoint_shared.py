@@ -317,6 +317,32 @@ def test_an_older_body_refuses_the_shared_form_typed_and_a_missing_part_is_typed
     assert wc.read_working(tmp_path, "pause-task", 1)[1]["messages"] == []
 
 
+
+def test_a_part_that_cannot_be_located_now_is_never_missing_and_each_read_names_the_task(tmp_path, monkeypatch):
+    """Each part read names the checkpoint's task, the packs reader's cost hint. A part whose bytes cannot be
+    located now (``EvidenceUnavailable``: the packs catalog cannot answer) is no missing part: the read raises
+    it, never ``SharedValueMissing`` (kept for a part nothing holds, the test above), the rolling file stays,
+    and the same state reads once the part can be located."""
+    _ctx, limit_ctx = _state_fixture(tmp_path, rounds=2)
+    write_task_result(tmp_path, "pause-task", "running")
+    assert wc.save_round(limit_ctx, "candidate") is True
+    data, part = _file(tmp_path).read_bytes(), _manifest(tmp_path)["shared_parts"][0]
+    real, tasks = packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == part["sha256"]:
+            raise packs.EvidenceUnavailable("evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(packs, "blob_bytes", unlocatable)
+        with pytest.raises(packs.EvidenceUnavailable):
+            wc.read_working(tmp_path, "pause-task", 1)
+    assert tasks and set(tasks) == {"pause-task"}, tasks
+    assert _file(tmp_path).read_bytes() == data
+    assert wc.read_working(tmp_path, "pause-task", 1)[1]["task_id"] == "pause-task"
+
 def test_a_pausing_seed_and_a_park_source_are_completed_from_the_expanded_state(tmp_path):
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.budget_pause import STATE_PAUSING

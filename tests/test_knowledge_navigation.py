@@ -168,6 +168,23 @@ def test_a_notes_keys_ride_its_navigation_row_read_once_per_content(tmp_path, mo
     assert store.speaker_pages(tmp_path, "mail", "", "vela@example.org")["page"] == page and len(parses) == 3
 
 
+def test_claims_ride_both_descriptors_and_leave_both_index_forms_byte_identical(tmp_path):
+    address = store.resolve_knowledge_address(tmp_path, "overview", "global")
+    raw = "---\ntype: note\ntitle: Overview\nsummary: A familiar index line.\n---\nShared understanding.\n"
+    initial = store.write_knowledge_note(address, raw, writer="turn").current
+    index_path = address.shelf / store.INDEX_FILE
+    index = index_path.read_bytes()
+    before = store.knowledge_index_views(address, overview=initial)
+    assert store._navigation_descriptor(address)["claims"] == store.note_descriptor(initial)["claims"] == []
+
+    claimed = raw.replace("summary:", "claims: ['room:1', false, 'place:Field%2FSite', ' case kept ']\nsummary:")
+    changed = store.write_knowledge_note(address, claimed, writer="turn", expected_revision=initial.revision).current
+    expected = ["room:1", "place:Field%2FSite", " case kept "]
+    assert store._navigation_descriptor(address)["claims"] == store.note_descriptor(changed)["claims"] == expected
+    assert store.knowledge_index_views(address, overview=changed) == before
+    assert index_path.read_bytes() == index
+
+
 @pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX change time; Windows st_ctime is the creation "
                     "time, so an edit restoring size and mtime keeps the identity (utils.json_snapshot's rule)")
 def test_an_in_place_edit_that_restores_size_and_mtime_is_parsed_again(tmp_path, monkeypatch):

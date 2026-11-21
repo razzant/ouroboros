@@ -225,10 +225,10 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
 
                 _open(page, fixture["url"])
                 page.add_style_tag(content=_STILL)
-                for path, fold in [('agents', 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'),
-                                   ('permissions', 'OUROBOROS_REVIEW_MAX_CYCLES'),
-                                   ('models', 'OUROBOROS_PROMPT_CACHE_TTL'), ('computer', '')]:
-                    open_settings(page, path, fold)
+                for path, reveal in [('agents', 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'),
+                                     ('permissions', 'OUROBOROS_REVIEW_MAX_CYCLES'),
+                                     ('models', 'OUROBOROS_PROMPT_CACHE_TTL'), ('computer', '')]:
+                    open_settings(page, path, reveal)
                     for name in GROUPS:
                         measure(name)
                     target, label = LONG

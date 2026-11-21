@@ -12,6 +12,8 @@ import asyncio
 import logging
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 import httpx
@@ -301,6 +303,7 @@ def _provider_specs(
     settings: dict,
     *,
     record_image_input: bool = False,
+    provider_id: str | None = None,
 ) -> list[tuple[ModelCatalogApiSource, Callable[[httpx.AsyncClient], Awaitable[list[dict]]]]]:
     """One loader per configured connection, with the resolved host transport alongside, not inside its read."""
     from ouroboros.llm_attempt import ConnectionUnavailable, processing_transport_modes
@@ -313,18 +316,21 @@ def _provider_specs(
     specs = []
     for route in connection_routes(rows):
         kind, name = route.kind, route.connection
+        source = connection_id(kind, name)
+        if provider_id is not None and provider_id != source:
+            continue
         try:
-            target = resolve_target(f"{connection_id(kind, name)}::catalog", settings)
+            target = resolve_target(f"{source}::catalog", settings)
         except ConnectionUnavailable:
             continue
         # A compatible endpoint lists its models with or without a key (the legacy base too).
         if target.get("base_url") if kind == "openai-compatible" else connection_configured(route, settings.get, rows):
             modes = processing_transport_modes(target)
-            source: ModelCatalogApiSource = {"id": connection_id(kind, name), "label": connection_display(kind, name, rows)}
+            descriptor: ModelCatalogApiSource = {"id": source, "label": connection_display(kind, name, rows)}
             if modes is not None:
-                source["processing_transport"] = list(modes)
-            specs.append((source, _labelled_loader(_connection_loader(kind, target, record_image_input, cache_ttl),
-                                                  source, named=bool(name))))
+                descriptor["processing_transport"] = list(modes)
+            specs.append((descriptor, _labelled_loader(_connection_loader(kind, target, record_image_input, cache_ttl),
+                                                  descriptor, named=bool(name))))
     return specs
 
 
@@ -346,7 +352,7 @@ def _local_model_entry(settings: dict) -> dict | None:
 
 
 def _catalog_error_stage(exc: Exception) -> str:
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
         return "timeout"
     if isinstance(exc, httpx.ConnectError):
         return "connect"
@@ -368,7 +374,7 @@ async def _load_provider(
     started = time.perf_counter()
     log.info("model_catalog provider=%s stage=start", provider_id)
     try:
-        items = await loader(client)
+        items = await asyncio.wait_for(loader(client), timeout=_CATALOG_HTTP_TIMEOUT_SEC)
         duration_ms = int((time.perf_counter() - started) * 1000)
         log.info(
             "model_catalog provider=%s stage=success duration_ms=%s item_count=%s",
@@ -380,14 +386,15 @@ async def _load_provider(
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
         stage = _catalog_error_stage(exc)
+        message = str(exc) or (f"Catalog read exceeded {_CATALOG_HTTP_TIMEOUT_SEC:g}s" if stage == "timeout" else type(exc).__name__)
         log.warning(
             "model_catalog provider=%s stage=%s duration_ms=%s error=%s",
             provider_id,
             stage,
             duration_ms,
-            exc,
+            message,
         )
-        return [], {"provider_id": provider_id, "error": str(exc), "stage": stage, "duration_ms": duration_ms}
+        return [], {"provider_id": provider_id, "error": message, "stage": stage, "duration_ms": duration_ms}
 
 
 def account_catalog_supported(operations: list[dict], path: str) -> bool:
@@ -457,7 +464,112 @@ def observed_profile(source: str, pin: str) -> tuple | None:
     return None
 
 
-def _subscription_model_catalog(source_id: str = "", profile_id: str = "") -> dict:
+def _one_subscription_catalog(gateway, source: dict, account_view: bool, profile_id: str, *,
+                              observe: Callable[[dict], None]) -> dict:
+    identifier = source["id"]
+    result = {"items": [], "errors": []}
+    if account_view:
+        result.update(account_catalogs=[], partial=False)
+    catalog = gateway.list_source_models(identifier, credential_profile_id=profile_id or None,
+                                         **({"view": "accounts"} if account_view else {}))
+    observe(catalog if catalog.get("source") == identifier else {})
+    if account_view:
+        result["account_catalogs"].append(catalog)
+        result["partial"] = catalog.get("partial", False)
+        for account in catalog.get("accounts", []):
+            # A readable account carrying a problem (spent window, cooldown) is account state,
+            # already on its items and account_catalogs; only a missing catalog is a read failure.
+            if account.get("catalog") is None:
+                problem = account.get("problem") or {}
+                result["errors"].append({"provider_id": "claudexor", "source_id": identifier,
+                    "credential_profile_id": account.get("credentialProfileId"),
+                    "code": problem.get("code", "catalog_unavailable"),
+                    "error": problem.get("message", "This account catalog could not be read."),
+                    "availability": account.get("availability"), "problem": account.get("problem")})
+        records = account_catalog_models(catalog)
+    else:
+        records = ((None, catalog, model) for model in catalog.get("models", []))
+    for account, catalog, model in records:
+        model_id = str(model.get("id") or "")
+        if not model_id:
+            continue
+        entry = _build_model_catalog_entry("claudexor", str(source.get("label") or identifier),
+            model_id, str(model.get("label") or model_id), source="Claudexor")
+        entry.update({
+            "source_id": identifier,
+            **({"sourceProgram": catalog.get("sourceProgram")} if not account_view else {}),
+            "value": f"claudexor::{identifier}={model_id}",
+            "credential_profile_id": catalog.get("credentialProfileId"),
+            "account_fingerprint": catalog.get("accountFingerprint"),
+            "context_window": model.get("contextWindow"),
+            "max_context_window": model.get("maxContextWindow"),
+            "max_output_tokens": model.get("maxOutputTokens"),
+            "is_default": model.get("isDefault", False),
+            "supported_options": model.get("supportedOptions", []),
+            "reasoning_efforts": model.get("reasoningEfforts", []),
+            "default_reasoning_effort": model.get("defaultReasoningEffort"),
+            "input_modalities": model.get("inputModalities", []),
+            "provenance": catalog.get("provenance"),
+            "observed_at": catalog.get("observedAt"),
+        })
+        if account is not None:
+            entry.update(availability=account.get("availability"), problem=account.get("problem"),
+                         processing=model.get("processing"))
+        elif "processing" in model:  # Older catalogs also report per-model tiers, without account proof.
+            entry["processing"] = model["processing"]
+        result["items"].append(entry)
+    return result
+
+
+def _join_subscription_catalogs(discovery: dict, parts) -> dict:
+    result = {**discovery, "items": [], "errors": list(discovery["errors"])}
+    if "account_catalogs" in discovery:
+        result["account_catalogs"] = []
+    for part in parts:
+        result["items"].extend(part["items"])
+        result["errors"].extend(part["errors"])
+        if "account_catalogs" in result:
+            result["account_catalogs"].extend(part.get("account_catalogs", []))
+        if part.get("partial"):
+            result["partial"] = True
+    return result
+
+
+def _subscription_timeout(source=None):
+    error = {"provider_id": "claudexor", "stage": "timeout", "error": "Subscription catalogs did not answer in time."}
+    if source is not None:
+        error["source_id"] = source
+    return {"items": [], "errors": [error], "partial": True}
+
+
+class _SubscriptionBatch:
+    """A response samples finished sources at one deadline. The worker owns the gateway
+    until its last read finishes, including reads that outlive the HTTP response."""
+
+    def __init__(self):
+        self.deadline = time.monotonic() + _CATALOG_HTTP_TIMEOUT_SEC
+        self.started = Future()
+
+    def read(self, discovery, sources, read):
+        # Discovery itself may have outlived the batch. Do not start new catalog calls for it.
+        if not sources:
+            return discovery
+        if time.monotonic() >= self.deadline:
+            return _join_subscription_catalogs(discovery, (_subscription_timeout(s["id"]) for s in sources))
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            jobs = {source["id"]: pool.submit(copy_context().run, read, source) for source in sources}
+            self.started.set_result((discovery, jobs))
+        return self.snapshot()
+
+    def snapshot(self):
+        if not self.started.done():
+            return {"model_sources": [], **_subscription_timeout()}
+        discovery, jobs = self.started.result()
+        return _join_subscription_catalogs(discovery, (
+            job.result() if job.done() else _subscription_timeout(source) for source, job in jobs.items()))
+
+
+def _subscription_model_catalog(source_id: str = "", profile_id: str = "", batch: _SubscriptionBatch | None = None, *, sources_only: bool = False) -> dict:
     """Read raw transport catalogs from the owned engine, never CLI model inventory.
 
     Account-view engines enumerate every enabled account, retaining independent
@@ -490,74 +602,34 @@ def _subscription_model_catalog(source_id: str = "", profile_id: str = "") -> di
             if isinstance(store := getattr(gateway, "store_identity", ""), str) and store.strip():
                 result["store_id"] = store.strip()  # this handshake's store, for this endpoint generation only
             sources = gateway.list_model_sources(**({"view": "accounts"} if source_view else {})).get("sources", [])
+            result["model_sources"] = sources
+            if sources_only:
+                return result
             if account_view:
                 result.update(account_catalogs=[], partial=False)
-            result["model_sources"] = sources
             forget_missing_sources({row.get("id") for row in sources})
-            for source in sources:
-                identifier = str(source.get("id") or "")
-                if source_id and identifier != source_id:
-                    continue
+
+            def read(source):
+                identifier = source["id"]
                 try:
-                    catalog = gateway.list_source_models(identifier, credential_profile_id=profile_id or None,
-                        **({"view": "accounts"} if account_view else {}))
+                    return _one_subscription_catalog(
+                        gateway, source, account_view, profile_id,
+                        observe=lambda catalog: _remember_profiles(
+                            identifier, profile_id, catalog, result.get("store_id", ""), revision, started),
+                    )
                 except Exception as exc:
                     _remember_profiles(identifier, profile_id, {}, "", revision, started)
-                    result["errors"].append({"provider_id": "claudexor", "source_id": identifier,
-                        "code": str(getattr(exc, "code", "catalog_unavailable")), "error": str(exc)})
-                    if account_view:
-                        result["partial"] = True
-                    continue
-                _remember_profiles(identifier, profile_id, catalog if catalog.get("source") == identifier else {},
-                                   result.get("store_id", ""), revision, started)
-                if account_view:
-                    result["account_catalogs"].append(catalog)
-                    result["partial"] = result["partial"] or catalog.get("partial", False)
-                    for account in catalog.get("accounts", []):
-                        # A readable account carrying a problem (spent window, cooldown) is account state,
-                        # already on its items and account_catalogs; only a missing catalog is a read failure.
-                        if account.get("catalog") is None:
-                            problem = account.get("problem") or {}
-                            result["errors"].append({"provider_id": "claudexor", "source_id": identifier,
-                                "credential_profile_id": account.get("credentialProfileId"),
-                                "code": problem.get("code", "catalog_unavailable"),
-                                "error": problem.get("message", "This account catalog could not be read."),
-                                "availability": account.get("availability"), "problem": account.get("problem")})
-                    records = account_catalog_models(catalog)
-                else:
-                    records = ((None, catalog, model) for model in catalog.get("models", []))
-                for account, catalog, model in records:
-                    model_id = str(model.get("id") or "")
-                    if not model_id:
-                        continue
-                    entry = _build_model_catalog_entry("claudexor", str(source.get("label") or identifier),
-                        model_id, str(model.get("label") or model_id), source="Claudexor")
-                    entry.update({
-                        "source_id": identifier,
-                        **({"sourceProgram": catalog.get("sourceProgram")} if not account_view else {}),
-                        "value": f"claudexor::{identifier}={model_id}",
-                        "credential_profile_id": catalog.get("credentialProfileId"),
-                        "account_fingerprint": catalog.get("accountFingerprint"),
-                        "context_window": model.get("contextWindow"),
-                        "max_context_window": model.get("maxContextWindow"),
-                        "max_output_tokens": model.get("maxOutputTokens"),
-                        "is_default": model.get("isDefault", False),
-                        "supported_options": model.get("supportedOptions", []),
-                        "reasoning_efforts": model.get("reasoningEfforts", []),
-                        "default_reasoning_effort": model.get("defaultReasoningEffort"),
-                        "input_modalities": model.get("inputModalities", []),
-                        "provenance": catalog.get("provenance"),
-                        "observed_at": catalog.get("observedAt"),
-                    })
-                    if account is not None:
-                        entry.update(availability=account.get("availability"), problem=account.get("problem"),
-                                     processing=model.get("processing"))
-                    elif "processing" in model:  # an older engine's per-model tiers, kept as it states them
-                        entry["processing"] = model["processing"]
-                    result["items"].append(entry)
-            if source_id and not any(str(source.get("id") or "") == source_id for source in sources):
+                    return {"items": [], "partial": account_view, "errors": [{
+                        "provider_id": "claudexor", "source_id": source["id"],
+                        "code": str(getattr(exc, "code", "catalog_unavailable")), "error": str(exc)}]}
+
+            if batch is not None:
+                return batch.read(result, sources, read)
+            selected = [s for s in sources if s.get("id") == source_id] if source_id else sources
+            if source_id and not selected:
                 result["errors"].append({"provider_id": "claudexor", "source_id": source_id,
                     "code": "model_source_unavailable", "error": "This engine does not provide the selected model transport."})
+            return _join_subscription_catalogs(result, map(read, selected))
     except Exception as exc:
         forget_missing_sources(set())
         result["errors"].append({"provider_id": "claudexor", "source_id": source_id,
@@ -570,25 +642,41 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     if "processing_model" in query:  # one route's tiers (``pricing.route_processing``), never the catalogs
         if "source_id" in query or "credential_profile_id" in query:
             return json_error("processing_model takes no source_id or credential_profile_id", 400)
+        if any(key in query for key in ("view", "provider_id", "harness_id")):
+            return json_error("processing_model takes no view, provider_id or harness_id", 400)
         from ouroboros.pricing import route_processing
 
         return JSONResponse(await asyncio.to_thread(route_processing, str(query["processing_model"]), load_settings))
     source_id = str(query.get("source_id") or "").strip()
     profile_id = str(query.get("credential_profile_id") or "").strip()
+    if query.get("view") == "sources":
+        if source_id or profile_id or "provider_id" in query or "harness_id" in query:
+            return json_error("view=sources cannot be combined with a source, profile or provider selector", 400)
+        return JSONResponse(await asyncio.to_thread(_subscription_model_catalog, sources_only=True))
+    if "provider_id" in query:
+        provider_id = query["provider_id"].strip()
+        if not provider_id or source_id or profile_id or "harness_id" in query:
+            return json_error("provider_id must name one connection without a subscription selector", 400)
+        return JSONResponse(await catalog_payload(load_settings(), provider_id=provider_id))
+    if "harness_id" in query:
+        from ouroboros.gateway.claudexor_accounts import session_model_catalog
+
+        harness_id = query["harness_id"].strip()
+        if not harness_id or source_id:
+            return json_error("harness_id must name one agent session without a subscription source", 400)
+        return JSONResponse(await asyncio.to_thread(session_model_catalog, harness_id, profile_id))
     if profile_id and not source_id:
-        return json_error("credential_profile_id requires source_id", 400)
-    subscription = await asyncio.to_thread(_subscription_model_catalog, source_id, profile_id)
+        return json_error("credential_profile_id requires source_id or harness_id", 400)
     if source_id:
-        return JSONResponse(subscription)
-    return JSONResponse(await catalog_payload(load_settings(), subscription))
+        return JSONResponse(await asyncio.to_thread(_subscription_model_catalog, source_id, profile_id))
+    return JSONResponse(await catalog_payload(load_settings()))
 
 
-async def draft_catalog(saved: dict, draft: dict, typed: set) -> dict:
+async def draft_catalog(saved: dict, draft: dict, typed: set, *, provider_id: str | None = None) -> dict:
     """The catalog of an unsaved settings draft (the setup wizard's): ``catalog_payload`` over ``draft``, recording
     no capability evidence. A connection whose kept secret the draft would send somewhere it was not saved for is
     not asked: its reason is its error row (``_saved_secret_moved``; ``typed`` is what the draft's author typed)."""
-    subscription = await asyncio.to_thread(_subscription_model_catalog)
-    return await catalog_payload(draft, subscription, refused=lambda source_id: _saved_secret_moved(
+    return await catalog_payload(draft, provider_id=provider_id, refused=lambda source_id: _saved_secret_moved(
         source_id, *_kept_binding(source_id, saved, draft), typed))
 
 
@@ -617,14 +705,38 @@ def _kept_binding(source_id: str, saved: dict, draft: dict) -> tuple[dict, dict]
     return next((pair for pair in pairs if reached(pair[1]) and reached(pair[1]) == reached(draft)), (saved, draft))
 
 
-async def catalog_payload(settings: dict, subscription: dict, *, refused: Callable[[str], str] | None = None) -> dict:
-    """The catalog of ``settings``: the engine's rows (``subscription``), every API connection that can serve and
-    the local model. ``refused`` (a draft read) names why a connection is not asked, and nothing is recorded."""
-    items = list(subscription["items"])
-    errors = list(subscription["errors"])
+async def catalog_payload(settings: dict, *, provider_id: str | None = None,
+                          refused: Callable[[str], str] | None = None) -> dict:
+    """Read independent inventories together. A selected API connection needs no subscription read.
+    A draft names refused connections and records no capability evidence."""
+    if provider_id is not None:
+        return await _api_catalog(settings, provider_id, refused)
+    # A whole-list client has one response budget. Slow subscription discovery must not consume
+    # the API connections' time before they even start, or discard their already returned models.
+    async def subscriptions():
+        batch = _SubscriptionBatch()
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_subscription_model_catalog, "", "", batch), _CATALOG_HTTP_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            return batch.snapshot()
+    engine, api = await asyncio.gather(subscriptions(), _api_catalog(settings, None, refused))
+    items = sorted(engine["items"] + api["items"], key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
+    return {**engine, "items": items, "errors": engine["errors"] + api["errors"], "api_sources": api["api_sources"]}
+
+
+async def _api_catalog(settings, provider_id, refused):
+    result = {"items": [], "errors": [], "model_sources": [], "api_sources": []}
+    if provider_id == "local":
+        return {**result, "items": list(filter(None, [_local_model_entry(settings)]))}
+    items = result["items"]
+    errors = result["errors"]
     kept_at: dict[str, int] = {}
+    configured = _provider_specs(settings, record_image_input=refused is None, provider_id=provider_id)
+    if provider_id is not None and not configured:
+        return {**result, "errors": [{"provider_id": provider_id, "stage": "configuration",
+                                      "error": "This connection has no configured model catalog."}]}
     specs = []
-    for source, loader in _provider_specs(settings, record_image_input=refused is None):
+    for source, loader in configured:
         if refused and (reason := refused(source["id"])):
             errors.append({"provider_id": source["id"], "error": reason, "stage": "kept_key", "duration_ms": 0})
         else:
@@ -636,7 +748,7 @@ async def catalog_payload(settings: dict, subscription: dict, *, refused: Callab
     except ExtraCaBundleError as exc:
         # A misconfigured trust bundle is a fact for the owner to read, not a bare 500:
         # keep the engine catalog, name the setting, skip the API providers this turn.
-        errors.append({"provider_id": "extra_ca_bundle", "error": str(exc), "stage": "trust", "duration_ms": 0})
+        errors.append({"provider_id": provider_id or "extra_ca_bundle", "error": str(exc), "stage": "trust", "duration_ms": 0})
         results = []
     else:
         async with httpx.AsyncClient(timeout=timeout, **verify) as client:
@@ -662,9 +774,10 @@ async def catalog_payload(settings: dict, subscription: dict, *, refused: Callab
                 kept_at[value] = len(items)
                 items.append(item)
 
-    items.extend(filter(None, [_local_model_entry(settings)]))
+    if provider_id is None:
+        items.extend(filter(None, [_local_model_entry(settings)]))
     items.sort(key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
-    return {**subscription, "items": items, "errors": errors, "api_sources": [source for source, _ in specs]}
+    return {**result, "items": items, "errors": errors, "api_sources": [source for source, _ in specs]}
 
 
 async def api_local_model_start(request: Request) -> JSONResponse:

@@ -127,7 +127,10 @@ def retain_generation_receipt(root, row: dict, payload, *, status_code: int = 20
 
 
 def validate_retained_receipt(root, attempt_id: str, receipt: dict) -> bool:
-    """Verify source bytes and derived money; the accounting owner checks the row binding."""
+    """Verify source bytes and derived money; the accounting owner checks the row binding. Evidence whose
+    bytes cannot be located now raises ``EvidenceUnavailable``: such a receipt is neither valid nor invalid yet."""
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     if (not isinstance(receipt, dict) or receipt.get("attempt_id") != attempt_id
             or receipt.get("provider") != "openrouter" or receipt.get("status") != "price"):
         return False
@@ -139,6 +142,8 @@ def validate_retained_receipt(root, attempt_id: str, receipt: dict) -> bool:
                                            status_code=evidence.get("status_code"))
         return (parsed.get("status") == "price" and provider_cost_value(receipt.get("cost_usd")) is not None
                 and parsed["cost_usd"] == receipt["cost_usd"])
+    except EvidenceUnavailable:
+        raise
     except (OSError, ValueError, TypeError):
         return False
 

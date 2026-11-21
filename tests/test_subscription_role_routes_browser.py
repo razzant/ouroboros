@@ -166,15 +166,28 @@ def test_subscription_accounts_roundtrip_existing_editors(role_ui, width):
     assert not any("login" in path for path, _ in ui["posts"])
 
 
+def refresh_agent_catalog(ui):
+    """An account change refreshes the open form's own model catalog."""
+    page = ui["page"]
+    profile = ui["fixture"]["status"]["profiles"]["profiles"][0]["profile"]
+    profile["display_name"] = profile.get("display_name", "Personal") + "!"
+    with page.expect_response(lambda response: "/api/model-catalog?source_id=" in response.url):
+        page.evaluate("async () => (await import('/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+
+
 def test_source_switch_and_catalog_refresh_keep_focus_and_draft(role_ui):
     ui = role_ui
     configure_mixed(ui)
     lane = api_lane(ui, 'openai')
+    api_lane(ui, 'openrouter')
     row = open_agent(ui, "native")
     page = ui["page"]
     page.wait_for_function("""() => document.querySelector('[data-subagent-field="route"]')
         ?.querySelector('option[value="subscription:opaque-source"]')""")
-    row.locator('[data-subagent-field="route"]').select_option(lane)
+    query = "/api/model-catalog?source_id=opaque-source&credential_profile_id=personal"
+    assert any(url.endswith(query) for url in ui["reads"])
+    with page.expect_response("**/api/model-catalog?provider_id=openai"):
+        row.locator('[data-subagent-field="route"]').select_option(lane)
     assert row.locator('[data-subagent-field="account"]').count() == 0
     # A source change clears only source-bound fields: the Reviewer mark stays.
     assert row.locator('[data-subagent-field="review_eligible"]').is_checked()
@@ -187,12 +200,12 @@ def test_source_switch_and_catalog_refresh_keep_focus_and_draft(role_ui):
     field.evaluate("e => e.setSelectionRange(3, 3)")
     scroller = settings_page(page, "agents/native")
     before = scroller.evaluate("e => e.scrollTop")
-    page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
-        'settings-model-catalog:updated', {detail}))""", ui["fixture"]["catalog"])
+    refresh_agent_catalog(ui)
     assert page.evaluate("document.activeElement.getAttribute('data-subagent-field') === 'model'")
     assert field.input_value() == "gpt-manual"
     assert field.evaluate("e => e.selectionStart") == 3
     assert scroller.evaluate("e => e.scrollTop") == before
+    assert not any(url.endswith(("/api/model-catalog", "provider_id=openrouter")) for url in ui["reads"])
     capture(page, "role-source-refresh-focus")
 
 
@@ -262,6 +275,7 @@ def test_models_does_not_guess_a_credential_family_when_source_mapping_is_unread
 def test_catalog_failure_recovery_and_empty_read_keep_an_agents_form_nodes_and_draft(role_ui):
     """An agent's page while the model catalogue fails, recovers and reads empty: the form keeps its nodes, the
     caret and the unsaved model; the failure is said on the page, and the page's own Save writes the draft."""
+    from playwright.sync_api import expect
     ui = role_ui
     configure_mixed(ui)
     row = open_agent(ui, "native")
@@ -285,7 +299,11 @@ def test_catalog_failure_recovery_and_empty_read_keep_an_agents_form_nodes_and_d
         (503, {"error": "catalog temporarily offline"}),
     ]:
         response.update(status=status, body=body)
-        page.evaluate("async () => (await import('/static/modules/settings_catalog.js')).refreshModelCatalog()")
+        refresh_agent_catalog(ui)
+        if status == 503:
+            expect(problem).to_contain_text("catalog temporarily offline")
+        else:
+            expect(problem).not_to_contain_text("catalog temporarily offline")
         assert field.evaluate("e => e === window.catalogDraftNode && document.activeElement === e")
         assert field.evaluate("e => [e.selectionStart, e.selectionEnd]") == [4, 9]
         assert field.input_value() == "gpt-owner-unsaved"
@@ -293,11 +311,6 @@ def test_catalog_failure_recovery_and_empty_read_keep_an_agents_form_nodes_and_d
         assert account.evaluate("e => e === window.catalogAccountNode") and account.input_value() == "personal"
         assert ("catalog temporarily offline" in problem.text_content()) is (status == 503)
     capture(page, "catalog-recovery-draft-actor")
-    # Not this page's: the Circles page, mounted with the app, re-reads the catalogue on every broadcast and rejects
-    # a failed read with nothing listed (circles.js readCatalog, from its listener), unhandled. Anything else counts.
-    refused = "The model catalog could not be read."
-    assert not [error for error in ui["errors"].unexpected() if refused not in error], ui["errors"].report()
-    ui["errors"].clear()
     assert press_editor_save(page).startswith("Saved")
     saved = saved_catalog(ui)["items"][0]
     assert saved["route"] == {"kind": "api_model", "target_id": "claudexor::opaque-source=gpt-owner-unsaved",
@@ -330,7 +343,8 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
         (503, {"error": "catalog temporarily offline"}),
     ]:
         response.update(status=status, body=body)
-        page.evaluate("async () => (await import('/static/modules/settings_catalog.js')).refreshModelCatalog()")
+        page.evaluate("""window.dispatchEvent(new CustomEvent('ouro:settings-page-shown',
+            { detail: { path: 'models/role/main' } }))""")
         assert field.evaluate("e => e === window.catalogDraftNode && document.activeElement === e")
         assert field.evaluate("e => [e.selectionStart, e.selectionEnd]") == [4, 9]
         assert field.input_value() == "gpt-owner-unsaved"
@@ -369,3 +383,30 @@ def test_image_generation_has_no_settings_default(role_ui):
     saved = settings_saves(ui)[-1]
     assert saved['OUROBOROS_MODEL_VISION'] == 'owner-vision'
     assert 'OUROBOROS_MODEL_IMAGE' not in saved
+
+
+def test_open_agent_source_menu_gets_subscription_without_losing_focus(role_ui):
+    from playwright.sync_api import expect
+
+    ui, page = role_ui, role_ui["page"]
+    configure_mixed(ui)
+    api_lane(ui, "openai")
+    pending = []
+    page.route("**/api/model-catalog?view=sources", lambda route: pending.append(route))
+    row = open_agent(ui, "direct")
+    button = row.locator("[data-source-picker]")
+    button.click()
+    expect(button).to_be_focused()
+    popup = page.locator(".ui-source-options[role=listbox]")
+    expect(popup).to_be_visible()
+    assert pending
+    option = popup.get_by_role("option", name="Codex (model)", exact=True)
+    expect(option).to_have_count(0)
+    for route in pending:
+        route.fulfill(json={"model_sources": ui["fixture"]["catalog"]["model_sources"], "items": [], "errors": []})
+    expect(option).to_be_visible()
+    expect(button).to_be_focused()
+    option.click()
+    expect(row.locator('[data-subagent-field="route"]')).to_have_value("subscription:opaque-source")
+    expect(button).to_be_focused()
+    assert not ui["posts"]
