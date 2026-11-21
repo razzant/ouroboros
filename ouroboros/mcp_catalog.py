@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -125,6 +126,17 @@ def _file_lock(server_id: str, *, wait_sec: float) -> Iterator[None]:
 
 def _same_record(data: Any, cfg: Any) -> bool:
     return isinstance(data, dict) and data.get("server_id") == cfg.id and data.get("identity") == identity(cfg)
+
+
+def note_call(cfg: Any, current: Any, *, ok: bool, code: str = "", method: str = "") -> None:
+    """``record_call`` for a call that just ended, only when it changes ``current`` (the adopting process's mark:
+    its call's own ``rebind`` already stat-checked it, so an unchanged outcome reads no disk). Never raises."""
+    if not call_changed(current, ok=ok, code=code):
+        return
+    try:
+        record_call(cfg, ok=ok, code=code, method=method, at=datetime.now(timezone.utc).isoformat())
+    except Exception:  # noqa: BLE001 - a lost mark is written by the next changed call
+        log.debug("MCP call outcome mark failed for %s", getattr(cfg, "id", "?"), exc_info=True)
 
 
 def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:

@@ -1413,20 +1413,11 @@ class MCPManager:
             return self._resolve_locked(prefixed_name)[0]
 
     def _note_call(self, cfg: MCPServerConfig, method: str, *, ok: bool, code: str = "") -> None:
-        """Date a change of whether ``cfg``'s server answers calls (``latest_call`` in its published envelope).
-
-        An outcome equal to the adopted envelope's costs nothing (the call's own ``rebind`` already stat-checked
-        it); a change is written under the file lock and adopted by every process's next read. Never fails the
-        call it describes."""
+        """Date a change of whether ``cfg``'s server answers calls against the adopted envelope's mark."""
         with self._lock:
             runtime = self._servers.get(cfg.id)
             current = (runtime.catalog or {}).get("latest_call") if runtime is not None else None
-        if not mcp_catalog.call_changed(current, ok=ok, code=code):
-            return
-        try:
-            mcp_catalog.record_call(cfg, ok=ok, code=code, method=method, at=datetime.now(timezone.utc).isoformat())
-        except Exception:  # noqa: BLE001 - a lost mark is written by the next changed call
-            log.debug("MCP call outcome mark failed for %s", cfg.id, exc_info=True)
+        mcp_catalog.note_call(cfg, current, ok=ok, code=code, method=method)
 
     def _task_session_live(self, cfg: MCPServerConfig, register: Optional[Callable[[], None]] = None) -> bool:
         """Whether ``cfg`` is still this manager's task-session configuration; ``register`` runs under the lock
