@@ -160,7 +160,7 @@ _PENDING_FIELDS = (
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause', '_park_confirmation',
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
     '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
-    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by', '_folder_wait', '_placement_folder',
+    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by', '_lane_wait', '_placement_folder',
     '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 

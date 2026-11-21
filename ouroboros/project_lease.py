@@ -154,23 +154,29 @@ def candidate_is_leasable(candidate: Dict[str, Any], running_ids: Set[str], *,
     return not _is_lane_occupant(candidate) or project not in running_ids
 
 
-def note_folder_wait(candidate: Dict[str, Any], running: Iterable[Any], pending: Iterable[Any],
-                     holders: Dict[Any, Set[str]]) -> bool:
-    """Name on ``candidate`` the tree another room's (or its own room's) work keeps its folder for, as
-    ``_folder_wait`` ``{task_id, project_id, folder}``, or clear it; whether it changed. The queue snapshot
-    carries it to the roster the mind reads (``peer_roster``)."""
-    blockers, folder, wait = sorted(_folder_holders(candidate, holders)), lane_folder(candidate), {}
-    if blockers:
-        rows = [_as_task(item) for item in [*(running or ()), *(pending or ())]]
-        project = next((_task_project_id(row) for row in rows if _tree(row) == blockers[0]
-                        and lane_folder(row) == folder), "")
-        wait = {"task_id": blockers[0], "project_id": project, "folder": folder}
-    if (candidate.get("_folder_wait") or {}) == wait:
+def note_lane_wait(candidate: Dict[str, Any], running: Iterable[Any], pending: Iterable[Any],
+                   holders: Dict[Any, Set[str]]) -> bool:
+    """Name on a lane occupant the tree that keeps it out, as ``_lane_wait`` ``{lane, task_id, project_id}``
+    (``lane`` ``"project"`` or ``"folder"``, the latter with its ``folder``), or clear it; whether it changed.
+    Its Project's lane first, the nearer cause; the first blocker in sorted order. The queue snapshot carries it
+    to the roster the mind reads (``peer_roster``) and to the owner's card (``gateway/work_status``)."""
+    wait: Dict[str, Any] = {}
+    if _is_lane_occupant(candidate):
+        project, folder = _task_project_id(candidate), lane_folder(candidate)
+        blockers = sorted(holders.get(project, set()) - {_tree(candidate)})
+        if blockers:
+            wait = {"lane": "project", "task_id": blockers[0], "project_id": project}
+        elif blockers := sorted(_folder_holders(candidate, holders)):
+            rows = [_as_task(item) for item in [*(running or ()), *(pending or ())]]
+            holder_project = next((_task_project_id(row) for row in rows if _tree(row) == blockers[0]
+                                   and lane_folder(row) == folder), "")
+            wait = {"lane": "folder", "task_id": blockers[0], "project_id": holder_project, "folder": folder}
+    if (candidate.get("_lane_wait") or {}) == wait:
         return False
     if wait:
-        candidate["_folder_wait"] = wait
+        candidate["_lane_wait"] = wait
     else:
-        candidate.pop("_folder_wait", None)
+        candidate.pop("_lane_wait", None)
     return True
 
 
@@ -241,7 +247,7 @@ __all__ = [
     "lane_folder",
     "lane_holders",
     "mark_task_project",
-    "note_folder_wait",
+    "note_lane_wait",
     "running_project_ids",
     "task_lane_project_state",
 ]

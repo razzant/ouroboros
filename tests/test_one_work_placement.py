@@ -161,10 +161,10 @@ def test_a_move_into_a_folder_another_room_holds_waits_before_selection_and_chan
     assert dispatch_choice.choose(queue, 5.0, ()) == [], "the chooser leaves it queued"
     assert work["_placement_folder"] == str(shared) and work["workspace_root"] == str(old)
     assert dispatch_choice.choose(queue, 5.0, ()) == [], "and its next pass names who keeps the folder"
-    assert work["_folder_wait"] == {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    assert work["_lane_wait"] == {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
     del workers.RUNNING["other"]
     assert dispatch_choice.choose(queue, 5.0, ()) == [work], "nothing else held it"
-    assert "_folder_wait" not in work
+    assert "_lane_wait" not in work
     claimed = [{"task": holder}]  # that work's launch is claimed on the admission lane and not RUNNING yet
     assert not readmit_placement(data, work, repo_dir=repo, running=claimed, pending=workers.PENDING)
     assert work["workspace_root"] == str(old) and "placement_applied_at" not in work, "a refusal changes nothing"
@@ -251,7 +251,7 @@ def test_the_chooser_reads_a_moved_works_copy_records_once_and_its_launch_reads_
         assert not readmit_placement(data, work, repo_dir=repo, running=workers.RUNNING, pending=workers.PENDING)
     assert reads == [False, True] and (work["workspace_root"], work["_placement_folder"]) == ("", str(shared))
     assert [dispatch_choice.choose(queue, 100.0, ()) for _ in range(3)] == [[]] * 3 and len(reads) == 2
-    assert work["_folder_wait"] == {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    assert work["_lane_wait"] == {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
 
 
 def test_bind_failure_never_changes_pending_or_running(runtime, monkeypatch):
@@ -375,7 +375,7 @@ def test_restore_of_old_execution_scope_readmits_committed_move(host, tmp_path, 
     assert reads == [False, True]
 
 
-def test_a_folder_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_picked(tmp_path, monkeypatch):
+def test_a_lane_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk_picked(tmp_path, monkeypatch):
     """Opus 16.11.2026: two rooms share one recorded folder and a store gate (here a schedule's control) refuses both
     rows every pass. The row a walk picks holds the folder only for the rest of that walk and may never start, so the
     later row's wait never names it and a pass marks nothing (``dispatch_choice._collect``'s ``waits``). Work that
@@ -405,15 +405,15 @@ def test_a_folder_wait_names_only_work_holding_the_folder_now_never_a_row_a_walk
 
     for _ in range(3):
         one_pass()
-    assert marks.count("folder_wait") == 0 and "_folder_wait" not in second, marks
+    assert marks.count("lane_wait") == 0 and "_lane_wait" not in second, marks
     workers.RUNNING["other"] = {"task": {"id": "other", "type": "task", "project_id": "elsewhere",
                                          "root_task_id": "other", "workspace_root": str(shared),
                                          "workspace_mode": "external"}, "worker_id": 0}
     one_pass()
     one_pass()
-    wait = {"task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
-    assert first["_folder_wait"] == second["_folder_wait"] == wait
-    assert marks.count("folder_wait") == 2, "each named once, then unchanged"
+    wait = {"lane": "folder", "task_id": "other", "project_id": "elsewhere", "folder": str(shared)}
+    assert first["_lane_wait"] == second["_lane_wait"] == wait
+    assert marks.count("lane_wait") == 2, "each named once, then unchanged"
 
 
 def test_a_moved_rows_unreadable_own_resource_is_said_once_a_move_and_the_row_waits(tmp_path, monkeypatch, caplog):
