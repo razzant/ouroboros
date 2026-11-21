@@ -451,6 +451,11 @@ def _start_task(
                                                  started_root=True, owner_basis=owner_basis))
         _attach_origin_from_metadata(ctx, evt)
         _attach_client_surface(ctx, evt)
+        if pid and not presence_carrier and not is_focus_wake(metadata) and getattr(ctx, "is_direct_chat", False):
+            from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+            if transported := reply_transport_from_metadata(canonical_data_root(ctx), metadata):
+                evt[TURN_ADDRESS] = transported
     _attach_drafted_objective(ctx, evt)
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
         if owner_basis["source"] in ("owner_press", "owner_quiz_answer") or (owner_basis.get("reply_to") or {}).get("card_id"):

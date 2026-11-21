@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import dialogue_store
 from ouroboros.chat_uploads import attachment_views, same_message, stored_refs
-from ouroboros.store import StoreError
+from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, SUBAGENT_MESSAGE_FIELDS
 from ouroboros.utils import utc_now_iso
 
@@ -39,6 +39,12 @@ log = logging.getLogger(__name__)
 _INGRESS_LOCK = threading.Lock()
 # The dispatchers an obligation can name: replayable from the recorded input and the stored row.
 _DISPATCHERS: Dict[str, Callable[..., Any]] = {}
+
+
+class NotAccepted(RuntimeError):
+    """This attempt was refused before it wrote anything: tried again, the same delivery is decided afresh.
+    Raised only where this attempt's acceptance is known not to have begun (it says nothing of earlier
+    attempts under the same id); its cause says why."""
 
 
 def _bus_dispatch(bridge: Any, text: str, **message: Any) -> None:
@@ -243,8 +249,11 @@ def _chat_record(
             from ouroboros.settings_integrity import effective_subagents_mode
 
             record["message_accepted_at"] = utc_now_iso()
+            sent = (message_meta or {}).get("reply_to") if source == "skill:telegram" else None
+            room = sent.get("telegram_room_chat_id") if isinstance(sent, dict) else None  # the turn's room, not this chat
             try:
-                if effective_subagents_mode(task={"chat_id": chat_id}, drive_root=root) == "swarm":
+                if effective_subagents_mode(task={"chat_id": room if type(room) is int and room > 0 else chat_id},
+                                            drive_root=root) == "swarm":
                     record["subagents_mode"] = "swarm"
             except Exception:
                 log.debug("Subagents label unavailable for the inbound row", exc_info=True)
@@ -280,6 +289,8 @@ def _chat_record(
             record["ui_control"] = {"name": str(meta["ui_control"]["name"])}
         if isinstance(meta.get("execution_transport"), dict):
             record["execution_transport"] = dict(meta["execution_transport"])
+        if direction == "out" and meta.get("logical_room_chat_id") == 1:
+            record["logical_room_chat_id"] = 1
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
             meta["reply_to"] = origin_reply(root, task_id)
@@ -514,15 +525,43 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import delivery_reply, ingress_reply
+    from ouroboros.chat_references import delivery_reply, exact_reply_ingress, ingress_reply, telegram_reply_room, with_turn_address
+
+    exact = bool(task_metadata.get("reply_to")) and exact_reply_ingress(
+        root, source, chat_id, message_id, message.get("transport"))
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
-        row = accepted_chat_message(root, chat_id, message_id)
-        reply = ingress_reply(drive_root, message.get("task_metadata") or {}, accepted=row)
-        if reply:  # a replayed obligation dispatches the same reference
-            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
+        try:
+            row = accepted_chat_message(root, chat_id, message_id)
+        except (StoreBusy, StoreMigrating) as exc:
+            if not exact:
+                raise
+            raise NotAccepted("the store was busy before this attempt was accepted") from exc
+        try:
+            reply = ingress_reply(root, task_metadata, accepted=row, strict_transient=exact)
+        except (StoreBusy, StoreMigrating) as exc:
+            if not exact:
+                raise
+            raise NotAccepted("the store was busy before this attempt was accepted") from exc
+        if row is None:
+            if reply and exact:
+                try:
+                    room, decided = telegram_reply_room(root, reply, chat_id)
+                except (StoreBusy, StoreMigrating) as exc:
+                    raise NotAccepted("the store was busy before this attempt was accepted") from exc
+                except (OSError, ValueError, StoreError):
+                    room, decided = None, True
+                if decided:
+                    reply = {**reply, "telegram_room_chat_id": room}
+            carried = with_turn_address(task_metadata, {
+                "source": source, "direction": "in", "transport": message.get("transport"),
+                "client_message_id": message_id, "chat_id": chat_id, "reply_to": reply})
+            if reply:
+                carried["reply_reference"] = reply
+            if carried != task_metadata:
+                message["task_metadata"] = carried
         fresh = attempted = False
         if row is None:
             attempted = True
@@ -561,9 +600,9 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             if (message.get("task_metadata") or {}).get("chat_attachments"):
                 message["task_metadata"] = {**message["task_metadata"], "chat_attachments": row.get("attachments")}
         ts = str(row.get("ts") or "")
-        if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            message["task_metadata"] = {**(message.get("task_metadata") or {}),
-                                        "reply_reference": delivery_reply(row["reply_to"], reply)}
+        if row.get("reply_to"):
+            message["task_metadata"] = with_turn_address({**(message.get("task_metadata") or {}),
+                "reply_reference": delivery_reply(row["reply_to"], reply)}, row)
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.

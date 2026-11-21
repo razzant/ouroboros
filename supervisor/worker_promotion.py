@@ -464,6 +464,11 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     rejection = _admit_project_scope(evt, task, tid, pid, attachment_manifest)
     if rejection is not None:
         return rejection
+    if pid and not _presence_promotion(evt) and origin.get("work_kind") == "owner":
+        from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+        if evt.get(TURN_ADDRESS) and (surface := reply_transport_from_metadata(_pool().DRIVE_ROOT, evt)):
+            task["metadata"][TURN_ADDRESS] = surface
     # The answer the task was actually admitted with, so the promote's own receipt
     # names the room the binding names.
     effective_pid = pid

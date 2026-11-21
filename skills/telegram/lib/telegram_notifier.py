@@ -28,6 +28,7 @@ from .telegram_state import (
     _read_json_file,
     _state_file,
     _mirror_options,
+    TelegramDestinationUnavailable,
 )
 from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, telegram_proxy
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
@@ -81,6 +82,8 @@ async def _push_notification(
     token, generation = binding.snapshot()  # one identity: its references and its requests are one bot's
     state_dir = Path(api.get_state_dir())
     try:
+        if not token:
+            raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
         client = TelegramClient(
             token, trust_env=trust_env,
             proxy=telegram_proxy(state_dir),
@@ -107,6 +110,9 @@ async def _push_notification(
             api.log("debug", f"Telegram notify failed: {exc}")
             return "transient", exc
         api.log("error", f"Telegram notification permanently rejected; skipping it: {exc}")
+        return "skipped", exc
+    except TelegramDestinationUnavailable as exc:  # its turn's bot or chat is not this one: it stays in Ouroboros
+        api.log("info", f"Telegram notification not sent: {exc}")
         return "skipped", exc
 
 
@@ -385,8 +391,15 @@ async def _check_tasks_notify(
             parts.append(cost)
         msg = _completion_text(e, tid, lang, parts)
         from ouroboros.chat_chain import format_address, row_address
+        from ouroboros.chat_references import turn_reply_transport
 
-        event = {**e, "row_address": format_address(row_address(e))}
+        # An exact Reply's turn tells its end where it was asked (its bot and chat, no anchor); any other, as before.
+        try:
+            exact = turn_reply_transport(_data_dir(api), tid, anchor=False, strict=True)
+        except Exception as exc:  # its record unreadable now: it waits for the next cycle, never a guessed chat
+            transient = exc
+            break
+        event = {**e, "row_address": format_address(row_address(e)), **({"transport": exact} if exact else {})}
         send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env, event=event)
         if send_outcome == "transient":
             # Stop the batch on the first transient failure: every further

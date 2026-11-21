@@ -384,6 +384,9 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
         keys = [("chat_id", room["chat_id"]) for room in ds.rooms(root)
                 if room["chat_id"] not in projects and room["chat_id"] >= 0]
         keys.append(("chat_id", None))
+        if stream == "chat":
+            keys.extend(("telegram_inbound_chat", p) for p in sorted(projects))
+            keys.append(("appearance", "room:1"))
     if chat in projects:
         tasks = {str(binding["task_id"])} if binding is not None else {
             str(tid) for tid, bound in resolver.bindings.items() if int(bound.get("project_chat_id") or 0) == chat}

@@ -508,7 +508,7 @@ def test_a_late_answer_bypasses_an_unrelated_project_reader(tmp_path, monkeypatc
 
     heads = []
     pending = [{"id": "pending-root", "chat_id": chat_id, "root_task_id": "pending-root",
-                "delegation_role": "root", "drive_root": str(tmp_path)}]
+                "delegation_role": "root", "drive_root": str(tmp_path), "project_id": project["id"]}]
     ctx = SimpleNamespace(
         DRIVE_ROOT=tmp_path, PENDING=[], RUNNING={"pending-root": {"task": pending[0]}},
         load_state=lambda: {"owner_id": 1, "owner_chat_id": 1, "session_id": "s-1"},
@@ -603,6 +603,8 @@ def test_a_late_answer_reaches_the_head_its_askers_earlier_answer_started(tmp_pa
     _late_answer_head("head-1", head_asker, chat_id, project_id=str(project.get("id") or ""))
     unrelated = {"id": "busy-root", "chat_id": chat_id, "root_task_id": "busy-root",
                  "delegation_role": "root", "drive_root": str(tmp_path)}
+    if project:
+        unrelated["project_id"] = project["id"]
     started = _intake(tmp_path, monkeypatch, bridge, running={"busy-root": {"task": unrelated}})
 
     # The unrelated reader is never addressed; in a Project it hears the room's words as context, naming the head.
