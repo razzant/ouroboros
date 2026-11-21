@@ -70,6 +70,10 @@ def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscri
     assert page.locator(".skills-starter-group h3").all_inner_texts() == [
         "Built in", "Documents", "Search & research", "More"], "no counts; the categories of one skill close as «More»"
     assert page.locator("[data-starter-skill] input:checked").count() == 6
+    # Where a row could not keep one line (a phone), every row takes two: the title on its own line, then the pitch and
+    # mark under it; wide, the title and its words share one line.
+    assert set(page.locator("[data-starter-skill] strong").evaluate_all("els => els.map((el) => getComputedStyle(el).display)")) == {
+        "block" if width < 600 else "inline"}
     # A row has no surface of its own, ticked or not (owner 21.11: «слишком крупные карточки»): the box says it.
     assert set(page.locator("[data-starter-skill]").evaluate_all(
         "rows => rows.map((row) => getComputedStyle(row).backgroundColor + ' ' + getComputedStyle(row).borderTopWidth)")) == {

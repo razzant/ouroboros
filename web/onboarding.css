@@ -1517,7 +1517,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 }
 /* The step holds the reading place itself (onboarding_starter_skills.js readingPlace): an engine's own scroll anchoring
    would move the page a second time when the hub's skills arrive. */
-.skills-starter-step { overflow-anchor: none; }
+.skills-starter-step { overflow-anchor: none; container: skillsstep / inline-size; }
 .skills-starter-list { display: grid; gap: var(--space-2); min-width: 0; padding-bottom: var(--space-3); }
 .skills-starter-bar { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
 .skills-starter-count { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
@@ -1562,6 +1562,13 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .skills-connection-facts a { color: var(--text-primary); font-weight: 600; }
 .skills-connection-option { display: flex; align-items: flex-start; gap: 6px; margin-top: var(--space-1); color: var(--text-primary); cursor: pointer; }
 .skills-connection-option .ui-checkbox { flex: none; margin: 1px 0 0; }
+/* Where a row could not keep one line (a phone, a narrow window), every row takes two: the title, then what it gives and
+   its mark on one muted line under it, the same rhythm for all instead of a break mid-sentence. The card's action stays
+   beside its title. */
+@container skillsstep (max-width: 35rem) {
+  .skills-starter-words strong { display: block; margin-right: 0; }
+  .skills-connection-head { align-items: flex-start; }
+}
 .skills-starter-trust-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-starter-trust-row strong { flex: 1 1 30%; min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-starter-trust .selection-pill { padding: 6px 12px; font-size: var(--type-meta); }
