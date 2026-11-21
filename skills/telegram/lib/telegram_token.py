@@ -27,9 +27,9 @@ import threading
 import weakref
 
 from .telegram_api import OUTBOUND_JOURNAL, TelegramBindingChanged, TelegramTokenMissing
+from .telegram_pairing import CODE_KEY  # the pairing code: the Mini App never uses it, so it never restarts it
 
 TOKEN_KEY = "TELEGRAM_BOT_TOKEN"
-CODE_KEY = "TELEGRAM_PAIRING_CODE"  # lib/telegram_pairing.py; the Mini App never uses it, so it never restarts it
 WATCH_SEC = 2.0
 # Outcomes after which this generation needs no further refresh (PluginAPI 2.4's closed set); the rest are
 # asked again next read: not_started, retained, stop_unconfirmed, settings_unknown, settings_changed.
