@@ -871,11 +871,12 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
 }
 
 /* ---- The register of parts (DESIGN.md principle 8) ------------------------------------------------------------------
-   The one list of the parts this sheet holds: each entry names a part's classes, then its job, variants and states,
-   and what a page may not do with it. Screens compose the parts and lay them out in their own containers; a look two
-   screens need changes once, in its part, every consumer shown before and after; a part no entry covers is added here
-   with its recipe. The home test (web/tests/ui_primitives.test.js) reads this list both ways: every class an entry
-   names is selected in this sheet, and every class this sheet selects is named by an entry.
+   The one list of the parts this sheet holds: each entry names a part's classes (or the attribute that marks it),
+   then its job, variants and states, and what a page may not do with it. Screens compose the parts and lay them out
+   in their own containers; a look two screens need changes once, in its part, every consumer shown before and after;
+   a part no entry covers is added here with its recipe. The home test (web/tests/ui_primitives.test.js) reads this
+   list both ways: what an entry names is selected in this sheet, and every class this sheet selects, and every part
+   it draws by an attribute alone, is named by an entry, each part by one entry.
    - .btn .btn-default .btn-primary .btn-ghost .btn-danger .btn-save .btn-float .btn-sm — a command, a capsule on the
      rest shadow: neutral, the crimson primary, ghost (no body), danger, save; float is glass over moving content and
      .btn-sm the small capsule in a row. Hover and press change its colour, never its height; focus wears the ring;
@@ -914,9 +915,9 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      lines, one meta line, the actions at the end, under the words when the row itself is narrow. The caller gives the
      words; a page never re-lays it by the viewport.
    - .ui-list-more — a list's one length control, "Show all (N)": a quiet small capsule at the list's start.
-   - .ui-section-actions .app-page-actions — with an action row and a dialog's foot, the slots of a place's one
-     primary action: the first [data-primary] in a slot is crimson, a second neutral, so two crimsons in one place
-     cannot be expressed.
+   - .ui-section-actions .app-page-actions [data-primary] — with an action row and a dialog's foot, the slots of a
+     place's one primary action: the first [data-primary] in a slot is crimson, a second neutral, so two crimsons in
+     one place cannot be expressed.
    - .section-place .section-shell .section-rail .section-pane .section-lead .section-lead-col .section-lead-page
      .section-lead-rail .section-list .section-group .section-group-title .section-rows .section-row .section-row-glyph
      .section-row-words .section-row-title .section-row-answer .section-row-end — a place's own pages (Settings,
@@ -940,8 +941,12 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
    - .ui-chrome-group .ui-chrome-control — controls floating over scrolling content (Main's header): one box, baseline
      and pill corner; the group is invisible and moves no control.
    - .status-mark — what a work or a room is doing (status_mark.js creates and paints it): its shape says what the
-     work does, its hue whether the owner has a move. A surface changes its marks' ink only through --mark-ink.
+     work does, its hue whether the owner has a move. A surface changes its marks' ink only through --mark-ink, and
+     its ok dot's only through --mark-ok (a settled question's recorded answer).
    - .muted — quiet words in the meta ink.
+   - svg[data-glyph="fluent"] — a glyph of the Fluent set (page_icons.js fillIcon, the shell's SHELL_ICONS): filled
+     with the text colour and never stroked wherever it sits, so a selector that strokes hand-drawn icons never
+     outlines it.
    - .ouro-ui .keyboard-open .chat-bubble .assistant .user .chat-live-card .settings-voice .md-code-block
      .app-page-header .app-page-title-block .app-page-title-row .app-page-lead .shell-back .settings-gauge — context,
      not parts: their owners' classes that recipes here read (the product documents' root, a phone keyboard's state,

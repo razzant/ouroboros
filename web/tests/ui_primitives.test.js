@@ -313,21 +313,42 @@ function cssRules(css) {
 const displayOf = (css, selector) => cssRules(css).filter((rule) => rule.selectors.includes(selector))
     .map((rule) => rule.body.match(/(?:^|;)\s*display:\s*([^;]+)/)?.[1].trim()).filter(Boolean).at(-1) || '';
 
-/** The register in `css` (its "- <classes> — <job>" entries) against what `css` selects; [] when both ways hold. */
+// A part the sheet draws by an attribute alone (`svg[data-glyph="fluent"]`), as an entry writes it.
+const ATTRIBUTE_PART = /(?<![\w-])([a-z]*\[[\w-]+(?:="[^"]*")?\])/g;
+// Selectors that hold values, not parts: the document's scopes, and a keyframe's steps.
+const NOT_A_PART = /^(?::root|html)\b|^(?:from|to|[\d.]+%)$/;
+
+/** The register in `css` (its "- <parts> — <job>" entries) against what `css` selects; [] when both ways hold. */
 function registerFaults(css) {
     const block = css.match(/\/\* ---- The register of parts[\s\S]*?\*\//)?.[0];
     if (!block) return ['ui.css has no register of parts'];
-    const named = new Set();
+    const heads = [];
     const faults = [];
     for (const entry of block.split(/\n\s*- /).slice(1)) {
         const head = entry.split(' — ')[0];
-        const classes = [...head.matchAll(/(?<![\w-])\.([A-Za-z][\w-]*)/g)].map(([, name]) => name);
-        if (!classes.length || head === entry) faults.push(`an entry names no class before its job: "${entry.slice(0, 50)}"`);
-        classes.forEach((name) => named.add(name));
+        const parts = [...head.matchAll(/(?<![\w-])\.([A-Za-z][\w-]*)/g)].map(([, name]) => `.${name}`)
+            .concat([...head.matchAll(ATTRIBUTE_PART)].map(([, attribute]) => attribute));
+        if (!parts.length || head === entry) faults.push(`an entry names no part before its job: "${entry.slice(0, 50)}"`);
+        else heads.push({ root: head.trim().split(/\s+/)[0], parts });
     }
+    // Each part has one entry: an entry's first name (its part) is named by no other entry; state classes may repeat.
+    for (const { root } of heads) {
+        const entries = heads.filter(({ parts }) => parts.includes(root)).length;
+        if (entries > 1) faults.push(`the register names ${root} in ${entries} entries`);
+    }
+    const named = new Set(heads.flatMap(({ parts }) => parts));
     const selected = selectedClasses(css);
-    for (const name of named) if (!selected.has(name)) faults.push(`the register names .${name}, which no rule here selects`);
-    for (const name of selected) if (!named.has(name)) faults.push(`.${name} is selected here but no register entry names it`);
+    const items = cssRules(css).flatMap((rule) => rule.selectors);
+    for (const part of named) {
+        const found = part.startsWith('.') ? selected.has(part.slice(1)) : items.some((item) => item.includes(part));
+        if (!found) faults.push(`the register names ${part}, which no rule here selects`);
+    }
+    for (const name of selected) if (!named.has(`.${name}`)) faults.push(`.${name} is selected here but no register entry names it`);
+    for (const item of items) {
+        if (/\.-?[A-Za-z_]/.test(item) || NOT_A_PART.test(item)) continue;
+        if (![...named].some((part) => !part.startsWith('.') && item.includes(part)))
+            faults.push(`${item} draws a part by an attribute alone, and no register entry names it`);
+    }
     return faults;
 }
 
@@ -341,6 +362,18 @@ test('ui.css lists every shared part once, and the list and the sheet agree both
         '.ui-b is selected here but no register entry names it']);
     assert.deepEqual(registerFaults(register(['.ui-a — a part', '.ui-b — a part']) + '.ui-a, .ui-b { color: red; }'), []);
     assert.deepEqual(registerFaults('.ui-a { color: red; }'), ['ui.css has no register of parts']);
+    // A part drawn by an attribute alone is named as written, both ways; the document's scopes and keyframes are values.
+    const glyph = ':root { --x: 1; }\nhtml[data-layout="stack"] { --y: 2; }\nsvg[data-glyph="fluent"], svg[data-glyph="fluent"] path { fill: red; }\n'
+        + '@keyframes k { from { opacity: 0; } 52.5% { opacity: 1; } }\n';
+    assert.deepEqual(registerFaults(register(['svg[data-glyph="fluent"] — a glyph']) + glyph), []);
+    assert.deepEqual(registerFaults(register(['.ui-a — a part']) + '.ui-a { color: red; }\n' + glyph), [
+        'svg[data-glyph="fluent"] draws a part by an attribute alone, and no register entry names it',
+        'svg[data-glyph="fluent"] path draws a part by an attribute alone, and no register entry names it']);
+    assert.deepEqual(registerFaults(register(['.ui-a — a part', 'svg[data-glyph="mark"] — a glyph']) + '.ui-a { color: red; }'),
+        ['the register names svg[data-glyph="mark"], which no rule here selects']);
+    // Once: a part's second entry fails, while a state class may stand in several entries.
+    assert.deepEqual(registerFaults(register(['.ui-a .active — a part', '.ui-b .active — a part', '.ui-c .ui-a — a part'])
+        + '.ui-a.active, .ui-b.active, .ui-c { color: red; }'), ['the register names .ui-a in 2 entries']);
     // Comments, at-rules and keyframe steps hold no selector; a file name in a comment is not a class.
     assert.deepEqual([...selectedClasses('/* .ui-x see ui.js */ @keyframes k { 0%, 52.5% { opacity: 0; } } .ui-y::before { content: "."; }')],
         ['ui-y']);
