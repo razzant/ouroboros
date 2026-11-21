@@ -521,6 +521,7 @@ test('Settings confirms a key model after its priced detail answers, not after t
     assert.equal(page.editor.entry().processing, 'ultrafast');
 
     const field = page.host.querySelector('[data-model-role-model]');
+    field.disabled = true;  // no layout in this stub: a disabled field never opens the chooser's popup, the editor still reads the input
     field.value = second;
     await field.fire('input', { target: field });
     const awaitingSecond = page.editor.confirmUltrafast(true);

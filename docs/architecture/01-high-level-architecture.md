@@ -53,6 +53,7 @@ supervisor/ — background thread inside server.py (§5)
   queue.py — task queue (PENDING/RUNNING) with activity-based timeouts; the one task-state authority (§5); loop_load.py measures it
   queue_schedules.py, schedule_lifecycle.py, queue_snapshot.py, queue_timeouts.py, followup_policy.py — leaves re-exported by `supervisor.queue`; related/independent relationship admission (`followup_relation`) (§5)
   queue_publication.py — marks under Q; the tick publishes outside Q by revision (§5)
+  work_stop_migration.py — One boot conversion of pre-selection queue carriers by the `work_stop_format` stamp; no execution authority (§5)
   cognitive_operations.py — operation leases and typed wait marks (`wait_for_tasks` picks a responsible parent) for silence attention and reply preparation; no durable ledger (§6)
   silence_attention.py — silence episodes and their mail to the source and one waiting ancestor (§5)
   task_model_wait.py — live model-wait projection with quota-clock reads for liveness (§6 Quota and auth waits)
@@ -390,6 +391,7 @@ ouroboros/ — agent core and shared runtime (§6)
   task_store.py, task_reads.py — Indexed facts/signatures, review/plan candidates, documents, display views; one captured value per statement, decoded after close; read/modify inside (PERSISTENCE.md)
   pause_notices.py — Confirmed-pause System disclosures: pending episodes, saved-chat receipts, off-loop local replay
   task_result_schema.py — Task-result schema admission: the `_schema_version` stamp, the classifier, and the quarantine an unstamped, future or malformed row lands in
+  queue_observation.py — Queue documents read by file identity: expands `$shared` task values, takes heartbeats and pool counts from the generation-matched stamp (§5)
   task_status.py — effective status, lineage and waits; `execution_owner` and dated `execution_observation` separate lifecycle from liveness (§5); the worker-side cancel predicate fails open toward liveness (§10 invariant 14)
   git_shell_policy.py — Shell Git argv checks
   protected_artifacts.py — Execute-only black-box policy for protected artifacts
@@ -495,6 +497,7 @@ ouroboros/ — agent core and shared runtime (§6)
     history_paging.py, history_chronology.py, chat_search.py — room pages/search of the dialogue store, Project `latest_arrival`; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Ledger-derived dashboard buckets, period view and root-task detail over the same physical-attempt authority
     projects.py, project_folder_contracts.py — GET/POST /api/projects, /from-task, /update, /delete, /folder
+    places_api.py — Owner place and circle choices; every write there is my human's (§12)
     _helpers.py — Shared request-root/coercion, the JSON body (`request_json_or`) and error envelope, `run_sync_to_completion`, the settled worker wait for request-owned blocking work
   tools/ — Auto-discovered tool plugins
     registry.py — Tool registry SSOT: loads tool modules, exposes schemas, executes safely; owns the shell-guard/process-tool membership sets

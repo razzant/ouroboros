@@ -29,7 +29,7 @@ from ouroboros._usage_response import (
 )
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, size_refusal
 from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
-from ouroboros.llm_routing import (  # noqa: F401 -- shared with the catalog and native send builders
+from ouroboros.transport_custody import (  # noqa: F401 -- shared with the catalog and native send builders
     apply_processing_preference, attempt_pricing_fields, processing_transport_modes, provider_reported_cost_only,
     submitted_processing_mode,
 )

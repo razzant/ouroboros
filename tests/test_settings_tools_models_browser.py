@@ -363,7 +363,8 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
         "main", "fallback/1", "fallback/2", "fallback/3", "light", "vision", "consciousness", "safety", "websearch"]
     assert "gpt-test" in level.locator('[data-entry-id="main"]').inner_text()
     values = level.locator("[data-row-value]").evaluate_all("spans => spans.map((span) => span.textContent)")
-    assert values[:6] == ["gpt-light", "Main model", "Main model", "Light model", "Auto", "Max"]
+    # An empty Safety Supervisor names the route it checks with now (Light's model) and whose it is.
+    assert values[:6] == ["gpt-light", "Main model", "Main model", "gpt-light · as Light", "Auto", "Max"]
 
     # The Context door shows the install's value, leads to Main and writes nothing.
     level.locator('[data-setting-row="models:context"]').click()

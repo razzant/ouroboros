@@ -518,11 +518,13 @@ def test_global_ttl_docstrings_name_every_consumer():
         for p in (repo / "ouroboros").rglob("*.py")
         if p.name not in definition_sites and call.search(p.read_text(encoding="utf-8"))
     )
+    # ``_usage_cache_splits.reservation_cache_ttl`` holds the literal call for the payload-free
+    # admission fallback; ``usage_accounting._reservation_cost`` reaches it through that helper.
     assert consumers == [
+        "ouroboros/_usage_cache_splits.py",
         "ouroboros/effort_evidence.py",
         "ouroboros/llm_attempt.py",
         "ouroboros/tools/review_helpers.py",
-        "ouroboros/usage_accounting.py",
     ], consumers
 
     finalizer_doc = LLMClient._normalize_payload_cache_ttl.__doc__ or ""

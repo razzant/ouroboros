@@ -460,6 +460,10 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
     if basis:  # the same consumed amount the loop lane reports, tagged on the settled row
         normalized.update(cost=cost, cost_basis=basis)
     if cost is not None:
+        if cost == 0 and isinstance(payload, dict) and isinstance(payload.get("error"), dict) \
+                and refusal_body_conflicts(payload):
+            # A failed reply whose own body shows work or an upstream attempt has not proved a free call.
+            return normalized, None, False
         return normalized, cost, True
     completion = normalized["completion_tokens"]
     if (
@@ -675,7 +679,7 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
     if not is_processing_refusal(error):
         for body in (stream, payload):
             usage, cost, final = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
-            if final and cost is not None:
+            if final and cost is not None and not (cost == 0 and refusal_conflicts(error, check_stream_framing=False)):
                 return usage, cost
         return None
 

@@ -870,16 +870,21 @@ def _finalize_task_services(ctx: _LoopExitContext) -> bool:
 def _finish_tool_round_budget(
     ctx: _RoundLimitContext, budget_remaining_usd: Optional[float],
     cost_ceiling: "task_pacing.CostCeiling", active_model: str,
-    active_use_local: bool, active_effort: str,
+    active_use_local: bool, active_effort: str, *, context_prepared: bool = False, ready_finish: bool = False,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Complete the existing budget decision after warm or cold owner input.
 
     The batch's delegate requests were observed with its response, before any
     save or park, so a cold continuation owes only this decision: no old tool
-    is executed and no nanny anchor is rebuilt here.
+    is executed and no nanny anchor is rebuilt here. ``context_prepared``: the loop already read the candidate's
+    evidence for this tail. ``ready_finish``: a selected finish waits behind this call, so only money that is
+    actually gone decides here; a prospective wrap-up margin buys nothing over ready work.
     """
-    _loop()._prepare_post_tool_budget_context(
-        ctx.tools, ctx, ctx.llm_trace, active_model, active_use_local, active_effort)
+    if not context_prepared:
+        _loop()._prepare_post_tool_budget_context(
+            ctx.tools, ctx, ctx.llm_trace, active_model, active_use_local, active_effort)
+    if ready_finish and not authored_completion_budget_exhausted(ctx, budget_remaining_usd, cost_ceiling):
+        return None
     result = _loop()._check_budget_limits(ctx, budget_remaining_usd, cost_ceiling=cost_ceiling)
     if result is None:
         return None

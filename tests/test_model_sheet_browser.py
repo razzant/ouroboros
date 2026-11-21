@@ -251,7 +251,9 @@ def test_a_works_tier_switches_at_its_next_call_and_a_paused_work_has_no_model_c
             recorded = len(_wait_usage(page, server["data_dir"], task, 1))
             in_flight = len(provider.models_of(MARK))
             assert in_flight == 2, ("one call answered, the next one in flight", provider.models_of(MARK))
-            page.wait_for_timeout(500)
+            # The card paints the receipt on the next state body it receives: wait for its words, never a fixed pause
+            # (an absent fact would also read as nothing).
+            page.wait_for_function(f"(sel) => ({_CARD_TIER})(sel) === 'Standard asked · sent with no tier'", arg=card, timeout=30_000)
             seen["standard_words"] = page.evaluate(_CARD_TIER, card)
 
             # Fast, pressed on the card while that call is in flight: one act, applied from the next call.
@@ -1128,7 +1130,8 @@ def test_settings_main_model_save_stands_on_the_tier_shown_across_two_tabs(direc
         expect(form.locator("[data-editor-result]")).to_contain_text("Saved")
         stored = json.loads(path.read_text())
         assert stored[model] == "claudexor::codex=gpt-next" and json.loads(stored[tier])["main"] == "fast"
-        assert stored["OUROBOROS_MODEL_LIGHT"] == "claudexor::codex=gpt-test", "the unrelated write stands too"
+        # Light keeps its own source (this fixture seeds ``openai-compatible``): the other tab typed only its model.
+        assert stored["OUROBOROS_MODEL_LIGHT"] == "openai-compatible::gpt-test", "the unrelated write stands too"
         assert set(writes[-1]["if_unchanged"]) == MAIN_BINDING, writes[-1]
 
 
@@ -1172,7 +1175,7 @@ def test_composer_main_model_change_stands_on_the_tier_shown_across_two_tabs(dir
             assert stored[model] == target
             assert json.loads(stored[tier]).get("main", "") == ("fast" if second == "before_pick" else "")
             if second == "unrelated":
-                assert stored["OUROBOROS_MODEL_LIGHT"] == "claudexor::codex=gpt-test"
+                assert stored["OUROBOROS_MODEL_LIGHT"] == "openai-compatible::gpt-test"  # Light's own source, as seeded
 
 
 @pytest.mark.parametrize("engine, premium", [("chromium", True), ("webkit", False)], ids=["wide-priced", "phone-unknown"])

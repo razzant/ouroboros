@@ -78,8 +78,10 @@ def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]
         return None
 
 
-def _check_received_tier_error(client, response, request, target, candidate):
-    """Adapt a returned body error to the same physical failure as an SDK exception."""
+def _check_received_tier_error(client, response, request, target, candidate, *, account_received: bool = False):
+    """Adapt a returned body error to the same physical failure as an SDK exception. Only an uncontradicted refusal
+    proves no work. A contradicted one stays a failure on a chat send; a search leg (``account_received``) keeps it
+    as the reply it received, so its own attempt row and its one usage event carry what that reply reported."""
     if request.submitted_processing_mode not in {"priority", "flex", "fast", "ultrafast"}:
         return
     body = _plain(response)
@@ -91,7 +93,7 @@ def _check_received_tier_error(client, response, request, target, candidate):
         refusal = processing_refusal(target, candidate, error)
         if refusal is not error:
             raise refusal from error
-        if is_processing_refusal(error):
+        if is_processing_refusal(error) and not account_received:
             raise error
 
 
@@ -487,7 +489,8 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
-                _check_received_tier_error(self, response, request, target, candidate)
+                _check_received_tier_error(self, response, request, target, candidate,
+                                           account_received=search_server_tool)
                 return response
 
             try:

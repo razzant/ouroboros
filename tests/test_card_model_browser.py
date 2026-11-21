@@ -175,7 +175,13 @@ def _serve(page, stand: Stand) -> None:
     def settings(route):  # the real document and its tokens, Main as this stand has it: a change of Main is read on it
         if route.request.method != "GET":
             return route.continue_()
-        route.fulfill(json={**route.fetch().json(), "OUROBOROS_MODEL": stand.main["model"], "USE_LOCAL_MAIN": False})
+        document = route.fetch().json()
+        # The stand's catalog lists OpenRouter and Anthropic models, so the keys they go through can send: a
+        # connection the real document holds without its key would say "(no key)" once the page adopts it.
+        meta = document.setdefault("_meta", {})
+        meta["connections"] = [{**entry, "configured": True} if entry.get("id") in ("openrouter", "anthropic") else entry
+                               for entry in meta.get("connections", [])]
+        route.fulfill(json={**document, "OUROBOROS_MODEL": stand.main["model"], "USE_LOCAL_MAIN": False})
 
     page.route(re.compile(r"/api/settings$"), settings)
 

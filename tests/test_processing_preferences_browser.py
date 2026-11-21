@@ -52,7 +52,12 @@ def test_processing_settings_save_reopen_and_actor_reference(role_ui):
     before = len(ui['posts'])
     assert press_editor_save(page).startswith('Saved')
     # Only what changed is written: Main's entry of the processing map, by the checker; the model is not sent again.
-    assert ui['posts'][before:] == [('/api/owner/safety-model', {'settings': {'OUROBOROS_MODEL_PROCESSING_PREFERENCES': {'main': 'standard'}}})]
+    # It stands on Main's whole binding as the page read it: the four tokens travel as the write's condition.
+    [(path, body)] = ui['posts'][before:]
+    assert path == '/api/owner/safety-model'
+    assert body.pop('if_unchanged').keys() == {'OUROBOROS_MODEL', 'USE_LOCAL_MAIN', 'OUROBOROS_MODEL_ACCOUNTS',
+                                               'OUROBOROS_MODEL_PROCESSING_PREFERENCES'}
+    assert body == {'settings': {'OUROBOROS_MODEL_PROCESSING_PREFERENCES': {'main': 'standard'}}}
     assert ui['settings']['OUROBOROS_MODEL'] == main_model
     page.reload()
     level = open_settings(page, "models", "OUROBOROS_PROCESSING_PREFERENCE")

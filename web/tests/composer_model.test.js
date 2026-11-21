@@ -1029,6 +1029,10 @@ test('Ultrafast for Main asks first, for the route and account Main has: a cance
     assert.equal(questions.length, 2, 'one question per Ultrafast press, including the cancelled one');
     assert.deepEqual(r.tierPosts(), [{ processing: 'fast' }, { processing: 'ultrafast', if_unchanged: { ...fastTokens, ultrafast: JSON.stringify([ASTRA, false, 'home', 'store-a', 'fp-home']) } }], 'a subscription has no API connection to bind');
     assert.deepEqual([r.store.tiers().main, r.tierWord(), r.modelPosts()], ['ultrafast', 'Ultrafast', []]);
+    // The server now holds what was written: a sheet opening reads Main's pin fresh (model_sheet.js), and that read is
+    // the stored document, not the one the question was asked on.
+    r.settings.OUROBOROS_MODEL = ASTRA;
+    r.settings.OUROBOROS_MODEL_PROCESSING_PREFERENCES = { main: 'ultrafast' };
     await opened(r);
     assert.deepEqual([r.tierView().checked, offered(r)], [['ultrafast'], ['standard', 'fast', 'ultrafast']], 'reopened: the choice is there');
     r.controls.destroy();

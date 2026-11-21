@@ -211,7 +211,8 @@ def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_u
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('[data-collapse="local-model"] > summary').click()
     page.locator('[data-collapse="more-providers"] > summary').click()
-    for field in page.locator(".wizard-content input, .wizard-content select").all():
+    # A hidden input holds a choice strip's word and is no control: the strip's own group carries the name.
+    for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
         assert field.evaluate("el => el.labels.length > 0 || Boolean(el.getAttribute('aria-label'))")
         assert field.evaluate("el => el.classList.contains('ui-control')")
         hint = field.get_attribute("aria-describedby")

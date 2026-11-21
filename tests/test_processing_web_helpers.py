@@ -217,11 +217,12 @@ def test_charged_opaque_failure_stops_at_the_first_sdk_call(helpers, ctx, monkey
     ("openrouter", "sdk_price", {}, None, 0.125),
     ("openrouter", "raised", {"is_byok": True, "cost": 0.125}, None, None),
     ("openrouter", "returned", {"is_byok": True, "cost": 0.125}, None, None),
-    ("openrouter", "returned", {"cost": 0}, 504, 0),
-    ("openrouter", "returned", {"cost": 0}, "raw_timeout", 0),
-    ("openrouter", "raised", {"cost": 0}, 502, 0),
-    ("openrouter", "raised", {"cost": 0}, "dispatched", 0),
-    ("anthropic", "raised", {"cost": 0, "server_tool_use": {"web_search_requests": 1}}, None, 0),
+    # A zero beside work or an upstream attempt is not a proved free call: the amount stays unknown and non-final.
+    ("openrouter", "returned", {"cost": 0}, 504, None),
+    ("openrouter", "returned", {"cost": 0}, "raw_timeout", None),
+    ("openrouter", "raised", {"cost": 0}, 502, None),
+    ("openrouter", "raised", {"cost": 0}, "dispatched", None),
+    ("anthropic", "raised", {"cost": 0, "server_tool_use": {"web_search_requests": 1}}, None, None),
 ])
 def test_typed_refusal_with_charge_work_or_upstream_attempt_stops_auto_search(
         helpers, ctx, monkeypatch, provider, delivery, usage, upstream, expected_cost):
@@ -263,8 +264,12 @@ def test_typed_refusal_with_charge_work_or_upstream_attempt_stops_auto_search(
     assert row["state"] == ("settled" if delivery != "raised" or expected_cost is not None else "unresolved")
     assert (row.get("cost_usd"), bool(row.get("cost_final"))) == (expected_cost, expected_cost is not None)
     if delivery != "raised":
+        # A received reply is accounted once and shown once: one event, bound to that attempt, carrying its row's
+        # amount and finality (the reply's own SDK price included), never a second charge or an estimate.
         [event] = ctx.pending_events
+        assert event["ledger_attempt_ids"] == [row["attempt_id"]]
         assert (event["cost"], event["cost_final"]) == (expected_cost, expected_cost is not None)
+        assert (event["cost"], event["cost_final"]) == (row.get("cost_usd"), bool(row.get("cost_final")))
 
 
 @pytest.mark.parametrize("metadata", [{}, {"provider_name": "upstream", "raw": 'data: {"error":{"type":"rate_limit_error"}}'}])
@@ -317,7 +322,8 @@ def test_a_tier_error_with_a_reported_charge_cannot_release_the_search(helpers):
     (400, {"code": "unsupported_service_tier"}, {"total_cost": 0.25}, 0.25),
     pytest.param(429, {"code": "resource_unavailable", "usage": {"output_tokens": 1}}, {"cost": 0.375}, 0.375,
                  id="tier-refusal-inner-work-outer-charge"),
-    (429, {"code": "rate_limit_exceeded"}, {"cost": 0, "output_tokens": 2}, 0),
+    # A raised failure that reports zero beside its own output has no proved amount: the bound stays open.
+    pytest.param(429, {"code": "rate_limit_exceeded"}, {"cost": 0, "output_tokens": 2}, None, id="zero-with-output"),
 ])
 def test_responses_create_error_settles_the_reported_cost_without_a_resend(
         data_root, ctx, patch_env, mock_openai, monkeypatch, status, native, usage, cost):
@@ -335,7 +341,8 @@ def test_responses_create_error_settles_the_reported_cost_without_a_resend(
     mock_openai.responses.create.assert_called_once()
     [row], [leg] = ledger(data_root), result["legs_tried"]
     assert leg["ledger_attempt_ids"] == [row["attempt_id"]] and leg["outcome"] == "provider_outcome_unknown"
-    assert (row["state"], row["cost_usd"], row["cost_final"]) == ("settled", cost, True)
+    assert (row["state"], row.get("cost_usd"), bool(row.get("cost_final"))) == (
+        "settled" if cost is not None else "unresolved", cost, cost is not None)
 
 
 @pytest.mark.parametrize("event_type,started,usage,state,cost,reason", [
@@ -346,7 +353,8 @@ def test_responses_create_error_settles_the_reported_cost_without_a_resend(
     ("response.incomplete", True, {"cost": 0.125}, "settled", 0.125, "provider_response_failed"),
     ("response.failed", False, {"cost": 0.125}, "settled", 0.125, "provider_response_failed"),
     ("failed_sdk_price", False, {}, "settled", 0.125, "provider_response_failed"),
-    ("response.failed", False, {"cost": 0, "output_tokens": 1}, "settled", 0, "provider_response_failed"),
+    # The terminal failure was received, so the attempt is accounted; its zero beside output is not a final price.
+    ("response.failed", False, {"cost": 0, "output_tokens": 1}, "settled", None, "provider_response_failed"),
 ])
 def test_responses_stream_failure_keeps_its_own_evidence_and_settlement(
         data_root, ctx, patch_env, mock_openai, monkeypatch, event_type, started, usage, state, cost, reason):

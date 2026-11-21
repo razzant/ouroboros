@@ -65,7 +65,13 @@ def subscription_ui():
         "OUROBOROS_SUBAGENTS": fixture["preview"]["available_subagents"],
         "OUROBOROS_RUNTIME_MODE": "advanced",
         "OUROBOROS_CONTEXT_MODE": "max",
-        "_meta": {"setup_contract": bootstrap["contract"]},
+        # Main's binding as the real document carries it (defaults for the keys the preview leaves out), each with
+        # the token a write of Main stands on: a Main write is refused without all four (model_roles.js, model_catalog_store.js).
+        "USE_LOCAL_MAIN": False,
+        "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {},
+        "_meta": {"setup_contract": bootstrap["contract"],
+                  "tokens": {key: f"fixture-{key.lower()}" for key in (
+                      "OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS", "OUROBOROS_MODEL_PROCESSING_PREFERENCES")}},
     }
 
     class Handler(SimpleHTTPRequestHandler):

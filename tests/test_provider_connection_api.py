@@ -68,7 +68,9 @@ def test_get_masks_row_secrets_and_describes_every_connection(settings_client):
     assert body[CONNECTIONS_KEY] == [{**BYOK, "api_key": "sk-or-v1..."}]
     meta = {row["id"]: row for row in body["_meta"]["connections"]}
     byok = dict(meta["openrouter@byok"])
-    assert re.fullmatch(r"[0-9a-f]{24}", byok.pop("revision"))  # ``connection_revisions``: a 24-hex token per row
+    # ``connection_revisions`` adds ``<id>#<24 hex>`` per row (``owner_settings.connection_revision``): the row's own id
+    # plus a process-salted digest, never a bare token.
+    assert re.fullmatch(r"openrouter@byok#[0-9a-f]{24}", byok.pop("revision"))
     assert byok == {
         "kind": "openrouter", "name": "byok", "label": "Claude credits", "builtin": False, "enabled": True,
         "configured": True, "source": "settings", "id": "openrouter@byok", "display": "OpenRouter · Claude credits"}

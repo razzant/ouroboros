@@ -602,7 +602,9 @@ async function mainPage(t, values = {}, { revision = '' } = {}) {
     const elsewhere = (key, value) => { page.server.values[key] = value; page.server.tokens[key] = (page.server.tokens[key] || 0) + 1; };
     const result = () => page.container.querySelector('[data-editor-result]').textContent;
     return { ...page, elsewhere, result,
-        type: async (text) => { model.value = text; await model.fire('input', { target: model }); await settle(); },
+        // The chooser's popup is layout work this DOM stub has none of; a disabled field never opens it, and the
+        // editor's own `input` listener, which is what is typed into, does not read that flag.
+        type: async (text) => { model.disabled = true; model.value = text; await model.fire('input', { target: model }); await settle(); },
         save: () => page.press(page.container.querySelector('[data-editor-save]')) };
 }
 

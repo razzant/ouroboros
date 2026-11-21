@@ -926,7 +926,9 @@ def test_named_openrouter_search_sends_and_bills_on_its_own_resolved_connection(
     assert (row["reservation_upper_bound_usd"], row["reservation_basis"]) == (None, "opaque_unknown")
     assert row["unpriced_add_on"] and not row.get("provider_reported_cost_only")
     assert (row["cost_usd"], row["cost_final"]) == shown
-    assert row["submitted_processing_mode"] == ("default" if preference else "")
+    # An inherited preference is no selection: the row then carries no processing keys at all (``usage_accounting``).
+    assert ("submitted_processing_mode" in row) is bool(preference)
+    assert row.get("submitted_processing_mode", "") == ("default" if preference else "")
     [event] = ctx.pending_events
     assert (event["model"], event["cost"], event["cost_final"]) == ("openrouter@byok::openai/gpt-5.5", *shown)
     assert "row-secret-key" not in json.dumps(event, default=str) and "row-secret-key" not in str(row)
