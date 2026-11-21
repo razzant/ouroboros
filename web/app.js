@@ -760,10 +760,10 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         if (map) layers.batch(() => pageNavigation.clear());
         if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
         if (!openOnly) { layers.back('project-toggle'); return; }
-        if (!latest && !(taskId && quizId)) return;
         const inst = projectInstances.get(project.id);
-        // A notification also supersedes an older reveal and its paint in the room already on screen.
-        if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); }
+        if (sourceReveal) return revealProjectSource(project.id, inst, sourceReveal, navigation);
+        if (!latest && !(taskId && quizId)) return;
+        if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); } // superseded by notification
         return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest });
     }
     const origin = pageNavigation.capture();
@@ -820,17 +820,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         syncNavigationState();
         } });
         if (movedToChat === false || navigation !== projectNavigationGeneration) return;
-        if (sourceReveal) {
-            const reveal = {};
-            projectReveals.set(project.id, reveal);
-            cancelProjectPaint(project.id, inst);
-            try {
-                return await inst.revealSource(sourceReveal.address,
-                    () => navigation === projectNavigationGeneration, sourceReveal.page);
-            } finally {
-                if (projectReveals.get(project.id) === reveal) projectReveals.delete(project.id);
-            }
-        }
+        if (sourceReveal) return await revealProjectSource(project.id, inst, sourceReveal, navigation);
         await landInProject(project, inst, { taskId, quizId, latest, forcePaint: !inst.hasPaintedHistory?.() });
     } finally {
         projectPanelOpeningSince = 0;
@@ -845,6 +835,17 @@ async function landInProject(project, inst, { taskId, quizId, latest, forcePaint
     void inst?.revealQuestion?.();  // a plain landing cancels any pending question reveal
     // ACK the exact painted revision; chat.js owns the receipt and skips redundant reads.
     await acknowledgeProjectAfterPaint(project, inst, { forcePaint });
+}
+
+async function revealProjectSource(id, inst, source, navigation) {
+    const reveal = {};
+    projectReveals.set(id, reveal);
+    cancelProjectPaint(id, inst);
+    try {
+        return await inst?.revealSource(source.address, () => navigation === projectNavigationGeneration, source.page);
+    } finally {
+        if (projectReveals.get(id) === reveal) projectReveals.delete(id);
+    }
 }
 
 // A Project named by its id alone (a reference, a portal, a completion row, a row older than the feed) opens its own
@@ -887,7 +888,7 @@ async function revealQuotedSource(address, chatId, isCurrent) {
             .catch((error) => { if (current()) previewsRefused(error); throw error; });
         if (!current()) return null;
         if (page?.anchor?.state !== 'found') return page?.anchor || { state: 'unknown' };
-        const matches = address.startsWith('task:') ? chatId === 1 && page.anchor.task_id === address.slice(5)
+        const matches = address.startsWith('task:') ? page.anchor.task_id === address.slice(5)
             : page.anchor.row_address === address && page.anchor.chat_id === chatId;
         if (!matches) return { state: 'unknown' };
         if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent } });
@@ -898,9 +899,11 @@ async function revealQuotedSource(address, chatId, isCurrent) {
 }
 
 window.addEventListener('ouro:open-task', async ({ detail }) => {
-    if (!detail?.task_id || detail.chat_id !== 1 || !await showPage('chat', { reveal: true })) return;
+    if (!detail?.task_id || !Number.isSafeInteger(detail.chat_id) || detail.chat_id < 1) return;
+    if (detail.chat_id === 1 && !await showPage('chat', { reveal: true })) return;
+    ++projectNavigationGeneration;  // a later press owns its own reveal
     try {
-        const result = await revealQuotedSource(`task:${detail.task_id}`, detail.chat_id, () => state.activePage === 'chat');
+        const result = await revealQuotedSource(`task:${detail.task_id}`, detail.chat_id, () => true);
         if (result && result.state !== 'found') showToast(tr('consciousness.task_unavailable', 'This task is unavailable.'), 'warn');
     } catch { showToast(tr('consciousness.task_unavailable', 'This task is unavailable.'), 'warn'); }
 });

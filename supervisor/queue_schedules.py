@@ -669,35 +669,41 @@ def _task_from_schedule(record: Dict[str, Any], *, task_id: str = "") -> Dict[st
 def _scan_outcomes(root, snapshot):
     """Observe canonical settled results off-lock; missing/nonterminal reads retry.
 
-    This is a cache of terminal-time facts. Once an id is observed, later result
-    enrichment does not revise it; projections never open the task store.
+    Once a run's preview is classified, later enrichment does not revise it.
+    Classify pre-upgrade cached previews once, before they can ride new views.
     """
     from ouroboros.task_results import load_task_result
     from ouroboros.task_status import SETTLED_STATUSES
-    from ouroboros.task_finalization import quiet_finish, terminal_host_notice_text
+    from ouroboros.task_finalization import quiet_finish, schedule_report_run, terminal_host_notice_text
     from ouroboros.terminal_time import terminal_time_fact
     from ouroboros.store import acquisition_budget
 
     observed = {}
     for row in snapshot.get("tasks") or []:
         task_id = str(row.get("last_task_id") or "")
-        if not task_id or (row.get("last_outcome") or {}).get("task_id") == task_id:
+        previous = row.get("last_outcome") or {}
+        same_run = previous.get("task_id") == task_id
+        if not task_id or (same_run and isinstance(previous.get("report_only"), bool)):
             continue
         try:
             with acquisition_budget(0):  # optional observation must not stall active rows
                 result = load_task_result(root, task_id, strict=True)
             if not result or result.get("status") not in SETTLED_STATUSES:
                 continue
+            report_only = schedule_report_run(result)
             notice = terminal_host_notice_text(result)
-            words = str(result.get("wake_summary") or "").strip()
+            words = "" if report_only else str(result.get("wake_summary") or "").strip()
             # A host notice's first line (its cause) is the run's public line, else the sentence it wrote
             # for its human (whole), else the end of a spoken answer; a quiet run's internal note never is.
-            text = str(notice or ("" if words or result.get("wake_silent") is True else result.get("result")) or "").strip()
-            observed[str(row.get("id") or "")] = {
-                "task_id": task_id, "state": result["status"], "quiet": quiet_finish(result),
+            text = str(notice or ("" if words or result.get("wake_silent") is True
+                                  or report_only else result.get("result")) or "").strip()
+            outcome = previous if same_run and not report_only else {
+                "task_id": task_id, "state": result["status"],
+                "quiet": not (result.get("owner_message_sent") or notice) if report_only else quiet_finish(result),
                 "notice": bool(notice), "ended_at": terminal_time_fact(result)["occurred_at"],
                 "line": text.splitlines()[0 if notice else -1][:160] if text else words,
             }
+            observed[str(row.get("id") or "")] = {**outcome, "report_only": report_only, "chat_id": result.get("chat_id")}
         except Exception:
             log.debug("schedule result %s not observed this pass", task_id, exc_info=True)
     return observed
@@ -791,7 +797,9 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 continue
             unchanged = copy.deepcopy(record)
             outcome = outcomes.get(str(record.get("id") or ""))
-            if outcome and record.get("last_task_id") == outcome["task_id"] and record.get("last_outcome") != outcome:
+            cached = record.get("last_outcome") or {}
+            if (outcome and record.get("last_task_id") == outcome["task_id"]
+                    and not (cached.get("task_id") == outcome["task_id"] and isinstance(cached.get("report_only"), bool))):
                 record["last_outcome"] = outcome
                 changed = True
             previous_open = record.get("previous_run_open")

@@ -20,7 +20,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
-from ouroboros.task_finalization import quiet_finish, send_provider_death_notice, work_label
+from ouroboros.task_finalization import quiet_finish, schedule_report_fields, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -800,6 +800,7 @@ def _resolve_lifecycle_fault(
     # RUNNING/slot bookkeeping, snapshot — instead of the old private partial
     # copy (RUNNING pop + slot clear only), which resolved nothing owner-visible.
     status = str(stored.get("status") or "failed")
+    report = schedule_report_fields(stored)
     task_type = str(evt.get("task_type") or task_row.get("type") or "")
     task_done_event: Dict[str, Any] = {
         "ts": utc_now_iso(),
@@ -817,7 +818,9 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
+        "wake_silent": stored.get("wake_silent") is True, **report, **work_label(stored, task_row),
+        **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name")
+           if stored.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
@@ -1068,6 +1071,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     eff_cost = terminal_cost.get("accounted_upper_bound_usd")
     eff_rounds = terminal_cost.get("total_rounds")
     known_result = final_task_result if isinstance(final_task_result, dict) else {}
+    report = schedule_report_fields(known_result)
     task_done_event = {
         "ts": evt.get("ts", utc_now_iso()),
         "type": "task_done",
@@ -1087,7 +1091,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
+        "wake_silent": known_result.get("wake_silent") is True, **report, **work_label(known_result, task),
+        **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name")
+           if known_result.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable

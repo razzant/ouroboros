@@ -175,6 +175,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
     summary_kind: str
+    schedule_report_only: bool  # terminal card links to a saved report, not a transcript message
     historical_terminal: Dict[str, Any]
     current_outcome: Dict[str, Any]  # the current terminal outcome projection; distinct from historical_terminal
     model_waits: Dict[str, Any]  # system_type task_model_wait: wait_id -> the wait's latest revision

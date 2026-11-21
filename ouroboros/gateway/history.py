@@ -63,6 +63,7 @@ _MAX_N_HUMAN = 1500
 _MAX_N_PROGRESS = 600
 # Bound subagent lineage so a huge swarm fan-out can't balloon the response.
 _LINEAGE_CAP = 300
+_TASK_SUMMARY_FLAGS = ("wake_silent", "quiet_effective", "schedule_report_only")
 
 _PROGRESS_META_FIELDS = (
     "subagent_event",
@@ -287,7 +288,7 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     """Copy terminal chat facts for task summaries."""
     if entry.get("type") != "task_summary":
         return
-    rec.update({key: entry[key] for key in ("wake_silent", "quiet_effective") if type(entry.get(key)) is bool})
+    rec.update({key: entry[key] for key in _TASK_SUMMARY_FLAGS if type(entry.get(key)) is bool})
     for key in ("model_execution", "review_projection", "history_retention", "terminal_time", "cancel_origin"):
         if isinstance(entry.get(key), dict):
             rec[key] = dict(entry[key])
@@ -357,6 +358,7 @@ def _annotate_terminal_task_truth(
         from ouroboros.late_review_marks import late_current_outcome
         from ouroboros.project_dialogue import outcome_phase
         from ouroboros.projects_registry import task_presentation_name
+        from ouroboros.task_finalization import schedule_report_run
         from ouroboros.task_status import FINAL_STATUSES
 
         cache = result_cache if result_cache is not None else {}
@@ -439,8 +441,7 @@ def _annotate_terminal_task_truth(
                 str(checkpoint.get("post_task_synthesis") or "")
                 if isinstance(checkpoint, dict) else ""
             )
-            # An open post-task checkpoint is still finalizing, even with a stored final answer:
-            # plain roots may already say completed; split-drive roots stay scheduled/running until copy-back.
+            # An open post-task checkpoint still finalizes: plain roots may say completed; split-drive roots wait for copy-back.
             # Cancellation is terminal immediately; without a checkpoint the legacy semantics stand.
             checkpoint_open = post_task_synthesis_is_open(synthesis)
             if checkpoint_open and (status in {"completed", "failed"} or status not in FINAL_STATUSES):
@@ -463,7 +464,8 @@ def _annotate_terminal_task_truth(
                         terminal_truth[key] = dict(result[key])
                 if isinstance(result.get("body_adoptions"), list):  # its settled adoptions, read beside its Reviews
                     terminal_truth["body_adoptions"] = [dict(row) for row in result["body_adoptions"] if isinstance(row, dict)]
-                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name", "terminal_origin", "reason_code") if result.get(key)})
+                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name", "terminal_origin", "reason_code")
+                                       if result.get(key) and (key != "wake_summary" or not schedule_report_run(result))})
                 if isinstance(result.get("delegated_runs_unreconciled"), list):  # the current debt (#1583)
                     terminal_truth["delegated_runs_unreconciled"] = list(result["delegated_runs_unreconciled"])
                 retention = retention_summary(result)
@@ -745,8 +747,8 @@ def _collect_chat_rows(
             # the final visible window are annotated with it below.
             historical = historical_terminal_projection(entry)
             if historical and historical_terminals is not None:
-                historical.update({key: entry[key] for key in ("wake_silent", "quiet_effective")
-                                   if type(entry.get(key)) is bool})
+                flags = {key: entry[key] for key in _TASK_SUMMARY_FLAGS if type(entry.get(key)) is bool}
+                historical.update(flags)
                 tid = str(entry["task_id"])
                 previous = historical_terminals.get(tid, {})
                 if historical["ts"] >= previous.get("ts", ""):
@@ -755,9 +757,8 @@ def _collect_chat_rows(
                 if replay_evidence is not None and belongs(_stored_chat_id(entry.get("chat_id"), 1), entry):
                     replay_evidence.append({"text": "", "role": "system", "is_progress": False,
                                             "system_type": "task_summary", "summary_kind": entry["summary_kind"],
-                                            "task_id": tid, "ts": historical["ts"],
-                                            "historical_terminal": dict(historical), **_history_identity(entry)})
-                    replay_evidence[-1].update({**{k: entry[k] for k in ("wake_silent", "quiet_effective") if type(entry.get(k)) is bool}, **{k: str(entry[k]) for k in ("suggested_name", "wake_summary", "schedule_name") if entry.get(k)}})
+                                            "task_id": tid, "ts": historical["ts"], "historical_terminal": dict(historical),
+                                            **_history_identity(entry), **flags, **{k: str(entry[k]) for k in ("suggested_name", "wake_summary", "schedule_name") if entry.get(k)}})
             # Skip A2A virtual chat_ids so A2A task traffic does not appear in human chat history.
             if is_a2a_chat_id(entry.get("chat_id", 1)):
                 continue

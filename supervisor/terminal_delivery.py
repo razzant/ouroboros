@@ -29,7 +29,7 @@ from ouroboros.terminal_outbox import (  # noqa: F401 — shared storage owner; 
 )
 from ouroboros.task_finalization import (
     HOST_AUTHORED_TERMINAL_ORIGINS, TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE,
-    TERMINAL_ORIGIN_MODEL_FINAL, artifact_store_roots, rescued_files_fact, rescued_files_sentence,
+    TERMINAL_ORIGIN_MODEL_FINAL, artifact_store_roots, rescued_files_fact, rescued_files_sentence, schedule_report_run,
 )
 
 log = logging.getLogger(__name__)
@@ -674,8 +674,9 @@ def replay_pending_deliveries(drive_root: Any, *, event_queue: Any = None) -> Li
     Corruption is disclosed, never proof that no debt remains. Returns continued/replayed ids.
     """
     from supervisor.events_chat_delivery import replay_deferred_deliveries
-    from supervisor.terminal_supersession import supersede_recorded_stops
-    rows = supersede_recorded_stops(drive_root, pending_deliveries(drive_root, disclose_corruption=True))
+    from supervisor.terminal_supersession import filter_schedule_report_debt, supersede_recorded_stops
+    rows = filter_schedule_report_debt(drive_root, supersede_recorded_stops(
+        drive_root, pending_deliveries(drive_root, disclose_corruption=True)))
     continued = replay_deferred_deliveries(drive_root, rows + _kept_send_facts(drive_root), event_queue=event_queue)
     rows = [row for row in rows if not row.get("delivery_deferred")]
     # Cached Main debt goes through its settlement (supervisor queue): the canonical claim is its one retry clock.
@@ -879,11 +880,9 @@ def build_completed_result_event(
 ) -> Optional[Dict[str, Any]]:
     """Build (without sending) the completion-wins ``send_message`` event.
 
-    Split from the enqueue half (GR2-4) so the cancel path can register the
-    answer as OWED in the durable outbox BEFORE it settles the cancel intent —
-    a crash between the settle and the send then replays the row instead of
-    losing both the watchdog trigger and the answer. Returns None when there
-    is nothing deliverable (no text, a silent wake with no custody line, no chat).
+    Owed registration precedes settling, so a crash replays instead of losing
+    both. No text, chat or quiet custody means no event; an older schedule's
+    report is its record, never this seam's speech (#3687).
 
     ``unreconciled_runs``: a completed answer whose teardown left delegated
     runs open carries the outcome-independent disclosure line on its CUSTODY
@@ -897,9 +896,10 @@ def build_completed_result_event(
     tid = str(task_id or "").strip()
     core_text = str((stored or {}).get("result") or "")
     task_row = task if isinstance(task, dict) and task else dict(stored or {})
+    legacy = schedule_report_run(task_row) or schedule_report_run(stored or {})
     chat_id = lineage_chat_id(pathlib.Path(drive_root), task_row, tid)
     quiet = (stored or {}).get("wake_silent") is True  # its words stay internal; only custody may speak
-    if not tid or not (core_text or quiet) or not chat_id:
+    if not tid or not chat_id or (not legacy and not (core_text or quiet)):
         return None
     from ouroboros.owner_stop_receipt import terminal_event_fields
     from ouroboros.task_finalization import terminal_custody_notice_text
@@ -909,6 +909,11 @@ def build_completed_result_event(
     note = unreconciled_runs_note(runs).lstrip("\n")
     if note and any(run not in custody for run in runs):
         custody = "\n\n".join(part for part in (note, custody) if part)
+    if legacy:
+        # Only a host custody notice may still be owed. The report itself never leaves the record.
+        if not custody:
+            return None
+        quiet = True
     if quiet and not (core_text := custody):  # a silent wake's row is the host's custody line alone
         return None
     event = {
@@ -1411,29 +1416,10 @@ def build_unreviewed_salvage_event(
 ) -> Optional[Dict[str, Any]]:
     """Build (without sending) the one salvage/terminal chat message.
 
-    GR2-4: the cancel path owes this event before settling the intent.
-    Returns None without a lineage chat.
-
-    ``settled_status`` is the TYPED stored status (GR2-12): the completed-vs-
-    salvage branch compares it against ``STATUS_COMPLETED`` instead of parsing
-    the presentation prose in ``outcome``. The wording itself is unchanged.
-
-    ``delivery_id`` overrides the content-derived identity (GR4-2): the cascade
-    summary dedups per INTENT, not per content, because a replay's rebuilt
-    digest can differ while still being the same owed message.
-
-    CF-04: ``_stop_episode_delivery_id`` retains the exact Stop identity across
-    replay/settle; terminal paths without a Stop keep ``final:...`` identities.
-
-    Q4/Q5 presentation: the message is a typed SYSTEM receipt (``role`` +
-    ``system_type`` ride the event end to end — Q4 non-mimicry), a raw
-    fragment is named the last persisted intermediate model message (never an
-    "answer"), and the technical facts (path/sha256/bytes/children digest)
-    live in the durable ``cancel_receipt`` block on the task result — the
-    details panel — not in chat. A partial digest census (``membership_gap``) is named there, said here.
-    ``reason_code`` (TZ-2 C1): the TYPED rail; with an empty ``outcome`` the owner
-    sentence comes from TASK_CAUSE_PHRASES here, and the code rides the receipt, not the prose.
-    TZ-2 C2: text and receipt state the files rescued (positive/zero/unknown, stat-only walk, no hashes).
+    Owed registration precedes settling; no lineage chat means no event. The
+    typed ``settled_status`` chooses completed vs salvage; ``delivery_id`` keeps
+    one Stop identity across replay. Host words form a SYSTEM receipt; technical
+    facts live in the task's ``cancel_receipt`` details, not in the report text.
     """
     from ouroboros.owner_stop_receipt import terminal_event_fields
     from ouroboros.task_results import STATUS_COMPLETED
@@ -1446,12 +1432,20 @@ def build_unreviewed_salvage_event(
         from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
         outcome = f"stopped by the supervisor. {TASK_CAUSE_PHRASES.get(code, code)}"
     task_row = task if isinstance(task, dict) else {}
-    chat_id = lineage_chat_id(pathlib.Path(drive_root), task_row, tid)
+    try:
+        from ouroboros.task_results import load_task_result
+        root_row = load_task_result(pathlib.Path(drive_root), tid, strict=True)
+    except Exception:
+        root_row = None
+    chat_id = lineage_chat_id(pathlib.Path(drive_root), {**task_row, **(root_row or {})}, tid)
     if not chat_id:
         log.debug("terminal-delivery skipped for %s: no lineage chat", tid)
         return None
+    borrowed = str(task_row.get("id") or task_row.get("task_id") or tid) != tid
+    # A descendant supplies an address, not the report's classification. An ordinary direct row needs no such loan.
+    kept = schedule_report_run(root_row or {}) or (not root_row if borrowed else schedule_report_run(task_row))
     body = str(salvaged_text or "").strip()
-    preview, omitted = salvage_preview(body)
+    preview, omitted = salvage_preview("" if kept else body)
     outcome_text = str(outcome or "stopped")
     descendants = f" {len(children)} descendant task(s) were settled with it." if children else ""
     # Only a receipt with a preview promises one below (new fallback ids; owed rows keep their bytes).
@@ -1465,7 +1459,7 @@ def build_unreviewed_salvage_event(
             " Below is the last persisted intermediate model message, preserved WITHOUT review (salvaged "
             "best-effort; NOT a final answer)." if preview else "") + descendants]
     lines += ["", preview, "", _preview_note_line(preserved_path, omitted)] if preview else [
-        "", "(no salvageable agent output was found for this task)"]
+        "", "(its output stays in the task details)" if kept and body else "(no salvageable agent output was found for this task)"]
     # TZ-2 C2: "no salvageable text" never implies "no files": the stat-only store count
     # rides the mutable disclosure (never the content-derived identity), hashes not computed.
     rescued = rescued_files_fact(tid, artifact_store_roots(drive_root, tid, task=task_row))

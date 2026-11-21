@@ -15,7 +15,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence
 
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES
+from ouroboros.loop_completion_schema import SCHEDULE_DOOR
+from ouroboros.tool_capabilities import (
+    CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES, completion_control_call,
+)
 from ouroboros.contracts.task_contract import canonical_tool_name
 
 
@@ -27,7 +30,7 @@ NANO_SCHEMA_META_NAMES = META_TOOL_NAMES | frozenset({"compact_context"})
 # ``presence_finish`` is the completion door only a pre-upgrade Presence registry still publishes.
 # Its estimate (8 141 on 16.11.2026) stays at most NANO_RESIDENT_SCHEMA_TOKENS (tests/test_nano_tool_policy.py).
 NANO_RESIDENT_SCHEMA_NAMES = NANO_SCHEMA_META_NAMES | frozenset({
-    "finish_task", "presence_finish", "read_file", "list_files", "search_code", "write_file", "edit_text",
+    "finish_task", SCHEDULE_DOOR, "read_file", "list_files", "search_code", "write_file", "edit_text",
     "run_command", "memory_read", "knowledge_read",
 })
 NANO_RESIDENT_SCHEMA_TOKENS = 8_300
@@ -130,7 +133,8 @@ def fit_tool_schemas_to_limit(
     """Fit one request's schemas under a route's physical ceiling: ``(kept, left_out)``.
 
     Under the ceiling (or without one) the list is unchanged. Above it, core and meta
-    schemas and the MCP gateway stay first, then ``protect`` (names this task's history already called),
+    schemas, the completion door (an older schedule's adapter too) and the MCP gateway stay first,
+    then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
     purpose before), then the rest in their own order, and ``ROUTE_TAIL_TOOL_NAMES`` last
     (the rule beside ``CORE_TOOL_NAMES``); the tail beyond the ceiling is left out. The
@@ -141,7 +145,8 @@ def fit_tool_schemas_to_limit(
         return list(schemas), ()
     keep, first, protect = frozenset(keep), frozenset(first), frozenset(protect)
     names = [str(schema["function"]["name"]) for schema in schemas]
-    rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES or name == MCP_GATEWAY_TOOL_NAME else 1 if name in protect
+    rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES or name == MCP_GATEWAY_TOOL_NAME
+            or completion_control_call(name) else 1 if name in protect
             else 2 if name in first else 3 if name in keep else 5 if name in ROUTE_TAIL_TOOL_NAMES else 4
             for name in names]
     kept = set(sorted(range(len(names)), key=lambda index: (rank[index], index))[:max(0, limit)])
