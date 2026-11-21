@@ -96,9 +96,9 @@ def _skill_text(record: Dict[str, Any]) -> str:
         started = sorted(str(fact.get("ts")) for fact in failures.values() if isinstance(fact, dict) and fact.get("ts"))
         known_good = (record.get("last_known_good") or {}).get("ts") if isinstance(record.get("last_known_good"), dict) else ""
         problems.append(f"not live ({reason or 'unknown'}) {_since(started[0] if started else '')}"
-                        + (f"; last live {known_good}" if known_good else "") + f"; observed {observed.get('ts')}")
-    elif status == health.INACTIVE:
-        problems.append(f"enabled but not live ({reason or 'unknown'}) since: unknown; observed {observed.get('ts')}")
+                        + (f"; last live {known_good}" if known_good else ""))
+    elif status == health.INACTIVE:  # an observation's own time moves on every server reconcile: not a start
+        problems.append(f"enabled but not live ({reason or 'unknown'}) since: unknown")
     worker = (record.get("observations") or {}).get("worker") if isinstance(record.get("observations"), dict) else None
     if status == health.LIVE and isinstance(worker, dict) and worker.get("status") == health.BROKEN:
         problems.append(f"not live in workers ({worker.get('reason') or 'unknown'}) since {worker.get('ts')}")

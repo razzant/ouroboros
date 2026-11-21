@@ -95,15 +95,15 @@ def test_a_skill_not_live_or_missing_a_permission_is_dated_and_a_live_one_is_not
     monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: SimpleNamespace(enabled=True))
     path = extension_health.health_path(tmp_path, "desk")
     path.write_text(json.dumps({"_schema_version": 1, "skill": "desk", "status": "broken", "last_observed": {
-        "status": "broken", "reason": "companion_failed:svc", "ts": "2026-11-21T10:00:00+00:00"},
+        "status": "broken", "reason": "companion_restart_exhausted:svc", "ts": "2026-11-21T10:00:00+00:00"},
         "companion_failures": {"svc": {"ts": "2026-11-21T09:00:00+00:00"}},
         "last_known_good": {"ts": "2026-11-20T08:00:00+00:00"}}), encoding="utf-8")
     [row] = breakage.start_notice_rows(_work(tmp_path), [])
     assert row == {"surface": "skill", "reason": "capability_broken", "error": (
-        "desk: not live (companion_failed:svc) since 2026-11-21T09:00:00+00:00; last live 2026-11-20T08:00:00+00:00; "
-        "observed 2026-11-21T10:00:00+00:00")}
+        "desk: not live (companion_restart_exhausted:svc) since 2026-11-21T09:00:00+00:00; last live 2026-11-20T08:00:00+00:00")}
+    told = breakage.start_notice_rows(_work(tmp_path), [])
     extension_health.record_extension_health(tmp_path, "desk", status=extension_health.LIVE)
-    assert "not live (" in breakage.start_notice_rows(_work(tmp_path), [])[0]["error"]  # the open failure still holds
+    assert breakage.start_notice_rows(_work(tmp_path), []) == told  # a re-observation of the open failure is no change
     extension_health.record_extension_health(tmp_path, "desk", status=extension_health.LIVE, companions=[])
     assert breakage.start_notice_rows(_work(tmp_path), []) == []  # live, no failure open: nothing to say
     extension_health.record_permission_observation(tmp_path, "desk", refused={
