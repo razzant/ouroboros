@@ -356,8 +356,9 @@ def extension_report(result: Any) -> Dict[str, Any]:
         if isinstance(refusal.get("where"), str) and refusal["where"].strip():
             reason["where"] = " ".join(refusal["where"].split())[:_WHERE_CHARS]
         return {"extension_reason": reason}
-    if result.code not in ("OK", "OWNER_OPERATION_REFUSED"):
-        return {}
+    text = result.producer_text if result.producer_text is not None else result.text
+    if result.code not in ("OK", "OWNER_OPERATION_REFUSED") or '"permissions_available"' not in str(text or ""):
+        return {}  # a success body is parsed again only when it names permissions (it can be megabytes)
     body = _extension_body(result)
     items = body.get("permissions_available") if body.get("ok") is not False else None
     available = list(dict.fromkeys(name for name in (items[:_PERMISSIONS_READ] if isinstance(items, list) else [])
