@@ -16,7 +16,7 @@ import inspect
 import logging
 import pathlib
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import ouroboros.tools.extension_dispatch as extension_dispatch
 import ouroboros.tools.registry_guard_process as registry_guard_process
@@ -306,6 +306,26 @@ def _append_shell_core_notice(
     return str(result) + "\n\n" + notice
 
 
+# What policy_hidden_reason says for each cause the one built-in visibility rule names; an alias says
+# nothing (callable, never advertised: discovery answers as for any non-public name).
+_HIDDEN_REASON_TEXT = {
+    "disabled": "disabled by this task's contract (disabled_tools)",
+    "presence": "outside this presence task's positive capability ceiling",
+    "network": "resource_blocked (network=false)",
+    "readonly": "hidden by the read-only subagent profile",
+    "acting": "hidden by the acting subagent profile",
+}
+
+
+class _BuiltinView(NamedTuple):
+    """The task facts the built-in visibility rule reads, taken once per reader call."""
+
+    disabled: frozenset
+    readonly: bool
+    acting_names: Optional[frozenset]
+    for_dispatch: bool
+
+
 class ToolRegistry:
     """Tool registry; modules export ``get_tools()``."""
 
@@ -474,22 +494,52 @@ class ToolRegistry:
             and not bool(bootstrap.get("zero_run_receipt_recorded"))
         )
 
+    def _builtin_view(self, *, for_dispatch: bool = False) -> _BuiltinView:
+        """``for_dispatch``: whether it can be CALLED. A consciousness-origin task is shown an owner
+        turn's tools (its disabled_tools bind at dispatch only, В31=B), and the web resource gate binds
+        the call, not the schema."""
+        dispatch_only = registry_guards.disabled_tools_dispatch_only(self._ctx)
+        acting = self._is_acting_subagent()
+        return _BuiltinView(
+            disabled=_disabled_tools(self._ctx) if for_dispatch or not dispatch_only else frozenset(),
+            readonly=self._is_local_readonly_subagent(),
+            acting_names=acting_tool_names_for_context(self._ctx, self._entries) if acting else None,
+            for_dispatch=for_dispatch,
+        )
+
+    def _builtin_hidden(self, entry: ToolEntry, view: _BuiltinView,
+                        availability: Optional[tuple] = None) -> Optional[str]:
+        """The ONE visibility rule of a registered built-in: None when this task is shown it (or, for
+        dispatch, may call it), else the first cause, in one order: contract, Presence ceiling, alias,
+        network, local availability (``availability`` when the caller already read it), web (dispatch
+        only), child profile. schemas(), available_tools, policy_hidden_reason, get_schema_by_name and
+        callable_rows all read it; dispatch keeps its own argument-aware admission."""
+        name = entry.name
+        if name in view.disabled:
+            return "disabled"
+        if not _presence_tool_allowed(self._ctx, name):
+            return "presence"
+        if _alias_hidden(self._ctx, entry):
+            return "alias"
+        if not registry_guards._builtin_network_allowed(self._ctx, name):
+            return "network"
+        if not (availability or _builtin_tool_availability(name, self._ctx))[0]:
+            return "unavailable"
+        if view.for_dispatch and name in registry_guards._WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
+            return "web"
+        if view.readonly and not self._readonly_tool_allowed(name):
+            return "readonly"
+        if view.acting_names is not None and name not in view.acting_names:
+            return "acting"
+        return None
+
+    def is_builtin(self, name: str) -> bool:
+        """Whether ``name`` is a registered built-in of this catalog (aliases included), shown or not."""
+        return str(name or "").strip() in self._entries
+
     def available_tools(self) -> List[str]:
-        acting_subagent = self._is_acting_subagent()
-        local_readonly_subagent = self._is_local_readonly_subagent()
-        # A consciousness-origin task keeps its full schema set (dispatch-only policy, В31=B).
-        disabled = frozenset() if registry_guards.disabled_tools_dispatch_only(self._ctx) else _disabled_tools(self._ctx)
-        return [
-            e.name
-            for e in self._entries.values()
-            if not _alias_hidden(self._ctx, e)
-            if e.name not in disabled  # declarative tool policy (task_contract.disabled_tools)
-            if _presence_tool_allowed(self._ctx, e.name)
-            if _builtin_tool_availability(e.name, self._ctx)[0]
-            if registry_guards._builtin_network_allowed(self._ctx, e.name)
-            if not local_readonly_subagent or self._readonly_tool_allowed(e.name)
-            if not acting_subagent or e.name in acting_tool_names_for_context(self._ctx, self._entries)
-        ]
+        view = self._builtin_view()
+        return [entry.name for entry in self._entries.values() if self._builtin_hidden(entry, view) is None]
 
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
         schema = entry.schema
@@ -718,31 +768,21 @@ class ToolRegistry:
         return rows
 
     def schemas(self) -> List[Dict[str, Any]]:
-        acting_subagent = self._is_acting_subagent()
-        local_readonly_subagent = self._is_local_readonly_subagent()
         # Dispatch-only policy (В31=B): a consciousness-origin task is filtered by nothing here and
         # records no disabled_by_contract omission, so its prefix matches an owner turn's exactly.
-        disabled_tools = frozenset() if registry_guards.disabled_tools_dispatch_only(self._ctx) else _disabled_tools(self._ctx)
+        view = self._builtin_view()
+        disabled_tools = view.disabled
         # Rebuild from the load-time facts, never from empty: a rebuilt schema
         # list must not erase module_load_failed omissions (H3, capinv-447).
         self._capability_omissions = [dict(item) for item in self._module_load_omissions]
+        availability = {entry.name: _builtin_tool_availability(entry.name, self._ctx) for entry in self._entries.values()}
         # Every locally unavailable built-in is withheld under its own cause, not only a missing key.
-        unavailable_tools = {
-            entry.name: (reason, detail)
-            for entry in self._entries.values()
-            for available, reason, detail in [_builtin_tool_availability(entry.name, self._ctx)]
-            if not available and entry.name not in disabled_tools
-        }
+        unavailable_tools = {name: (reason, detail) for name, (available, reason, detail) in availability.items()
+                             if not available and name not in disabled_tools}
         built_in = [
             schema
             for entry in self._entries.values()
-            if not _alias_hidden(self._ctx, entry)
-            if entry.name not in disabled_tools  # declarative tool policy (task_contract.disabled_tools)
-            if _presence_tool_allowed(self._ctx, entry.name)
-            if entry.name not in unavailable_tools
-            if registry_guards._builtin_network_allowed(self._ctx, entry.name)
-            if not local_readonly_subagent or self._readonly_tool_allowed(entry.name)
-            if not acting_subagent or entry.name in acting_tool_names_for_context(self._ctx, self._entries)
+            if self._builtin_hidden(entry, view, availability[entry.name]) is None
             for schema in self._schemas_for_entry(entry)
         ]
         if disabled_tools:
@@ -792,49 +832,31 @@ class ToolRegistry:
     def policy_hidden_reason(self, name: str) -> Optional[str]:
         """Why a REGISTERED built-in tool is invisible to THIS task, or None.
 
-        Read-only companion to get_schema_by_name (same predicates, same order):
-        it distinguishes "hidden by policy" from "does not exist" so discovery
-        answers can stop reporting a policy-filtered tool as nonexistent (F3,
-        2026-08-10 saga). None means visible OR unknown name — callers that got
-        no schema and no reason may honestly say "not found".
+        The one visibility rule's cause, in words: it distinguishes "hidden by policy" from "does
+        not exist" so discovery answers can stop reporting a policy-filtered tool as nonexistent
+        (F3, 2026-08-10 saga). None means visible OR unknown name — callers that got no schema
+        and no reason may honestly say "not found". The contract and the Presence ceiling also
+        answer for a name that is not a built-in (2026-08-10 amendments), so a contract-disabled
+        extension/MCP name says why; deeper extension/MCP reasons (grants, network) would need
+        new plumbing — disclosed residual, not built.
         """
         requested = str(name or "").strip()
         if not requested:
             return None
-        # BEFORE the registration check: the declarative contract policy applies
-        # across ALL discovery sources (get_schema_by_name checks it first for the
-        # same reason), so a contract-disabled extension/MCP name answers with its
-        # reason instead of "not found" (2026-08-10 amendments). Deeper extension/
-        # MCP policy reasons (grants, network) would need new plumbing — disclosed
-        # residual, not built.
-        if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
-            return "disabled by this task's contract (disabled_tools)"
-        if not _presence_tool_allowed(self._ctx, requested):
-            return "outside this presence task's positive capability ceiling"
-        if requested not in self._entries:
-            return None
-        if not registry_guards._builtin_network_allowed(self._ctx, requested):
-            return "resource_blocked (network=false)"
-        if _alias_hidden(self._ctx, self._entries[requested]):
-            # Mirrors get_schema_by_name: a compat alias is callable but never
-            # advertised — discovery answers as for any non-public name.
-            return None
-        available, reason, _detail = _builtin_tool_availability(requested, self._ctx)
-        if not available:
-            return f"unavailable ({reason})"
-        acting_subagent = self._is_acting_subagent()
-        if self._is_local_readonly_subagent() and not self._readonly_tool_allowed(requested):
-            return "hidden by the read-only subagent profile"
-        if acting_subagent and requested not in acting_tool_names_for_context(self._ctx, self._entries):
-            return "hidden by the acting subagent profile"
-        return None
+        entry = self._entries.get(requested)
+        if entry is None:
+            if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
+                return _HIDDEN_REASON_TEXT["disabled"]
+            return None if _presence_tool_allowed(self._ctx, requested) else _HIDDEN_REASON_TEXT["presence"]
+        availability = _builtin_tool_availability(requested, self._ctx)
+        cause = self._builtin_hidden(entry, self._builtin_view(), availability)
+        return f"unavailable ({availability[1]})" if cause == "unavailable" else _HIDDEN_REASON_TEXT.get(cause or "")
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
         acting_subagent = self._is_acting_subagent()
         acting_grants = self._acting_tool_grants() if acting_subagent else set()
-        local_readonly_subagent = self._is_local_readonly_subagent()
         # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
         # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
         if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
@@ -842,28 +864,17 @@ class ToolRegistry:
         if not _presence_tool_allowed(self._ctx, requested):
             return None
         entry = self._entries.get(requested)
-        if entry and _alias_hidden(self._ctx, entry):
-            # Compat aliases are callable, never advertised — discovery answers
-            # as it does for any non-public name.
-            return None
         if entry:
-            if not registry_guards._builtin_network_allowed(self._ctx, requested):
-                return None
-            available, reason, detail = _builtin_tool_availability(requested, self._ctx)
-            if not available:
-                if reason:
-                    self._capability_omissions.append({
-                        "surface": "tools",
-                        "reason": reason,
-                        "tools": [requested],
-                        "details": {requested: detail},
-                    })
-                return None
-            if local_readonly_subagent and not self._readonly_tool_allowed(requested):
-                return None
-            if acting_subagent and requested not in acting_tool_names_for_context(self._ctx, self._entries):
-                return None
-            return self._schema_for_entry(entry)
+            availability = _builtin_tool_availability(requested, self._ctx)
+            cause = self._builtin_hidden(entry, self._builtin_view(), availability)
+            if cause == "unavailable" and availability[1]:
+                self._capability_omissions.append({
+                    "surface": "tools",
+                    "reason": availability[1],
+                    "tools": [requested],
+                    "details": {requested: availability[2]},
+                })
+            return None if cause else self._schema_for_entry(entry)
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
@@ -925,11 +936,9 @@ class ToolRegistry:
         from ouroboros.mcp_schema import annotation_marks
 
         disabled = _disabled_tools(self._ctx)
-        rows: List[Dict[str, Any]] = [
-            {"name": name} for name in self.available_tools()
-            if name not in registry_guards._WEB_TOOLS or _resource_allowed(self._ctx, "web")
-            if registry_guards._builtin_network_allowed(self._ctx, name)
-        ]
+        view = self._builtin_view(for_dispatch=True)
+        rows: List[Dict[str, Any]] = [{"name": entry.name} for entry in self._entries.values()
+                                      if self._builtin_hidden(entry, view) is None]
         for surface in ("ext_", "mcp_"):
             if namespace and not namespace.startswith(surface) or not _resource_allowed(self._ctx, "network"):
                 continue

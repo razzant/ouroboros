@@ -816,3 +816,21 @@ def test_light_actionable_redirects_keep_legacy_mapping_without_light_remap(
     expected_adapter_calls = 0 if isinstance(failure_route, ToolResult) else 3
     assert len(adapter_calls) == expected_adapter_calls
     assert downstream_calls == []
+
+
+def test_is_builtin_answers_registration_not_visibility(tmp_path):
+    """The public question a one-name loader asks: is this a registered built-in, shown or hidden?"""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="child",
+                                     task_constraint=TaskConstraint(mode="local_readonly_subagent")))
+    # Registered and hidden from this child: a built-in all the same.
+    assert registry.is_builtin("write_file") and registry.policy_hidden_reason("write_file")
+    # A compat alias is registered, callable and never advertised.
+    assert registry.is_builtin(" advisory_review ") and registry.get_schema_by_name("advisory_review") is None
+    assert registry.is_builtin("read_file") and registry.get_schema_by_name("read_file") is not None
+    for name in ("calendar", "mcp_srv__lookup", "ext_7_weather_forecast", ""):
+        assert not registry.is_builtin(name), name
