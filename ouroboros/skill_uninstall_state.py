@@ -115,8 +115,12 @@ def delete_local_skill(
 
 
 def write_uninstall_tombstone(drive_root: pathlib.Path, name: str, *, source: str) -> None:
-    """Durably mark a skill's payload as uninstalled. Never raises."""
+    """Durably mark a skill's payload as uninstalled and end its grant's installation, so a later same-named
+    skill inherits no key (the exact bytes binding stays, ``skill_grant_scope.end_identity``). Never raises."""
+    from ouroboros.skill_grant_scope import end_identity
     from ouroboros.skill_loader import SKILL_OWNER_STATE_SCHEMA_VERSION, skill_state_dir
+
+    end_identity(pathlib.Path(drive_root), name)
 
     try:
         atomic_write_json(

@@ -839,11 +839,15 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
 
 
 def bytes_accepted(skill: LoadedSkill) -> bool:
-    """Whether the current bytes are accepted: an executable verdict, or a pending status through an acceptance
-    basis for these bytes (trusted source, owner skip/edit, author finish), never Cyber alone."""
+    """Whether the current bytes are accepted: an acceptance basis for them (trusted source, owner skip/edit, the
+    author's acceptance) or a finished executable verdict about them; never Cyber alone, which also runs edited
+    bytes whose verdict is about earlier ones (stale)."""
     gate = skill.review.gate_for(skill.content_hash)
-    return bool(gate["executable_review"]) and not (
-        gate["status"] == _REVIEW_STATUS_PENDING and gate["blocking_reason"] not in ACCEPTANCE_REASONS)
+    if not gate["executable_review"]:
+        return False
+    if gate["blocking_reason"] in ACCEPTANCE_REASONS or gate.get("author_accepted"):
+        return True
+    return not gate["stale"] and gate["status"] != _REVIEW_STATUS_PENDING
 
 
 @dataclass

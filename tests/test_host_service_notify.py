@@ -117,6 +117,41 @@ def test_notices_are_refused_before_anything_is_written(tmp_path: pathlib.Path, 
     assert [row["text"] for row in _rows(tmp_path)] == ["Notice · cal\ngranted"]
 
 
+
+def test_a_notice_from_edited_files_waits_for_their_check(tmp_path: pathlib.Path, chat, monkeypatch) -> None:
+    """Owner 1A (21.11): Ouroboros edits an installed skill in Cyber Pro. The skill keeps running; its notice is
+    refused with the reason, writes nothing, and goes out once an acceptance of the new files carries the
+    owner's grant to them. Cyber Pro alone accepts nothing."""
+    from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME
+    from ouroboros.skill_acceptance import carry_if_accepted
+    from ouroboros.skill_grant_scope import install_identity
+    from ouroboros.skill_loader import SkillReviewState, find_skill, save_review_state, save_skill_grants
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    client, _app = _client(tmp_path)
+    skill = find_skill(tmp_path, "cal")
+    save_skill_grants(tmp_path, "cal", [], content_hash=skill.content_hash, requested_keys=[],
+                      granted_permissions=["notify_owner"], requested_permissions=["notify_owner"],
+                      install_identity=install_identity(tmp_path, skill))
+    (skill.skill_dir / "plugin.py").write_text("def register(api):\n    return None\n", encoding="utf-8")
+    edited = find_skill(tmp_path, "cal")
+    assert edited.content_hash != skill.content_hash
+    # The loader mints the running extension a token for the bytes it loaded.
+    atomic_write_json(tmp_path / "state" / "skills" / "cal" / AUTH_TOKEN_FILENAME,
+                      {"token": "tok", "content_hash": edited.content_hash, "issued_at": "now"})
+    waiting = client.post("/notify", headers=HEADERS, json={"text": "before the check"})
+    assert waiting.status_code == 403
+    assert "waits for the check of the edited version" in waiting.json()["error"]
+    assert _rows(tmp_path) == []
+    assert carry_if_accepted(tmp_path, edited) is False  # Cyber Pro runs the edit; it accepts nothing
+    save_review_state(tmp_path, "cal", SkillReviewState(status="pass", content_hash=edited.content_hash))
+    assert carry_if_accepted(tmp_path, find_skill(tmp_path, "cal")) is True  # the check passed
+    allowed = client.post("/notify", headers=HEADERS, json={"text": "after the check"})
+    assert allowed.status_code == 200, allowed.text
+    assert [row["text"] for row in _rows(tmp_path)] == ["Notice · cal\nafter the check"]
+
+
 def test_bad_bodies_and_the_rate_lane_write_nothing(tmp_path: pathlib.Path, chat) -> None:
     assert host_notify.NOTIFY_TEXT_MAX_CHARS == 400
     client, app = _client(tmp_path)

@@ -475,6 +475,68 @@ def test_owner_edit_rebinds_unchanged_grant_requests(tmp_path):
     assert load_skill_grants(drive_root, "probe")["content_hash"] != digest
 
 
+
+def _keyed_extension(root: pathlib.Path, name: str, env: str) -> pathlib.Path:
+    skill = root / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: d\nversion: 1.0.0\ntype: extension\nentry: plugin.py\n"
+        f"env_from_settings: [{env}]\n---\n\n# {name}\n", encoding="utf-8")
+    (skill / "plugin.py").write_text("def register(api):\n    pass\n", encoding="utf-8")
+    return skill
+
+
+def test_grant_installations_are_imported_once_and_carried_at_acceptance(tmp_path, monkeypatch):
+    """The startup import names the installation of records that cover the current bytes (a stale one stays
+    stale, an uninstalled one stays ended); an edit then keeps the key; an acceptance re-binds the record to the
+    accepted bytes, carrying only keys the manifest still declares."""
+    from ouroboros import config
+    from ouroboros.skill_acceptance import carry_if_accepted
+    from ouroboros.skill_grant_scope import import_grant_identities
+    from ouroboros.skill_loader import (
+        SkillReviewState, find_skill, grant_status_for_skill, load_skill_grants, save_review_state, save_skill_grants,
+    )
+    from ouroboros.skill_uninstall_state import write_uninstall_tombstone
+
+    monkeypatch.setattr(config, "load_settings", lambda: {"CAL_TOKEN": "x", "OLD_TOKEN": "y"})
+    drive_root = tmp_path / "data"
+    bucket = drive_root / "skills" / "external"
+    for name, env in (("cal", "CAL_TOKEN"), ("old", "OLD_TOKEN")):
+        _keyed_extension(bucket, name, env)
+        loaded = find_skill(drive_root, name)
+        save_review_state(drive_root, name, SkillReviewState(status="pass", content_hash=loaded.content_hash))
+        save_skill_grants(drive_root, name, [env], content_hash=loaded.content_hash, requested_keys=[env])
+    (bucket / "old" / "notes.md").write_text("edited before this update\n", encoding="utf-8")
+
+    assert import_grant_identities(drive_root)["imported"] == ["cal"]
+    assert load_skill_grants(drive_root, "cal")["install_identity"] == {"source": "", "location": "data:external/cal"}
+    assert load_skill_grants(drive_root, "old")["install_identity"] is None  # stale today: stays as it is
+    assert grant_status_for_skill(drive_root, find_skill(drive_root, "old"))["granted_keys"] == []
+    assert import_grant_identities(drive_root)["imported"] == []  # done is the field itself
+
+    (bucket / "cal" / "notes.md").write_text("Ouroboros's edit\n", encoding="utf-8")
+    edited = find_skill(drive_root, "cal")
+    assert grant_status_for_skill(drive_root, edited)["granted_keys"] == ["CAL_TOKEN"]
+    assert carry_if_accepted(drive_root, edited) is False  # a stale verdict accepts nothing
+    save_review_state(drive_root, "cal", SkillReviewState(status="pass", content_hash=edited.content_hash))
+    assert carry_if_accepted(drive_root, find_skill(drive_root, "cal")) is True
+    carried = load_skill_grants(drive_root, "cal")
+    assert carried["content_hash"] == edited.content_hash and carried["granted_keys"] == ["CAL_TOKEN"]
+
+    # An accepted manifest that no longer declares the key carries nothing of it.
+    (bucket / "cal" / "SKILL.md").write_text((bucket / "cal" / "SKILL.md").read_text(encoding="utf-8").replace(
+        "CAL_TOKEN", "OLD_TOKEN"), encoding="utf-8")
+    renamed = find_skill(drive_root, "cal")
+    save_review_state(drive_root, "cal", SkillReviewState(status="pass", content_hash=renamed.content_hash))
+    assert carry_if_accepted(drive_root, find_skill(drive_root, "cal")) is False
+    assert grant_status_for_skill(drive_root, find_skill(drive_root, "cal"))["granted_keys"] == []
+
+    write_uninstall_tombstone(drive_root, "cal", source="hub")
+    ended = load_skill_grants(drive_root, "cal")
+    assert ended["install_identity"] is None and ended["identity_ended_at"]
+    assert import_grant_identities(drive_root)["imported"] == []  # an ended installation stays ended
+
+
 def test_owner_state_protects_the_acceptance_facts(tmp_path, monkeypatch):
     """Generic agent writes cannot forge the gate's acceptance facts: filename, stem and
     every wrapper agree; a payload file of the same name stays ordinary payload."""

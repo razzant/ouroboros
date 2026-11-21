@@ -555,7 +555,7 @@ def _dependency_pass(drive: pathlib.Path, names: Optional[List[str]], logger: An
 def ensure_builtin_skills(drive_root: Optional[pathlib.Path] = None, *, log_obj: Any = None,
                           repo_dir: Optional[pathlib.Path] = None, dependency_pass: bool = True) -> int:
     """Startup work for an existing data root: the one-time identity conversion (with install
-    records for launcher-seeded built-ins), then, unless ``state/native_seed.json`` already names
+    records for launcher-seeded built-ins) and the grant installation import, then, unless ``state/native_seed.json`` already names
     this committed bundled tree, re-seeding changed built-ins and releasing built-ins the app no
     longer bundles. The receipt covers those bundle phases alone. The package/turn-on pass over
     every installed skill runs off the boot path whether or not the receipt matches.
@@ -574,6 +574,9 @@ def ensure_builtin_skills(drive_root: Optional[pathlib.Path] = None, *, log_obj:
         )
     except Exception:
         logger.warning("Skill identity conversion raised", exc_info=True)
+    from ouroboros.skill_grant_scope import import_grant_identities
+
+    import_grant_identities(drive, log_obj=logger)  # before a re-seed carries grants: they name their installation
     receipt = drive / "state" / "native_seed.json"
     identity = _seed_identity(repo)
     try:

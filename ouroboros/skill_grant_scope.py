@@ -155,7 +155,46 @@ def end_identity(drive_root: pathlib.Path, name: str) -> None:
         log.warning("Could not end the grant installation of %s", name, exc_info=True)
 
 
+def import_grant_identities(drive_root: pathlib.Path, *, log_obj: Any = None,
+                            repo_path: Optional[str] = None) -> Dict[str, Any]:
+    """The startup import (DEVELOPMENT «One stored format»): a grant record that covers the current bytes of
+    its skill and names no installation gains this one; a record already stale stays as it is and an ended one
+    stays ended. Done is the field itself, so a restored snapshot or an older body's write is imported again at
+    the next startup. Without it the first edit after this update would cost every skill its keys. Never raises."""
+    from ouroboros.skill_loader import GRANTS_FILENAME, discover_skills, skill_state_dir_path
+    from ouroboros.utils import atomic_write_json, read_json_dict
+
+    logger = log_obj or log
+    summary: Dict[str, Any] = {"imported": [], "errors": []}
+    try:
+        skills = discover_skills(pathlib.Path(drive_root), repo_path=repo_path)
+    except Exception as exc:
+        logger.warning("Grant installation import could not list skills", exc_info=True)
+        summary["errors"].append(f"discovery: {type(exc).__name__}: {exc}")
+        return summary
+    for skill in skills:
+        if skill.identity_collision or skill.load_error or not skill.content_hash:
+            continue
+        path = skill_state_dir_path(pathlib.Path(drive_root), skill.name) / GRANTS_FILENAME
+        try:
+            data = read_json_dict(path)
+            if (not isinstance(data, dict) or "install_identity" in data or data.get("identity_ended_at")
+                    or str(data.get("content_hash") or "") != skill.content_hash):
+                continue
+            identity = install_identity(drive_root, skill)
+            if identity is None:
+                continue
+            atomic_write_json(path, {**data, "install_identity": identity})
+            summary["imported"].append(skill.name)
+        except Exception as exc:
+            logger.warning("Grant installation import failed for %s", skill.name, exc_info=True)
+            summary["errors"].append(f"{skill.name}: {type(exc).__name__}: {exc}")
+    if summary["imported"]:
+        logger.info("Grant installations: imported records for %d skill(s)", len(summary["imported"]))
+    return summary
+
+
 __all__ = [
-    "USE_TIME_PERMISSIONS", "blocking_items", "blocking_lists", "end_identity", "grant_notes", "grant_view", "identity_holds", "install_identity",
+    "USE_TIME_PERMISSIONS", "blocking_items", "blocking_lists", "end_identity", "grant_notes", "import_grant_identities", "grant_view", "identity_holds", "install_identity",
     "payload_location", "waiting_refusal",
 ]
