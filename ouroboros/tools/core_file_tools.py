@@ -855,8 +855,8 @@ def _read_file(
         from ouroboros.tools.arg_feedback import read_end_spelling, with_argument_notes
 
         max_lines, note, refusal = read_end_spelling(ctx, path, start_line, max_lines, end_line, end_char)
-        return refusal or with_argument_notes(ctx, _read_file(
-            ctx, path, root, max_lines, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars), [note])
+        return refusal or with_argument_notes(ctx, _read_file(ctx, path, root, max_lines, start_line, start_char,
+                                                              bucket, skill_name, _resolved_binding, max_chars), [note])
     # Reset first: a blocked or missing read must never inherit the previous
     # read's extent (the renderer fills `extent` only when it rendered).
     ctx.last_read_view = None

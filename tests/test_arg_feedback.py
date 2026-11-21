@@ -172,7 +172,8 @@ def test_edit_text_count_one_is_the_single_replacement_and_a_larger_count_names_
     assert one.status == "ok" and "count=1 ignored: one replacement is edit_text's default" in one.text
     assert (repo / "m.txt").read_text(encoding="utf-8") == "c a a\n"
     for count in (3, 0, "all"):
-        refused = registry.execute_result("edit_text", {"path": "m.txt", "old_str": "a", "new_str": "z", "count": count})
+        refused = registry.execute_result("edit_text", {
+            "path": "m.txt", "old_str": "a", "new_str": "z", "count": count})
         assert refused.status == "error" and refused.code == "TOOL_ARG_ERROR", refused.text
         assert 'edit_batch(edits=[{"path": "m.txt", "old_str": <this call\'s old_str>' in refused.text
         assert ('"count": 3}' if count == 3 else '"count": <occurrences>}') in refused.text
