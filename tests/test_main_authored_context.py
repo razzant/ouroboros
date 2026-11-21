@@ -440,3 +440,45 @@ def test_main_keeps_earlier_notes_under_empty_keep_and_merges_only_named_ones(ma
     assert replaced["checkpoint_ref"] == seen["address"]["checkpoint_ref"]
     restored = [text for text in accounts(f.inputs[7]["messages"]) if text.startswith("[Historical source")]
     assert len(restored) == 1 and goal in restored[0]
+
+
+def _plain(rows):
+    """A request's rows as a provider's cache compares them: the host's cache marks and text-block wrapping aside."""
+    def row(message):
+        out = {key: value for key, value in message.items() if key != "cache_control"}
+        content = out.get("content")
+        if isinstance(content, list) and content and all(isinstance(b, dict) and set(b) - {"cache_control"} == {"type", "text"}
+                                                         for b in content):
+            out["content"] = "".join(block["text"] for block in content)
+        return out
+    return [row(message) for message in rows]
+
+
+def test_two_full_folds_leave_the_start_and_the_first_folds_request_in_place(main_loop):
+    """Test 1 of the cheap-folds order: a full fold leaves the request's start rows byte-identical and writes its note
+    after them; its own call carries a pointer to the note, whose capsule holds the exact text; the next full fold
+    leaves every row of the request sent after the first fold, up to its last row before the model's answer, as
+    that request carried it, and writes its note after them."""
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.tools.compact_context import NOTE_POINTER
+
+    f = main_loop
+    first_note, second_note = "The first read holds the conclusion.", "The second read agrees with the first."
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"),
+           call("compact_context", {"working_note": first_note, "keep_unit_ids": []}, "fold-1"),
+           call("read_file", {"path": "evidence.txt"}, "read-2"),
+           call("compact_context", {"working_note": second_note, "keep_unit_ids": []}, "fold-2"),
+           {"content": "done"}])
+    start, after_first, after_second = (_plain(f.inputs[i]["messages"]) for i in (0, 2, 4))
+    assert [row.get(HOST_CONTEXT_KIND_KEY) for row in start[2:]] == ["ouroboros_roster_snapshot", "ouroboros_context_facts"]
+    notes = [(i, meta) for i, row in enumerate(after_first) if (meta := _capsule_metadata(row)[1])]
+    (at, meta), = notes
+    assert at == len(start) and after_first[:at] == start  # the start's host rows stand, the note follows them
+    own = after_first[at + 1]
+    assert own["tool_calls"][0]["id"] == "fold-1"
+    assert json.loads(own["tool_calls"][0]["function"]["arguments"]) == {
+        "working_note": NOTE_POINTER.format(unit_id=meta["unit_id"]), "keep_unit_ids": []}
+    assert after_first[at]["content"][0]["text"].endswith("\n" + first_note)
+    assert after_second[:len(after_first)] == after_first  # that whole request stands, superseded facts included
+    second = after_second[len(after_first)]
+    assert _capsule_metadata(second)[1] and second["content"][0]["text"].endswith("\n" + second_note)

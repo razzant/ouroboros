@@ -72,13 +72,16 @@ def _obsolete_host_rows(messages: Sequence[Mapping[str, Any]]) -> set[int]:
 
 def superseded_host_fact(messages: Sequence[Mapping[str, Any]]) -> str:
     """The count, for the facts row being written now, of superseded host rows in view: the latest facts
-    row is one of them once this one follows it. They leave where the conversation is next rebuilt."""
+    row is one of them once this one follows it. They leave where the conversation is next rebuilt; rows that stand
+    through a fold (``compact_context.standing_rows``) are not counted."""
     from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+    from ouroboros.tools.compact_context import standing_rows
     from ouroboros.utils import estimate_tokens
 
     latest = max((i for i, row in enumerate(messages) if row.get("role") == "user"
                   and row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and host_row_intact(row)), default=None)
     positions = _obsolete_host_rows(messages) | ({latest} if latest is not None else set())
+    positions -= set(standing_rows(messages)) if positions else set()
     tokens = sum(estimate_tokens(str(messages[i].get("content") or "")) for i in positions)
     return f"superseded host rows {len(positions)} ~{tokens:,} (leave at the next rebuild)" if positions else ""
 

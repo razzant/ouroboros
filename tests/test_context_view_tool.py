@@ -554,3 +554,182 @@ def test_a_receipt_transfer_that_does_not_complete_keeps_the_round_and_names_its
         assert notice["receipt_retention_error"] == f"{type(error).__name__}: {error}"
         assert "receipt_source" not in event  # the event keeps every structure itself
     assert "source_retention" in ctx._round_prologue["sections_ms"], ctx._round_prologue
+
+
+# --- cheap folds: what stands through a fold, the own call's pointer, the tail selector ------------------------------
+
+def _read(call_id, text="Long exact evidence "):
+    return [{"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
+        "name": "read_file", "arguments": json.dumps({"path": f"{call_id}.py"})}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": text * 200}]
+
+
+def _facts(text):
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+
+    return bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] " + text)
+
+
+def _fold(tmp_path, monkeypatch, ctx, view, call_id, *, arrivals=(), own=None, **selector):
+    """One fold the way Main applies it: the mind's call on the view it saw, its result, the boundary."""
+    record_context_view(ctx, view, [])
+    arguments = {"working_note": f"Note written by {call_id}.", **selector}
+    response = _compact_context(ctx, **arguments)
+    assert "requested" in response, response
+    call_row = own or {"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function",
+                       "function": {"name": "compact_context", "arguments": json.dumps(arguments)}}]}
+    current = [*copy.deepcopy(view), call_row, {"role": "tool", "tool_call_id": call_id, "content": response},
+               *arrivals]
+    folded = _run_round_compaction(current, _context(tmp_path / call_id, ctx, [], monkeypatch))
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    return folded
+
+
+def _notes(rows):
+    from ouroboros.context_compaction import _capsule_metadata
+
+    return [i for i, row in enumerate(rows) if _capsule_metadata(row)[1]]
+
+
+def _unit_at(rows, index):
+    from ouroboros.context_compaction import context_units
+
+    return next(unit for unit in context_units(rows, scope="dialogue") if unit.start == index)
+
+
+def _start():
+    return [*_source()[:2], _facts("round 1")]
+
+
+def test_a_full_fold_stands_after_the_start_and_releasing_its_note_or_omitting_it_takes_its_rows(tmp_path, monkeypatch):
+    """Tests 1 and 2 of the order at the tool's own seam. A full fold keeps the start's host rows and writes its
+    note after them, and its own call names the note; the next full fold keeps that note's whole request (call,
+    result, receipt, the next facts row) and writes after it. Both directions: replacing the note takes its rows in
+    the same fold, and an explicit keep_unit_ids list that omits a standing unit removes it."""
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.tools.compact_context import NOTE_POINTER, standing_rows
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    start = _start()
+    first = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-1", keep_unit_ids=[])
+    at, = _notes(first)
+    assert first[:at] == start and at == len(start)
+    meta = _capsule_metadata(first[at])[1]
+    assert first[at]["content"][0]["text"].endswith("\nNote written by fold-1.")
+    assert json.loads(first[at + 1]["tool_calls"][0]["function"]["arguments"]) == {
+        "working_note": NOTE_POINTER.format(unit_id=meta["unit_id"]), "keep_unit_ids": []}
+    request = [*first, _facts("round 3")]  # the request sent after that fold, up to the model's answer
+    assert sorted(standing_rows(request)) == [2, *range(at + 1, len(request))]
+
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-2", keep_unit_ids=[])
+    assert second[:len(request)] == request and _notes(second) == [at, len(request)]
+
+    note_id = _unit_at(request, at).unit_id
+    released = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-3", keep_unit_ids=[],
+                     replace_note_ids=[note_id])
+    assert released[:at] == start and _notes(released) == [at]  # its rows went with it
+    assert not any(row.get("tool_call_id") == "fold-1" for row in released)
+    alone = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-5", replace_note_ids=[note_id])
+    assert not any(row.get("tool_call_id") == "fold-1" for row in alone)  # omitted selectors: only its own rows go
+    assert alone[:at] == start and any(row.get("tool_call_id") == "two" for row in alone)
+    omitted = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-4",
+                    keep_unit_ids=[_unit_at(request, at + 1).unit_id])
+    assert request[2] not in omitted and request[at + 1] in omitted  # the mind's explicit choice still decides
+
+
+def test_keep_last_n_leaves_no_anchor_and_the_next_full_fold_takes_its_tail(tmp_path, monkeypatch):
+    """Test 3: a keep_last_n fold keeps an earlier full fold's standing rows untouched, writes its note after them
+    and leaves no anchor of its own (its call keeps its argument); the next full fold folds its kept tail and its
+    own rows, and writes its note right after the keep_last_n fold's note."""
+    from ouroboros.tools.compact_context import standing_rows
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "fold-1", keep_unit_ids=[])
+    request = [*first, _facts("round 3")]
+    view = [*request, *_read("two"), *_read("three"), *_read("four")]
+    tail = _fold(tmp_path, monkeypatch, ctx, view, "keep", keep_last_n=2)
+    assert tail[:len(request)] == request and _notes(tail) == [3, len(request)]
+    own = next(row for row in tail if (row.get("tool_calls") or [{}])[0].get("id") == "keep")
+    assert json.loads(own["tool_calls"][0]["function"]["arguments"])["working_note"] == "Note written by keep."
+    after = [*tail, _facts("round 5")]
+    assert max(standing_rows(after)) == len(request) - 1  # nothing of the keep_last_n fold stands
+    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("five")], "fold-2", keep_unit_ids=[])
+    assert full[:len(request) + 1] == after[:len(request) + 1] and _notes(full) == [3, len(request), len(request) + 1]
+    assert not any(row.get("tool_call_id") in ("three", "four", "keep", "five") for row in full)
+
+
+def test_fold_last_n_changes_only_the_tail_and_refuses_what_it_cannot_select(tmp_path, monkeypatch):
+    """Test 4: fold_last_n folds the newest N tool units and everything after the first of them; every row before
+    the first folded unit stays byte-identical, a superseded host row and a typed row that is no unit included (a
+    fold changes nothing before its first replaced unit), and the tail fold leaves no anchor. Its argument errors
+    change nothing."""
+    from ouroboros.tools.compact_context import standing_rows
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    typed = {**_facts("round 2"), "msg_id": "facts-2"}  # a host row the dialogue scope does not address
+    view = [*_start(), *_read("one"), typed, *_read("two"), _facts("round 3"), *_read("three")]
+    first_folded = len(view) - 2
+    folded = _fold(tmp_path, monkeypatch, ctx, view, "tail", arrivals=[_facts("round 4")], fold_last_n=1)
+    assert folded[:first_folded] == view[:first_folded] and _notes(folded) == [first_folded]
+    assert not any(row.get("tool_call_id") == "three" for row in folded)
+    assert sorted(standing_rows([*folded, _facts("round 5")])) == [2]  # raw units before it: no anchor
+    two = _fold(tmp_path, monkeypatch, ctx, view, "tail-2", fold_last_n=2)
+    assert two[:5] == view[:5] and _notes(two) == [6] and typed in two
+    record_context_view(ctx, view, [])
+    for selector, words in (({"fold_last_n": 0}, "at least 1"), ({"fold_last_n": True}, "at least 1"),
+                            ({"fold_last_n": 1, "keep_last_n": 2}, "keep_last_n both select"),
+                            ({"fold_last_n": 1, "keep_unit_ids": []}, "keep_unit_ids both select")):
+        assert words in _compact_context(ctx, working_note="A note.", **selector)
+    record_context_view(ctx, _start(), [])
+    assert "no completed tool unit" in _compact_context(ctx, working_note="A note.", fold_last_n=1)
+    assert ctx._pending_compaction is None  # no refused request was queued
+
+
+def test_inspect_lists_standing_units_as_not_eligible_and_says_why(tmp_path, monkeypatch):
+    """Test 5 (inspect): a unit of the start and a unit of a full fold's own rows are listed as not eligible with the
+    fact of why; an ordinary unit stays eligible with no such fact."""
+    ctx = SimpleNamespace(active_context_mode="low")
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "fold-1", keep_unit_ids=[])
+    view = [*first, _facts("round 3"), *_read("two")]
+    record_context_view(ctx, view, [])
+    units = {unit["unit_id"]: unit for unit in json.loads(_compact_context(ctx, inspect=True))["units"]}
+    note = _unit_at(view, 3).unit_id
+    assert units[_unit_at(view, 2).unit_id]["stands"] == "start of the request"
+    assert units[_unit_at(view, 4).unit_id]["stands"] == f"own rows of note {note}"
+    assert not units[_unit_at(view, 2).unit_id]["eligible"] and not units[_unit_at(view, 4).unit_id]["eligible"]
+    ordinary = units[_unit_at(view, len(view) - 2).unit_id]
+    assert ordinary["eligible"] and "stands" not in ordinary
+
+
+@pytest.mark.parametrize("route", ["anthropic", "responses"])
+def test_the_own_calls_pointer_leaves_native_replay_and_keeps_a_complete_unit(tmp_path, monkeypatch, route):
+    """Test 6: with a direct-Anthropic or a direct-Responses receipt on the fold's own call, the pointer edit makes
+    the row project canonically (its receipt no longer validates) and the call with its result is one complete tool
+    unit. Before the edit the same row validates (the guard's other direction)."""
+    from ouroboros.anthropic_native_custody import _validated_receipt, retain_native_assistant_content
+    from ouroboros.context_compaction import context_units
+    from ouroboros.openai_responses_custody import retain_items, validated_items
+
+    arguments = {"working_note": "Note written by native.", "keep_unit_ids": []}
+    row = {"role": "assistant", "content": "", "tool_calls": [{"id": "native", "type": "function", "function": {
+        "name": "compact_context", "arguments": json.dumps(arguments)}}]}
+    if route == "anthropic":
+        row = retain_native_assistant_content(row, [
+            {"type": "thinking", "thinking": "private thought", "signature": "signature"},
+            {"type": "tool_use", "id": "native", "name": "compact_context", "input": arguments}],
+            {"provider": "anthropic", "base_url": "https://anthropic.example/v1", "resolved_model": "test-model"})
+        valid = lambda message: _validated_receipt(message) is not None  # noqa: E731
+    else:
+        row = retain_items(row, [{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"},
+                                 {"type": "function_call", "call_id": "native", "name": "compact_context",
+                                  "arguments": json.dumps(arguments)}],
+                           {"provider": "openai", "api_surface": "responses", "base_url": "https://api.openai.com/v1",
+                            "resolved_model": "gpt-test"}, "completed")
+        valid = lambda message: validated_items(message) is not None  # noqa: E731
+    assert valid(row)
+    ctx = SimpleNamespace(active_context_mode="low")
+    folded = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "native", own=row, keep_unit_ids=[])
+    at = next(i for i, message in enumerate(folded) if (message.get("tool_calls") or [{}])[0].get("id") == "native")
+    assert not valid(folded[at]) and "working_note" in folded[at]["tool_calls"][0]["function"]["arguments"]
+    assert any(unit.start == at and unit.end == at + 1 for unit in context_units(folded, scope="dialogue"))

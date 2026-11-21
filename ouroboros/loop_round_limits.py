@@ -637,7 +637,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         candidate = copy.deepcopy(candidate)
         update_resident_notice(ctx.tools, schemas, candidate)
     if pending is not None:  # an applied view's facts, kept with the receipt they appear in
-        from ouroboros.tools.compact_context import fold_receipt_facts
+        from ouroboros.tools.compact_context import fold_receipt_facts, point_call_at_note
+        candidate = point_call_at_note(candidate, receipt, proposal.get("working_note"))  # the own call names its note
         receipt.update(fold_receipt_facts(proposal["observed"]["messages"], candidate, receipt))
     receipt_source, retained_receipt = None, None
     if receipt["status"] != "no_op":
