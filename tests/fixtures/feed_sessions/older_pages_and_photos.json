@@ -1,0 +1,23 @@
+{
+  "about": "Reading back to the edge of what is loaded: an older page lands above the passage, photos above it finish loading later; the passage stays through both. ↓ then reaches the end at once and the next reply follows.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Older pages", "rows": [
+      {"count": 140, "words": [18, 60]},
+      {"photo": "p1", "height": 420},
+      {"count": 4, "words": [20, 50]},
+      {"photo": "p2", "height": 300},
+      {"count": 150, "words": [18, 60]}
+    ]}
+  },
+  "events": [
+    {"open": "a"},
+    {"older": true},
+    {"image": "p2"},
+    {"image": "p1"},
+    {"wheel": -600},
+    {"arrive": "a", "words": 50},
+    {"latest": true},
+    {"arrive": "a", "words": 30}
+  ]
+}
