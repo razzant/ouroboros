@@ -27,7 +27,7 @@ from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatche
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
-    _plain, _provider_exception_facts, physical_failure_evidence, priced_failure_usage, provider_failure_payload, provider_cost_value, refusal_conflicts,
+    _plain, _provider_exception_facts, physical_failure_evidence, priced_failure_usage, refusal_failure_payload, provider_cost_value, refusal_conflicts,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
 from ouroboros.transport_custody import ProcessingNotStarted, release_pre_dispatch_attempt, report_attempt_end
@@ -1237,7 +1237,7 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
     With ``exc`` only once the answer path ended: ``ended_unbound_model_request`` reads that."""
     payload = None
     try:
-        payload = provider_failure_payload(exc) if exc is not None else _plain(response)
+        payload = refusal_failure_payload(exc) if exc is not None else _plain(response)
         stream_receipt = (getattr(exc, "stream_receipt", None) if exc is not None else
                           payload.get("_stream_receipt") if isinstance(payload, dict) else None)
         stream_receipt = stream_receipt if isinstance(stream_receipt, dict) else {}
@@ -1365,7 +1365,7 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
         return "settled"
     if provider == "openrouter" and not reservation.provider_reported_cost_only and not tier_conflict:
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
-            if predicate(exc):
+            if predicate(exc) and not refusal_conflicts(exc, retained_payload=payload):
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if not tier_conflict and isinstance(stream_usage, dict) and stream_usage:

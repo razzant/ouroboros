@@ -153,12 +153,14 @@ def test_responses_flex_refusal_reprices_standard_and_keeps_original_intent(ctx,
         assert all(row["effort"] == request.effort for row in attempt_rows)
 
 
-@pytest.mark.parametrize(("work_seen", "cost", "full_bill", "expected"), [
-    (True, 0.0, False, None), (True, 0.125, False, 0.125), (False, 0.0, False, 0.0),
-    (True, 0.0, True, 0.0),
+@pytest.mark.parametrize(("work_seen", "input_tokens", "cost", "full_bill", "expected"), [
+    (True, 0, 0.0, False, None), (True, 0, 0.125, False, 0.125), (False, 0, 0.0, False, 0.0),
+    (True, 0, 0.0, True, 0.0),
+    pytest.param(False, 10, 0.0, True, 0.0, id="confirmed-full-zero-with-terminal-tokens"),
+    pytest.param(False, 10, 0.0, False, None, id="gateway-zero-with-terminal-tokens"),
 ])
 def test_responses_failure_bills_zero_only_without_contradictory_prior_work(
-    ctx, patch_env, mock_openai, monkeypatch, work_seen, cost, full_bill, expected,
+    ctx, patch_env, mock_openai, monkeypatch, work_seen, input_tokens, cost, full_bill, expected,
 ):
     monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "openai")
     holds = []
@@ -171,7 +173,7 @@ def test_responses_failure_bills_zero_only_without_contradictory_prior_work(
 
     monkeypatch.setattr(search_module, "reserve_attempt", reserve)
     terminal = {"status": "failed", "error": {"code": "invalid_request_error", "status_code": 400},
-                "usage": {"input_tokens": 0, "output_tokens": 0}}
+                "usage": {"input_tokens": input_tokens, "output_tokens": 0}}
     if full_bill:
         terminal["total_cost_usd"] = cost
     else:
@@ -247,19 +249,10 @@ def test_web_search_falls_back_to_openrouter_server_tool(monkeypatch):
 
     calls: dict = {}
 
-    class _Usage:
-        def model_dump(self):
-            return {"prompt_tokens": 11, "completion_tokens": 7}
-
-    class _Message:
-        content = "fresh answer from openrouter"
-
-    class _Choice:
-        message = _Message()
-
     class _Response:
-        choices = [_Choice()]
-        usage = _Usage()
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "fresh answer from openrouter"}}],
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 7}}
 
     class _Completions:
         def create(self, **kwargs):
@@ -804,6 +797,18 @@ def test_openrouter_ambiguous_outcome_stops_cross_provider_cascade(ctx, monkeypa
     assert result["reason_code"] == "provider_outcome_unknown"
 
 
+def test_r3_openrouter_error_finish_is_not_a_search_summary(ctx, monkeypatch):
+    from ouroboros import llm
+
+    body = {"choices": [{"message": {"content": "partial"}, "finish_reason": "error"}], "usage": {"cost": 0}}
+    monkeypatch.setattr(search_module, "_search_target", lambda *_args: {"api_key": "test-key"})
+    monkeypatch.setattr(llm, "openrouter_web_search_server_tool", lambda **_kwargs: body)
+    result = json.loads(search_module._web_search_openrouter(ctx, "once", model="openrouter::test-model"))
+    assert result["reason_code"] == "provider_outcome_unknown"
+    assert "answer" not in result
+    assert (ctx.pending_events[-1]["cost"], ctx.pending_events[-1]["cost_final"]) == (None, False)
+
+
 def test_anthropic_ambiguous_outcome_stops_ddgs_cascade(ctx, monkeypatch):
     from ouroboros import llm
 
@@ -870,8 +875,9 @@ _TYPED_404 = {"code": "model_not_found", "type": "invalid_request_error", "messa
     ({"code": 404, "message": "No endpoints found matching your data policy."}, {}, False),
     (_TYPED_404, {}, True),
     (_TYPED_404, {"usage": {"cost": 0.25}}, False),
+    ({"code": 404, "message": _NO_ENDPOINTS}, {"usage": {"server_tool_use": {"web_search_requests": 1}}}, False),
 ], ids=["router-number", "router-number-naming-its-routing-step", "router-number-data-policy", "provider-typed",
-        "provider-typed-beside-a-charge"])
+        "provider-typed-beside-a-charge", "router-number-with-search-work"])
 def test_a_404_reaches_another_search_source_only_as_a_typed_refusal_nothing_contradicts(
         ctx, monkeypatch, tmp_path, error, envelope, advances):
     """One OpenRouter search leg answered HTTP 404 through the real attempt ledger, with a second source eligible.
@@ -914,6 +920,8 @@ def test_a_404_reaches_another_search_source_only_as_a_typed_refusal_nothing_con
     if not envelope:  # the ledger says the same of all four: free, by the router's status and words
         assert (row["state"], row["settle_reason"], row["cost_usd"], row["cost_final"]) == (
             "settled", "pre_routing_rejection", 0, True)
+    elif "server_tool_use" in envelope["usage"]:
+        assert (row["state"], row.get("cost_usd"), bool(row.get("cost_final"))) == ("unresolved", None, False)
     assert another.called is advances
     if advances:
         assert result["answer"] == "another source" and result["backend"] == "anthropic_server_tool"

@@ -119,6 +119,23 @@ def test_zero_counters_do_not_price_an_upstream_attempt():
     assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
 
 
+def test_numeric_error_code_supplies_missing_timeout_status():
+    body = {"error": {"message": "request rejected"},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+    body["error"]["code"] = 504
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+def test_byok_body_error_without_upstream_charge_does_not_infer_zero():
+    body = {"error": {"code": 429}, "usage": {
+        "is_byok": True, "cost": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+    assert ua.usage_from_response({**body, "total_cost_usd": 0}, provider="openrouter")[1:] == (0.0, True)
+    body["usage"]["cost_details"] = {"upstream_inference_cost": 0}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+
+
 def test_usable_completion_keeps_explicit_zero_with_nonfatal_error_field():
     from ouroboros.llm import LLMClient
 
@@ -129,6 +146,44 @@ def test_usable_completion_keeps_explicit_zero_with_nonfatal_error_field():
     body["choices"][0]["message"] = {}
     assert LLMClient._provider_body_error(body) == body["error"]
     assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+def test_explicit_error_finish_does_not_make_partial_text_a_usable_zero_bill():
+    from ouroboros._usage_response import provider_body_error, refusal_body_conflicts
+
+    body = {"error": {"code": 502, "message": "provider failure"},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0},
+            "choices": [{"finish_reason": "error", "message": {"content": "partial"}}]}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+    assert provider_body_error(body) == body["error"]
+    assert refusal_body_conflicts(body)  # Partial output still prevents a replay.
+
+
+def test_r3_zero_full_bill_cannot_override_nested_byok_charge():
+    body = {"total_cost_usd": 0, "usage": {"prompt_tokens": 10}, "error": {
+        "code": 502, "usage": {"is_byok": True, "cost": 0.25},
+    }}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+@pytest.mark.parametrize("prior", [None, []], ids=["plain", "stream"])
+def test_r3_failure_price_reuses_retained_body_without_sdk_reread(prior):
+    from ouroboros._usage_response import priced_failure_usage
+
+    class SDKResponse:
+        reads = 0
+
+        def json(self):
+            self.reads += 1
+            return body
+
+    body = {"error": {"code": 502}, "usage": {"cost": 0, "completion_tokens": 1}}
+    error = RuntimeError("provider failure")
+    error.response = SDKResponse()
+    error.stream_prior_usage = prior
+    error.stream_usage = {"cost": 0}
+    assert priced_failure_usage(error, body, "openrouter") is None
+    assert error.response.reads == 0
 
 
 def test_api_cost_extraction_rejects_untrustworthy_provider_amounts():

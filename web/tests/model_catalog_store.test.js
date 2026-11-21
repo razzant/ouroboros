@@ -414,6 +414,10 @@ test('a late answer never stands under another model; a failed, foreign or tierl
     const waiting = new Map();
     const store = createModelCatalogStore({ readProcessing: (value) => new Promise((resolve, reject) => { waiting.set(value, { resolve, reject }); }) });
     const state = (model) => store.detail(route(model))?.state || null;
+    const firstRead = store.readDetail(route('a/selector-witness'));
+    await Promise.resolve();
+    waiting.get('a/selector-witness').resolve(endpoints('a/selector-witness', ['standard']));
+    await firstRead;
     const [first, second] = [store.readDetail(route('a/one')), store.readDetail(route('a/two'))];
     await Promise.resolve();
     waiting.get('a/two').resolve(endpoints('a/two', ['standard', 'fast', 'ultrafast']));
@@ -439,6 +443,32 @@ test('a late answer never stands under another model; a failed, foreign or tierl
     waiting.get('a/refused').resolve(endpoints('a/refused', ['standard', 'economy']));
     await retry;
     assert.deepEqual([...store.detail(route('a/refused')).modes], ['standard', 'economy']);
+});
+
+test('a core that ignores the detail selector leaves modes unknown without repeatedly fetching its catalog', async () => {
+    let reads = 0;
+    const store = createModelCatalogStore({ readProcessing: async () => { reads += 1; return { items: [] }; } });
+    const target = route('a/one');
+    await store.readDetail(target);
+    await store.readDetail(target);
+    await store.readDetail(route('a/two'));
+    const said = store.detail(target);
+    assert.deepEqual([reads, said.complete, [...said.modes]], [1, false, []]);
+});
+
+test('concurrent cold detail reads share the legacy selector discovery', async () => {
+    const reads = [];
+    let respond;
+    const catalog = new Promise((resolve) => { respond = resolve; });
+    const store = createModelCatalogStore({ readProcessing: (value) => { reads.push(value); return catalog; } });
+    const first = store.readDetail(route('a/one'));
+    const second = store.readDetail(route('a/two'));
+    respond({ items: [] });
+    await Promise.all([first, second]);
+    assert.deepEqual(reads, ['a/one']);
+    for (const model of ['a/one', 'a/two']) assert.notEqual(store.detail(route(model))?.complete, true);
+    await store.readDetail(route('a/two'));
+    assert.equal(reads.length, 1);
 });
 
 test('the account Main is pinned to is the settings document\'s word, or a write\'s own answer; unknown before either', () => {

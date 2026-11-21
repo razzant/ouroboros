@@ -491,6 +491,7 @@ class LLMClient(
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
+                    wire_completion=resp,
                 )
                 result[1]["ledger_attempt_ids"] = list(attempt_ids)
                 return _one_shot_result(result, tools)
@@ -522,6 +523,7 @@ class LLMClient(
             _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
+            wire_completion=resp,
         )
         result[1]["ledger_attempt_ids"] = list(attempt_ids)
         return _one_shot_result(result, tools)

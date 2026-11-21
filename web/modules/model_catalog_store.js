@@ -106,6 +106,10 @@ const tierWords = (list) => (Array.isArray(list) ? list.filter((tier) => typeof 
  *  and each classified endpoint with its price (USD per 1M tokens). Throws for another model's answer or one that
  *  names no tier: neither is ever read as a model with only its ordinary service. */
 function detailOf(value, data) {
+    // Older cores ignore the selector and return their ordinary catalog. That says nothing about this model.
+    if (Array.isArray(data?.items) && !Object.hasOwn(data, 'processing')) {
+        return { state: 'unsupported', modes: new Set(), complete: false, endpoints: [] };
+    }
     const said = data?.processing;
     const modes = tierWords(said?.modes);
     if (data?.value !== value || !modes.length) throw new Error('no tiers read for this model');
@@ -124,7 +128,8 @@ function detailOf(value, data) {
  */
 export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), readPreferences = () => apiClient.uiPreferences(),
     readSettings = () => apiClient.settings(), savePreferences = (body) => apiClient.saveUiPreferences(body),
-    readProcessing = (value) => fetchCatalog(`?processing_model=${encodeURIComponent(value)}`, (data) => Boolean(data?.processing)),
+    readProcessing = (value) => fetchCatalog(`?processing_model=${encodeURIComponent(value)}`, (data) =>
+        Boolean(data?.processing) || Array.isArray(data?.items)),
     now = () => Date.now() } = {}) {
     // `served`: the pins as the server last said them; `pins`: what this window shows, those with each route's latest
     // unanswered press here on top (`pinning`: `{ route | null, seq }`). `pinOut` counts the writes out or queued,
@@ -133,7 +138,8 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
     const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
         recentsAgain: false, served: [], pins: [], pinning: new Map(), pinSeq: 0, pinOut: 0, pinWriting: null,
         pinsWritten: 0, connections: null, connectionsReading: null, connectionsAgain: false, index: null, tiers: null, cacheTier: null,
-        readTier: undefined, mainAccount: null, mainAccountRoute: null, details: new Map(), generation: null, detailEpoch: 0, revisions: null,
+        readTier: undefined, mainAccount: null, mainAccountRoute: null, details: new Map(), processingSelector: null, processingProbe: null,
+        generation: null, detailEpoch: 0, revisions: null,
         // `sourceEpoch` counts connection changes; until a catalog read sent under the latest one answers, the
         // transport of `staleSources` (null: every API row's) is told by no earlier read; `readAgain`: one is owed.
         sourceEpoch: 0, staleSources: new Set(), readAgain: false, settingsSeen: 0 };
@@ -288,6 +294,7 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
         state.generation = generation;
         if (generation !== previous) {
             state.details.clear();
+            state.processingSelector = state.processingProbe = null;
             state.detailEpoch += 1;
             const changed = state.revisions && revisions.size ? new Set([...new Set([...state.revisions.keys(), ...revisions.keys()])]
                 .filter((id) => state.revisions.get(id) !== revisions.get(id))) : null;
@@ -363,22 +370,35 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
      *  again by the next call, never by a paint. The answer stands under its own routed value only. */
     function readDetail(raw) {
         const route = normalizeRoute(raw);
-        if (!route || !detailed(route)) return Promise.resolve();
+        if (!route || !detailed(route) || state.processingSelector === 'unsupported') return Promise.resolve();
         const value = route.model;
         const held = state.details.get(value);
         if (held?.reading) return held.reading;
         if (held?.state === 'ok' && now() - held.readAt < CATALOG_FRESH_MS) return Promise.resolve();
         const entry = { state: 'reading', modes: new Set(), complete: false, endpoints: [], readAt: now() };
-        entry.reading = Promise.resolve().then(() => readProcessing(value))
-            .then((data) => detailOf(value, data))
+        // An old server gives its entire catalog for each unknown selector. Until one response tells us otherwise,
+        // let the first model's normal detail read also serve as the capability probe for the window.
+        const probe = state.processingProbe;
+        entry.reading = (probe || Promise.resolve()).then(async () => {
+            if (state.details.get(value) !== entry) return null;
+            if (state.processingSelector === 'unsupported') return { ...entry, state: 'unsupported' };
+            return detailOf(value, await readProcessing(value));
+        })
             // Not read: the tiers of an earlier read are not this moment's, so nothing is told (never Standard only).
             .catch(() => ({ state: 'failed', modes: new Set(), complete: false, endpoints: [] }))
             .then((read) => {
                 // An answer that comes after its connection changed (its entry was dropped, or another one asked
                 // since) is of the earlier source: it is not kept, and the next call asks again.
-                if (state.details.get(value) === entry) state.details.set(value, { ...read, readAt: now(), reading: null });
+                if (state.processingProbe === entry.reading) state.processingProbe = null;
+                if (read && state.details.get(value) === entry) {
+                    if (read.state === 'unsupported' || read.state === 'ok') {
+                        state.processingSelector = read.state === 'ok' ? 'supported' : 'unsupported';
+                    }
+                    state.details.set(value, { ...read, readAt: now(), reading: null });
+                }
                 notify();
             });
+        if (!probe && state.processingSelector === null) state.processingProbe = entry.reading;
         state.details.set(value, entry);
         notify();
         return entry.reading;
@@ -404,7 +424,7 @@ export function createModelCatalogStore({ readCatalog = () => fetchCatalog(), re
         /** How many times the held endpoint answers were dropped for another connection: a reader that asked under an
          *  earlier count asks again. */
         detailEpoch: () => state.detailEpoch,
-        /** A key route's own endpoints as last read (`{ state: 'reading' | 'ok' | 'failed', modes, complete, endpoints }`);
+        /** A key route's own endpoints as last read (`{ state: 'reading' | 'ok' | 'failed' | 'unsupported', modes, complete, endpoints }`);
          *  null for a route never asked or whose tiers no such read tells. */
         detail(raw) {
             const route = normalizeRoute(raw);

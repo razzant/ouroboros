@@ -13,15 +13,42 @@ from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 _UNREAD_PAYLOAD = object()
 
 
+def _first_chat_choice(body: dict) -> dict:
+    choices = body.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices else None
+    return first if isinstance(first, dict) else {}
+
+
 def provider_body_error(body: Any) -> Optional[Dict[str, Any]]:
     """A top-level provider error is nonfatal if the first completion is usable."""
     error = body.get("error") if isinstance(body, dict) else None
     if not isinstance(error, dict):
         return None
-    choices = body.get("choices")
-    first = choices[0] if isinstance(choices, list) and choices else None
-    message = first.get("message") if isinstance(first, dict) else None
-    return None if isinstance(message, dict) and (message.get("content") or message.get("tool_calls")) else error
+    first = _first_chat_choice(body)
+    message = first.get("message")
+    usable = isinstance(message, dict) and (message.get("content") or message.get("tool_calls"))
+    return None if usable and reply_usability(first.get("finish_reason"), None, message) != "unusable" else error
+
+
+def failed_chat_completion(body: Any) -> bool:
+    """A Chat error finish is a failure even without a top-level error object."""
+    finish = _first_chat_choice(body).get("finish_reason") if isinstance(body, dict) else None
+    return reply_usability(finish, None, None) == "unusable"
+
+
+def failed_chat_completion_shows_work(body: Any) -> bool:
+    """A Chat error finish may carry partial work, not permission for another physical send."""
+    return failed_chat_completion(body) and refusal_body_conflicts(body)
+
+
+def _response_failed(body: Any) -> bool:
+    if not isinstance(body, dict):
+        return False
+    if (body.get("object") == "response" or "output" in body) and "status" in body:
+        incomplete = body.get("incomplete_details")
+        reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+        return reply_usability(reason, body.get("status"), None) == "unusable"
+    return provider_body_error(body) is not None or failed_chat_completion(body)
 
 
 def _plain(value: Any) -> Any:
@@ -151,14 +178,15 @@ def reply_usability(finish: Any, status: Any, msg: Any) -> str:
     its words. ``intermediate``: completed commentary with text and no call — continue it as an ordinary round;
     ``unusable``: a provider-stated terminal that is no result — ``incomplete`` for any reason but its output
     limit (``content_filter``, ``max_messages``, ``steered``, none), a completed one ending as the provider's
-    content refusal, or a failed/cancelled one — neither text, JSON nor call counts; ``usable``: everything else,
+    content refusal, or a failed/cancelled one (including a Chat ``error`` finish) — neither text, JSON nor call
+    counts; ``usable``: everything else,
     which the existing finish rules (output-limit cut, tool-call finish, refusal, empty) still read. A reply
     without a terminal status (every Chat-shaped lane) is judged by its finish alone. The reply's items, reason
     and usage are retained by their owners either way."""
     label, state = str(finish or "").strip().lower(), str(status or "").strip().lower()
     if state and state != "completed" and not (state == "incomplete" and label in OUTPUT_LIMIT_FINISH_REASONS):
         return "unusable"
-    if state and label in CONTENT_REFUSAL_FINISH_REASONS:
+    if label == "error" or (state and label in CONTENT_REFUSAL_FINISH_REASONS):
         return "unusable"
     text = isinstance(msg, dict) and bool(str(msg.get("content") or "").strip())
     if label in INTERMEDIATE_FINISH_REASONS and text and not (isinstance(msg, dict) and msg.get("tool_calls")):
@@ -461,24 +489,17 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
         }
         if split:
             normalized["cache_write_tokens_by_ttl"] = split
-    cost, invalid, basis = reported_price(
-        usage, payload.get("total_cost_usd") if isinstance(payload, dict) else None,
-        getattr(response, "total_cost_usd", None),
-    )
+    cost, invalid, basis = response_reported_price(payload, usage, getattr(response, "total_cost_usd", None))
     normalized.pop("cost_invalid", None)  # Derive from provider prices, never trust their marker.
     if invalid:
         normalized["cost_invalid"] = True
     if basis:  # the same consumed amount the loop lane reports, tagged on the settled row
         normalized.update(cost=cost, cost_basis=basis)
-    failed = provider_body_error(payload) is not None
     if cost is not None:
-        if cost == 0 and failed and refusal_body_conflicts(payload):
-            # A failed reply whose own body shows work or an upstream attempt has not proved a free call.
-            return normalized, None, False
         return normalized, cost, True
     completion = normalized["completion_tokens"]
     if (
-        not provider_reported_cost_only and failed
+        not provider_reported_cost_only and provider_body_error(payload) is not None
         and prompt == 0
         and completion == 0
         and _reported_usage_empty(usage, reported)
@@ -668,6 +689,11 @@ def refusal_failure_payload(error: BaseException) -> Any:
         return body
     if not isinstance(envelope, dict):
         error.refusal_envelope_conflict = True
+        if body is None:
+            try:
+                return response.text  # Private evidence only; this decode failure proves no bill or retry.
+            except Exception:
+                pass  # Some SDKs have already released or never loaded the response body.
         return body
     if isinstance(body, dict) and "error" not in envelope and "usage" in envelope and "code" not in envelope:
         envelope = {"error": body.get("error", body), **envelope}
@@ -683,7 +709,62 @@ def refusal_failure_payload(error: BaseException) -> Any:
 
 
 def _confirmed_zero_bill(payload: Any, cost: Optional[float], final: bool) -> bool:
-    return final and cost == 0 and isinstance(payload, dict) and provider_cost_value(payload.get("total_cost_usd")) == 0
+    if final and cost == 0 and isinstance(payload, dict):
+        reports = _billing_reports(((payload, None), (payload.get("error"), None)))
+        chosen, _, invalid, confirmed = _reconcile_failure_price(reports, len(reports))
+        return chosen is not None and chosen[0] == 0 and confirmed and not invalid
+    return False
+
+
+def response_reported_price(payload: Any, usage: dict, sdk_total: Any = None):
+    """The ledger and loop price the original reply before any lossy Chat projection."""
+    if not _response_failed(payload):
+        total = payload.get("total_cost_usd") if isinstance(payload, dict) else None
+        return reported_price(usage, total, sdk_total)
+    reports = _billing_reports(((payload, sdk_total), (payload.get("error"), None)))
+    chosen, basis, invalid, confirmed = _reconcile_failure_price(reports, len(reports))
+    if chosen is None:
+        return None, invalid, ""
+    cost = chosen[0]
+    if cost == 0 and (invalid or (not confirmed and refusal_body_conflicts(payload))):
+        return None, True, ""
+    return cost, False, basis
+
+
+def _billing_reports(frames):
+    return [(body, sdk_total, _plain(body.get("usage"))) for body, sdk_total in frames if isinstance(body, dict)]
+
+
+def _reconcile_failure_price(reports, terminal_count):
+    """Terminal reports agree; older snapshots can be lower, and wallet bounds never mint totals."""
+    has_byok = any(isinstance(raw, dict) and raw.get("is_byok") is True for _, _, raw in reports)
+    chosen = None
+    basis = ""
+    gateway_min = upstream_min = unlabelled_min = 0.0
+    malformed = confirmed_zero = False
+    for index, (body, sdk_total, raw) in enumerate(reports):
+        total = body.get("total_cost_usd")
+        price = _refusal_price(raw, total, sdk_total, byok_known=has_byok)
+        if price.disagreement:
+            return None, "", True, False
+        malformed |= price.malformed
+        gateway, upstream = price.byok_parts
+        gateway_min, upstream_min = max(gateway_min, gateway or 0.0), max(upstream_min, upstream or 0.0)
+        unlabelled_min = max(unlabelled_min, price.unlabelled_min)
+        if price.total is None:
+            continue
+        confirmed_zero |= index < terminal_count and price.total == 0 and (
+            provider_cost_value(total) == 0 or provider_cost_value(sdk_total) == 0 or bool(price.basis))
+        if chosen is None:
+            chosen = (price.total, index)
+        elif price.total != chosen[0]:
+            if index >= terminal_count and price.total < chosen[0]:
+                continue  # A later report can include work after this snapshot.
+            return None, "", True, False
+        basis = price.basis or basis
+    if chosen is not None and chosen[0] < max(unlabelled_min, _byok_subtotal((gateway_min, upstream_min))):
+        return None, "", True, False
+    return chosen, basis, malformed or (has_byok and chosen is None), confirmed_zero
 
 
 def search_failure_usage(error: BaseException, payload: Any, reported: Any, *, work_seen: bool):
@@ -703,7 +784,8 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
     from ouroboros.transport_custody import is_processing_refusal
 
     stream = {"usage": getattr(error, "stream_usage", None)}
-    if not is_processing_refusal(error):
+    prior = getattr(error, "stream_prior_usage", None)
+    if prior is None and not is_processing_refusal(error):
         for body in (stream, payload):
             usage, cost, final = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
             # A later wire close doesn't invalidate a usage bill. An explicit provider failure
@@ -711,59 +793,39 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
             check_zero = (body is not stream or provider_body_error(payload) is not None) and not _confirmed_zero_bill(
                 body, cost, final)
             if final and cost is not None and not (
-                    cost == 0 and check_zero and refusal_conflicts(error, check_stream_framing=False)):
+                    cost == 0 and check_zero and refusal_conflicts(
+                        error, check_stream_framing=False, retained_payload=payload)):
                 return usage, cost
         return None
 
     response = getattr(error, "response", None)
     body = payload if isinstance(payload, dict) else {}
     alternate = getattr(error, "refusal_alternate_payload", None)
-    frames = [(body, response), (body.get("error"), None)]
+    frames = [(body, getattr(response, "total_cost_usd", None)), (body.get("error"), None)]
     if isinstance(alternate, dict):
         frames.extend(((alternate, None), (alternate.get("error"), None)))
-    prior = getattr(error, "stream_prior_usage", None)
+    reports = _billing_reports(frames)
+    choice_terminal_start = len(reports)
+    reports.extend(_billing_reports((frame, None) for frame in reversed(getattr(error, "stream_terminal_usage", ()))))
+    terminal_count = len(reports)
     # The legacy merged view is not another report on this wire.
-    frames.extend((frame, None) for frame in (reversed(prior) if prior is not None else (stream,)))
-    reports = [(body, carrier, _plain(body.get("usage"))) for body, carrier in frames if isinstance(body, dict)]
-    has_byok = any(isinstance(raw, dict) and raw.get("is_byok") is True for _, _, raw in reports)
-    chosen = None
-    basis = ""
-    gateway_min = upstream_min = unlabelled_min = 0.0
-    malformed = False
-    prior_count = len(prior) if prior is not None else 1
-    terminal_count = len(reports) - prior_count
-    for index, (body, carrier, raw) in enumerate(reports):
-        price = _refusal_price(
-            raw, body.get("total_cost_usd"), getattr(carrier, "total_cost_usd", None), byok_known=has_byok)
-        if price.disagreement:
-            return None
-        malformed |= price.malformed
-        gateway, upstream = price.byok_parts
-        gateway_min, upstream_min = max(gateway_min, gateway or 0.0), max(upstream_min, upstream or 0.0)
-        unlabelled_min = max(unlabelled_min, price.unlabelled_min)
-        if price.total is None:
-            continue
-        if chosen is None:
-            chosen = (price.total, body, carrier)
-        elif price.total != chosen[0]:
-            if index >= terminal_count and price.total < chosen[0]:
-                continue  # A later report can include work after this snapshot.
-            return None
-        basis = price.basis or basis
-    # Maxima per wallet, not a sum of duplicated frames. Bounds never mint a total.
+    reports.extend(_billing_reports((frame, None) for frame in (reversed(prior) if prior is not None else (stream,))))
+    chosen, basis, malformed, confirmed_zero = _reconcile_failure_price(reports, terminal_count)
     if chosen is None:
         return None
-    cost, body, carrier = chosen
-    if cost < max(unlabelled_min, _byok_subtotal((gateway_min, upstream_min))) or (
-            cost == 0 and (malformed or refusal_conflicts(error, check_stream_framing=False))):
+    cost, selected = chosen
+    confirmed_zero |= choice_terminal_start <= selected < terminal_count
+    if cost == 0 and (malformed or selected >= terminal_count or (not confirmed_zero and refusal_conflicts(
+            error, check_stream_framing=False, retained_payload=payload))):
         return None
-    usage, _, _ = usage_from_response(carrier, payload=body, provider=provider, provider_reported_cost_only=True)
+    body = reports[selected][0]
+    usage, _, _ = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
     # Reports are newest first; the complete price and each cumulative counter are independent facts.
     latest = {}
-    for report, other, raw in reports:
+    for index, (report, _, raw) in enumerate(reports):
         if isinstance(raw, dict) and raw:
-            counts = usage if report is body and other is carrier else usage_from_response(
-                other, payload=report, provider=provider, provider_reported_cost_only=True)[0]
+            counts = usage if index == selected else usage_from_response(
+                report, payload=report, provider=provider, provider_reported_cost_only=True)[0]
             for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
                 if counts[key] is not None:
                     latest.setdefault(key, counts[key])
@@ -810,8 +872,9 @@ def _reply_shows_work(body: dict) -> bool:
                     return True
     raw = _plain(body.get("usage"))
     price = _refusal_price(raw, body.get("total_cost_usd"))
-    if price.disagreement or price.malformed:
-        return True  # An unreadable or inconsistent charge leaves open whether work occurred.
+    incomplete_wallets = isinstance(raw, dict) and raw.get("is_byok") is True and price.total is None
+    if price.disagreement or price.malformed or incomplete_wallets:
+        return True  # An unreadable, inconsistent or incomplete charge cannot establish a free rejection.
     if price.total or any(price.byok_parts):
         return True
     if not isinstance(raw, dict):
@@ -827,10 +890,13 @@ def refusal_body_conflicts(body: Any, status: Optional[int] = None) -> bool:
     error = body.get("error", body)
     if isinstance(error, dict) and error is not body and _reply_shows_work(error):
         return True
-    body_status = error.get("status_code") if isinstance(error, dict) else None
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    body_status = error.get("status_code", code if type(code) is int and 100 <= code <= 599 else None)
     if body_status in (408, 504) or (status is not None and body_status is not None and status != body_status):
         return True
-    metadata = error.get("metadata") if isinstance(error, dict) else None
+    metadata = error.get("metadata")
     if not isinstance(metadata, dict) or not metadata.get("raw"):
         return False
     # Read each quoted JSON/SSE reply, not just the recognizable objects in a diagnostic excerpt.
@@ -861,7 +927,7 @@ def refusal_body_conflicts(body: Any, status: Optional[int] = None) -> bool:
         return True
     if not answer.walk_complete:
         return True
-    outer_status = status or error.get("status_code", error.get("code"))
+    outer_status = status or body_status
     rejected = False
     for obj in answer.objects[1:]:  # skip the synthetic root; its direct children are the quoted frames
         if _reply_shows_work(obj.value):
@@ -880,7 +946,8 @@ def refusal_body_conflicts(body: Any, status: Optional[int] = None) -> bool:
     return not rejected
 
 
-def refusal_conflicts(source: Any, *, reported_cost: Optional[float] = None, check_stream_framing: bool = True) -> bool:
+def refusal_conflicts(source: Any, *, reported_cost: Optional[float] = None, check_stream_framing: bool = True,
+                      retained_payload: Any = _UNREAD_PAYLOAD) -> bool:
     """Contrary evidence on the same physical send, including the SDK envelope and explicit causes."""
     if reported_cost is not None and reported_cost > 0:
         return True
@@ -894,7 +961,7 @@ def refusal_conflicts(source: Any, *, reported_cost: Optional[float] = None, che
     status_seen = None
     while isinstance(current, BaseException) and id(current) not in seen:
         seen.add(id(current))
-        body = refusal_failure_payload(current)
+        body = retained_payload if current is source and retained_payload is not _UNREAD_PAYLOAD else refusal_failure_payload(current)
         response = getattr(current, "response", None)
         native_cost = getattr(response, "total_cost_usd", None)
         if native_cost is not None and provider_cost_value(native_cost) != 0:
@@ -1027,6 +1094,7 @@ def physical_failure_evidence(root, attempt_id: str, *, payload, exc=None, respo
             **({"reported_total_cost_usd": sdk_total} if sdk_total is not None else {}),
             **({"alternate_body": alternate} if alternate is not None else {}),
             **({"stream_prior_usage": prior} if prior is not None else {}),
+            **({"stream_terminal_usage": exc.stream_terminal_usage} if getattr(exc, "stream_terminal_usage", None) else {}),
             "stream_usage": getattr(exc, "stream_usage", None),
             "stream_receipt": getattr(exc, "stream_receipt", None),
             "stream_evidence": getattr(exc, "stream_evidence", None)})

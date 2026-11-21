@@ -341,7 +341,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
                 processing_preference=processing_preference,
                 **_web_search_caller_deadline(ctx),
             )
-        from ouroboros._usage_response import usage_from_response
+        from ouroboros._usage_response import failed_chat_completion, usage_from_response
         from ouroboros.llm_attempt import attach_processing_receipt
 
         body = search_api.plain(response)
@@ -357,6 +357,8 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
                     and not refusal_conflicts(body, reported_cost=cost)):
                 return json.dumps({"error": sanitize_tool_result_for_log(str(error.get("message") or "Search refused"))[:500],
                                    "ledger_attempt_ids": attempt_ids})
+            return _unknown_provider_outcome("openrouter_server_tool", attempt_ids)
+        if failed_chat_completion(body):
             return _unknown_provider_outcome("openrouter_server_tool", attempt_ids)
         choices = body.get("choices") if isinstance(body, dict) else None
         message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}

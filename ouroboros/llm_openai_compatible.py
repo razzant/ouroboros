@@ -45,7 +45,7 @@ from ouroboros.request_wire_recovery import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
-from ouroboros._usage_response import observed_processing_mode, reported_price
+from ouroboros._usage_response import observed_processing_mode, response_reported_price
 from ouroboros.event_usage import REPORTED_TOKENS_KEY
 
 
@@ -423,13 +423,15 @@ class _OpenAICompatibleLaneMixin:
         A Responses reply is read through ``openai_responses.completion_view`` and leaves with its exact items
         and terminal facts attached (``attach_reply_facts``); every other step is the one Chat takes."""
         responses_facts = None
+        cost, cost_invalid, cost_basis = response_reported_price(
+            resp_dict, dict(resp_dict.get("usage") or {}), getattr(wire_completion, "total_cost_usd", None))
         if responses_route(target):
             resp_dict, responses_facts = completion_view(resp_dict)
         usage = dict(resp_dict.get("usage") or {})
         for host_key in REPLY_FACT_KEYS:  # host-owned terminal facts: a provider usage extension never sets them
             usage.pop(host_key, None)
         # What the reply consumed (a BYOK reply: gateway charge + provider-billed share).
-        usage["cost"], cost_invalid, cost_basis = reported_price(usage, resp_dict.get("total_cost_usd"))
+        usage["cost"] = cost
         usage.pop("cost_estimated", None)  # Only the host's estimator below sets this flag.
         usage.pop("cost_invalid", None)  # Host fact, never a provider usage extension.
         if cost_invalid:

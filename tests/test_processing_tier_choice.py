@@ -492,6 +492,19 @@ def test_replaced_pinned_identity_refuses_composer_and_settings(room, monkeypatc
         assert config.SETTINGS_PATH.read_bytes() == before
 
 
+def test_safety_model_writer_returns_shared_invalid_main_binding_code(room):
+    from ouroboros.gateway.safety_settings import api_owner_safety_model
+
+    _, client = room
+    client.app.router.routes.append(Route("/api/owner/safety-model", api_owner_safety_model, methods=["POST"]))
+    config.load_settings(migrate=True)
+    before = config.SETTINGS_PATH.read_bytes()
+    reply = client.post("/api/owner/safety-model", json={"settings": {ROLES: {"main": "ultrafast"}}})
+    assert reply.status_code == 400, reply.text
+    assert reply.json()["code"] == "main_binding_invalid" and reply.json()["saved"] is False
+    assert config.SETTINGS_PATH.read_bytes() == before
+
+
 @pytest.mark.parametrize("writer", ["tier", "model"])
 def test_a_choice_refused_for_a_replaced_pinned_identity_is_saved_when_made_again_on_the_one_observed(room, monkeypatch, writer):
     """The owner's second choice after that 409. The refusal wrote nothing and moved no token, so the same read with

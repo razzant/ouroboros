@@ -20,7 +20,7 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
-from ouroboros._usage_response import _plain, provider_body_error, refusal_failure_payload
+from ouroboros._usage_response import _plain, failed_chat_completion_shows_work, provider_body_error, refusal_failure_payload
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.llm_attempt import (
@@ -71,9 +71,15 @@ def _wire_surface(target: Dict[str, Any]) -> str:
     return OPENAI_API_SURFACES["responses"] if responses_route(target) else OPENAI_API_SURFACES["chat_completions"]
 
 
-def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]:
+def _retryable_body_error(client: Any, body: Any) -> Optional[Dict[str, Any]]:
+    error = client._provider_body_error(body)
+    return None if error and failed_chat_completion_shows_work(body) else error
+
+
+def _response_body_error(client: Any, response: Any, *, for_retry: bool = False) -> Optional[Dict[str, Any]]:
     try:
-        return client._provider_body_error(response.model_dump())
+        body = response.model_dump()
+        return _retryable_body_error(client, body) if for_retry else client._provider_body_error(body)
     except Exception:
         return None
 
@@ -214,7 +220,7 @@ class _RecoveryLadderMixin:
                 body = response.model_dump()
             except Exception:
                 return None
-            error = cls._provider_body_error(body)
+            error = _retryable_body_error(cls, body)
             if error is None:
                 return None
             status, receipt = error.get("code"), body.get("openrouter_metadata")
@@ -387,7 +393,7 @@ class _RecoveryLadderMixin:
             resp_dict = resp.model_dump()
         except Exception:
             return None
-        err = self._provider_body_error(resp_dict)
+        err = _retryable_body_error(self, resp_dict)
         if not err or is_size_refusal(err):  # read on the whole object, before the transient heuristic below
             return None
         if not self._is_transient_body_error(err):
@@ -418,7 +424,7 @@ class _RecoveryLadderMixin:
             resp_dict = resp.model_dump()
         except Exception:
             return None
-        body_err = self._provider_body_error(resp_dict)
+        body_err = _retryable_body_error(self, resp_dict)
         if not isinstance(body_err, dict) or is_size_refusal(body_err):
             return None
         try:
@@ -512,7 +518,7 @@ class _RecoveryLadderMixin:
                 signature_used = False
                 for _ in range(8):
                     if current_failure is None:
-                        body = _response_body_error(self, current_response)
+                        body = _response_body_error(self, current_response, for_retry=True)
                         retry_kwargs = plan_next_wire_retry(
                             current_candidate, error=body, body_error=True, target=target,
                         )
@@ -704,7 +710,7 @@ class _RecoveryLadderMixin:
                 signature_used = False
                 for _ in range(8):
                     if current_failure is None:
-                        body = _response_body_error(self, current_response)
+                        body = _response_body_error(self, current_response, for_retry=True)
                         retry_kwargs = plan_next_wire_retry(
                             current_candidate, error=body, body_error=True, target=target,
                         )

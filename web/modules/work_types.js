@@ -48,7 +48,7 @@
  * @property {?string} requested
  * @property {?string} submitted
  * @property {?string=} submittedNative  // the provider's own word for what was sent
- * @property {string} observed  // standard | fast | economy | unknown
+ * @property {string} observed  // standard | fast | economy | ultrafast | mixed | unknown
  * @property {Array<string>=} observedNative  // the provider's own words (an older Codex: `ultrafast` folded into fast)
  * @property {?string} reason  // processing_not_submitted | submitted_mode_differs | provider_mode_changed
  */

@@ -225,7 +225,7 @@ A malformed catalog is refused at save (`reviewer_slot_config.review_pool_save_e
 
 ### Usage ledger substrate vs. accounting policy
 
-`usage_store.py`: one row per attempt in `state/usage.sqlite` over `store.py` ([Usage store](../USAGE_STORE.md)). `usage_ledger.py` imports no policy; `usage_accounting.py` owns price, holds, settlement, scopes and admission. Storage cannot change cost; events/mirrors/UI carry IDs and totals. `_usage_response.provider_cost_value` checks cash apart from historical grammar; DeepSeek reads raw tokens before int/clamp. Tier refusals reconcile stream reports and the terminal price: incomplete means unknown; a price grants no retry. Other pre-work body errors can settle free on explicit zero usage. Adapters own envelopes; Loop/Safety share `pricing.normalize_usage_cost`: malformed is unknown, missing may be estimated/nonfinal, local is free.
+`usage_store.py`: one row per attempt over `store.py` ([Usage store](../USAGE_STORE.md)); `usage_accounting.py` owns price, holds, settlement, scopes and admission. Storage cannot change cost; events/mirrors/UI carry IDs and totals. `_usage_response` checks cash on the original reply, before Chat projection. Failed replies reconcile nested bills and wire-ordered reports; a prior stream zero is not a terminal bill. Only evidenced pre-work refusals can infer zero; a bill grants no retry. DeepSeek reads raw tokens before int/clamp. Loop/Safety share `pricing.normalize_usage_cost`: malformed is unknown, missing may be estimated/nonfinal, local is free.
 
 ### Caller-owned subscription model calls
 

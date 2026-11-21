@@ -730,11 +730,15 @@ def test_chat_sse_tier_refusal_reads_prior_reports_before_settlement(transport, 
         assert first["cost_basis"] == "byok_gateway_plus_upstream" and first["completion_tokens"] == 2
 
 
-@pytest.mark.parametrize(("explicit_error", "cost", "full_bill", "expected"), [
-    (True, 0.0, False, None), (True, 0.125, False, 0.125),
-    (False, 0.0, False, 0.0), (True, 0.0, True, 0.0),
+@pytest.mark.parametrize(("explicit_error", "prior_cost", "terminal_total", "expected"), [
+    (True, 0.0, None, None), (True, 0.125, None, 0.125),
+    (False, 0.0, None, None), (True, 0.0, 0.0, 0.0),
+    pytest.param(True, 0.125, 0.25, 0.25, id="higher-terminal-total"),
+    pytest.param(True, 0.25, 0.125, None, id="terminal-total-below-prior"),
+    pytest.param(False, 0.125, None, 0.125, id="transport-close-keeps-prior-bill"),
 ])
-def test_chat_sse_failure_does_not_revive_rejected_zero(transport, monkeypatch, explicit_error, cost, full_bill, expected):
+def test_chat_sse_failure_does_not_revive_rejected_zero(
+        transport, monkeypatch, explicit_error, prior_cost, terminal_total, expected):
     from ouroboros.llm_stream import IncompleteProviderStream, ProviderStreamError
     from tests.test_openrouter_transport_evidence import Wire
 
@@ -743,11 +747,11 @@ def test_chat_sse_failure_does_not_revive_rejected_zero(transport, monkeypatch, 
     def create(**candidate):
         sent.append(candidate)
         frames = [{"choices": [{"index": 0, "delta": {"content": "partial"}}]},
-                  {"usage": {"cost": cost, "prompt_tokens": 0, "completion_tokens": 0}, "choices": []}]
+                  {"usage": {"cost": prior_cost, "prompt_tokens": 0, "completion_tokens": 0}, "choices": []}]
         if explicit_error:
             frames.append({"error": {"code": 502, "message": "failed"}})
-            if full_bill:
-                frames[-1]["total_cost_usd"] = cost
+            if terminal_total is not None:
+                frames[-1]["total_cost_usd"] = terminal_total
         return Wire([("data: " + json.dumps(frame) + "\n\n").encode() for frame in frames])
 
     monkeypatch.setattr(client, "_get_remote_client", lambda _: SimpleNamespace(
@@ -758,6 +762,112 @@ def test_chat_sse_failure_does_not_revive_rejected_zero(transport, monkeypatch, 
     [row] = ledger_rows(root)
     assert (row["state"], row.get("cost_usd"), bool(row.get("cost_final"))) == (
         "unresolved" if expected is None else "settled", expected, expected is not None)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_returned_error_finish_never_retries_partial_chat_or_projects_final_zero(transport, monkeypatch, asynchronous):
+    from ouroboros._usage_response import UnusableReplyError
+
+    root, client, sent = transport
+    body = {"error": {"code": 502, "message": "temporary upstream failure"},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0},
+            "choices": [{"finish_reason": "error", "message": {"role": "assistant", "content": "partial"}}]}
+
+    def create(**candidate):
+        sent.append(candidate)
+        assert len(sent) == 1
+        return SimpleNamespace(model_dump=lambda: copy.deepcopy(body))
+
+    async def create_async(**candidate):
+        return create(**candidate)
+
+    monkeypatch.setattr(client, "_get_remote_client", lambda _: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    monkeypatch.setattr(client, "_get_async_remote_client", lambda _: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create_async))))
+    args = ([{"role": "user", "content": "once"}], "openrouter::same-model")
+    kwargs = {"stream": False, "processing_preference": "standard"}
+    with pytest.raises(UnusableReplyError) as failed:
+        asyncio.run(client.chat_async(*args, **kwargs)) if asynchronous else client.chat(*args, **kwargs)
+    usage = failed.value.usage
+    assert len(sent) == 1 and usage["response_finish_reason"] == "error"
+    assert failed.value.reply_message["content"] == "partial"
+    assert usage.get("provider_error") and (usage["cost"], usage["cost_final"]) == (None, False)
+    [attempt] = ledger_rows(root)
+    assert (attempt.get("cost_usd"), bool(attempt.get("cost_final"))) == (None, False)
+
+
+@pytest.mark.parametrize(("frames", "raised", "expected"), [
+    pytest.param([{"total_cost_usd": 0},
+                  {"choices": [{"index": 0, "delta": {"content": "partial"}}]},
+                  {"error": {"code": 502}}], "ProviderStreamError", None, id="midstream-zero"),
+    pytest.param([{"usage": {"cost": 0.125}},
+                  {"choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": "error"}],
+                   "total_cost_usd": 0.25}], "ProviderStreamError", 0.25, id="choice-ends-with-price"),
+    pytest.param([{"total_cost_usd": 0.25}], "IncompleteProviderStream", 0.25, id="eof-after-price-only"),
+])
+def test_r3_stream_prices_follow_wire(transport, monkeypatch, frames, raised, expected):
+    from ouroboros import llm_stream
+    from tests.test_openrouter_transport_evidence import Wire
+
+    root, client, sent = transport
+
+    def create(**candidate):
+        sent.append(candidate)
+        return Wire([("data: " + json.dumps(frame) + "\n\n").encode() for frame in frames])
+
+    monkeypatch.setattr(client, "_get_remote_client", lambda _: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    with pytest.raises(getattr(llm_stream, raised)):
+        client.chat([{"role": "user", "content": "once"}], "openrouter::same-model", stream=True)
+    assert len(sent) == 1
+    [row] = ledger_rows(root)
+    assert (row.get("cost_usd"), bool(row.get("cost_final"))) == (expected, expected is not None)
+
+
+def test_r3_chat_error_finish_without_error_object_is_not_free(transport, monkeypatch):
+    from ouroboros._usage_response import UnusableReplyError
+
+    root, client, sent = transport
+    body = {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0},
+            "choices": [{"finish_reason": "error", "message": {"role": "assistant", "content": "partial"}}]}
+
+    def create(**candidate):
+        sent.append(candidate)
+        return SimpleNamespace(model_dump=lambda: copy.deepcopy(body))
+
+    monkeypatch.setattr(client, "_get_remote_client", lambda _: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    with pytest.raises(UnusableReplyError) as failed:
+        client.chat([{"role": "user", "content": "once"}], "openrouter::same-model")
+    assert len(sent) == 1
+    [row] = ledger_rows(root)
+    assert (row.get("cost_usd"), bool(row.get("cost_final"))) == (None, False)
+    assert (failed.value.usage["cost"], failed.value.usage["cost_final"]) == (None, False)
+
+
+@pytest.mark.parametrize("full_bill", [True, False], ids=["explicit-full-zero", "partial-gateway-zero"])
+def test_r3_responses_failed_price_agrees_between_client_and_ledger(transport, monkeypatch, full_bill):
+    from ouroboros._usage_response import UnusableReplyError
+    from tests.test_openai_responses import _body, _message, _target
+
+    root, client, sent = transport
+    body = (_body(status="failed", usage={"input_tokens": 10}, total_cost_usd=0) if full_bill else
+            _body(_message("partial", status="incomplete"), status="failed", usage={"cost": 0}))
+
+    def create(**candidate):
+        sent.append(candidate)
+        return SimpleNamespace(model_dump=lambda: copy.deepcopy(body))
+
+    monkeypatch.setattr(client, "_resolve_remote_target", lambda _model: _target())
+    monkeypatch.setattr(client, "_get_remote_client", lambda _: SimpleNamespace(responses=SimpleNamespace(create=create)))
+    with pytest.raises(UnusableReplyError) as failed:
+        client.chat([{"role": "user", "content": "once"}], "openai::gpt-6.1-terra")
+    assert len(sent) == 1
+    [row] = ledger_rows(root)
+    expected = (0.0, True) if full_bill else (None, False)
+    assert (failed.value.usage["cost"], failed.value.usage["cost_final"]) == expected
+    assert (row.get("cost_usd"), bool(row.get("cost_final"))) == expected
 
 
 def test_partial_ultrafast_stream_never_authorizes_a_second_send(transport, monkeypatch):

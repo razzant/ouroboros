@@ -66,7 +66,7 @@ class ProcessingReceipt(TypedDict):
     requested: Optional[str]
     submitted: Optional[str]
     submittedNative: NotRequired[Optional[str]]
-    observed: str  # standard, fast, economy or unknown
+    observed: str  # standard | fast | economy | ultrafast | mixed | unknown
     observedNative: NotRequired[List[str]]
     reason: Optional[str]  # processing_not_submitted, submitted_mode_differs, provider_mode_changed
 
