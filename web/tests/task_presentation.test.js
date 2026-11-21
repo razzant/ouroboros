@@ -182,11 +182,8 @@ test('failed child remains a compact local fact without owner-alarm semantics', 
     assert.doesNotMatch(child.fullBody, /Reason: /, 'no machine label in front of the owner sentence');
     assert.equal('ownerAlarm' in child, false);
     assert.equal('notification' in child, false);
-    const adapter = chatSource.slice(
-        chatSource.indexOf('function routeSubagentTerminalToCard'),
-        chatSource.indexOf('function updateLiveCardFromLogEvent'),
-    );
-    assert.match(adapter, /reason_code: evt\.reason_code \|\| ''/);
+    // The route itself is exercised behaviorally (extracted from chat.js and run) in
+    // reason_detail.test.js; no exact-spread source regex is pinned here.
 });
 
 test('interrupted child stays retryable with a Working chip and inspectable detail', () => {

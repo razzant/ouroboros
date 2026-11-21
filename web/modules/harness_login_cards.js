@@ -27,6 +27,7 @@
 //
 // Pure helpers up top are node-tested without a DOM.
 
+import { restoreFocusWithoutReveal } from './scroll_fade.js';
 import { apiFetch } from './api_client.js';
 import { harnessAccountIdentityMarkup } from './harness_presentation.js';
 import {
@@ -46,6 +47,8 @@ export const JOB_POLL_GIVE_UP_FAILURES = 10;
 export const LOGIN_CARD_FULL = 'full';
 export const LOGIN_CARD_COMPACT = 'compact';
 export const SIGN_IN_SCOPE_NOTE = 'Sign-in does not verify main-chat support or agent execution.';
+// Volatile-word masks of a standing card (paintCard): control characters, spelled as escapes (see start()'s note).
+const SLOT_MASKS = { deviceCode: '\u0001device-code\u0002', state: '\u0001state-line\u0002' };
 
 export const TERMINAL_TRANSPORT_ERROR_CODES = Object.freeze([
     'terminal_transport_unavailable',
@@ -149,13 +152,12 @@ function durableTerminalTransportError(active) {
     return typeof code === 'string' && TERMINAL_TRANSPORT_ERRORS.has(code) ? code : '';
 }
 
+const requiredActionsOf = (active) => (Array.isArray(active?.requiredActions) ? active.requiredActions : []);
+
 export function externalTerminalActionAvailable(active) {
     if (!active || active.transport === 'client_pty' || active.attachCommand) return false;
     const problemCode = String(active.problemCode || '');
-    const actions = Array.isArray(active.requiredActions) ? active.requiredActions : [];
-    if (TERMINAL_TRANSPORT_ERRORS.has(problemCode)) {
-        return actions.includes('use_external_terminal');
-    }
+    if (TERMINAL_TRANSPORT_ERRORS.has(problemCode)) return requiredActionsOf(active).includes('use_external_terminal');
     return Boolean(durableTerminalTransportError(active));
 }
 
@@ -163,8 +165,7 @@ export function loginRetryAvailable(active) {
     const code = String(active?.problemCode || '') || durableTerminalTransportError(active);
     if (code !== 'terminal_transport_unavailable'
         && code !== 'terminal_transport_unsupported') return true;
-    const actions = Array.isArray(active?.requiredActions) ? active.requiredActions : [];
-    return actions.includes('retry_setup_login');
+    return requiredActionsOf(active).includes('retry_setup_login');
 }
 
 // How long the card waits for the engine to disclose a sign-in link before
@@ -466,7 +467,7 @@ export async function reconcileLoginJob(jobId, fetchImpl = apiFetch) {
     }
 }
 
-export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FULL, statusPayload = null } = {}) {
+export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FULL, statusPayload = null, slotMask = false } = {}) {
     // The card's whole body as a STRING — pure, so every face is asserted in
     // node without a DOM: the unsafe-URL refusal, the unconfirmed re-check,
     // and the rule that a verdict silences the live status line.
@@ -499,7 +500,7 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
                 <label for="harness-profile-name-input">Name for the ${escapeHtml(active.needsProfile.familyLabel || active.harness)} account (e.g. work, backup). Lowercase letters, digits, "-" and "_" — anything else becomes "-".</label>
                 <div class="harness-code-entry-row">
                     <input class="ui-control" type="text" id="harness-profile-name-input" data-profile-name-input autocomplete="off" spellcheck="false"
-                        placeholder="account name" value="${escapeHtml(active.profileNameValue || '')}">
+                        placeholder="account name">
                     <button type="button" class="btn btn-primary" data-profile-name-submit>Add account &amp; connect</button>
                 </div>
                 ${active.profileNameNote ? `<div class="settings-inline-status" data-tone="muted" data-profile-name-note>${escapeHtml(active.profileNameNote)}</div>` : ''}
@@ -529,7 +530,7 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
             bits.push(`
                 <div class="harness-device-code">
                     <p>Enter this one-time code on that page:</p>
-                    <div class="harness-code" data-device-code>${escapeHtml(disclosure.code)}</div>
+                    <div class="harness-code" data-device-code>${slotMask ? SLOT_MASKS.deviceCode : escapeHtml(disclosure.code)}</div>
                     <button type="button" class="btn btn-default" data-copy-device-code>Copy code</button>
                 </div>
             `);
@@ -546,7 +547,7 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
         const line = active.preparingRuntime
             ? claudexorPreparationLine(statusPayload)
             : loginStatusLine(active.envelope || {});
-        if (line) bits.push(`<div class="settings-inline-status" data-tone="muted" data-login-state>${escapeHtml(line)}</div>`);
+        if (line) bits.push(`<div class="settings-inline-status" data-tone="muted" data-login-state>${slotMask ? SLOT_MASKS.state : escapeHtml(line)}</div>`);
     }
     // Shape 2: the ALWAYS-VISIBLE paste-code entry for a job whose disclosure
     // flow is `oauth_url_input`. Claude's CLI prompts for the code only when
@@ -562,7 +563,7 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
                 <label for="harness-code-input">If the browser shows a code instead of finishing, paste it here (otherwise the sign-in completes on its own):</label>
                 <div class="harness-code-entry-row">
                     <input class="ui-control ui-control-code" type="text" id="harness-code-input" data-login-code-input autocomplete="off" spellcheck="false"
-                        placeholder="sign-in code" value="${escapeHtml(active.inputValue || '')}"${active.inputSent ? ' disabled' : ''}>
+                        placeholder="sign-in code"${active.inputSent ? ' disabled' : ''}>
                     <button type="button" class="btn btn-default" data-login-code-submit${busy ? ' disabled' : ''}>${active.inputBusy ? 'Sending…' : (active.inputSent ? 'Code sent' : 'Submit code')}</button>
                 </div>
                 ${active.inputError ? `<div class="settings-inline-note" data-tone="error">${escapeHtml(active.inputError)}</div>` : ''}
@@ -656,8 +657,8 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
     if (!compact && !directExternal && !summary.terminal && attachFallbackDue(active, nowMs)) {
         const commandLabel = attachShellLabel(active.attachShell);
         bits.push(`
-            <details class="harness-advanced" data-login-advanced${active.advancedOpen ? ' open' : ''}>
-                <summary>Advanced: sign in from your own terminal</summary>
+            <details class="harness-advanced" data-login-advanced>
+                <summary data-login-advanced-toggle>Advanced: sign in from your own terminal</summary>
                 <p>${active.engineDegraded
         ? (active.setupLoginSource === 'legacy_global_operation'
             ? 'This older agent service exposes only a global sign-in capability, not a per-agent host guarantee. Run this in your own terminal (outside Ouroboros); the card follows the progress automatically:'
@@ -680,28 +681,21 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
 }
 
 export function preserveCardFocus(host, swap, doc = typeof document === 'undefined' ? null : document) {
-    // The card re-renders on EVERY 3-second poll tick by replacing its whole
-    // DOM, and the replacement dropped the caret out of the paste-code field
-    // mid-typing — a sign-in code cannot be typed into a field that dies every
-    // three seconds. The focused entry and its selection are captured across
-    // the swap and restored onto the element that replaced it.
+    // A changed answer replaces the card's DOM, and the replacement used to drop
+    // the caret out of the paste-code field mid-typing, or the keyboard out of
+    // Submit once the owner tabbed there. Every card control is named by its own
+    // data attribute: the focused one, with any selection, is restored onto the
+    // control that replaced it — the same command, never a different one. The
+    // controller passes no `doc` for another job's card.
     const prior = doc ? doc.activeElement : null;
-    // The paste-code field AND the name-the-account field share the fate: a
-    // re-render (poll tick, or the name face redrawing its normalization note)
-    // replaces the input mid-typing.
-    const marker = ['data-login-code-input', 'data-profile-name-input']
-        .find((attr) => prior && host.contains?.(prior) && prior.hasAttribute?.(attr));
-    const keep = Boolean(marker);
-    const start = keep ? prior.selectionStart : null;
-    const end = keep ? prior.selectionEnd : null;
+    const marker = prior && host.contains?.(prior) && prior.getAttributeNames?.().find((name) => name.startsWith('data-'));
+    const selection = marker && [prior.selectionStart, prior.selectionEnd ?? prior.selectionStart, prior.selectionDirection];
     swap();
-    if (!keep) return;
+    if (!marker) return;
     const next = host.querySelector?.(`[${marker}]`);
     if (!next || next.disabled) return;
-    next.focus?.();
-    if (typeof next.setSelectionRange === 'function' && start !== null) {
-        next.setSelectionRange(start, end === null ? start : end);
-    }
+    if (selection[0] != null) next.setSelectionRange?.(...selection);
+    restoreFocusWithoutReveal(next);
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +732,7 @@ export function createLoginCardController({
     fetchImpl = apiFetch,
     doc = () => (typeof document === 'undefined' ? null : document),
     now = () => Date.now(),
+    preservePlace = paint => paint(),
     onSettled = () => {},
 } = {}) {
     const getHost = typeof host === 'function' ? host : () => host;
@@ -751,6 +746,7 @@ export function createLoginCardController({
         disposed: false,
         detachedStatus: null,
     };
+    let painted = {};   // the card node, job and markup of the last paint
 
     function holdStatusPolling() {
         // A live login job keeps the shared status poll awake even when the
@@ -771,10 +767,17 @@ export function createLoginCardController({
         ctl.jobTimer = 0;
     }
 
-    function clearHost() {
-        const hostEl = getHost();
-        if (hostEl) hostEl.innerHTML = '';
+    function stopAllPolling() {
+        stopJobPolling();
+        releaseStatusPolling();
     }
+
+    // An emptied host retires the painted card with it: no detached node, job or draft outlives the close.
+    function emptyHost(hostEl = getHost()) {
+        if (hostEl) hostEl.innerHTML = '';
+        painted = {};
+    }
+    const clearHost = () => preservePlace(() => emptyHost());
 
     // While the create POST holds the transition (runtime ensure included),
     // no job polling exists yet, so nothing re-rendered the card as the
@@ -787,26 +790,59 @@ export function createLoginCardController({
         : () => {};
 
     function render() {
+        preservePlace(paintCard);
+    }
+
+    function paintCard() {
         const hostEl = getHost();
         if (!hostEl) return;
         const active = ctl.active;
-        if (!active) { hostEl.innerHTML = ''; return; }
+        if (!active) { emptyHost(hostEl); return; }
         // Resolve at paint time: only a proven current catalog read may lend
         // its display name; a retained snapshot after a gap stays untrusted.
         active.familyLabel = familyLabel(active.harness, store?.snapshot || null, {
             catalogKnown: Boolean(store?.catalogKnown),
         });
         if (active.needsProfile) active.needsProfile.familyLabel = active.familyLabel;
-        preserveCardFocus(hostEl, () => {
-            // A failed refresh RETAINS the prior snapshot and records the
-            // error; a retained snapshot is not phase evidence, and rendering
-            // it kept a positive "Installing…" claim alive off a dead read.
-            hostEl.innerHTML = loginCardHtml(active, now(), {
-                mode,
-                statusPayload: store?.error ? null : (store?.snapshot || null),
-            });
-        }, getDoc());
-        wireLoginCard(hostEl, active);
+        // A failed refresh RETAINS the prior snapshot and records the error; a
+        // retained snapshot is not phase evidence, and rendering it kept a
+        // positive "Installing…" claim alive off a dead read.
+        const nowMs = now();
+        const statusPayload = store?.error ? null : (store?.snapshot || null);
+        const markup = loginCardHtml(active, nowMs, { mode, statusPayload });
+        // An answer that changes nothing leaves the DOM alone; one re-wording only this job's volatile slots
+        // (SLOT_MASKS) leaves every control node alone too, so a held press survives the poll and its release
+        // is one real click. Anything structural — another job, face or verdict — repaints the card instead.
+        const same = painted.card && painted.card === hostEl.firstElementChild && painted.active === active;
+        if (same && painted.markup === markup) { writeInPlace(hostEl, active, statusPayload); return; }
+        const masked = loginCardHtml(active, nowMs, { mode, statusPayload, slotMask: true });
+        if (same && painted.masked === masked) { painted.markup = markup; writeInPlace(hostEl, active, statusPayload); return; }
+        // The swap wires the card too: an Advanced this job's owner opened is open again before focus returns into it.
+        const swap = () => { hostEl.innerHTML = markup; writeInPlace(hostEl, active, statusPayload); wireLoginCard(hostEl, active); };
+        preserveCardFocus(hostEl, swap, same ? getDoc() : null);
+        painted = { card: hostEl.firstElementChild, active, markup, masked };
+    }
+
+    // In-place writes into a standing card, never re-mounting a control: drafts into their live fields (only
+    // where they differ, so a caret never moves), the job's volatile words — one-time code, state line — into
+    // the leaves the last full paint mounted, so a poll landing inside a press detaches nothing.
+    function writeInPlace(hostEl, active, statusPayload) {
+        const line = active.preparingRuntime ? claudexorPreparationLine(statusPayload)
+            : loginStatusLine(active.envelope || {});
+        for (const [selector, prop, text] of [['[data-login-code-input]', 'value', active.inputValue],
+            ['[data-profile-name-input]', 'value', active.profileNameValue],
+            ['[data-device-code]', 'textContent', deviceCodeDisclosure(active.envelope || {})?.code || ''],
+            ['[data-login-state]', 'textContent', line]]) {
+            const leaf = hostEl.querySelector?.(selector);
+            if (leaf && text && leaf[prop] !== text) leaf[prop] = text;
+        }
+    }
+
+    // A settled card repaints, asks the shared store for the rows it changed, and tells its host.
+    function announceSettled() {
+        render();
+        store?.refresh?.();
+        onSettled();
     }
 
     function withLoginTransition(fn) {
@@ -856,32 +892,27 @@ export function createLoginCardController({
         });
         // Copy is a STEP of signing in here, so a non-secure origin or a
         // desktop shell without the async clipboard must not leave a dead
-        // button: the shared helper falls back and always reports.
-        hostEl.querySelector('[data-copy-signin-link]')?.addEventListener('click', () => {
-            const disclosure = deviceCodeDisclosure(active.envelope || {});
-            void copyTextWithToast(disclosure?.url || '', { okMessage: 'Sign-in link copied.' });
-        });
-        hostEl.querySelector('[data-copy-device-code]')?.addEventListener('click', () => {
-            const disclosure = deviceCodeDisclosure(active.envelope || {});
-            void copyTextWithToast(disclosure?.code || '', { okMessage: 'Code copied.' });
-        });
-        hostEl.querySelector('[data-copy-attach]')?.addEventListener('click', () => {
-            void copyTextWithToast(active.attachCommand || '', { okMessage: 'Command copied.' });
-        });
+        // button: the shared helper falls back and always reports; each fact
+        // is read at click time — a poll's replaced envelope is the one copied.
+        const copyFact = (selector, text, okMessage) => hostEl.querySelector(selector)
+            ?.addEventListener('click', () => void copyTextWithToast(text(), { okMessage }));
+        copyFact('[data-copy-signin-link]', () => deviceCodeDisclosure(active.envelope || {})?.url || '', 'Sign-in link copied.');
+        copyFact('[data-copy-device-code]', () => deviceCodeDisclosure(active.envelope || {})?.code || '', 'Code copied.');
+        copyFact('[data-copy-attach]', () => active.attachCommand || '', 'Command copied.');
         const advanced = hostEl.querySelector('[data-login-advanced]');
-        // Re-renders (every poll tick) must not slam the user's Advanced section
-        // shut: the open state is carried on the job and re-applied.
+        // The browser owns the disclosure, as it owns a draft: its state rides the job, never the markup
+        // (toggling it is no structural change), and a rebuilt card gets it back here.
+        if (advanced && active.advancedOpen) advanced.open = true;
         advanced?.addEventListener('toggle', () => { active.advancedOpen = advanced.open; });
-        const codeInput = hostEl.querySelector('[data-login-code-input]');
-        codeInput?.addEventListener('input', () => { active.inputValue = codeInput.value; });
-        codeInput?.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') { event.preventDefault(); submitCodeFromCard(active); }
-        });
-        const nameInput = hostEl.querySelector('[data-profile-name-input]');
-        nameInput?.addEventListener('input', () => { active.profileNameValue = nameInput.value; });
-        nameInput?.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') { event.preventDefault(); submitProfileNameFromCard(active); }
-        });
+        const draftField = (selector, key, submit) => {
+            const field = hostEl.querySelector(selector);
+            field?.addEventListener('input', () => { active[key] = field.value; });
+            field?.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') { event.preventDefault(); submit(active); }
+            });
+        };
+        draftField('[data-login-code-input]', 'inputValue', submitCodeFromCard);
+        draftField('[data-profile-name-input]', 'profileNameValue', submitProfileNameFromCard);
         hostEl.querySelector('[data-profile-name-submit]')?.addEventListener('click', () => submitProfileNameFromCard(active));
         hostEl.querySelector('[data-login-code-submit]')?.addEventListener('click', () => submitCodeFromCard(active));
         hostEl.querySelector('[data-login-reconcile]')?.addEventListener('click', () => reconcile(active));
@@ -916,8 +947,28 @@ export function createLoginCardController({
             reason: terminationReason(active.envelope) || 'custody_retained',
             detail: String(result.error || fallbackDetail || '').trim(),
         };
-        stopJobPolling();
-        releaseStatusPolling();
+        stopAllPolling();
+    }
+
+    // What the card can claim without asking: its envelope's custody, unless a cancel already proved it unknown.
+    function cardCustody(active) {
+        const result = custodyResult(active.envelope, { absent: Boolean(active.absent) });
+        return active.custodyStatus === LOGIN_CUSTODY_UNKNOWN ? { ...result, status: LOGIN_CUSTODY_UNKNOWN } : result;
+    }
+
+    // Cancel a job whose release is not proven yet (Close and the C7 guard of a new start). A terminal answer
+    // that landed while the DELETE was in flight is judged by the same release predicate and outranks an
+    // unconfirmed cancel (`raced`); no "settled means gone" shortcut. Null when the card moved on meanwhile.
+    async function cancelUnreleased(active, { shuttingDown = false } = {}) {
+        const result = await cancelLoginJob(active.jobId, fetchImpl);
+        if (ctl.active !== active || (ctl.disposed && !shuttingDown)) return null;
+        const current = custodyResult(active.envelope, { absent: Boolean(active.absent) });
+        const raced = result.status === LOGIN_CUSTODY_UNKNOWN && (current.status === LOGIN_CUSTODY_RELEASED
+            || (active.verdict?.kind === 'recovery' && active.custodyStatus !== LOGIN_CUSTODY_UNKNOWN));
+        const judged = raced ? current : result;
+        if (judged.envelope) active.envelope = judged.envelope;
+        if (judged.absent) active.absent = true;
+        return { result: judged, raced };
     }
 
     function detach() {
@@ -933,22 +984,15 @@ export function createLoginCardController({
             // detachedStatus}, and fabricating absent/released here would be
             // exactly the empty-slot release proof this seam forbids.
             ctl.disposed = true;
-            stopJobPolling();
-            releaseStatusPolling();
+            stopAllPolling();
             clearHost();
             return ctl.detachedStatus;
         }
         const active = ctl.active;
-        let result = active
-            ? custodyResult(active.envelope, { absent: Boolean(active.absent) })
-            : custodyResult(null, { absent: true });
-        if (active?.custodyStatus === LOGIN_CUSTODY_UNKNOWN) {
-            result = { ...result, status: LOGIN_CUSTODY_UNKNOWN };
-        }
+        const result = active ? cardCustody(active) : custodyResult(null, { absent: true });
         ctl.disposed = true;
         ctl.pendingStart = null;
-        stopJobPolling();
-        releaseStatusPolling();
+        stopAllPolling();
         // Same fence as the timers and the polling hold: a detached controller
         // must not keep reacting to store snapshots (the disposer is
         // idempotent, so a later dispose() releasing again is a no-op).
@@ -962,7 +1006,7 @@ export function createLoginCardController({
     async function _closeLocked(expected, { shuttingDown = false } = {}) {
         const active = ctl.active;
         if (!active) {
-            if (shuttingDown) { stopJobPolling(); releaseStatusPolling(); clearHost(); }
+            if (shuttingDown) { stopAllPolling(); clearHost(); }
             // A remembered detach verdict outranks the empty-slot default: a
             // queued close that detached with UNKNOWN must not be overwritten
             // by a later shutdown answering absent/released for the same card
@@ -981,12 +1025,8 @@ export function createLoginCardController({
             // verdict is still remembered so a dispose queued behind this
             // close answers it instead of fabricating release from the empty
             // slot; a later start opens a new custody story and clears it.
-            let result = custodyResult(active.envelope, { absent: Boolean(active.absent) });
-            if (active.custodyStatus === LOGIN_CUSTODY_UNKNOWN) {
-                result = { ...result, status: LOGIN_CUSTODY_UNKNOWN };
-            }
-            stopJobPolling();
-            releaseStatusPolling();
+            const result = cardCustody(active);
+            stopAllPolling();
             ctl.active = null;
             ctl.detachedStatus = result.status;
             clearHost();
@@ -1005,32 +1045,19 @@ export function createLoginCardController({
             return result;
         }
         if (result.status !== LOGIN_CUSTODY_RELEASED && active.jobId) {
-            result = await cancelLoginJob(active.jobId, fetchImpl);
-            if (ctl.active !== active || ctl.disposed && !shuttingDown) return custodyResult(null);
-            // A terminal response may have landed while DELETE was in flight.
-            // The same release predicate judges that fresher envelope; no
-            // separate "settled means gone" shortcut is allowed.
-            const current = custodyResult(active.envelope, { absent: Boolean(active.absent) });
-            if (!shuttingDown
-                && result.status === LOGIN_CUSTODY_UNKNOWN
-                && current.status === LOGIN_CUSTODY_RELEASED
-                && active.verdict) {
+            const cancelled = await cancelUnreleased(active, { shuttingDown });
+            if (!cancelled) return custodyResult(null);
+            result = cancelled.result;
+            if (!shuttingDown && cancelled.raced && result.status === LOGIN_CUSTODY_RELEASED && active.verdict) {
                 // The passive GET won the race and already rendered a truthful
                 // terminal face while the DELETE was unconfirmed. Do not let
                 // that older Close continuation erase the outcome it just
                 // learned. A later explicit Close starts with the verdict
                 // already present and still dismisses the settled card.
-                stopJobPolling();
-                releaseStatusPolling();
+                stopAllPolling();
                 render();
-                return current;
+                return result;
             }
-            if (result.status === LOGIN_CUSTODY_UNKNOWN
-                && (current.status === LOGIN_CUSTODY_RELEASED
-                    || (active.verdict?.kind === 'recovery'
-                        && active.custodyStatus !== LOGIN_CUSTODY_UNKNOWN))) result = current;
-            if (result.envelope) active.envelope = result.envelope;
-            if (result.absent) active.absent = true;
         }
 
         if (result.status === LOGIN_CUSTODY_RETAINED) {
@@ -1043,8 +1070,7 @@ export function createLoginCardController({
             active.error = 'Could not cancel this sign-in — it may still be running. '
                 + 'Try dismissing again once the daemon is reachable.';
             if (shuttingDown) {
-                stopJobPolling();
-                releaseStatusPolling();
+                stopAllPolling();
                 clearHost();
             } else {
                 render();
@@ -1052,22 +1078,17 @@ export function createLoginCardController({
             return result;
         }
 
-        stopJobPolling();
-        releaseStatusPolling();
+        stopAllPolling();
         if (!shuttingDown && result.absent) {
             active.error = '';
             active.confirming = false;
             active.verdict = { kind: 'unavailable', reason: 'job_absent' };
-            render();
-            store?.refresh?.();
-            onSettled();
+            announceSettled();
             return result;
         }
         ctl.active = null;
         if (shuttingDown) { clearHost(); return result; }
-        render();
-        store?.refresh?.();
-        onSettled();
+        announceSettled();
         return result;
     }
 
@@ -1083,33 +1104,21 @@ export function createLoginCardController({
             return Promise.resolve(ctl.detachedStatus);
         }
         const active = ctl.active;
-        if ((active?.error || active?.needsProfile) && !active.jobId
-            && (expected === undefined || expected === active)) {
-            // A create that produced no usable identity has nothing this card
-            // can address with DELETE. A typed refusal carries absent=true and
-            // detaches as released; an untyped discovery/transport failure
-            // preserves unknown. Either way the existing Close affordance is
-            // usable through honest local detach.
-            const result = detach();
-            onSettled();
-            return Promise.resolve(result);
-        }
-        if (active?.verdict?.kind === 'unavailable'
-            && (expected === undefined || expected === active)) {
+        const mine = active && (expected === undefined || expected === active);
+        if (mine && active.verdict?.kind === 'unavailable') {
             // The absent response already released custody. Its distinct face
             // is informational, not a card the owner can never close.
-            stopJobPolling();
-            releaseStatusPolling();
+            stopAllPolling();
             ctl.active = null;
             clearHost();
             onSettled();
             return Promise.resolve(LOGIN_CUSTODY_RELEASED);
         }
-        if (active?.verdict?.kind === 'recovery'
-            && (expected === undefined || expected === active)) {
-            // The FIRST active Close already attempted cancellation and exposed
-            // recovery. The SECOND visible Close is the distinct synchronous
-            // local detach: zero create, DELETE or reconcile requests.
+        // Honest local detach, with zero create, DELETE or reconcile requests, in two cases. A create that
+        // produced no usable identity has nothing a DELETE can address: a typed refusal carries absent=true and
+        // detaches as released, an untyped discovery/transport failure preserves unknown. And the FIRST active
+        // Close already attempted cancellation and exposed recovery; the SECOND visible Close detaches.
+        if (mine && (((active.error || active.needsProfile) && !active.jobId) || active.verdict?.kind === 'recovery')) {
             const result = detach();
             onSettled();
             return Promise.resolve(result);
@@ -1137,9 +1146,7 @@ export function createLoginCardController({
                     ? { kind: 'unavailable', reason: 'job_absent' }
                     : { kind: 'reconciled', reason: '' };
                 releaseStatusPolling();
-                render();
-                store?.refresh?.();
-                onSettled();
+                announceSettled();
                 return result;
             }
             const detail = result.error || (result.status === LOGIN_CUSTODY_RETAINED
@@ -1211,7 +1218,7 @@ export function createLoginCardController({
         render();
     }
 
-    function start(harness, profile, transport = '') {
+    function start(harness, profile, transport = '', answer = paint => paint()) {
         if (!harness || ctl.disposed) return Promise.resolve();
         // Duplicate starts are COALESCED, not merely serialized. The queue
         // guaranteed order, and order made an ordinary double-click into
@@ -1226,19 +1233,32 @@ export function createLoginCardController({
         // SILENCE instead of "no match", so a reviewer looking for a symbol
         // in here concludes it does not exist. Same key, same collisions.
         const key = `${harness}\u0000${profile || ''}\u0000${transport || ''}`;
-        if (ctl.pendingStart && ctl.pendingStart.key === key) return ctl.pendingStart.promise;
-        const promise = withLoginTransition(() => _startLocked(harness, profile, transport));
+        // A repeated command shares the one operation but is still a command: the latest
+        // caller's view answers it, at once if the opening card already stands.
+        const shared = ctl.pendingStart;
+        if (shared && shared.key === key) {
+            if (shared.answered) answer(render);
+            else shared.answer = answer;
+            return shared.promise;
+        }
+        const pending = { key, answer, answered: false };
+        pending.promise = withLoginTransition(() => _startLocked(harness, profile, transport, (paint) => {
+            pending.answered = true;
+            pending.answer(paint);
+        }));
         const clear = () => {
-            if (ctl.pendingStart && ctl.pendingStart.promise === promise) ctl.pendingStart = null;
+            if (ctl.pendingStart === pending) ctl.pendingStart = null;
         };
         // Both arms, and on the ORIGINAL promise: a derived one would be an
         // unhandled rejection for callers that fire and forget.
-        promise.then(clear, clear);
-        ctl.pendingStart = { key, promise };
-        return promise;
+        pending.promise.then(clear, clear);
+        ctl.pendingStart = pending;
+        return pending.promise;
     }
 
-    async function _startLocked(harness, profile, transport = '') {
+    // `answer` wraps the one paint that answers this command: the opening card, or the open
+    // sign-in that could not be released. Every later paint is an ordinary repaint.
+    async function _startLocked(harness, profile, transport, answer) {
         // Re-read after the queue wait: a shutdown may have been queued ahead of
         // this start, and a disposed controller must not create a job nobody
         // will ever poll or cancel.
@@ -1258,25 +1278,19 @@ export function createLoginCardController({
         const prev = ctl.active;
         if (prev && prev.jobId
             && !loginReleaseProven(prev.envelope, { absent: Boolean(prev.absent) })) {
-            let result = await cancelLoginJob(prev.jobId, fetchImpl);
-            if (ctl.active !== prev || ctl.disposed) return;
-            const current = custodyResult(prev.envelope, { absent: Boolean(prev.absent) });
-            if (result.status === LOGIN_CUSTODY_UNKNOWN
-                && (current.status === LOGIN_CUSTODY_RELEASED
-                    || (prev.verdict?.kind === 'recovery'
-                        && prev.custodyStatus !== LOGIN_CUSTODY_UNKNOWN))) result = current;
-            if (result.envelope) prev.envelope = result.envelope;
-            if (result.absent) prev.absent = true;
+            const cancelled = await cancelUnreleased(prev);
+            if (!cancelled) return;
+            const { result } = cancelled;
             if (result.status === LOGIN_CUSTODY_RETAINED) {
                 showRecovery(prev, result);
-                render();
+                answer(render);
                 return;
             }
             if (result.status === LOGIN_CUSTODY_UNKNOWN) {
                 prev.custodyStatus = LOGIN_CUSTODY_UNKNOWN;
                 prev.error = 'Could not cancel the active sign-in — it may still be running. '
                     + 'Retry from its card, or dismiss it first.';
-                render();
+                answer(render);
                 return;
             }
         }
@@ -1298,7 +1312,7 @@ export function createLoginCardController({
             closing: false,
         };
         const active = ctl.active;
-        render();
+        answer(render);
         try {
             const resp = await fetchImpl('/api/claudexor/login', {
                 method: 'POST',
@@ -1372,9 +1386,7 @@ export function createLoginCardController({
                 // structurally-pointless second cancel.
                 showRecovery(active, custodyResult(active.envelope));
                 if (!ctl.disposed) {
-                    render();
-                    store?.refresh?.();
-                    onSettled();
+                    announceSettled();
                 }
             } else await settleVerdict(active, verdict);
         } catch (error) {
@@ -1439,11 +1451,8 @@ export function createLoginCardController({
                 active.custodyStatus = LOGIN_CUSTODY_RELEASED;
                 active.error = '';
                 active.verdict = { kind: 'unavailable', reason: 'job_absent' };
-                stopJobPolling();
-                releaseStatusPolling();
-                render();
-                store?.refresh?.();
-                onSettled();
+                stopAllPolling();
+                announceSettled();
                 return;
             }
             // ANY answer that CARRIED A JOB (a pending snapshot included) resets the
@@ -1482,9 +1491,7 @@ export function createLoginCardController({
                         + 'still have completed. Press Refresh to re-check the account.',
                 };
                 releaseStatusPolling();
-                render();
-                store?.refresh?.();
-                onSettled();
+                announceSettled();
                 return;
             }
             render();
@@ -1501,9 +1508,7 @@ export function createLoginCardController({
                 active.verdict = verdict;
                 releaseStatusPolling();
             }
-            render();
-            store?.refresh?.();
-            onSettled();
+            announceSettled();
             return;
         }
         // The verify-race: never declare failure off one stale verification read
@@ -1560,8 +1565,7 @@ export function createLoginCardController({
         if (ctl.disposed && !ctl.active) {
             // Idempotent once locally detached: no second request, and the
             // remembered status prevents detach from becoming false proof.
-            stopJobPolling();
-            releaseStatusPolling();
+            stopAllPolling();
             return Promise.resolve(ctl.detachedStatus || LOGIN_CUSTODY_RELEASED);
         }
         // Set FIRST: no new start may be queued behind the shutdown.

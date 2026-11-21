@@ -15,7 +15,6 @@ import json
 import os
 import pathlib
 import shutil
-import subprocess
 import sys
 import tempfile
 
@@ -23,6 +22,7 @@ import pytest
 
 from devtools.benchmarks.editbench import run_editbench
 from tests._cases import case_folders
+from tests._workspace_git import git_repository
 
 # The very module objects the runner imported (it puts the editbench dir on sys.path),
 # so a pin patched here is the pin the runner checks.
@@ -324,10 +324,8 @@ def _registry_on(tmp_path, monkeypatch, workspace: pathlib.Path):
     import ouroboros.safety as safety
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    system, drive = tmp_path / "system", tmp_path / "drive"
-    system.mkdir()
+    system, drive = git_repository(tmp_path / "system", unborn=True), tmp_path / "drive"
     drive.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=system, check=True)
     registry = ToolRegistry(repo_dir=system, drive_root=drive)
     registry.set_context(ToolContext(repo_dir=system, system_repo_dir=system, drive_root=drive,
                                      workspace_root=workspace, workspace_mode="external"))

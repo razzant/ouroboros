@@ -133,10 +133,9 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "the child's work order attaches them; its later starts, continuations and replacements select their own. "
             "With input_sources=declared only these inputs are copied to the child."),
         **input_files_parameter(
-            "Read-only children only (write_surface omitted or read_only); [] reports an empty receipt. Checked with your "
-            "read authority and the child's limits and retained before the child is queued; the queued receipt lists each "
-            "copy. An API child's first input names each copy for read_file(path=<copy>); an agent_session child's first "
-            "start verifies them."),
+            "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
+            "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
+            "unless it explicitly replaces the selection."),
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
@@ -338,11 +337,17 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
-        if str(params.get("write_surface") or "").strip().lower() not in {"self_worktree", "external_workspace", "genesis"} \
-                or not default_shaped_directory_options(directory_options.get("directory_strategy"),
-                                                        directory_options.get("scope_paths")):
+        surface = str(params.get("write_surface") or "").strip().lower()
+        in_the_way = [] if surface in {"self_worktree", "external_workspace", "genesis"} else [
+            f"write_surface={params['write_surface']!r}" if params.get("write_surface") else "no write_surface"]
+        if not default_shaped_directory_options(directory_options.get("directory_strategy"),
+                                                directory_options.get("scope_paths")):
+            in_the_way += ["directory_strategy='copy'"] * (directory_options.get("directory_strategy") == "copy") + [
+                "scope_paths"] * bool(directory_options.get("scope_paths"))
+        if in_the_way:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface "
-                        "and no directory options.")
+                        f"and no directory options; in the way: {', '.join(in_the_way)}. Omitting workspace removes "
+                        "this conflict.")
         directory_options["workspace"] = "in_place"
 
     # Folder geometry is a WRITE-side request: a read-only child reads the selected

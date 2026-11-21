@@ -864,6 +864,9 @@ def test_the_whole_search_fits_well_inside_both_callers_job_ceiling(shard_plan):
 
 
 UI_SHARDED = [f"tests/test_ui.py::test_{index:02}" for index in range(24)]
+# The lane's shard count, read from the workflow that runs it (its matrix states it once).
+UI_SHARDS = len(yaml.safe_load((WORKFLOWS / "ui-browser.yml").read_text(encoding="utf-8"))
+                ["jobs"]["ui-shard"]["strategy"]["matrix"]["shard"])
 
 
 def _frozen_lane(tmp_path, monkeypatch, shard_plan):
@@ -874,7 +877,7 @@ def _frozen_lane(tmp_path, monkeypatch, shard_plan):
     plan, table = _prepared(shard_plan, _answers(*history))
     frozen = _write(tmp_path / "plan" / "ci-durations.json", table)
     monkeypatch.setenv(DURATIONS_ENV, str(frozen))
-    blocks = {shard: _ui_lane(tmp_path, UI_SHARDED, f"{shard}/9")[0] for shard in range(1, 10)}
+    blocks = {shard: _ui_lane(tmp_path, UI_SHARDED, f"{shard}/{UI_SHARDS}")[0] for shard in range(1, UI_SHARDS + 1)}
     return plan, table, frozen, _ui_lane(tmp_path, UI_SHARDED)[0], blocks
 
 
@@ -884,10 +887,10 @@ def _prove(tmp_path, manifest, blocks):
     for shard, block in blocks.items():
         _projection(root / "shards" / f"s{shard}" / "host", [_row(node, 1.0) for node in block["assigned"]],
                     system="Linux", ui_browser=block)
-    return reconcile_shards(root / "manifest", root / "shards", count=9, sha=SHA, run_id=RUN)
+    return reconcile_shards(root / "manifest", root / "shards", count=UI_SHARDS, sha=SHA, run_id=RUN)
 
 
-def test_the_manifest_and_all_nine_shards_pack_by_the_one_frozen_table(tmp_path, monkeypatch, shard_plan):
+def test_the_manifest_and_every_shard_packs_by_the_one_frozen_table(tmp_path, monkeypatch, shard_plan):
     """The real readers over the real table: one weight list, one honest source, a complete proof; a leg that read
     anything else is a gap in the same reconciliation."""
     plan, table, frozen, manifest, blocks = _frozen_lane(tmp_path, monkeypatch, shard_plan)
@@ -905,9 +908,9 @@ def test_the_manifest_and_all_nine_shards_pack_by_the_one_frozen_table(tmp_path,
     data["ui_nodes"][UI_SHARDED[0]] += 100_000
     other = _write(tmp_path / "plan" / "other.json", data)
     monkeypatch.setenv(DURATIONS_ENV, str(other))
-    blocks[3] = _ui_lane(tmp_path, UI_SHARDED, "3/9")[0]
+    blocks[3] = _ui_lane(tmp_path, UI_SHARDED, f"3/{UI_SHARDS}")[0]
     gaps, _ = _prove(tmp_path / "second", manifest, blocks)
-    assert "shard 3/9: node weights differ from the manifest" in gaps, gaps
+    assert f"shard 3/{UI_SHARDS}: node weights differ from the manifest" in gaps, gaps
 
 
 def _gh_shim(tmp_path, answers):

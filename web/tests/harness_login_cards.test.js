@@ -598,6 +598,60 @@ test('duplicate starts are COALESCED, so a double-click cannot create-cancel-cre
     t.mock.timers.reset();
 });
 
+test('a repeated start shares the operation, and the latest press answers its view', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let releaseCreate = null;
+    let releaseCancel = null;
+    const gate = new Promise((resolve) => { releaseCreate = resolve; });
+    const cancelGate = new Promise((resolve) => { releaseCancel = resolve; });
+    const store = createClaudexorStatusStore({
+        fetchImpl: async () => json(200, statusPayload(false)),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    let created = 0;
+    let cancels = 0;
+    const ctl = createLoginCardController({
+        host: fakeHost(), store,
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                created += 1;
+                if (created === 1) await gate;
+                return json(200, { job_id: `job-${created}`, job: { state: 'running' } });
+            }
+            if (init.method === 'DELETE') {
+                cancels += 1;
+                await cancelGate;
+                return json(409, { error: 'release not proven' });
+            }
+            return json(200, { job: { state: 'running' } });
+        },
+    });
+    const views = [];
+    const view = (name) => (paint) => { paint(); views.push(name); };
+    // The opening card already stands while the create is pending: a second press is answered at once.
+    const first = ctl.start('codex', '', '', view('first'));
+    await flush();
+    assert.deepEqual(views, ['first']);
+    assert.equal(ctl.start('codex', '', '', view('again')), first);
+    assert.deepEqual(views, ['first', 'again']);
+    releaseCreate();
+    await first;
+    assert.equal(created, 1);
+    // A restart waits for the open sign-in to stop; the press repeated meanwhile answers its refusal.
+    const restart = ctl.start('codex', '', '', view('restart'));
+    await flush();
+    assert.equal(ctl.start('codex', '', '', view('latest')), restart);
+    releaseCancel();
+    await restart;
+    assert.deepEqual(views, ['first', 'again', 'latest'], 'one answer, for the latest press');
+    assert.equal(cancels, 1);
+    assert.equal(created, 1);
+    assert.match(ctl.active.error, /Could not cancel the active sign-in/);
+    await ctl.dispose();
+    store.dispose();
+    t.mock.timers.reset();
+});
+
 test('the pending-start key includes transport and the external start uses the release guard', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     let releaseCreate = null;
@@ -1450,7 +1504,7 @@ test('preserveCardFocus keeps the caret in the name-the-account input across a r
     };
     const prior = {
         selectionStart: 2, selectionEnd: 4,
-        hasAttribute: (attr) => attr === 'data-profile-name-input',
+        getAttributeNames: () => ['id', 'data-profile-name-input'],
     };
     const host = {
         contains: (el) => el === prior,
@@ -1459,6 +1513,53 @@ test('preserveCardFocus keeps the caret in the name-the-account input across a r
     preserveCardFocus(host, () => {}, { activeElement: prior });
     assert.equal(focused, nextInput, 'focus lands on the replacement input');
     assert.deepEqual(nextInput.sel, [2, 4], 'the selection survives the swap');
+});
+
+test('an unchanged job answer leaves the card DOM alone; a changed one redraws it', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let writes = 0, markup = '', state = 'running';
+    const card = {};
+    const host = {
+        contains: () => false, querySelector: () => null, querySelectorAll: () => [],
+        get innerHTML() { return markup; },
+        set innerHTML(value) { writes += 1; markup = value; },
+        get firstElementChild() { return markup ? card : null; },
+    };
+    const ctl = createLoginCardController({ host, store: null, doc: null, fetchImpl: async (url, init = {}) => {
+        if (init.method === 'POST') return json(200, { job_id: 'job-1', job: { state: 'running', phase: 'awaiting_user' } });
+        return json(200, { job: { state, phase: 'awaiting_user' } });
+    } });
+    await ctl.start('codex', '');
+    const settled = writes;
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.equal(writes, settled, 'the same answer writes nothing');
+    state = 'succeeded';
+    t.mock.timers.tick(3000);
+    await flush();
+    assert.ok(writes > settled && markup.includes('data-login-verdict'), 'a changed answer redraws');
+    ctl.detach();
+    t.mock.timers.reset();
+});
+
+test('preserveCardFocus gives focus back to the same command, found by its own attribute', () => {
+    const focused = [];
+    const control = (names, disabled = false) => ({
+        disabled, getAttributeNames: () => names, focus() { focused.push(names); },
+    });
+    const submit = control(['type', 'class', 'data-login-code-submit']);
+    const close = control(['type', 'class', 'data-login-dismiss']);
+    const asked = [];
+    const host = {
+        contains: (el) => el === submit,
+        querySelector: (sel) => { asked.push(sel); return { '[data-login-code-submit]': submit, '[data-login-dismiss]': close }[sel]; },
+    };
+    preserveCardFocus(host, () => {}, { activeElement: submit });
+    assert.deepEqual(asked, ['[data-login-code-submit]'], 'only that command is looked up');
+    assert.deepEqual(focused, [['type', 'class', 'data-login-code-submit']]);
+    // Without a document (another job's card) nothing is restored.
+    preserveCardFocus(host, () => {}, null);
+    assert.equal(focused.length, 1);
 });
 
 test('normalizeProfileName enforces the engine slug contract ^[a-z0-9][a-z0-9_-]{0,63}$', () => {
@@ -1498,4 +1599,32 @@ for (const maintenance of [false, true]) test(`extra actions belong only to main
     assert.equal(host.innerHTML.includes('Retry after recovery'), maintenance);
     assert.equal(host.innerHTML.includes('use_external_terminal'), maintenance, 'maintenance actions are not a local token allowlist');
     await ctl.dispose();
+});
+
+test('slotMask hides only the volatile job words: a same-job re-word keeps the control skeleton, a settled job does not', () => {
+    const pending = (userCode, phase) => ({
+        harness: 'claude', profile: 'work',
+        envelope: {
+            job: phase ? { state: 'waiting_for_input', phase } : { state: 'waiting_for_input' },
+            deviceCode: { flow: 'oauth_url_input', verificationUrl: 'https://example.test/login', userCode },
+        },
+    });
+    const masked = { slotMask: true };
+    // The volatile words differ in the real markup ...
+    assert.notEqual(loginCardHtml(pending('CODE-ONE'), 0), loginCardHtml(pending('CODE-TWO'), 0));
+    assert.notEqual(loginCardHtml(pending('C', 'verifying'), 0), loginCardHtml(pending('C'), 0));
+    // ... but the masked skeleton is identical: a poll's new code or state line is a text-only change,
+    // which paintCard writes into the standing leaves instead of detaching the held control.
+    assert.equal(loginCardHtml(pending('CODE-ONE'), 0, masked), loginCardHtml(pending('CODE-TWO'), 0, masked));
+    assert.equal(loginCardHtml(pending('C', 'verifying'), 0, masked), loginCardHtml(pending('C'), 0, masked));
+    // A structural change is NOT masked: a settled job still repaints, so an obsolete press is never replayed.
+    const settled = { harness: 'claude', profile: 'work', envelope: { job: { state: 'succeeded' } } };
+    assert.notEqual(loginCardHtml(pending('C'), 0, masked), loginCardHtml(settled, 0, masked));
+    // The mask never leaks into the real markup.
+    assert.ok(!loginCardHtml(pending('CODE-ONE'), 0).includes('\u0001'));
+    // What the browser owns is no structure either: an Advanced the owner opened draws the same card, so the
+    // first poll after the toggle is an in-place write and not a rebuild under a held Submit.
+    const advanced = (advancedOpen) => ({ ...pending('C'), attachCommand: 'fixture-attach', engineDegraded: true, advancedOpen });
+    assert.match(loginCardHtml(advanced(true), 0), /<details class="harness-advanced" data-login-advanced>/);
+    assert.equal(loginCardHtml(advanced(true), 0), loginCardHtml(advanced(false), 0));
 });

@@ -520,7 +520,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     override_plan_readiness=override_plan_readiness, plan_answers=_plan_answers)
                 if refusal:
                     return refusal
-            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs, thread_folder=continuation.folder)
+            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs, continuation.folder, configured_order=bool(actor.get("compiled_work_order")))
             if refusal:
                 return refusal
             readonly_root, root, instructions = inputs.scope_root, inputs.scope_root or root, instructions + inputs.instruction
@@ -1198,13 +1198,13 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("delegate_start", {
             "name": "delegate_start",
             "description": (
-                "Start a run on the owner's configured agent-session (subscription) harness and supervise it as its "
-                "NANNY; API actors are scheduled with schedule_subagent instead. "
-                "Subscription is requested, not guaranteed free: expired auth, paid routes or auth fallback "
-                "may bill. Read delegate_wait's terminal cost (zero, billed, estimated or undisclosed); "
+                "Supervise a configured agent-session (subscription) run as its "
+                "NANNY; use schedule_subagent for API actors. "
+                "Subscription is requested, not guaranteed free: expired auth, paid routes or fallback "
+                "may bill. Read delegate_wait's terminal cost (zero, billed, estimated, undisclosed); "
                 "time, quota and a worker slot are also spent. Root, route and access inherit your authority and cannot widen; "
                 "access only lowers native rights. A run lives in engine-scoped native state: it may not see the owner's own sessions "
-                "and is no courier to them. Read-only runs only read and answer. Mutating Git runs edit a PRIVATE SNAPSHOT (or, with workspace='in_place', your own write root), never commit. Ordinary folders use "
+                "and is no courier to them. Read-only runs only read and answer; input_files can pin a git_range. Mutating Git runs edit a PRIVATE SNAPSHOT (or, with workspace='in_place', your own write root), never commit. Ordinary folders use "
                 "directory_strategy=direct (default) or copy with scope_paths. Direct edits are already "
                 "on site, without full rollback. Snapshot/copied results reach your tree only through "
                 "integrate_delegated_patch(run_id=..., decision='apply'|'reject'); first inspect the captured "
@@ -1215,13 +1215,13 @@ def get_tools() -> List[ToolEntry]:
                 "skill_preflight and skill_review. Create a new skill's manifest first. Seeded native is "
                 "system-repo territory; markerless native is logical external. "
                 "Returns run_id for delegate_wait/delegate_cancel. Output is a claim to verify; host "
-                "verification receipts remain yours. Missing/unavailable routes refuse typed: explicitly "
+                "verification receipts remain yours. Unavailable routes refuse: "
                 "select a configured alternative, wait, narrow or report blocked. Direct starts require "
                 "subagent_id. Fresh configured work starts its leaf before the first round; restored work follows "
-                "its continuation receipt. Replay an unresolved (unknown-outcome) start with retry_of, without a new "
+                "its continuation receipt. Replay an unknown-outcome start with retry_of, no new "
                 "selector; a new prompt is a new run. Replacement with prompt='' requires "
                 "verified cancellation/terminal settlement or a typed refusal proving no run exists. "
-                "Continue finished work with continue_from (see arguments). This call requests no extra Claudexor review panel; "
+                "Continue via continue_from. This call requests no extra Claudexor review panel; "
                 "new ordinary runs on engine 3.9.8+ default to none. The receipt names engine_version; "
                 "older engines or a recovered historical run may retain earlier review behavior. Engine review, execution, "
                 "integration and Ouroboros review gates remain separate."

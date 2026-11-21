@@ -12,6 +12,7 @@ import {
     openViaHostBridge,
     openExternalViaHostBridge,
 } from '../modules/ui_helpers.js';
+import { createLoginCardController } from '../modules/harness_login_cards.js';
 
 const BASE = 'http://127.0.0.1:8765/';
 
@@ -641,13 +642,51 @@ test('the page selection a copy disturbed is restored after focus returns, and a
     assert.equal(button.focuses, 1, 'a keyboard owner stays on the control that asked');
 });
 
-test('the agent login card never writes to the clipboard without a fallback', () => {
+test('the agent login card never writes to the clipboard without a fallback', async (t) => {
     const source = readFileSync(new URL('../modules/harness_login_cards.js', import.meta.url), 'utf8');
     // Copying the sign-in link, the device code, and the attach command are
     // STEPS of signing in; a bare optional-chained clipboard write is a control
     // that dies silently on every non-secure origin.
     assert.equal(source.includes('navigator.clipboard'), false);
-    assert.equal((source.match(/copyTextWithToast\(/g) || []).length, 3);
+    // So each of the three controls of a mounted card is pressed on a page with no async clipboard at all:
+    // its own fact goes through the shared copy's selection fallback, and the copy is said.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const presses = new Map();
+    const host = {
+        innerHTML: '', contains: () => false, querySelectorAll: () => [],
+        querySelector(selector) {
+            if (!this.innerHTML.includes(selector.slice(1, -1))) return null;
+            return { addEventListener: (type, press) => type === 'click' && presses.set(selector, press) };
+        },
+    };
+    const answer = {
+        job_id: 'job-1', job: { state: 'waiting_for_input' }, attach_command: 'fixture-attach --job job-1',
+        disclosure_native: false,
+        deviceCode: { flow: 'chatgpt', verificationUrl: 'https://example.test/login', userCode: 'CODE-42' },
+    };
+    const card = createLoginCardController({ host, store: null, doc: null,
+        fetchImpl: async () => ({ ok: true, status: 200, json: async () => answer }) });
+    await card.start('codex', '');
+    const prior = { window: globalThis.window, document: globalThis.document };
+    const said = toastDocument();
+    const page = copyPage();
+    try {
+        globalThis.window = { navigator: {} };
+        globalThis.document = { ...said.doc, querySelectorAll: () => [], execCommand: (command) => page.execCommand(command),
+            createElement: (tag) => (tag === 'textarea' ? page.createElement() : said.doc.createElement(tag)) };
+        for (const control of ['[data-copy-signin-link]', '[data-copy-device-code]', '[data-copy-attach]']) {
+            assert.ok(presses.has(control), `${control} is mounted and wired`);
+            presses.get(control)();
+            for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+        }
+    } finally {
+        globalThis.window = prior.window;
+        globalThis.document = prior.document;
+        card.detach();
+    }
+    assert.deepEqual(page.seen, ['https://example.test/login', 'CODE-42', 'fixture-attach --job job-1']
+        .map((text) => ({ command: 'copy', tag: 'area', text })));
+    assert.deepEqual(said.toasts, ['Sign-in link copied.', 'Code copied.', 'Command copied.']);
 });
 
 test('without a bridge the download fetches the canonical URL, not the compat form', async () => {

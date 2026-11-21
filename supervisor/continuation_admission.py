@@ -664,7 +664,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
     statement of who pressed, recorded as ``admission.by`` and never a permission; a mind's door binds ``control_actor``."""
     from ouroboros.owner_continue import (
         AUTHOR_STOP_CAUSE, VERB, BINDING_VERSION, binding_sha, carried_execution_fields, claim_on_predecessor, continuation_eligibility,
-        continuation_room, declared_inputs, execution_carry, owner_sources, successor_id, valid_nonce,
+        continuation_room, declared_inputs, execution_carry, owner_sources, recorded_task_type, successor_id, valid_nonce,
     )
     from ouroboros.task_results import STATUS_SCHEDULED, load_task_result, validate_task_id, write_task_result
 
@@ -689,6 +689,8 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_
                 "successor_task_id": str(claim.get("successor_task_id") or ""),
                 **({"state": "bound", "action_nonce": claim.get("action_nonce")}
                    if claim.get("state") == "bound" else {})}
+    if claim and recorded_task_type(result) == "deep_self_review":  # an older bound claim never creates one now
+        return {"ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
     verdict = continuation_eligibility(result, predecessor) if not claim else {
         "eligible": True, "cause": str((claim.get("binding") or {}).get("cause") or ""), "refusal": ""}
     if not verdict["eligible"]:

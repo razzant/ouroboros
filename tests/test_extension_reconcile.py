@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from ouroboros import extension_loader
 from ouroboros.skill_loader import SkillReviewState, save_enabled, save_review_state
 
@@ -441,3 +443,80 @@ def test_reconcile_does_not_revert_when_flag_off(tmp_path):
     )
     assert state.get("action") == "extension_load_error"
     assert load_enabled(drive_root, "boomext2") is True
+
+
+@pytest.mark.parametrize("invalid", [b'{"companion_failures":', b'[]'], ids=["malformed", "not_an_object"])
+def test_unreadable_extension_health_is_not_empty_or_a_runtime_control(tmp_path, invalid):
+    from ouroboros import extension_health as health
+
+    key = (tmp_path, "demo")
+    ready = {"desired_live": True, "live_loaded": True, "reason": "ready", "action": "extension_loaded"}
+    assert health.read_extension_health(*key) is None
+    assert health.apply_companion_failure_to_runtime_state(dict(ready), *key) == ready
+    path = health.health_path(*key)
+    path.write_bytes(invalid)
+
+    projected = health.apply_companion_failure_to_runtime_state(dict(ready), *key)
+    assert projected == {**ready, "reason": "health_unavailable"}
+    receipt = health.record_health_for_runtime_state(*key, projected, stamp=("test", "could-not-persist"))
+    assert receipt == health.read_extension_health(*key) == {"status": "unknown", "reason": "health_unavailable"}
+    assert projected["reason"] == "health_unavailable" and path.read_bytes() == invalid
+
+    for separate in ({**ready, "reason": "load_error", "load_error": "plugin failed"},
+                     {**ready, "desired_live": False, "reason": "disabled"},
+                     {**ready, "reason": "retained_unresolved", "retained_companions": {"peer": "stop requested"}}):
+        assert health.apply_companion_failure_to_runtime_state(dict(separate), *key) == separate
+
+
+@pytest.mark.parametrize("fault", ["worker_cannot_read", "server_cannot_write"])
+def test_failed_health_update_returns_persisted_evidence_without_erasing_it(tmp_path, monkeypatch, fault):
+    from ouroboros import extension_health as health
+    from ouroboros import utils
+    from ouroboros.gateway import ws
+
+    key = (tmp_path, "demo")
+    monkeypatch.setattr(health, "code_stamp", lambda: ("v", "known-good"))
+    monkeypatch.setattr(ws, "notify_extension_health_changed", lambda: None)
+    health.record_extension_health(*key, status="live", version="v", sha="known-good", reason="ready")
+    for name in ("failed", "sibling"):
+        health.record_companion_restart_exhausted(*key, name, returncode=7)
+    path = health.health_path(*key)
+    prior = health.read_extension_health(*key)
+    before = path.read_bytes()
+    attempted = []
+    if fault == "worker_cannot_read":
+        read = utils.read_json_dict
+
+        def refuse_read(selected):
+            if selected == path:
+                attempted.append(None)
+                return None
+            return read(selected)
+
+        monkeypatch.setattr(utils, "read_json_dict", refuse_read)
+    else:
+        write = utils.atomic_write_json
+
+        def refuse(selected, data, **kwargs):
+            if selected == path:
+                attempted.append((data["last_known_good"]["sha"], data["companion_failures"]))
+                raise OSError("failed to replace health file")
+            return write(selected, data, **kwargs)
+
+        monkeypatch.setattr(utils, "atomic_write_json", refuse)
+
+    process = "worker" if fault == "worker_cannot_read" else "server"
+    state = {"desired_live": True, "live_loaded": True, "reason": "ready", "action": "extension_loaded", "process": process}
+    returned = health.record_health_for_runtime_state(*key, state, stamp=("v", "not-persisted"), companions=[])
+    assert attempted == ([None] if fault == "worker_cannot_read" else [("not-persisted", {})])
+    assert returned == health.read_extension_health(*key) == prior
+    assert returned["last_known_good"]["sha"] == "known-good" and set(returned["companion_failures"]) == {"failed", "sibling"}
+    assert path.read_bytes() == before
+    # Neither a worker nor a publication registering neither name is answered with the kept failures.
+    assert state["reason"] == "ready" and "companion_failed" not in state
+    if process == "server":  # the publication that registers them is, though this write did not land either
+        registering = dict(state)
+        health.record_health_for_runtime_state(*key, registering, stamp=("v", "not-persisted"),
+                                               companions=["failed", "sibling"])
+        assert registering["reason"] == "companion_restart_exhausted:failed,sibling"
+        assert path.read_bytes() == before

@@ -475,7 +475,7 @@ async def _compile_status_text(api, lang: str = "en") -> str:
 
     status_str = t.format("metrics_budget_status", spent_usd=spent_spec, total_budget=total_spec, rem=rem_spec,
                           branch=branch, bg_status=bg_status_raw)
-    status_str += "\n" + await asyncio.to_thread(_collect_health, api, lang)
+    status_str += "\n" + await asyncio.to_thread(_collect_health, api, lang, runtime_state)
     return status_str
 
 
@@ -624,8 +624,8 @@ async def _handle_poll_callback(api, client, update, pinned_chat, command_mode, 
             header, keyboard = _build_language_keyboard(lang)
             await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
         elif target == "tasks":
-            header, keyboard = await asyncio.to_thread(
-                _build_menu_tasks, api, command_mode, lang
+            header, keyboard = await asyncio.to_thread(  # the window's works (/api/state)
+                _build_menu_tasks, await _load_runtime_state(api), command_mode, lang
             )
             await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
         elif target == "settings":

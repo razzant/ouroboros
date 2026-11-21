@@ -300,7 +300,7 @@
  * @property {string=} subagent_role
  * @property {boolean=} accepted
  * @property {number=} active_subagent_count
- * @property {number=} max_active_subagents
+ * @property {number=} max_active_subagents  // the owner's number per root; absent: no number
  * @property {boolean=} queued_behind_active_cap
  * @property {string[]=} required_capabilities
  * @property {string=} write_surface
@@ -1057,13 +1057,14 @@
  * @property {string[]=} granted_permissions
  * @property {string=} turn_on_when_ready
  * @property {string=} setup_error
- * @property {string=} extension_action
- * @property {string=} extension_reason
- * @property {string=} load_error
+ * @property {?string=} extension_action  // null, as live_loaded, when no reconcile answered (an Enable refused first)
+ * @property {?string=} extension_reason
+ * @property {?string=} load_error
  * @property {Object=} grants
  * @property {string=} process
  * @property {string=} server_reconcile
- * @property {boolean=} live_loaded
+ * @property {?boolean=} live_loaded
+ * @property {Object<string,string>=} retained_companions  // as SkillToggleResponse
  * @property {string=} error
  */
 
@@ -1577,7 +1578,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.11.1-alpha.0';
+export const GATEWAY_CONTRACT_VERSION = '7.12.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

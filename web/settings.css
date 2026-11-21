@@ -1624,6 +1624,12 @@ textarea.ui-control.settings-rules-text {
 .accounts-service > .agents-service { flex: 1 1 16rem; align-items: center; }
 .accounts-service .agents-service-banner { padding: 0; }
 .accounts-service .agents-service-diagnostics { margin: var(--space-2) 0 0; }
+#harness-accounts-groups {
+    --account-start-room: 0px;
+    --account-end-room: 0px;
+    overflow-anchor: none;
+    padding-block: var(--account-start-room) var(--account-end-room);
+}
 .agent-family-list > .agent-family-card { gap: var(--space-4); padding: 0; border: 0; background: none; }
 .agent-family-program:empty,
 .agent-family-accounts[hidden] { display: none; }

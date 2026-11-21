@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Protocol, Sequence
 
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES
 from ouroboros.contracts.task_contract import canonical_tool_name
 
 
@@ -132,16 +132,18 @@ def fit_tool_schemas_to_limit(
     Under the ceiling (or without one) the list is unchanged. Above it, core and meta
     schemas and the MCP gateway stay first, then ``protect`` (names this task's history already called),
     then ``first`` (the load being made now), then ``keep`` (names the actor loaded on
-    purpose before), then the rest in their own order; the tail beyond the ceiling is
-    left out. The kept schemas retain their order. Omitted names stay callable;
-    ``enable_tools``, where available, shows or loads their schemas.
+    purpose before), then the rest in their own order, and ``ROUTE_TAIL_TOOL_NAMES`` last
+    (the rule beside ``CORE_TOOL_NAMES``); the tail beyond the ceiling is left out. The
+    kept schemas retain their order. Omitted names stay callable; ``enable_tools``, where
+    available, shows or loads their schemas.
     """
     if limit is None or len(schemas) <= limit:
         return list(schemas), ()
     keep, first, protect = frozenset(keep), frozenset(first), frozenset(protect)
     names = [str(schema["function"]["name"]) for schema in schemas]
     rank = [0 if name in CORE_TOOL_NAMES or name in META_TOOL_NAMES or name == MCP_GATEWAY_TOOL_NAME else 1 if name in protect
-            else 2 if name in first else 3 if name in keep else 4 for name in names]
+            else 2 if name in first else 3 if name in keep else 5 if name in ROUTE_TAIL_TOOL_NAMES else 4
+            for name in names]
     kept = set(sorted(range(len(names)), key=lambda index: (rank[index], index))[:max(0, limit)])
     return ([schema for index, schema in enumerate(schemas) if index in kept],
             tuple(name for index, name in enumerate(names) if index not in kept))
@@ -160,22 +162,61 @@ def usable_selectors(registry: Any, resident: Iterable[Dict[str, Any]] | None = 
     return frozenset(names)
 
 
+# A short purpose is presentation, never policy: the full description stays in the schema.
+PURPOSE_CHARS = 120
+
+
+def tool_purpose(schema: Mapping[str, Any]) -> tuple[str, bool]:
+    """A tool's short purpose as its own author wrote it, and whether it was cut: the first sentence of its
+    description (of the server's own one inside the host frame for an MCP tool, ``mcp_schema.server_description``;
+    '' without one), at most ``PURPOSE_CHARS``. The one reading for the catalog rows and the route notice."""
+    from ouroboros.mcp_schema import server_description
+
+    function = schema.get("function") or {}
+    text = str(function.get("description") or "")
+    if tool_namespace(str(function.get("name") or "")).startswith("mcp_"):
+        text = server_description(text)
+    text = " ".join(text.split())
+    head, stop, _rest = text.partition(". ")
+    sentence = head + "." if stop else text
+    return sentence[:PURPOSE_CHARS], len(sentence) > PURPOSE_CHARS
+
+
 def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequence[str], *,
-                            selectors: Iterable[str]) -> str:
+                            selectors: Iterable[str], schemas: Sequence[Dict[str, Any]]) -> str:
     """The fact an actor reads when its route could not carry all of its loaded schemas.
 
-    It names only the ``selectors`` this actor can use in the fitted request (``usable_selectors``).
+    Each left-out name comes with its purpose (``tool_purpose``) read from ``schemas``, the list the
+    fit was made from, in the fit's own order, so one cut always reads the same; an MCP server's text
+    is quoted as data. It names only the ``selectors`` this actor can use in the fitted request
+    (``usable_selectors``). Without the loader (``enable_tools``) it promises no load: it says their
+    schemas cannot be loaded here (a usable list still shows them), and names a resident MCP gateway
+    as the way to the MCP ones this task is permitted to call.
     """
+    purposes = {str(schema["function"]["name"]): tool_purpose(schema) for schema in schemas}
+    rows = []
+    for name in left_out:
+        purpose, cut = purposes.get(name, ("", False))
+        purpose += "…" if cut else ""
+        if purpose and tool_namespace(name).startswith("mcp_"):
+            purpose = repr(purpose)
+        rows.append(f"- {name}: {purpose}" if purpose else f"- {name}")
     selectors = frozenset(selectors)
-    ways = [way for name, way in (
-        ("list_available_tools", "list_available_tools marks them not loaded"),
-        ("enable_tools", "enable_tools loads one if it fits (possibly displacing another), or shows an MCP "
-                         "schema for a resident text gateway without taking a slot"),
-    ) if name in selectors]
+    listing = "list_available_tools marks them not loaded" if "list_available_tools" in selectors else ""
+    if "enable_tools" in selectors:
+        tail = ("They stay callable: " + (listing + ", and " if listing else "")
+                + "enable_tools loads one if it fits (possibly displacing another), or shows an MCP schema "
+                  "for a resident text gateway without taking a slot.")
+    else:
+        gateway = MCP_GATEWAY_TOOL_NAME in {schema["function"]["name"] for schema in schemas} - set(left_out)
+        mcp = gateway and any(tool_namespace(name).startswith("mcp_") for name in left_out)
+        tail = ("This task has no schema loader, so their schemas cannot be loaded here"
+                + (f" ({listing})" if listing else "")
+                + (f"; {MCP_GATEWAY_TOOL_NAME} reaches the MCP ones this task is permitted to call" if mcp else "")
+                + ".")
     return ("[SYSTEM NOTICE]\n"
             f"The route {model} accepts at most {limit} tool schemas in one request; this task had "
-            f"{total} loaded. Not loaded for now: {', '.join(left_out)}. They stay callable"
-            + (": " + ", and ".join(ways) if ways else "") + ".")
+            f"{total} loaded. Not loaded for now:\n" + "\n".join(rows) + "\n" + tail)
 
 
 def compact_tool_catalog(
@@ -190,10 +231,10 @@ def compact_tool_catalog(
     rows = []
     for schema in canonical_schemas:
         function = schema["function"]
-        purpose = " ".join(str(function.get("description") or "").split())
+        purpose, cut = tool_purpose(schema)
         rows.append({
-            "name": function["name"], "description": purpose[:120],
-            "description_truncated": len(purpose) > 120,
+            "name": function["name"], "description": purpose,
+            "description_truncated": cut,
             "residency": "loaded" if function["name"] in resident else "not_loaded",
         })
     return rows

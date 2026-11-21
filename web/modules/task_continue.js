@@ -49,17 +49,22 @@ export function continueOfferView(detail) {
     }
     // A finite budget whose remainder the saved execution clock cannot establish: the host refuses
     // rather than guess. Its `cause` is the interruption's, so the note names the budget instead.
-    if (offer.eligible === false && offer.refusal === 'execution_budget_unknown') {
-        return { kind: 'refusal', refusal: 'execution_budget_unknown' };
+    // A deep self-review saves no point to continue from: Continue would start an ordinary task under its name.
+    if (offer.eligible === false && ['execution_budget_unknown', 'deep_review_restart_required'].includes(offer.refusal)) {
+        return { kind: 'refusal', refusal: offer.refusal };
     }
     return offer.eligible ? { kind: 'offer', cause: String(offer.cause || '') } : { kind: 'none' };
 }
 
+const REFUSAL_PHRASES = {
+    execution_budget_unknown: () => tr('task.continue.budget_unknown',
+        "The time left in this task's execution budget could not be read from its saved clock, so no new task starts."),
+    deep_review_restart_required: () => tr('task.continue.deep_review_restart',
+        'A deep self-review keeps no saved point to continue from; send /review to start a new one.'),
+};
+
 function refusalPhrase(view) {
-    return view.refusal === 'execution_budget_unknown'
-        ? tr('task.continue.budget_unknown',
-            "The time left in this task's execution budget could not be read from its saved clock, so no new task starts.")
-        : taskReasonPhrase(view.cause);
+    return REFUSAL_PHRASES[view.refusal] ? REFUSAL_PHRASES[view.refusal]() : taskReasonPhrase(view.cause);
 }
 
 /**
@@ -99,7 +104,8 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
         if (body.state === 'bound' && body.action_nonce) continueNonce(id, storage, body.action_nonce);
         // The same nonce stays: pressing again retries this very admission. A typed hard limit says itself; any other
         // failure is said in the shared failure words (U131), its raw text kept for the log.
-        const limit = body.reason_code === 'hard_limit_reached' && body.cause ? taskReasonPhrase(body.cause) : '';
+        const limit = body.reason_code === 'hard_limit_reached' && body.cause ? taskReasonPhrase(body.cause)
+            : body.reason_code === 'deep_review_restart_required' ? REFUSAL_PHRASES.deep_review_restart_required() : '';
         if (!limit) console.warn('Continue not confirmed', exc);
         toast(limit ? `Continue not confirmed: ${limit}` : `Continue not confirmed. ${errorWords(exc).text}`, 'error');
         return '';

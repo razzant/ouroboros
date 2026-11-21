@@ -14,11 +14,11 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 58 | 0 |
 | D06 | Review stack | 101 | 0 |
-| D07 | Delegation, subagents & Claudexor | 113 | 0 |
+| D07 | Delegation, subagents & Claudexor | 114 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 80 | 0 |
 | D09 | Cancellation, owner control & process custody | 29 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 123 | 0 |
+| D11 | Gateway, server & Web UI | 124 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 74 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1066** | **0** |
+| **total** | | **1068** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -601,6 +601,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/delegate_documents.py`
 - `ouroboros/delegate_evidence.py`
 - `ouroboros/delegate_feed.py`
+- `ouroboros/delegate_git_range.py`
 - `ouroboros/delegate_hold.py`
 - `ouroboros/delegate_interactions.py`
 - `ouroboros/delegate_invocation.py`
@@ -951,6 +952,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/obligations.py`
 - `ouroboros/question_answers.py`
 - `ouroboros/record_compression.py`
+- `ouroboros/recovery_turn_facts.py`
 - `ouroboros/room_reader.py`
 - `ouroboros/saved_state_retirement.py`
 - `ouroboros/server_auth.py`
