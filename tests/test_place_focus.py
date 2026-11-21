@@ -376,21 +376,30 @@ lease.release()
             child.wait(timeout=10)
 
 
-@pytest.mark.parametrize("silent,promote", [(False, False), (True, False), (False, True)])
-def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent, promote):
+@pytest.mark.parametrize("silent,kind,door", [
+    (False, "focus", False), (True, "focus", False), (False, "promoted", False),
+    (False, "focus", True), (False, "promoted", True), (False, "scheduled", True)])
+def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent, kind, door):
+    """No door: a wordy finish is speech and meets the ``place_reply`` check, whose flag returns once. A declared door
+    (owner 21.11, 1A): the finish of every root bound to the place is its record; one that sent nothing returns once
+    with the record note and then stands, no check bought, and only the focus turn's wake ends quiet."""
     import queue
     from ouroboros import loop
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.presence_runner import build_presence_result_event
     root, _place, _admission, _event = focus
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
     task = task_for(focus)
-    if promote:
+    if kind != "focus":
         from tests.test_place_reply_revision import promoted
         task = promoted(task)
+        if kind == "scheduled":
+            task["metadata"]["schedule_occurrence"] = {"schedule_id": "s-1", "occurrence_id": "o-1"}
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx.task_metadata = task["metadata"]
     registry._ctx.task_contract = task["task_contract"]
-    registry._ctx.is_direct_chat = not promote
+    registry._ctx.is_direct_chat = kind == "focus"
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
     checks, calls = [], []
@@ -415,6 +424,11 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
     if silent:
         assert len(calls) == 1 and not checks
         assert result["outcome"] == "silent" and result["text"] == ""
+    elif door:
+        assert len(calls) == 2 and not checks, "the record buys no place_reply check"
+        assert "[FOCUS_FINISH_IS_A_RECORD]" in json.dumps(calls[-1], ensure_ascii=False)
+        assert result["outcome"] == "silent" and result["text"] == ""
+        assert (usage.get("wake_silent") is True) is (kind == "focus"), "a root keeps the final its Project reads"
     else:
         assert len(calls) == 2 and len(checks) == 2
         assert any("Reconsider this reply" in str(row.get("content")) for row in calls[-1])
@@ -721,6 +735,9 @@ def test_a_refused_focus_reply_returns_destination_sends_and_silence(tmp_path):
     assert 'Your own send calls there without a receipt yet: ext_send at 2026-11-06T02:18:50+00:00: "queued".' in note
     assert 'Silence is valid: finish_task(action="finish", silent=true) keeps the answer as your internal note' in note
     assert refusal_facts(SimpleNamespace(task_metadata={})) == ""  # no reply carrier: no destination, no note
+    ctx.task_metadata = {**ctx.task_metadata, "schedule_occurrence": {"schedule_id": "s-1"}}  # no connector follows it
+    scheduled = refusal_facts(ctx)
+    assert "No connector reads this run's final in Team chat (route " in scheduled and "is posted as" not in scheduled
 
 
 # --- an order exists only where the mind cites my human's exact words and the host verifies their provenance -------
@@ -795,12 +812,13 @@ def test_focus_frame_folds_the_allowance_to_counts_behind_an_exact_reader(focus,
     assert task["metadata"]["focus_allowance"]["roots"] == allowance["roots"]
 
 
-def _publish_bridge_tools(monkeypatch, *declarations):
+def _publish_bridge_tools(monkeypatch, *declarations, plugin_api=None):
     """The focus's own connector ``bridge`` with these declared tools, in its registration order, as the dispatcher's
-    published registry holds them; their surface names."""
+    published registry holds them (``plugin_api``: its manifest's declared minimum); their surface names."""
     from ouroboros import extension_registry_state as registry
     from ouroboros.extension_surface_names import extension_surface_name
-    manifest = SimpleNamespace(raw_extra={"tools": list(declarations)})
+    manifest = SimpleNamespace(raw_extra={"tools": list(declarations)},
+                               **({"plugin_api": {"version": plugin_api, "capabilities": []}} if plugin_api else {}))
     bundle = registry._ExtensionRegistrations(generation_digest="g1", loaded_skill=SimpleNamespace(manifest=manifest))
     names = []
     for declaration in declarations:
@@ -810,38 +828,54 @@ def _publish_bridge_tools(monkeypatch, *declarations):
     return names
 
 
-def _publish_bridge_send(monkeypatch, **declaration):
+def _publish_bridge_send(monkeypatch, plugin_api=None, **declaration):
     """One declared tool ``send`` of the connector ``bridge``."""
-    return _publish_bridge_tools(monkeypatch, {"name": "send", **declaration})[0]
+    return _publish_bridge_tools(monkeypatch, {"name": "send", **declaration}, plugin_api=plugin_api)[0]
 
 
+# Mail's door (owner 21.11, 1A): the thread is the conversation and the recipients explicit write groups (``touches``).
+_MAIL_DOOR = {"effect": "message", "target": ["account_id", "conversation_id", "thread_id"], "conversation": "conversation_id",
+              "thread": "thread_id", "touches": [{"conversation": field, "effect": "write", "match": "exact_casefold"}
+                                                 for field in ("to", "cc", "bcc")]}
+
+
+@pytest.mark.parametrize("kind", ["focus", "promoted", "scheduled"])
 @pytest.mark.parametrize("declaration,records", [
     ({"effect": "message", "target": ["channel"], "conversation": "channel", "thread": "thread_ts"}, True),
     ({"effect": "message", "target": ["account_id", "chat_id"], "conversation": "chat_id"}, True),
+    (_MAIL_DOOR, True),
     ({"effect": "message", "target": ["url"], "conversation": "context_id", "thread": "task_id"}, False),  # a peer URL
     ({"effect": "message", "target": ["account_id", "to", "cc", "bcc"], "conversation": "conversation_id"}, False),  # mail
     ({"effect": "write", "target": ["channel"], "conversation": "channel"}, False),
 ])
-def test_speak_line_and_records_only_follow_the_connectors_declarations(focus, monkeypatch, declaration, records):
+def test_speak_line_and_records_only_follow_the_connectors_declarations(focus, monkeypatch, declaration, records, kind):
+    """One rule for every root bound to the place (owner 21.11, 1A): the focus turn, a root it handed off and a
+    schedule's run read the same declaration, never the wake that started them."""
     from ouroboros.place_reply import records_only, speak_line
     from ouroboros.presence_context import frame_focus_content
+    from tests.test_place_reply_revision import promoted
     root, place, admission, event = focus
-    name = _publish_bridge_send(monkeypatch, **declaration)
+    name = _publish_bridge_send(monkeypatch, plugin_api="2.5" if "touches" in declaration else None, **declaration)
     task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}),
                        replace(event, thread_id="1712.5", conversation_key="chat:a:r:1712.5"), drive_root=root, staged_files=())
-    rendered, line = frame_focus_content(task, "hello"), speak_line(task["metadata"])
-    assert records_only(task["metadata"]) is records and line in rendered
+    metadata = task["metadata"] if kind == "focus" else promoted(task)["metadata"]
+    if kind == "scheduled":
+        metadata["schedule_occurrence"] = {"schedule_id": "s-1", "occurrence_id": "o-1"}
+    line = speak_line(metadata)
+    assert records_only(metadata) is records
+    if kind == "focus":
+        assert line in frame_focus_content(task, "hello")
     if records:
         thread = f", {declaration['thread']}=1712.5" if declaration.get("thread") else ""
         account = ", account_id=a" if "account_id" in declaration["target"] else ""
         assert line == (f"Words reach chat only when you send them, through {name} ({declaration['conversation']}=r{thread}{account}); "
                         "a send may ride in the same response as your finish. Your finish is your record, never posted.")
         # a Silent place or Advises autonomy keep the held draft, and the line says so
-        task["metadata"]["presence"]["place"]["state"] = "silent"
-        assert "(chat is Silent: a send is refused and your finish is held for your human, not posted)" in speak_line(task["metadata"])
-        task["metadata"]["presence"]["place"]["state"] = "active"
-        task["metadata"]["consciousness_autonomy"] = "observe"
-        assert "(autonomy is Advises: a send is refused and your finish is held for your human, not posted)" in speak_line(task["metadata"])
+        metadata["presence"]["place"]["state"] = "silent"
+        assert "(chat is Silent: a send is refused and your finish is held for your human, not posted)" in speak_line(metadata)
+        metadata["presence"]["place"]["state"] = "active"
+        metadata["consciousness_autonomy"] = "observe"
+        assert "(autonomy is Advises: a send is refused and your finish is held for your human, not posted)" in speak_line(metadata)
     else:
         assert line.startswith("Your non-silent finish is posted in chat as your words")
     assert "bridge" not in line.replace(name, ""), "no connector is named by the host; the tool's own name is"
@@ -920,6 +954,70 @@ def test_speak_line_lists_words_and_gesture_doors_and_a_gesture_door_must_name_i
         "id is the waking message; another message's exact id from this conversation is valid too.")
     task["metadata"]["presence"]["place"]["state"] = "silent"
     assert "(chat is Silent: a send or gesture is refused and your finish is held" in speak_line(task["metadata"])
+
+
+@pytest.mark.parametrize("kind", ["promoted", "scheduled"])
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_handed_off_or_scheduled_roots_finish_follows_its_connectors_declaration(focus, monkeypatch, kind, door):
+    """One rule at the common exit (owner 21.11, 1A): with a door a wordy finish that sent nothing returns once with
+    the record note and the next is the record (``silent``, no Safety bought); without one the final is speech under
+    the ``place_reply`` check. A Silent place holds either as one System row; neither ends the root's wake quiet."""
+    from ouroboros import dialogue_store
+    from ouroboros.place_reply import prepare_focus_reply
+    from tests.test_place_reply_revision import promoted
+    root, place, _admission, _event = focus
+    if door:
+        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    if kind == "scheduled":
+        task["metadata"]["schedule_occurrence"] = {"schedule_id": "s-1", "occurrence_id": "o-1"}
+    checks = []
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
+
+    def run():
+        return SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                               _completion_riding_send=False)
+
+    active = run()
+    if door:
+        allowed, note = prepare_focus_reply(active, "Hello")
+        assert not allowed and note.startswith("[FOCUS_FINISH_IS_A_RECORD] Nothing was posted"), note
+        assert "Confirmed sent there by this run: " in note and "Your finish is your record" in note
+    assert prepare_focus_reply(active, "Hello") == (True, "")
+    assert active._presence_completion["outcome"] == ("silent" if door else "message")
+    assert checks == ([] if door else ["place_reply"]) and not getattr(active, "_focus_record_only", False)
+    p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
+    held = run()
+    for _ in range(2):
+        assert prepare_focus_reply(held, "Hello") == (True, "")
+    rows = [entry.row for entry in dialogue_store.iter_rows(root, "chat") if entry.row.get("held")]
+    assert [row["held_text"] for row in rows] == ["Hello"] and held._presence_completion["outcome"] == "silent"
+    assert checks == ([] if door else ["place_reply"]), "a held reply buys no check"
+
+
+@pytest.mark.parametrize("kind", ["focus", "promoted"])
+def test_only_the_focus_turns_record_owes_my_humans_reply_first(focus, monkeypatch, kind):
+    """R3 keeps its scope (owner 21.11, 1A): a focus turn's records-only finish is refused while my human's Main
+    message is unanswered, as a silent one is; a root it handed off is not (its words never went to my human) and keeps
+    its Project final, never ending quiet."""
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL
+    from ouroboros.place_reply import prepare_focus_reply
+    from tests.test_place_reply_revision import promoted
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = task_for(focus) if kind == "focus" else promoted(task_for(focus))
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _completion_riding_send=True)
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.loop_messages.owner_reply_owed", lambda _ctx: True)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: pytest.fail("a record buys no check"))
+    if kind == "focus":
+        assert prepare_focus_reply(ctx, "Hello") == (False, OWNER_REPLY_OWED_REFUSAL)
+        assert not hasattr(ctx, "_presence_completion")
+    else:
+        assert prepare_focus_reply(ctx, "Hello") == (True, "")
+        assert ctx._presence_completion["outcome"] == "silent" and not getattr(ctx, "_focus_record_only", False)
 
 
 # --- a place turn reads any project journal; writes and a child's reads stay forbidden (owner 06.11, 4=A) ----------

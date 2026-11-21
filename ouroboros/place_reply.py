@@ -193,12 +193,27 @@ def conversation_gesture_tools(connector: str) -> list:
 
 
 def records_only(metadata) -> bool:
-    """A place focus whose own connector speaks through such a tool: its finish is its record and people hear only
-    what it sends (owner 06.11, 2A). A connector without one (a peer URL, mail recipients) keeps the final as its reply."""
+    """A place-bound root (a focus turn, a root it handed off, a schedule's run) whose own connector speaks through
+    such a tool: its finish is its record and people hear only what it sends (owner 06.11 «2A», 21.11 «1A»). A
+    connector without one (a peer URL) keeps the final as its reply."""
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
-    return (metadata.get("wake_cause") == "focus" and bool(reply_carrier(metadata))
-            and bool(conversation_send_tools(str(presence.get("transport_skill") or ""))))
+    return bool(reply_carrier(metadata)) and bool(conversation_send_tools(str(presence.get("transport_skill") or "")))
+
+
+def _focus_turn(metadata) -> bool:
+    """The place's own focus turn: only its records-only finish owes my human's reply first (R3) and ends its wake
+    quiet; a root it handed off keeps the final its Project reads."""
+    return isinstance(metadata, dict) and metadata.get("wake_cause") == "focus"
+
+
+def final_is_speech(metadata) -> bool:
+    """Whether this run's non-silent final is offered to its place as words (place state and Safety still apply): it
+    carries a place conversation, is no schedule's run (no connector follows one) and its connector declares no door
+    (``records_only``). The receipts, the forced contract and the refusal facts name a final's fate by it."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return (isinstance(metadata.get("presence"), dict) and bool(metadata["presence"])
+            and not metadata.get("schedule_occurrence") and not records_only(metadata))
 
 
 def records_only_now(ctx) -> bool:
@@ -308,9 +323,7 @@ def speak_line(metadata) -> str:
     event, place = presence.get("event") or {}, presence.get("place") or {}
     label = place.get("label") or place.get("provider") or presence.get("place_id") or "this place"
     connector = str(presence.get("transport_skill") or "")
-    focus = metadata.get("wake_cause") == "focus"
-    tools = conversation_send_tools(connector) if focus else []
-    gestures = conversation_gesture_tools(connector) if focus else []
+    tools, gestures = conversation_send_tools(connector), conversation_gesture_tools(connector)
     if not tools and not gestures:
         return f"Your non-silent finish is posted in {label} as your words."
     message_id = waking_message_id(event)
@@ -350,7 +363,7 @@ def speak_line(metadata) -> str:
 
 def record_note(ctx) -> str:
     """The one return of a records-only finish that posted nothing and sent nothing in its response: the facts (where
-    words go, what this turn already sent there, how to send) and the two choices. The mind decides; once per run."""
+    words go, what this run already sent there, how to send) and the two choices. The mind decides; once per run."""
     from ouroboros.place_guard import this_turn_sends
     from ouroboros.presence_context import _source_conversation
 
@@ -361,7 +374,7 @@ def record_note(ctx) -> str:
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
                         for row in sends["calls_without_receipt"]) or "none"
     return (f"[FOCUS_FINISH_IS_A_RECORD] Nothing was posted: in {label} (route {route}) your finish is your record, and "
-            f"people hear only what you send. Confirmed sent there by this turn: {sends['confirmed']}. Your own send calls "
+            f"people hear only what you send. Confirmed sent there by this run: {sends['confirmed']}. Your own send calls "
             f"there without a receipt yet: {pending}. {speak_line(metadata)} Send it now, or finish again to keep this "
             "text as your record.")
 
@@ -370,26 +383,27 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     """Speech follows the mind's selection, never delivery receipts: where the place has no in-conversation send
     tool an answer is new speech even after a tool sent an acknowledgement, while ``quiet`` (an explicit silent
     finish or a host-authored final) says nothing new. Where the place speaks by tool (``records_only_now``) the
-    finish is the record: nothing is posted; a finish with words that sent nothing in its own response returns
-    once with the facts (``record_note``), the next is accepted. An admitted handoff stays deferred either way;
-    words that are not speech never ride it (``quiet`` in the completion)."""
+    finish of every root bound to it is the record: nothing is posted; a finish with words that sent nothing in its
+    own response returns once with the facts (``record_note``), the next is accepted. Only the focus turn also owes
+    my human's reply first (R3) and ends its wake quiet; a root it handed off keeps the final its Project reads. An
+    admitted handoff stays deferred either way; words that are not speech never ride it (``quiet`` in the completion)."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
     if not carrier:
         return True, ""
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
-    records = records_only_now(ctx)
-    if records and text and not quiet:
+    records, focus = records_only_now(ctx), _focus_turn(metadata)
+    if records and focus and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
-        if owner_reply_owed(ctx):  # R3 at the common exit: a records-only finish owes my human's reply as a silent one does
+        if owner_reply_owed(ctx):  # R3 at the common exit: a focus's record owes my human's reply as a silent one does
             return False, OWNER_REPLY_OWED_REFUSAL
     if (records and text and not quiet and getattr(ctx, "_completion_riding_send", None) is False
             and not getattr(ctx, "_records_only_noted", False)):
         ctx._records_only_noted = True  # once: the mind then sends, or finishes again to keep its record
         return False, record_note(ctx)
-    if records:
-        ctx._focus_record_only = True  # the loop's wake_silent usage follows the transport (R7)
+    if records and focus:
+        ctx._focus_record_only = True  # the focus's wake_silent usage follows the transport (R7); a root keeps its final
     quiet = quiet or records
     root = canonical_data_root(ctx)
     held = ""
@@ -425,27 +439,20 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
 
 def refusal_facts(ctx) -> str:
     """Host facts beside a refused automatic reply, for the round that follows: where a non-silent finish would be
-    posted and to whom (only where ``final_route`` reads a route; routeless or unsettled, it says that instead), what
-    this turn already sent there (receipts and its own receipt-less calls), and that a silent finish is valid. Facts
-    only; whether to post, rewrite or stay silent is the mind's decision."""
+    posted and to whom (``final_is_speech``; a schedule's run says no connector reads it), what this turn already sent
+    there (receipts and its own receipt-less calls), and that a silent finish is valid. Facts only; whether to post,
+    rewrite or stay silent is the mind's decision."""
     from ouroboros.place_guard import this_turn_sends
-    from ouroboros.presence_context import ROUTED, ROUTELESS, UNKNOWN, _source_conversation, final_route
-    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.presence_context import _source_conversation
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
     if not carrier or records_only_now(ctx):  # a records-only place posts no finish: the record note says so
         return ""
     label, route = _source_conversation(metadata.get("presence") or {})
-    try:
-        state, why = final_route(canonical_data_root(ctx), metadata, getattr(ctx, "task_id", ""))
-    except Exception:
-        state, why = UNKNOWN, "its route could not be read now"
-    posted = f"posted as a new message in {label} (route {route}) to the people there, in your own voice"
-    fate = {ROUTED: f"A non-silent finish_task answer is {posted}.",
-            ROUTELESS: f"No connector reads this run's final in {label} (route {route}): {why}. A non-silent finish_task "
-                       "answer stays this work's record; only a connector tool reaches the people there.",
-            }.get(state, f"Whether a connector reads this run's final is not settled ({why}); if one does, a non-silent "
-                         f"finish_task answer is {posted}.")
+    fate = (f"A non-silent finish_task answer is posted as a new message in {label} (route {route}) to the people "
+            "there, in your own voice." if final_is_speech(metadata) else
+            f"No connector reads this run's final in {label} (route {route}): a non-silent finish_task answer stays "
+            "this work's record; only a connector tool reaches the people there.")
     sends = this_turn_sends(ctx, carrier["conversation_key"])
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
                         for row in sends["calls_without_receipt"]) or "none"

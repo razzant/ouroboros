@@ -1022,24 +1022,23 @@ def _capture_context_core(
                          for section in recent)
     try:
         from ouroboros.consciousness_authority import is_focus_wake
-        from ouroboros.place_reply import reply_carrier
-        from ouroboros.presence_context import ROUTELESS, UNKNOWN, build_presence_context_section, final_route
+        from ouroboros.place_reply import records_only, reply_carrier, speak_line
+        from ouroboros.presence_context import build_presence_context_section
 
         inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
         scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
-        # The same carrier that speaks this root's final names its audience, as far as the published
-        # references settle whether a connector reads it (FOCUS does inline).
+        # The same carrier that speaks this root's final names its audience; where its connector declares a door
+        # the finish is a record and the doors are named instead (FOCUS does both inline).
         spoken = not inline and not scheduled and bool(reply_carrier(task_metadata))
-        route, why = final_route(canonical_root, task_metadata, str(task.get("id") or "")) if spoken else ("", "")
+        records = spoken and records_only(task_metadata)
         presence_section = build_presence_context_section(
             pathlib.Path(env.drive_root),
             task_metadata.get("presence"),
             str(task.get("id") or ""),
             status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
             scheduled=scheduled,
-            answers_conversation=spoken and route != ROUTELESS,
-            unsettled=why if route == UNKNOWN else "",
-            routeless=why if spoken and route == ROUTELESS else "",
+            answers_conversation=spoken and not records,
+            record_line=speak_line(task_metadata) if records else "",
             inline=inline,
         )
         if presence_section:

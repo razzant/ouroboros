@@ -816,7 +816,7 @@ def test_undelivered_send_frames_publish_the_current_producer_contract(tmp_path,
 
     LOCAL_ROOM_UNAVAILABLE: an inline Presence turn's local-room frame with no live queue, worker sink or
     supervisor bus (owner_delivery `_no_consumer`). PEER_DELIVERY_UNSUPPORTED: a non-text frame for an unbound
-    peer, where text still goes. Real Place turns and their receipt words: tests/test_presence_final_route.py
+    peer, where text still goes. Real Place turns and their receipt words: tests/test_presence_send_receipts.py
     and tests/test_owner_live_delivery.py.
     """
     from queue import Queue

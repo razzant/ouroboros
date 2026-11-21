@@ -595,19 +595,20 @@ class WorkerDeath(BaseException):
     """The worker process dies here: nothing after it runs."""
 
 
-def promoted_root(room, monkeypatch, responses, *, chat_id=1, project=None, crash=False):
+def promoted_root(room, monkeypatch, responses, *, chat_id=1, project=None, crash=False, turn_script=None):
     """A root promoted from this conversation keeps the speaker carrier: the real loop and pipeline run it.
 
     A response may be a callable of the messages, like a turn's script; ``None`` is a provider that returns nothing.
     ``chat_id`` is the room it was admitted in (``"place"``: the conversation's own room); ``project`` binds it
     there, as admission does. ``pending`` holds the pipeline's events for the supervisor. ``crash``: the worker
-    dies inside the result store, after its answer was owed."""
+    dies inside the result store, after its answer was owed. ``turn_script`` replaces the source turn's one finish."""
     import queue
 
     from ouroboros import agent_task_pipeline as pipeline, loop
     from ouroboros.tools.registry import ToolRegistry
 
-    room.h.script = [finish(answer="I will compile the report as separate work.")]
+    room.h.script = (list(turn_script) if turn_script is not None
+                     else [finish(answer="I will compile the report as separate work.")])
     body = turn(room)
     room.transport.submit("chat:a:1", body)
     root_id = "promoted-place-root"
@@ -721,6 +722,47 @@ def test_a_promoted_place_root_in_a_project_answers_there_once_beside_its_conver
     assert not [row for row in pending_deliveries(room.data, strict=True) if row.get("task_id") == root.id]
     assert outward == ([] if case == "held" else [answer])
     assert root.stored["metadata"]["presence_outcome"] == ("silent" if case == "held" else "message")
+
+
+def test_a_records_only_handed_off_root_in_a_project_still_answers_there_once(records_room, monkeypatch):
+    """R6 under one speech rule (owner 21.11, 1A): the place hears nothing from the final of a door connector's
+    handed-off root (one return with the record note, then its record), while the internal Project it lives in still
+    receives that final as its ordinary answer, once."""
+    from ouroboros.projects_registry import create_project
+
+    room = records_room
+    project = create_project(room.data, "report", name="Report")
+    answer = "The compiled report is attached above."
+    root = promoted_root(room, monkeypatch, [finish(answer=answer), finish(answer=answer)], chat_id=project["chat_id"],
+                         project=project, turn_script=[finish(silent=True, answer=NOTE)])
+    assert len(root.inputs) == 2 and RECORD_NOTE in json.dumps(root.inputs[-1], ensure_ascii=False)
+    assert root.stored["metadata"]["presence_outcome"] == "silent" and root.stored.get("wake_silent") is not True
+    before = room.transport.texts()
+    room.transport.work[root.id] = "chat:a:1"
+    room.transport.poll()
+    assert room.transport.texts() == before, "nothing from the final reaches the place"
+    supervise(room.data, monkeypatch, root.pending)
+    assert room_speech(room.data, project["chat_id"], root.id) == [answer]
+
+
+def test_my_humans_message_holds_a_records_only_focus_turn_never_a_root_it_handed_off(records_room, monkeypatch):
+    """R3 keeps its scope (owner 21.11, 1A): the focus turn above owes my human's Main message a reply before its
+    records-only finish; a handed-off root's words never went to my human, so its finish is the record note's one
+    return and then its record, never the owed-reply refusal."""
+    from ouroboros.owner_mailbox import write_owner_message
+
+    room = records_room
+
+    def owner_writes_then_finish(_messages):
+        write_owner_message(room.data, "One more thing.", "promoted-place-root", msg_id="owner-1")
+        return finish(answer=FINAL)
+
+    root = promoted_root(room, monkeypatch, [owner_writes_then_finish, finish(answer=FINAL), finish(answer=FINAL)],
+                         turn_script=[finish(silent=True, answer=NOTE)])
+    words = json.dumps(root.inputs, ensure_ascii=False)
+    assert "One more thing." in words, "my human's message reached the root"
+    assert "owner_reply_owed" not in words and RECORD_NOTE in words
+    assert root.stored["result"] == FINAL and root.stored["metadata"]["presence_outcome"] == "silent"
 
 
 @pytest.mark.parametrize("case", ["held", "unbound", "live"])

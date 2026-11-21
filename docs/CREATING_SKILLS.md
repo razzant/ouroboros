@@ -1252,12 +1252,14 @@ Use the connector's ordinary content-hash-bound skill token for:
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
   `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
-  its explicit answer, silence or handoff, never from a delivery receipt. Where the event's own
+  its explicit answer, silence or handoff, never from a delivery receipt; an absent key means an older
+  host without this promise: any confirmed tool receipt may suppress its final. Where the event's own
   connector declares an `effect: message` tool whose targets lie within one conversation (account,
-  its conversation argument, its thread argument), a focus's finish is its record and people hear
-  only what it sends through that tool: the outcome is `silent` and the text stays on the card. A
-  connector without such a tool (a peer URL, mail recipients) keeps the final as its reply. An absent
-  key means an older host without this promise: any confirmed tool receipt may suppress its final.
+  its conversation argument, its thread argument), the finish of every root bound to the place (the
+  focus, a root it handed off, a schedule's run) is its record and people hear only what it sends
+  through that tool: the outcome is `silent` and the text stays on the card. A connector without such a
+  tool (a peer URL) keeps the final as its reply. A connector with one therefore has no final to follow:
+  its custody of an event can close at the admission receipt.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1429,11 +1431,11 @@ its close is acknowledged in its transcript, never read by its model, and starts
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
-message tool (above) a focus's finish, a `finish_task` answer or a tool-less final alike, is its record: a send
-may ride in the same response, a finish with words that sent nothing there returns once with the facts, the
-next is accepted (a Main message pending from the owner is owed first, as for a silent finish); a Silent or
-Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
-any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
+message tool (above) the finish of the focus and of every root promoted or scheduled from it, a `finish_task`
+answer or a tool-less final alike, is its record: a send may ride in the same response, a finish with words that
+sent nothing there returns once with the facts, the next is accepted (the focus owes a Main message pending from
+the owner first, as for a silent finish); a Silent or Paused place and Advises keep the held draft. Where it has
+none, an answer after any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
 Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
 (receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply

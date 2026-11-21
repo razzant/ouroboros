@@ -683,7 +683,7 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     (``completion_request``), the same byte selection and the silence rule of
     ``consume_completion_request``; nothing is staged, executed or acknowledged here."""
     from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
-    from ouroboros.place_reply import records_only_now
+    from ouroboros.place_reply import _focus_turn, records_only_now
     from ouroboros.tools.control_runtime import completion_request
 
     if malformed or not isinstance(parsed, dict) or getattr(parsed, "duplicate_keys", set()):
@@ -692,7 +692,8 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     if error:
         return None, None, "invalid_completion_request: " + error
     text, error = selected_completion_text(request, candidate, messages or [], held_sha256)
-    if not error and tool_ctx is not None and (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
+    if not error and tool_ctx is not None and (request.get("wake_silent") or (  # R3: silence, or a focus's record
+            records_only_now(tool_ctx) and _focus_turn(getattr(tool_ctx, "task_metadata", None)))) and owner_reply_owed(tool_ctx):
         error = OWNER_REPLY_OWED_REFUSAL
     return (None, None, error) if error else (request, text, "")
 
@@ -764,8 +765,9 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     observation = request.get("observation") or {}
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
-    from ouroboros.place_reply import records_only_now, riding_sends
-    if (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
+    from ouroboros.place_reply import _focus_turn, records_only_now, riding_sends
+    if ((request.get("wake_silent") or (records_only_now(tool_ctx) and _focus_turn(getattr(tool_ctx, "task_metadata", None))))
+            and owner_reply_owed(tool_ctx)):  # R3: an explicit silence, or a focus's records-only finish
         error = OWNER_REPLY_OWED_REFUSAL
     calls = (trace.get("tool_calls") or [])[int(observation.get("tool_count") or 0):]
     conflict = getattr(tool_ctx, "_completion_conflict", False)
@@ -1486,7 +1488,7 @@ def _no_tool_final_answer(
         tools._ctx._presence_completion_accepted = True
         limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
         limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
-    if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or records-only finish
+    if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or a focus's records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
     if (getattr(tools._ctx, "_completion_selected", None) or {}).get("fold_read") is True: limit_ctx.accumulated_usage["fold_read"] = True
