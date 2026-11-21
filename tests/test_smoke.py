@@ -484,8 +484,8 @@ def test_js_module_gate_buckets_and_grandfathering():
         ("repo/web/app.js", "x\n" * 2000),                   # gated, over hard gate, not grandfathered
         ("repo/web/modules/chat.js", "x\n" * 4000),          # gated, grandfathered by rel-path
         ("repo/web/vendor/chart.umd.min.js", "x\n" * 9000),  # vendored/minified — excluded
-        ("repo/web/vendor/qrcodegen/qrcodegen.js", "x\n" * 1100),  # vendored under its release's own name — excluded
-        ("repo/web/vendor/qrcodegen/qr_wrapper.js", "x\n" * 1100),  # first-party code beside it — still gated
+        ("repo/web/vendor/qrcodegen/qrcodegen.js", "x\n" * 2000),  # vendored under its release's own name — excluded
+        ("repo/web/vendor/qrcodegen/qr_wrapper.js", "x\n" * 2000),  # first-party code beside it — still gated
         ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — a test module, out of the band
         ("repo/ouroboros/small.py", "x\n" * 10),
     ]
