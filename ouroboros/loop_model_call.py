@@ -59,9 +59,7 @@ def _record_authoring_handover(
     reason: str,
     tool_calls_at_handover: int,
 ) -> None:
-    """Record a host-driven authoring handover for the current loop: not an error (the successor may
-    continue normally) but a typed fact the next tool-less response must see as a continuation when the
-    predecessor already used tools. Kept on the existing ToolContext/usage/trace seams."""
+    """Open the successor’s handover after the predecessor used tools. Trace and usage share its row."""
     source = str(from_model or "").strip()
     target = str(to_model or "").strip()
     if not source or not target or source == target or tool_calls_at_handover < 1:
@@ -71,6 +69,7 @@ def _record_authoring_handover(
         "to_model": target,
         "reason": str(reason or "host_route_change"),
         "tool_calls_at_handover": int(tool_calls_at_handover),
+        "reply_observed": True,
         "recovery_prompted": False,
         "status": "pending",
     }
@@ -85,17 +84,38 @@ def _record_authoring_handover(
         trace.setdefault("route_handovers", []).append(row)
 
 
-def _pending_model_wait_handover(
-    tool_ctx: Any, *, from_model: str, to_model: str, tool_calls: int,
-) -> None:
-    """Hold one distinct wait-switch until its re-prepared send succeeds."""
-    if str(from_model or "") == str(to_model or ""):
+def observe_authoring_response(tool_ctx: Any, model: str, *, forced: bool = False) -> None:
+    """Only a reply transfers authorship. Failed attempts leave the host's reason for the next reply."""
+    reason = getattr(tool_ctx, "_pending_handover_reason", None)
+    tool_ctx._pending_handover_reason = None
+    handover = getattr(tool_ctx, "_authoring_handover", None) or {}
+    trace = getattr(tool_ctx, "_execution_trace", None) or {}
+    usage = getattr(tool_ctx, "_accumulated_usage", None) or {}
+    source = (getattr(tool_ctx, "_completion_observation", None) or {}).get("model")
+    if not handover and model and reason != "mind_switch":
+        # Restore reunites this execution's two copies, but an old route pair proves no reply. Only its target's
+        # actual reply attaches the row, and not after an author the pair does not name or a switch the mind made.
+        routes, rows = trace.get("route_handovers"), usage.get("authoring_handovers")
+        if (isinstance(routes, list) and routes and isinstance(rows, list) and rows
+                and (row := routes[-1]) is rows[-1] and isinstance(row, dict) and row.get("to_model") == model
+                and source in (None, row.get("from_model")) and row.get("reply_observed") is not True
+                and (row.get("status") == "pending" or (row.get("status") == "incomplete"
+                    and trace.get("authoring_handover_incomplete") is row))):
+            row["reply_observed"] = True
+            tool_ctx._authoring_handover = row
+            return
+    if not (reason or handover or forced):
         return
-    pending = getattr(tool_ctx, "_pending_model_wait_handover", None)
-    tool_ctx._pending_model_wait_handover = (
-        pending[0] if pending else str(from_model or ""), str(to_model or ""),
-        pending[2] if pending else int(tool_calls),
-    )
+    if not source:  # A retry under a new ID retains the predecessor's accepted routes in the trace.
+        routes = usage.get("accepted_routes") or trace.get("accepted_routes") or []
+        previous = routes[-1].get("to_binding") if routes else None
+        source = previous[0] if previous else None
+    if reason == "mind_switch":
+        if handover and model != handover.get("to_model"):
+            tool_ctx._authoring_handover = None  # its previous author made no selection
+        return
+    _record_authoring_handover(tool_ctx, from_model=source, to_model=model, reason=reason or "route_change",
+                               tool_calls_at_handover=len(trace.get("tool_calls") or []))
 
 
 def _adopt_fallback_route(
@@ -109,10 +129,6 @@ def _adopt_fallback_route(
     active_context_mode: str,
     tool_schemas: List[Dict[str, Any]],
     accumulated_usage: Dict[str, Any],
-    *,
-    handover_from_model: str = "",
-    handover_reason: str = "fallback",
-    tool_calls_at_handover: Optional[int] = None,
 ) -> tuple:
     """Round-4 C1.1: adopt a cross-family fallback (usable, or its reply allowance spent) for the rest of the loop with its
     sanitized transcript, so a later round never replays THIS fallback's reasoning to the primary family unsanitized; the caller already
@@ -120,18 +136,6 @@ def _adopt_fallback_route(
     ctx.active_model = fallback_model
     ctx.active_use_local = fallback_use_local
     messages[:] = fallback_messages
-    trace = getattr(ctx, "_execution_trace", None)
-    trace_calls = trace.get("tool_calls") if isinstance(trace, dict) else []
-    _record_authoring_handover(
-        ctx,
-        from_model=handover_from_model,
-        to_model=fallback_model,
-        reason=handover_reason,
-        tool_calls_at_handover=(
-            len(trace_calls or [])
-            if tool_calls_at_handover is None else int(tool_calls_at_handover)
-        ),
-    )
     if context_fit_plan is not None:
         tools._ctx.context_fit_plan = context_fit_plan
         tools._ctx.messages = messages
@@ -294,6 +298,7 @@ def _run_cross_model_fallback_chain(
                     getattr(tools._ctx, "_route_left_out_tool_names", None))
         failure_before, meta_before = accumulated_usage.get("_last_llm_failure"), accumulated_usage.get("_last_llm_call_meta")
         told = tell_failed_attempt(fallback_messages, facts, asked)  # before this candidate's fit measurement and send
+        tools._ctx._pending_handover_reason = reason or "fallback"
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
         previous_model, previous_use_local = candidate_call.active_model, candidate_call.active_use_local
         fresh = accumulated_usage.get("_last_llm_failure") is not failure_before  # output recovery's gate sends nothing, keeps it
@@ -317,11 +322,6 @@ def _run_cross_model_fallback_chain(
                 candidate_mode,
                 tool_schemas,
                 accumulated_usage,
-                # The predecessor author is the route whose round entered this
-                # fallback chain.  ``previous_model`` may name a candidate that
-                # failed before the successful candidate ever authored a turn.
-                handover_from_model=active_model,
-                handover_reason=reason or "fallback",
             )
             own_call = own_call_record(accumulated_usage, msg is not None, meta_before, failure_before)
             tools._ctx._route_facts_pending = "" if is_primary else route_facts_text(
@@ -381,6 +381,8 @@ def _run_cross_model_fallback_chain(
             active_use_local=active_use_local, active_context_mode=active_context_mode,
             drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
         retry_call.defer_resource_wait = False
+        if deferred_candidate is not None:
+            tools._ctx._pending_handover_reason = "owner_wait"
         _disclose_unknown(retry_call.messages, "The previous attempt ended without a usable answer; "
                                                "the host is preparing another request after the owner's answer.")
         # An owner may select a DIFFERENT account on either the primary or a
@@ -402,8 +404,7 @@ def _run_cross_model_fallback_chain(
             active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
                 ctx, tools, retry_call.active_model, retry_call.active_use_local,
                 messages, retry_call.messages, retry_call.context_fit_plan, active_context_mode,
-                tool_schemas, accumulated_usage, handover_from_model=active_model,
-                handover_reason="owner_wait")
+                tool_schemas, accumulated_usage)
             tools._ctx._route_facts_pending = route_facts_text(
                 tools._ctx, model=active_model, use_local=active_use_local, role=role, failed_model=entry_model,
                 failure=entry_failure, waiter=waiter, usage=accumulated_usage, round_idx=round_idx, own_call=own_call)
@@ -917,7 +918,7 @@ def _dispatch_round_model(
             stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx, mailbox_peek=mailbox_peek)) if attempt_cap is None else None,
             owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
             allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
-            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition is not None else None),
+            physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
             candidate_predicate=candidate_predicate, physical_fit_predicate=admit, model_role=role, model_account_override=account,
             processing_preference=task_processing_preference(
                 {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role),
@@ -944,18 +945,12 @@ def _dispatch_round_model(
             ctx.accumulated_usage[RESOURCE_REFUSAL_KEY] = deferral.terminal(fallbacks_tried=[], owner_wait="not_allowed")
     elif deferral is not None and deferral.fact and result[0] is None:
         ctx.tools._ctx._deferred_resource_refusal = deferral
-    pending_wait_handover = getattr(ctx.tools._ctx, "_pending_model_wait_handover", None)
-    if pending_wait_handover is not None:
-        if result[0] is not None:
-            from_model, to_model, tool_count = pending_wait_handover
-            _record_authoring_handover(
-                ctx.tools._ctx,
-                from_model=from_model,
-                to_model=to_model,
-                reason="model_wait",
-                tool_calls_at_handover=tool_count,
-            )
-        ctx.tools._ctx._pending_model_wait_handover = None
+    if result[0] is not None:
+        from ouroboros.primary_route_observation import own_call_record
+        call = own_call_record(ctx.accumulated_usage, True, previous_call, None)
+        author = call.get("model") or ctx.active_model
+        observe_authoring_response(ctx.tools._ctx, author)
+        ctx.tools._ctx._completion_observation["model"] = author
     from ouroboros.primary_route_observation import record_round_route_result
     record_round_route_result(ctx, role, accepted=result[0] is not None)
     observed = ctx.accumulated_usage.get("_model_route")
@@ -1018,13 +1013,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
         ctx.tools._ctx.route_choice = explicit("wait_card")
     if _fit_route_tool_ceiling(ctx):  # an owner's switch may land on a route with a schema ceiling
         kwargs["tools"] = ctx.tool_schemas
-    trace = getattr(ctx.tools._ctx, "_execution_trace", {})
-    _pending_model_wait_handover(
-        ctx.tools._ctx,
-        from_model=previous_model,
-        to_model=str(model or ""),
-        tool_calls=len(trace.get("tool_calls") or []) if isinstance(trace, dict) else 0,
-    )
+    if model != previous_model:
+        ctx.tools._ctx._pending_handover_reason = "model_wait"
     _project_wake_input(ctx)
     # The physical pre-send predicate rechecks this newly adopted route before dispatch.
     from ouroboros.loop_messages import append_context_facts
@@ -1056,7 +1046,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
                                          and not use_local and provider_for_model(model) != "claudexor")
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
-    physical = with_attempt_prefix(_physical_context_for_fit(disposition), ctx.accumulated_usage) if disposition else None
+    physical = with_attempt_prefix(_physical_context_for_fit(disposition, ctx.context_fit_plan), ctx.accumulated_usage) if disposition else None
     if physical is not None:  # the remaining attempts of this call send under the new route's measurement
         ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())

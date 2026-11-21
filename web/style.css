@@ -7278,6 +7278,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     overflow: hidden;
 }
 
+.widgets-context-tools, .widgets-context-report:not([hidden]) { margin-block-start: var(--space-4); }
+.widgets-context-report iframe { display: block; width: 100%; height: clamp(20rem, 78vh, 60rem); border: 0; }
+
 .skills-scroll,
 .widgets-scroll {
     flex: 1;

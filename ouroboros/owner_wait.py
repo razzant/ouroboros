@@ -254,7 +254,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "active_model", "active_effort", "active_use_local", "active_context_mode",
             "active_model_override", "active_effort_override", "active_use_local_override",
             "active_role_override", "route_wait_on_primary", "primary_route", "_route_facts_pending",
-            "route_choice",  # following its role, or the task's own (route_choice)
+            "route_choice", "_pending_handover_reason",  # a host switch may still be waiting for its first reply
             "_lead_episode", "_lead_cause", "_lead_return_from", "_lead_role",  # one departure fact, including an unaccepted return
             "_owner_model_applied_id",  # only a completed handover survives a checkpoint
             "_owner_processing_applied_id",  # a tier act the mind was already told of
@@ -1223,6 +1223,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
               if key in {"_acceptance_pending_review_choice", "_left_review_wait", *_RESULT_REVIEW_SHOWN}}
     for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
+    from ouroboros.loop_nudges import restore_authoring_handover
+
+    restore_authoring_handover(ctx, state, trace, usage)
     if "_completion_request" in state["delivery"] and "_completion_conflict" not in state["delivery"]:
         ctx._completion_conflict = None  # saved before this fact rode beside its request: unknown, not "no conflict"
     from ouroboros.route_choice import restored_choice

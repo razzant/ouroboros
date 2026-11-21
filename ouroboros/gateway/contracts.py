@@ -1191,6 +1191,9 @@ class TaskDetailResponse(TypedDict, total=False):
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
     review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?, skills?} (review_overrides.py)
+    # Host switches after tool use: {from_model, to_model, status, selection?, work_observed?, reply_observed?}.
+    # reply_observed=true confirms a reply; legacy rows may not say. Absent list means history unavailable.
+    authoring_handovers: List[Dict[str, Any]]
     place_origin: Dict[str, Any]  # ChatOutbound.place_origin's shape, from the task's own admitted focus; absent elsewhere
     error: str
 

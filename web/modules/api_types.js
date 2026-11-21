@@ -1232,6 +1232,7 @@
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
  * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}, skills?:{count:number, latest:{skill:string, reason:string, door:string, at:string, task_id:string}, seen:string[]}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
+ * @property {Array<{from_model:string, to_model:string, status:'selected'|'recovered'|'incomplete'|'pending'|string, selection?:'answer'|'answer_sha256'|'silent'|'stop'|string, work_observed?:boolean, reply_observed?:boolean}>=} authoring_handovers
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */
@@ -1256,7 +1257,6 @@
  * @typedef {"ok"|"not_read"|"failed"} ClaudexorReadState
  */
 /**
- * Independent facets: ok=authoritative, not_read=never asked or discarded, failed=no usable answer. Empty without ok proves nothing.
  * @typedef {Object} ClaudexorStatusReads
  * @property {ClaudexorReadState} catalog
  * @property {ClaudexorReadState} accounts

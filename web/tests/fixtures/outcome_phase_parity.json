@@ -99,7 +99,7 @@
         "outcome_axes": {"execution": {"status": "degraded"}, "objective": {"status": "not_evaluated"}}
       },
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "The replacement model stopped before resuming tool work."
+      "acceptance_clause": "The saved result records an incomplete model handover."
     },
     {
       "name": "definite pre-branch publication failure stays Failed beside degraded review",
