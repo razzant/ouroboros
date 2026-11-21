@@ -693,15 +693,22 @@ def touched_band_errors(
 
 def _touched_paths(root: pathlib.Path, base: str, candidate: str | None) -> frozenset[str]:
     """Paths whose file differs between ``base`` and ``candidate`` (a tree-ish; ``None`` is the
-    worktree with its untracked files); a Git failure raises."""
-    def names(*args: str) -> set[str]:
-        out = subprocess.run(["git", "--no-optional-locks", *args], cwd=root, check=True, capture_output=True).stdout
-        return {item.decode("utf-8") for item in out.split(b"\0") if item}
+    worktree with its untracked files: a file only the index dropped, ``git rm --cached``, is
+    touched when Git would add it with other content or mode); a Git failure raises."""
+    def names(*args: str, env: Mapping[str, str] | None = None) -> set[str]:
+        run = subprocess.run(["git", "--no-optional-locks", *args], cwd=root, check=True, capture_output=True, env=env)
+        return {item.decode("utf-8") for item in run.stdout.split(b"\0") if item}
 
     if candidate is not None:
         return frozenset(names("diff-tree", "-r", "--no-renames", "--name-only", "-z", base, candidate))
-    return frozenset(names("diff", "--no-renames", "--name-only", "-z", base, "--")
-                     | names("ls-files", "--others", "--exclude-standard", "-z"))
+    changed = names("diff", "--no-renames", "--name-only", "-z", base, "--")
+    untracked, same = names("ls-files", "--others", "--exclude-standard", "-z"), set()
+    if kept := sorted(changed & untracked):  # deleted from the index, still on disk: add it to a scratch index
+        with tempfile.TemporaryDirectory(prefix="ouroboros-ratchet-index-") as tmp:
+            scratch = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index"), "GIT_LITERAL_PATHSPECS": "1"}
+            names("update-index", "--add", "--info-only", "--", *kept, env=scratch)
+            same = set(kept) - names("diff-index", "--cached", "--name-only", "-z", base, "--", *kept, env=scratch)
+    return frozenset((changed | untracked) - same)
 
 
 def _touched_findings(

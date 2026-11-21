@@ -452,6 +452,26 @@ def test_the_rule_reads_what_the_candidate_touched_and_an_unchanged_tree_stays_g
     assert regenerate.main(["--band-rationale", "low.py=no such module"]) == 2
 
 
+def test_a_file_only_the_index_dropped_is_touched_when_git_would_add_it_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``git rm --cached`` with the same file kept on disk touches nothing, so the live check and the
+    regenerator stay green; kept with other content or another mode it is touched; a staged deletion passes."""
+    repo = _band_repo(tmp_path, {"gap.py": 1599}, _manifest())
+    monkeypatch.setattr(regenerate, "REPO_ROOT", repo)
+    _git(repo, "rm", "-q", "--cached", "gap.py")
+    assert validate_size_ratchet(repo) == []
+    assert regenerate.main([]) == 0
+    _write_lines(repo / "gap.py", 1598)
+    assert validate_size_ratchet(repo) == ["touched 1598-line module needs a nonblank band rationale: gap.py"]
+    if os.name != "nt":  # a Windows checkout keeps no executable bit
+        _write_lines(repo / "gap.py", 1599)
+        (repo / "gap.py").chmod(0o755)
+        assert validate_size_ratchet(repo) == ["touched 1599-line module needs a nonblank band rationale: gap.py"]
+    (repo / "gap.py").unlink()
+    assert validate_size_ratchet(repo) == []
+
+
 def test_the_pairwise_check_reads_touched_modules_when_the_manifest_did_not_change(tmp_path: Path) -> None:
     repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
     base = _git(repo, "rev-parse", "HEAD")
