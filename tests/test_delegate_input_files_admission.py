@@ -247,18 +247,27 @@ def test_a_session_workspace_root_preserves_explicit_resource_and_leaf_scope(cha
     assert child.workspace_root == pathlib.Path(rt.repo).resolve()
 
 
-def test_a_tampered_retained_copy_refuses_the_first_start(chain, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("ranged", [False, True], ids=["file", "range"])
+def test_a_tampered_retained_copy_refuses_the_first_start(chain, monkeypatch, ranged):  # noqa: F811
+    from tests.test_delegate_input_files import _range_fixture
+
     rt, _parent, engine, sid = chain
     _parent_files(rt)
-    _reply, event = _schedule(chain, sid, input_files=SELECTION[:1])
+    selection = SELECTION[:1]
+    if ranged:
+        _range_fixture(rt.repo / "nested")
+        selection = [{"git_range": {"repository": "nested", "base": "before", "head": "after"}}]
+    _reply, event = _schedule(chain, sid, input_files=selection)
     _admit(rt, event)
     payload = _restore(rt)
-    pathlib.Path(event["prepared_input_files"][0]["local"]).write_bytes(b"tampered\n")
+    target = next(row for row in event["prepared_input_files"] if not ranged or row["path"] == "range.patch")
+    pathlib.Path(target["local"]).write_bytes(b"tampered\n")
     child, wake = _session_first_start(chain, monkeypatch, payload)
     assert engine.of("run") == [] and not wake, wake  # a zero-spend terminal, its typed reason kept for the parent
     refusal = child._configured_startup_refusal
     assert refusal["reason"] == "input_files_unavailable", refusal
-    assert [row["status"] for row in refusal["input_files"]] == ["changed"]
+    assert [(row["path"], row["status"]) for row in refusal["input_files"] if row["status"] == "changed"] == [
+        (target["path"], "changed")]
 
 
 def test_losing_resource_intent_reproduces_a_folderless_leaf_scope_mismatch(chain, monkeypatch):  # noqa: F811
@@ -297,7 +306,7 @@ def test_prose_only_worktrees_are_not_selected_or_claimed_prepared(chain, monkey
     _, wake = _session_first_start(chain, monkeypatch, _restore(rt))
     assert json.loads(wake)["status"] == "configured_session_started"
     (_, _, body), = engine.of("run")
-    manifest = json.loads((pathlib.Path(body["scope"]["root"]) / "inputs.json").read_text())
+    manifest = json.loads((pathlib.Path(body["scope"]["root"]) / "inputs.json").read_text(encoding="utf-8"))
     assert any(item["source"] == str(drive / "brief.md") for item in manifest)
     assert not any(str(root) in item["source"] for item in manifest for root in worktrees)
 
@@ -373,26 +382,45 @@ def test_a_parent_on_its_own_drive_retains_canonically_and_its_child_still_reads
     assert "parent brief" in _native_read(rt, payload, monkeypatch, path=row["local"])
 
 
-def test_under_an_inherited_presence_ceiling_a_native_child_reads_exactly_its_copies(chain, monkeypatch):  # noqa: F811
-    """The source passes the parent's Presence ceiling; the child, under that same inherited ceiling, reads its
-    retained copies and nothing else in that store, with no artifact or runtime grant."""
+@pytest.mark.parametrize("fixed_runtime_root", [False, True], ids=["inferred", "fixed-runtime-data"])
+def test_inherited_presence_input_matches_the_receiving_childs_scope(chain, monkeypatch, fixed_runtime_root):  # noqa: F811
+    """A detached drive keeps its dispatch coordinates; copies of admitted sources keep their exact read grant."""
+    from ouroboros.presence_authority import PresenceArgumentBinding
+    from ouroboros.tools.control_scheduling import _schedule_task
+    from ouroboros.tools.registry import ToolRegistry
     from tests.test_delegate_input_files import _presence
 
     rt, parent, _engine, _sid = chain
     drive = _parent_files(rt)
     (rt.drive / "elsewhere.md").write_bytes(b"ungranted runtime data\n")
-    _presence(parent, ("task_drive", "."))  # the task drive only: no artifact_store or runtime_data grant
-    parent.pending_events.clear()
-    from ouroboros.tools.control_scheduling import _schedule_task
+    sid = _api_row(monkeypatch)
+    if fixed_runtime_root:
+        _presence(parent, ("runtime_data", drive.relative_to(rt.drive).as_posix()), read_bindings=(
+            PresenceArgumentBinding(("root",), "static", static_value="runtime_data"),))
+        selection = [{"root": "runtime_data", "path": str(drive / row["path"])} for row in SELECTION]
+        _, event = _schedule(chain, sid)
+        _admit(rt, event)
+        assert "PRESENCE_RESOURCE_BLOCKED" in _native_read(rt, _restore(rt), monkeypatch, **selection[0])
+        registry = ToolRegistry(repo_dir=rt.repo, drive_root=rt.drive)
+        registry.set_context(parent)
+        assert "parent brief" in registry.execute("read_file", selection[0])
+        parent.pending_events.clear()
+        denied = _schedule_task(parent, subagent_id=sid, objective="Read", expected_output="Summary",
+                                memory_mode="empty", input_files=selection)
+        assert '"status": "denied"' in denied and "PRESENCE_RESOURCE_BLOCKED" in denied, denied
+        assert not parent.pending_events
+        return
 
-    refused = _schedule_task(parent, subagent_id=_api_row(monkeypatch), objective="Read", expected_output="Summary",
+    _presence(parent, ("task_drive", "."))
+    refused = _schedule_task(parent, subagent_id=sid, objective="Read", expected_output="Summary",
                              memory_mode="empty", input_files=[{"root": "runtime_data", "path": "elsewhere.md"}])
     assert "PRESENCE_RESOURCE_BLOCKED" in refused and not parent.pending_events, refused
-    _reply, event = _schedule(chain, _api_row(monkeypatch), input_files=SELECTION)
+    _reply, event = _schedule(chain, sid, input_files=SELECTION)
     rows = event["prepared_input_files"]
     _admit(rt, event)
     payload = _restore(rt)
     assert payload["task_contract"]["capability_ceiling"] == parent.task_contract["capability_ceiling"], "inherited"
+    assert "parent brief" in _native_read(rt, payload, monkeypatch, root="task_drive", path=str(drive / "brief.md"))
     (drive / "brief.md").write_bytes(b"edited after queueing\n")
     text = _native_read(rt, payload, monkeypatch, path=rows[0]["local"])
     assert "parent brief" in text and "PRESENCE" not in text, text
@@ -401,3 +429,127 @@ def test_under_an_inherited_presence_ceiling_a_native_child_reads_exactly_its_co
     assert "PRESENCE_RESOURCE_BLOCKED" in _native_read(rt, payload, monkeypatch, root="runtime_data", path="elsewhere.md")
     pathlib.Path(rows[0]["local"]).write_bytes(b"tampered\n")  # a copy whose bytes no longer match is not admitted
     assert "PRESENCE_RESOURCE_BLOCKED" in _native_read(rt, payload, monkeypatch, path=rows[0]["local"])
+
+
+@pytest.mark.parametrize("consumer", ["session", "api"])
+def test_frozen_range_reaches_the_reader_after_refs_move(chain, monkeypatch, tmp_path, consumer):  # noqa: F811
+    import subprocess
+
+    from tests.test_delegate_input_files import _expected_range, _range_fixture, _unescape_range
+
+    rt, _parent, engine, sid = chain
+    repo = rt.repo / "source"
+    commits, _trees = _range_fixture(repo)
+    literal = "readme[1]"
+    expected = _expected_range(repo, commits, literal)
+    child_folder = rt.repo / "child"
+    child_folder.mkdir()
+    _, event = _schedule(chain, _api_row(monkeypatch) if consumer == "api" else sid,
+                         workspace_root=str(child_folder), input_sources="declared", input_files=[
+                             {"git_range": {"root": "system_repo", "repository": "source",
+                                            "base": "before", "head": "after", "path": literal}}])
+    subprocess.run(["git", "update-ref", "refs/heads/after", commits["base"]], cwd=repo, check=True)
+    _admit(rt, event)
+    payload = _restore(rt)
+    if consumer == "session":
+        _, wake = _session_first_start(chain, monkeypatch, payload)
+        rows = json.loads(wake)["startup"]["input_files"]
+        (_, _, body), = engine.of("run")
+        assert body["scope"]["root"] == str(child_folder)
+        assert all(row["local"] in body["instructions"] for row in rows)
+        assert all(row["source"] == str(repo) for row in rows)
+    else:
+        rows = payload["prepared_input_files"]
+        first = _text_of(_first_input(tmp_path, payload)[0])
+        assert all(row["local"] in first for row in rows)
+    paths = {row["path"]: row["local"] for row in rows}
+    if consumer == "api":
+        def read_text(name):
+            rendered = _native_read(rt, payload, monkeypatch, path=paths[name])
+            return "".join(line.split("\t", 1)[1] for line in rendered.splitlines(keepends=True)[1:])
+
+        manifest = json.loads(read_text("range.json"))
+        view = manifest["patch"]["text_view"]
+        assert view["encoding"] == "utf8-byte-escapes-v1"
+        recovered = _unescape_range(read_text(view["name"]))
+    else:
+        manifest = json.loads(pathlib.Path(paths["range.json"]).read_bytes())
+        recovered = pathlib.Path(paths["range.patch"]).read_bytes()
+    assert manifest["commits"] == commits and manifest["changes"] == [{"path": literal, "status": "M"}]
+    assert recovered == expected and manifest["patch"]["sha256"] == hashlib.sha256(expected).hexdigest()
+
+
+def test_historic_entry_with_static_user_files_root_uses_normal_dispatch(chain):  # noqa: F811
+    from ouroboros.delegate_readonly_inputs import admit_selected_source, selected_read_binding
+    from ouroboros.presence_authority import PresenceArgumentBinding
+    from tests.test_delegate_input_files import _presence
+
+    rt, parent, _, _ = chain
+    entry = (rt.repo / "note.txt").resolve()
+    entry.write_bytes(b"fixture note\n")
+    _presence(parent, ("active_workspace", "note.txt"), read_bindings=(
+        PresenceArgumentBinding(("root",), "static", static_value="user_files"),))
+    # The normal read dispatcher routes a user_files spelling inside the active workspace back to it.
+    binding = selected_read_binding(parent, {"root": "active_workspace", "path": str(entry)},
+                                    exact=entry, historic=True)
+    assert binding.root == "active_workspace" and binding.target_path == entry
+    admit_selected_source(parent, binding, entry=entry)
+
+
+@pytest.mark.parametrize("replacement", [[], [{"root": "system_repo", "path": "own.txt"}]], ids=["empty", "file"])
+@pytest.mark.parametrize("ranged", [False, True], ids=["ordinary-source", "range-source"])
+def test_first_start_override_after_unrun_keeps_original_out_of_effective_inputs(chain, monkeypatch, replacement, ranged):  # noqa: F811
+    from ouroboros import subagent_runtime
+    from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, work_order_fingerprint
+    from ouroboros.tools import delegate
+    from tests.test_delegate_input_files import _range_fixture
+
+    rt, _, engine, sid = chain
+    # Keep the real configured actor: the shared transport fixture substitutes a row without its work-order flag.
+    monkeypatch.setattr(delegate, "prepare_delegate_start_actor", subagent_runtime.prepare_delegate_start_actor)
+    if ranged:
+        _range_fixture(rt.repo / "source")
+    (rt.repo / "own.txt").write_bytes(b"replacement input\n")  # LF on every platform: the copy is compared as bytes
+    _parent_files(rt)
+    original = [{"git_range": {"repository": "source", "base": "before", "head": "after"}}] if ranged else SELECTION[:1]
+    _, event = _schedule(chain, sid, access="readonly", attachment_paths=["attachments/brief.md"], input_files=original)
+    task = _admit(rt, event)
+    payload = _restore(rt)
+    assert event[ORIGINAL_INPUTS_FACT] is task[ORIGINAL_INPUTS_FACT] is payload[ORIGINAL_INPUTS_FACT] is True
+    engine.faults = [("import", "lose")]
+    child, wake = _session_first_start(chain, monkeypatch, payload)
+    assert wake and not engine.of("run")
+    assert child._configured_actor_bootstrap["work_order_fingerprint"] == work_order_fingerprint(payload)
+    started = json.loads(subagent_runtime.delegate_start_entry(child, "", input_files=replacement).text)
+    assert started["status"] == "started", started
+    (_, _, body), = engine.of("run")
+    assert "Original schedule-time selection" in body["prompt"]
+    assert all(row["local"] not in body["instructions"] for row in event["prepared_input_files"])
+    assert "replaces the original schedule-time selection" in body["instructions"]
+    rows = started["input_files"]
+    if replacement:
+        row, = rows
+        assert row["path"] == "own.txt" and row["local"] in body["instructions"]
+        assert pathlib.Path(row["local"]).read_bytes() == b"replacement input\n"
+    else:
+        assert not rows and "effective explicit selection is empty" in body["instructions"]
+
+
+def test_selected_inputs_section_bytes_are_frozen_for_legacy_and_original_only_orders():
+    """The exact text a work order carries for its selection joins its fingerprint after an Update:
+    a record without the fact keeps its recorded bytes; one with it names the original selection."""
+    import hashlib
+
+    from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, _selected_input_files, work_order_fingerprint
+
+    rows = [{"root": "active_workspace", "path": "a.txt", "sha256": "a" * 64, "size": 3},
+            {"root": "system_repo", "path": "range.patch", "source": "/r", "sha256": "d" * 64, "size": 9,
+             "git_range": {"base": "b" * 40, "head": "c" * 40, "path": "src"}}]
+    legacy, original = {"prepared_input_files": rows}, {"prepared_input_files": rows, ORIGINAL_INPUTS_FACT: True}
+    digest = lambda task: hashlib.sha256(_selected_input_files(task).encode()).hexdigest()  # noqa: E731
+    assert digest(legacy) == "c1120a8b61287f6920705554859c9b9f14fc449fbbeade6842e1d9536200c374"
+    assert digest(original) == "60ae6656380b0f1ec1da523314ba93cd2a9f28b5d9f002e33310f37f6458e11d"
+    assert digest({"prepared_input_files": rows, "metadata": {ORIGINAL_INPUTS_FACT: True}}) == digest(original)
+    assert _selected_input_files(original).startswith("Original schedule-time selection (input_files).")
+    task = {"id": "kid", "objective": "Read", "expected_output": "Findings", **legacy}
+    assert work_order_fingerprint(task) != work_order_fingerprint({**task, ORIGINAL_INPUTS_FACT: True})

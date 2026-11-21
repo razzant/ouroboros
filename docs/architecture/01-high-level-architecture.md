@@ -273,7 +273,7 @@ ouroboros/ — agent core and shared runtime (§6)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
   delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py, delegate_accepted.py — exact-leaf recovery, `continue_from` after any stop, a lost start's lookup/replay by key (§6 Delegated subagents)
-  delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_documents.py — registration/taken/history, STARTED fields, lineage/selected files and documents (§6)
+  delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_git_range.py, delegate_documents.py — registration, taken/history, STARTED fields, lineage/files/diffs/docs (§6)
   delegate_terminal.py, owner_stop_receipt.py — terminal reconciliation, audit-only custody persistence, typed custody card rows, Wrap up's saved-work receipt (§6 Delegated subagents)
   subagent_dispatch_notes.py — executor-note exports shared with `agent.py`; `agent_dispatch.py` implements the note/blocked-outcome pair
   subagent_messages.py, subagents.py, subagent_history.py, subagent_metrics.py, subagent_metric_events.py — child messages, dispatch, dated row measurements, no admission policy (§6)
@@ -364,7 +364,7 @@ ouroboros/ — agent core and shared runtime (§6)
   extension_ui_validation.py, extension_widget_assets.py — Widget/contribution schema and finite browser-file capture (§3)
   extension_contributions.py — Manifest staging, captured host assets and revision URLs
   extension_isolated_deps.py — non-reentrant reader/writer leases for `sys.path`; the dependency RLock serializes importer-cache sweeps, not plugin execution
-  extension_health.py — Durable process-qualified per-skill health at `data/state/skills/<name>/health.json`; server observation is authoritative, worker observation a handoff-qualified view
+  extension_health.py — Process-qualified skill health and companion failures (§12)
   extension_plugin_api.py, extension_registry_state.py, extension_liveness.py, extension_child_catalog.py, extension_import_staging.py, extension_surface_names.py — the extension runtime's leaves: the `PluginAPI`, live-surface registries, liveness, child-catalog validation, staged import trees, surface naming
   live_conversation.py — Ordinary actor host port: common context, tools, history, money and Stop (§13)
   live_timing.py — Renewal boundaries assembled into the existing call timing journal (§13)

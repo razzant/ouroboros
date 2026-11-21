@@ -950,14 +950,15 @@ class SkillGrantResponse(TypedDict, total=False):
     granted_permissions: list[str]
     turn_on_when_ready: str
     setup_error: str  # grants succeeded; the requested setup did not
-    enabled: bool  # present when this grant also carried the owner's Enable
-    extension_action: str
-    extension_reason: str
-    load_error: str
+    enabled: bool  # present with the owner's Enable, except a grants refusal over an unreadable enabled.json
+    extension_action: Optional[str]  # null, as live_loaded, when no reconcile answered (an Enable refused first)
+    extension_reason: Optional[str]
+    load_error: Optional[str]
     grants: Dict[str, Any]
     process: str
     server_reconcile: str
-    live_loaded: bool
+    live_loaded: Optional[bool]
+    retained_companions: Dict[str, str]  # as SkillToggleResponse: registered names awaiting confirmed exit
     error: str
 
 
@@ -1492,6 +1493,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "log",
     "heartbeat",
     "extension_lifecycle",
+    "extension_health_changed",
     "message_annotation",
     "projects_changed",
     "ui_preferences_changed",

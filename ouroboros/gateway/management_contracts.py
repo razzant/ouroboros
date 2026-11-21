@@ -19,6 +19,12 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 
 # --- Skills and extensions ---------------------------------------------------------------------
 
+class ExtensionHealthChangedOutbound(TypedDict):
+    """Invalidates the Skills listing; the frame carries no health data."""
+
+    type: Literal["extension_health_changed"]
+
+
 class SkillMcpServerFact(TypedDict):
     """One declared server's passive state in an installed skill's ``mcp_servers`` list."""
 
@@ -49,6 +55,7 @@ class InstalledSkill(TypedDict, total=False):
     source: Required[str]  # native | clawhub | ouroboroshub | external | self_authored | user_repo
     content_hash: Required[str]  # the revision every expected_content_hash names
     payload_root: Required[str]  # skills/<bucket>/<dir>, or ""
+    manifest_file: str  # the manifest the loader parsed; "" when none was readable (permissions/grants are then a placeholder)
     installed_at: Required[str]
     removal: str  # uninstall | delete | "": the server's available removal action
     review_status: str  # clean | warnings | blockers | pending
@@ -64,6 +71,7 @@ class InstalledSkill(TypedDict, total=False):
     desired_live: bool
     live_loaded: bool
     live_reason: str
+    retained_companions: Dict[str, str]  # registered names awaiting confirmed exit, with supervisor reasons
     process: str  # "", server or worker
     server_reconcile: str
     health_regressed: bool
@@ -82,6 +90,7 @@ class InstalledSkill(TypedDict, total=False):
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
+    collision_row_id: str  # display identity for one colliding directory, never an operation target
     # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
     # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
     # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
@@ -199,6 +208,8 @@ class SkillToggleResponse(TypedDict, total=False):
     grants: Dict[str, Any]
     extension_action: Optional[str]  # extension_loaded | extension_unloaded | ... ; null for non-extensions
     extension_reason: Optional[str]
+    load_error: Optional[str]  # as SkillReconcileResponse: an unfinished repair's words, the switch staying On
+    retained_companions: Dict[str, str]
     process: str
     server_reconcile: str
 
@@ -227,6 +238,7 @@ class SkillActionRefusal(TypedDict, total=False):
     enabled: bool
     extension_action: Optional[str]
     extension_reason: Optional[str]
+    retained_companions: Dict[str, str]  # a failed Enable's pending exits, as SkillToggleResponse
     process: str
     server_reconcile: str
     load_error: Optional[str]
@@ -355,6 +367,7 @@ class SkillReconcileResponse(TypedDict):
     extension_reason: Optional[str]
     live_loaded: bool
     load_error: Optional[str]
+    retained_companions: NotRequired[Dict[str, str]]  # may coexist with a separate load error
     process: str
     server_reconcile: str
 
@@ -1413,6 +1426,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 
 __all__ = [
+    "ExtensionHealthChangedOutbound",
     "SkillMcpServerFact", "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
     "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",

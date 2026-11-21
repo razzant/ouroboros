@@ -1057,13 +1057,14 @@
  * @property {string[]=} granted_permissions
  * @property {string=} turn_on_when_ready
  * @property {string=} setup_error
- * @property {string=} extension_action
- * @property {string=} extension_reason
- * @property {string=} load_error
+ * @property {?string=} extension_action  // null, as live_loaded, when no reconcile answered (an Enable refused first)
+ * @property {?string=} extension_reason
+ * @property {?string=} load_error
  * @property {Object=} grants
  * @property {string=} process
  * @property {string=} server_reconcile
- * @property {boolean=} live_loaded
+ * @property {?boolean=} live_loaded
+ * @property {Object<string,string>=} retained_companions  // as SkillToggleResponse
  * @property {string=} error
  */
 

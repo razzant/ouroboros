@@ -35,6 +35,7 @@ from ouroboros.config import (
 )
 from ouroboros.cost_projection import with_cost_aliases
 from ouroboros.model_slots import ResolvedModelTarget
+from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT
 
 log = logging.getLogger(__name__)
 
@@ -662,6 +663,7 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     # A read-only child's explicit ``input_files``, retained at schedule time (DELEGATED_ADMISSION §3b):
     # the receipt its first input names and its first session start verifies. [] records an explicit none.
     "prepared_input_files",
+    ORIGINAL_INPUTS_FACT,
     # A parent's widening of its child's memory view by field (``schedule_subagent(memory_view=…)``); the child's start checks it.
     "memory_view",
     # The parent's resolved resource intent is required to preserve folderless scratch versus an explicit folder
