@@ -781,6 +781,8 @@ def search_failure_usage(error: BaseException, payload: Any, reported: Any, *, w
 
 def priced_failure_usage(error: BaseException, payload: Any, provider: str):
     """Read a failed send's own prices, without deriving a free rejection from zero token counts."""
+    import httpx
+    from ouroboros.llm_stream import IncompleteProviderStream
     from ouroboros.transport_custody import is_processing_refusal
 
     stream = {"usage": getattr(error, "stream_usage", None)}
@@ -815,9 +817,22 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
         return None
     cost, selected = chosen
     confirmed_zero |= choice_terminal_start <= selected < terminal_count
-    if cost == 0 and (malformed or selected >= terminal_count or (not confirmed_zero and refusal_conflicts(
-            error, check_stream_framing=False, retained_payload=payload))):
-        return None
+    if cost == 0:
+        if malformed:
+            return None
+        if selected >= terminal_count:
+            if (not (isinstance(error, httpx.TransportError) or type(error) is IncompleteProviderStream)
+                    or _response_failed(body) or is_processing_refusal(error)):
+                return None
+            # A wire interruption does not revoke an explicit bill, but a provisional
+            # zero-output report contradicted by observed generation is not that bill.
+            raw = reports[selected][2]
+            receipt = getattr(error, "stream_receipt", None)
+            if (isinstance(receipt, dict) and receipt.get("refusal_prior_work") and isinstance(raw, dict)
+                    and any(provider_cost_value(raw.get(key)) == 0 for key in ("completion_tokens", "output_tokens"))):
+                return None
+        elif not confirmed_zero and refusal_conflicts(error, check_stream_framing=False, retained_payload=payload):
+            return None
     body = reports[selected][0]
     usage, _, _ = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
     # Reports are newest first; the complete price and each cumulative counter are independent facts.
