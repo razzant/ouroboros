@@ -1,0 +1,77 @@
+name: QA 1868 Service Readers (Isolated Branch)
+
+on:
+  push:
+    branches:
+      - 'qa/1868-report-display-6b7bf876'
+
+concurrency:
+  group: qa-1868-service-readers-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  browser-witness:
+    name: Browser witness (Ubuntu ${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, webkit]
+    env:
+      OUROBOROS_RUN_UI_SMOKE: "1"
+      OUROBOROS_EXPECT_BROWSER_ENGINES: ${{ matrix.engine }}
+    steps:
+      - name: Set runner temp browser and evidence paths
+        shell: bash
+        run: |
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/pw-browsers" >> "$GITHUB_ENV"
+          echo "OUROBOROS_UI_EVIDENCE_DIR=$RUNNER_TEMP/ui-evidence/${{ matrix.engine }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install standard Playwright ${{ matrix.engine }}
+        shell: bash
+        run: .venv/bin/python -I -S scripts/ci_browser_install.py ${{ matrix.engine }}
+      - name: Run browser witness (${{ matrix.engine }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=".venv/bin/python"
+          mkdir -p "$OUROBOROS_UI_EVIDENCE_DIR" "$RUNNER_TEMP/ci-private"
+          xvfb-run -a "$PY" -I -S scripts/safe_test.py -- "$PY" -m pytest \
+            tests/test_service_stop_checkpoint_browser.py -m ui_browser -k "${{ matrix.engine }}" \
+            -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/browser-${{ matrix.engine }}.xml"
+          "$PY" -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k, f, e = [int(s.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')]; print(f'{n} ran, {k} skipped, {f} failed, {e} errors'); sys.exit(0 if (n >= 1 and k == 0 and f == 0 and e == 0) else 1)" "$RUNNER_TEMP/ci-private/browser-${{ matrix.engine }}.xml"
+      - name: Verify exact 3 PNGs and JSON summary (${{ matrix.engine }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in \
+            "service-stop-${{ matrix.engine }}-live-details.png" \
+            "service-stop-${{ matrix.engine }}-reopened-details.png" \
+            "service-stop-${{ matrix.engine }}-logs.png" \
+            "service-stop-${{ matrix.engine }}-summary.json"; do
+            test -s "$OUROBOROS_UI_EVIDENCE_DIR/$f" || { echo "Missing or empty $f"; exit 1; }
+          done
+      - name: Upload 3 PNGs and JSON summary (${{ matrix.engine }})
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: service-stop-browser-${{ matrix.engine }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ui-evidence/${{ matrix.engine }}/service-stop-${{ matrix.engine }}-live-details.png
+            ${{ runner.temp }}/ui-evidence/${{ matrix.engine }}/service-stop-${{ matrix.engine }}-reopened-details.png
+            ${{ runner.temp }}/ui-evidence/${{ matrix.engine }}/service-stop-${{ matrix.engine }}-logs.png
+            ${{ runner.temp }}/ui-evidence/${{ matrix.engine }}/service-stop-${{ matrix.engine }}-summary.json
+          if-no-files-found: error
+          retention-days: 14
+
