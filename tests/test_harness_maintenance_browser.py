@@ -29,6 +29,107 @@ def _inventory_row(harness, *, exact=True):
     }
 
 
+def _seed_accounts(ui, count):
+    profiles = ui["fixture"]["status"]["profiles"]["profiles"]
+    seed = copy.deepcopy(profiles[0])
+    profiles[:] = []
+    for number in range(count):
+        profile = copy.deepcopy(seed)
+        profile["profile"]["profile_id"] = f"account-{number}"
+        profile["identity"]["label"] = f"Account {number + 1}"
+        profiles.append(profile)
+
+
+def _read_deep_account(more, focused):
+    from playwright.sync_api import expect
+
+    focused.focus()
+    more.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+    expect(focused).to_be_focused()
+    expect(focused).not_to_be_in_viewport()
+    expect(more).to_be_in_viewport()
+    return more.bounding_box()["y"]
+
+
+def _observe_renamed_account(ui):
+    """A changed name on the actual row proves the passive status answer reached the page."""
+    from playwright.sync_api import expect
+
+    page = ui["page"]
+    ui["fixture"]["status"]["profiles"]["profiles"][14]["profile"]["display_name"] = "Updated 15"
+    with page.expect_request("**/api/claudexor/status?view=quota"):
+        page.evaluate("""async () => {
+            const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
+            await claudexorStatus.observe({afterCurrent: true});
+        }""")
+    expect(page.locator('[data-profile="account-14"] .harness-account-main strong')).to_have_text("Updated 15")
+
+
+def test_login_job_poll_preserves_offscreen_code_selection(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    _seed_accounts(ui, 18)
+    answer = {"job_id": "fixture", "job": {"state": "waiting_for_input", "harness": "codex"},
+              "deviceCode": {"flow": "oauth_url_input", "verificationUrl": "https://example.test/login"}}
+    create_url = "**/api/claudexor/login"
+    creates, held = [], []
+    page.route(create_url, lambda route: creates.append(route))
+    job_url = "**/api/claudexor/login/fixture"
+    page.route(job_url, lambda route: route.fulfill(json=answer))
+    page.route(job_url, lambda route: held.append(route), times=1)
+    writes = []
+
+    def record_write(request):
+        path = urlparse(request.url).path
+        if path.startswith("/api/claudexor/") and request.method not in {"GET", "HEAD"}:
+            writes.append((request.method, path))
+
+    page.on("request", record_write)
+    page.goto(ui["url"] + "/#settings")
+    open_settings(page, "accounts/codex")
+    more = page.locator('[data-profile="account-14"] [data-resources]')
+    more.click()
+    card = page.locator('[data-family-login="codex"]')
+    with page.expect_request(create_url):
+        page.locator('[data-profile="account-14"] [data-harness-login]').click()
+    expect(card).to_be_in_viewport()
+    y = _read_deep_account(more, card.locator("[data-login-dismiss]"))
+    with page.expect_request(job_url):
+        creates.pop().fulfill(json=answer)
+    assert more.bounding_box()["y"] == pytest.approx(y, abs=1)
+    field = card.locator('[data-login-code-input]')
+    field.fill("fixture-text")
+    field.evaluate("el => el.setSelectionRange(2, 7, 'backward')")
+    y = _read_deep_account(more, field)
+
+    def expect_draft_and_reading_place():
+        expect(field).to_be_focused()
+        assert more.bounding_box()["y"] == pytest.approx(y, abs=1)
+        expect(field).not_to_be_in_viewport()
+        expect(more).to_have_attribute("aria-expanded", "true")
+        assert field.evaluate("e => [e.value, e.selectionStart, e.selectionEnd, e.selectionDirection]") == [
+            "fixture-text", 2, 7, "backward"]
+
+    polled_link = "https://example.test/continue"
+    height = card.bounding_box()["height"]
+    answer["deviceCode"].update(verificationUrl=polled_link, userCode="TEST-CODE")
+    held.pop().fulfill(json=answer)
+    expect(card.locator("[data-open-signin]")).to_have_attribute("href", polled_link)
+    expect(card.locator("[data-device-code]")).to_have_text("TEST-CODE")
+    assert card.bounding_box()["height"] > height + 20
+    print(f"login poll: More y={y:.1f} -> {more.bounding_box()['y']:.1f}")
+    expect_draft_and_reading_place()
+    _observe_renamed_account(ui)
+    expect_draft_and_reading_place()
+    capture(page, "login-offscreen-after-provider-poll")
+    page.keyboard.press("Alt+Tab" if page.context.browser.browser_type.name == "webkit" else "Tab")
+    submit = card.locator('[data-login-code-submit]')
+    expect(submit).to_be_focused()
+    expect(submit).to_be_in_viewport()
+    assert writes == [("POST", "/api/claudexor/login")]
+
+
 @pytest.mark.parametrize("width", [1440, 390])
 @pytest.mark.parametrize("account_count", [1, 18])
 def test_maintenance_lost_reply_cancel_and_saved_assignments(subscription_ui, width, account_count):
@@ -36,14 +137,7 @@ def test_maintenance_lost_reply_cancel_and_saved_assignments(subscription_ui, wi
 
     ui, page = subscription_ui, subscription_ui["page"]
     page.set_viewport_size({"width": width, "height": 950})
-    profiles = ui["fixture"]["status"]["profiles"]["profiles"]
-    seed = copy.deepcopy(profiles[0])
-    profiles[:] = []
-    for number in range(account_count):
-        profile = copy.deepcopy(seed)
-        profile["profile"]["profile_id"] = f"account-{number}"
-        profile["identity"]["label"] = f"Account {number + 1}"
-        profiles.append(profile)
+    _seed_accounts(ui, account_count)
 
     row = _inventory_row("codex")
     native = _inventory_row("agy", exact=False)
@@ -278,6 +372,7 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     ui, page = subscription_ui, subscription_ui["page"]
     page.add_init_script("localStorage.setItem('ouroboros.theme', %s)" % repr(theme))
     page.set_viewport_size({"width": width, "height": 950})
+    _seed_accounts(ui, 18)
     executable = tmp_path / "Moved Ouroboros.app" / "Contents" / "Frameworks" / "node-standalone" / "bin" / "node"
     status, failure = _host_reply_for_missing_executable(executable, monkeypatch)
     assert failure["error"]["message"] == f"spawn {executable} ENOENT"
@@ -340,24 +435,35 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     page.locator(".agents-service").scroll_into_view_if_needed()
     capture(page, f"maintenance-missing-executable-{width}-{theme}")
 
-    # A failed read lands without rebuilding the row: its Details keeps focus and open state.
+    # The failed family read repaints Details while the owner reads an expanded account below.
+    world["broken"] = False
+    codex.get_by_role("button", name="Check latest", exact=True).click()
+    expect(banner).not_to_contain_text("no longer present")
     details = codex.get_by_role("button", name="Details", exact=True)
+    more = codex.locator('[data-profile="account-14"] [data-resources]')
+    more.click()
     world["hold"] = True
     codex.get_by_role("button", name="Check latest", exact=True).click()
     expect(codex.get_by_role("button", name="Checking…", exact=True)).to_be_disabled()
-    details.focus()
+    page.keyboard.press("Tab")
+    y = _read_deep_account(more, details)
+    assert details.evaluate("el => el.matches(':focus-visible')")
     assert held
     world["hold"] = False
+    world["broken"] = True
     held.pop().fulfill(status=status, json=failure)
     expect(codex.get_by_role("button", name="Check latest", exact=True)).to_be_enabled()
+    expect(banner).to_contain_text("no longer present")
     expect(details).to_be_focused()
     expect(details).to_have_attribute("aria-expanded", "true")
 
-    # The status tick's own rebuild keeps the disclosure open too.
-    page.evaluate("""async () => {
-        const {refreshHarnessStatus} = await import('/static/modules/harness_accounts.js');
-        await refreshHarnessStatus();
-    }""")
+    assert more.bounding_box()["y"] == pytest.approx(y, abs=1)
+    expect(details).not_to_be_in_viewport()
+
+    # The provider repaint preserves the same family's focused disclosure too.
+    _observe_renamed_account(ui)
+    expect(details).to_be_focused()
+    assert more.bounding_box()["y"] == pytest.approx(y, abs=1)
     expect(codex.get_by_role("button", name="Details", exact=True)).to_have_attribute("aria-expanded", "true")
     expect(codex.locator(".harness-maintenance-details")).to_be_visible()
     expect(page.locator("#agents-service-diagnostics-toggle")).to_have_attribute("aria-expanded", "true")

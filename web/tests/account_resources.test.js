@@ -60,6 +60,29 @@ test('known outcomes without effect preserve prior usage and availability', () =
     }
 });
 
+test('resource rows keep their own identities when labels coincide or the engine reorders them', () => {
+    const payload = snapshot();
+    const resource = payload.resources[0];
+    const [offer, refill] = resource.resets.value;
+    refill.grants = structuredClone(offer.grants); // Grant ids are local to an offer.
+    payload.quota.push({ ...structuredClone(payload.quota[0]), source: 'second-source' });
+    const balance = resource.balances.value[0];
+    resource.balances.value.push({ ...balance, id: resource.spending.value[0].id }, { ...balance, id: null });
+    const keys = () => [...accountResourcesMarkup(row, payload).matchAll(/ data-resource-reading="([^"]+)"/g)]
+        .map(match => match[1]).sort();
+    const before = keys();
+    assert.equal(new Set(before).size, before.length);
+    for (const [prefix, count] of [['usage', 4], ['balance', 2], ['spending', 1], ['reset', 2], ['grant', 2],
+        ['source', 6], ['source-diagnostic', 1], ['source-grant', 2]]) {
+        assert.equal(before.filter(key => key.startsWith(prefix + ':')).length, count, prefix);
+    }
+    payload.quota.reverse();
+    resource.resets.value.reverse();
+    resource.balances.value.reverse();
+    for (const item of resource.balances.value) item.label = 'Renamed balance';
+    assert.deepEqual(keys(), before);
+});
+
 test('normal copy uses engine descriptions and keeps native provenance in optional details', () => {
     const payload = snapshot();
     const offer = payload.resources[0].resets.value[0];
