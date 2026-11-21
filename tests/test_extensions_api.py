@@ -367,38 +367,32 @@ def test_api_extensions_index_uses_one_request_local_repo_identity(
 def test_extensions_index_collision_row_skips_lifecycle_projections(
     tmp_path, monkeypatch
 ):
+    from types import SimpleNamespace
+
     import ouroboros.extension_health as extension_health
     import ouroboros.extension_loader as extension_loader
     import ouroboros.gateway.extensions as extensions_api
     import ouroboros.marketplace.provenance as marketplace_provenance
     import ouroboros.skill_review_runner as skill_review_runner
     import ouroboros.tools.github as github_tools
-    from ouroboros.contracts.skill_manifest import SkillManifest
-    from ouroboros.skill_loader import LoadedSkill
+    from ouroboros import extension_companion as companion
 
     drive_root = tmp_path / "drive"
-    skill_dir = drive_root / "skills" / "clawhub" / "alpha"
-    skill_dir.mkdir(parents=True)
-    collision = LoadedSkill(
-        name="alpha",
-        skill_dir=skill_dir,
-        manifest=SkillManifest(
-            name="alpha",
-            description="",
-            version="",
-            type="extension",
-            entry="plugin.py",
-        ),
-        content_hash="",
-        load_error="Skill name collision: clawhub and user_repo",
-        source="clawhub",
-        identity_collision=True,
+    roots = drive_root / "skills"
+    skill_dir = _write_ext(roots / "clawhub", "alpha", permissions=[], plugin="")
+    _write_ext(roots / "external", "alpha", permissions=[], plugin="")
+    waiting = {"beta": "stop requested"}
+    supervisor = companion.CompanionSupervisor(drive_root)
+    supervisor._runtimes["alpha:beta"] = SimpleNamespace(
+        retiring=waiting["beta"], death_known=False,
+        descriptor=SimpleNamespace(skill_name="alpha", name="beta", skill_dir=str(skill_dir.resolve())),
     )
+    monkeypatch.setattr(companion, "is_server_process", lambda: True)
+    monkeypatch.setattr(companion, "_GLOBAL_SUPERVISOR", supervisor)
 
     def _unexpected(*_args, **_kwargs):
         raise AssertionError("collision row invoked a lifecycle/runtime projection")
 
-    monkeypatch.setattr(extensions_api, "discover_skills", lambda *_a, **_kw: [collision])
     monkeypatch.setattr(extensions_api, "snapshot", lambda: {})
     monkeypatch.setattr(extensions_api, "_review_fields", _unexpected)
     monkeypatch.setattr(extensions_api, "skill_conflict_status", _unexpected)
@@ -409,27 +403,26 @@ def test_extensions_index_collision_row_skips_lifecycle_projections(
     monkeypatch.setattr(marketplace_provenance, "read_provenance", _unexpected)
     monkeypatch.setattr(github_tools, "github_token_from_env_or_settings", _unexpected)
 
-    payload = extensions_api._build_extensions_index(drive_root, repo_path="")
-
-    assert len(payload["skills"]) == 1
-    row = payload["skills"][0]
-    assert row["name"] == "alpha"
-    assert row["load_error"] == collision.load_error
-    assert row["source"] == "clawhub"
-    assert row["live_reason"] == "load_error"
-    assert row["live_loaded"] is False
-    assert row["dispatch_live"] is False
-    assert row["conflict"] is None
-    assert row["skill_review"] == {}
-    assert row["grants"] == {}
-    assert row["submit_hub"] == {
-        "visible": False,
-        "publication_ready": False,
-        "task_start_allowed": False,
-        "disabled": True,
-        "state": "hard_block",
-        "reason": "",
-    }
+    rows = extensions_api._build_extensions_index(drive_root, repo_path="")["skills"]
+    assert len(rows) == 2
+    for row in rows:
+        assert row["name"] == "alpha" and row["type"] == "instruction" and row["identity_collision"]
+        assert "Skill name collision" in row["load_error"] and row["live_reason"] == "load_error"
+        assert row["manifest_file"] == ""  # a placeholder manifest: its empty permissions are no declaration
+        assert not (row["enabled"] or row["executable_review"] or row["desired_live"] or row["live_loaded"] or row["dispatch_live"])
+        assert row["conflict"] is None and row["skill_review"] == row["grants"] == {}
+        assert row["submit_hub"] == {
+            "visible": False, "publication_ready": False, "task_start_allowed": False,
+            "disabled": True, "state": "hard_block", "reason": "",
+        }
+    by_source = {row["source"]: row for row in rows}
+    assert by_source["clawhub"]["retained_companions"] == waiting
+    assert "retained_companions" not in by_source["external"]
+    assert len({row["collision_row_id"] for row in rows}) == 2
+    supervisor._runtimes.clear()  # the monitor proved exit; no durable state is needed to refresh
+    settled = extensions_api._build_extensions_index(drive_root, repo_path="")["skills"]
+    assert [row["collision_row_id"] for row in settled] == [row["collision_row_id"] for row in rows]
+    assert all("retained_companions" not in row for row in settled)
     assert not (drive_root / "state").exists()
 
 
@@ -503,6 +496,7 @@ def test_extensions_index_rows_carry_publication_receipt_fields(tmp_path, monkey
 
     try:
         row = _row()
+        assert row["manifest_file"] == "SKILL.md"  # a parsed manifest names itself, apart from the payload hash
         assert row["published"] is None
         assert row["published_malformed"] is False
 
@@ -1639,6 +1633,7 @@ def test_api_skill_reconcile_clears_cached_load_error(tmp_path, monkeypatch):
         assert payload["extension_action"] == "extension_loaded"
         assert payload["process"] in {"server", "worker"}
         assert payload["server_reconcile"] in {"", "requested", "request_failed"}
+        assert "retained_companions" not in payload
         assert broadcasts[-1]["type"] == "extension_lifecycle"
         assert broadcasts[-1]["skill"] == "reconcile_demo"
         assert broadcasts[-1]["action"] == "extension_loaded"

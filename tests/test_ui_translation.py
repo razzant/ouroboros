@@ -14,10 +14,12 @@ from ouroboros import ui_translation as gen
 
 class FakeLight:
     """``LLMClient.chat`` double: answers from a queue of (content, stop) pairs and records
-    every request so a test can read the prompt the generator built."""
+    every request so a test can read the prompt the generator built. ``stop`` is the operation's finish, in the
+    usage; ``message_finish`` is the finish the nested message carries too, when it carries one."""
 
-    def __init__(self, answers):
+    def __init__(self, answers, message_finish=""):
         self.answers = list(answers)
+        self.message_finish = message_finish
         self.calls = []
 
     def chat(self, **kwargs):
@@ -25,7 +27,8 @@ class FakeLight:
         if not self.answers:
             raise AssertionError("the generator called the model more often than the test planned")
         content, stop = self.answers.pop(0)
-        return {"content": content}, {"response_finish_reason": stop}
+        message = {"content": content, **({"finish_reason": self.message_finish} if self.message_finish else {})}
+        return message, {"response_finish_reason": stop}
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +121,7 @@ def test_enqueue_catalog_queues_missing_and_stale_codes_but_never_an_owner_pin(t
 
 
 def test_translate_batch_writes_validated_answers_as_generated_entries_and_broadcasts(tmp_path, light):
-    _ru(tmp_path)
+    _ru(tmp_path, profile={"label": "Русский"})
     memory.record_missing(tmp_path, "ru", [
         {"key": "Settings", "context": {"role": "button", "page": "settings"}},
         {"key": "{n} notes", "context": {"source": "{n} notes", "params": ["n"]}},
@@ -148,15 +151,45 @@ def test_translate_batch_writes_validated_answers_as_generated_entries_and_broad
     # The prompt: a stable prefix (rules, plural categories) and the batch with its context.
     request = client.calls[0]
     assert request["model"] == "fake/light" and request["model_role"] == "light"
-    assert request["response_format"] == {"type": "json_object"}
+    assert request.get("response_format") is None, "no provider JSON mode: the batch reads its answer from text"
     assert request["max_tokens"] == gen.UI_TRANSLATION_MAX_TOKENS
     system, user = request["messages"][0]["content"], request["messages"][1]["content"]
-    assert "one, few, many, other" in system and "`{n}`" in system
+    assert "Русский" in system and "one, few, many, other" in system and "`{n}`" in system
+    assert all(f'"{key}"' in system for key in ("translations", "id", "text", "forms")), "the answer's keys are named"
     rows = json.loads(user.split("\n", 1)[1])
     assert rows[0] == {"id": 0, "text": "Settings", "plural": False, "placeholders": [],
                        "context": {"role": "button", "page": "settings"}}
     assert rows[1]["plural"] is True and rows[1]["placeholders"] == ["{n}"]
     assert rows[2]["text"] == "Done" and "source" not in rows[2]["context"]
+
+
+# What the batch reads from a reply's parts. The ordinary string, typed and Gemini replies pass through the real lanes
+# in ``tests/test_light_call_deadlines.py``; a part that must not be read has the text ``"x"``, which would show.
+_REPLY_READS = [
+    pytest.param([{"text": "a"}, {"type": None, "text": "b"}, {"type": "", "text": "c"}], "abc", id="untyped_text"),
+    pytest.param([{"text": "a"}, {"type": "output_text", "text": "b"}], "ab", id="output_text"),
+    pytest.param([{"thought": True, "text": "x"}, {"type": "text", "thought": True, "text": "x"},
+                  {"type": "output_text", "thought": True, "text": "x"}], "", id="thought_flag_on_any_text"),
+    pytest.param([{"type": "thinking", "thinking": "x"}, {"type": "reasoning", "text": "x"},
+                  {"type": "redacted_thinking", "data": "x"}], "", id="reasoning_types"),
+    pytest.param([{"type": "tool_use", "id": "c", "name": "w", "input": {}, "text": "x"},
+                  {"type": "image_url", "image_url": {"url": "data:image/png;base64,"}, "text": "x"}], "",
+                 id="opaque_blocks_with_text_fields"),
+    pytest.param([{"type": "summary_text", "text": "x"}, {"type": "input_text", "text": "x"}], "", id="other_types"),
+    pytest.param([{"functionCall": {"name": "w", "args": {"text": "x"}}}, {"inlineData": {"mimeType": "image/png"}}],
+                 "", id="gemini_call_and_image_parts"),
+    # An explicit type that is not a string is malformed, never "no type": falsy ones are not untyped parts.
+    pytest.param([{"type": False, "text": "x"}, {"type": 0, "text": "x"}, {"type": [], "text": "x"},
+                  {"type": {}, "text": "x"}, {"type": ["text"], "text": "x"}], "", id="malformed_type"),
+    pytest.param([{"text": None}, {"text": 5}, "bare", None, ["x"]], "", id="not_text"),
+    pytest.param({"type": "text", "text": "x"}, "", id="not_a_list"),
+    pytest.param(None, "", id="none"),
+]
+
+
+@pytest.mark.parametrize(("content", "read"), _REPLY_READS)
+def test_a_reply_is_read_from_its_plain_text_parts(content, read):
+    assert gen._visible_text(content) == read
 
 
 def test_invalid_answers_are_requeued_with_their_attempt_and_dropped_after_the_bound(tmp_path, light):
@@ -379,6 +412,22 @@ def test_resolve_language_request_failures_are_typed(tmp_path, light):
     with pytest.raises(gen.LanguageResolveError):
         gen.resolve_language_request("Klingon", drive_root=tmp_path, client=unnamed)
 
+    # A well-formed profile from an operation that ended incomplete is no final answer (Claudexor's usage marker).
+    cut = FakeLight([(json.dumps({"tag": "qya", "label": "Quenya", "direction": "ltr"}), "incomplete")])
+    with pytest.raises(gen.LanguageResolveError) as unfinished:
+        gen.resolve_language_request("Quenya", drive_root=tmp_path, client=cut)
+    assert unfinished.value.code == "language_resolve_failed"
+
+
+@pytest.mark.parametrize("message_finish", ["", "stop"], ids=["operation_only", "message_stop"])
+def test_a_profile_from_a_reply_cut_at_the_output_limit_is_refused_however_it_parses(tmp_path, light, message_finish):
+    """The operation's cut stands over a nested message that says ``stop``: a profile that parses is still no answer."""
+    profile = json.dumps({"tag": "qya", "label": "Quenya", "direction": "ltr"})
+    cut = FakeLight([(profile, "length")], message_finish=message_finish)
+    with pytest.raises(gen.LanguageResolveError) as refused:
+        gen.resolve_language_request("Quenya", drive_root=tmp_path, client=cut)
+    assert refused.value.code == "language_resolve_failed" and "output budget" in str(refused.value)
+
 
 def test_the_batch_at_the_model_still_counts_as_pending_for_the_gateway(tmp_path, light):
     light.setenv("OUROBOROS_UI_LANGUAGE", "ru")
@@ -519,6 +568,32 @@ def test_a_cut_answer_requeues_without_counting_an_attempt(tmp_path, light):
     assert not pending["Settings"].get("attempts")
 
 
+@pytest.mark.parametrize(("usability", "finish", "error"), [
+    pytest.param("unfinished", "max_output_tokens", "output_truncated", id="output_limit"),
+    pytest.param("unusable", "content_filter", "UnusableReplyError", id="other_refusal"),
+])
+def test_a_direct_responses_cut_is_the_output_limit_and_no_other_refusal_is(tmp_path, light, usability, finish, error):
+    """``LLMClient.chat`` refuses a tool-less reply its provider did not complete before it returns anything
+    (``UnusableReplyError``). An output-limit cut is the generator's own: its text, a valid batch here, is never read.
+    Any other refusal keeps its error."""
+    from ouroboros._usage_response import UnusableReplyError
+
+    _ru(tmp_path)
+    memory.record_missing(tmp_path, "ru", [{"key": "Settings", "context": {}}, {"key": "Files", "context": {}}])
+    reply = {"role": "assistant", "content": json.dumps(
+        {"translations": [{"id": 0, "text": "Настройки"}, {"id": 1, "text": "Файлы"}]}, ensure_ascii=False)}
+
+    class Refusing:
+        def chat(self, **kwargs):
+            raise UnusableReplyError(usability, reply, {"response_status": "incomplete", "response_finish_reason": finish})
+
+    light.setattr(gen, "_broadcast", lambda frame: None)
+    facts = gen.translate_batch(tmp_path, "ru", client=Refusing())
+    assert facts["error"].startswith(error) and (facts["applied"], facts["requeued"], facts["dropped"]) == (0, 2, 0)
+    assert memory.load_memory(tmp_path, "ru")["entries"] == {}, "a refused reply is never read"
+    assert all(not row.get("attempts") for row in dict(memory.take_pending(tmp_path, "ru", 10)).values())
+
+
 def test_a_faithful_answer_keeps_a_code_sources_own_angle_text(tmp_path, light):
     _ru(tmp_path)
     gen.register_catalog("tg.menu_test", lambda: {"lang_title": "For any other language send `/language <name>`"}, "test table")
@@ -550,17 +625,25 @@ def test_an_answer_with_a_brace_field_the_source_lacks_is_refused_per_key_not_pe
 
 
 class _Narrow:
-    """A route whose output bound fits ``fits`` strings a call: a larger batch comes back cut."""
+    """A route whose output bound fits ``fits`` strings a call: a larger batch comes back cut, as its finish or, with
+    ``refusal``, as the error the direct Responses lane raises before it returns any reply."""
 
-    def __init__(self, fits):
+    def __init__(self, fits, refusal=False):
         self.fits = fits
+        self.refusal = refusal
         self.sizes = []
 
     def chat(self, **kwargs):
+        from ouroboros._usage_response import UnusableReplyError
+
         rows = json.loads(kwargs["messages"][1]["content"].split("\n", 1)[1])
         self.sizes.append(len(rows))
         if len(rows) > self.fits:
-            return {"content": "{\"translations\": [{\"id\": 0, \"te"}, {"response_finish_reason": "length"}
+            cut = {"content": "{\"translations\": [{\"id\": 0, \"te"}
+            if self.refusal:
+                raise UnusableReplyError("unfinished", cut, {"response_status": "incomplete",
+                                                             "response_finish_reason": "max_output_tokens"})
+            return cut, {"response_finish_reason": "length"}
         answers = [{"id": row["id"], "text": "RU " + row["text"]} for row in rows]
         return {"content": json.dumps({"translations": answers})}, {"response_finish_reason": "stop"}
 
@@ -575,10 +658,11 @@ def _drain_with(light, tmp_path, client):
     return worker
 
 
-def test_an_answer_cut_by_the_output_bound_is_asked_again_in_half_the_batch(tmp_path, light):
+@pytest.mark.parametrize("refusal", [False, True], ids=["finish", "responses_refusal"])
+def test_an_answer_cut_by_the_output_bound_is_asked_again_in_half_the_batch(tmp_path, light, refusal):
     _ru(tmp_path)
     memory.record_missing(tmp_path, "ru", [{"key": f"Label {i}", "context": {}} for i in range(8)])
-    client = _Narrow(fits=2)
+    client = _Narrow(fits=2, refusal=refusal)
     worker = _drain_with(light, tmp_path, client)
     assert client.sizes == [8, 4, 2, 2, 2, 2], "halved until the answer fits, then kept at that size"
     entries = memory.load_memory(tmp_path, "ru")["entries"]

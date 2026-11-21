@@ -7537,7 +7537,6 @@ html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
     padding: 0;
     border: 0;
     background: none;
-    cursor: pointer;
     text-align: left;
     color: var(--text-primary);
     font: inherit;
@@ -7546,6 +7545,7 @@ html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
     line-height: var(--line-title);
     overflow-wrap: anywhere;
 }
+button.skills-card-name { cursor: pointer; }
 .skills-card-name:focus-visible,
 .skills-read-more:focus-visible,
 .skills-mark:focus-visible,

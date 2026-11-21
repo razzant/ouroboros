@@ -652,6 +652,94 @@ def test_the_detail_sheet_reads_the_entry_and_returns_focus(skills_browser, brow
             skills.close(browser)
 
 
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_the_installed_sheet_takes_access_from_its_own_manifest_never_the_catalog(skills_browser, browser_name):
+    """A source-backed installation, with the catalog cached and its entry fetched, shows what its own loaded manifest
+    and grants say, an id with no friendlier word as declared (card and sheet alike); when that manifest was not read
+    it claims nothing. Browse keeps the catalog's own words and labels and still leaves out an id it gives neither."""
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": 390, "height": 900})
+        catalog = copy.deepcopy(CATALOG)
+        entry = next(item for item in catalog["items"] if item["id"] == "ouroboros/weather")
+        # Competing, plausible declarations: a known word, and an id that no word or label names.
+        entry.update(permissions=["net", "cached_unlabeled"], needs_keys=["WEATHER_KEY"])
+        installed = {**_row("weather"), "permissions": ["page_module"]}  # all its manifest declares: no friendlier word
+        skills = _open(page, catalog=catalog, listing=[installed])
+        detail_path = "/api/skill-catalog/item/ouroboros/weather"
+        skills.answers[detail_path] = {
+            "about": "Weather from the source.",
+            "uses": [{"id": "net", "kind": "permission"},
+                     {"id": "feed_reader", "kind": "permission", "label": "Reads the weather feed"},
+                     {"id": "fetched_unlabeled", "kind": "permission"},
+                     {"id": "WEATHER_KEY", "kind": "key"}]}
+        _tab(page, "browse")  # the catalog is now cached, so the installed sheet could join it
+        _card(page, "ouroboros/weather").wait_for()
+        _tab(page, "installed")
+        sheet = page.locator(".skills-detail-sheet")
+        card = page.locator('.skills-card[data-skill="weather"]')
+        can_use = card.locator(".skills-detail-row", has_text="Can use").locator(".skills-detail-value")
+
+        def open_installed():
+            page.locator('.skills-card[data-skill="weather"] .skills-card-name').click()
+            sheet.locator(".skills-sheet-about", has_text="Weather from the source.").wait_for()
+            page.wait_for_function("!document.querySelector('.skills-detail-sheet .skills-sheet-status')")
+            return sheet.inner_text()
+
+        text = open_installed()  # a parsed manifest: its own access, with the row's grants (no keys requested)
+        assert "What it can use" in text and "Your keys: none" in text and "WEATHER_KEY" not in text
+        assert "page_module" in text and "Nothing beyond its own folder" not in text
+        for claimed in ("Internet", "Reads the weather feed", "cached_unlabeled", "fetched_unlabeled"):
+            assert claimed not in text, f"{claimed} is the catalog's claim, not this manifest's"
+        page.locator("[data-sheet-close]").click()
+        card.locator(".skills-details > summary").click()
+        assert can_use.inner_text() == "page_module"  # the card says the same, not "Nothing beyond its own folder"
+
+        # An id with no friendlier word stands as declared beside the known words: once, in order, and escaped.
+        mixed = {**installed, "permissions": ["net", "page_module", 'odd"<i>x</i>', "page_module"]}
+        skills.set_skills([mixed])
+        page.locator("#skills-refresh").click()
+        page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
+        shown = 'Internet · page_module · odd"<i>x</i>'
+        assert can_use.inner_text() == shown and card.locator(".skills-detail-value i").count() == 0
+        assert shown in open_installed() and sheet.locator(".skills-sheet-section i").count() == 0
+        page.locator("[data-sheet-close]").click()
+
+        unread = {**installed, "manifest_file": "", "type": "instruction",
+                  "load_error": "manifest parse error: bad", "grants": {}}  # its placeholder permissions declare nothing
+        skills.set_skills([unread])
+        page.locator("#skills-refresh").click()
+        page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
+        assert "Can use" not in card.inner_text() and "page_module" not in card.inner_text()
+        text = open_installed()
+        assert "What it can use" not in text and "WEATHER_KEY" not in text and "Your keys" not in text
+        assert "Nothing beyond its own folder" not in text and "page_module" not in text
+        sheet.locator(".skills-sheet-details > summary").click()
+        assert unread["payload_root"] in sheet.locator(".skills-sheet-facts").inner_text()  # the exact folder remains
+        page.locator("[data-sheet-close]").click()
+
+        # Browse keeps the catalog's own words: the known one and the source's label, and neither unlabeled id.
+        _tab(page, "browse")
+        skills.hold = {detail_path}
+        _card(page, "ouroboros/weather").locator(".skills-card-name").click()
+        skills.wait_for_request(detail_path)
+        reading = sheet.inner_text()  # before the entry is read: the cached claim
+        assert "Internet" in reading and "cached_unlabeled" not in reading and "page_module" not in reading
+        skills.release(detail_path)
+        skills.hold.clear()
+        sheet.locator(".skills-sheet-about", has_text="Weather from the source.").wait_for()
+        page.wait_for_function("!document.querySelector('.skills-detail-sheet .skills-sheet-status')")
+        text = sheet.inner_text()
+        assert "Internet · Reads the weather feed" in text and "Your keys: WEATHER_KEY" in text
+        for hidden in ("cached_unlabeled", "fetched_unlabeled", "page_module"):
+            assert hidden not in text, hidden
+        page.locator("[data-sheet-close]").click()
+    finally:
+        if skills:
+            skills.close(browser)
+
+
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])
 def test_sources_trust_menu_and_the_two_step_add(skills_browser, browser_name, width):
     browser = getattr(skills_browser, browser_name).launch(headless=True)

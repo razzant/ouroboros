@@ -1312,7 +1312,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             raise SubagentSelectionError(exc.code, exc.detail) from exc
         from ouroboros.delegate_readonly_inputs import InputSelectionError, resolve_selection, selection_entries
 
-        try:  # every selected file is checked as read_file checks it, before the daemon is touched
+        try:  # ordinary sources are checked before the daemon; compare range trees once during retention
             if entries := selection_entries(options.get("input_files")):
                 resolve_selection(ctx, entries)
         except InputSelectionError as exc:

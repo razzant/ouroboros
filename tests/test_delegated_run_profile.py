@@ -185,8 +185,12 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
         "override_plan_readiness", "workspace", "attachment_paths", "attachment_import", "input_files",
     }
     item = entry.schema["parameters"]["properties"]["input_files"]["items"]
-    assert set(item["properties"]) == {"root", "path"}
-    assert item["additionalProperties"] is False
+    plain, ranged = item["anyOf"]
+    assert set(plain["properties"]) == {"root", "path"}
+    assert set(ranged["properties"]) == {"git_range"}
+    selection = ranged["properties"]["git_range"]
+    assert set(selection["properties"]) == {"root", "repository", "base", "head", "path"}
+    assert all(shape["additionalProperties"] is False for shape in (plain, ranged, selection))
     assert entry.schema["parameters"]["properties"]["attachment_import"]["enum"] == ["reuse", "new"]
     assert entry.schema["parameters"]["properties"]["attachment_paths"]["items"] == {"type": "string"}
     assert entry.schema["parameters"]["properties"]["workspace"]["enum"] == ["copy", "in_place"]

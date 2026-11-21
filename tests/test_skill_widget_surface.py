@@ -558,9 +558,15 @@ def test_summarize_skills_projects_live_extension_facts(tmp_path, monkeypatch):
 
 def test_skill_exec_extension_message_reports_typed_liveness(tmp_path, monkeypatch):
     """skill_exec no longer asserts register(api) ran for an extension that never loaded."""
+    from ouroboros import extension_health
     from ouroboros.tools import skill_exec as skill_exec_mod
 
     loaded, repo_root, drive_root = _prepare_live_extension(tmp_path)
+    _set_process_role(monkeypatch, False)
+    monkeypatch.setattr(extension_health, "code_stamp", lambda: ("test", "historical-server"))
+    extension_health.record_companion_exit(drive_root, loaded.name, "daemon", returncode=7,
+                                           observed_at="past", still_current=lambda: True)
+    history = extension_health.read_extension_health(drive_root, loaded.name)
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
     ctx = ToolContext(repo_dir=tmp_path / "repo3", drive_root=drive_root)
     (tmp_path / "repo3").mkdir()
@@ -569,6 +575,9 @@ def test_skill_exec_extension_message_reports_typed_liveness(tmp_path, monkeypat
     assert "SKILL_EXEC_EXTENSION" in out
     assert "live_loaded=False" in out
     assert "has already been called" not in out
+    assert "process='worker'" in out and "server's background companion state" in out
+    assert history["status"] == "broken" and history["companion_failures"]["daemon"]["load_error"] not in out
+    assert extension_health.read_extension_health(drive_root, loaded.name) == history
 
 
 @pytest.mark.parametrize('registration', [True, False])
