@@ -126,15 +126,20 @@ def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path,
     assert ("HOST TASK CONTRACT AUTHORITY" in instructions) is not compiled
 
 
-def test_session_start_carries_the_design_bible_whole_with_its_digest(tmp_path, monkeypatch):
-    """The session's start request carries the author's view of the prepared copy (rethink C13): its design bible
-    verbatim, the rest of the book by headings and the pinned bytes' SHA-256; other rules stay one read away."""
-    bible = ('## Design bible: "Airy dopamine"\n\n1. **The room is plain.** PRINCIPLE_DELIVERED\n\n**Seed**\n\n'
-             "| Role | Light |\n| --- | --- |\n| Room | SEED_DELIVERED |\n")
+BIBLE = ('## Design bible: "Airy dopamine"\n\n1. **The room is plain.** PRINCIPLE_DELIVERED\n\n**Seed**\n\n'
+         "| Role | Light |\n| --- | --- |\n| Room | SEED_DELIVERED |\n")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_session_start_carries_the_design_bible_whole_with_its_digest(tmp_path, monkeypatch, newline):
+    """The session's start request carries the author's view of the prepared copy (item 97): its design bible
+    verbatim, the rest of the book by headings and the pinned bytes' SHA-256; other rules stay one read away. The view
+    reads the same however the file was written (RV1, Astra 4); the digest names the file's own bytes."""
+    bible = BIBLE
 
     def with_bible(_ctx):
-        (tmp_path / "prepared/docs/DESIGN.md").write_text(
-            "# Design\n\n" + bible + "\n## Prepared copy heading\nOriginal rule text, not navigation.\n", encoding="utf-8")
+        (tmp_path / "prepared/docs/DESIGN.md").write_bytes(("# Design\n\n" + bible + "\n## Prepared copy heading\n"
+            "Original rule text, not navigation.\n").replace("\n", newline).encode("utf-8"))
 
     request, row, _task, _ctx, live, prepared = _start(tmp_path, monkeypatch, prepare=with_bible)
     delivered = request["instructions"].split("DESIGN DELIVERY", 1)[1]

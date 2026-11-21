@@ -104,16 +104,18 @@ def _nav_lines(entries: List[tuple[int, str, int, int]]) -> List[str]:
 
 
 def _design_bible(text: str) -> Optional[tuple[str, int, int]]:
-    """DESIGN's ``## Design bible`` section verbatim with its 1-based inclusive lines, or ``None``: from its heading
-    to the next level-1 or level-2 heading outside a code fence (fences read as ``generate_doc_nav_map`` reads them)."""
-    lines = text.splitlines(keepends=True)
+    """DESIGN's ``## Design bible`` section verbatim with its 1-based inclusive lines, or ``None``: from the heading
+    titled exactly so (a subtitle only after ``: ``) to the next level-1 or level-2 heading outside a code fence
+    (fences read as ``generate_doc_nav_map`` reads them). Every reader sees its lines with ``\\n`` endings, however
+    the file was written; a digest still names the file's own bytes."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines(keepends=True)
     first, in_fence = None, False
     for number, line in enumerate(lines, start=1):
         if line.lstrip().startswith("```"):
             in_fence = not in_fence
         elif in_fence:
             continue
-        elif first is None and re.match(r"## Design bible\b", line):
+        elif first is None and re.fullmatch(r"## Design bible(?:: .*)?", line.rstrip()):
             first = number
         elif first is not None and line.startswith(("# ", "## ")):
             return "".join(lines[first - 1:number - 1]).strip(), first, number - 1

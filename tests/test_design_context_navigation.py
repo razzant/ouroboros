@@ -363,3 +363,17 @@ def test_a_short_window_takes_the_bible_to_its_map_before_memory_or_any_book(tmp
             window = int(window * (0.9 if stages - {"whole"} else 0.99))  # finely until the first yield
         assert {"whole", "bible alone", "memory or books after it"} <= stages, (preferred, stages)
         assert preferred != "max" or "books lowered" in stages
+
+
+def test_the_bible_is_the_heading_titled_so_not_a_lookalike(tmp_path):
+    """Only a heading titled exactly "Design bible" (a subtitle after ": ") starts the section (RV1, Carbon 1.3); the
+    slice reads the same whatever line endings the file was written with (RV1, Astra 4)."""
+    from ouroboros.context_layout import design_bible_section, design_bible_view
+
+    lookalikes = "# Design\n## Design bible history\nOLD_NOTES\n## Design bible-archive\nARCHIVED\n"
+    text = lookalikes + BIBLE + "## Attention\nBODY_RULE_NOT_DELIVERED\n"
+    assert design_bible_section(text) == BIBLE.strip()
+    assert design_bible_section(lookalikes) is None
+    crlf = text.replace("\n", "\r\n")
+    assert design_bible_section(crlf) == BIBLE.strip()
+    assert design_bible_view(crlf, source="`x`") == design_bible_view(text, source="`x`")

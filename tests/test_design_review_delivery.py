@@ -231,6 +231,25 @@ def test_a_share_too_small_for_the_whole_bible_still_carries_its_principles(gove
     assert "| A role |" in context.selected_inline and "docs/DESIGN.md#Design bible principles" not in rows
 
 
+def test_a_crlf_book_gives_the_reviewer_and_the_author_one_slice(governance_repo):
+    """However the file was written, reviewer and author read the same lines (RV1, Astra 4)."""
+    from types import SimpleNamespace
+
+    from ouroboros.context_layout import task_design_navigation
+    from ouroboros.review_words import compare_sources
+
+    source = governance_repo / "docs" / "DESIGN.md"
+    source.write_bytes((DESIGN_BIBLE + "\n**Seed**\n\nFull design recipes.\n" + DESIGN).replace("\n", "\r\n").encode())
+    words = compare_sources([("ouroboros/notice.py", 'TEXT = "Read the result"', 'TEXT = "Read the updated result"')])
+    context = governance_context(governance_repo, surface="triad", touched_paths=["ouroboros/notice.py"],
+                                 usable_window_tokens=1_000_000, review_words=words)
+    reviewed = dict(context.inline_sections)["docs/DESIGN.md#Design bible (excerpt: the whole section)"]
+    assert reviewed == DESIGN_BIBLE + "\n**Seed**\n\nFull design recipes." and "\r" not in reviewed
+    author = task_design_navigation(SimpleNamespace(repo_dir=governance_repo, system_repo_dir=governance_repo,
+                                                    drive_root=governance_repo.parent / "data", task_metadata={}), {})
+    assert author.full_text.startswith(reviewed + "\n\n## DESIGN.md (navigation map)")
+
+
 def test_missing_bible_excerpt_never_falls_back_to_whole_design(governance_repo):
     from ouroboros.review_words import compare_sources
 
