@@ -983,3 +983,101 @@ def test_runtime_names_the_kept_services_custody_reads_now(tmp_path, monkeypatch
         assert "incomplete" not in fact
     finally:
         _settle(leader, identities=[(pid, birth)])
+
+
+# --- setup: how this install began and whether my human and I have met (context_first_hour.setup_fact) ---
+
+def _born(root, origin, **state):
+    """A data root whose first state ``origin`` minted (``first_boot`` or an owner Reset's pending identity)."""
+    from supervisor import state_initialization as witness
+
+    if origin == "owner_reset":
+        identity = witness.mark_pending(root, origin="owner_reset")
+    else:
+        identity = witness.initialization_decision(root)["initialization_id"]
+    (root / "state" / "state.json").write_text(json.dumps({"initialization_id": identity, **state}), encoding="utf-8")
+    assert witness.complete(root, identity, adopted=False)
+
+
+def _said(root, *rows):
+    from ouroboros import dialogue_store
+
+    for stamp, direction in rows:
+        dialogue_store.append(root, "chat", {"ts": f"2026-11-21T{stamp}:00.000000+00:00", "direction": direction,
+                                             "chat_id": 1, "text": direction})
+
+
+@pytest.mark.parametrize("shape", ["first_boot", "owner_reset", "talked", "unread_binding"])
+def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an_unreadable_binding(tmp_path, shape):
+    """Facts only, every line from its own source: a fresh first boot with an empty binding and no messages, a Reset's
+    new state (what a Reset deletes, never history), a bound install where my message followed my human's first
+    one, and a binding that cannot be read, kept apart from a known empty slot."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "settings.json").write_text(json.dumps({"OUROBOROS_ONBOARDING_COMPLETED_AT": "2026-11-21T09:58:12.000000+00:00"}),
+                                            encoding="utf-8")
+    bound = {"talked": 1, "unread_binding": 1}.get(shape)
+    _born(tmp_path, "owner_reset" if shape == "owner_reset" else "first_boot", owner_id=bound, owner_chat_id=bound,
+          bg_consciousness_enabled=shape != "talked",
+          **({"_recovery": {"unconfirmed": ["owner_chat_id"]}} if shape == "unread_binding" else {}))
+    if shape == "talked":
+        _said(tmp_path, ("10:00", "in"), ("10:01", "system"), ("10:02", "out"))
+    elif shape == "unread_binding":
+        _said(tmp_path, ("10:00", "in"))
+    fact = setup_fact(tmp_path)
+    assert fact["finished_at"] == "2026-11-21 09:58 UTC"
+    assert fact["state"].startswith("owner_reset: a new state born" if shape == "owner_reset"
+                                    else "first_boot: the first state of this data root, born")
+    assert ("a Reset deletes memory, chats" in fact["state"]) is (shape == "owner_reset")
+    assert fact["owner_chat"] == {"talked": "Main (chat 1)",
+                                  "unread_binding": "unknown: the owner chat binding is not confirmed",
+                                  }.get(shape, "none bound yet: no owner message has bound one")
+    assert fact["consciousness"] == ("off" if shape == "talked" else "on")
+    assert fact["main"] == {
+        "talked": "my human first wrote in Main 2026-11-21 10:00 UTC; my first message after it 2026-11-21 10:02 UTC",
+        "unread_binding": "my human first wrote in Main 2026-11-21 10:00 UTC; no message of mine after it yet",
+    }.get(shape, "my human has not written in Main, nor have I")
+    assert "starter_skills" not in fact and "startup_problems" not in fact  # never ran here, nothing recorded
+
+
+def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_theirs(tmp_path):
+    """The starter installer's counts and the newest startup verification's problems join only once recorded; a wake
+    that spoke before my human wrote is my first message there, not a reply; an unreadable source says unknown."""
+    from ouroboros.context_first_hour import setup_fact
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "logs").mkdir()
+    _born(tmp_path, "first_boot", owner_id=None, owner_chat_id=None, bg_consciousness_enabled=True)
+    _said(tmp_path, ("10:05", "out"))
+    (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "pending", "requested": ["a", "b", "c"],
+        "results": {"a": {"status": "installed"}, "b": {"status": "failed"}, "c": {"status": "pending"}}}), encoding="utf-8")
+    verification = {"type": "startup_verification", "ts": "2026-11-21T09:59:00.000000+00:00", "issues_count": 2,
+                    "checks": {"model": {"configured": "(not set)"}, "version_sync": {"status": "warning"},
+                               "budget": {"status": "skipped"}, "identity": {"exists": True, "non_empty": True}}}
+    (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(verification) + "\n", encoding="utf-8")
+    fact = setup_fact(tmp_path)
+    assert fact["main"] == "my human has not written in Main; my first message there 2026-11-21 10:05 UTC"
+    assert fact["starter_skills"] == "waiting to retry: 3 chosen; 1 installed, 1 pending, 1 failed (state/skill_starter.json)"
+    assert fact["startup_problems"] == ("2026-11-21 09:59 UTC, 2 issues: model not set, version_sync warning "
+                                        "(its startup_verification row in logs/events.jsonl)")
+    assert fact["finished_at"] == "none recorded"  # no setup ran here (Colab, headless, a preset)
+    clean = {**verification, "issues_count": 0, "checks": {"version_sync": {"status": "ok"}}}
+    (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(clean) + "\n", encoding="utf-8")
+    (tmp_path / "state" / "skill_starter.json").write_text(json.dumps({"state": "upgrade"}), encoding="utf-8")
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "state" / "state.initialized.json").write_text("{not json", encoding="utf-8")
+    fact = setup_fact(tmp_path)
+    assert "startup_problems" not in fact and "starter_skills" not in fact  # a clean check; an install older than it
+    assert fact["finished_at"] == "unknown: the settings document cannot be read"
+    assert fact["state"] == "unknown: the initialization record is invalid"
+    assert fact["owner_chat"].startswith("unknown: runtime state unavailable") and fact["consciousness"] == "unknown"
+
+
+def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_path):
+    env = _make_health_env(tmp_path)
+    shared = json.loads(build_runtime_section(env, {"id": "task-1", "type": "task"}).split("\n\n", 1)[1])
+    assert shared["setup"]["owner_chat"].startswith("unknown: runtime state unavailable")  # the helper env has no witness
+    declared = json.loads(build_runtime_section(env, {"id": "task-2", "type": "task", "input_sources": "declared"})
+                          .split("\n\n", 1)[1])
+    assert "setup" not in declared

@@ -254,6 +254,7 @@ D20 = "Presence"
 "ouroboros/context.py" = "D03"
 "ouroboros/context_input_selection.py" = "D03"
 "ouroboros/context_runtime_facts.py" = "D03"
+"ouroboros/context_first_hour.py" = "D03"  # the Runtime setup facts: how this install began, the first exchange
 "ouroboros/context_budget.py" = "D03"
 "ouroboros/context_compaction.py" = "D03"
 "ouroboros/arrival_notes.py" = "D03"  # the working-view notes in view, named when the owner's words or press arrive
