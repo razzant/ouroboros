@@ -7,10 +7,12 @@ is autouse, so importing it into a test module re-applies it there.
 """
 from __future__ import annotations
 
-import subprocess
 from types import SimpleNamespace
 
 import pytest
+
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 @pytest.fixture(autouse=True)
@@ -23,14 +25,13 @@ def _managed_worker_pool_available(monkeypatch):
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
 
 
-def _init_repo_with_file(repo, name="tracked.txt", content="old\n"):
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    (repo / name).write_text(content, encoding="utf-8")
-    subprocess.run(["git", "add", name], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "init"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
+def _lay_repo_with_file(folder):
+    repo = git_repository(folder / "repo", unborn=True)
+    (repo / "tracked.txt").write_text("old\n", encoding="utf-8")
+    world_git(repo, "add", "tracked.txt")
+    world_git(repo, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "init")
+
+
+def _init_repo_with_file(repo):
+    """One commit ``init`` holding ``tracked.txt`` (``old``), copied from the run's world of it."""
+    clone_repository(world("headless-cli-tracked-file", _lay_repo_with_file) / "repo", repo)
