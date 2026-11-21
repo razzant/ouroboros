@@ -2,7 +2,7 @@
 
 The 27.10 incident class: the model pressed cmd+tab and an arrow key into whatever was in front and read
 ``observed_effect: true`` (the helper exited 0) as "the slide changed". Every test here fakes only the OS
-boundary (``subprocess.run``: cliclick, lsappinfo, wmctrl/xdotool, the native helper's JSON; ``urlopen`` toward
+boundary (``subprocess.run``: the input program, lsappinfo, wmctrl/xdotool, the native helper's JSON; ``urlopen`` toward
 an OSWorld guest; ``ssh``) and asserts both directions: the guard fires (nothing is sent, no mark) and stays
 quiet (one input, the mark, the place). The same receipt contract is pinned on every transport.
 """
@@ -14,7 +14,8 @@ import sys
 
 import pytest
 
-from tests._unix_computer_use import API, CHORD_POSTED, KEYNOTE, SAFARI, app_dict, inputs, load_plugin, mac, receipt
+from tests._unix_computer_use import (API, CHORD_POSTED, KEYNOTE, RETURN, RIGHT, SAFARI, app_dict, inputs, is_input, key,
+                                      load_plugin, mac, receipt)
 
 
 # --- an input aimed at an application (macOS) -----------------------------------------------------
@@ -23,7 +24,7 @@ def test_a_targeted_key_is_sent_only_after_the_target_is_verified_in_front(tmp_p
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is True and out["observed_effect"] is True, out
-    assert inputs(state) == [["cliclick", "kp:arrow-right"]], "exactly one input, after the switch"
+    assert inputs(state) == [[RIGHT]], "exactly one input, after the switch"
     assert state["helper"][0][:2] == ["activate", "Keynote"], "one helper call resolves, activates and verifies"
     assert out["target"]["requested"] == "Keynote" and out["target"]["activated"] is True and out["target"]["verified"] is True
     assert out["delivered_to"] == app_dict(KEYNOTE)
@@ -37,7 +38,7 @@ def test_a_target_that_did_not_come_forward_sends_nothing(tmp_path, monkeypatch)
     out = receipt(api.tools["key"](keys="right", app="Stuck"))
     assert out["ok"] is False and "observed_effect" not in out, out
     assert out["reason"] == "not_frontmost_after_activate" and "Safari" in out["error"] and "nothing was sent" in out["error"]
-    assert out["target"]["verified"] is False and inputs(state) == [], "the guard fires: no cliclick at all"
+    assert out["target"]["verified"] is False and inputs(state) == [], "the guard fires: no input at all"
 
 
 @pytest.mark.parametrize("query, reason", [("NoSuchApp", "not_running"), ("Term", "ambiguous")])
@@ -54,7 +55,7 @@ def test_an_untargeted_input_keeps_working_and_names_who_received_it(tmp_path, m
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is True and out["observed_effect"] is True
-    assert inputs(state) == [["cliclick", "kp:arrow-right"]] and state["helper"] == [], "no activation without app="
+    assert inputs(state) == [[RIGHT]] and state["helper"] == [], "no activation without app="
     assert out["delivered_to"]["app"] == "Safari" and "target" not in out and "front_before" not in out
     # app="" is what a voice model sends for an unused optional field: identical to omitting it.
     state["calls"].clear()
@@ -67,7 +68,7 @@ def test_without_lsappinfo_the_place_is_unknown_and_the_input_still_goes(tmp_pat
     out = receipt(api.tools["key"](keys="return"))
     assert out["ok"] is True and out["observed_effect"] is True
     assert out["delivered_to"] == "unknown" and "unknown" in out["note"] and "front_after" not in out
-    assert inputs(state) == [["cliclick", "kp:return"]]
+    assert inputs(state) == [[RETURN]]
 
 
 def test_a_front_change_after_the_input_is_reported(tmp_path, monkeypatch):
@@ -78,38 +79,46 @@ def test_a_front_change_after_the_input_is_reported(tmp_path, monkeypatch):
     assert out["delivered_to"]["app"] == "Safari" and out["front_after"]["app"] == "Keynote", out
 
 
-def test_a_dropped_input_is_an_honest_failure(tmp_path, monkeypatch):
-    """cliclick exits 0 and only warns on stderr when macOS has no Accessibility grant for the posting process."""
-    warning = "WARNING: Accessibility privileges not enabled. Many actions may fail.\n"
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", warning))
+def test_a_refused_input_is_an_honest_failure(tmp_path, monkeypatch):
+    """Without the right to post input events the input program posts nothing, says so on stderr and exits 0: the
+    receipt is a refusal (nothing was sent) with the one structured field naming the grant only the owner can give."""
+    warning = "WARNING: Accessibility privileges not enabled (no right to post input events); nothing was sent\n"
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", warning))
     out = receipt(api.tools["key"](keys="right"))
-    assert out["ok"] is False and "observed_effect" not in out, out
+    assert out["ok"] is False and "observed_effect" not in out and out["dispatched"] is False, out
     assert out["reason"] == "permission_denied" and out["permission"] == {"accessibility": "untrusted", "source": "helper stderr"}
-    assert "Accessibility" in out["helper_stderr"]
+    assert out["refusal"] == {"kind": "permission", "grant": "post_events", "fixable_by": "owner",
+                              "where": "System Settings > Privacy & Security > Accessibility"}, out
+    assert "Accessibility" in out["helper_stderr"] and "not sent" in out["note"] and out["front"]["app"] == "Safari"
     # A switch observed before the dropped input keeps its own mark.
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and out["observed_effect"] is True and out["activation_done"] is True
     # Other stderr noise is kept beside a successful dispatch.
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", "some note\n"))
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", "some note\n"))
     out = receipt(api.tools["key"](keys="right"))
-    assert out["ok"] is True and out["observed_effect"] is True and out["helper_stderr"] == "some note"
+    assert out["ok"] is True and out["observed_effect"] is True and out["helper_stderr"] == "some note" and "refusal" not in out
 
 
-def test_characters_the_layout_cannot_type_are_an_honest_failure(tmp_path, monkeypatch):
-    """Measured on the live probe (27.10.2026): under a Cyrillic layout cliclick typed none of 'ouroboros probe',
-    printed one 'Unable to get key code for <c>' line per letter and exited 0. The hint names the method used."""
-    stderr = "".join(f"Unable to get key code for {c} (see README-Characters.md)\n" for c in "ourbs")
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", stderr))
+def test_text_goes_in_any_layout_and_a_key_the_layout_lacks_is_an_honest_refusal(tmp_path, monkeypatch):
+    """Measured on the live probe (27.10.2026): under a Cyrillic layout the former typing helper typed none of
+    'ouroboros probe'. Text now goes as Unicode key events (#63), so no layout refuses it; the receipt says how many
+    characters had no key of their own. A key chord still needs a key, and its refusal names the layout."""
+    answer = '{"posted":30,"method":"unicode_events","chars_total":15,"chars_sent":15,"override_only":15}\n'
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, answer, ""))
     out = receipt(api.tools["type_text"](text="ouroboros probe"))
-    assert out["ok"] is False and "observed_effect" not in out, out
-    assert out["reason"] == "untypable_characters" and out["untyped"] == list("ourbs") and "via=paste" in out["error"]
+    assert out["ok"] is True and out["observed_effect"] is True and out["method"] == "unicode_events", out
+    assert (out["chars_sent"], out["chars_total"], out["override_only"]) == (15, 15, 15) and "clipboard_replaced" not in out
+    assert inputs(state) == [[{"op": "type", "text": "ouroboros probe", "interval_ms": 0}]]
+    stderr = "Unable to get key code for s (no key of com.apple.keylayout.Russian gives s alone or with Shift); nothing was sent\n"
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", stderr))
     shortcut = receipt(api.tools["key"](keys="cmd+shift+s"))  # Command alone with one character is the chord program's
-    assert shortcut["reason"] == "untypable_characters" and "layout" in shortcut["error"] and "via=paste" not in shortcut["error"]
-    # The paste chord no longer types the layout's "v" (cliclick's warning above does not reach it); the chord program
-    # says the same words when no key of the layout gives v under Command (measured: Turkmen), and posts nothing.
+    assert shortcut["reason"] == "untypable_characters" and "layout" in shortcut["error"] and shortcut["dispatched"] is False
+    assert shortcut["untyped"] == ["s"] and "not sent" in shortcut["note"] and "observed_effect" not in shortcut, shortcut
+    # The paste chord says the same words when no key of the layout gives v under Command (measured: Turkmen), and
+    # posts nothing; the clipboard write before it stands.
     refusal = ("Unable to get key code for v (no key of com.apple.keylayout.Turkmen gives v under Command); "
                "the paste chord was not sent\n")
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", stderr), chord=(0, "", refusal))
+    module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", refusal))
     pasted = receipt(api.tools["type_text"](text="x", via="paste"))
     assert pasted["reason"] == "untypable_characters" and "paste chord" in pasted["error"] and "via=paste" not in pasted["error"]
     assert "V under Command" in pasted["error"] and pasted["untyped"] == ["v"] and inputs(state) == [], pasted
@@ -119,7 +128,7 @@ def test_characters_the_layout_cannot_type_are_an_honest_failure(tmp_path, monke
 
 
 def test_an_activation_that_ran_before_a_failed_input_keeps_its_mark_and_says_the_input_is_unknown(tmp_path, monkeypatch):
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(1, "", "boom"))
+    module, api, state = mac(tmp_path, monkeypatch, events=(1, "", "boom"))
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is False and out["observed_effect"] is True and out["activation_done"] is True, out
     assert out["target"]["activated"] is True and out["error"] == "boom"
@@ -143,12 +152,12 @@ def test_a_key_sequence_brings_the_target_forward_once_and_rechecks_before_each_
 def test_a_targeted_sequence_stops_when_its_app_leaves_the_front(tmp_path, monkeypatch):
     """The 27.10 shape inside one call: cmd+tab (sent to Keynote) moves the front to Safari; the arrow is NOT sent."""
     def switch(argv, state):
-        if "kp:tab" in argv:
+        if json.loads(argv[-1])["ops"][0].get("code") == 48:
             state["front"] = SAFARI
     module, api, state = mac(tmp_path, monkeypatch, on_input=switch)
     out = receipt(api.tools["key"](keys="cmd+tab right", app="Keynote"))
     assert out["ok"] is False and out["reason"] == "target_lost" and out["steps_done"] == 1 and out["steps_total"] == 2, out
-    assert inputs(state) == [["cliclick", "kd:cmd", "kp:tab", "ku:cmd"]], "the arrow was never sent"
+    assert inputs(state) == [[key(48, "cmd")]], "the arrow was never sent"
     assert out["observed_effect"] is True, "the first step ran"
     assert out["delivered_to"]["app"] == "Keynote" and out["front"]["app"] == "Safari" and out["front_after"]["app"] == "Safari"
     assert "no longer in front" in out["error"] and "nothing more was sent" in out["error"]
@@ -156,7 +165,7 @@ def test_a_targeted_sequence_stops_when_its_app_leaves_the_front(tmp_path, monke
 
 def test_an_untargeted_sequence_names_every_recipient_when_they_differ(tmp_path, monkeypatch):
     def switch(argv, state):
-        if "kp:tab" in argv:
+        if json.loads(argv[-1])["ops"][0].get("code") == 48:
             state["front"] = KEYNOTE
     module, api, state = mac(tmp_path, monkeypatch, on_input=switch)
     out = receipt(api.tools["key"](keys="cmd+tab right"))
@@ -177,7 +186,7 @@ def test_mouse_up_and_move_never_change_the_front(tmp_path, monkeypatch):
     for tool in ("mouse_up", "move"):
         assert "app" not in api.meta[tool]["schema"]["properties"], tool
     out = receipt(api.tools["mouse_down"](x=5, y=6, raw=True, app="Keynote"))
-    assert out["ok"] is True and out["target"]["activated"] is True and inputs(state)[-1] == ["cliclick", "dd:5,6"]
+    assert out["ok"] is True and out["target"]["activated"] is True and inputs(state)[-1] == [{"op": "button", "down": True, "button": "left", "x": 5, "y": 6}]
 
 
 # --- activate_app ---------------------------------------------------------------------------------
@@ -257,7 +266,7 @@ def test_type_text_via_paste_writes_the_clipboard_after_the_target_is_verified(t
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["type_text"](text="Привет, мир " * 40, via="paste", app="Keynote"))
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
-    # #2589: the chord is the Command-plane key of the active layout, posted by the chord program, never cliclick t:v.
+    # #2589: the chord is the Command-plane key of the active layout, posted by the chord program, never a typed "v".
     assert state["clipboard"].startswith("Привет") and inputs(state) == [] and state["chords"] == [list(module.PASTE_CHORD_ARGV)]
     assert state["clipboard_contract"] == ("utf-8", "en_US.UTF-8"), "UTF-8 bytes, pbcopy told so whatever it inherited"
     assert out["cmd"] == list(module.PASTE_CHORD_ARGV) and out["cmd"][-1].endswith("paste_chord.js"), "the receipt names what ran"
@@ -267,7 +276,8 @@ def test_type_text_via_paste_writes_the_clipboard_after_the_target_is_verified(t
     chord_at = next(i for i, argv in enumerate(state["calls"]) if argv[0] == "osascript")
     assert activate_at < copy_at < chord_at, "the clipboard is written only after the target is verified in front"
     plain = receipt(api.tools["type_text"](text="hi"))
-    assert plain["ok"] is True and inputs(state)[-1] == ["cliclick", "t:hi"] and "method" not in plain
+    assert plain["ok"] is True and inputs(state)[-1] == [{"op": "type", "text": "hi", "interval_ms": 0}]
+    assert plain["method"] == "unicode_events" and "clipboard_replaced" not in plain
     # A refusal leaves the owner's clipboard alone and says nothing was sent.
     module, api, state = mac(tmp_path, monkeypatch)
     refused = receipt(api.tools["type_text"](text="secret", via="paste", app="NoSuchApp"))
@@ -291,7 +301,29 @@ def test_screenshot_transform_uses_display_bounds_and_the_target_display(tmp_pat
     click = receipt(api.tools["click"](x=100, y=50, observation_id=out["observation_id"]))
     assert click["ok"] is True
     sx = out["coord_transform"]["sx"]
-    assert inputs(state)[-1] == ["cliclick", f"c:{round(100 * sx) + 1728},{round(50 * out['coord_transform']['sy'])}"]
+    assert inputs(state)[-1] == [{"op": "click", "x": round(100 * sx) + 1728, "y": round(50 * out["coord_transform"]["sy"]),
+                                  "button": "left", "count": 1}]
+
+
+def test_a_display_capture_without_the_screen_recording_grant_is_refused_and_one_with_it_is_taken(tmp_path, monkeypatch):
+    """screencapture exits 0 without the grant and writes only the wallpaper; the display list reads the grant
+    (prompt-free) and the screenshot refuses before capturing, with the one structured refusal field."""
+    def helper(recording):
+        def answer(args, state):
+            if args[0] == "displays":
+                return {"ok": True, "screen_recording": recording,
+                        "displays": [{"id": 1, "main": True, "x": 0, "y": 0, "width": 1728, "height": 1117, "index": 1}]}
+            return {"ok": False, "error": "no fake"}
+        return answer
+    module, api, state = mac(tmp_path, monkeypatch, helper=helper("denied"))
+    out = receipt(api.tools["screenshot"](job_id="denied"))
+    assert out["ok"] is False and out["reason"] == "permission_denied" and out["note"] == "nothing was captured", out
+    assert out["refusal"] == {"kind": "permission", "grant": "screen_recording", "fixable_by": "owner",
+                              "where": "System Settings > Privacy & Security > Screen & System Audio Recording"}
+    assert not any(argv[0] == "screencapture" for argv in state["calls"]) and "auto_attach_image" not in out
+    module, api, state = mac(tmp_path, monkeypatch, helper=helper("granted"))
+    taken = receipt(api.tools["screenshot"](job_id="granted"))
+    assert taken["ok"] is True and "refusal" not in taken and any(argv[0] == "screencapture" for argv in state["calls"])
 
 
 # --- registration -------------------------------------------------------------------------------
@@ -561,12 +593,12 @@ def test_a_failed_paste_helper_still_reports_the_clipboard_write(tmp_path, monke
     module, api, state = mac(tmp_path, monkeypatch, chord=(1, "", "execution error: boom (-2700)"))
     out = receipt(api.tools["type_text"](text="secret", via="paste"))
     assert out["ok"] is False and out["observed_effect"] is True and out["clipboard_done"] is True and "activation_done" not in out
-    # The chord program refuses to post without the right to (the words cliclick warns with): nothing was posted.
+    # The chord program refuses to post without the right to (the words the input program uses): nothing was posted.
     warning = "WARNING: Accessibility privileges not enabled (no right to post input events); the paste chord was not sent\n"
     module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", warning))
     dropped = receipt(api.tools["type_text"](text="secret", via="paste"))
     assert dropped["reason"] == "permission_denied" and dropped["clipboard_done"] is True and dropped["observed_effect"] is True
-    assert "clipboard write" in dropped["note"]
+    assert "clipboard write" in dropped["note"] and dropped["refusal"]["grant"] == "post_events"
 
 
 def test_a_failed_clipboard_write_sends_nothing_and_says_so(tmp_path, monkeypatch):
@@ -584,13 +616,13 @@ def test_a_failed_clipboard_write_sends_nothing_and_says_so(tmp_path, monkeypatc
     assert out["dispatched"] is False and "front_at_dispatch" not in out and out["front"]["app"] == "Keynote"
 
 
-def test_a_demoted_step_inside_a_sequence_is_reported_as_dispatched_with_its_facts(tmp_path, monkeypatch):
-    warning = "WARNING: Accessibility privileges not enabled. Many actions may fail.\n"
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", warning))
+def test_a_refused_step_inside_a_sequence_is_reported_as_not_sent_with_its_facts(tmp_path, monkeypatch):
+    warning = "WARNING: Accessibility privileges not enabled (no right to post input events); nothing was sent\n"
+    module, api, state = mac(tmp_path, monkeypatch, events=(0, "", warning))
     out = receipt(api.tools["key"](keys="down return"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and out["steps_done"] == 0
-    assert "failed" in out["error"] and "not sent" not in out["error"] and out["permission"]["accessibility"] == "untrusted"
-    assert out["dispatched"] is True and "dropped" in out["note"], "the demoted step keeps its own explanation"
+    assert "not sent" in out["error"] and out["permission"]["accessibility"] == "untrusted" and out["refusal"]["grant"] == "post_events"
+    assert out["dispatched"] is False and "was not sent" in out["note"], "the refused step keeps its own explanation"
     # After completed steps the explanation is said about the next step, beside what completed.
     module, api, state = mac(tmp_path, monkeypatch)
     calls = {"n": 0}
@@ -598,7 +630,7 @@ def test_a_demoted_step_inside_a_sequence_is_reported_as_dispatched_with_its_fac
 
     def second_dropped(cmd, *a, **k):
         argv = [str(p) for p in cmd]
-        if argv[0] == "cliclick":
+        if is_input(argv):
             calls["n"] += 1
             if calls["n"] == 2:
                 return subprocess.CompletedProcess(argv, 0, "", warning)
@@ -606,12 +638,12 @@ def test_a_demoted_step_inside_a_sequence_is_reported_as_dispatched_with_its_fac
     monkeypatch.setattr(module.subprocess, "run", second_dropped)
     out = receipt(api.tools["key"](keys="down return up"))
     assert out["steps_done"] == 1 and out["reason"] == "permission_denied" and out["observed_effect"] is True and calls["n"] == 2, out
-    assert out["note"].startswith("1 of 3 step(s) completed") and "dropped" in out["note"] and "the rest were not sent" in out["note"], out["note"]
+    assert out["note"].startswith("1 of 3 step(s) completed") and "was not sent" in out["note"] and "the rest were not sent" in out["note"], out["note"]
 
 
 def test_a_failed_helper_with_an_unread_front_is_still_a_dispatched_input(tmp_path, monkeypatch):
     """The reader going silent is not proof that nothing was sent: the helper ran, its outcome is unknown."""
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(1, "", "boom"), lsappinfo=False)
+    module, api, state = mac(tmp_path, monkeypatch, events=(1, "", "boom"), lsappinfo=False)
     out = receipt(api.tools["key"](keys="right down"))
     assert out["ok"] is False and out["steps_done"] == 0 and out["dispatched"] is True
     assert "failed" in out["error"] and "unknown" in out["note"] and "not sent" not in out["note"]
@@ -621,7 +653,7 @@ def test_a_failed_helper_with_an_unread_front_is_still_a_dispatched_input(tmp_pa
 
     def second_fails(cmd, *a, **k):
         argv = [str(p) for p in cmd]
-        if argv[0] == "cliclick":
+        if is_input(argv):
             calls["n"] += 1
             if calls["n"] == 2:
                 return subprocess.CompletedProcess(argv, 1, "", "boom")
@@ -637,7 +669,7 @@ def test_a_failed_helper_with_an_unread_front_is_still_a_dispatched_input(tmp_pa
 
     def front_unread_after_first(cmd, *a, **k):
         argv = [str(p) for p in cmd]
-        if argv[0] == "cliclick":
+        if is_input(argv):
             seen["inputs"] += 1
             if seen["inputs"] == 2:
                 return subprocess.CompletedProcess(argv, 1, "", "boom")
@@ -650,7 +682,7 @@ def test_a_failed_helper_with_an_unread_front_is_still_a_dispatched_input(tmp_pa
     assert out["steps_delivered_to"][0]["app"] == "Safari" and out["steps_delivered_to"][1] == "unknown", out
 
 
-def test_cliclick_gets_absolute_negative_coordinates_for_a_display_left_of_the_main_one(tmp_path, monkeypatch):
+def test_input_gets_absolute_negative_coordinates_for_a_display_left_of_the_main_one(tmp_path, monkeypatch):
     def helper(args, state):
         if args[0] == "displays":
             return {"ok": True, "displays": [{"id": 1, "main": True, "x": 0, "y": 0, "width": 1728, "height": 1117, "index": 1},
@@ -665,9 +697,9 @@ def test_cliclick_gets_absolute_negative_coordinates_for_a_display_left_of_the_m
     shot = receipt(api.tools["screenshot"](job_id="left", app="Keynote"))
     assert shot["display"]["index"] == 2 and (shot["coord_transform"]["ox"], shot["coord_transform"]["oy"]) == (-1920, -200)
     click = receipt(api.tools["click"](x=100, y=50, observation_id=shot["observation_id"]))
-    assert click["ok"] is True and inputs(state)[-1] == ["cliclick", "c:=-1870,=-175"], "a bare '-' would be a relative move"
-    assert receipt(api.tools["click"](x=-10, y=20, raw=True))["ok"] is True and inputs(state)[-1] == ["cliclick", "c:=-10,20"]
-    assert receipt(api.tools["move"](x=5, y=5, raw=True))["ok"] is True and inputs(state)[-1] == ["cliclick", "m:5,5"]
+    assert click["ok"] is True and inputs(state)[-1] == [{"op": "click", "x": -1870, "y": -175, "button": "left", "count": 1}]
+    assert receipt(api.tools["click"](x=-10, y=20, raw=True))["ok"] is True and inputs(state)[-1][0]["x"] == -10
+    assert receipt(api.tools["move"](x=5, y=5, raw=True))["ok"] is True and inputs(state)[-1] == [{"op": "move", "x": 5, "y": 5}]
 
 
 LIBRE = ("0x00000001  0 4242 10 20 800 600 navigator.Firefox host Browser - Docs\n"

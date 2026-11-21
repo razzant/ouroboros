@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from skills.unix_computer_use import plugin
-from skills.unix_computer_use.remote import cliclick_keys
+from skills.unix_computer_use import mac_input
 from tests.test_unix_computer_use_safety_contract import _API, guest_key_validation
 
 
@@ -161,7 +161,7 @@ def test_ssh_capture_maps_exact_primary_and_validates_same_geometry(desktop, mon
             geometry_reads.append(bounds)
             return 0, bounds, ""
         if not command.startswith("screencapture -x -m "):
-            assert "cliclick" in command
+            assert "osascript -l JavaScript -e" in command
             sent.append(command)
         return 0, "", ""
 
@@ -181,8 +181,7 @@ def test_ssh_capture_maps_exact_primary_and_validates_same_geometry(desktop, mon
     assert desktop._load_transform()["transforms"][0]["display_geometry"] == transform["display_geometry"]
     clicked = json.loads(desktop.click(x=20, y=40, observation_id=shot["observation_id"]))
     assert clicked["ok"] is True and clicked["geometry_verification"] == "live"
-    point = f"{'=' if x + 10 < 0 else ''}{x + 10},{'=' if y + 20 < 0 else ''}{y + 20}"
-    assert len(sent) == 1 and f"cliclick c:{point}" in sent[0]
+    assert len(sent) == 1 and f'{{"op":"click","x":{x + 10},"y":{y + 20},' in sent[0]
     assert len(geometry_reads) == 2
     # A moved origin with unchanged dimensions invalidates this observation.
     bounds = json.dumps({"x": x + 1, "y": y, "w": 100, "h": 80})
@@ -260,7 +259,8 @@ def test_raw_and_coordinate_free_release_do_not_need_an_observation(desktop):
     desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
     assert json.loads(desktop.click(x=-2, y=-3, raw=True))["ok"] is True
     assert json.loads(desktop.mouse_up())["ok"] is True
-    assert sent == [["cliclick", "c:=-2,=-3"], ["cliclick", "du:."]]
+    assert sent == [mac_input.argv([{"op": "click", "x": -2, "y": -3, "button": "left", "count": 1}]),
+                    mac_input.argv([{"op": "button", "down": False, "button": "left"}])]
 
 
 def test_wayland_mapping_uses_capture_bounds_without_claiming_live_geometry(desktop, monkeypatch):
@@ -311,7 +311,8 @@ def test_local_key_commands_are_prepared_once_before_activation(desktop, monkeyp
     desktop._native = native
     desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
     out = json.loads(desktop.key(keys="down A cmd+A", app="Editor"))
-    assert out["ok"] is True and sent == [["cliclick", "kp:arrow-down"], ["cliclick", "t:A"], plugin.command_chord_argv("a")]
+    assert out["ok"] is True and sent == [mac_input.argv([{"op": "keys", "mods": [], "code": 125}]),
+                                          mac_input.argv([{"op": "keys", "mods": [], "char": "A"}]), plugin.command_chord_argv("a")]
     assert not hasattr(desktop, "_last_base_raw")
 
 
@@ -355,31 +356,37 @@ def test_unavailable_x11_validation_is_not_success(desktop, monkeypatch, error):
     assert out["ok"] is False and out["dispatched"] is False
 
 
-def test_mac_local_and_ssh_share_real_cliclick_key_commands():
-    assert cliclick_keys(["cmd"], "a") == ["kd:cmd", "t:a", "ku:cmd"]
-    assert cliclick_keys([], "A") == ["t:A"]
-    for key in ["num-enter", "play-pause", "keys-light-up", "f16"]:
-        assert cliclick_keys([], key) == ["kp:" + key]
-    for key in ["invalid-name", "f35", "XF86AudioPlay"]:
+def test_mac_local_and_ssh_share_real_virtual_key_codes():
+    """kVK_* codes from HIToolbox Events.h (layout-independent); a character is looked up in the active layout by the
+    program itself. The media and brightness names the former helper sent as system events have no virtual key code
+    and are refused rather than claimed."""
+    assert mac_input.key_op(["cmd"], "a") == {"op": "keys", "mods": ["cmd"], "char": "a"}
+    assert mac_input.key_op([], "A") == {"op": "keys", "mods": [], "char": "A"}
+    for key, code in [("num-enter", 76), ("f16", 106), ("f1", 122), ("return", 36), ("fwd-delete", 117), ("page-down", 121)]:
+        assert mac_input.key_op([], key) == {"op": "keys", "mods": [], "code": code}
+    assert mac_input.key_op(["cmd"], "shift", hold_ms=200) == {"op": "hold", "mods": ["cmd", "shift"], "ms": 200}
+    assert mac_input.key_op([], "space", hold_ms=50) == {"op": "hold", "mods": [], "ms": 50, "code": 49}
+    for key in ["invalid-name", "f35", "XF86AudioPlay", "play-pause", "keys-light-up"]:
         with pytest.raises(ValueError):
-            cliclick_keys([], key)
+            mac_input.key_op([], key)
 
 
 @pytest.mark.parametrize("keys,mac,x11", [
     ("cmd+S", None, "super+s"),  # None: the Command chord program given "s" (tests/test_unix_computer_use_paste_chord.py)
-    ("ctrl+C", ["kd:ctrl", "t:c", "ku:ctrl"], "ctrl+c"),
-    ("Control+S", ["kd:ctrl", "t:s", "ku:ctrl"], "ctrl+s"),
+    ("ctrl+C", {"op": "keys", "mods": ["ctrl"], "char": "c"}, "ctrl+c"),
+    ("Control+S", {"op": "keys", "mods": ["ctrl"], "char": "s"}, "ctrl+s"),
 ])
 def test_a_letter_under_a_modifier_adds_no_shift_and_a_bare_letter_stays_as_written(desktop, monkeypatch, keys, mac, x11):
     """A kept capital presses Shift on the way out: cmd+S would become cmd+shift+s. Shift is only what the combo names."""
     sent, commands = [], []
     desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
     assert json.loads(desktop.key(keys=keys))["ok"] is True
-    assert sent == [plugin.command_chord_argv("s") if mac is None else ["cliclick", *mac]]
+    assert sent == [plugin.command_chord_argv("s") if mac is None else mac_input.argv([mac])]
     select(desktop, "ssh_macos")
     desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, "", "")
     assert json.loads(desktop.key(keys=keys))["ok"] is True
-    remote = shlex.join(plugin.command_chord_argv("s", remote=True)) if mac is None else " ".join(["cliclick", *mac])
+    remote = shlex.join(plugin.command_chord_argv("s", remote=True) if mac is None else
+                        mac_input.argv([mac], remote=True, budget_ms=28000))
     assert remote + ";" in commands[0]
     desktop.use_local()
     monkeypatch.setattr(plugin, "_platform", lambda: "linux")
@@ -482,8 +489,8 @@ def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatc
         assert out["reason"] == "target_lost" and not out.get("observed_effect")
         assert "is not in front" in out["error"] and FIRST_REFUSAL in out["error"], out["error"]
         assert "no longer" not in out["error"] and "nothing more" not in out["error"], out["error"]
-        assert not any(cmd[0] in ("cliclick", "pbcopy") or cmd[:2] in (["xdotool", "key"], ["xdotool", "type"])
-                       or (cmd[0] == "ssh" and "cliclick" in cmd[-1]) for cmd in calls)
+        assert not any(mac_input.ops_of(cmd) or cmd[0] == "pbcopy" or cmd[:2] in (["xdotool", "key"], ["xdotool", "type"])
+                       or (cmd[0] == "ssh" and '"ops":' in cmd[-1]) for cmd in calls)
 
 
 @pytest.mark.parametrize("host", ["macos", "x11", "osworld"])
@@ -507,7 +514,7 @@ def test_never_policy_with_an_unread_front_claims_no_switch(tmp_path, monkeypatc
     assert "could not be read" in out["error"] and FIRST_REFUSAL in out["error"], out["error"]
     assert "switch was requested" not in out["error"] and "None" not in out["error"], out["error"]
     assert not any("activate" in cmd or "System Events" in " ".join(cmd) or cmd[:3] == ["wmctrl", "-i", "-a"]
-                   or cmd[0] == "cliclick" or cmd[:2] == ["xdotool", "key"] or (cmd[0] == "ssh" and "cliclick" in cmd[-1])
+                   or bool(mac_input.ops_of(cmd)) or cmd[:2] == ["xdotool", "key"] or (cmd[0] == "ssh" and '"ops":' in cmd[-1])
                    for cmd in calls)
 
 
@@ -548,7 +555,7 @@ def test_never_policy_x11_hold_refused_before_the_press_is_not_dispatched(tmp_pa
 def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
     from tests._unix_computer_use import mac, inputs, KEYNOTE, SAFARI
     def switch(argv, state):
-        if "kp:tab" in argv:
+        if '"code":48' in argv[-1]:
             state["front"] = SAFARI
     _, api, state = mac(tmp_path, monkeypatch, front=KEYNOTE, on_input=switch)
     out = json.loads(api.tools["key"](keys="cmd+tab right", app="Keynote", raise_policy="never"))
@@ -595,7 +602,7 @@ def test_ssh_super_modifier_preserves_existing_mapping(desktop):
     out = json.loads(desktop.key(keys="super+a meta+b"))
     assert out["ok"] is True  # both name Command: the Command chord, its program and character quoted word by word
     for command, char in zip(commands, "ab"):
-        assert shlex.join(plugin.command_chord_argv(char, remote=True)) + ";" in command and "cliclick kd:" not in command
+        assert shlex.join(plugin.command_chord_argv(char, remote=True)) + ";" in command and '"ops":' not in command
 
 
 def test_x11_fn_modifier_reaches_name_validation_without_keyerror(desktop, monkeypatch):

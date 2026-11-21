@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.8.0
+version: 0.9.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -93,7 +93,8 @@ Tools:
   `double_click`/`triple_click` (models call these names unprompted), `move`,
   `left_click_drag`, `mouse_down`/`mouse_up`, `cursor_position`, `type_text`,
   `key`, `hold_key`, `scroll`, and `wait` execute input through platform tools
-  when available. Pointer coordinates pass through one normalizer that accepts
+  when available (on a local or SSH Mac the skill's own CoreGraphics program, so
+  nothing is installed there). Pointer coordinates pass through one normalizer that accepts
   the malformations models actually emit (the pair packed into `x` with `y`
   absent or duplicated) and fails loudly on anything ambiguous.
 - `activate_app` brings a running application to the front (name, bundle id /
@@ -345,7 +346,7 @@ Coordinate contract:
   the stored transform folds the Retina scale in, computed from the captured
   display's own CoreGraphics bounds (a second display no longer stretches the
   scale), including a negative origin for a display left of or above the main
-  one (cliclick then receives `=`-prefixed absolute coordinates, locally and
+  one (the input events carry those absolute global points, locally and
   on a Mac over SSH; on a Mac negative raw coordinates are valid input, while
   an X11/Wayland desktop and an OSWorld guest, which have no screen space left
   of or above their origin, refuse them before any call, also when a stored
@@ -397,15 +398,30 @@ Input receipts (the same contract on every backend):
   receipt carries follow what happened: a refusal has `target`, `reason` and
   who is in front; a failed helper has `front_at_dispatch`; a dispatched input
   has `delivered_to`.
-- On a local or SSH Mac, `cliclick` exits 0 and only warns on stderr when the
-  posting process lacks the Accessibility grant (the OS drops the event) or
-  when a character has no key code in the active keyboard layout (nothing is
-  typed; measured 27.10.2026 under a Cyrillic layout); the paste chord program
-  warns the same way and then posts nothing. Such receipts are
-  `ok: false` with `reason: permission_denied` / `untypable_characters` and no
-  input mark (a completed clipboard write or switch before it keeps its own,
-  `clipboard_done` / `activation_done`); the hint names the method that failed
-  (typing, a shortcut, the paste chord).
+- On a local or SSH Mac, the input program (`input_events.js`) and the paste
+  chord program check before posting anything whether the process may post
+  input events (`CGPreflightPostEventAccess`, prompt-free) and whether every key
+  a chord names exists in the active keyboard layout; either refusal posts
+  nothing, warns on stderr and exits 0. Such receipts are `ok: false` with
+  `reason: permission_denied` / `untypable_characters`, no input mark and, for
+  the input and Command chord programs, `dispatched: false` (a completed
+  clipboard write or switch before it keeps its own, `clipboard_done` /
+  `activation_done`); the error names what was not sent (the input, a shortcut,
+  the paste chord). A missing grant also carries one structured field,
+  `refusal`: `{"kind": "permission", "grant": "post_events" | "accessibility" |
+  "screen_recording", "fixable_by": "owner", "where": "System Settings > Privacy
+  & Security > …"}`. Nothing asks the system to show a grant prompt. A local
+  display `screenshot` without the Screen Recording grant (read with the display
+  list) is refused the same way, `note: "nothing was captured"`, instead of
+  returning the wallpaper. With `app=` the switch runs before the input program
+  reads the grant, and keeps its mark.
+- A macOS receipt names its method: `cg_events` (pointer, wheel, keys),
+  `unicode_events` (typed text), `command_chord`, or `paste`. Typed text also
+  says `chars_sent`, `chars_total` (graphemes) and `override_only`: characters
+  no key of the active layout gives, sent on a neutral key with only their
+  Unicode string; an application that ignores an event's string (some remote
+  desktop clients, virtual machines, games) drops exactly those, so use
+  `via=paste` there.
 - A switch that happened before a failed or dropped input keeps the mark
   (`activation_done`): the front changed, which is an observed effect.
 - An input of several steps that fails after earlier steps succeeded returns
@@ -470,21 +486,28 @@ Observation without images (`ax_tree`, `window_list`):
 
 Backend matrix (honest limitations):
 
-- macOS: `screencapture` + `cliclick` + `osascript`; `sips` for downscaling;
+- macOS: `screencapture` + `osascript`; `sips` for downscaling;
   `lsappinfo` for the frontmost application; the native helper for windows,
   activation, the element walk, grants and displays. Activation tries AX
   `AXFrontmost`, then `NSRunningApplication`, then System Events, accepting
   each only after a fresh read shows the target in front within `wait_ms` (a
   request the OS accepts and ignores, or completes slower than that, falls
   through to the next); the System Events step can raise a one-time
-  Automation consent prompt. `scroll` is **unsupported**
-  (cliclick has no scroll-wheel command — page via `key` with
-  `page-down`/`page-up`); `middle` click and non-left `mouse_down`/`mouse_up`
-  are unsupported via cliclick. `hold_key` holds PURE-MODIFIER combos only
-  (`cmd`, `cmd+shift`, ...): cliclick `kd:`/`ku:` accept only modifiers and
-  `kp:` cannot hold — non-modifier holds report an honest error. In `key`
-  combos the base key is tapped while modifiers are held (`cmd+s` = hold cmd,
-  tap s). On a local or SSH Mac and on X11 a letter's case under a modifier adds
+  Automation consent prompt. Pointer, wheel, keys and text are CoreGraphics
+  events posted by the skill's own JavaScript for Automation program
+  (`input_events.js` through `osascript -l JavaScript`, built by `mac_input.py`),
+  under the grant to post input events (Accessibility; no Automation grant);
+  every event carries the skill's mark in `kCGEventSourceUserData`. `click`
+  takes left, right and middle with a real click count (double and triple
+  register as such); `left_click_drag` posts the way between its ends;
+  `mouse_down`/`mouse_up` take any button, and a `move` while a button is held
+  is a drag; `cursor_position` reads the pointer without posting anything;
+  `scroll` posts wheel lines at the pointer (up/down/left/right, one line per
+  step; the window under the pointer receives them). `hold_key` holds any key
+  or modifier combo, and the program lets up everything it pressed in its
+  `finally`, under its own deadline below the helper's timeout. In `key` combos
+  the base key is tapped while modifiers are held (`cmd+s` = hold cmd, tap s).
+  On a local or SSH Mac and on X11 a letter's case under a modifier adds
   no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
   capital. On local/SSH Macs, Command plus one printable character presses the
   key that gives that character under Command in the active layout. One only
@@ -493,26 +516,34 @@ Backend matrix (honest limitations):
   Shift under Command (`cmd+?` on ABC is Command, Shift and /). Name a
   shortcut by that character: under a Cyrillic layout `cmd+g`, while its own
   letters (`cmd+п`) are refused, never typed. A missing key or posting grant
-  refuses before posting. Other modifiers, named keys and holds still use
-  cliclick, which types the base character on the layout's typing plane: a
-  character that plane lacks is refused, and where the planes differ cliclick
-  may add a modifier (Option on Russian - PC) or press a key that means another
-  shortcut (Dvorak - QWERTY ⌘) under an ok receipt (#2589 measured `v`).
+  refuses before posting. Other combos with a character press the key that
+  gives it in the active layout alone or with Shift (Shift is then added); a
+  character the layout lacks is refused before anything is posted. Named keys
+  are layout-independent virtual key codes (`return`, `tab`, arrows, `home`,
+  `end`, `page-up`/`page-down`, `f1`–`f16`, the keypad); the media and
+  brightness keys have none and are refused.
+  `type_text` sends each grapheme as one key-down/up pair carrying its own
+  Unicode string, in any layout and script (Cyrillic under ABC, Latin under a
+  Russian layout, emoji, accents), on the key that gives the character when
+  the layout has one; the receipt says how (see "Input receipts").
   `key(cmd+v)` sends only the shortcut, without changing the clipboard.
   `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and
   pastes with Command and the key that gives `v` under Command in the active
   keyboard layout, with exactly the Command flag (an `osascript` JavaScript
-  program, the same over SSH, posting under the Accessibility grant cliclick
-  needs; no Automation grant), after the target was verified in front (a
-  refusal leaves the clipboard alone; the receipt says whether the clipboard
-  was replaced, also when the paste chord after it failed); use it for long or
-  non-ASCII text, which `cliclick t:` types slowly. Neither the layout's typed
+  program, the same over SSH, posting under the same grant), after the target
+  was verified in front (a refusal leaves the clipboard alone; the receipt says
+  whether the clipboard was replaced, also when the paste chord after it
+  failed); use it for long text or an application that ignores typed strings.
+  Neither the layout's typed
   `v` nor a fixed US key is that key everywhere (measured on an AppKit Edit
   menu: Russian – PC, Dvorak – QWERTY ⌘, Dvorak); a layout with none
   (Turkmen) is `untypable_characters` and nothing is posted. `helper_stderr`
   names the key sent; a dispatched paste does not prove the focused element
   took it. `via` accepts `type` or `paste`; anything else is refused.
+  Not yet measured on a real Mac (the events were checked only against inert
+  stand-ins): whether natural scrolling flips the posted wheel direction, and
+  which applications ignore an event's Unicode string.
 - Linux X11: key/hold validation also requires loadable `libX11` (discovered by
   `ctypes.util.find_library`); missing validation refuses without sending a prefix.
   `xdotool` (input and the active window), `gnome-screenshot`/`scrot`
@@ -578,8 +609,9 @@ Backend matrix (honest limitations):
   `backspace` presses BackSpace and `fwd-delete` presses forward Delete, and a
   letter reaches pyautogui as written (`ctrl+C` = `hotkey('ctrl', 'C')`);
   screenshots are capped at 20 MB and PNG-validated before use.
-- Remote SSH macOS: `screenshot` uses remote `screencapture` + `scp`; input uses
-  `cliclick` (Command-alone shortcuts/paste: the shared JXA helper), wrapped
+- Remote SSH macOS: `screenshot` uses remote `screencapture` + `scp`; input runs
+  the same input program's source through the Mac's own `osascript -e` (Command-alone
+  shortcuts/paste: the shared chord program), so nothing is installed there; wrapped
   so the same ssh call reads the frontmost
   application before and after and withholds a targeted input when the target
   is no longer in front. `app=` is resolved from the Mac's `lsappinfo list`
@@ -591,8 +623,8 @@ Backend matrix (honest limitations):
   wrapper's completion marker (a refused connection, a channel broken after
   the input may have run: `ssh_failed`) leaves the outcome unknown
   (`dispatched: null`, `transport_failed`; a clipboard marker that did come
-  back is kept as a fact), never "not sent". cliclick's stderr is read the same
-  way as locally. `type_text` with `via=paste` writes the Mac's clipboard
+  back is kept as a fact), never "not sent". The programs' stderr is read the same
+  way as locally, and the wheel, the middle button and `hold_key` work as locally. `type_text` with `via=paste` writes the Mac's clipboard
   (`pbcopy`, told the text is UTF-8 whatever locale ssh forwarded) and pastes
   with the same chord program through the Mac's own `osascript` in the same
   ssh call, and the receipt says whether the clipboard stage completed (a
@@ -600,8 +632,9 @@ Backend matrix (honest limitations):
   `window_list` lists applications and the frontmost one (no window
   titles over SSH); a listing that failed or named nothing is `apps_unread`,
   an unread front says `front_unread`. The remote Mac must have
-  Screen Recording, Accessibility and (for activation) Automation grants
-  configured by the owner. This skill does not install or store private SSH
+  Screen Recording, Accessibility (input events, for the process the SSH session
+  runs as) and (for activation) Automation grants configured by the owner;
+  `test_connection` checks that `screencapture` and `osascript` are there. This skill does not install or store private SSH
   keys.
 
 Connection registry:
@@ -633,8 +666,9 @@ check and are available to observe-only consciousness (owner decision
 Layout: `plugin.py` (registration, coordinate contract, local input),
 `place.py` (targets, activation, the receipt composer `_finish` shared by every
 transport, window rows, element reads), `remote.py` (OSWorld and SSH
-transports), `macos_native.py` (the helper process), `paste_chord.js` (the
-macOS paste chord, local and over SSH), `macos_stream.py` and
+transports), `macos_native.py` (the helper process), `input_events.js` and
+`mac_input.py` (macOS pointer, wheel, keys and text as CoreGraphics events, and
+the structured grant refusal), `paste_chord.js` (the macOS paste chord, local and over SSH), `macos_stream.py` and
 `window_session_server.py` (the window session and its MCP server). The skill intentionally
 does not hide OS permission requirements, and missing backends produce explicit
 errors with the capability report instead of guessing. The agent should prefer

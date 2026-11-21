@@ -24,6 +24,7 @@ import re
 import time
 from typing import Any
 
+from .mac_input import REFUSES_BEFORE_POSTING, permission_refusal
 from .macos_native import parse_info
 
 _UNREAD = object()  # "read the front yourself" marker for _finish
@@ -438,7 +439,7 @@ class PlaceMixin:
 
     def _finish(self, payload: dict[str, Any], ctx: dict[str, Any], stderr: str = "", *, after: Any = _UNREAD) -> dict[str, Any]:
         """Compose the place facts of an input receipt (any transport) and demote a dispatch the helper itself
-        reported as dropped (cliclick, or the paste chord program, warns on stderr and exits 0). ``after`` is the
+        refused (the macOS input or paste chord program warns on stderr, posts nothing and exits 0). ``after`` is the
         post-input front; the local backends read it here, the remote ones pass what their probe printed (None = unread)."""
         if after is _UNREAD:
             after = self._front_local()
@@ -501,40 +502,33 @@ class PlaceMixin:
         if untyped or dropped:
             payload.pop("observed_effect", None)
             payload["ok"] = False
-            chord = payload.get("method") == "command_chord"
-            if chord:
-                # The Command chord program refuses before it makes an event: nothing was posted, a known fact.
+            method = payload.get("method")
+            chord = method == "command_chord"
+            what = {"paste": "paste chord", "command_chord": "shortcut"}.get(method, "input")
+            if method in REFUSES_BEFORE_POSTING:
+                # These programs refuse before they make an event: nothing was posted, a known fact.
                 payload["dispatched"] = False
                 if isinstance(payload.get("delivered_to"), dict):
                     payload["front"] = payload.pop("delivered_to")
                 else:
                     payload.pop("delivered_to", None)
-            if untyped and chord:
-                error = (f"no key of the active keyboard layout gives {untyped[0]} under Command, with or without Shift, so "
-                         "the shortcut was not sent: name it by its Command-plane character (cmd+g, not the layout's own "
-                         "letter), switch the layout or use the app's own commands")
+            if untyped and method == "paste":
+                error = ("no key of the active keyboard layout gives V under Command, so the paste chord was not sent: "
+                         "switch the layout, or use the app's own commands")
                 payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
             elif untyped:
-                # cliclick types through key codes of the ACTIVE keyboard layout and exits 0 when it cannot find
-                # one (measured 27.10.2026: Latin text under a Cyrillic layout typed nothing). Partial typing is unknown.
-                # The paste chord program says the same when no key of the layout gives V under Command: it sent nothing.
-                if payload.get("method") == "paste":
-                    error = ("no key of the active keyboard layout gives V under Command, so the paste chord was not sent: "
-                             "switch the layout, or use the app's own commands")
-                else:
-                    hint = ("switch the keyboard layout (a Latin one for Latin keys) or use the app's own commands"
-                            if "keys" in payload else "use type_text with via=paste")
-                    error = (f"{len(untyped)} character(s) have no key code in the active keyboard layout and were "
-                             f"not typed (the rest may have been); {hint}")
+                error = (f"no key of the active keyboard layout gives {untyped[0]} under Command, with or without Shift, so "
+                         "the shortcut was not sent: name it by its Command-plane character (cmd+g, not the layout's own "
+                         "letter), switch the layout or use the app's own commands" if chord else
+                         f"no key of the active keyboard layout gives {untyped[0]} alone or with Shift, so the keys were "
+                         "not sent: switch the keyboard layout (a Latin one for Latin keys), type the text with "
+                         "type_text, or use the app's own commands")
                 payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
-            else:  # the paste chord program refuses to post rather than have macOS drop it
-                payload.update({"reason": "permission_denied",
+            else:
+                payload.update({"reason": "permission_denied", **permission_refusal("post_events"),
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},
-                                "error": ("this process may not post input events (the Accessibility grant), so the "
-                                          + ("shortcut was not sent" if chord else "paste chord was not sent")
-                                          if payload.get("method") in ("paste", "command_chord") else
-                                          "macOS drops synthetic input from a process without the Accessibility grant: "
-                                          "the helper exited 0 but nothing reached the screen")})
+                                "error": f"this process may not post input events (the Accessibility grant), so the {what} "
+                                         "was not sent"})
             effects = []
             if target.get("activated"):
                 payload["observed_effect"] = True  # the switch before it was observed
@@ -544,14 +538,7 @@ class PlaceMixin:
                 payload["observed_effect"] = True  # the clipboard write before it completed
                 payload["clipboard_done"] = True
                 effects.append("the clipboard write")
-            if payload.get("method") == "paste":
-                dropped_text = "the paste chord was not sent (see error)"
-            elif chord:
-                dropped_text = "the shortcut was not sent (see error)"
-            elif untyped:
-                dropped_text = "the characters without a key code were dropped (see error); those with one may have been typed"
-            else:
-                dropped_text = "the input was dropped (see error)"
+            dropped_text = f"the {what} was not sent (see error)"
             payload["note"] = ((" and ".join(effects) + " ran; the input after it: " + dropped_text) if effects
                                else dropped_text + "; this tool observed no UI change")
             return payload

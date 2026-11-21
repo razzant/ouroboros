@@ -258,8 +258,8 @@ def ssh(tmp_path, monkeypatch, script):
 
 
 def is_input(command: str) -> bool:
-    """The remote input stage: a cliclick input, or the paste chord program (osascript JavaScript, #2589)."""
-    return "cliclick" in command or "osascript -l JavaScript" in command
+    """The remote input stage: the input program or the paste chord program (both osascript JavaScript, #63, #2589)."""
+    return "osascript -l JavaScript" in command
 
 
 def mac_over_ssh(front, after=None, input_stderr=""):
@@ -310,7 +310,8 @@ def test_ssh_targeted_input_resolves_from_lsappinfo_and_activates_by_pid(tmp_pat
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is True and out["observed_effect"] is True, out
     assert "lsappinfo list" in calls[0][-1] and "unix id is 200" in calls[1][-1] and "to activate" not in calls[1][-1]
-    assert "cliclick kp:arrow-right" in calls[2][-1] and '"$P" != "200"' in calls[2][-1], "the same ssh call checks the pid before the input"
+    assert '{"op":"keys","mods":[],"code":124}' in calls[2][-1] and '"$P" != "200"' in calls[2][-1], "the same ssh call checks the pid before the input"
+    assert out["method"] == "cg_events"
     assert out["delivered_to"]["app"] == "Keynote" and out["target"]["activated"] is True and out["front_before"]["app"] == "Safari"
     assert out["output"] == "", "the probe markers never reach the model as command output"
     assert "error" not in out
@@ -335,23 +336,24 @@ def test_ssh_refuses_a_not_running_app_before_any_activation(tmp_path, monkeypat
     assert len(calls) == 1 and "System Events" not in calls[0][-1] and "to activate" not in calls[0][-1], "nothing is launched"
     stuck = receipt(api.tools["type_text"](text="x", app="Keynote"))
     assert stuck["ok"] is False and stuck["reason"] == "not_frontmost_after_activate" and "observed_effect" not in stuck
-    assert not any("cliclick" in argv[-1] for argv in calls)
+    assert not any(is_input(argv[-1]) for argv in calls)
 
 
 def test_ssh_already_front_sends_without_a_switch_and_marks_no_activation(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(KEYNOTE))
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is True and out["target"]["already_front"] is True and "front_before" not in out
-    assert len(calls) == 2 and "cliclick" in calls[1][-1]
+    assert len(calls) == 2 and is_input(calls[1][-1])
     again = receipt(api.tools["activate_app"](app="Keynote"))
     assert again["ok"] is True and again["activated"] is False and "observed_effect" not in again
 
 
-def test_ssh_input_dropped_by_the_remote_mac_is_an_honest_failure(tmp_path, monkeypatch):
-    warning = "WARNING: Accessibility privileges not enabled. Many actions may fail.\n"
+def test_ssh_input_refused_by_the_remote_mac_is_an_honest_failure(tmp_path, monkeypatch):
+    warning = "WARNING: Accessibility privileges not enabled (no right to post input events); nothing was sent\n"
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, input_stderr=warning))
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and "observed_effect" not in out, out
+    assert out["dispatched"] is False and out["refusal"]["grant"] == "post_events" and out["refusal"]["fixable_by"] == "owner"
 
 
 def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
@@ -360,10 +362,10 @@ def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
     remote = calls[-1][-1]
     # One ssh call (#2589): front read, the clipboard told the bytes are UTF-8, the stage marker, the local chord
-    # program through the Mac's own osascript (never cliclick t:v), front read.
+    # program through the Mac's own osascript (never a typed "v"), front read.
     assert (remote.index("__FRONT_BEFORE__") < remote.index("LC_ALL=en_US.UTF-8 pbcopy") < remote.index("echo __CLIPBOARD_WRITTEN__")
             < remote.index("osascript -l JavaScript -e") < remote.index("__FRONT_AFTER__")), remote
-    assert "cliclick kd:" not in remote and "t:v" not in remote and len([c for c in calls if is_input(c[-1])]) == 1
+    assert '"ops":' not in remote and len([c for c in calls if is_input(c[-1])]) == 1
 
 
 def run_guest_program(command: list[str], *, fronts: list[str], raise_probe: bool = False) -> tuple[list[str], str, int]:
@@ -529,15 +531,19 @@ def test_ssh_stage_facts_survive_a_transport_failure_and_an_empty_inventory_is_u
     assert empty["ok"] is False and empty["reason"] == "apps_unread" and len(calls) == 1
     module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (127, "", "lsappinfo: command not found"))
     assert receipt(api.tools["window_list"]())["reason"] == "apps_unread"
-    # A snippet cliclick cannot express is refused before any switch.
+    # A snippet the input program cannot express is refused before any switch.
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, KEYNOTE))
-    refused = receipt(api.tools["scroll"](clicks=2, app="Keynote"))
-    assert refused["ok"] is False and calls == [], "nothing reached the Mac, no switch for an input that cannot be sent"
+    impl = module._ComputerUse(api)
+    refused = impl._remote_input(dict(backend="ssh_macos", host="mac.invalid"), "pyautogui.write('x')", target="Keynote")
+    assert refused["ok"] is False and "unsupported pyautogui snippet" in refused["error"] and calls == [], refused
+    # The wheel is no longer such a snippet (#63): it reaches the Mac after the switch.
+    sent = receipt(api.tools["scroll"](clicks=2, app="Keynote"))
+    assert sent["ok"] is True and '{"op":"scroll","dy":-2}' in calls[-1][-1], sent
 
 
 def test_ssh_paste_reports_the_clipboard_stage_truthfully(tmp_path, monkeypatch):
     def pbcopy_failed(command):
-        if "cliclick" in command or "pbcopy" in command:
+        if "pbcopy" in command:
             return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__FRONT_AFTER__{info_line(SAFARI)}\n", "pbcopy: not found"
         return 0, ""
     module, api, calls = ssh(tmp_path, monkeypatch, pbcopy_failed)
@@ -545,7 +551,7 @@ def test_ssh_paste_reports_the_clipboard_stage_truthfully(tmp_path, monkeypatch)
     assert out["ok"] is False and out["clipboard_replaced"] is False and "observed_effect" not in out
 
     def chord_failed(command):
-        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "cliclick died"
+        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "osascript died"
     module, api, calls = ssh(tmp_path, monkeypatch, chord_failed)
     out = receipt(api.tools["type_text"](text="x", via="paste"))
     assert out["ok"] is False and out["clipboard_replaced"] is True and "__CLIPBOARD" not in out["output"]
@@ -566,7 +572,7 @@ def test_a_marker_shaped_title_in_the_guest_inventory_forges_nothing(tmp_path, m
 
 def test_ssh_a_failed_paste_chord_keeps_the_clipboard_effect_without_a_switch(tmp_path, monkeypatch):
     def chord_failed(command):
-        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "cliclick died"
+        return 1, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n__FRONT_AFTER__{info_line(SAFARI)}\n", "osascript died"
     module, api, calls = ssh(tmp_path, monkeypatch, chord_failed)
     out = receipt(api.tools["type_text"](text="x", via="paste"))
     assert out["ok"] is False and out["clipboard_replaced"] is True and out["observed_effect"] is True and out["clipboard_done"] is True
@@ -585,7 +591,7 @@ def test_ssh_window_list_says_when_the_inventory_or_the_front_is_unread(tmp_path
 def test_ssh_negative_coordinates_are_absolute_points_on_the_remote_mac(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI))
     out = receipt(api.tools["click"](x=-250, y=200, raw=True))
-    assert out["ok"] is True and "cliclick c:=-250,200" in calls[-1][-1]
+    assert out["ok"] is True and '{"op":"click","x":-250,"y":200,"button":"left","count":1}' in calls[-1][-1]
 
 
 def test_osworld_a_lost_answer_after_a_paste_is_not_retyped_and_negative_points_are_refused_for_a_guest(tmp_path, monkeypatch):

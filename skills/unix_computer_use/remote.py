@@ -27,6 +27,7 @@ import urllib.request
 import uuid
 from typing import Any
 
+from . import mac_input
 from .macos_native import parse_info, parse_list, resolve
 from .place import parse_wmctrl_rows, parse_x11_front, window_id_int, x11_resolve, x11_same
 
@@ -74,34 +75,6 @@ def _osworld_completion(out):
 def _osworld_result_ok(out: dict[str, Any]) -> tuple[bool, str]:
     ok, _completed, error = _osworld_completion(out)
     return ok, error
-
-
-# Complete kp vocabulary, from cliclick 5.1 KeyPressAction.getSupportedKeycodes:
-# https://github.com/BlueM/cliclick/blob/d786bc5faf8830dd30584e731b166e504927dbad/Actions/KeyPressAction.m
-_CLICLICK_KEYS = set("return enter esc tab space delete fwd-delete arrow-up arrow-down arrow-left arrow-right "
-                     "home end page-up page-down num-clear num-equals num-divide num-multiply num-minus num-plus "
-                     "num-enter mute volume-up volume-down brightness-up brightness-down play-pause play-previous "
-                     "play-next keys-light-toggle keys-light-up keys-light-down".split()) | {
-                         f"f{i}" for i in range(1, 17)} | {f"num-{i}" for i in range(10)}
-_CLICLICK_MODS = {"cmd", "ctrl", "alt", "shift", "fn"}
-
-
-def cliclick_keys(mods, base, *, hold_ms=None):
-    if any(m not in _CLICLICK_MODS for m in mods):
-        raise ValueError(f"unsupported cliclick modifiers {mods!r}")
-    if hold_ms is not None:
-        if base not in _CLICLICK_MODS:
-            raise ValueError(f"cliclick cannot hold non-modifier key {base!r}; only modifier combos are holdable")
-        held = ",".join([*mods, base])
-        return [f"kd:{held}", f"w:{hold_ms}", f"ku:{held}"]
-    if len(base) == 1 and base.isprintable():
-        inner = f"t:{base}"
-    elif base.lower() in _CLICLICK_KEYS:
-        inner = f"kp:{base.lower()}"
-    else:
-        raise ValueError(f"unknown cliclick key {base!r}")
-    held = ",".join(mods)
-    return [f"kd:{held}", inner, f"ku:{held}"] if mods else [inner]
 
 
 _PYAUTOGUI_BASE_ALIASES = {
@@ -197,12 +170,6 @@ def ssh_paste_command(text: str) -> str:
     return f"printf %s {shlex.quote(text)} | LC_ALL={PBCOPY_LOCALE} pbcopy && echo __CLIPBOARD_WRITTEN__ && {chord}"
 
 
-def cliclick_point(x: int, y: int) -> str:
-    """A cliclick point: an absolute negative coordinate (a display left of or above the main one) takes the ``=``
-    prefix, because a bare ``-`` means a move relative to the pointer."""
-    return f"{'=' if int(x) < 0 else ''}{int(x)},{'=' if int(y) < 0 else ''}{int(y)}"
-
-
 def parse_markers(text: str, parse: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
     """Marker LINES (``__FRONT_BEFORE__…``, ``__FRONT_AFTER__…``, ``__TARGET_LOST__``, ``__FRONT_UNREAD__``) ->
     (before, after, stop) where ``stop`` is ``"target_lost"``, ``"front_unread"`` or ``""``. Only a whole line is a
@@ -296,65 +263,6 @@ class RemoteBackends:
         if unsupported:
             raise ValueError(f"unsupported guest key(s): {unsupported!r}")
 
-    @staticmethod
-    def _ssh_macos_key_name(key: str) -> str:
-        low = str(key or "").strip().lower()
-        return {
-            "enter": "return", "return": "return", "esc": "esc", "escape": "esc",
-            # Input is a PYAUTOGUI key name: its "delete" is forward delete (cliclick fwd-delete).
-            "delete": "fwd-delete", "backspace": "delete", "pagedown": "page-down",
-            "pageup": "page-up", "down": "arrow-down", "up": "arrow-up",
-            "left": "arrow-left", "right": "arrow-right", "winleft": "cmd",
-            "super": "cmd", "meta": "cmd",
-        }.get(low, key)
-
-    def _ssh_macos_cliclick_for_pyautogui(self, code: str) -> tuple[list[str], str]:
-        """Translate the pyautogui snippets this skill emits into cliclick args."""
-        text = str(code or "").strip()
-        m = re.search(r"pyautogui\.click\((-?\d+),\s*(-?\d+),\s*clicks=(\d+).*button=([\"'])([^\"']+)\4", text)
-        if m:
-            x, y, clicks, button = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(5)
-            if button == "right":
-                return [f"rc:{cliclick_point(x, y)}"], ""
-            if button == "middle":
-                return [], "middle-click unsupported by cliclick"
-            op = "tc" if clicks >= 3 else ("dc" if clicks == 2 else "c")
-            return [f"{op}:{cliclick_point(x, y)}"], ""
-        m = re.search(r"pyautogui\.moveTo\((-?\d+),\s*(-?\d+)\).*pyautogui\.dragTo\((-?\d+),\s*(-?\d+)", text)
-        if m:
-            sx, sy, ex, ey = map(int, m.groups())
-            return [f"dd:{cliclick_point(sx, sy)}", f"dm:{cliclick_point(ex, ey)}", f"du:{cliclick_point(ex, ey)}"], ""
-        m = re.search(r"pyautogui\.moveTo\((-?\d+),\s*(-?\d+)\)", text)
-        if m:
-            return [f"m:{cliclick_point(int(m.group(1)), int(m.group(2)))}"], ""
-        m = re.search(r"pyautogui\.(mouseDown|mouseUp)\(x=(-?\d+),\s*y=(-?\d+),\s*button=([\"'])([^\"']+)\4", text)
-        if m:
-            fn, x, y, button = m.group(1), int(m.group(2)), int(m.group(3)), m.group(5)
-            if button != "left":
-                return [], "mouseDown/mouseUp supports only left button via cliclick"
-            return [f"{'dd' if fn == 'mouseDown' else 'du'}:{cliclick_point(x, y)}"], ""
-        m = re.search(r"pyautogui\.(mouseDown|mouseUp)\(button=([\"'])([^\"']+)\2", text)
-        if m:
-            fn, button = m.group(1), m.group(3)
-            if button != "left":
-                return [], "mouseDown/mouseUp supports only left button via cliclick"
-            return [f"{'dd' if fn == 'mouseDown' else 'du'}:."], ""
-        m = re.search(r"pyautogui\.typewrite\((?P<q>[\"'])(?P<txt>.*?)(?P=q),\s*interval=", text)
-        if m:
-            return [f"t:{m.group('txt')}"], ""
-        if text.startswith(("pyautogui.press(", "pyautogui.hotkey(")):
-            import ast
-            try:
-                call = ast.parse(text, mode="eval").body
-                tokens = [ast.literal_eval(arg) for arg in call.args]
-                keys = [self._ssh_macos_key_name(t) for t in tokens]
-                return cliclick_keys(keys[:-1], keys[-1]), ""
-            except (ValueError, SyntaxError, AttributeError, IndexError) as exc:
-                return [], str(exc)
-        if "pyautogui.scroll" in text or "pyautogui.hscroll" in text:
-            return [], "scroll unsupported via cliclick; use key page-down/page-up"
-        return [], f"unsupported pyautogui snippet for ssh_macos/cliclick: {text[:120]}"
-
     def _remote_pyautogui(self, conn: dict[str, Any], code: str, *, note: dict[str, Any] | None = None, timeout: int = 30,
                           input_effect: bool = True, target: str = "", ctx: dict[str, Any] | None = None, later: bool = False,
                           raise_policy: str = "allow") -> str:
@@ -373,11 +281,12 @@ class RemoteBackends:
             return json.loads(self._disabled_connection_error("remote", conn))
         backend = str(conn.get("backend") or "").lower()
         if backend == "ssh_macos" and not ssh_command:
-            # Translate before any switch: a snippet cliclick cannot express is refused without moving the front.
-            cliclick_args, err = self._ssh_macos_cliclick_for_pyautogui(code)
+            # Translate before any switch: a snippet the input program cannot express is refused without moving the front.
+            ops, err = mac_input.ops_for_pyautogui(code)
             if err:
                 return {"ok": False, "backend": backend, "error": err, "code": code}
-            ssh_command = "cliclick " + " ".join(shlex.quote(arg) for arg in cliclick_args)
+            ssh_command = shlex.join(mac_input.argv(ops, remote=True, budget_ms=max(1000, timeout * 1000 - 3000)))
+            note = {**(note or {}), "method": mac_input.method_of(ops)} if input_effect else note
         if input_effect and ctx is None:
             refusal, ctx = self._begin(target, raise_policy=raise_policy, connection=("remote", conn))
             if refusal:
@@ -429,7 +338,7 @@ class RemoteBackends:
                 completed = (rc == 0 or bool(re.search(r"^__FRONT_AFTER__", stdout, re.M))) if input_effect else True
                 started = completed or bool(re.search(r"^__FRONT_BEFORE__", stdout, re.M))
                 payload = {"ok": rc == 0 and completed, "backend": backend, "returncode": rc, "output": strip_markers(stdout),
-                           "dispatched": True if completed else None}
+                           "dispatched": True if completed else None, **mac_input.answer_fields(strip_markers(stdout))}
                 if not completed:
                     payload.update({"transport_failed": True, "reason": "ssh_failed",
                                     "error": f"ssh ended without the wrapper's completion marker ({stderr.strip() or f'exit {rc}'}); "
@@ -924,18 +833,21 @@ class RemoteBackends:
     def _test_ssh_macos(self, conn: dict[str, Any], name: str) -> str:
         rc, stdout, stderr = self._ssh_run(
             conn,
-            "printf 'host='; hostname; printf '\\nuser='; whoami; printf '\\nos='; sw_vers -productVersion 2>/dev/null; printf '\\n'; command -v screencapture; command -v cliclick || true",
+            "printf 'host='; hostname; printf '\\nuser='; whoami; printf '\\nos='; sw_vers -productVersion 2>/dev/null; printf '\\n'; command -v screencapture; command -v osascript || true",
             timeout=15,
         )
-        ok = rc == 0 and "screencapture" in stdout
+        ok = rc == 0 and "screencapture" in stdout and "osascript" in stdout
         hint = ""
         if rc != 0:
             hint = (
                 "SSH auth failed. Put the private key in ~/.ssh/<name>, chmod 600 it, "
                 "and add Host/User/IdentityFile to ~/.ssh/config; then retry test_connection."
             )
-        elif "cliclick" not in stdout:
-            hint = "Install cliclick on the Mac (e.g. brew install cliclick) and grant Accessibility permission."
+        elif "osascript" not in stdout:
+            hint = "osascript (part of macOS) was not found on the remote Mac: input is posted through it, so nothing can be sent."
+        else:
+            hint = ("Input is posted as CoreGraphics events through the Mac's own osascript: the remote Mac must grant "
+                    "Accessibility to the process the SSH session runs as, or every input is refused before posting.")
         return self._json_text({"ok": ok, "connection": name, "backend": "ssh_macos", "output": stdout, "error": stderr, "hint": hint})
 
 
@@ -959,7 +871,7 @@ class RemoteBackends:
             if refusal:
                 return self._json_text(refusal)
         # typewrite silently drops non-ASCII, so paste it via the in-VM clipboard
-        # (base64-safe), like official OSWorld agents; ssh_macos `t:` handles unicode.
+        # (base64-safe), like official OSWorld agents; ssh_macos types Unicode key events.
         #
         # ASCII is NOT automatically safe either: pyautogui types shift-symbols by
         # pressing the unshifted key with SHIFT held, and on the guest's keymap that

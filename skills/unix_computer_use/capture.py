@@ -20,6 +20,7 @@ import time
 import uuid
 from typing import Any
 
+from .mac_input import permission_refusal
 from .macos_capture import window_selector
 
 _WINDOW_TIMEOUT_MS = 5000  # both ScreenCaptureKit completion handlers together (macos_capture.SPEC)
@@ -58,6 +59,9 @@ class CaptureMixin:
         display list, an app not resolved (refused, or no answer naming its ``target``) is an ``error``, uncaptured;
         without one the app is not looked up (``app_display_unread``): the default capture stays capture-only."""
         res = self._native("displays", timeout=10)
+        if res.get("screen_recording") == "denied":  # screencapture would exit 0 with the wallpaper alone
+            return {"reason": "permission_denied", **permission_refusal("screen_recording"), "note": "nothing was captured",
+                    "error": "this process may not record the screen (the Screen Recording grant); only the owner can grant it"}
         displays = res.get("displays") if res.get("ok") else None
         query = str(app or "").strip()
         if not displays:

@@ -12,7 +12,7 @@ import contextvars
 
 import pytest
 
-from tests._unix_computer_use import CONTINUE, KEYNOTE, SAFARI, STOPPED, StopAPI, app_dict, inputs, mac, receipt
+from tests._unix_computer_use import CONTINUE, DOWN, KEYNOTE, RETURN, SAFARI, STOPPED, StopAPI, app_dict, inputs, is_input, mac, receipt
 
 NO_TASK = {"status": "continue", "reason": "no_task", "note": "this call was made for no task, which no Stop governs"}
 UNREADABLE = {"status": "stop", "reason": "stop_unreadable", "note": "this task's Stop could not be read"}
@@ -46,10 +46,10 @@ def test_every_chord_asks_last_the_first_one_included(tmp_path, monkeypatch, app
         switch, *reads = reads
         assert is_helper(calls[switch + 1]) and "activate" in calls[switch + 1]
     assert len(reads) == 3, "each chord has its own check"
-    assert all(calls[index + 1][0] == "cliclick" for index in reads), calls
+    assert all(is_input(calls[index + 1]) for index in reads), calls
     assert is_helper(calls[reads[0] - 1]) if app else calls[reads[0] - 1][0] == "lsappinfo", calls
     assert all(calls[index - 1][0] == "lsappinfo" for index in reads[1:]), "a later chord asks after its front re-read"
-    assert calls.index(["cliclick", "kp:arrow-down"]) > reads[0], "no chord before the first reading"
+    assert next(i for i, argv in enumerate(calls) if is_input(argv)) > reads[0], "no chord before the first reading"
 
 
 @pytest.mark.parametrize("answer", [STOPPED, UNREADABLE, UNBOUND])
@@ -117,7 +117,7 @@ def test_a_stop_between_chords_sends_no_further_chord_and_keeps_the_sent_ones_re
     assert out["dispatched"] is False
     assert out["steps_done"] == 1 and out["steps_total"] == 3 and out["observed_effect"] is True
     assert answer["reason"] in out["note"] and answer["note"] in out["note"] and "'down' not sent" in out["note"]
-    assert inputs(state) == [["cliclick", "kp:arrow-down"]], "only the chord before the refusal was sent"
+    assert inputs(state) == [[DOWN]], "only the chord before the refusal was sent"
     assert len(stop_reads(state)) == 3 and out["activation_done"] is True
     assert "the next step was not sent" in out["note"] and "Keynote" in out["note"]
 
@@ -145,7 +145,7 @@ def test_a_stop_of_one_task_leaves_another_tasks_call_of_the_same_skill_whole(tm
     assert stopped.get("status") == stopped["reason"] == "stopped" and "ok" not in stopped and "error" not in stopped, stopped
     assert stopped["steps_done"] == 0
     assert whole["ok"] is True and whole["steps"] == 2, whole
-    assert inputs(state) == [["cliclick", "kp:arrow-down"], ["cliclick", "kp:return"]], "only B's chords were sent"
+    assert inputs(state) == [[DOWN], [RETURN]], "only B's chords were sent"
     assert [argv for argv in state["calls"] if argv[0] == "get_stop_state"] == [
         ["get_stop_state", "A"], ["get_stop_state", "B"], ["get_stop_state", "B"], ["get_stop_state", "B"]]
 

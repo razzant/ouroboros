@@ -71,15 +71,33 @@ def observing(helper):
     return answer
 
 
-def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""), lsappinfo=True, on_input=None,
+def is_input(argv: list[str]) -> bool:
+    """A call of the macOS input program (``osascript -l JavaScript input_events.js '<spec>'``)."""
+    return argv[:3] == ["osascript", "-l", "JavaScript"] and len(argv) == 5 and argv[3].endswith("input_events.js")
+
+
+def ops(argv: list[str]) -> list[dict]:
+    """The operations an input program call was given."""
+    return json.loads(argv[-1])["ops"]
+
+
+def key(code: int | None = None, *mods: str, char: str | None = None) -> dict:
+    """One ``keys`` operation: a virtual key code or a character, under ``mods``."""
+    return {"op": "keys", "mods": list(mods), **({"code": code} if code is not None else {"char": char})}
+
+
+DOWN, RIGHT, RETURN, TAB = key(125), key(124), key(36), key(48)
+
+
+def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, "", ""), lsappinfo=True, on_input=None,
         chord=(0, "", CHORD_POSTED)):
     """A faked local Mac: lsappinfo reports ``state['front']``; the native helper answers through ``helper(args, state)``;
-    ``on_input(argv, state)`` runs when cliclick is called (a key that moves the front, for instance); the paste chord
-    program (``osascript -l JavaScript``) answers ``chord`` (exit code, stdout, stderr)."""
+    ``on_input(argv, state)`` runs when the input program is called (a key that moves the front, for instance) and it
+    answers ``events`` (exit code, stdout, stderr); the paste chord program answers ``chord``."""
     module = load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
     monkeypatch.setattr(module, "_session_type", lambda: "native")
-    tools = {"cliclick", "screencapture", "osascript", "pbcopy"} | ({"lsappinfo"} if lsappinfo else set())
+    tools = {"screencapture", "osascript", "pbcopy"} | ({"lsappinfo"} if lsappinfo else set())
     monkeypatch.setattr(module, "_which", lambda name: f"/usr/bin/{name}" if name in tools else "")
     monkeypatch.setattr(module.time, "sleep", lambda _s: None)
     state = {"front": front, "calls": [], "helper": [], "clipboard": None, "chords": []}
@@ -142,10 +160,10 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""
             state["helper"].append(args)
             out = answer(args, state)
             return subprocess.CompletedProcess(argv, 0 if out.get("ok") else 1, json.dumps(out) + "\n", "")
-        if argv[0] == "cliclick":
+        if is_input(argv):
             if on_input:
                 on_input(argv, state)
-            rc, out, err = cliclick
+            rc, out, err = events
             return subprocess.CompletedProcess(argv, rc, out, err)
         if argv[0] == "pbcopy":
             state["clipboard"] = k.get("input")
@@ -167,8 +185,9 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""
     return module, api, state
 
 
-def inputs(state) -> list[list[str]]:
-    return [argv for argv in state["calls"] if argv[0] == "cliclick"]
+def inputs(state) -> list[list[dict]]:
+    """The operations of every input program call, in order."""
+    return [ops(argv) for argv in state["calls"] if is_input(argv)]
 
 
 def receipt(text: str) -> dict:

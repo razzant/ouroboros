@@ -278,16 +278,16 @@ def _between(rows: list[dict], start: float, end: float, *events: str) -> list[d
     return [row for row in rows if start < row["t"] < end and row["event"] in events]
 
 
-def _input_ready(call, *, cliclick: bool = True, **also: str) -> None:
-    """Foreground input needs the grants to post it and cliclick to send it (Command and one character go through
-    osascript, cliclick=False); without them the case is skipped."""
+def _input_ready(call, *, events: bool = True, **also: str) -> None:
+    """Foreground input needs the grants to post it and osascript to run the skill's input program (Command and one
+    character go through the chord program, events=False); without them the case is skipped."""
     grants = _grants(call)
     required = {"accessibility": "trusted", "post_events": "granted", **also}
     lacking = {key: grants.get(key, "absent") for key, value in required.items() if grants.get(key) != value}
     if lacking:
         pytest.skip(f"unsupported here, not passed: this process lacks {lacking} (no grant is requested)")
-    if cliclick and (call("capabilities").get("input") or {}).get("cliclick") is not True:
-        pytest.skip("unsupported here, not passed: cliclick is not installed, so key, type_text and click send nothing")
+    if events and (call("capabilities").get("input") or {}).get("input_events") is not True:
+        pytest.skip("unsupported here, not passed: osascript is missing, so key, type_text and click send nothing")
 
 
 def _hand_front(call, owned: Owned) -> dict:
@@ -485,7 +485,7 @@ def test_command_a_arrives_as_command_a_however_its_letter_is_cased(host, launch
     menu that acts on it); no quit or logout key is ever sent. It is the Command chord program's: the characters the
     event types under Command are "a" in any layout (charactersIgnoringModifiers is the typing plane: "ф" in Russian)."""
     call, _schema = host
-    _input_ready(call, cliclick=False)
+    _input_ready(call, events=False)
     front = launch("front")
     _hand_front(call, front)
     problems: list[str] = []
@@ -591,10 +591,10 @@ def test_command_shortcuts_reach_the_menu_by_the_character_command_gives(host, l
     answer. cmd+? is checked by its event only: one key down with exactly Command and Shift that the layout itself reads
     as ? (its characters, or charactersIgnoringModifiers where the key types under Command alone what it typed with
     Shift: the layout ignored Shift). Whether the app's own Shortcut ? item fires is recorded, not judged: in the guest
-    no ⌘? sent on key code 44 reached it, the base's cliclick included, and what took it is not established. So this
+    no ⌘? sent on key code 44 reached it, the former typing helper of the base included, and what took it is not established. So this
     case does not prove ⌘? reaches an app's command."""
     call, _schema = host
-    _input_ready(call, cliclick=False)
+    _input_ready(call, events=False)
     paste = launch("paste")
     _hand_front(call, paste)
     layout = (paste.mark("layout").get("input_source") or {}).get("layout")
