@@ -744,7 +744,8 @@ def test_invalid_requests_are_rejected_before_reading(ctx, kwargs, message):
     ({"op": "blob", "sha256": "0" * 64, "ids": ["caller"]}, 'ids=["caller"] applies only to op=json or op=jsonl'),
     ({"op": "json", "kind": "queue_snapshot", "blob_kind": "txt"}, 'blob_kind="txt" applies only to op=blob'),
     ({"op": "json"}, 'kind="": op=json needs one of task_result, review_ledger'),
-    ({"op": "jsonl", "kind": "queue_snapshot"}, "kind=queue_snapshot requires op=json"),
+    ({"op": "jsonl", "kind": "queue_snapshot", "tail": 5},
+     'kind=queue_snapshot requires op=json; tail=5 applies only to op=jsonl: send op="json" without it'),
     ({"op": "lines"}, 'op="lines": use sql, json, jsonl or blob'),
 ])
 def test_another_operations_parameter_is_named_with_its_owner(ctx, kwargs, message):
@@ -753,6 +754,24 @@ def test_another_operations_parameter_is_named_with_its_owner(ctx, kwargs, messa
     message_text = refused(call(ctx, **kwargs), message)
     if kwargs["op"] in {"json", "blob"}:
         assert "bounds rows" not in message_text  # these operations have no row control to offer
+
+
+def test_the_one_operation_a_kind_takes_is_read_for_the_other_and_named(ctx):
+    """A kind exactly one of json/jsonl reads names its operation: the other one takes it, disclosed;
+    jsonl's own filter or tail on a JSON kind still asks for rows it lacks and is refused with the call."""
+    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", b'{"pass":true}\n')
+    write(ctx, "state/queue_snapshot.json", b'{"a":1}')
+    plain = call(ctx, op="jsonl", kind="verification_receipts")
+    assert plain["data"] == [{"pass": True}] and "notes" not in plain
+    lines = call(ctx, op="json", kind="verification_receipts", tail=1)
+    assert lines["status"] == "ok" and lines["data"] == plain["data"] and lines["source"]["op"] == "jsonl"
+    assert lines["notes"] == ["op='json' read as op='jsonl': kind=verification_receipts is read only by op=jsonl"]
+    document = call(ctx, op="jsonl", kind="queue_snapshot")
+    assert document["data"] == {"a": 1} and document["source"]["op"] == "json"
+    assert document["notes"] == ["op='jsonl' read as op='json': kind=queue_snapshot is read only by op=json"]
+    assert "notes" not in call(ctx, op="json", kind="queue_snapshot")
+    refused(call(ctx, op="jsonl", kind="queue_snapshot", filter={"field": "a", "op": "eq", "value": 1}),
+            'filter={"field": "a", "op": "eq", "value": 1} applies only to op=jsonl: send op="json" without it')
 
 
 def test_a_default_valued_parameter_of_another_operation_takes_the_omitted_path(ctx):
@@ -936,7 +955,8 @@ def test_knowledge_history_lists_writes_without_bodies_from_the_installation_roo
     narrowed = call(ctx, op="jsonl", kind="knowledge_history", filter={"field": "topic", "op": "contains", "value": "lessons"})
     assert [r["summary"] for r in narrowed["data"]] == ["Exit codes."]
     assert call(ctx, op="jsonl", kind="knowledge_history", tail=1, select="[0].topic")["data"] == "lessons/tests"
-    assert call(ctx, op="json", kind="knowledge_history")["status"] == "error"  # a log reads as JSONL
+    as_json = call(ctx, op="json", kind="knowledge_history", tail=10)  # a log reads as JSONL, named
+    assert as_json["data"] == result["data"] and as_json["notes"][0].startswith("op='json' read as op='jsonl'")
     monkeypatch.setattr("ouroboros.tools.query_data._child_root", lambda *_a: pytest.fail("history has no child"))
     refused = call(ctx, op="jsonl", kind="knowledge_history", child_task_id="second")
     assert refused["status"] == "error" and "global knowledge" in refused["message"]
