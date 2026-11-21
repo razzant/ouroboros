@@ -181,12 +181,16 @@ def test_a_drive_document_from_before_the_optional_cap_reads_its_defaults_as_bla
     """Owner decision 09.11, migration A: Colab's first-launch 1 and the form's 10 meant no choice; the launch reads them
     as blank and writes the format marker, so a later 1 or 10 the owner sets stays theirs. Other values stay."""
     from ouroboros.colab_bootstrap import build_colab_settings
-    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY, SUBAGENT_CAP_FORMAT_KEY
 
-    drive = {"OUROBOROS_MAX_WORKERS": saved, **({OWNER_CAP_FORMAT_KEY: 1} if marked else {})}
+    per_root = "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"  # its shipped 6 likewise; a marked 6 is the owner's
+    drive = {"OUROBOROS_MAX_WORKERS": saved, per_root: 6,
+             **({OWNER_CAP_FORMAT_KEY: 1, SUBAGENT_CAP_FORMAT_KEY: 1} if marked else {})}
     out = build_colab_settings({}, existing=drive)
     assert out["OUROBOROS_MAX_WORKERS"] == expected and out[OWNER_CAP_FORMAT_KEY] == 1
+    assert out[per_root] == (6 if marked else "") and out[SUBAGENT_CAP_FORMAT_KEY] == 1
     assert build_colab_settings({}, existing=out)["OUROBOROS_MAX_WORKERS"] == expected, "it never repeats"
+    assert build_colab_settings({}, existing=out)[per_root] == (6 if marked else "")
 
 
 def test_a_repeat_launch_through_drive_keeps_the_saved_triple_and_an_app_edit_between_launches(monkeypatch, tmp_path):

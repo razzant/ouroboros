@@ -8,6 +8,7 @@ Every guard is shown both ways in its test.
 from __future__ import annotations
 
 import json
+import pathlib
 import time
 import threading
 
@@ -689,37 +690,64 @@ def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assignin
 
 # ---- the owner's number: optional, read live, migration A ----------------------------------------------------------
 
-@pytest.mark.parametrize(("saved", "marked", "read"), [
-    (10, False, None),  # the form's 10, saved on every save: no choice
-    ("10", False, None),
-    (40, False, 40),  # the owner's own number stays his cap
-    (1, False, 1),  # off Colab a 1 is a choice (Colab's first-launch 1: tests/test_colab_bootstrap.py)
-    ("", False, None),
-    ("abc", False, 10),  # a typo is finite, never "no cap"
-    (0, False, 10),
-    (10, True, 10),  # after the format marker, 10 is the owner's again
+_WORKERS, _PER_ROOT = "OUROBOROS_MAX_WORKERS", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"
+
+
+@pytest.mark.parametrize(("key", "saved", "marked", "read"), [
+    (_WORKERS, 10, False, None),  # the form's 10, saved on every save: no choice
+    (_WORKERS, "10", False, None),
+    (_WORKERS, 40, False, 40),  # the owner's own number stays his cap
+    (_WORKERS, 1, False, 1),  # off Colab a 1 is a choice (Colab's first-launch 1: tests/test_colab_bootstrap.py)
+    (_WORKERS, "", False, None),
+    (_WORKERS, "abc", False, 10),  # a typo is finite, never "no cap"
+    (_WORKERS, 0, False, 10),
+    (_WORKERS, 10, True, 10),  # after the format marker, 10 is the owner's again
+    # The per-root subagent number: every save wrote the shipped 6 before it became optional.
+    (_PER_ROOT, 6, False, None),
+    (_PER_ROOT, "6", False, None),
+    (_PER_ROOT, 64, False, 64),  # the owner's own number stays
+    (_PER_ROOT, "", False, None),
+    (_PER_ROOT, "abc", False, 6),  # a typo is finite, never "no number"
+    (_PER_ROOT, 6, True, 6),  # a 6 the new Settings saved carries the marker and is the owner's
 ])
-def test_a_saved_worker_number_reads_as_migration_a_says_and_never_repeats(tmp_path, monkeypatch, saved, marked,
+def test_a_saved_worker_number_reads_as_migration_a_says_and_never_repeats(tmp_path, monkeypatch, key, saved, marked,
                                                                          read):
     from ouroboros import config
-    from ouroboros.runtime_limits import get_max_workers
-    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+    from ouroboros.runtime_limits import get_max_active_subagents_per_root, get_max_workers
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY, SUBAGENT_CAP_FORMAT_KEY
 
+    marker, getter = {_WORKERS: (OWNER_CAP_FORMAT_KEY, get_max_workers),
+                      _PER_ROOT: (SUBAGENT_CAP_FORMAT_KEY, get_max_active_subagents_per_root)}[key]
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"OUROBOROS_MAX_WORKERS": saved, **({OWNER_CAP_FORMAT_KEY: 1} if marked else {})}),
-                    encoding="utf-8")
+    path.write_text(json.dumps({key: saved, **({marker: 1} if marked else {})}), encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
-    monkeypatch.delenv("OUROBOROS_MAX_WORKERS", raising=False)
+    monkeypatch.delenv(key, raising=False)
     loaded = config.load_settings()
-    assert loaded[OWNER_CAP_FORMAT_KEY] == 1, "the view carries the marker into the next save"
+    assert loaded[marker] == 1, "the view carries the marker into the next save"
     config.apply_settings_to_env(loaded, environ=(environ := {}))
-    if "OUROBOROS_MAX_WORKERS" in environ:  # the server's projection, which the supervisor reads on every pass
-        monkeypatch.setenv("OUROBOROS_MAX_WORKERS", environ["OUROBOROS_MAX_WORKERS"])
-    assert get_max_workers() == read
+    if key in environ:  # the server's projection, which the supervisor reads on every pass
+        monkeypatch.setenv(key, environ[key])
+    assert getter() == read
     config.save_settings(loaded)  # a read stays a read; the first save writes the marker: never again
     stored = json.loads(path.read_text(encoding="utf-8"))
-    assert stored[OWNER_CAP_FORMAT_KEY] == 1 and config.load_settings()["OUROBOROS_MAX_WORKERS"] == (
-        "" if read is None else read)
+    assert stored[marker] == 1 and config.load_settings()[key] == ("" if read is None else read)
+
+
+@pytest.mark.parametrize("fixture", ["settings_v6.113.4.json", "settings_v6.87.5.json"])
+def test_an_earlier_release_document_reads_its_saved_six_as_no_number(tmp_path, monkeypatch, fixture):
+    from ouroboros import config
+    from ouroboros.settings_scales import SUBAGENT_CAP_FORMAT_KEY
+
+    document = json.loads((pathlib.Path(__file__).parent / "fixtures" / "nminus1" / fixture).read_text(encoding="utf-8"))
+    assert document[_PER_ROOT] == 6 and SUBAGENT_CAP_FORMAT_KEY not in document, "the release saved its default"
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.delenv(_PER_ROOT, raising=False)
+    loaded = config.load_settings()
+    assert loaded[_PER_ROOT] == "" and loaded[SUBAGENT_CAP_FORMAT_KEY] == 1
+    config.save_settings(loaded)
+    assert config.load_settings()[_PER_ROOT] == "", "the next save keeps no number"
 
 
 @pytest.mark.parametrize("provenance", [False, True])

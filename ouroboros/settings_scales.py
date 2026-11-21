@@ -397,7 +397,7 @@ def defaults_for_settings_document(document_present: bool) -> dict:
     compatibility pass only rewrites an existing document), so only a document an earlier
     release or a harness wrote without the key falls to the legacy value. Every view carries
     the owner cap's format marker, so the first save of a fresh install keeps a cap it sets."""
-    defaults = {**SETTINGS_DEFAULTS, OWNER_CAP_FORMAT_KEY: 1, MODEL_CAP_FORMAT_KEY: 1}
+    defaults = {**SETTINGS_DEFAULTS, **{marker: 1 for _key, _saved, marker in _UNCHOSEN_SAVED}}
     if document_present:
         defaults.update(OPTIONAL_BOUND_LEGACY)
     return defaults
@@ -416,6 +416,7 @@ OWNER_CAP_FORMAT_KEY = "_owner_cap_format"  # disk format, never an environment 
 # ``runtime_limits.MAX_ACTIVE_SUBAGENTS_HARD_CAP`` still bound the tree); a typo reads the earlier default 6.
 SUBAGENT_CAP_KEY = "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"
 SUBAGENT_CAP_LEGACY = 6
+SUBAGENT_CAP_FORMAT_KEY = "_subagent_cap_format"  # disk format: a 6 saved before it was the form's, not a choice
 # The owner's optional numbers: blank is no number, a typo reads the finite value given here.
 OWNER_NUMBERS: dict[str, int] = {OWNER_CAP_KEY: OWNER_CAP_LEGACY, SUBAGENT_CAP_KEY: SUBAGENT_CAP_LEGACY}
 
@@ -429,12 +430,14 @@ MODEL_CAP_KEY = "OUROBOROS_MODEL_MAX_CONCURRENCY"
 MODEL_CAP_LOCAL = 3  # also the value every install saved before the owner's choice became optional
 MODEL_CAP_FORMAT_KEY = "_model_cap_format"  # disk format, never an environment setting or owner knob
 # An optional number whose earlier shipped value every document carries: (key, that value, the marker that ends it).
-_UNCHOSEN_SAVED = ((OWNER_CAP_KEY, OWNER_CAP_LEGACY, OWNER_CAP_FORMAT_KEY), (MODEL_CAP_KEY, MODEL_CAP_LOCAL, MODEL_CAP_FORMAT_KEY))
+_UNCHOSEN_SAVED = ((OWNER_CAP_KEY, OWNER_CAP_LEGACY, OWNER_CAP_FORMAT_KEY), (MODEL_CAP_KEY, MODEL_CAP_LOCAL, MODEL_CAP_FORMAT_KEY),
+                   (SUBAGENT_CAP_KEY, SUBAGENT_CAP_LEGACY, SUBAGENT_CAP_FORMAT_KEY))
 
 
 def unchosen_saved_document(raw: Any) -> Any:
     """The read seam's migration of a document from before an optional number (no format marker): the value the
-    shipped default saved for it (the owner cap's 10, the model limit's 3) reads as blank. A read stays a read; every
+    shipped default saved for it (the owner cap's 10, the model limit's 3, the per-root subagent number's 6) reads as
+    blank. A read stays a read; every
     view carries the markers (``defaults_for_settings_document``), so the next whole-document save ends the migration,
     and a partial save writes the blank the migration read."""
     if not isinstance(raw, Mapping):
