@@ -1166,19 +1166,19 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     told = floor.view_tokens(story) + floor.view_tokens(room)  # the view's memory, before the handbook's note
     admit = dict(book=book, ordinary_memory=told, ratio=ratio, reserve=reserve, output_reserve=output_reserve, window=window,
                  nano=mode == "nano") if book and kept is None and known_window and current_messages is None else None
-    if admit and _admit_required_book(fixed=fixed, memory=told, refuse=False, **admit):  # optional maps first (RV1)
+    for retry in (False, True):  # one admission, note included; once refused, optional maps make room (RV1, RVD1)
+        ordinary = book and fixed + told  # the ordinary admission's estimate
+        note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
+            free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None) if book and snapshot else ""
+        memory = floor.view_tokens(story) + floor.view_tokens("\n\n".join(filter(None, (room, note))))
+        if not admit or not _admit_required_book(fixed=fixed, memory=memory, refuse=retry, **admit):
+            break
         receipts = floor.optional_for_book(sections[mode], receipts, root=core.section_root, task_id=core.section_task_id, retain=retain)
         fixed = measure(mode, sent, section_views(sections[mode], receipts))
-    ordinary = book and fixed + told  # the ordinary admission's estimate
-    note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
-        free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None
-    ) if book and snapshot else ""
     if note:  # its own cost, like the book's, stays outside every later automatic choice (``required_book_tokens``)
         room, facts = "\n\n".join(filter(None, (room, note))), {**facts, BOOK_NOTE_KEY: floor.view_tokens("\n\n" + note)}
     receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact and (
         {**room_fact, "book_required": True} if book else room_fact), mode, required_book=math.ceil(book * ratio))) if snapshot else {}
-    if admit:
-        _admit_required_book(fixed=fixed, memory=floor.view_tokens(story) + floor.view_tokens(room), **admit)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     contents = {}

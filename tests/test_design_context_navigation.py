@@ -466,6 +466,17 @@ def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_pat
     assert rows == ["design_bible"] and design.operative_view in text and BIG_BIBLE.strip() not in text
     assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in view.system_message()["content"])
     assert starts(low) is None and "directly required handbook" in refusals[low]  # named, as before
+    # No larger window refuses: the one admission prices the handbook's note before it maps the bible (RVD1, Fable N1).
+    def whole(window):
+        shown = starts(window)
+        return bool(shown) and "design_bible" not in shown[2]
+
+    below, whole_from = high, 2_000_000
+    while whole_from - below > 1:
+        middle = (below + whole_from) // 2
+        below, whole_from = (below, middle) if whole(middle) else (middle, whole_from)
+    for window in range(whole_from - 64, whole_from):  # where the check without the note let the refusal through
+        assert starts(window), (window, refusals.get(window))
     # The bible's map is what made the room: with its retention failing it stays whole and the same window refuses.
     monkeypatch.setattr(floor, "retain_section", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("unavailable")))
     assert starts(high) is None and "directly required handbook" in refusals[high]
