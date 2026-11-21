@@ -699,7 +699,8 @@ export const apiClient = {
     widgets: (init = {}) => fetchJson('/api/widgets', { cache: 'no-store', ...init }),
     skillPublishPreflight,
     createTask,
-    skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),
+    skillLifecycleQueue: ({ signal } = {}) => withinRequestLifetime(
+        (transport) => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store', signal: transport }), { signal }),
     /** @returns {Promise<import('./api_types.js').SkillDeleteResponse>} */
     deleteSkill: (skill, payloadRoot, expectedContentHash = '') => jsonPost(`/api/skills/${encodeURIComponent(skill)}/delete`, {
         payload_root: payloadRoot,

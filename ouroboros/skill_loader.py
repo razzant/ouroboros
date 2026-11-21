@@ -1434,6 +1434,11 @@ def list_available_for_execution(
     return out
 
 
+def collision_row_id(skill_dir: Any) -> str:
+    """The display key of one directory of a name several claim (CLIENT_CONTRACT §11), never an operation target."""
+    return hashlib.sha256(os.fsencode(skill_dir)).hexdigest()
+
+
 def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill]] = None) -> Dict[str, Any]:
     """Compact catalogue for the installed-skills context and list_skills; ``skills`` reuses a caller's discovery."""
     skills = discover_skills(drive_root) if skills is None else skills
@@ -1508,6 +1513,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             "load_error": s.load_error,
             "source": s.source,
             "location": s.location,
+            **({"collision_row_id": collision_row_id(s.skill_dir)} if s.identity_collision else {}),  # as GET names it
             "manifest_file": s.manifest_file,
             "conflicts": list(s.manifest.conflicts or []),
             "conflict": conflict,
@@ -1524,9 +1530,12 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
         live: Dict[str, Any] = {}
         if s.manifest.is_extension() and not s.identity_collision:
             try:
+                from ouroboros.extension_health import show_recorded_companion_health
                 from ouroboros.extension_loader import runtime_state_for_loaded_skill
 
-                live = runtime_state_for_loaded_skill(s, drive_root, skills=skills)
+                # Read-only: a worker's row also names the companion failures the server last recorded.
+                live = show_recorded_companion_health(
+                    runtime_state_for_loaded_skill(s, drive_root, skills=skills), drive_root, s.name)
             except Exception:
                 log.debug("extension liveness projection failed for %s", s.name, exc_info=True)
                 live = {}
@@ -1538,6 +1547,14 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
         })
         if live.get("load_error"):
             rows[-1]["load_error"] = str(live.get("load_error"))
+        retained = live.get("retained_companions")
+        if not live:  # no runtime state (a collision, an unreadable manifest): this exact directory's custody, as GET
+            from ouroboros.extension_liveness import retained_companions_for_directory
+
+            if retained := retained_companions_for_directory(s.name, str(s.skill_dir)):
+                rows[-1]["process"] = "server"  # only the server's memory holds pending exits
+        if retained:  # the server's observed pending exits, as ``process`` names
+            rows[-1]["retained_companions"] = dict(retained)
     broken = sum(1 for row in rows if row["load_error"])  # finished rows, after every runtime overlay (#600)
     return {
         "count": len(skills),
@@ -1562,5 +1579,5 @@ __all__ = [
     "load_enabled", "load_review_state", "load_skill_grants", "load_skill",
     "requested_core_setting_keys", "review_status_allows_execution", "skill_review_gate",
     "save_enabled", "save_review_state", "save_skill_grants", "skill_state_dir",
-    "summarize_skills",
+    "summarize_skills", "collision_row_id",
 ]

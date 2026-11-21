@@ -965,11 +965,7 @@ def _non_text_script_refusal(script_path: pathlib.Path, script_rel: str) -> str:
 
 
 def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> str:
-    """Explain why an extension does not execute, with its typed live state.
-
-    The prior wording asserted unconditionally that ``register(api)`` had already
-    run, which is false for an extension that failed to load.
-    """
+    """Name this process's registration, not an unobserved server start."""
     try:
         from ouroboros.extension_loader import runtime_state_for_loaded_skill
 
@@ -977,20 +973,22 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
     except Exception:
         log.debug("skill_exec extension liveness lookup failed", exc_info=True)
         live = {}
+    process = str(live.get("process") or "unknown")
     facts = (
         f"live_loaded={bool(live.get('live_loaded'))}, "
         f"desired_live={bool(live.get('desired_live'))}, "
         f"reason={str(live.get('reason') or 'unknown')!r}, "
-        f"process={str(live.get('process') or 'unknown')!r}"
-    )
+        f"process={process!r}"
+    ) if live else "unavailable"
     if live.get("load_error"):
         facts += f", load_error={str(live.get('load_error'))!r}"
+    server_note = ("This worker does not observe the server's background companion state; ``list_skills`` "
+                   "shows the companion failures the server last recorded. " if process == "worker" else "")
     return (
         f"⚠️ SKILL_EXEC_EXTENSION: skill {loaded.name!r} is a "
         "type=extension plugin and does not execute through the "
-        f"subprocess substrate. Its current live state is {facts} "
-        "(inspect the registered surfaces via the snapshot produced by "
-        "``ouroboros.extension_loader.snapshot()``). Use its "
+        f"subprocess substrate. Runtime state in this process: {facts}. {server_note}"
+        "Inspect local registrations via ``ouroboros.extension_loader.snapshot()``. Use its "
         "provider-safe ``ext_<len>_<token>_*`` tools, "
         "``/api/extensions/<skill>/...`` routes, or provider-safe "
         "extension WebSocket handlers instead."

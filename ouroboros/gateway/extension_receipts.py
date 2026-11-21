@@ -18,12 +18,14 @@ def extension_reconcile_receipt(
     skill_name: str, state: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Project the public reconcile response without dropping process custody."""
+    retained = state.get("retained_companions")
     return {
         "skill": skill_name,
         "extension_action": state.get("action"),
         "extension_reason": state.get("reason"),
         "live_loaded": bool(state.get("live_loaded")),
         "load_error": state.get("load_error"),
+        **({"retained_companions": retained} if retained else {}),
         **extension_process_receipt(state),
     }
 

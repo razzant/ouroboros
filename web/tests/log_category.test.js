@@ -23,6 +23,11 @@ const TABLE = [
     ['LLM call failure (live)', { type: 'llm_round_error', error: 'boom' }, 'error', 'errors'],
     ['LLM call failure (durable)', { type: 'llm_api_error', error: 'boom', model: 'm' }, 'error', 'errors'],
     ['extension frame with level=error', { type: 'extension_ws', level: 'error', message: 'handler raised' }, 'error', 'errors'],
+    ['companion exhausted its restarts', { type: 'extension_companion_exhausted', returncode: 7 }, 'error', 'errors'],
+    ['companion restart failed', { type: 'extension_companion_restart_failed', returncode: 7 }, 'error', 'errors'],
+    ['companion replacement failed', { type: 'extension_companion_refresh_failed' }, 'error', 'errors'],
+    ['companion recovered', { type: 'extension_companion_recovered', returncode: 7 }, 'info', 'system'],
+    ['superseded companion exited', { type: 'extension_companion_exited', returncode: 7 }, 'info', 'system'],
     ['typed ok=false', { type: 'managed_update_rollback_after_failed_boot', ok: false, msg: 'rollback failed' }, 'error', 'errors'],
     // genuine failures whose ONLY typed fact is the name (the pinned remainder)
     ['crash storm (counters only)', { type: 'crash_storm_detected', crash_count: 4, worker_count: 2 }, 'error', 'errors'],

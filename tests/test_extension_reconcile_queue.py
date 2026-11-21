@@ -14,8 +14,9 @@ import json
 import pathlib
 from typing import Any, Dict
 
-from ouroboros import extension_loader
-from ouroboros import extension_plugin_api
+import pytest
+
+from ouroboros import extension_companion, extension_loader
 from ouroboros.extension_companion import CompanionSupervisor, init_server_process_pid
 from ouroboros.extension_reconcile_queue import (
     MAX_ATTEMPTS,
@@ -78,14 +79,12 @@ def test_worker_reconcile_writes_server_marker_for_enable_and_disable(tmp_path: 
     assert "desired_disabled" in {item["reason"] for item in requests}
 
 
-def test_server_pickup_spawns_stops_and_redrives_missing_companion(
-    tmp_path: pathlib.Path,
-    monkeypatch,
-) -> None:
-    init_server_process_pid()
-    loaded, repo_root, drive_root = _prepare_companion_extension(tmp_path)
-
+@pytest.fixture
+def queue_supervisor(monkeypatch):
+    """A single signal-free process owner for registration, redrive and the health writer."""
     class FakeSupervisor:
+        declined = False
+
         def __init__(self):
             self.runtimes: Dict[str, Dict[str, Any]] = {}
             self.started: list[str] = []
@@ -93,12 +92,26 @@ def test_server_pickup_spawns_stops_and_redrives_missing_companion(
 
         def start(self, descriptor):
             key = f"{descriptor.skill_name}:{descriptor.name}"
-            self.runtimes[key] = {"skill_name": descriptor.skill_name, "name": descriptor.name}
             self.started.append(key)
+            if self.declined:
+                return False
+            self.runtimes[key] = {"skill_name": descriptor.skill_name, "name": descriptor.name}
             return True
 
         def snapshot(self):
             return dict(self.runtimes)
+
+        def companion_ownership(self, skill_name, names):
+            return [name for name in names if f"{skill_name}:{name}" not in self.runtimes], {}
+
+        def retained_companions(self, _skill_name, _skill_dir):
+            return {}  # this fake always stops synchronously
+
+        def observed_companion_starts(self, _skill_name, _skill_dir, _names):
+            return {}, False, False  # this fake has no asynchronous transitions
+
+        def companions_allow_known_good(self, skill_name, names):
+            return all(f"{skill_name}:{name}" in self.runtimes for name in names)
 
         def stop(self, skill_name: str, name: str):
             self.stopped.append(f"{skill_name}:{name}")
@@ -113,11 +126,16 @@ def test_server_pickup_spawns_stops_and_redrives_missing_companion(
             }
 
     fake = FakeSupervisor()
-    # The companion supervisor is read by PluginAPIImpl (its owner) at register
-    # time and by the loader's ensure_companions_running/unload paths.
-    monkeypatch.setattr(extension_plugin_api, "get_global_supervisor", lambda: fake)
-    monkeypatch.setattr(extension_loader, "get_global_supervisor", lambda: fake)
+    monkeypatch.setattr(extension_companion, "_GLOBAL_SUPERVISOR", fake)
+    return fake
 
+
+def test_server_pickup_spawns_stops_and_redrives_missing_companion(tmp_path, monkeypatch, queue_supervisor):
+    from ouroboros.extension_health import read_extension_health
+
+    init_server_process_pid()
+    loaded, repo_root, drive_root = _prepare_companion_extension(tmp_path)
+    fake = queue_supervisor
     request_extension_reconcile(drive_root, loaded.name, reason="test")
     processed = process_extension_reconcile_requests(drive_root, lambda: {}, repo_path=str(repo_root))
 
@@ -130,13 +148,23 @@ def test_server_pickup_spawns_stops_and_redrives_missing_companion(
     assert fake.started == [f"{loaded.name}:daemon"]
 
     fake.runtimes.clear()
+    known_good = read_extension_health(drive_root, loaded.name)["last_known_good"]
+    assert known_good
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(extension_companion, "_GLOBAL_SUPERVISOR", None)
+        partial = extension_loader.reconcile_extension(loaded.name, drive_root, lambda: {}, repo_path=str(repo_root),
+                                                       health_stamp=("test", "unavailable"))
+    assert partial["live_loaded"] and partial["companions"]["action"] == "no_supervisor"
+    assert read_extension_health(drive_root, loaded.name)["last_known_good"] == known_good
     state = extension_loader.reconcile_extension(
         loaded.name,
         drive_root,
         lambda: {},
         repo_path=str(repo_root),
+        health_stamp=("test", "recovered"),
     )
     assert state["action"] == "extension_already_live"
+    assert read_extension_health(drive_root, loaded.name)["last_known_good"]["sha"] == "recovered"
     assert fake.started == [f"{loaded.name}:daemon", f"{loaded.name}:daemon"]
 
     fake.runtimes.clear()
@@ -155,6 +183,40 @@ def test_server_pickup_spawns_stops_and_redrives_missing_companion(
     assert fake.stopped == [f"{loaded.name}:daemon", loaded.name]
     assert fake.snapshot() == {}
     assert list_extension_reconcile_requests(drive_root) == []
+
+
+@pytest.mark.parametrize("recovering", [False, True], ids=["initial_registration", "missing_companion_recovery"])
+def test_server_declined_companion_start_is_a_load_error_not_last_known_good(
+    tmp_path, monkeypatch, recovering, queue_supervisor,
+):
+    from ouroboros import extension_health
+    from ouroboros.gateway import ws
+
+    init_server_process_pid()
+    loaded, repo_root, drive_root = _prepare_companion_extension(tmp_path)
+    stamp = ("test", "previous")
+    monkeypatch.setattr(extension_health, "fresh_code_stamp", lambda: stamp)
+    monkeypatch.setattr(ws, "notify_extension_health_changed", lambda: None)
+    fake = queue_supervisor
+
+    def reconcile():
+        return extension_loader.reconcile_extension(loaded.name, drive_root, lambda: {}, repo_path=str(repo_root))
+
+    if recovering:
+        assert reconcile()["action"] == "extension_loaded"
+    else:
+        extension_health.record_extension_health(drive_root, loaded.name, status="live", version=stamp[0], sha=stamp[1])
+    known_good = extension_health.read_extension_health(drive_root, loaded.name)["last_known_good"]
+    fake.runtimes.clear()
+    stamp, fake.declined = ("test", "current"), True
+    state = reconcile()
+    health = extension_health.read_extension_health(drive_root, loaded.name)
+    assert fake.started == [f"{loaded.name}:daemon"] * (2 if recovering else 1)
+    assert (state["action"], state["live_loaded"]) == ("extension_load_error", False)
+    assert "companion 'daemon' start was declined" in state["load_error"]
+    assert loaded.name not in extension_loader._extensions
+    assert health["status"] == "broken" and health["last_observed"]["sha"] == "current"
+    assert health["last_known_good"] == known_good and known_good["sha"] == "previous"
 
 
 def test_pickup_keeps_newer_marker_written_during_processing(
@@ -300,6 +362,31 @@ def test_a_failing_skill_counts_its_attempts_on_one_marker_and_records_the_termi
     events = [json.loads(line) for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [(row["type"], row["skill"], row["attempts"]) for row in events] == [
         ("extension_reconcile_failed", "broken", MAX_ATTEMPTS)]
+
+
+def test_a_companion_recovery_s_recorded_failure_is_still_a_failed_attempt(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """A reconcile answers a companion recovery that disposed its publication with the load error that recovery
+    recorded, where it used to raise it: the pass still counts the attempt on the newest marker, with those words.
+    An ordinary load error is a reconcile that ran, and removes its markers as before."""
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    for skill in ("recovering", "recovering", "plain"):
+        request_extension_reconcile(drive_root, skill, reason="dup")
+    words = "skill 'recovering' companion recovery failure: OSError: spawn refused"
+    answers = {"recovering": {"action": "extension_load_error", "reason": "load_error", "load_error": words,
+                              "companions": {"action": "recovery_failed"}},
+               "plain": {"action": "extension_load_error", "reason": "load_error", "load_error": "import failed"}}
+    ensured = []
+    monkeypatch.setattr(extension_loader, "reconcile_extension", lambda skill, *_a, **_k: dict(answers[skill]))
+    monkeypatch.setattr(extension_loader, "ensure_companions_running",
+                        lambda skill, *_a, **_k: ensured.append(skill) or {"action": "not_live"})
+
+    processed = process_extension_reconcile_requests(drive_root, lambda: {})
+    [pending] = list_extension_reconcile_requests(drive_root)
+    assert (pending["skill"], pending["attempts"], pending["last_error"]) == ("recovering", 1, words)
+    assert ([(row["skill"], row["marker_removed"]) for row in processed], ensured) == ([("plain", True)], ["plain"])
 
 
 _DRIVER_PLUGIN = (

@@ -672,6 +672,7 @@ WS_SHAPES: dict[str, tuple[str, str]] = {
     "log": ("", "LogOutbound"),
     "heartbeat": ("", "HeartbeatOutbound"),
     "extension_lifecycle": ("", "ExtensionLifecycleOutbound"),
+    "extension_health_changed": ("", "ExtensionHealthChangedOutbound"),
     "message_annotation": ("", "MessageAnnotationOutbound"),
     "projects_changed": ("", "ProjectsChangedOutbound"),
     "ui_preferences_changed": ("", "UiPreferencesChangedOutbound"),
