@@ -1298,13 +1298,13 @@ def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
         return False
     earlier = frozenset(getattr(ctx.tools._ctx, "_route_left_out_tool_names", ()) or ())
     loaded = frozenset(getattr(ctx.tools._ctx, "_actor_loaded_tool_names", ()) or ())
-    total = len(schemas)
+    before = list(schemas)
     schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded,
                                                      protect=history_tool_names(ctx.messages))
     ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
     rewrite_view(ctx.tools._ctx, ctx.task_id, "route_tool_ceiling", scope="tools")
     _loop()._append_or_merge_user_message(ctx.messages, route_tool_limit_notice(
-        ctx.active_model, limit, total, left_out, selectors=usable_selectors(ctx.tools, schemas)))
+        ctx.active_model, limit, len(before), left_out, selectors=usable_selectors(ctx.tools, schemas), schemas=before))
     return True
 
 
