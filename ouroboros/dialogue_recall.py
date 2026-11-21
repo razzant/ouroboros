@@ -9,8 +9,8 @@ one physical bound: past it the read returns the examined range, never a block. 
 they exist, hand in fewer candidates through the same seam (``_candidates``); the predicate stays the judge.
 
 No relevance order and no host choice of a row: ``order`` (the caller's direction of time) and the page
-are all. ``voice=owner`` keeps the rows ``dialogue_provenance.owner_speech`` already calls my human's words
-and, on a card, only the fields my human wrote. A row stamped by the API door (``client_surface.channel ==
+are all. ``voice=owner`` selects the rows ``dialogue_provenance.owner_speech`` already calls my human's words;
+every typed field of such a row is matched (a card's question too) and each keeps its own speaker on the line. A row stamped by the API door (``client_surface.channel ==
 "api_command"``) says that its sender is not recorded; any other row claims nothing about its route.
 """
 from __future__ import annotations
@@ -32,11 +32,9 @@ API_DOOR_NOTE = "API door, sender not recorded"
 _SPEAKER_WORDS = {"owner": "my human", "host": "host"}
 # The owner-facing sentence of ``chat_history``'s ``words`` (tools/control.py), beside the reader it describes.
 WORDS_DESCRIPTION = (
-    "Instead of search, which matches a literal piece of a rendered row (an id, a label, part of a word): "
-    "alternatives, any one may match. Each is words that must all occur, in any order, as word prefixes within "
-    "one field of one row (message text, a card's question, an offered option, the comment on an answer); a part "
-    "in double quotes is an exact word or phrase. Case, ё/е and Unicode forms do not matter; no ranking. Each "
-    "line names the row's address, room, date, speaker, matched field and its readers.")
+    "Instead of search (a literal piece of the rendered row: an id, a label, part of a word): alternatives, any "
+    "one may match; each is word prefixes that must all occur, in any order, in one field of one row (text, a "
+    "card's question, an option, the comment); a quoted part is an exact word or phrase.")
 
 
 def _room(room_id: Any) -> Optional[int]:
@@ -227,12 +225,9 @@ def words_history(memory: Any, query: WordQuery, *, room: Optional[int], voice: 
         examined["last"] = row
         author = row_author(row, owner_accounts=accounts)
         fields = fields_of(row)
-        searched = [field for field in fields if field.words]
-        if voice == "owner":  # my human's rows, and on a card only what my human wrote; the rest stays shown
-            if not owner_speech(row, author):
-                return False
-            searched = [field for field in searched if field.speaker in ("author", "owner")]
-        matched = match_fields(query, searched)
+        if voice == "owner" and not owner_speech(row, author):  # a row selector; each field keeps its speaker
+            return False
+        matched = match_fields(query, [field for field in fields if field.words])
         if matched:
             hits[id(row)] = {"author": author, "fields": fields, "matched": matched}
         return bool(matched)

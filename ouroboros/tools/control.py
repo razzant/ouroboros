@@ -439,9 +439,9 @@ def get_tools() -> List[ToolEntry]:
                 "date_to": {"type": "string", "default": "", "description": "Inclusive ISO-8601 upper timestamp bound"},
                 "snapshot": {"type": "string", "default": "", "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"},
                 "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
-                "room_id": {"type": "string", "description": "With words: one room, its chat id as text (1 is Main); default every room."},
-                "voice": {"type": "string", "enum": ["owner"], "description": "With words: only my human's own words; on a card, the comment, not the question or options."},
-                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first, so an original said before its restatements can come first."},
+                "room_id": {"type": "string", "description": "With words: one room's chat id (1 is Main)."},
+                "voice": {"type": "string", "enum": ["owner"], "description": "With words: only rows of my human's own words, a card they answered included."},
+                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first."},
             }, "required": [], "additionalProperties": False},
         }, _chat_history),
         ToolEntry("update_scratchpad", {

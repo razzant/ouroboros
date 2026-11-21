@@ -87,19 +87,21 @@ def test_order_is_the_callers_direction_of_time(tmp_path):
     assert "2026-11-01" in _addresses(oldest)[0] and "2026-11-03" in _addresses(newest)[0]
 
 
-def test_voice_owner_keeps_my_humans_words_and_on_a_card_only_what_they_wrote(tmp_path):
+def test_voice_owner_selects_my_humans_rows_and_matches_every_field_of_them(tmp_path):
     _say(tmp_path, "2026-11-01T10:00:00Z", "merge plan from me")
     _say(tmp_path, "2026-11-01T10:01:00Z", "merge plan from Ouroboros", direction="out")
-    _card(tmp_path, "2026-11-01T10:02:00Z", question="Merge plan B?", options=["Yes", "No"], index=0, comment="fine")
-    everyone = _read(tmp_path, words=["merge plan"])
-    assert "total=3" in everyone
+    _card(tmp_path, "2026-11-01T10:02:00Z", question="Merge plan B?", options=["Yes", "No"], index=0, comment="")
+    # a card asked but never answered: Ouroboros's row, not my human's
+    ds.append(tmp_path, "chat", {"ts": "2026-11-01T10:03:00Z", "type": "quiz", "direction": "out", "chat_id": 1,
+                                 "text": "Merge plan C?", "quiz": {"quiz_id": "qc", "question": "Merge plan C?",
+                                                                   "options": ["Yes"]}})
+    assert "total=4" in _read(tmp_path, words=["merge plan"])
     mine = _read(tmp_path, words=["merge plan"], voice="owner")
-    assert "total=1" in mine and "merge plan from me" in mine and "from Ouroboros" not in mine
-    # the card's question is the asking task's text: not my human's words, though the card is shown whole
-    shown = _read(tmp_path, words=["fine"], voice="owner")
-    assert "total=1" in shown
-    assert "question (task asker-1): Merge plan B?" in shown and "comment (my human): fine" in shown
-    assert "press (my human): (1) Yes" in shown
+    assert "total=2" in mine and "merge plan from me" in mine
+    assert "from Ouroboros" not in mine and "Merge plan C" not in mine
+    # the answered card is found by its question's words, and the line says whose words they are
+    assert "matched question" in mine
+    assert "question (task asker-1): Merge plan B?" in mine and "press (my human): (1) Yes" in mine
 
 
 def test_the_api_door_stamp_is_named_and_an_unstamped_row_claims_nothing(tmp_path):
