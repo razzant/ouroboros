@@ -124,6 +124,8 @@ class ContextFitPlan:
     # ``UNKNOWN_START``: a restored task whose continuation did not carry its start (``restored_start``).
     start: Tuple[str, str] = ("", "")
 
+    requested_load_window: Optional[int] = None  # the selected physical load, including Auto (0)
+
     def start_schema_names(self, mode: str) -> Optional[Tuple[str, ...]]:
         """The schema names the start priced, selected for ``mode`` as the start selected them (a live call's own
         Nano base, else the standing work set); None when the start priced none or was not captured."""
@@ -554,27 +556,30 @@ def estimate_context_prompt_tokens(
     )
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
 
-    def project(value: Any) -> Any:
-        if isinstance(value, dict):
-            if any(custody_private_key(key) for key in value):
-                value = context_custody_proxy(value)
-            # A realtime engine's own wire shapes are images too: OpenAI's ``input_image`` and Gemini's
-            # ``inlineData`` (28.10: four screenshots in a Gemini renewal counted as 309k tokens of base64).
-            media = value.get("inlineData")
-            if (str(value.get("type") or "") in {"image", "image_url", "input_image"}
-                    or (isinstance(media, dict) and str(media.get("mimeType") or "").startswith("image/"))):
-                return {
-                    "type": str(value.get("type") or "image"),
-                    "image_token_proxy": "#" * IMAGE_BLOCK_CHAR_EQUIVALENT,
-                }
-            return {
-                str(key): project(item)
-                for key, item in value.items()
-                if str(key) != "_context_capsule"
-            }
+    def project(value: Any, *, part: bool = False) -> Any:
         if isinstance(value, list):
-            return [project(item) for item in value]
-        return value
+            return [project(item, part=part) for item in value]
+        if not isinstance(value, dict):
+            return value
+        private = {key: item for key, item in value.items() if custody_private_key(key)}
+        if private:
+            value = {**{key: item for key, item in value.items() if key not in private},
+                     **context_custody_proxy(private)}
+        media = value.get("inlineData")
+        if part and (value.get("type") in ("image", "image_url", "input_image")
+                     or isinstance(media, dict) and str(media.get("mimeType") or "").startswith("image/")):
+            return {"type": value.get("type") or "image", "image_token_proxy": "#" * IMAGE_BLOCK_CHAR_EQUIVALENT}
+        # Descend through chat content and the two realtime event envelopes. Function arguments,
+        # tool schemas and other JSON are opaque even when their keys resemble an image block.
+        row = dict(value)
+        row.pop("_context_capsule", None)
+        if row.get("type") == "function_call_output" and isinstance(row.get("output"), list):
+            row["output"] = project(row["output"], part=True)
+        for key in ("content", "parts", "events", "item", "clientContent", "turns"):
+            child = row.get(key)
+            if isinstance(child, list) or key in ("item", "clientContent") and isinstance(child, dict):
+                row[key] = project(child, part=key in ("content", "parts"))
+        return row
 
     from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
     from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -656,7 +661,31 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
                                                          credential_profile_id=account)["credential_profile_id"])
     from ouroboros.response_limits import bind_context_route
     bind_context_route(route, settings)
+    target = route.get("_resolved_target")
+    if target and route["provider"] == "openai-compatible":
+        from ouroboros.server_window import private_host
+        from ouroboros.llm_routing import configured_window
+        if private_host(target.get("base_url")):
+            bound = task.get("load_window_binding") or {}
+            load, cap = bound.get("load"), bound.get("cap")
+            if (bound.get("scope") and bound["scope"] == route.get("window_observation_fp")
+                    and bound.get("role") == role and all(type(v) is int and v >= 0 for v in (load, cap))):
+                target["bound_load_window"], route["bound_role_window"] = load, cap
+            else:
+                target["bound_load_window"] = configured_window(target, settings)
     return route, settings
+
+
+def native_load_window_binding(plan):
+    """The optional continuation payload: only a scoped load intent and its role's owner cap."""
+    from ouroboros.capability_evidence import SOURCE_USER_SETTING
+
+    record = getattr(plan, "window_record", None)
+    load = getattr(plan, "requested_load_window", None)
+    if load is None or not getattr(record, "route_fp", ""):
+        return {}
+    cap = next((v.tokens for v in record.declared if v.source == SOURCE_USER_SETTING), 0)
+    return {"scope": record.route_fp, "role": plan.model_role, "load": load, "cap": cap}
 
 
 def resolve_context_fit_route(
@@ -691,8 +720,10 @@ def resolve_context_fit_route(
         route["options"] = {**route["options"], **{key: getattr(evidence, key) for key in (
             "source_id", "credential_profile_id", "account_fingerprint")}}
         route["window_observation_fp"] = route_observation_scope(route, settings, target=route.get("_resolved_target"))
-    window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"],
-                                   settings=settings))
+    target = route.get("_resolved_target") or {}
+    window = route.get("bound_role_window") if target.get("requested_load_window") is not None else None
+    if window is None:
+        window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"], settings=settings))
     return route, with_role_window(evidence, window)
 
 
@@ -1262,9 +1293,13 @@ def build_context_fit_plan(
     counted("request_forms")
     levels, sized = start_room(view_task, role), {}
 
+    from ouroboros.llm_ollama import OllamaUpgradeRequired
+
     def answer(ask: Callable[[], Tuple[Dict[str, Any], Any]]) -> Tuple[Dict[str, Any], Any]:
         try:  # a child probes its own route too: its parent's warm evidence is no fact about it
             return ask()
+        except OllamaUpgradeRequired:
+            raise
         except Exception:
             log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
             # A cold start asks about its next send; the original task may name another route.
@@ -1282,7 +1317,7 @@ def build_context_fit_plan(
                                                     working_reserve_tokens=working_reserve)[1]
         scope = route.get("window_observation_fp", evidence.route_fp)
         bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
+        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope, load=(route.get("_resolved_target") or {}).get("requested_load_window"))
         provider = str(route.get("provider") or "")
         if provider not in sized:  # the whole request measured once per provider, however many answers are framed
             sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider,
@@ -1306,8 +1341,13 @@ def build_context_fit_plan(
             sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages)
 
         def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
-            return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
-                                     work_room_levels=levels)
+            try:
+                return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
+                                         work_room_levels=levels)
+            except MinimumViewUnfit as unfit:
+                target = state.route.get("_resolved_target") or {}
+                unfit.server_program = (target.get("ollama_record") or {}).get("protocol")
+                raise
         try:
             return (*fit(core.user_content_json), {})
         except MinimumViewUnfit as unfit:
@@ -1421,6 +1461,7 @@ def build_context_fit_plan(
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         window_evidence=window_evidence(evidence, window_record),
+        requested_load_window=window_record.load,  # the load its record was resolved for, never another scope's
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start_nano_base=nano_base,
         start_reasoning_effort=reasoning_effort,
@@ -1447,6 +1488,7 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         response_reserve_tokens=measurement.response_reserve_tokens,
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
+        requested_load_window=getattr(measurement, "requested_load_window", None),
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
         mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
     )

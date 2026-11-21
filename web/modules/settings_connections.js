@@ -14,7 +14,9 @@ import { CONFIRMS, bindSettingRows, commitSetting, outcomeLine, readSettings, se
 import { checkerFieldsNote, checkerReads, checkerUses, deploymentOf } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
-import { PROVIDER_CARDS, choiceWords, connectionFieldsHtml, connectionRowHtml, paintConnectionChoices, pressConnectionChoice,
+import { CONSENT_REVOKED, consentEdit, guardChip, markTestCode, nextOutcome, paintServerCheck, providerTestNetworkErrorStatus,
+    providerTestStatusText, providerTestTone, restoreConsent, retargetConsent, testVerdict } from './connection_server_check.js';
+import { PROVIDER_CARDS, choiceWords, connectionConsentHtml, connectionFieldsHtml, connectionRowHtml, paintConnectionChoices, pressConnectionChoice,
     seedConnectionChoices } from './settings_provider_cards.js';
 import { revealNewRow, setInlineStatus } from './ui_helpers.js';
 import { setResult } from './ui_primitives.js';
@@ -110,18 +112,6 @@ export function cacheHintsNote(entry) {
         ? ` since ${when.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : ''}`;
 }
 
-export function providerTestStatusText(result = {}) {
-    if (result?.ok === true) return 'Works';
-    const reason = String(result?.error || '').trim();
-    return reason ? `Not ready — ${reason}` : 'Not ready';
-}
-
-/** A failed request reads "Not ready"; only the server's typed refusal adds its own controlled reason. */
-export function providerTestNetworkErrorStatus(error) {
-    const body = error?.status === 400 && error?.body;
-    return body?.code === 'masked_key_endpoint_changed' ? providerTestStatusText(body) : 'Not ready';
-}
-
 export function providerTestResultIsCurrent({
     sentGeneration, currentGeneration, sentFingerprint, currentFingerprint,
 } = {}) {
@@ -172,6 +162,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     const generations = new Map();
     const inFlight = new Set();
     const asked = new WeakMap();  // row → the request its Test status answers (or awaits)
+    const outcomes = new WeakMap();  // row → what its Test was withheld for (`guardCode`), until the address changes
+    const addressed = new WeakMap();  // row → the address its consent box last stood for
     let rowBaselines = new WeakMap();
 
     const cardNode = (kind) => root.querySelector(`[data-provider-card="${cards.get(kind)?.id}"]`);
@@ -179,6 +171,11 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     const addedRows = (kind) => [...(rowsHost(kind)?.querySelectorAll('[data-connection-row][data-uid]') || [])];
     const rowKey = (row) => (row.dataset.builtin === '1' ? row.dataset.kind : row.dataset.uid);
     const fieldInput = (row, field) => row.querySelector(`[data-connection-field="${field.rowField}"]`);
+    const consentBox = (row) => row.querySelector('[data-connection-consent]');
+    // The address a row's consent box stands for: its base URL as it would be saved, the built-in key's pair as the page holds it.
+    const consentUrl = (row) => (row.dataset.builtin === '1' ? compatibleEndpoint(flatDraft()).baseUrl
+        : fieldInput(row, cards.get(row.dataset.kind).fields.find((field) => field.rowField === 'base_url'))?.value.trim() || '');
+    const consentOf = (row) => (cards.get(row.dataset.kind)?.consent ? consentEdit(consentBox(row), consentUrl(row)) : null);
 
     function setCardOpen(kind, open) {
         const node = cardNode(kind);
@@ -204,6 +201,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         const card = cards.get(row.dataset.kind);
         const original = originals.get(row.dataset.uid) || {};
         const value = { ...original, kind: card.kind, name };
+        const consent = consentOf(row);
+        if (consent !== null) value[card.consent.rowField] = consent;
         const label = row.querySelector('[data-connection-label]')?.value.trim() || '';
         if (label || 'label' in original) value.label = label;
         const enabled = row.dataset.enabled !== '0';
@@ -276,6 +275,14 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         }
         if (fixed) { toggle.hidden = true; remove.hidden = true; }
         paintConnectionChoices(row);  // a held key's choice is shown, never pressed
+        const box = consentBox(row);
+        if (box) {  // the box stands for the address shown: a new one starts it unticked, whatever a Test asked at the last
+            const url = consentUrl(row);
+            if (addressed.has(row) && addressed.get(row) !== url) { retargetConsent(box, url); outcomes.delete(row); }
+            addressed.set(row, url);
+            box.disabled = fixed || (builtin && checkerReads(deployment, card.consent.settingKey));  // the organization's key keeps its consent too
+            paintServerCheck(row, { outcome: outcomes.get(row) || '' });
+        }
     }
 
     function paintAll() {
@@ -285,7 +292,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     // Field edits withdraw saved readiness without duplicating provider credential rules.
     // Toggle status remains independent, and restoring the loaded fields restores their facts.
     function rowFingerprint(row) {
-        return JSON.stringify([row.querySelector('[data-connection-label]')?.value.trim() || '',
+        return JSON.stringify([row.querySelector('[data-connection-label]')?.value.trim() || '', consentBox(row)?.checked ? 1 : 0,
             ...cards.get(row.dataset.kind).fields.map((field) => {
                 const input = fieldInput(row, field);
                 return [field.secret ? input?.value || '' : (input?.value || '').trim(), input?.dataset.forceClear || ''];
@@ -297,6 +304,19 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         generations.set(key, (generations.get(key) || 0) + 1);
         asked.delete(row);
         setInlineStatus(row.querySelector('[data-connection-test-status]'), '', 'muted');
+        markTestCode(row.querySelector('[data-connection-test-status]'), '');
+    }
+
+    // A row's box as the loaded draft holds it: ticked while a consent is stored for the address the row has.
+    function readConsent(row) {
+        const card = cards.get(row.dataset.kind);
+        const box = consentBox(row);
+        if (!card?.consent || !box) return;
+        const stored = row.dataset.builtin === '1' ? pageSettings[card.consent.settingKey] : originals.get(row.dataset.uid)?.[card.consent.rowField];
+        const word = String(stored ?? '').trim();  // the revocation word reads as no consent, as everywhere
+        restoreConsent(box, { stands: Boolean(word) && word !== CONSENT_REVOKED, url: consentUrl(row) });
+        addressed.set(row, consentUrl(row));
+        outcomes.delete(row);
     }
 
     function load(settings = {}, { modelSlots = [] } = {}) {
@@ -329,6 +349,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
             if (added.length && !touched.has(card.kind)) setCardOpen(card.kind, true);
         }
         root.querySelectorAll('[data-connection-row]').forEach(expire);
+        root.querySelectorAll('[data-connection-row]').forEach(readConsent);  // a field of the draft: before its baseline
         rowBaselines = new WeakMap([...root.querySelectorAll('[data-connection-row]')].map((row) => [row, rowFingerprint(row)]));
         paintAll();
         baseline = JSON.stringify(collectRows());
@@ -342,6 +363,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         const row = host.lastElementChild;
         bindSecretInputs(row);
         seedConnectionChoices(row);  // a new key starts on the word the server would seed and stores it
+        readConsent(row);  // and without consent: nothing was given for an address it has not got
         paintRow(row);
         setCardOpen(kind, true);
         revealNewRow(row, row.querySelector('[data-connection-label]'));
@@ -368,6 +390,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
                 if (field.secret) input.dataset.forceClear = '1';
                 input.dispatchEvent(new Event('input', { bubbles: true }));
             }
+            const box = consentBox(row);
+            if (box && !box.disabled && box.checked) box.checked = false;  // a removed key takes its draft consent with it
             onChange();
             return;
         }
@@ -405,6 +429,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
             const value = (input?.value || '').trim();
             if (value !== (input?.dataset.appliedValue ?? '').trim()) overrides[builtin ? field.settingKey : field.rowField] = value;
         }
+        const consent = consentOf(row);  // what the draft would allow; a Test saves none of it
+        if (consent !== null) overrides[builtin ? card.consent.settingKey : card.consent.rowField] = consent;
         return builtin ? builtinTestRequest(card.kind, overrides, flatDraft())
             : { provider_id: card.kind, connection: names(card.kind).get(row), overrides };
     }
@@ -432,7 +458,12 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         setInlineStatus(status, 'Testing…', 'muted');
         try {
             const data = await test(sent);
-            if (current()) setInlineStatus(status, providerTestStatusText(data), data?.ok ? 'ok' : 'danger');
+            if (current()) {
+                setInlineStatus(status, providerTestStatusText(data), providerTestTone(data));
+                markTestCode(status, testVerdict(data).code);  // what the check withheld for decides the box, as on a key's page
+                outcomes.set(row, nextOutcome(data, outcomes.get(row)));
+                paintServerCheck(row, { outcome: outcomes.get(row) });
+            }
         } catch (error) {
             if (current()) setInlineStatus(status, providerTestNetworkErrorStatus(error), 'danger');
         } finally {
@@ -486,6 +517,25 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
             legacyAddress = legacyAddressOf(settings);
             paintAll();
             settle();
+        },
+        /** Re-base the consent boxes against another document than the loaded draft (the wizard's saved state):
+         *  a box SHOWS the draft while `applied`/`appliedUrl` say what is stored, so Test and Save diff against
+         *  the stored consent — a Continue/Back remount never tests the draft's own copy, nor revives a withdrawn one. */
+        rebaseConsent(saved = {}) {
+            const savedRows = connectionRows(saved[CONNECTIONS_KEY]);
+            for (const row of root.querySelectorAll('[data-connection-row]')) {
+                const card = cards.get(row.dataset.kind), box = consentBox(row), builtin = row.dataset.builtin === '1';
+                if (!card?.consent || !box) continue;
+                const savedRow = builtin ? null : savedRows.find((entry) => entry.kind === card.kind && entry.name === row.dataset.name);
+                const word = String((builtin ? saved[card.consent.settingKey] : savedRow?.[card.consent.rowField]) ?? '').trim();
+                box.dataset.applied = word && word !== CONSENT_REVOKED ? '1' : '0';
+                box.dataset.appliedUrl = builtin ? compatibleEndpoint(saved).baseUrl : String(savedRow?.base_url ?? '').trim();
+            }
+        },
+        /** The built-in key's consent as the flat setting the draft saves with its fields (`null` while it stands as loaded). */
+        consent(kind) {
+            const row = root.querySelector(`[data-connection-row][data-builtin="1"][data-kind="${kind}"]`);
+            return row ? consentOf(row) : null;
         },
         /** The setting travels only when the rows differ from the loaded ones. */
         collect() {
@@ -659,6 +709,7 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
     let generation = 0;     // an edit ends the Test in flight
     let gone = false;
     let said = null;        // the result line, kept across a redraw
+    let withheld = '';      // what a Test of this draft was withheld for (`guardCode`), until its address changes
     const builtin = !key.fresh && !key.name;
     const id = () => keyId(kind, key.name);
     const card = () => cardOf(kind);
@@ -666,13 +717,15 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
     const fieldInput = (field) => find(`[data-connection-field="${field.rowField}"]`);
     const typed = (field) => { const input = fieldInput(field); return field.secret ? input?.value || '' : (input?.value || '').trim(); };
     const changed = (field) => { const input = fieldInput(field); return input?.dataset.forceClear === '1' || typed(field) !== (input?.dataset.appliedValue ?? ''); };
-    const say = (line) => { said = line; setResult(find('[data-editor-result]'), line || {}); };
+    const say = (line) => { said = line; setResult(find('[data-editor-result]'), line || {}); markTestCode(find('[data-editor-result]'), line?.code || ''); };
     // A built-in key's write: the flat settings of the fields that travel, as one row of the helper.
     const flatRow = (fields) => ({ id: `accounts:key:${kind}`, keys: fields.map((field) => field.settingKey), page: 'accounts',
         name: card().title, control: { kind: 'custom' }, writer: 'generic' });
     const storedRow = () => (key.name ? connectionRows(settings?.[CONNECTIONS_KEY]).find((row) => row.kind === kind && row.name === key.name) || null : null);
     const keys = () => apiConnections(settings || {});     // the read's keys, so a sentence names a key by its label
     const entry = () => keys().find((item) => item.id === id()) || null;
+    // The read's own facts of this key that the pickers do not carry (`_meta.connections`).
+    const listed = () => (Array.isArray(settings?._meta?.connections) ? settings._meta.connections : []).find((item) => item?.id === id()) || null;
 
     function draw() {
         resetSecretReveals(container);
@@ -689,6 +742,7 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const on = entry()?.enabled !== false;
         const usage = connectionUsage(settings, settings?._meta?.setup_contract?.modelSlots || []);
         const form = connectionFieldsHtml(card(), builtin ? {} : { uid, name: key.name, label: stored?.label, values: stored || {}, draft: key.fresh }, { choices: true });
+        withheld = '';
         const provider = key.fresh ? `<div class="form-field ui-field"><label for="${uid}-kind">Provider</label><select id="${uid}-kind" class="ui-control" data-key-kind>${
             PROVIDER_CARDS.map((each) => `<option value="${each.kind}"${each.kind === kind ? ' selected' : ''}>${escapeHtml(each.title)}</option>`).join('')}</select></div>` : '';
         const legacy = builtin && kind === 'openai' && rowById('OPENAI_BASE_URL');
@@ -697,7 +751,8 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         container.innerHTML = `<p class="settings-page-lead">${key.fresh ? 'A second key of a provider, under a name of its own. A role or an agent names the key it uses.'
             : `${escapeHtml(usedWords(usage.get(id())))}.${on ? '' : ' It is off: nothing is sent through it.'}`}</p>
             <section class="ui-card settings-card accounts-key" data-connection-row data-kind="${kind}"${builtin ? ` data-builtin="1" data-setting-row="accounts:key:${kind}"` : ` data-uid="${uid}" data-name="${escapeHtml(key.name)}"${key.fresh ? ' data-draft="1"' : ''}`}>
-                <div class="accounts-key-form">${provider}${form}</div>
+                <div class="accounts-key-form">${provider}${form}${connectionConsentHtml(card())}</div>
+                <p class="settings-card-note" data-connection-unidentified hidden></p>
                 <p class="settings-card-note" data-key-fixed${fixed ? '' : ' hidden'}>Set by your organization: its Safety Supervisor sends through this key.</p>
                 <p class="settings-card-note" data-connection-fixed-fields hidden></p>
                 <div class="ui-action-row">
@@ -727,6 +782,12 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const borrowed = builtin && !fixed ? card().fields.filter((field) => checkerReads(deployment, field.settingKey)) : [];
         Object.assign(find('[data-connection-fixed-fields]'), { textContent: checkerFieldsNote(borrowed.map((field) => field.label)), hidden: !borrowed.length });
         if (fixed) container.querySelectorAll('.accounts-key-form input').forEach((input) => { input.readOnly = true; });
+        const box = find('[data-connection-consent]');
+        if (box) {  // ticked while the stored consent covers the address this key has now
+            restoreConsent(box, { stands: !key.fresh && listed()?.unidentified?.admission === 'consent', url: consentUrl() });
+            box.disabled = fixed || (builtin && checkerReads(deployment, card().consent.settingKey));
+        }
+        paintServer();
         // A key that is not saved yet starts each choice as the server would seed it (the built-in key of an older
         // setup on the earlier word); a saved one shows what it stores.
         (key.fresh || (builtin && !entry()?.configured) ? seedConnectionChoices : paintConnectionChoices)(container,
@@ -736,13 +797,24 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         bindSecretInputs(container);
         if (legacy) rows = bindSettingRows(find('[data-settings-fold]'), { rows: [legacyRow], ask: ctx.ask });
         if (legacyFixed) find('[data-settings-fold] [data-setting-control]').readOnly = true;
-        if (said) setResult(find('[data-editor-result]'), said);
+        if (said) say(said);
     }
+
+    // The address the consent box speaks of: the base URL as it would be saved, the built-in key's pair as the page holds it.
+    const consentUrl = () => (builtin ? compatibleEndpoint(flatDraft()).baseUrl : typed(card().fields.find((field) => field.rowField === 'base_url')).trim());
+    // The box as an edit (connection_server_check.js `consentEdit`); null while it stands as read or the kind has none.
+    const consentValue = () => (card().consent ? consentEdit(find('[data-connection-consent]'), consentUrl()) : null);
+    // The draft's address is not the one the saved key and its facts have: they say nothing of it, and a Test of it is not the key's.
+    const moved = () => Boolean(card().consent) && !key.fresh && consentUrl() !== find('[data-connection-consent]')?.dataset.appliedUrl;
+    // The box, the note and the Test's word, painted from what is known now; a moved draft offers the box only for what a Test of it found.
+    const paintServer = () => paintServerCheck(container, { entry: key.fresh ? null : listed(), outcome: withheld, moved: moved() });
 
     // What this form would send as one row of the list: the stored row under the fields as shown.
     function rowValue(name) {
         const original = storedRow() || {};
         const value = { ...original, kind, name };
+        const consent = consentValue();
+        if (consent !== null) value[card().consent.rowField] = consent;
         const label = find('[data-connection-label]')?.value.trim() || '';
         if (label || 'label' in original) value.label = label;
         for (const field of card().fields) {
@@ -763,6 +835,8 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
     function testRequest() {
         const overrides = {};
         for (const field of card().fields) if (changed(field)) overrides[builtin ? field.settingKey : field.rowField] = typed(field).trim();
+        const consent = consentValue();  // Test checks what a save of this form would allow, and saves none of it
+        if (consent !== null) overrides[builtin ? card().consent.settingKey : card().consent.rowField] = consent;
         return builtin ? builtinTestRequest(kind, overrides, flatDraft())
             : { provider_id: kind, connection: key.name || connectionNameFor(find('[data-connection-label]')?.value, takenNames()), overrides };
     }
@@ -774,14 +848,18 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         setButtonBusy(button, true);
         say({ text: 'Testing…', tone: 'muted' });
         let verdict;
+        let answered = null;
         try {
-            const data = await test(testRequest());
-            verdict = { text: providerTestStatusText(data), tone: data?.ok ? 'ok' : 'danger' };
-        } catch (error) { verdict = { text: providerTestNetworkErrorStatus(error), tone: 'danger' }; }
+            answered = await test(testRequest());
+            verdict = testVerdict(answered);
+        } catch (error) { verdict = { text: providerTestNetworkErrorStatus(error), tone: 'danger', code: '' }; }
         setButtonBusy(find('[data-connection-test]'), false);
         if (gone || sent !== generation) return;
-        if (!key.fresh) TESTS.set(id(), verdict);
+        // The list's head says it short; the key's own line carries the server's words.
+        if (!key.fresh && !moved()) TESTS.set(id(), { text: verdict.code ? guardChip(verdict.code) : verdict.text, tone: verdict.tone });
+        withheld = nextOutcome(answered, withheld);  // what the check withheld for decides the box (connection_server_check.js)
         say(verdict);
+        paintServer();
     }
 
     /** What a save would refuse here, as `{ input, message }`; null when it may go. */
@@ -814,6 +892,8 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
             const edits = card().fields.filter(changed);
             const fields = edits.some((field) => fieldInput(field).dataset.seeded !== '1') ? edits : [];
             const values = fields.map((field) => (fieldInput(field).dataset.forceClear === '1' ? '' : typed(field)));
+            const consent = consentValue();
+            if (consent !== null) { fields.push(card().consent); values.push(consent); }
             outcome = !fields.length ? { state: 'unchanged' } : await commitSetting(flatRow(fields), fields.length > 1 ? values : values[0], { confirmed: true, ask: ctx.ask });
         } else {
             const wanted = rowValue(name);
@@ -855,8 +935,10 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         setButtonBusy(button, true);
         let outcome;
         if (builtin) {
-            // The built-in key stays where it is typed: Remove clears what makes it usable.
-            const fields = card().fields.filter((field) => field.secret || field.credential);
+            // The built-in key stays where it is typed: Remove clears what makes it usable — and the stored consent
+            // with it, so a recreated key never inherits a grant nobody shows; a checker-read consent stays out.
+            const fields = [...card().fields.filter((field) => field.secret || field.credential),
+                ...(card().consent && !checkerReads(deployment, card().consent.settingKey) ? [card().consent] : [])];
             outcome = await commitSetting(flatRow(fields), fields.length > 1 ? fields.map(() => '') : '', { confirmed: true, ask: ctx.ask });
         } else {
             outcome = await writeKeyList((list) => (list.some((row) => row.kind === kind && row.name === key.name)
@@ -890,7 +972,11 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
     const onInput = (event) => {
         if (!event.target?.closest?.('.accounts-key-form')) return;
         event.target.removeAttribute?.('aria-invalid');
+        // A consent was given for an address: the box stands for the one shown, and what a Test found at the last one is gone.
+        const box = find('[data-connection-consent]');
+        if (box && event.target.dataset?.connectionField === 'base_url') { retargetConsent(box, consentUrl()); withheld = ''; }
         edited();
+        if (box) paintServer();
     };
     const onChange = (event) => {
         if (!event.target?.matches?.('[data-key-kind]')) return;

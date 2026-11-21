@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.review_run_isolation import run_cap_from_env
 from ouroboros.provider_models import (
-    DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS, OPENAI_RESPONSES_DIRECT_DEFAULTS, choice_error,
+    DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS, OPENAI_RESPONSES_DIRECT_DEFAULTS, PROVIDER_KINDS, choice_error,
 )
 from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
@@ -21,7 +21,7 @@ from ouroboros.model_slots import (
     PROCESSING_PREFERENCE_KEY, normalize_model_role_options, normalize_processing_preference,
 )
 from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
-from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
+from ouroboros.provider_connections import canonical_builtin_consent, configured_connections, connection_rows, normalize_connections
 from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections, typed_connection_secrets
 from ouroboros.settings_integrity import operator_variables, skill_environ
 
@@ -174,7 +174,12 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
     ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Saved for models routed straight to Anthropic, and for Claude tooling.", "password", "primary"),
     ("openai-compatible-url", "compatibleBaseUrl", "OPENAI_COMPATIBLE_BASE_URL", "s-compatible-url", "OpenAI-compatible Base URL", "http://localhost:11434/v1", "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required whenever a slot uses the OpenAI-compatible endpoint as its source.", "url", "more"),
     ("openai-compatible-key", "compatibleApiKey", "OPENAI_COMPATIBLE_API_KEY", "s-compatible-key", "OpenAI-compatible API Key", "Leave empty for no auth", "API key for the endpoint. Leave empty if your server does not require authentication.", "password", "more"),
+    # Drawn as the compatible card's consent box, never as a text field. It holds the base URL the owner lets Ouroboros
+    # send to although its server names no program (saved as that address's id); empty withdraws it.
+    ("openai-compatible-continue", "compatibleContinueUnconfirmed", "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED", "s-compatible-continue", "Continue via the compatible API without confirmation that history is preserved", "", "The Base URL you let Ouroboros send to although that server names no program, saved as the address's id. Empty withdraws it; it never opens an address where Ollama was seen.", "text", "more"),
 ))
+# The built-in compatible key's consent: a field of the draft, sent or absent (an older client never clears a saved one).
+_COMPATIBLE_CONSENT = PROVIDER_KINDS["openai-compatible"].flat_key("continue_unconfirmed")
 
 # Secret-key membership and its configured marker are re-exported from the
 # leaf wire contract so onboarding, Settings, repair, and persistence cannot drift.
@@ -526,6 +531,17 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop", docume
         )
         for field in _PROVIDER_FIELDS
     })
+    # The consent box stands for the endpoint shown: a saved consent that names another endpoint (one changed outside
+    # this form) is not mounted as given, on the built-in key or a row, so the box is never ticked by a token alone.
+    from ouroboros.llm_ollama_guard import CONSENT_FIELD, consented
+    from ouroboros.provider_models import compatible_endpoint
+
+    mounted = next(field["stateKey"] for field in _PROVIDER_FIELDS if field["settingKey"] == _COMPATIBLE_CONSENT)
+    if not consented(compatible_endpoint(lambda key: _string(settings.get(key)))[1], state[mounted]):
+        state[mounted] = ""
+    for row in state["connections"]:
+        if CONSENT_FIELD in row and not consented(row.get("base_url"), row[CONSENT_FIELD]):
+            del row[CONSENT_FIELD]
     state.update(budget_state)
     state["modelAccounts"] = normalize_model_role_options(MODEL_ACCOUNTS_KEY, settings.get(MODEL_ACCOUNTS_KEY))[0]
     state["modelContextWindows"] = normalize_model_role_options(MODEL_CONTEXT_WINDOWS_KEY, settings.get(MODEL_CONTEXT_WINDOWS_KEY))[0]
@@ -649,6 +665,8 @@ def draft_access(data: dict, current_settings: dict) -> Tuple[Any, Dict[str, str
         elif setting_key in secret_keys and value:
             typed.add(value)
         keys[setting_key] = value
+    if _COMPATIBLE_CONSENT not in data:  # a client that does not know the field keeps what is saved; '' withdraws it
+        keys[_COMPATIBLE_CONSENT] = _string(current_settings.get(_COMPATIBLE_CONSENT))
     return connections, keys, typed, None
 
 
@@ -706,8 +724,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "OPENAI_API_SURFACE",
-                               "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", _COMPATIBLE_CONSENT, "MINIMAX_REGION", "ZAI_PLAN",
+                               "OPENAI_API_SURFACE", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     )
     has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
@@ -769,6 +787,8 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             return {}, str(exc)
     prepared.update(models)
     prepared.update(keys)
+    if _COMPATIBLE_CONSENT in data:
+        canonical_builtin_consent(prepared, data)  # a consent the body names is saved as the id of its endpoint
     from ouroboros.provider_connections import seed_new_api_surfaces
 
     seed_new_api_surfaces(prepared, current_settings)  # a key new to this install starts on Responses

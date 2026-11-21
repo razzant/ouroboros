@@ -567,6 +567,7 @@ def _attempt_request(
     payload: Dict[str, Any],
     *,
     source: Optional[str] = None,
+    image_context: Optional[Dict[str, Any]] = None,
 ) -> AttemptRequest:
     """Build secret-free facts for one final inspectable candidate."""
     prompt_payload = {
@@ -583,7 +584,7 @@ def _attempt_request(
         prompt_chars = len(str(prompt_payload or ""))
     from ouroboros.context_fit import bounded_prompt_tokens_for_payload
 
-    bounded_tokens = bounded_prompt_tokens_for_payload(prompt_payload, prompt_chars)
+    bounded_tokens = bounded_prompt_tokens_for_payload(image_context or prompt_payload, prompt_chars)
     request_source = source
     if request_source is None:
         bound_scope = current_usage_scope()
@@ -597,7 +598,7 @@ def _attempt_request(
         key: payload[key] for key in CANDIDATE_CONTEXT_KEYS if key in payload
     })
     from ouroboros.send_clock import record_candidate, split_clock_note
-    from ouroboros.vision_routing import note_candidate_images
+    from ouroboros.vision_routing import note_candidate_images, payload_image_digests
     from ouroboros.openrouter_cost import binding_for_target
 
     # The same bytes carry the Main clock line; its clock-free twin identifies
@@ -605,7 +606,8 @@ def _attempt_request(
     clock_note, clock_free = split_clock_note(payload)
     raw_sha256 = hashlib.sha256(raw).hexdigest()
     record_candidate(raw_sha256, clock_note)
-    note_candidate_images(raw_sha256, payload)  # the images it carries, for an image-refusal retry's predicate
+    if image_context is None:
+        note_candidate_images(raw_sha256, payload)
     measured = _exact_local_measurement(target, payload)
     return AttemptRequest(
         model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
@@ -614,13 +616,15 @@ def _attempt_request(
         max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens")
                                   or payload.get("max_output_tokens") or 0),
         source=str(request_source or ""),
+        prompt_count_basis="" if target.get("settings_test") else "prompt",
         prompt_cache_ttl=_applied_payload_cache_ttl(payload) or "",
         candidate_raw_sha256=raw_sha256,
+        candidate_image_digests=tuple(sorted(payload_image_digests(image_context))) if image_context is not None else None,
         candidate_raw_size_bytes=len(raw),
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context() or helper_context_for(target, payload),
+        physical_context=current_physical_attempt_context() or helper_context_for(target, image_context or payload),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),
@@ -653,7 +657,7 @@ def _physical_candidate(payload: Dict[str, Any]) -> Dict[str, Any]:
             value.pop("_context_capsule", None)
             for key, child in value.items():
                 # Continuation payloads belong to the provider, including nested keys.
-                if key not in {"reasoning_details", "reasoning_content"}:
+                if key not in {"reasoning_details", "reasoning_content", "tool_calls"}:
                     _strip(child)
         elif isinstance(value, list):
             for child in value:

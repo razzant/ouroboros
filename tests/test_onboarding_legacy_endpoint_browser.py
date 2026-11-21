@@ -27,7 +27,9 @@ EDITED_KEY = "sk-edited-legacy-pair-0123456789"
 
 @contextmanager
 def _endpoint(models):
-    """An inert OpenAI-compatible server that records where each request went and with which auth."""
+    """An inert OpenAI-compatible server that records where each request went and with which auth. It names its
+    program at ``/props`` as llama.cpp does: a private server that names none sends only with its connection's
+    consent (``ouroboros/llm_ollama_guard.py``), and these journeys are about keys and addresses."""
     calls = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -44,6 +46,8 @@ def _endpoint(models):
 
         def do_GET(self):
             calls.append({"method": "GET", "path": self.path, "authorization": self.headers.get("Authorization")})
+            if self.path == "/props":
+                return self._answer({"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1})
             self._answer({"data": [{"id": model} for model in models]})
 
         def do_POST(self):

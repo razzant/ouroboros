@@ -1049,7 +1049,8 @@ def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     client = LLMClient()
-    route = {**target("openai-compatible"), "base_url": f"http://127.0.0.1:{server.server_port}/v1"}
+    address = f"http://127.0.0.1:{server.server_port}/v1"
+    route = {**target("openai-compatible"), "base_url": address, "continue_unconfirmed": address}  # it names no program
     monkeypatch.setattr(client, "_resolve_remote_target", lambda model: route)
     try:
         kwargs = dict(messages=MESSAGES, model="openai-compatible::fixture", stream=True, no_proxy=no_proxy, timeout=5)

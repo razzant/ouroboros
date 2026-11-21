@@ -59,9 +59,11 @@ def project_wire_messages(messages, *, delivery_marks=False):
     Opaque strings and unknown provider fields are never interpreted or rewritten.
     """
     hidden = HOST_ONLY_MESSAGE_KEYS - (DELIVERY_MESSAGE_KEYS if delivery_marks else frozenset())
-    def project(value):
+
+    def project(value, parent=None):
         if isinstance(value, dict):
-            return {key: project(child) for key, child in value.items() if key not in hidden}
+            return {key: copy.deepcopy(child) if parent == "function" and key == "arguments" else project(child, key)
+                    for key, child in value.items() if key not in hidden}
         if isinstance(value, (list, tuple)):
             return [project(child) for child in value]
         return value

@@ -24,6 +24,20 @@ _CANCEL = contextvars.ContextVar("usage_presend_cancel", default=None)
 _CLEANUP = contextvars.ContextVar("usage_cleanup", default=False)
 # Acquisition slicing controls responsiveness, not lifetime or quota policy.
 ACQUISITION_SLICE_SEC = 0.25
+# Monotonic stamp of the last pre-send accounting wait this process contended through. A decision made
+# before such a wait (a compatible route's admission verdict, ``llm_ollama.limit_compatible_send``) is
+# stale for the send the wait delayed: the owner may have acted while the ledger was busy.
+_LAST_PRESEND_WAIT = 0.0
+
+
+def _note_presend_wait():
+    global _LAST_PRESEND_WAIT
+    _LAST_PRESEND_WAIT = time.monotonic()
+
+
+def presend_wait_after(stamp: float) -> bool:
+    """Whether a pre-send accounting wait contended after ``stamp`` (``time.monotonic``)."""
+    return _LAST_PRESEND_WAIT > stamp
 
 
 class _PresendWait:
@@ -77,6 +91,7 @@ class _PresendWait:
             raise error
         if not self.entered:
             self.entered = True
+            _note_presend_wait()
             _hold(self.owner, "entered", self.started, self.episode_id)
         return ACQUISITION_SLICE_SEC
 
@@ -202,6 +217,7 @@ def send_acquisition(check=None):
                         raise
                     if not entered:
                         entered = True
+                        _note_presend_wait()
                         _hold(owner, "entered", started, episode_id)
                     continue
                 with stack:

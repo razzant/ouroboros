@@ -22,8 +22,10 @@ def _episode(tmp_path, monkeypatch, server):
             shutil.copyfile(REPO / name, repo / name)
     if (REPO / "docs/architecture").is_dir():
         shutil.copytree(REPO / "docs/architecture", repo / "docs/architecture")
+    # The fake server shows no program (its /props answers 404): the owner's consent for its address lets Main send.
     cfg = keyless_settings(server, OUROBOROS_CONTEXT_MODE="max", OUROBOROS_REASONING_SUMMARY="off",
-                           OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off")
+                           OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off",
+                           OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED=server.base_url)
     for key, value in cfg.items():
         if isinstance(value, (str, int, float)):
             monkeypatch.setenv(key, str(value))

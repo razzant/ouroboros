@@ -3,8 +3,10 @@
 The real OpenAI SDK serializes each request and a ``httpx.MockTransport`` peer reads
 the JSON it would put on the wire, so these checks cover the shared builder through
 its actual consumers: sync, async, streaming and no-proxy sends. Nothing here calls a
-vendor. The refusal bodies below are SYNTHETIC — constructed for these tests, not
-recorded provider responses — and prove only the host's own adaptation rule: a
+vendor or a socket: the private address is a synthetic gateway that names no program,
+which the owner's consent admits to ``/v1``. The refusal bodies below are SYNTHETIC —
+constructed for these tests, not recorded provider responses — and prove only the
+host's own adaptation rule: a
 rejection naming the field adapts that exact route, a nonspecific 400 adapts nothing.
 Carriage is not evidence that a provider applied the effort; the reported effort
 stays unknown until a provider reports one.
@@ -18,9 +20,11 @@ import openai
 import pytest
 
 from ouroboros.llm import LLMClient
+from tests._ollama import install_http as install_http
 from tests.test_transport_b_stream_deadlines import chunk, completion, sse
 from tests.test_transport_b_stream_deadlines import isolated as isolated
 
+GATEWAY = "http://127.0.0.1:11434/v1"
 ROUTES = {
     "openai-compatible": ("openai-compatible::glm-5", {
         "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
@@ -30,11 +34,14 @@ ROUTES = {
     "cloudru": ("cloudru::zai-org/GLM-4.7", {
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key",
         "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://cloudru.invalid/v1"}),
-    # Two models on one local Ollama-shaped endpoint: each is its own exact route.
+    # Two models behind one private gateway that relays Ollama's /v1 replies and names no program: the owner's
+    # consent admits it to /v1, and each model is its own exact route.
     "ollama": ("openai-compatible::llama3.2:latest", {
-        "OPENAI_COMPATIBLE_API_KEY": "ollama", "OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:11434/v1"}),
+        "OPENAI_COMPATIBLE_API_KEY": "ollama", "OPENAI_COMPATIBLE_BASE_URL": GATEWAY,
+        "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": GATEWAY}),
     "ollama-thinking": ("openai-compatible::qwen3:latest", {
-        "OPENAI_COMPATIBLE_API_KEY": "ollama", "OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:11434/v1"}),
+        "OPENAI_COMPATIBLE_API_KEY": "ollama", "OPENAI_COMPATIBLE_BASE_URL": GATEWAY,
+        "OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED": GATEWAY}),
 }
 MESSAGES = [{"role": "user", "content": "hello"}]
 UNSUPPORTED_FIELD = {"error": {  # SYNTHETIC: names the field as unsupported
@@ -63,8 +70,9 @@ def _answer(payload, script):
 
 
 @pytest.fixture
-def route(monkeypatch):
-    """One provider route whose HTTP peer records each JSON body it receives."""
+def route(monkeypatch, install_http):
+    """One provider route whose HTTP peer records each JSON body it receives. Every client reaches that peer;
+    the private gateway's own service reads (the check before each send) find no program and are not bodies."""
     opened = []
 
     def make(provider, *, asynchronous=False, no_proxy=False, script=None):
@@ -74,11 +82,13 @@ def route(monkeypatch):
         client, sent, script = LLMClient(), [], list(script or [])
 
         def respond(request):
+            if not request.url.path.endswith("/chat/completions"):
+                return httpx.Response(404, json={"detail": "Not Found"})
             payload = json.loads(request.content)
             sent.append(payload)
             return _answer(payload, script)
 
-        transport = httpx.MockTransport(respond)
+        transport = httpx.MockTransport(install_http(respond))
         http = (httpx.AsyncClient if asynchronous else httpx.Client)(transport=transport)
         remote = (openai.AsyncOpenAI if asynchronous else openai.OpenAI)(
             api_key="fixture-not-live", base_url="https://route.invalid/v1", max_retries=0, http_client=http)

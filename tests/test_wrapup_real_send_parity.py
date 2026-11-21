@@ -26,6 +26,7 @@ from ouroboros.task_pacing import main_loop_wire_options
 
 from tests.test_tree_cost_ceiling import _ctx, _patch_execute_candidate
 from tests._cases import case_folders
+from tests._ollama import install_http as install_http
 
 _IDENTITY = ("model", "provider", "candidate_raw_sha256", "candidate_raw_size_bytes")
 _MESSAGES = [{"role": "system", "content": "policy"}, {"role": "user", "content": "wrap up"}]
@@ -781,3 +782,49 @@ def test_pricing_view_does_not_survive_exact_budget_resume(tmp_path, monkeypatch
                           'graceful_ceiling' if decision == 'control' else 'wrapup_last_fit')
     if decision != 'control':
         assert any(row['mode'] == 'low' for row in prices), 'the acting route must actually narrow during pricing'
+
+
+@pytest.mark.parametrize("chosen,busy", [(80000, False), (80000, True), (0, True)])
+def test_bound_native_wrapup_is_priced_and_sent_once_after_settings_change(install_http, monkeypatch, tmp_path, chosen, busy):
+    from dataclasses import replace
+    from ouroboros import config, loop_forced_finalization as forced
+    import httpx
+    from ouroboros.context_fit import resolve_context_fit_route
+    from tests._ollama import TARGET, OllamaHTTP, _compatible_target
+
+    target = _compatible_target(monkeypatch, TARGET["base_url"])
+    model = target["capability_route"]["model"]
+    settings = config.runtime_settings()
+    settings["OUROBOROS_MODEL_CONTEXT_WINDOWS"] = {"main": chosen}
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    server = OllamaHTTP()
+    def handle(request):
+        if busy and request.url.path == "/api/version":
+            return httpx.Response(429)
+        return server(request)
+    install_http(handle)
+    route, _ = resolve_context_fit_route({"model": model, "route_start_read": True}, allow_fetch=True)
+    selected = route["_resolved_target"]["requested_load_window"]
+    assert selected == chosen
+    busy = False
+    plan = replace(_forced_plan(window=80000), model=model, provider=target["provider"],
+                   route_fp=route["window_observation_fp"], requested_load_window=selected)
+    owner = SimpleNamespace(context_fit_plan=plan, active_context_mode="max", task_metadata={}, model_turn_state=None)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    ctx = _ctx(drive_logs=logs, llm=LLMClient(), active_model=model,
+               tools=SimpleNamespace(_ctx=owner), messages=copy.deepcopy(_MESSAGES))
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+            drive_root=tmp_path, task_id="task1", root_task_id="task1")):
+        settings["OUROBOROS_MODEL_CONTEXT_WINDOWS"] = {"main": 120000}
+        request, messages = task_pacing.prepared_wrapup_candidate(ctx, copy.deepcopy(_MESSAGES), allow_server_web_search=False)
+        assert not server.posts
+        physical = owner._forced_physical_context
+        assert forced._call_forced_model_once(ctx, initial_messages=messages, admitted_request=request) == "391"
+        [sent] = server.posts
+        assert sent["options"] == {**({"num_ctx": chosen} if chosen else {}), "num_predict": request.max_completion_tokens}
+        assert sent["truncate"] is sent["shift"] is False
+    with usage_accounting.bind_physical_attempt_context(physical):
+        ctx.llm.chat(_MESSAGES, model=model)
+    ctx.llm.chat(_MESSAGES, model=model)
+    assert [body["options"].get("num_ctx") for body in server.posts] == [chosen or None, chosen or None, 120000]

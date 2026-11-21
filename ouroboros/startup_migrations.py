@@ -6,8 +6,9 @@ Run before producers on every startup door: ``ensure_current_store`` opens or cr
 boot admissions no document derives (drives present on disk, the one-time upgrade
 receipts) join the owner-held rows, and legacy questions bind their publication
 address once (a closed one whose card no room shows retires its closure note). ``state/migrations.json``
-keeps the watermarks: the store, the cancel-latch, the question-publication, the closures-owed-nowhere and the
-retired-set generations.
+keeps the watermarks: the store, the cancel-latch, the question-publication, the closures-owed-nowhere, the
+retired-set and the prior-compatible-route generations. Every start also retires the prior compatible routes
+its connections no longer serve (``retire_unserved_prior_routes``).
 ``python -m ouroboros.startup_migrations`` is the explicit rebuild job, including
 its historical seal audit (no audit watermark). An owner-held obligation set whose producer
 this body retired (``RETIRED_SETS``) has no reader or remover left, so the first boot of its
@@ -34,6 +35,7 @@ QUESTION_PUBLICATIONS_GENERATION = 1
 CLOSURES_OWED_NOWHERE_GENERATION = 1  # closures an earlier import's verdict owes nowhere, retired once
 RETIRED_SETS = ("memory_max",)  # the lost-Max episode's one row, retired 29.10 with its producer
 RETIRED_SETS_GENERATION = 2  # also retire the old episode's unsent outbox lines; generation 1 removed only its set
+PRIOR_COMPATIBLE_ROUTES_GENERATION = 1  # the one snapshot of compatible routes an earlier body left serving
 
 
 def watermarks(root) -> dict:
@@ -199,6 +201,62 @@ def retire_sets(root, *, rebuild=False) -> int:
     return removed
 
 
+def record_prior_compatible_routes(root, *, earlier_body: bool):
+    """Once per install, at the first start of a body that asks consent before sending to a private compatible
+    server which names no program: a compatible connection keeps its ``/v1`` at the endpoint a server answered
+    it at under an earlier body (``llm_ollama_guard.record_prior_routes``).
+
+    What proves such a route is that body's own record of the answer, found for a route this start's settings
+    send now (``llm_ollama_guard.answered_before``), in a data root that carried migration watermarks before this
+    start (``earlier_body``: after a lost watermark a record may be this body's own). The settings prove nothing
+    by being there, whether a saved document, one the launch points at or its variables: each may be new with
+    this start. A document that cannot be read keeps nothing; a store that cannot be read defers the snapshot,
+    unstamped, to a start that can read it — an imagined empty store is never taken for the absence of every
+    earlier route. Stamped before the routes are stored, so no later
+    start widens the snapshot: whatever it does not hold asks the owner's consent. Returns the routes kept,
+    ``None`` when nothing was due."""
+    from ouroboros import config
+
+    if (watermarks(root).get("prior_compatible_routes_generation") == PRIOR_COMPATIBLE_ROUTES_GENERATION
+            or Path(root).resolve() != Path(config.DATA_DIR).resolve()):
+        return None
+    if not earlier_body:
+        stamp(root, prior_compatible_routes_generation=PRIOR_COMPATIBLE_ROUTES_GENERATION)
+        return 0
+    from ouroboros.llm_ollama_guard import EvidenceStoreUnavailable, answered_before, record_prior_routes, store_checked
+
+    try:
+        store_checked(root)
+    except EvidenceStoreUnavailable:
+        return None  # the one snapshot waits for a start that can read the store; the watermark stays unstamped
+    stamp(root, prior_compatible_routes_generation=PRIOR_COMPATIBLE_ROUTES_GENERATION)
+    return record_prior_routes(answered_before(config.load_settings(strict=True), root), root)
+
+
+def retire_unserved_prior_routes(root) -> int:
+    """Every start: a prior route whose connection this start no longer serves at that endpoint is retired
+    (``llm_ollama_guard.retire_prior_routes``), so a connection removed or switched off between two starts
+    does not hand its route to one made again under its name. A document that cannot be read retires
+    nothing: its connections are unknown, not gone. Returns the routes retired."""
+    from ouroboros import config
+
+    if Path(root).resolve() != Path(config.DATA_DIR).resolve():
+        return 0
+    from ouroboros.llm_ollama_guard import retire_prior_routes
+    from ouroboros.provider_connections import served_compatible_addresses
+
+    return retire_prior_routes(lambda: served_compatible_addresses(_saved_settings_document()), root)
+
+
+def _saved_settings_document():
+    """The configured data root's settings document as saved, ``None`` for none; one that is present and cannot
+    be read as an object raises ``settings_integrity.SettingsDocumentUnknown``."""
+    from ouroboros import config
+    from ouroboros.settings_integrity import read_settings_json_strict
+
+    return read_settings_json_strict(config.SETTINGS_PATH, behind_writer=True)
+
+
 def boot_admissions(root) -> dict:
     """Owner-held rows no document derives: a drive directory present on disk owes its terminal
     files (a terminal result can land in the drive before the canonical start/result did), and
@@ -247,12 +305,22 @@ def _prepare_startup_state(root, *, rebuild, repo_dir=None, initialize_journal=F
         log.warning("Legacy private-copy registry not imported; the next start repeats it", exc_info=True)
         copies = {"error": type(exc).__name__}
     try:
-        watermarks(root)
+        earlier_body = bool(watermarks(root))  # before this start stamps anything: an earlier body ran here
     except ValueError:
         # A torn watermark file is rewritten empty: every job below then runs and restamps it.
         log.warning("Migration watermarks unreadable; rewriting them and re-running the lifecycle import")
         from ouroboros.utils import atomic_write_json
         atomic_write_json(root / "state" / "migrations.json", {}, trailing_newline=True)
+        earlier_body = False  # what cannot be read proves no earlier route
+    try:
+        record_prior_compatible_routes(root, earlier_body=earlier_body)
+    except Exception:
+        log.warning("Prior compatible routes not recorded; a route missing from the snapshot asks consent", exc_info=True)
+    try:
+        retire_unserved_prior_routes(root)
+    except Exception:
+        log.warning("Prior compatible routes not checked against this start's connections; the next start or "
+                    "settings write repeats it", exc_info=True)
     started = time.monotonic()
     try:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir or Path(__file__).resolve().parents[1],

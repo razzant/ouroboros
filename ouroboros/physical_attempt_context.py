@@ -45,6 +45,7 @@ class PhysicalAttemptContext:
     # (``transcript_prefix.attempt_prefix_fact``): never the provider's verdict, which is the row's measured counts.
     # None on rows written before it existed and on sends without a Main candidate.
     prefix: Optional[dict] = field(default=None, compare=False)
+    requested_load_window: Optional[int] = None
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made

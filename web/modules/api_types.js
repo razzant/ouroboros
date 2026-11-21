@@ -127,17 +127,17 @@
  * @property {string[]} models
  * @property {string=} error
  */
-/** `api_key_setting` names the built-in compatible pair under test (its address may then be overridden too);
- * omitted keeps the historical resolution.
- * @typedef {Object} ProviderTestRequest
+/** @typedef {Object} ProviderTestRequest
  * @property {string} provider_id
  * @property {Object<string, string>=} overrides
  * @property {string=} connection
- * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} api_key_setting
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} api_key_setting  // the built-in compatible pair under test (its address may then be overridden too); omitted keeps the historical resolution
  */
 /** @typedef {Object} ProviderTestResponse
  * @property {boolean} ok
  * @property {string=} error
+ * @property {string=} caution
+ * @property {('ollama_guard_consent'|'ollama_guard_held'|'ollama_guard_unavailable')=} code
  */
 /** @typedef {Object} AvailableSubagentRoute
  * @property {'api_model'|'agent_session'} kind

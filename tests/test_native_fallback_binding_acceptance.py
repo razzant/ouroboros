@@ -384,7 +384,7 @@ def test_transient_cooldown_keeps_other_native_account_available(main_call, monk
 
 @pytest.mark.parametrize(("primary_account", "choice"), [("account-a", "return"), ("", "wait")])
 def test_primary_choice_survives_shared_cold_continuation(main_call, monkeypatch, choice, primary_account):
-    from ouroboros import budget_pause, loop_model_call, owner_wait
+    from ouroboros import budget_pause, loop_routes, owner_wait
     from ouroboros.model_slots import route_binding
 
     ctx, _gateway, owner, _events, _decide, _observations = main_call
@@ -414,7 +414,7 @@ def test_primary_choice_survives_shared_cold_continuation(main_call, monkeypatch
         ctx.tools, state, ctx.messages, {}, {}, set(), budget_remaining_usd=5.0)
     assert budget_pause.budget_pause_row(ctx.drive_root, inner.task_id)["state"] == budget_pause.STATE_RESUMED
     assert any("after an explicit Resume (" in str(row.get("content")) for row in ctx.messages)  # a grant naming nobody
-    model, local, effort, plan, _mode = loop_model_call._apply_round_route_overrides(
+    model, local, effort, plan, _mode = loop_routes._apply_round_route_overrides(
         inner, ctx.tools, ctx.messages, (model, local, effort), restored_plan, mode, "max", [])
     assert plan.model_role == "main" and inner.route_wait_on_primary is (choice == "wait")
     assert route_binding(model, local, plan.model_role, overrides=owner.overrides) == (MODEL, False, primary_account)

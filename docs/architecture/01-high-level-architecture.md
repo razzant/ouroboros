@@ -31,7 +31,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     model_wait.js — model waits and owner actions in chat cards (§6 Quota and auth waits)
     task_checkpoints.js, cancel_presentation.js, dashboard.js, logs.js, worker_sha_presentation.js, costs.js, files.js — typed checkpoints and cancellation-cause text shared by Chat and Logs; Dashboard, Logs, worker-SHA presentation, Costs (unknown is not free), Files (§3)
     skills.js, skill_*.js — Skills page: Installed, Browse and Sources, cards, sheet, dialogs, Skill Review cards, publish (§3 Skills and Widgets)
-    settings_ui.js, settings_home.js, settings_rows.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
+    settings_ui.js, settings_home.js, settings_rows.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, connection_server_check.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
     model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)
     subagents_settings.js, subagent_status_primitives.js, route_editor_primitives.js, harness_accounts.js, harness_account_rows.js, account_resources.js, harness_login_cards.js, claudexor_status_store.js — Agents and accounts (§3 Agent accounts)
     onboarding_agents_step.js, onboarding_starter_skills.js, onboarding_overlay.js, project_create.js, utils.js — first-run accounts step and starter skills; the wizard frame's sandbox policy, one security boundary; New Project dialog; shared utilities (§2; §3 Project rooms)
@@ -189,9 +189,9 @@ ouroboros/ — agent core and shared runtime (§6)
   delegate_evidence.py — read-side execution evidence over custody rows (§6 Delegated subagents; §11.1)
   synthesis_cost_text.py — task_summary cost fields
   llm.py — multi-provider LLM routing (OpenRouter, OpenAI, compatible, Cloud.ru, MiniMax, DeepSeek, Z.ai, GigaChat, Anthropic); conversations stay function-shaped, exact-route adaptation lives in the request-wire leaves (§6 Context fitting; §7 Direct-provider routes)
-  llm_routing.py, llm_attempt.py, llm_messages.py, llm_capability_policy.py, llm_fallback.py, llm_pricing.py, llm_openai_compatible.py, openai_responses.py, llm_anthropic.py, llm_gigachat.py, llm_local.py, llm_claudexor.py, llm_substitution.py — leaves of `llm.py`: routing, attempt candidates and cache policy, transcript shaping, capability policy, the recovery ladder, price catalogs, one wire lane each, served-model substitution (§6 Caller-owned subscription model calls)
-  llm_helper_window.py — helper windows and replies (§6)
-  server_window.py, size_refusal.py, window_learning.py — windows, refusal numbers, retries (§6)
+  llm_routing.py, llm_attempt.py, llm_messages.py, llm_capability_policy.py, llm_fallback.py, llm_pricing.py, llm_openai_compatible.py, openai_responses.py, llm_anthropic.py, llm_gigachat.py, llm_local.py, llm_ollama*.py, llm_claudexor.py, llm_substitution.py — leaves of `llm.py`: routing, attempt candidates and cache policy, transcript shaping, capability policy, the recovery ladder, price catalogs, one wire lane each, served-model substitution (§6 Caller-owned subscription model calls)
+  llm_helper_window.py — helper budgets (§6)
+  server_window.py, size_refusal.py, window_learning.py — windows/refusals/retries (§6)
   llm_stream.py — SSE assembly inside one physical attempt (§6 Streams and transport waits)
   send_clock.py — Main preparation clocks and physical-candidate binding
   net_transport.py — shared httpx transport: TCP keepalive and the owner's extra-CA bundle every first-party client trusts (§7 `OUROBOROS_EXTRA_CA_BUNDLE`)
@@ -204,7 +204,7 @@ ouroboros/ — agent core and shared runtime (§6)
   anthropic_native_custody.py, openai_responses_custody.py — same-route replay custody: whole Anthropic reasoning blocks, whole Responses turns
   reasoning_artifacts.py — sealed-vs-portable reasoning-artifact classification, fail-closed; `SIGNED_PORTABLE` is a decaying external fact, extended only by a fresh cross-provider replay probe
   llm_observability.py — public call projections persisted; private sidecars stripped from durable records
-  llm_probe.py — Provider Test, non-generating reachability; no chat retry, fallback or learning
+  llm_probe.py — Provider Test
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
   mcp_client.py — identity, masks, names, launch admission; mcp_discovery.py — manager-owned joinable listing/settle (§6 MCP)
