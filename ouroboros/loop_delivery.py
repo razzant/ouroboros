@@ -1127,7 +1127,7 @@ def _plan_review_only_awaited(llm_trace: Dict[str, Any]) -> bool:
 
 @timed_phase("admission_seal")
 def _seal_admission_before_delivery(tools: ToolRegistry, limit_ctx: Any, llm_trace: Dict[str, Any]) -> bool:
-    """Seal root admission at an author stop, right before delivery; False holds the answer.
+    """Seal root admission once, at an author stop, right before delivery; False holds the answer.
 
     Only owner facts revise: a generation mismatch (also one seen locally while the transport
     was silent) or pending owner mail. A begin ``refused`` because the root is already ``sealed``
