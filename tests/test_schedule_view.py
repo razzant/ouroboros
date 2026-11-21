@@ -146,6 +146,8 @@ def test_every_enabled_standing_row_stands_with_its_last_run_and_only_that_runs_
     {"hold": {"reason": "capacity"}}, {"followup_wait": "origin_unavailable"},
     {"previous_run_open": {"task_id": "last", "since": "then"}},
     {"occurrence": {"phase": "admitted", "task_id": "run", "due_at": "then", "token": "t"}},
+    # Its occurrence settled, its run still going: the last run's outcome is not yet observed.
+    {"last_task_id": "run", "last_outcome": {"task_id": "earlier", "state": "completed"}},
 ])
 def test_a_switched_off_standing_row_with_an_outstanding_effect_stands_under_attention(fact):
     paused, withdrawn = _cron("paused", enabled=False, **fact), _cron("gone", enabled=False, delete_requested_at="then", **fact)
@@ -154,8 +156,12 @@ def test_a_switched_off_standing_row_with_an_outstanding_effect_stands_under_att
     assert view["inactive_standing_count"] == 1  # the one with nothing outstanding
     if "occurrence" in fact:
         assert view["attention"][0]["occurrence"] == {"phase": "admitted", "task_id": "run", "due_at": "then"}
-    # A one-shot keeps its own groups: an occurrence alone does not move it.
-    group = "one_shots" if "occurrence" in fact else "attention"
+    if "last_task_id" in fact:
+        assert view["attention"][0]["outcome"] == {"state": "pending_observation"}
+        observed = _cron("seen", enabled=False, last_task_id="run", last_outcome={"task_id": "run", "state": "failed"})
+        assert digest([observed], NOW)["inactive_standing_count"] == 1, "its last run observed: nothing in flight"
+    # A one-shot keeps its own groups: a run in flight alone does not move it.
+    group = "one_shots" if "occurrence" in fact or "last_task_id" in fact else "attention"
     assert [entry["id"] for entry in digest([row("once", **fact)], NOW)[group]] == ["once"]
 
 

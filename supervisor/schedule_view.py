@@ -168,10 +168,18 @@ def _entry(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
 _OUTSTANDING = ("hold", "followup_hold", "followup_wait", "last_error", "previous_run_open")
 
 
+def _run_in_flight(row: dict[str, Any]) -> bool:
+    """An occurrence not yet settled, or a last run whose outcome is not yet observed: the scheduler's settlement drops
+    ``occurrence`` while that run may still go, and observes every row's last run, switched off or not."""
+    last = str(row.get("last_task_id") or "")
+    cached = row.get("last_outcome") if isinstance(row.get("last_outcome"), dict) else {}
+    return isinstance(row.get("occurrence"), dict) or bool(last and cached.get("task_id") != last)
+
+
 def digest(rows: list[dict[str, Any]], now: datetime.datetime, limit: int = 8) -> dict[str, Any]:
     """Every enabled standing (cron) row, each with its last run; then, within one bound, rows with an outstanding
-    effect (a switched-off standing row also with an occurrence still in flight) and one-shots. A switched-off
-    standing row with nothing outstanding is counted beside the reader; nothing to show is no digest."""
+    effect (a switched-off standing row also while a run of it is in flight, ``_run_in_flight``) and one-shots. A
+    switched-off standing row with nothing outstanding is counted beside the reader; nothing to show is no digest."""
     groups: dict[str, list[dict[str, Any]]] = {"standing": [], "attention": [], "one_shots": []}
     inactive = 0
     for row in rows:
@@ -181,7 +189,7 @@ def digest(rows: list[dict[str, Any]], now: datetime.datetime, limit: int = 8) -
         cron = trigger.get("type", "cron") == "cron"
         if cron and row.get("enabled", True) and not row.get("delete_requested_at"):
             group = "standing"
-        elif any(row.get(key) for key in _OUTSTANDING) or (cron and isinstance(row.get("occurrence"), dict)):
+        elif any(row.get(key) for key in _OUTSTANDING) or (cron and _run_in_flight(row)):
             group = "attention"
         elif cron:
             inactive += 1
