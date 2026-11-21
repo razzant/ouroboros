@@ -421,8 +421,8 @@ def _recovery_record(tmp_path):
 def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_previous_turns_result(tmp_path, monkeypatch):
     """The Fault door (ARCHITECTURE §9), owner 2A. After a ``bus_lost``/``loop_failed`` entry the boot admits ONE turn
     through the auto-resume seam with facts only: the cause, when the previous generation ended, the tasks held with
-    saved state and the interrupted roots cancelled without a saved point (``server_shutdown``, Continue-eligible; an
-    owner Stop and a child are not listed), and the owner's one decision (the mind resumes or continues and tells
+    saved state and the interrupted roots cancelled without a saved point (``server_shutdown`` or this start's restore
+    fence, Continue-eligible; an owner Stop or Restart and a child are not listed; unreadable rows are unknown), and the owner's one decision (the mind resumes or continues and tells
     once). Its task id rides the ``auto_resume_triggered`` row (``trigger: core_lost``) and the durable record
     ``state/core_loss_recovery.json`` with the generation that admitted it, so rotation cannot lose it. Bound by a
     fact: when the generation that just died is the one that admitted the turn and that turn is not terminal, the boot
@@ -447,6 +447,14 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
                       cancel_origin={"source": "server_shutdown", "reason": "fault"})
     write_task_result(tmp_path, "root-stopped", "cancelled", root_task_id="root-stopped",
                       cancel_origin={"source": "owner_stop", "reason": "owner"})
+    # This start's restore fence (queue_snapshot: snapshot_restore + server_shutdown) is the stop's cancel too;
+    # an owner Restart's cancel is the owner's (it shares TECHNICAL_CANCEL_SOURCES), and a finished row is not cut.
+    write_task_result(tmp_path, "root-fenced", "cancelled", root_task_id="root-fenced",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    write_task_result(tmp_path, "root-owner-restart", "cancelled", root_task_id="root-owner-restart",
+                      cancel_origin={"source": "owner_restart", "reason": "server_shutdown"})
+    write_task_result(tmp_path, "root-done", "completed", root_task_id="root-done", result="done",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
     (tmp_path / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
 
     worker_chat_lane.auto_resume_after_restart()
@@ -456,14 +464,16 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     assert text.startswith("[recovery after a server fault] The previous server generation ended at " + FAULT_ENDED_AT)
     assert "its event-bus process exited" in text and "restarted itself with the same code" in text
     assert "Tasks held with their saved state (Resume continues each from that state): held-1." in text
-    assert "cancelled as server_shutdown (Continue-eligible): root-cut." in text
+    assert "cancelled by the stop or this start's restore (Continue-eligible): root-cut, root-fenced." in text
     assert "root-stopped" not in text and "child-cut" not in text and "plain-queued" not in text
+    assert "root-owner-restart" not in text and "root-done" not in text
     assert "held-by-an-earlier-quit" not in text, "a hold older than this fault's entry is not this fault's work"
     assert "You decide what to resume or continue, with your Resume and Continue tools, and tell the owner once." in text
     assert "[auto-resume after restart]" not in text, "the planned-restart turn is not a second turn beside the fault's"
     [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
     assert row["trigger"] == "core_lost" and row["task_id"] == "turn-1" and row["cause"] == "bus_lost"
-    assert row["ended_at"] == FAULT_ENDED_AT and row["held"] == ["held-1"] and row["cancelled"] == ["root-cut"]
+    assert row["ended_at"] == FAULT_ENDED_AT and row["held"] == ["held-1"]
+    assert row["cancelled"] == ["root-cut", "root-fenced"]
     record = _recovery_record(tmp_path)
     assert record == {"schema_version": 1, "task_id": "turn-1", "generation": _PROCESS_GENERATION, "cause": "bus_lost",
                       "admitted_at": record["admitted_at"]}
@@ -484,6 +494,13 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     worker_chat_lane.auto_resume_after_restart()
     assert len(turns) == 2 and "its event-bus process exited" in turns[1][1]
     assert _recovery_record(tmp_path)["task_id"] == "turn-2"
+    # Unreadable cancelled rows are unknown, never "none" (P1).
+    from ouroboros import task_results
+
+    write_task_result(tmp_path, "turn-2", "completed", chat_id=7, result="told the owner")
+    monkeypatch.setattr(task_results, "list_task_results", lambda *_a, **_k: (_ for _ in ()).throw(OSError("gone")))
+    worker_chat_lane.auto_resume_after_restart()
+    assert "(Continue-eligible): unknown, the cancelled rows could not be read." in turns[2][1]
 
 
 def test_a_fault_boot_of_another_generation_gets_its_own_turn_and_lists_a_held_earlier_one(tmp_path, monkeypatch):
