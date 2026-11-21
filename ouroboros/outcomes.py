@@ -966,6 +966,11 @@ def _apply_actor_first_terminal_projection(
     actor = dict(actor)
     axes = outcome.get("outcome_axes") if isinstance(outcome.get("outcome_axes"), dict) else {}
     execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    if actor.get("reason") == "initial_execution_display_only":
+        # A first-attempt witness does not move any axis of an established outcome.
+        execution["actor_first_terminal"] = actor
+        outcome["actor_first_terminal"] = actor
+        return outcome
     if str(execution.get("status") or "") == EXECUTION_OK:
         actor_status = str(actor.get("status") or "unknown")
         if actor_status not in {"incomplete", "unknown"}:
