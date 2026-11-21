@@ -451,6 +451,7 @@ def test_the_offloop_duty_never_holds_the_tick_and_runs_single_flight(q, monkeyp
     # process's first look, so without this its thread would outlive the test whenever this test runs first.
     monkeypatch.setattr(server_maintenance, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
     monkeypatch.setattr(server_maintenance, "_LAST_COLD_CUSTODY_SWEEP", [time.time()])
+    monkeypatch.setattr(server_maintenance, "_LAST_CENSUS_PASS", [time.time()])
     monkeypatch.setattr(server_maintenance, "_tick_maintenance_child", lambda: None)
     stop_event = threading.Event()
     stamps = [time.time(), time.time()]

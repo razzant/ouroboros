@@ -167,6 +167,9 @@ def _window_exhausted_refusal(code: str, message: str, resets_at: Any, *,
     if code not in WINDOW_EXHAUSTED_CODES or (
             code != "subscription_window_exhausted" and not dated):
         return None
+    from ouroboros.subscription_census import request_refresh
+
+    request_refresh(code)  # the engine named a spent window: the census duty reads again (never raises)
     return ClaudexorSubscriptionWindowExhausted(
         message, reset_at=str(resets_at or ""), status_code=status_code, code=code)
 

@@ -913,11 +913,22 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
         request_cancel(root, "cur-cancel-me", reason="cost contract", source="owner", requested_by="owner")
         return "an open cancel intent for a task nobody runs"
 
+    def census_file() -> str:
+        """A census file is on disk (here a torn one, which no facts row reads as a census): the census pass reads the
+        engine again, finds no descriptor and keeps that failed read for a second one. No engine descriptor is laid,
+        so the turns measured after the duties meet the same unprovisioned install."""
+        from ouroboros.subscription_census import CENSUS_FILE
+
+        (root / CENSUS_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (root / CENSUS_FILE).write_text("{}", encoding="utf-8")
+        return "a torn census file and no engine descriptor"
+
     from tests._live_set import companions as live_set_companions
 
     return {"delegated-body": body, "abandoned_usage_reconciliation": late_body, "custody-maintenance": owed_projection,
             "reconcile-maintenance": owed_mark, "maintenance-child": child_job, "question_delivery_replay": question,
-            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, **live_set_companions(root)}
+            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, "subscription-census": census_file,
+            **live_set_companions(root)}
 
 
 def _completion(root: pathlib.Path, who: str, _k: int) -> None:

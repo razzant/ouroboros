@@ -130,6 +130,7 @@ def test_cold_transfer_observation_uses_body_cadence_without_running_each_tick(t
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [clock[0]])
     monkeypatch.setattr(sm, "_LAST_COLD_CUSTODY_SWEEP", [0.0])
     monkeypatch.setattr(sm, "_COLD_CUSTODY_SWEEP_LOCK", threading.Lock())
+    monkeypatch.setattr(sm, "_LAST_CENSUS_PASS", [clock[0]])  # the subscription census keeps its own 600 s cadence
     monkeypatch.setattr(queue, "RUNNING", {"current": {}})
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})

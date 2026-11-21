@@ -783,6 +783,7 @@ D20 = "Presence"
 "ouroboros/subagent_inspection.py" = "D07"
 "ouroboros/claudexor_observations.py" = "D07"
 "ouroboros/engine_facts.py" = "D07"
+"ouroboros/subscription_census.py" = "D07"  # the engine's subscription verdicts counted per family, one dated file
 "ouroboros/subscription_install_presets.py" = "D12"
 "ouroboros/synthesis_cost_text.py" = "D01"
 "ouroboros/task_continuation.py" = "D06"
