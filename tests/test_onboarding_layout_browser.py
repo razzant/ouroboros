@@ -454,7 +454,7 @@ def _assert_skills_step_usable(page, size):
     seven titles stay inside their pills and nothing scrolls sideways, at the top of the list and at its end. The rail
     names each step in one short word on one line; a phone's names the current one alone («5 of 7 Skills»), clipping
     no neighbour. Entering the step, its title stands clear of the footer."""
-    page.wait_for_selector(".skills-starter-card")
+    page.wait_for_selector("[data-starter-skill]")
     rail = page.evaluate(RAIL)
     if size[0] <= 720:
         assert rail["shown"] == ["5 of 7 Skills"], rail
@@ -469,8 +469,8 @@ def _assert_skills_step_usable(page, size):
         spills = page.evaluate("""() => [...document.querySelectorAll('.wizard-step')]
             .filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent.trim())""")
         assert spills == [], f"a rail title runs out of its pill at the {place}"
-        assert page.locator(".skills-starter-card").first.evaluate(
-            "el => el.getBoundingClientRect().right <= innerWidth + 0.5"), size
+        assert page.locator("[data-starter-skill]").evaluate_all(
+            "rows => rows.every((row) => row.getBoundingClientRect().right <= innerWidth + 0.5)"), size
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])

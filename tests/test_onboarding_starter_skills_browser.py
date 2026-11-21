@@ -54,45 +54,44 @@ def _completion(ui):
     return []
 
 
-def _card(page, item_id):
-    return page.locator(".skills-starter-card", has=page.locator(f'[data-starter-item="{item_id}"]'))
+def _row(page, item_id):
+    return page.locator(f'[data-starter-skill="{item_id}"]')
 
 
 @pytest.mark.parametrize("width", [1360, 390])
 def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscription_ui, width):
     ui = subscription_ui
     page = _skills_step(ui, width=width)
-    page.wait_for_selector(".skills-starter-card")
+    page.wait_for_selector("[data-starter-skill]")
     assert page.locator(".step-title").inner_text() == "Skills"
     assert "Ouroboros starts with the ticked skills; clear any you do not want." in page.locator(".step-header").inner_text()
     assert page.locator(".skills-starter-count").inner_text() == "6 of 10 ticked"
-    heads = [text.split("\n")[0].strip() for text in page.locator(".skills-starter-group h3").all_inner_texts()]
-    assert [head.rstrip("0123456789").strip() for head in heads] == [
-        "Built in — comes with the app", "Messaging", "Documents", "Search & research", "About Ouroboros", "Writing & review"]
-    assert page.locator(".skills-starter-card input:checked").count() == 6
-    # A ticked card keeps the neutral body (the box says it), the same in both themes.
-    page.mouse.move(0, 0)  # no card under the pointer: a hover deepens one
-    page.wait_for_timeout(300)  # and the colour's own 120 ms change has ended
-    assert len(set(page.locator(".skills-starter-card").evaluate_all(
-        "cards => cards.map((card) => getComputedStyle(card).backgroundColor)"))) == 1
+    # A group's head is its name and count only.
+    assert page.locator(".skills-starter-group h3").all_inner_texts() == [
+        "Built in · 2", "Messaging · 1", "Documents · 2", "Search & research · 3", "About Ouroboros · 1", "Writing & review · 1"]
+    assert page.locator("[data-starter-skill] input:checked").count() == 6
+    # A row has no surface of its own, ticked or not (owner 21.11: «слишком крупные карточки»): the box says it.
+    assert set(page.locator("[data-starter-skill]").evaluate_all(
+        "rows => rows.map((row) => getComputedStyle(row).backgroundColor + ' ' + getComputedStyle(row).borderTopWidth)")) == {
+        "rgba(0, 0, 0, 0) 0px"}
     # Inside a group what works at once leads; what needs a key comes last (here Telegram after Computer control).
     assert page.locator('.skills-starter-group').first.locator('[data-starter-item]').evaluate_all(
         "boxes => boxes.map((box) => box.dataset.starterItem)") == ["builtin/unix_computer_use", "builtin/telegram"]
-    telegram = _card(page, "builtin/telegram").inner_text()
+    telegram = _row(page, "builtin/telegram").inner_text()
     assert "Telegram" in telegram and "Chat with Ouroboros from your phone in Telegram" in telegram
     assert "Needs a Telegram bot token" in telegram and "Built in" not in telegram and "Official" not in telegram
-    needs = _card(page, "builtin/telegram").locator(".skills-starter-needs")
-    pitch = _card(page, "builtin/telegram").locator(".skills-starter-pitch")
+    needs = _row(page, "builtin/telegram").locator(".skills-starter-needs")
+    pitch = _row(page, "builtin/telegram").locator(".skills-starter-pitch")
     assert needs.evaluate("el => getComputedStyle(el).color") != pitch.evaluate("el => getComputedStyle(el).color")
     assert page.locator('[data-mark="official"], .skills-chip').count() == 0, "where a skill comes from is said once"
-    assert page.get_by_text("Official skills from the Ouroboros hub: its maintainer vouches for each release.").count() == 1
+    assert page.locator(STEP).inner_text().count("Official") == 1, "where a skill comes from is said once, under the list"
     # Without the catalog's words the card keeps the skill's name and its author's text; a key shows in words.
-    assert "unix_computer_use" in _card(page, "builtin/unix_computer_use").inner_text()
-    assert "Uses your OpenRouter API Key" in _card(page, "ouroboros/perplexity").inner_text()
-    assert _card(page, "ouroboros/keenable").locator(".skills-starter-needs").count() == 0
+    assert "unix_computer_use" in _row(page, "builtin/unix_computer_use").inner_text()
+    assert "Uses your OpenRouter API Key" in _row(page, "ouroboros/perplexity").inner_text()
+    assert _row(page, "ouroboros/keenable").locator(".skills-starter-needs").count() == 0
     trust = page.locator(".skills-starter-trust")
     assert trust.inner_text().startswith(
-        "Official skills install without a review; skills from the community are reviewed first.")
+        "Official skills from the Ouroboros hub install without a review; skills from the community are reviewed first.")
     assert trust.locator("[data-starter-trust]").count() == 0, "how they install is one plain line until opened"
     assert "Without review" not in page.locator(STEP).inner_text() and "Review each" not in page.locator(STEP).inner_text()
     capture(page, f"skills-step-{width}")
@@ -124,9 +123,9 @@ def test_summary_change_returns_to_the_step_with_the_ticks_kept(subscription_ui)
     page.locator(ROW).wait_for()
     assert "None will install" in page.locator(ROW).inner_text()
     page.locator("[data-starter-change]").click()
-    page.wait_for_selector(".skills-starter-card")
+    page.wait_for_selector("[data-starter-skill]")
     assert page.locator(".step-title").inner_text() == "Skills"
-    assert page.locator(".skills-starter-card input:checked").count() == 0
+    assert page.locator("[data-starter-skill] input:checked").count() == 0
     page.locator('[data-starter-item="ouroboros/duckduckgo"]').check()
     page.click("#next-btn")
     page.locator(ROW).wait_for()
@@ -183,7 +182,7 @@ def starter_ui(request, monkeypatch):
 
 @pytest.mark.parametrize('width,theme', [(width, theme) for width in (1280, 390) for theme in ('light', 'dark')])
 def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, width, theme):
-    """The hub's skills join the list while the person is on it: their ticks, the focused box and the card being read
+    """The hub's skills join the list while the person is on it: their ticks, the focused box and the row being read
     stay where they were, and the newcomers join without a second entrance (DESIGN principle 6)."""
     ui = starter_ui
     page = ui['page']
@@ -209,7 +208,7 @@ def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, w
     box = page.locator('[data-starter-item="builtin/unix_computer_use"]')
     box.focus()
     page.evaluate("window.scrollTo(0, 60)")
-    anchor = page.evaluate("() => document.querySelector('[data-starter-card=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
+    anchor = page.evaluate("() => document.querySelector('[data-starter-skill=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
     engine = ui['engine']
     capture(page, f'skills-{engine}-{width}-{theme}-reading')
     for _ in range(200):
@@ -223,10 +222,10 @@ def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, w
     assert page.locator('[data-starter-item="ouroboros/duckduckgo"]').is_checked()
     assert 'Reading the Ouroboros hub' not in step.inner_text()
     assert page.evaluate("document.activeElement?.dataset.starterItem") == 'builtin/unix_computer_use', 'focus stays'
-    top = page.evaluate("() => document.querySelector('[data-starter-card=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
+    top = page.evaluate("() => document.querySelector('[data-starter-skill=\"builtin/unix_computer_use\"]').getBoundingClientRect().top")
     assert abs(top - anchor) <= 1, (anchor, top)
     assert page.locator('.skills-starter-list[data-arrive]').count() == 0, 'the hub brings no second entrance'
-    assert page.get_by_text('Official skills from the Ouroboros hub: its maintainer vouches for each release.').count() == 1
+    assert page.locator('.skills-starter-trust').inner_text().startswith('Official skills from the Ouroboros hub install without a review')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     capture(page, f'skills-{engine}-{width}-{theme}-ready')
     page.click('#next-btn')
@@ -293,7 +292,7 @@ def test_the_step_still_polls_after_five_minutes_in_earlier_setup(starter_ui):
     capture(page, f"skills-{ui['engine']}-390-r2-delayed-step")
 
 
-ARRIVAL = """() => [...document.querySelectorAll('.skills-starter-card')].slice(0, 14).map((el) => {
+ARRIVAL = """() => [...document.querySelectorAll('.skills-starter-group .skills-starter-skill')].slice(0, 14).map((el) => {
     const style = getComputedStyle(el);
     return {name: style.animationName, delay: parseFloat(style.animationDelay) * (style.animationDelay.endsWith('ms') ? 1 : 1000),
             duration: parseFloat(style.animationDuration) * (style.animationDuration.endsWith('ms') ? 1 : 1000)};
@@ -308,7 +307,7 @@ def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui
     ui = starter_ui
     ui['page'].emulate_media(reduced_motion=motion)
     page = _skills_step(ui)
-    page.wait_for_selector('.skills-starter-card')
+    page.wait_for_selector('[data-starter-skill]')
     page.locator('[data-starter-item="ouroboros/keenable"]').check()  # during the entrance: usable at once
     assert page.locator('[data-starter-item="ouroboros/keenable"]').is_checked()
     arrival = page.evaluate(ARRIVAL)
@@ -325,6 +324,92 @@ def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui
     page.click('#next-btn')
     page.locator(ROW).wait_for()
     page.locator('[data-starter-change]').click()  # entering again plays it again (unless motion is reduced)
-    page.wait_for_selector('.skills-starter-card')
+    page.wait_for_selector('[data-starter-skill]')
     assert page.locator('.skills-starter-list[data-arrive]').count() == 1
     assert {card['name'] for card in page.evaluate(ARRIVAL)} == ({'none'} if motion == 'reduce' else {'skills-starter-arrive'})
+
+
+CARD = {  # the Telegram skill's declared connection card as the host carries it on its starter item
+    "skill": "telegram", "token": "botToken",
+    "pairing": {"code": "pairingCode", "link": "https://t.me/{username}?start={code}",
+                "hint": "Scan it with your phone, then press Start in Telegram."},
+    "title": "Phone via Telegram", "pitch": "Write to Ouroboros and get its results on your phone",
+    "steps": [{"text": "Open @BotFather in Telegram", "link": "https://t.me/BotFather", "action": "Open @BotFather"},
+              {"text": "Send it /newbot"}],
+    "options": [{"key": "TELEGRAM_NOTIFY_TASKS", "label": "Send results and errors of work here", "on": "on", "off": "off",
+                 "new_connection": True, "store": "skill_settings", "route": "settings/save"}],
+}
+TOKEN = "123456789:AAF-browser-test-placeholder-token"
+
+
+def _with_card():
+    import copy
+    answer = copy.deepcopy(STARTER)
+    for group in answer["groups"]:
+        for item in group["items"]:
+            if item["id"] == "builtin/telegram":
+                item["connection"] = CARD
+    return answer
+
+
+@pytest.mark.parametrize("width", [1360, 390])
+def test_the_connection_card_checks_a_token_draws_its_qr_and_rides_the_completion(subscription_ui, width):
+    """A skill's declared card leads the step; Connect opens its steps and token field; a checked token shows the QR of
+    the link with a code made in the page, the account and the link for this device; the completion carries the token,
+    the same code and the option as `connections`, apart from the settings (owner 21.11, 3A)."""
+    ui = subscription_ui
+    page = ui["page"]
+    checks = []
+
+    def identity(route):
+        checks.append(json.loads(route.request.post_data))
+        answer = {"ok": True, "username": "my_ouro_bot"} if len(checks) > 1 else {"ok": False, "cause": "refused"}
+        route.fulfill(content_type="application/json", body=json.dumps(answer))
+
+    page.route("**/api/onboarding/connection/identity", identity)
+    page = _skills_step(ui, answer=_with_card(), width=width)
+    card = page.locator(".skills-connection")
+    card.wait_for()
+    assert card.locator("[data-starter-item]").get_attribute("data-starter-item") == "builtin/telegram"
+    assert page.locator(".skills-starter-group").first.locator("[data-starter-item]").count() == 1, "its skill leaves its group"
+    assert page.locator(".skills-starter-count").inner_text() == "6 of 10 ticked"
+    card.locator("[data-connection-toggle]").click()
+    assert card.locator('a[href="https://t.me/BotFather"]').is_visible()
+    field = card.locator("[data-connection-token]")
+    field.fill("123:wrong")
+    card.locator("[data-connection-check]").click()
+    card.locator('[data-connection-status="refused"]').wait_for()
+    assert card.locator('[data-connection-status="refused"]').inner_text() == "Telegram did not accept this token; it is not saved."
+    assert card.locator("svg").count() == 0
+    field.fill(TOKEN)
+    field.press("Enter")
+    card.locator(".skills-connection-qr svg").wait_for()
+    link = card.locator("[data-connection-link]").get_attribute("href")
+    assert link.startswith("https://t.me/my_ouro_bot?start=") and len(link.split("start=")[1]) == 22, link
+    assert card.locator("[data-connection-account]").inner_text() == "@my_ouro_bot"
+    assert card.locator('[data-connection-option="TELEGRAM_NOTIFY_TASKS"]').is_checked()
+    assert checks == [{"skill": "telegram", "token": "123:wrong"}, {"skill": "telegram", "token": TOKEN}]
+    assert page.evaluate("document.activeElement?.dataset.connectionToken") == "", "the field keeps focus through its repaint"
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    capture(page, f"skills-connection-{width}")
+    page.click("#next-btn")
+    page.locator(ROW).first.wait_for()
+    assert "Phone via Telegram @my_ouro_bot · Change" in page.locator('[data-starter-skills="row"]').inner_text().replace("\n", " ")
+    page.click("#next-btn")
+    payload = _completion(ui)[0]
+    code = link.split("start=")[1]
+    assert payload["connections"] == {"telegram": {"fields": {"botToken": TOKEN, "pairingCode": code},
+                                                   "options": {"TELEGRAM_NOTIFY_TASKS": "on"}}}
+    assert not any(key.startswith("TELEGRAM_") for key in payload), "nothing of the card in the settings part"
+
+
+def test_without_a_declared_card_the_skill_stays_a_row_and_nothing_rides(subscription_ui):
+    ui = subscription_ui
+    page = _skills_step(ui)
+    page.wait_for_selector("[data-starter-skill]")
+    assert page.locator(".skills-connection").count() == 0
+    assert page.locator(".skills-starter-group").first.locator('[data-starter-item="builtin/telegram"]').count() == 1
+    page.click("#next-btn")
+    page.locator(ROW).first.wait_for()
+    page.click("#next-btn")
+    assert "connections" not in _completion(ui)[0]
