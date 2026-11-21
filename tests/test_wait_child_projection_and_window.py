@@ -388,3 +388,30 @@ def test_a_slow_final_read_still_ends_inside_the_kill_timer(tmp_path, monkeypatc
     took = time.monotonic() - start
     assert out["window_bound"] == "deadline" and 0 < out["window_sec"] <= 1
     assert took < out["window_sec"] + 1.5 and executor - took >= 28
+
+
+@pytest.mark.parametrize("differs", [True, False], ids=["differs", "ordinary"])
+def test_both_child_surfaces_repeat_the_receipt_in_one_line(differs):
+    """c50-4: where the parent judges a child's answer (``[SUBTASK_OUTCOME]`` and the compact batch row) the
+    receipt repeats what still differs from the request, from the child's saved fields; in the ordinary case it
+    says nothing on record differs, and stops (no call rebuilds the full receipt, so it names none). It never
+    enters the child's work order."""
+    from ouroboros.helper_receipt import NOTHING_ON_RECORD
+    from ouroboros.subagent_work_order import compile_external_work_order
+
+    session = {"route": {"kind": "agent_session", "target_id": "codex=x"}}
+    data = {"task_id": CHILD, "status": STATUS_COMPLETED, "result": "answer", "configured_subagent": session,
+            "objective": "Read", "expected_output": "Findings",
+            **({"memory_view": {"marks": "everything"}, "resource_intent": {"kind": "explicit_resource", "root": "/r"},
+                "prepared_input_files": [{"root": "task_drive", "path": "a.md", "sha256": "a" * 64, "size": 1}]}
+               if differs else {})}
+    compact = mod._compact_child_projection(CHILD, data, None)["receipt"]
+    full = json.loads(mod._subtask_outcome_summary(data, task_id=CHILD))["receipt"]
+    assert compact == full
+    if differs:
+        assert "memory_view not used (marks is one of" in full and "outside the session's folder" in full
+        assert NOTHING_ON_RECORD not in full
+    else:
+        assert full == NOTHING_ON_RECORD
+    order = compile_external_work_order({"id": CHILD, **data})
+    assert "receipt" not in order

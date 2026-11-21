@@ -12,7 +12,6 @@ predicted authority, and any host-minted shared cooperative tree.
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import time
@@ -224,16 +223,11 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     ``parent_task_id``, ``root_task_id``, ``emitted_modes``, plus optional
     ``write_surface`` and ``write_root`` (the resolved root and who chose it).
 
-    It reports the REQUEST and nothing else. Until v6.87.28 it also printed an
-    `effective_lane=` and a `CAPABILITY_DELTA` line, both produced by resolving the
-    child inside the scheduling call — an answer about live availability, given
-    before the child was queued, let alone started. The reduction now reaches the
-    parent where it can act on it: in `[SUBTASK_OUTCOME]`, when it reads the answer
-    and decides how far to trust it. The write root is the ONE exception by design:
-    a SCHEDULE-TIME fact (the caller's, the host-minted shared coop tree or the parent
-    workspace; a self_worktree or genesis root is provisioned at admission), and
-    withholding it forced every wave to rediscover its own tree by trial and error
-    (the submarine waves' 'user_files path blocked' loop)."""
+    It reports the REQUEST and nothing else, as one receipt (``_schedule_receipt_facts``). Until v6.87.28 it
+    also printed an `effective_lane=` and a `CAPABILITY_DELTA` line, both produced by resolving the child inside
+    the scheduling call — an answer about live availability, given before the child was queued, let alone
+    started. The reduction now reaches the parent where it can act on it: in `[SUBTASK_OUTCOME]`, when it reads
+    the answer and decides how far to trust it."""
     task_ids = list(emission.get("task_ids") or [])
     requested_model_lane = str(emission.get("requested_model_lane") or "")
     objective = str(emission.get("objective") or "")
@@ -242,8 +236,6 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     parent_task_id = str(emission.get("parent_task_id") or "")
     root_task_id = str(emission.get("root_task_id") or "")
     emitted_modes = list(emission.get("emitted_modes") or [])
-    write_surface = str(emission.get("write_surface") or "")
-    write_root, write_source = emission.get("write_root") or ("", "")
     configured = emission.get("configured_subagent") if isinstance(
         emission.get("configured_subagent"), dict
     ) else {}
@@ -282,65 +274,73 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         pool_note = "\n" + engine_pool_line(getattr(ctx, "budget_drive_root", None) or ctx.drive_root)
     except Exception:
         pool_note = ""
-    # v6.57.0 (1.6): preview the child's EFFECTIVE tool profile (shell/writable) so
-    # the parent knows up front whether the child can run shell / write — the wasted
-    # rounds where a prober child hit workspace_blocked came from neither side
-    # knowing. AUTHORITY only: it carries no lane, because the lane is not resolved
-    # yet and a preview that guesses one is the claim this release removed.
-    profile_note = ""
-    try:
-        from ouroboros.tool_access import predicted_subagent_profile, summarize_subagent_profile
-
-        profile_note = ("\nsupervisor: " if route_kind == "agent_session" else "\n") + summarize_subagent_profile(
-            predicted_subagent_profile(write_surface=write_surface))
-    except Exception:
-        pass
-    leaf_scope_note = ""
-    if route_kind == "agent_session" and not write_surface:
-        selected = emission.get("input_files")
-        selected_note = (" Selected input_files replace automatic folderless lineage copies; they are retained, "
-                         "and preparation is not a read." if selected else "")
-        workspace = str(emission.get("workspace_root") or "").strip()
-        if workspace:
-            leaf_scope_note = f"\nagent_session selected source: workspace_root={workspace}; one directory."
-        else:
-            intent = emission.get("resource_intent") or {}
-            source = (("folderless selected files" if selected else "folderless task/artifact lineage")
-                      if intent.get("kind") == "explicit_none"
-                      else "inherited repository/folder")
-            leaf_scope_note = f"\nagent_session selected source: {source}."
-        leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
-                            "are not a leaf-access guarantee. Native/nanny tools are not automatically leaf session "
-                            "tools. Prompt-only paths are not prepared." + selected_note)
-    if write_surface in {"self_worktree", "genesis"}:
-        write_note = f"\nwrite root: provisioned for this child at admission ({write_surface})"
-    elif not write_surface:
-        write_note = "\nwrite root: none (read-only child)"
-    else:
-        write_note = f"\nwrite root: {write_root} ({write_source})"
-        if write_source == "host-minted coop tree":
-            write_note += (" — children write there (write_surface=external_workspace); you read it via "
-                           f"root=subagent_projects, path={Path(write_root).name!r}/…")
     commitment = _schedule_commitment(ctx, route_kind, emission)
     legacy_note = (
         "\nDEPRECATED_LEGACY_SELECTOR: deterministically mapped to this exact configured row; "
         "future calls must pass subagent_id."
         if legacy_selection else ""
     )
-    access_note = (
-        f"\naccess={emission['requested_access']!r} ignored for subagent_id={selected_name!r} "
-        "(api_model); write_surface controls read/write authority."
-        if route_kind == "api_model" and emission.get("requested_access") is not None else ""
-    )
-    inputs_note = ("\ninput_files (retained before queueing; prepared is not read): "
-                   + json.dumps(emission["input_files"], ensure_ascii=False) if emission.get("input_files") is not None else "")
+    from ouroboros.helper_receipt import build, render
+
     return (
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
-        f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{write_note}{legacy_note}{access_note}{inputs_note}"
+        f"{worker_note}{pool_note}{legacy_note}\n{render(build(_schedule_receipt_facts(emission, route_kind, selected_name)))}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
         f"{emission.get('held_note') or ''}"
     )
+
+
+def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_name: str) -> Dict[str, Any]:
+    """What a scheduled child will receive, as the request and the copies retained before queueing state it
+    (``helper_receipt``). The tool profile is the child's predicted AUTHORITY (v6.57.0, 1.6: a prober child hit
+    workspace_blocked because neither side knew shell was off); it carries no lane, which is not resolved yet.
+    A session leaf's access, folder and reading are decided at its first start, so they are said as requested.
+    The write root is a SCHEDULE-TIME fact (the caller's, the host-minted shared coop tree or the parent
+    workspace; a self_worktree or genesis root is provisioned at admission): withholding it forced every wave to
+    rediscover its own tree (the submarine waves' 'user_files path blocked' loop)."""
+    from ouroboros.helper_receipt import REQUESTED
+    from ouroboros.tool_access import predicted_subagent_profile, summarize_subagent_profile
+
+    write_surface = str(emission.get("write_surface") or "")
+    write_root, write_source = emission.get("write_root") or ("", "")
+    session = route_kind == "agent_session"
+    selected = emission.get("input_files")
+    facts: Dict[str, Any] = {"inputs": selected, "owner_words": emission.get("owner_origin") or {}}
+    try:
+        profile = summarize_subagent_profile(predicted_subagent_profile(write_surface=write_surface), receipt=True)
+    except Exception:
+        profile = "not predicted"
+    if write_surface in {"self_worktree", "genesis"}:
+        facts["write_root"] = f"provisioned for this child at admission ({write_surface})"
+    elif write_surface:
+        facts["write_root"] = f"{write_root} ({write_source})" + (
+            " — children write there (write_surface=external_workspace), you read it via "
+            f"root=subagent_projects, path={Path(write_root).name!r}/…" if write_source == "host-minted coop tree" else "")
+    if not session:
+        facts["access"] = [("access", profile, None)]
+        if emission.get("requested_access") is not None:
+            facts["access_ignored"] = (emission["requested_access"], selected_name)
+    else:
+        leaf = str(((emission.get("configured_subagent") or {}).get("access")) or "the row's")
+        facts["access"] = [("supervisor access", profile + " (supervisor read roots are not a leaf-access guarantee, "
+                            "native/nanny tools are not automatically leaf session tools)", False),
+                           ("session access", leaf, None)]
+    if session and not write_surface:
+        workspace = str(emission.get("workspace_root") or "").strip()
+        folderless = (emission.get("resource_intent") or {}).get("kind") == "explicit_none"
+        facts["folder"] = (f"workspace_root={workspace}, one directory" if workspace else
+                           ("none, folderless " + ("selected files" if selected else "task/artifact lineage"))
+                           if folderless else "inherited repository/folder")
+        facts["folder"] += " (scope or private checking copy: known after start)"
+        facts["inputs_outside"] = 0 if folderless else len(selected or ())
+        facts["inputs_note"] = ("Prompt-only paths are not prepared"
+                                + (". Selected input_files replace automatic folderless lineage copies" if selected and folderless else ""))
+    facts["memory_view"] = {"view": emission.get("memory_view"), "role": "nanny" if session else "child",
+                            "session_leaf": session}
+    asked = [str(emission.get(key) or "") for key in ("objective", "expected_output", "context", "constraints")]
+    facts["assignment"] = (f"{sum(map(len, asked))} chars as given (objective, output, context, constraints)", REQUESTED)
+    return facts
 
 
 def _effort_request_note(configured: Dict[str, Any], requested: str, task_metadata: Any = None) -> str:
@@ -1083,6 +1083,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
         "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"), "held_note": held_note,
+        "memory_view": fields.get("memory_view"), "owner_origin": owner_origin,
+        **{"expected_output": expected_output, "context": context, "constraints": constraints},
         "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
                        else "host-minted coop tree" if str(effective_write_root or "").strip() else "parent workspace"),
     })
@@ -1107,8 +1109,10 @@ def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_t
             resource_intent=resource_intent) if fields["input_files"] else []
         return ""
     except InputSelectionError as exc:
-        text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued. "
-                        f"input_files: {json.dumps(exc.results, ensure_ascii=False)}"), exc.code
+        from ouroboros.helper_receipt import build, render
+
+        text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued.\n"
+                        + render(build({"refused": exc.results}))), exc.code
     except (OSError, ValueError) as exc:
         text, reason = f"⚠️ input_files_unavailable: {type(exc).__name__}: {exc} The child was not queued.", "input_files_unavailable"
     code = refusal_host_code(reason)

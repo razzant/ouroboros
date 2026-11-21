@@ -323,6 +323,7 @@ D20 = "Presence"
 "ouroboros/delegate_bootstrap_identity.py" = "D07"
 "ouroboros/delegate_git_range.py" = "D07"
 "ouroboros/delegate_readonly_inputs.py" = "D07"
+"ouroboros/helper_receipt.py" = "D07"  # one receipt of what reached a helper, for every kind (owner item 50)
 "ouroboros/delegate_documents.py" = "D07"
 "ouroboros/delegate_shared.py" = "D07"
 "ouroboros/delegate_source_coverage.py" = "D07"

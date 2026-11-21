@@ -140,12 +140,16 @@ def test_folderless_start_copies_the_selection_inside_its_scope_even_from_a_prio
     (_drive(ctx) / "notes.txt").write_bytes(b"own notes\n")
     first = _start(ctx)
     assert first["status"] == "started" and "input_files" not in first, first
+    # c50-2: the automatic lineage copies are counted in the receipt; a selection that replaces them is not.
+    assert "prepared: inputs: automatic lineage, 1 file, 10 bytes" in first["note"], first["note"]
     assert not _retained_home(ctx).exists(), "no selection retains nothing"
     prior = pathlib.Path(engine.requests[0]["scope"]["root"])
     assert json.loads((prior / "inputs.json").read_text(encoding="utf-8"))
     selection = [{"root": "task_drive", "path": f"delegated_readonly_inputs/{prior.name}/inputs.json"}]
     second = _start(ctx, input_files=selection)
     assert second["status"] == "started", second
+    assert "automatic lineage" not in second["note"] and "outside the session's folder" not in second["note"]
+    assert "receipt: nothing differs from the request so far" in second["note"], "a copy inside its scope differs in nothing"
     scope = pathlib.Path(engine.requests[1]["scope"]["root"])
     assert scope != prior and scope.parent == prior.parent
     [row] = second["input_files"]
@@ -428,7 +432,9 @@ def test_schedule_copies_the_selection_before_queueing_and_the_work_order_names_
     assert row["status"] == "prepared" and pathlib.Path(row["local"]).read_bytes() == b"parent brief\n"
     assert pathlib.Path(row["local"]).parents[3] == _retained_home(ctx) / f"scheduled-{event['task_id']}"
     assert row["retained"] == row["local"] and not (drive / "delegated_readonly_inputs").exists()
-    assert '"status": "prepared"' in result and "prepared is not read" in result
+    # The receipt names count and bytes, not a manifest dump; the stage keeps "prepared is not read" (#2593).
+    assert "prepared: inputs: 1 file, 13 bytes, retained before queueing (prepared is not read)" in result
+    assert row["local"] not in result
     order = compile_external_work_order(saved)
     assert "SELECTED INPUT FILES" in order and "- task_drive:brief.md" in order
     (drive / "brief.md").write_bytes(b"edited after queueing\n")
@@ -442,7 +448,7 @@ def test_schedule_refuses_unpreparable_and_writing_selections_without_queueing(t
     ctx, selected, drive = _scheduler(tmp_path, monkeypatch, kind=kind)
     missing = control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                      input_files=[{"root": "task_drive", "path": "absent.md"}])
-    assert "input_files_unavailable" in missing and '"status": "missing"' in missing
+    assert "input_files_unavailable" in missing and 'not prepared: task_drive:absent.md (missing' in missing
     writer = control._schedule_task(ctx, subagent_id=selected, objective="Edit", expected_output="Patch",
                                     write_surface="self_worktree", input_files=[{"path": "brief.md"}])
     assert "input_files_readonly_only" in writer
@@ -450,7 +456,7 @@ def test_schedule_refuses_unpreparable_and_writing_selections_without_queueing(t
         "id": "brief", "role": "black_box_reference", "paths": [str(drive / "brief.md")]}]}}
     protected = control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                        input_files=[{"root": "task_drive", "path": "brief.md"}])
-    assert "input_files_unavailable" in protected and '"status": "denied"' in protected, protected
+    assert "input_files_unavailable" in protected and 'not prepared: task_drive:brief.md (denied' in protected, protected
     assert not [row for row in ctx.pending_events if row["type"] == "schedule_subagent"]
     assert not _retained_home(ctx).exists()
     assert not list((ctx.drive_root / "state" / "headless_tasks").glob("*")), "no child state was left behind"
@@ -645,7 +651,7 @@ def test_an_unsupported_root_refuses_at_both_consumers_before_anything(tmp_path,
     sched_ctx, selected, _drive_dir = _scheduler(tmp_path / "schedule", monkeypatch)
     queued = control._schedule_task(sched_ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                     input_files=[{"root": root, "path": "x.txt"}])
-    assert "input_files_unavailable" in queued and '"status": "unsupported_root"' in queued
+    assert "input_files_unavailable" in queued and '(unsupported_root' in queued
     assert not [row for row in sched_ctx.pending_events if row["type"] == "schedule_subagent"]
 
 
@@ -902,7 +908,7 @@ def test_selected_file_uses_the_actual_read_file_dispatch_root(tmp_path, monkeyp
         observed = registry.execute("read_file", selection[0])
         assert "ordinary sample" in observed and "PRESENCE_RESOURCE_BLOCKED" not in observed
         denied = control._schedule_task(ctx, **options)
-        assert "PRESENCE_RESOURCE_BLOCKED" in denied and '"status": "denied"' in denied and not ctx.pending_events
+        assert "PRESENCE_RESOURCE_BLOCKED" in denied and '(denied' in denied and not ctx.pending_events
     assert not _retained_home(ctx).exists()
 
     # A real direct start also needs read authority for its entire bound scope.
@@ -1731,7 +1737,7 @@ def test_ordinary_input_respects_presence_in_the_receiving_workspace(tmp_path, m
 
     _presence(ctx, *grants, ("active_workspace", "one.md"))
     refused = control._schedule_task(ctx, **options, input_files=[nested_file, inherited_file])
-    assert '"status": "checked"' in refused and "PRESENCE_RESOURCE_BLOCKED" in refused, refused
+    assert 'not prepared: active_workspace:nested/one.md (checked)' in refused and "PRESENCE_RESOURCE_BLOCKED" in refused, refused
     assert not ctx.pending_events and not _retained_home(ctx).exists()
 
     _presence(ctx, ("active_workspace", "."))  # ordinary inherited reads remain available
@@ -1805,7 +1811,7 @@ def test_unreadable_copy_address_refuses_before_publication_for_native_child(tmp
     _presence(ctx, ("runtime_data", "."), read_bindings=tuple(bindings))
     reply = control._schedule_task(ctx, subagent_id=selected, objective="Read input", expected_output="Summary",
                                    input_files=[{"root": "runtime_data", "path": source}])
-    assert reason in reply and '"status": "denied"' in reply, reply
+    assert reason in reply and '(denied' in reply, reply
     assert not ctx.pending_events and not any(path.is_file() for path in _retained_home(ctx).rglob("*"))
 
 
@@ -1958,3 +1964,59 @@ def test_a_diagnostic_git_prints_either_way_is_not_ambiguity(tmp_path, monkeypat
     with pytest.raises(InputSelectionError) as refused:
         schedule_selected_inputs(ctx, [entry], "ambiguous")
     assert "ambiguous" in refused.value.results[0]["detail"], refused.value.results
+
+
+def test_every_kind_of_helper_answers_with_the_one_receipt(tmp_path, monkeypatch):
+    """c50-1 (owner item 50): a native child, a session child under its nanny and a direct start answer
+    through the one builder, in one vocabulary: differences first, then one line per standing of fact."""
+    from ouroboros import helper_receipt
+    from ouroboros.tools import control, delegate
+
+    built, real = [], helper_receipt.build
+    assert delegate.build_receipt is real, "the direct start's name is the same builder"
+    spy = lambda facts: built.append(dict(facts)) or real(facts)  # noqa: E731
+    monkeypatch.setattr(helper_receipt, "build", spy)
+    monkeypatch.setattr(delegate, "build_receipt", spy)
+    answers = []
+    for kind in ("api_model", "agent_session"):
+        ctx, selected, _drive_dir = _scheduler(tmp_path / kind, monkeypatch, kind=kind)
+        answers.append(control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
+                                              input_files=[{"root": "task_drive", "path": "brief.md"}]))
+    (tmp_path / "direct").mkdir()
+    ctx, _engine = _ctx(tmp_path / "direct", monkeypatch)
+    started = _start(ctx, input_files=_sources(ctx))
+    answers.append(started["note"])
+    assert started["note"].startswith("receipt:"), "a durable start has no custody warning ahead of its receipt"
+    assert len(built) == 3, built
+    for answer in answers:
+        receipt = answer[answer.index("receipt:"):].split("\n")
+        stages = [row.split(":", 1)[0] for row in receipt if row.split(":", 1)[0] in ("requested", "prepared", "observed")]
+        assert stages == sorted(set(stages), key=("requested", "prepared", "observed").index), receipt
+        assert "prepared is not read" in answer and "applied: known after start" in answer, answer
+        assert row_count(receipt) == len(receipt), receipt
+    # The session child and the direct start both lie outside a session's folder; the native child reads its copies.
+    assert ["outside the session's folder" in answer for answer in answers] == [False, True, True]
+    assert started["input_files"] and all(row["carrier"] == "outside_scope_path" for row in started["input_files"])
+
+
+def row_count(receipt):
+    """Every receipt line is the head, a difference ending in its standing, or a standing's own line."""
+    stages = ("requested: ", "prepared: ", "observed: ")
+    return sum(1 for row in receipt if row.startswith("receipt:") or row.startswith(stages)
+               or row.endswith(("[requested]", "[prepared]", "[observed]")))
+
+
+@pytest.mark.parametrize("view,named", [({"marks": "everything"}, True), ({"knowledge": True}, False)],
+                         ids=["unknown-value", "known-value"])
+def test_a_memory_view_value_the_view_does_not_know_is_named_at_scheduling(tmp_path, monkeypatch, view, named):
+    """c50-2: the view refuses an unknown value at the child's start and uses the role default; the parent learns
+    it from the schedule receipt, with that default, while a known value reads as nothing differing."""
+    from ouroboros.tools import control
+
+    ctx, selected, _drive_dir = _scheduler(tmp_path, monkeypatch, kind="api_model")
+    answer = control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
+                                    memory_view=view)
+    assert ctx.pending_events, answer  # the request is queued either way: nothing here refuses it
+    unknown = "memory_view not used (marks is one of all, room_and_global, none): the child default stands [requested]"
+    assert (unknown in answer) is named and ("receipt: nothing differs from the request so far" in answer) is not named
+    assert ("memory view: child default with knowledge=True" in answer) is not named

@@ -641,7 +641,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
         key: (str(value)[:600] if isinstance(value, str) else value)
         for key in ("replay_of", "status", "ok", "host_code", "run_id", "state", "last_seq", "reason",
                     "waiting_on_user", "async_questions_only", "continuation", "continuation_note",
-                    "sleep", "cache_horizon_note", "leaf_live_input")
+                    "sleep", "cache_horizon_note", "leaf_live_input", "receipt")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -687,7 +687,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
                if payload.get("ok") is False else {}),
             "run_id": str(payload.get("run_id") or "")[:200],
             **{key: payload[key] for key in ("waiting_on_user", "async_questions_only", "continuation",
-                                             "continuation_note", "sleep", "leaf_live_input") if key in payload},
+                                             "continuation_note", "sleep", "leaf_live_input", "receipt") if key in payload},
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
@@ -1233,6 +1233,10 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
             payload["questions"] = questions
     if wakes:
         payload["wake_events"] = wakes
+    if payload.get("status") == "terminal":  # where the starter judges the result: what still differs, by run
+        from ouroboros.helper_receipt import run_result_line
+
+        payload["receipt"] = run_result_line(ctx, held, payload.get("access_evidence"))
     payload["coordination_context"] = coordination_live_context(ctx)
     _publish_wake_facts(ctx, descriptor, woke_by, payload, live_input)
     if descriptor.get("ignored_arguments"):

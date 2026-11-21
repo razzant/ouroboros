@@ -863,3 +863,33 @@ def test_review_wait_plan_offers_free_plan_read_without_an_ask(tmp_path, no_revi
     action = response["review_runs"][0]["collection"]
     assert action == {"status": "read_existing", "surface": "intention", "ask_id": "ask-1",
                       "tool": "plan_task", "arguments": {}}
+
+
+@pytest.mark.parametrize("differs", [True, False], ids=["differs", "ordinary"])
+def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, differs):
+    """c50-4: the finished run's terminal ``delegate_wait`` payload repeats what still differs from the request,
+    from that run's custody rows: the applied access when the engine applied another, and my human's later words
+    whose last outcome is not ``delivered`` (``accepted`` is not read). In the ordinary case nothing on record
+    differs, and the line stops there. The spilled envelope keeps it."""
+    from ouroboros import delegate_message_store, delegate_supervision as ds
+    from ouroboros.helper_receipt import NOTHING_ON_RECORD
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    _ended(tmp_path, "run-1")
+    effective = "workspace_write" if differs else "readonly"
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
+        "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
+        "access_evidence": {"requested": "readonly", "effective": effective, "verified": True}}))
+    frames = [{"frame": {"owner_words": {"address": "chat 1 / a"}, "ts": "1"}, "outcome": "delivered"},
+              {"frame": {"owner_words": {"address": "chat 1 / b"}, "ts": "2"}, "outcome": "accepted" if differs else "delivered"}]
+    monkeypatch.setattr(delegate_message_store, "placed_words", lambda _ctx, run_id: frames if run_id == "run-1" else [])
+    wake = _armed(ds.run_wait(ctx, "run-1"))
+    assert wake["status"] == "terminal"
+    if differs:
+        assert wake["receipt"] == ("access applied workspace_write, requested readonly [observed]; my human's later "
+                                   "words: 1 accepted (taken by the engine, not read) [observed]")
+    else:
+        assert wake["receipt"] == NOTHING_ON_RECORD
+    spilled = ds._render_wake_payload(ctx, {**wake, "wake_events": [{"type": "x", "text": "y" * 400_000}]})
+    assert _armed(spilled)["receipt"] == wake["receipt"], "the shortened envelope keeps the line"

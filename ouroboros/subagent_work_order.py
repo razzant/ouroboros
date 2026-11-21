@@ -565,7 +565,9 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
             rows.append(row)
     meta = getattr(ctx, "task_metadata", None)
     root = str((meta.get("root_task_id") if isinstance(meta, Mapping) else "") or getattr(ctx, "task_id", "") or "")
-    return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
+    rendered = render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
+    ctx._session_carried_words = (len(rows), rendered)  # counted where sent (``helper_receipt.start_facts``)
+    return rendered
 
 
 def session_memory_references(ctx: Any) -> str:
