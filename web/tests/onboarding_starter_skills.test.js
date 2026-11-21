@@ -1,7 +1,7 @@
 // The wizard's Skills step (owner 2026-11-21): ticks = the maintainer's recommended marks, built-ins lead, one
-// categorized list of cards with the catalog's words, the cards arriving once per entry, one quiet line about how
-// the hub's skills install, Summary's one row back to the step, and one payload the atomic Finish carries —
-// nothing when the list could not be read or the step is not offered.
+// categorized list of rows (not boxes) with the catalog's words, the rows arriving once per entry, one small sentence
+// under the list about where the hub's skills come from and how they install, Summary's one row back to the step, and
+// one payload the atomic Finish carries — nothing when the list could not be read or the step is not offered.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -25,7 +25,7 @@ const target = (attrs) => ({ closest: (selector) => {
     return key ? attrs[key] : null;
 } });
 const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-const cardOf = (html, id) => html.split('<label ').find((part) => part.includes(`data-starter-card="${id}"`)) || '';
+const rowOf = (html, id) => html.split('<label ').find((part) => part.includes(`data-starter-skill="${id}"`)) || '';
 
 test('built-ins lead as their own group; the host’s category order stays', () => {
     const lifted = normalizeStarterGroups([
@@ -33,12 +33,12 @@ test('built-ins lead as their own group; the host’s category order stays', () 
         { category: 'computer', label: 'Computer control', items: [{ id: 'builtin/ucu', name: 'unix_computer_use', builtin: true }] },
     ]);
     assert.deepEqual(lifted.map((group) => [group.label, group.items.map((item) => item.name)]), [
-        ['Built in — comes with the app', ['telegram', 'unix_computer_use']],
+        ['Built in', ['telegram', 'unix_computer_use']],
         ['Messaging', ['x']],
     ]);
     // The host's answer groups built-ins inside their categories; the step lifts them into one group first.
     assert.deepEqual(normalizeStarterGroups(STARTER.groups).map((group) => group.label), [
-        'Built in — comes with the app', 'Messaging', 'Documents', 'Search & research', 'About Ouroboros', 'Writing & review']);
+        'Built in', 'Messaging', 'Documents', 'Search & research', 'About Ouroboros', 'Writing & review']);
     assert.deepEqual(normalizeStarterGroups(null), []);
 });
 
@@ -52,7 +52,7 @@ test('the prerequisite is the catalog’s own words; without them, the settings 
     assert.equal(needsText({ needs_keys: [] }), '');
 });
 
-test('the step: the contract’s header over one list of cards with titles, pitches and their fallbacks', async () => {
+test('the step: the contract’s header over one list of rows with titles, pitches and their fallbacks', async () => {
     const step = createStarterSkillsStep({ read: async () => STARTER });
     assert.match(step.html({ title: 'Skills', copy: 'Ouroboros starts with the ticked skills; clear any you do not want.' }),
         /<h2 class="step-title">Skills<\/h2>[\s\S]*<p class="step-copy">Ouroboros starts with the ticked skills; clear any you do not want\.<\/p>[\s\S]*data-starter-skills="step"/);
@@ -60,26 +60,29 @@ test('the step: the contract’s header over one list of cards with titles, pitc
     const host = fakeHost();
     step.mount(host);
     const html = host.innerHTML;
-    assert.match(text(html), /^6 of 10 ticked Tick all · Untick all Built in — comes with the app 2/);
-    assert.match(html, /<h3 style="--arrive: 0">Built in — comes with the app<span>2<\/span><\/h3>/);
+    assert.match(text(html), /^6 of 10 ticked Tick all · Untick all Built in · 2/);
+    // A group's head is its name and count, nothing else.
+    assert.match(html, /<h3 style="--arrive: 0">Built in<span> · 2<\/span><\/h3>/);
+    // One row: the box, the title, then what it gives and what it needs first on the same line; no box of its own.
     // The catalog's words translate; a slug and an author's description keep their own words.
-    assert.match(cardOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong><\/span>\s*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>\s*<span class="skills-starter-needs">Needs a Telegram bot token<\/span>/);
-    assert.match(cardOf(html, 'builtin/unix_computer_use'), /<strong data-i18n-authored>unix_computer_use<\/strong>[\s\S]*<span class="skills-starter-pitch" data-i18n-authored>Desktop control: screenshots/);
-    assert.doesNotMatch(cardOf(html, 'ouroboros/keenable'), /skills-starter-needs/, 'its key is optional: no line');
-    assert.match(cardOf(html, 'ouroboros/slack-bridge'), /<span class="skills-starter-needs" data-i18n-authored>Uses your Slack bot token and 1 more setting<\/span>/);
-    // A ticked card keeps the neutral body; its box alone says so.
-    assert.match(cardOf(html, 'ouroboros/duckduckgo'), /^class="wizard-choice skills-starter-card"[\s\S]*data-starter-item="ouroboros\/duckduckgo" checked/);
-    assert.doesNotMatch(html, /skills-starter-card active/);
-    // Where they come from is said once per source, never per card: the built-in group's head, one line over the hub's.
-    assert.doesNotMatch(html, /data-mark="official"|skills-chip|skills-starter-marks/);
-    assert.equal((html.match(/Official skills from the Ouroboros hub: its maintainer vouches for each release\./g) || []).length, 1);
-    assert.match(text(html), /Built in — comes with the app 2 .* Official skills from the Ouroboros hub: its maintainer vouches for each release\. Messaging 1/);
+    assert.match(rowOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong>\s*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>\s*<span class="skills-starter-needs">· Needs a Telegram bot token<\/span><\/span>/);
+    assert.match(rowOf(html, 'builtin/unix_computer_use'), /<strong data-i18n-authored>unix_computer_use<\/strong>[\s\S]*<span class="skills-starter-pitch" data-i18n-authored>Desktop control: screenshots/);
+    assert.doesNotMatch(rowOf(html, 'ouroboros/keenable'), /skills-starter-needs/, 'its key is optional: no line');
+    assert.match(rowOf(html, 'ouroboros/slack-bridge'), /<span class="skills-starter-needs" data-i18n-authored>· Uses your Slack bot token and 1 more setting<\/span>/);
+    // A ticked row is the box alone: no card, no chosen fill.
+    assert.match(rowOf(html, 'ouroboros/duckduckgo'), /^class="skills-starter-skill"[\s\S]*data-starter-item="ouroboros\/duckduckgo" checked/);
+    assert.doesNotMatch(html, /wizard-choice|skills-starter-skill active/);
+    // Where they come from is said once, never per row: the built-in group's head, the one sentence under the list.
+    assert.doesNotMatch(html, /data-mark="official"|skills-chip|skills-starter-marks|maintainer vouches/);
+    assert.equal((html.match(/Official skills from the Ouroboros hub/g) || []).length, 1);
+    assert.match(text(html), /Built in · 2 .* Messaging · 1 /);
     // Inside a group what works at once leads (recommended first) and what needs something comes last.
-    const order = [...html.matchAll(/data-starter-card="([^"]+)"/g)].map((match) => match[1]);
+    const order = [...html.matchAll(/data-starter-skill="([^"]+)"/g)].map((match) => match[1]);
     assert.deepEqual(order, ['builtin/unix_computer_use', 'builtin/telegram', 'ouroboros/slack-bridge', 'ouroboros/pdf_tools',
         'ouroboros/word_tools', 'ouroboros/duckduckgo', 'ouroboros/keenable', 'ouroboros/perplexity', 'ouroboros/memory-atlas', 'ouroboros/anti-slop']);
-    // How the hub's skills install is one line in plain words; its choices open in place, in Settings' words.
-    assert.match(text(html), /Official skills install without a review; skills from the community are reviewed first\. Change$/);
+    // Where the hub's skills come from and how they install is one sentence under the list, in plain words; its
+    // choices open in place, in Settings' words.
+    assert.match(text(html), /Official skills from the Ouroboros hub install without a review; skills from the community are reviewed first\. Change$/);
     assert.doesNotMatch(html, /data-starter-trust="|Without review|Review each/);
     host.handlers.click({ target: target({ '[data-starter-trust-toggle]': {} }) });
     assert.match(host.innerHTML, /data-starter-trust-toggle aria-expanded="true">Hide</);
@@ -108,20 +111,25 @@ test('Tick all, Untick all (an explicit empty choice), one box and the hub trust
     host.handlers.click({ target: target({ '[data-starter-trust-toggle]': {} }) });
     host.handlers.click({ target: target({ '[data-starter-trust]': { dataset: { starterTrust: 'ouroboros', trust: 'review' } } }) });
     assert.equal(step.payload().skill_source_trust.ouroboros, 'review');
-    assert.match(text(host.innerHTML), /Official skills and skills from the community are reviewed first\. Hide/);
+    assert.match(text(host.innerHTML), /Official skills from the Ouroboros hub and skills from the community are reviewed first\. Hide/);
     host.handlers.click({ target: target({ '[data-starter-trust]': { dataset: { starterTrust: 'ouroboros-community', trust: 'trusted' } } }) });
-    assert.match(text(host.innerHTML), /Skills from the community install without a review; Official skills are reviewed first\./);
+    assert.match(text(host.innerHTML), /Skills from the community install without a review; Official skills from the Ouroboros hub are reviewed first\./);
 });
 
-test('a list where something is not Official says nothing about Official over it', async () => {
+test('a skill that is not Official gets no mark of its own either: the sentence speaks of the hub rows only', async () => {
     const mixed = structuredClone(STARTER);
     mixed.groups[0].items[1].official = false;  // a build's own starter id from another source
     const step = createStarterSkillsStep({ read: async () => mixed });
     await step.loading;
     const host = fakeHost();
     step.mount(host);
-    assert.doesNotMatch(host.innerHTML, /Official skills from the/);
-    assert.match(host.innerHTML, /data-starter-card="ouroboros\/slack-bridge"/);
+    assert.doesNotMatch(rowOf(host.innerHTML, 'ouroboros/slack-bridge'), /Official|data-mark/);
+    assert.equal((host.innerHTML.match(/Official skills from the Ouroboros hub/g) || []).length, 1);
+    const unread = createStarterSkillsStep({ read: async () => ({ ...mixed, hub_rows: [] }) });
+    await unread.loading;
+    const bare = fakeHost();
+    unread.mount(bare);
+    assert.doesNotMatch(bare.innerHTML, /Official skills|skills-starter-trust/, 'no hub row, no sentence');
 });
 
 test('Summary’s one row: «N will install · Change», and Change returns to the step', async () => {
@@ -131,7 +139,7 @@ test('Summary’s one row: «N will install · Change», and Change returns to t
     const row = fakeHost('row');
     step.mount(row);
     assert.equal(text(row.innerHTML), 'Skills 6 will install · Change');
-    assert.doesNotMatch(row.innerHTML, /data-starter-card/);
+    assert.doesNotMatch(row.innerHTML, /data-starter-skill/);
     row.handlers.click({ target: target({ '[data-starter-change]': {} }) });
     assert.equal(opened, 1);
     const host = fakeHost();
@@ -141,14 +149,14 @@ test('Summary’s one row: «N will install · Change», and Change returns to t
     assert.deepEqual(step.payload().starter_skills, [], 'the cleared ticks survive the walk to Summary');
 });
 
-test('the cards arrive once per entry: never on a re-render or a refresh, again after leaving and coming back', async () => {
+test('the rows arrive once per entry: never on a re-render or a refresh, again after leaving and coming back', async () => {
     const step = createStarterSkillsStep({ read: async () => STARTER });
     await step.loading;
     const first = fakeHost();
     step.mount(first);
     assert.match(first.innerHTML, /<div class="skills-starter-list" data-arrive>/);
-    assert.match(cardOf(first.innerHTML, 'ouroboros/anti-slop'), /style="--arrive: 9"/);
-    assert.match(first.innerHTML, /class="skills-starter-sub skills-starter-source" style="--arrive: 2"/, 'the hub line arrives before its cards');
+    assert.match(rowOf(first.innerHTML, 'ouroboros/anti-slop'), /style="--arrive: 9"/);
+    assert.match(first.innerHTML, /<h3 style="--arrive: 2">Messaging/, 'a group head arrives before its rows');
     const rerendered = fakeHost();  // the wizard re-renders the step it is on: a new node, the same entry
     step.mount(rerendered);
     assert.match(rerendered.innerHTML, /<div class="skills-starter-list">/);
@@ -164,7 +172,7 @@ test('the cards arrive once per entry: never on a re-render or a refresh, again 
     const many = fakeHost();
     capped.mount(many);
     assert.equal(Math.max(...[...many.innerHTML.matchAll(/--arrive: (\d+)/g)].map((match) => Number(match[1]))), 12,
-        'from the twelfth card on they arrive together');
+        'from the twelfth row on they arrive together');
 });
 
 test('an unreadable list leaves the host defaults and says so; the Finish payload adds nothing', async () => {
@@ -238,7 +246,7 @@ test('fresh-root polling merges recommended additions, preserves edits and trust
     assert.deepEqual(poll.step.payload().starter_skills, ['builtin/unix_computer_use', 'ouroboros/pdf_tools', 'ouroboros/word_tools', 'ouroboros/duckduckgo', 'ouroboros/memory-atlas', 'ouroboros/anti-slop']);
     assert.equal(poll.step.payload().skill_source_trust.ouroboros, 'review');
     assert.doesNotMatch(text(host.innerHTML), /Reading the Ouroboros hub|default starter list/);
-    assert.doesNotMatch(host.innerHTML, /data-arrive/, 'the cards the hub brings join without a second entrance');
+    assert.doesNotMatch(host.innerHTML, /data-arrive/, 'the rows the hub brings join without a second entrance');
 });
 
 test('a read that changes nothing rewrites nothing', async () => {
@@ -253,7 +261,7 @@ test('a read that changes nothing rewrites nothing', async () => {
     assert.match(painted, /data-arrive/);
 });
 
-test('Untick all also leaves newly discovered recommended cards unticked', async () => {
+test('Untick all also leaves newly discovered recommended rows unticked', async () => {
     let calls = 0;
     const poll = pollingStep(async () => ++calls === 1 ? freshOffer() : STARTER);
     await poll.step.loading;

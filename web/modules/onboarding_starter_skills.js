@@ -1,19 +1,19 @@
 // The first-run wizard's Skills step, between Consciousness and Review limits (owner 2026-11-21: «показать что есть
 // много крутых скилов анимированным списком, но юзер может поснимать галочки»; it replaces the Summary row his 4A of
 // 2026-10-17 chose). The server offers it only where completion honors the ticks (`stepOrder`: this data root's
-// starter list never ran). One categorized list of cards, built-ins first: each card its human title, one line of
-// what it gives and the prerequisite in words; the box alone says it is ticked (the maintainer's recommended ones
-// are). Where they come from is said once per source: the built-in group's head and one line over the hub's. Inside a
-// group what works at once leads and what needs a key comes last. The cards arrive in one short sequence on entering
-// the step, never on a repaint (DESIGN §7). How the hub's skills install is one plain line under the list, its
-// choices behind it. Nothing installs here: the one atomic Finish carries the ticked ids and the trust choices, and
+// starter list never ran). One categorized list, built-ins first, one row per skill (his 21.11 «слишком крупные
+// карточки»: rows, not boxes): its box, its human title and, muted on the same line, what it gives and what it needs
+// first; the maintainer's recommended ones are ticked. A group says its name and count only; where the skills come from
+// and how the hub's install is one small sentence under the list, its choices behind it. Inside a group what works at
+// once leads and what needs a key comes last. The rows arrive in one short sequence on entering the step, never on a
+// repaint (DESIGN §7). Nothing installs here: the one atomic Finish carries the ticked ids and the trust choices, and
 // the host installs them in the background after start. Summary shows one row back to the step. A list that cannot
 // be read leaves the host's defaults in place and says so.
 import { skillSourcesApi } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 
-const BUILT_IN_TITLE = 'Built in — comes with the app';
-const ARRIVE_LAST = 12;  // cards from the twelfth on arrive together, so the whole entrance stays under a second
+const BUILT_IN_TITLE = 'Built in';
+const ARRIVE_LAST = 12;  // rows from the twelfth on arrive together, so the whole entrance stays under a second
 const FOCUS_KEYS = ['starterItem', 'starterAll', 'starterTrustToggle', 'starterTrust'];
 
 /** Built-in skills lead as their own group; the rest keep the host's category order. */
@@ -45,13 +45,15 @@ export function needsText(item, keyLabels = {}) {
     return keys.length ? `Uses your ${keyLabels[keys[0]] || keyWords(keys[0])}${more ? ` and ${more} more setting${more === 1 ? '' : 's'}` : ''}` : '';
 }
 
-// How a hub row's skills are named in the trust line and behind it (Settings › Skill sources names the rows themselves).
-const SOURCE_WORDS = { official: ['Official skills', 'Official skills'], community: ['skills from the community', 'Community skills'] };
-const sourceWords = (row, inLine) => SOURCE_WORDS[row.part]?.[inLine ? 0 : 1] || `${inLine ? 'skills from ' : ''}${row.name}`;
+// How a hub row's skills are named in the sentence under the list and behind it (Settings › Skill sources names the
+// rows themselves): in the sentence the Official row also says where they come from.
+const SOURCE_WORDS = { official: [(row) => `Official skills from the ${row.name} hub`, () => 'Official skills'],
+    community: [() => 'skills from the community', () => 'Community skills'] };
+const sourceWords = (row, inLine) => SOURCE_WORDS[row.part]?.[inLine ? 0 : 1](row) || `${inLine ? 'skills from ' : ''}${row.name}`;
 const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 const quote = (value) => String(value).replace(/["\\]/g, '\\$&');
-// Where a card sits in the page's layout, whatever an entrance's transform does to it at this moment.
+// Where a row sits in the page's layout, whatever an entrance's transform does to it at this moment.
 const layoutTop = (node) => { let top = 0; for (let at = node; at; at = at.offsetParent) top += at.offsetTop; return top; };
 const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 
@@ -63,7 +65,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     let host = null;
     let view = '';  // what the mounted node shows: the step's list, Summary's row, or nothing
     let painted = '';
-    let arrived = false;  // this entry of the step has shown its cards once
+    let arrived = false;  // this entry of the step has shown its rows once
     let destroyed = false;
     let timer = null;
     let deadline = null;
@@ -128,7 +130,9 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     const label = (item) => String(item.title || item.name || '');
     const shown = (group) => [...group.items].sort((a, b) => rank(a) - rank(b) || label(a).localeCompare(label(b), 'en'));
 
-    function cardHtml(item, order) {
+    // One row: the box, the title and, muted on the same line (wrapping whole under it where the line is short), what it
+    // gives and, quieter, what it needs first.
+    function skillHtml(item, order) {
         const on = state.ticked.has(item.id);
         const title = String(item.title || '').trim();
         const pitch = String(item.pitch || '').trim();
@@ -136,15 +140,17 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         // The catalog's own words translate (the interface layer); a name, a skill author's text and a line composed
         // from setting names stay as they are.
         const authored = (own) => (own ? '' : ' data-i18n-authored');
-        return `<label class="wizard-choice skills-starter-card" data-starter-card="${escapeHtml(item.id)}" style="--arrive: ${order}">
-            <span class="skills-starter-head"><input type="checkbox" class="ui-checkbox" data-starter-item="${escapeHtml(item.id)}"${on ? ' checked' : ''}><strong${authored(title)}>${escapeHtml(title || item.name)}</strong></span>
-            <span class="skills-starter-pitch"${authored(pitch)}>${escapeHtml(pitch || item.description || '')}</span>
-            ${needs ? `<span class="skills-starter-needs"${authored(typeof item.needs === 'string')}>${escapeHtml(needs)}</span>` : ''}
+        return `<label class="skills-starter-skill" data-starter-skill="${escapeHtml(item.id)}" style="--arrive: ${order}">
+            <input type="checkbox" class="ui-checkbox" data-starter-item="${escapeHtml(item.id)}"${on ? ' checked' : ''}>
+            <span class="skills-starter-words"><strong${authored(title)}>${escapeHtml(title || item.name)}</strong>
+                <span class="skills-starter-pitch"${authored(pitch)}>${escapeHtml(pitch || item.description || '')}</span>${needs ? `
+                <span class="skills-starter-needs"${authored(typeof item.needs === 'string')}>· ${escapeHtml(needs)}</span>` : ''}</span>
         </label>`;
     }
 
-    // The hub's rows in plain words, e.g. «Official skills install without a review; skills from the community are
-    // reviewed first»; the two choices per row (Settings' words) wait behind it.
+    // Where the hub's skills come from and how they install, in plain words and said once, under the list: e.g.
+    // «Official skills from the Ouroboros hub install without a review; skills from the community are reviewed first»;
+    // the two choices per row (Settings' words) wait behind it.
     function trustHtml() {
         if (!state.rows.length) return '';
         const say = (trusted, verb) => {
@@ -158,43 +164,36 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             ${state.trustOpen ? `${rows}<span class="skills-starter-sub">Suggested choices apply until you choose.</span>` : ''}</div>`;
     }
 
-    // Said once over the hub's groups, where every skill there is Official (a build's own list may hold others).
-    function sourceLine(order) {
-        const hub = items().filter((item) => !item.builtin);
-        const official = state.rows.find((row) => row.part === 'official');
-        return hub.length && hub.every((item) => item.official)
-            ? `<p class="skills-starter-sub skills-starter-source" style="--arrive: ${order}">Official skills from the ${escapeHtml(official?.name || 'Ouroboros')} hub: its maintainer vouches for each release.</p>` : '';
-    }
-
     function stepHtml(arrive) {
         if (state.status !== 'ready') {
             const words = { loading: 'Reading the list…', error: unreadText(), empty: 'No skills are offered here. You can add skills any time on the Skills page.' }[state.status];
             return `<p class="skills-starter-sub" role="status">${escapeHtml(words)}</p>`;
         }
         let order = 0;
+        const next = () => Math.min(order++, ARRIVE_LAST);
         const pending = pendingText();
-        // What is still being read stands under the list, where the hub's skills will join it: its going moves no card.
+        // A group is its name and count over its rows. What is still being read stands under the list, where the hub's
+        // skills will join it: its going moves no row.
         return `<div class="skills-starter-list"${arrive ? ' data-arrive' : ''}>
             ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status">${countText()}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
-            ${state.groups.map((group, index) => `${group.category !== 'builtin' && !state.groups.slice(0, index).some((g) => g.category !== 'builtin') ? sourceLine(Math.min(order, ARRIVE_LAST)) : ''}
-                <section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span>${group.items.length}</span></h3>
-                <div class="wizard-choice-grid skills-starter-cards">${shown(group).map((item) => cardHtml(item, Math.min(order++, ARRIVE_LAST))).join('')}</div></section>`).join('')}
+            <div class="skills-starter-groups">${state.groups.map((group) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span> · ${group.items.length}</span></h3>
+                ${shown(group).map((item) => skillHtml(item, next())).join('')}</section>`).join('')}</div>
             ${pending ? `<p class="skills-starter-sub" role="status">${escapeHtml(pending)}</p>` : ''}
             ${trustHtml()}
         </div>`;
     }
 
-    // The reading place a repaint keeps (DESIGN principle 6): the focused control and the first card in view.
+    // The reading place a repaint keeps (DESIGN principle 6): the focused control and the first row in view.
     function readingPlace() {
         if (typeof host.querySelectorAll !== 'function') return null;
         const active = host.ownerDocument?.activeElement;
         const key = active && host.contains(active) ? FOCUS_KEYS.find((name) => active.dataset?.[name] !== undefined) : '';
         const focus = key ? `[${dataAttr(key)}="${quote(active.dataset[key])}"]${key === 'starterTrust' ? `[data-trust="${quote(active.dataset.trust)}"]` : ''}` : '';
-        const card = [...host.querySelectorAll('[data-starter-card]')].find((node) => node.getBoundingClientRect().bottom > 0);
-        const anchor = card && { id: card.dataset.starterCard, top: layoutTop(card) };
+        const row = [...host.querySelectorAll('[data-starter-skill]')].find((node) => node.getBoundingClientRect().bottom > 0);
+        const anchor = row && { id: row.dataset.starterSkill, top: layoutTop(row) };
         return () => {
             if (focus) host.querySelector(focus)?.focus({ preventScroll: true });
-            const again = anchor && host.querySelector(`[data-starter-card="${quote(anchor.id)}"]`);
+            const again = anchor && host.querySelector(`[data-starter-skill="${quote(anchor.id)}"]`);
             const moved = again ? layoutTop(again) - anchor.top : 0;
             if (moved) host.ownerDocument?.defaultView?.scrollBy(0, moved);
         };
@@ -248,7 +247,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             </div></div>
             <div class="skills-starter-step" data-starter-skills="step"></div>`,
         /** Mount into the node a wizard render gives (`data-starter-skills`: "step" or Summary's "row"); the ticks
-         * survive re-renders, and the cards arrive once each time the step is entered. */
+         * survive re-renders, and the rows arrive once each time the step is entered. */
         mount(node) {
             if (host === node) return;
             host?.removeEventListener('click', onClick);
