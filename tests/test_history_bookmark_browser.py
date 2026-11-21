@@ -626,7 +626,26 @@ _HOLD_ANSWERED = """({older, chatId}) => {
         held.status = response.status; held.body = await response.json();
         await new Promise(resolve => { window.__releaseHeld = resolve; });
         held.released = true;
-        return new Response(JSON.stringify(held.body), {status: held.status, headers: {'Content-Type': 'application/json'}});
+        const fresh = new Response(JSON.stringify(held.body), {status: held.status, headers: {'Content-Type': 'application/json'}});
+        const read = fresh.json.bind(fresh);
+        // `delivered`: the room has read the body; whether it lands or is dropped is decided in that continuation.
+        fresh.json = () => read().then(body => { held.delivered = true; return body; });
+        return fresh;
+    };
+}"""
+
+# The revisions of Main in each `/api/state` body the page itself reads, recorded as the page's own read resolves:
+# the snapshot is applied (app.js `observeMainRevision`) in that continuation, before any later task runs.
+_RECORD_STATE = """() => {
+    const inner = window.fetch;
+    window.__stateRevisions = [];
+    window.fetch = async (input, init) => {
+        const response = await inner(input, init);
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (url.pathname !== '/api/state') return response;
+        const read = response.json.bind(response);
+        response.json = () => read().then(body => { window.__stateRevisions.push(body?.main_visible_revision); return body; });
+        return response;
     };
 }"""
 
@@ -664,9 +683,9 @@ def test_latest_does_not_wait_for_a_held_older_read_whose_late_page_moves_no_one
             assert page.evaluate('() => !window.__held.released'), 'the present is reached while the older read is held'
             moved = _assert_at_newest(page, feed, newest)
             page.evaluate('() => window.__releaseHeld()')
+            page.wait_for_function('() => window.__held.delivered === true')
             _idle(page, feed)
-            page.wait_for_timeout(200)
-            page.evaluate(_FRAMES)
+            page.evaluate(_FRAMES)  # a page that landed would be drawn within these frames
             after = _assert_at_newest(page, feed, newest)
             box = body.evaluate('n => n.scrollTop')
             (tmp_path / f'latest-yields-{browser_engine}.json').write_text(json.dumps(
@@ -675,6 +694,7 @@ def test_latest_does_not_wait_for_a_held_older_read_whose_late_page_moves_no_one
             _screenshot(page, tmp_path, f'latest-moves-at-once-{browser_engine}')
             assert page.evaluate('() => window.__held.released')
             assert sentinel not in root.text_content(), ('the superseded older page was drawn', sentinel)
+            # Exact: a dropped page draws nothing, so the newest row's geometry is the same layout, not a near one.
             assert after['top'] == moved['top'] and after['gap'] == moved['gap'], (moved, after)
             assert abs(box - before['body']) <= 2, ('the late older page leaves the full output where it was', before, box)
         finally:
@@ -739,22 +759,27 @@ def test_a_wheel_inside_a_box_supersedes_a_landing_still_reading_and_its_late_an
             page.evaluate(_FRAMES)
             # Replies saved while the room is disconnected (no live notice); its catch-up read is answered and held.
             page.evaluate(_HOLD_ANSWERED, {'older': False, 'chatId': 1})
+            page.evaluate(_RECORD_STATE)
             for index in range(40):
                 dialogue_store.append(data, 'chat', {'direction': 'out', 'chat_id': 1, 'ts': f'2026-09-01T14:{index:02d}:00Z',
                                                      'text': f'Late arrival {index:02d}'}, feed=True, emit_live=False)
+            unread_revision = page.request.get(direct_server_with_data['url'] + '/api/state').json()['main_visible_revision']
             page.evaluate('() => window.__testSockets.find(s => s.readyState === WebSocket.OPEN).close()')
             page.wait_for_function('() => Boolean(window.__held?.body && window.__releaseHeld)', timeout=30_000)
+            # Pressing Main lands only once Main counts as unread: wait for the page's own read of that revision.
+            page.wait_for_function('r => window.__stateRevisions.some(seen => seen >= r)', arg=unread_revision,
+                                   timeout=30_000)
             assert any(row.get('text') == 'Late arrival 39' for row in page.evaluate('() => window.__held.body.messages'))
             page.locator('#primary-sidebar [data-nav-page="chat"]').click()
             page.evaluate(_FRAMES)
             assert page.locator('#chat-scroll-bottom').get_attribute('aria-busy') == 'true', 'the landing waits for its read'
             rect, frame = body.bounding_box(), root.bounding_box()
             assert rect['y'] >= frame['y'] and rect['y'] + 80 <= frame['y'] + frame['height'], (rect, frame)
-            page.mouse.move(rect['x'] + rect['width'] / 2, rect['y'] + 40)
-            page.wait_for_timeout(300)  # a new wheel burst
+            page.mouse.move(rect['x'] + rect['width'] / 2, rect['y'] + 40)  # no earlier wheel: this one starts a burst
             before = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET)}
             page.mouse.wheel(0, 240)
-            page.wait_for_timeout(300)
+            page.wait_for_function('([n, top]) => n.scrollTop > top', arg=[body.element_handle(), before['body']],
+                                   timeout=5_000)
             page.evaluate(_FRAMES)
             read = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET)}
             assert read['body'] > before['body'] and abs(read['line'] - before['line']) <= 1, (before, read)
@@ -763,8 +788,7 @@ def test_a_wheel_inside_a_box_supersedes_a_landing_still_reading_and_its_late_an
                                    arg=feed, timeout=15_000)
             page.wait_for_function("() => document.querySelector('#chat-scroll-bottom').getAttribute('aria-busy') !== 'true'",
                                    timeout=15_000)
-            page.wait_for_timeout(300)
-            page.evaluate(_FRAMES)
+            page.evaluate(_FRAMES)  # a late follow lands within followAfterLayout's two animation frames
             after = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET),
                      'gap': root.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')}
             (tmp_path / f'box-supersedes-landing-{browser_engine}.json').write_text(
