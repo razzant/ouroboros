@@ -1501,7 +1501,9 @@ Wheels, swipes and keys scroll bounded boxes until their edge. Scrollbar drags
 follow new replies only on release at the live edge; wheel, swipe or key
 scrolling follows when it ends there. Expansion or full output preserves place;
 only a newer line moves a card timeline to its end. New replies stay below
-without moving the passage.
+without moving the passage. A change of visible height (a phone keyboard coming
+or going, a shorter window) keeps the passage being read where it is on the
+screen, or the live edge while following, and the feed still scrolls.
 
 Reading far back releases newest pages, bounding retention as replies arrive.
 Disconnected fragments or uncertain coverage show
