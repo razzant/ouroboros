@@ -1,0 +1,74 @@
+name: QA · Accounts More keeps its place
+on:
+  push:
+    branches: [qa/account-more-place-2b0bd367]
+
+permissions:
+  contents: read
+
+jobs:
+  accounts:
+    if: ${{ !github.event.deleted }}
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the harness to the reviewed product
+        id: bind
+        run: |
+          # One QA-only commit on the exact product revision selected for this run.
+          test "$(git show -s --format=%P HEAD | wc -w)" -eq 1
+          fixed=$(git rev-parse HEAD^)
+          test "$(git show -s --format=%P "$fixed" | wc -w)" -eq 1
+          base=$(git rev-parse "$fixed^")
+          echo "control=$base" >> "$GITHUB_OUTPUT"
+          git diff --exit-code "$fixed" HEAD -- . ':!.github/qa/account_more.py' ':!.github/workflows/account-more-place.yml' ':!tests/qa_account_more_wk.py'
+          mkdir -p "$RUNNER_TEMP/account-more"
+          echo "product=$fixed qa=$GITHUB_SHA" | tee "$RUNNER_TEMP/account-more/revisions.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: build
+          install-project: 'false'
+      - name: Install the two locked Playwright browsers
+        id: install
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ runner.temp }}/node/bin/node
+        run: |
+          python -I -S scripts/download_node_standalone.py --destination "$RUNNER_TEMP/node"
+          python -m playwright install chromium webkit
+      - name: Fixed frontend · WebKit
+        run: python .github/qa/account_more.py fixed-webkit
+      - name: Fixed frontend · Chromium
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python .github/qa/account_more.py fixed-chromium
+      - name: Check out the original product for the negative control
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.bind.outputs.control }}
+          path: control
+          persist-credentials: false
+      - name: Old frontend · require a post-click place assertion to fail
+        run: |
+          echo "control=$(git -C control rev-parse HEAD)" >> "$RUNNER_TEMP/account-more/revisions.txt"
+          cp tests/test_account_resources_browser.py control/tests/
+          python .github/qa/account_more.py control
+      - name: System WKWebView · DOM activation and delayed quota response
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python .github/qa/account_more.py native
+      - name: Collect the case reports and native measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: account-more-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/account-more/revisions.txt
+            ${{ runner.temp }}/account-more/fixed-webkit.json
+            ${{ runner.temp }}/account-more/fixed-chromium.json
+            ${{ runner.temp }}/account-more/control.json
+            ${{ runner.temp }}/account-more/native.json
+          if-no-files-found: error
+          retention-days: 7
