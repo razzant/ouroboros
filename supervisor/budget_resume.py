@@ -19,6 +19,38 @@ from ouroboros.utils import utc_now_iso
 log = logging.getLogger(__name__)
 
 
+def child_selection_control(requester: str, reason: str, target: Dict[str, Any]):
+    """The control a root's model selects one held child under (owner Q9): ``mind_control``, and, when the root's
+    live Resume grant was given by an act the owner authorised (his press: ``by.actor == owner``; a mind's release
+    with a verified cite: ``by.owner_word_at``), that grant's time bound as the citing time, so the child's Panic
+    hold yields only to a root release made after that same Panic began (``work_stop.release_refusal``). The grant
+    the held members already bind to is the durable carrier; nothing else is stored."""
+    from contextlib import ExitStack
+
+    from ouroboros.control_actor import citing_owner, mind_control
+    from supervisor import queue as q
+    from supervisor.events_budget import _root_resume_grants, _root_resume_state
+
+    root_id = str(target.get("root_task_id") or target.get("id") or "")
+    granted = ""
+    try:
+        state = _root_resume_state(q, root_id, pathlib.Path(target.get("budget_drive_root") or q.DRIVE_ROOT))
+        live = _root_resume_grants(state)[0]
+        selection = (state["task"] or {}).get(SELECTION_KEY) or {}  # a held root's release mints its grant here
+        for grant_id, by, at in (*((grant.get("grant_id"), grant.get("by"), grant.get("granted_at")) for grant in (
+                (state["pause"] or {}).get("grant") or {}, (state["owner_fence"] or {}).get("resume_grant") or {})),
+                (selection.get("root_grant_id"), selection.get("by"), selection.get("selected_at"))):
+            by = by if isinstance(by, dict) else {}
+            if live and grant_id == live.get("grant_id") and (by.get("actor") == "owner" or by.get("owner_word_at")):
+                granted = str(at or "")
+    except Exception:
+        log.debug("The root grant of %s is unreadable; its child's Panic hold stays", root_id, exc_info=True)
+    stack = ExitStack()
+    stack.enter_context(mind_control(requester, reason))
+    stack.enter_context(citing_owner(granted))
+    return stack
+
+
 def grant_exact_budget_resume(task: Dict[str, Any], pause: Dict[str, Any],
                               *, selected_by: str = "",
                               external: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
