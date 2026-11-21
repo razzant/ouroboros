@@ -606,7 +606,7 @@ def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Di
 
 
 def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any,
-                            roots: Optional[RootSnapshot] = None) -> Any:
+                            roots: Optional[RootSnapshot] = None, *, decided_project_id: Optional[str] = None) -> Any:
     """Enrich a chat turn's metadata with the structural facts the decision turn
     needs: the RUNNING tasks in THIS chat (so it can tell_task the right one
     instead of spawning a duplicate) and the originating message id (for idempotent
@@ -621,9 +621,8 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     roots = roots if roots is not None else addressable_roots(ctx)
     addressable_here = roots.rows(chat_id)
     running_here = [row for row in addressable_here if row.get("status") == "running"]
-    project_id = str(md.get("project_id") or "").strip() or _project_id_for_registered_chat(
-        ctx, chat_id,
-    )
+    project_id = decided_project_id if decided_project_id is not None else (
+        str(md.get("project_id") or "").strip() or _project_id_for_registered_chat(ctx, chat_id))
     is_main_lane = not bool(project_id)
     try:
         # Every non-Project owner transport is the Main lane.  External transports

@@ -518,8 +518,15 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     if not logged:
         raise ValueError("message is empty")
     from ouroboros.chat_references import exact_reply_ingress, ingress_reply, telegram_reply_room, with_turn_address
-    reply = ingress_reply(drive_root, message.get("task_metadata") or {})
-    if reply and exact_reply_ingress(root, source, chat_id, message_id, message.get("transport")):
+    exact = bool(task_metadata.get("reply_to")) and exact_reply_ingress(
+        root, source, chat_id, message_id, message.get("transport"))
+    try:
+        reply = ingress_reply(root, task_metadata, strict_transient=exact)
+    except (StoreBusy, StoreMigrating) as exc:
+        if not exact:
+            raise
+        raise NotAccepted("the store was busy before this attempt was accepted") from exc
+    if reply and exact:
         try:  # the bundled owner bot's Reply: its room, decided once on its accepted row (0: this conversation's)
             room, decided = telegram_reply_room(root, reply, chat_id)
         except (OSError, ValueError, StoreError) as exc:
@@ -540,7 +547,12 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
-        row = accepted_chat_message(root, chat_id, message_id)
+        try:
+            row = accepted_chat_message(root, chat_id, message_id)
+        except (StoreBusy, StoreMigrating) as exc:
+            if not exact:
+                raise
+            raise NotAccepted("the store was busy before this attempt was accepted") from exc
         fresh = attempted = False
         if row is None:
             attempted = True

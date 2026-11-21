@@ -489,6 +489,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "task_metadata": task_metadata,
                     "log_text": log_text,
                     "origin_message_ref": origin_message_ref,
+                    "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
                 },
             )

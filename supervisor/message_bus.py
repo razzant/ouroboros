@@ -26,7 +26,6 @@ from supervisor.message_ingress import (  # noqa: F401 - the named ingress's pub
     recover_pending_dispatches)
 from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES
 from ouroboros.projects_registry import RoomResolver, stamp_project_thread
-from ouroboros.chat_references import keeps_binding
 from ouroboros.tools.core import (
     LinkActionsValidationError,
     QuizValidationError,
@@ -280,13 +279,15 @@ class LocalChatBridge:
         The supervisor rebinds per message: a later same-chat message in one
         drained batch must not steal an earlier one's reply transport.
         """
+        from ouroboros.chat_references import keeps_binding
+
         chat_id = coerce_chat_identity(msg.get("chat_id", (msg.get("chat") or {}).get("id")), 1)
         transport = msg.get("transport")
         if keeps_binding(msg):  # the host delivered the owner's Telegram act here: its binding stays
             return
         if isinstance(transport, dict) and transport and chat_id != 1:  # never the host's marks (chat_references)
             self._chat_transports[chat_id] = {key: value for key, value in transport.items()
-                                              if key not in ("exact_reply", "host_address")}
+                                              if key not in ("exact_reply", "host_address", "telegram_root")}
         else:
             self._chat_transports.pop(chat_id, None)
 

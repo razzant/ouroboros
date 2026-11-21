@@ -134,7 +134,8 @@ def host(tmp_path, monkeypatch, request):
     monkeypatch.setattr(LLMClient, "chat_async", forbidden_model_async)
     monkeypatch.setattr(lane, "admit_owner_turn", forbidden_lane)
     monkeypatch.setattr(workers, "_get_chat_agent", forbidden_actor)
-    monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata", lambda _ctx, _chat, _id, meta, _roots=None: meta)
+    monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata",
+                        lambda _ctx, _chat, _id, meta, _roots=None, **_kw: meta)
     # Later asyncio/TestClient loops also need their Windows self-pipe, not provider access.
     block_network_except_socketpair(monkeypatch, forbidden_model)
     ctx = SimpleNamespace(

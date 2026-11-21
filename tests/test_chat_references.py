@@ -309,7 +309,7 @@ def test_only_the_accepted_exact_reply_gives_its_turn_a_physical_address(tmp_pat
     assert proven_address({**plain, "chat_id": 1}) == {}, "accepted in another chat than the one it names"
 
 
-def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42):
+def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42, real_metadata=False, real_ack=False):
     """The accepted row through the owner router, as server.py hands it over: (turns, follow-ups, receipts).
     ``live``: the live roots each chat may address (``addressable_roots``), by chat id."""
     from types import SimpleNamespace
@@ -328,8 +328,12 @@ def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42):
                         lambda _ctx, chat, *_args, **_kwargs: followups.append(chat) or open_turn)
     monkeypatch.setattr(routing, "addressable_roots", lambda _ctx: SimpleNamespace(
         rows=lambda chat=None: [dict(root) for root in (live or {}).get(chat, [])], gap=None))
-    monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots: meta)
-    monkeypatch.setattr(routing, "_record_routing_receipt", lambda _bridge, _ctx, **fields: receipts.append(fields))
+    if not real_metadata:
+        monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots, **_kw: meta)
+    if real_ack:
+        monkeypatch.setattr(bridge, "send_routing_ack", lambda chat, **fields: receipts.append({"chat_id": chat, **fields}))
+    else:
+        monkeypatch.setattr(routing, "_record_routing_receipt", lambda _bridge, _ctx, **fields: receipts.append(fields))
     monkeypatch.setattr("ouroboros.owner_relay.carry_row_at_receipt", lambda *_args, **_kwargs: None)
     source = build_owner_message_ref(chat_id=chat, client_message_id=row["client_message_id"], ts=row["ts"],
                                      text=row["text"])
@@ -338,7 +342,7 @@ def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42):
         "chat_id": chat, "text": row["text"], "log_text": row["text"], "image_caption": "", "image_data": None,
         "client_message_id": row["client_message_id"], "task_constraint": None, "origin_message_ref": source,
         "task_metadata": {**(queued.get("task_metadata") or {}), "_host_operation": True},
-        "source": "skill:telegram", "received_at": row["ts"]})
+        "source": "skill:telegram", "received_at": row["ts"], "accepted_source_row": row})
     return started, followups, receipts
 
 
@@ -631,3 +635,98 @@ def test_a_proven_project_work_bearing_the_private_chats_number_stays_that_proje
     assert row_rooms(chat, plain, {chat}, rooms) == {1}
     started, followups, _receipts = _route(bridge, tmp_path, monkeypatch, plain, chat=chat)
     assert followups == [chat] and [kwargs["task_metadata"].get("project_id", "") for _args, kwargs in started] == [""]
+
+
+def test_c6_c10_same_number_uses_the_decided_project_and_main_lanes(tmp_path, monkeypatch):
+    from supervisor import state
+
+    bridge, _ = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)
+    chat = project["chat_id"]
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_external_chat_id": chat})
+    for mid, address, lane in ((20, "task:helper", "project"), (21, "", "main")):
+        row, _ = message_bus.accept_local_message(
+            bridge, tmp_path, "Check the report", chat_id=chat, user_id=chat, client_message_id=f"tg:123:{chat}:{mid}",
+            source="skill:telegram", transport={"kind": "telegram", "conversation_id": str(chat), "bot_id": "123",
+                                                "owner_message_id": mid}, task_metadata={"reply_to": address})
+        started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row, chat=chat, real_metadata=True)
+        [(_, kwargs)] = started
+        meta = kwargs["task_metadata"]
+        assert meta["routing_contract"]["source_lane"] == lane
+        assert (meta.get("project_id") or "") == (project["id"] if address else "")
+        assert followups == ([] if address else [chat]) and receipts == []
+
+
+def test_c5_refusal_transport_survives_an_unreadable_quote(tmp_path, monkeypatch):
+    from ouroboros.projects_registry import begin_project_deletion
+    from ouroboros.store import StoreBusy
+    from supervisor import message_ingress
+
+    bridge, _ = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)
+    row = _bot_message(bridge, tmp_path, "task:helper", mid=50)
+    begin_project_deletion(tmp_path, project["id"])
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("reading the display quote")
+    monkeypatch.setattr(message_ingress, "accepted_chat_message", busy)
+    started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row, real_ack=True)
+    assert not started and not followups
+    [receipt] = receipts
+    assert receipt["status"] == "project_unavailable"
+    assert receipt["reply_to"] == {}
+    assert receipt["transport"] == {"kind": "telegram", "conversation_id": "42", "bot_id": "123",
+                                    "host_address": "reply"}
+
+
+@pytest.mark.parametrize("inactive", [False, True])
+def test_c7_connector_command_reply_only_refuses_an_inactive_reservation(tmp_path, monkeypatch, inactive):
+    from ouroboros.projects_registry import begin_project_deletion
+
+    bridge, _ = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)
+    chat = project["chat_id"]
+    if inactive:
+        begin_project_deletion(tmp_path, project["id"])
+    else:
+        chat += 1
+    other = message_bus.log_chat("system", chat, 0, "Status OK", source="skill:other", record_type="command_reply")
+    address = format_address(row_address(other))
+    row = _bot_message(bridge, tmp_path, address, mid=50, text="What does that mean?")
+    assert row["reply_to"]["address"] == address
+    assert row["reply_to"]["telegram_room_chat_id"] == (None if inactive else 0)
+
+
+def test_c8_paged_main_history_keeps_the_physical_row_in_a_same_number_project(tmp_path, monkeypatch):
+    bridge, _ = _web_bridge(tmp_path, monkeypatch)
+    chat = _reply_world(tmp_path)["chat_id"]
+    mid = f"tg:123:{chat}:20"
+    message_bus.accept_local_message(bridge, tmp_path, "Physical conversation", chat_id=chat, user_id=chat,
+                                     client_message_id=mid, source="skill:telegram",
+                                     transport={"kind": "telegram", "conversation_id": str(chat), "bot_id": "123"})
+    message_bus.log_chat("in", chat, 0, "Written in project", source="web", client_message_id="web-room-row")
+    main_ids = {row.get("client_message_id") for row in _history(tmp_path, 1)}
+    project_ids = {row.get("client_message_id") for row in _history(tmp_path, chat)}
+    assert mid in main_ids and "web-room-row" not in main_ids
+    assert mid not in project_ids and "web-room-row" in project_ids
+
+
+def test_c4_room_binding_discards_turn_and_root_marks():
+    bridge = message_bus.LocalChatBridge()
+    bridge.activate_update_transport({"chat_id": 42, "source": "skill:telegram", "transport": {
+        "kind": "telegram", "conversation_id": "42", "host_address": "reply", "exact_reply": {},
+        "telegram_root": {"kind": "telegram", "host_address": "root"}}})
+    assert bridge.chat_transport(42) == {"kind": "telegram", "conversation_id": "42"}
+
+
+def test_c12_message_bus_keeps_its_reply_binding_dependency_lazy():
+    import ast
+    import inspect
+    import textwrap
+
+    def imports_binding(node):
+        return isinstance(node, ast.ImportFrom) and node.module == "ouroboros.chat_references" and any(
+            alias.name == "keeps_binding" for alias in node.names)
+
+    assert not any(imports_binding(node) for node in ast.parse(inspect.getsource(message_bus)).body)
+    body = ast.parse(textwrap.dedent(inspect.getsource(message_bus.LocalChatBridge.activate_update_transport)))
+    assert any(imports_binding(node) for node in ast.walk(body))

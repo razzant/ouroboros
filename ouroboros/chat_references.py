@@ -13,7 +13,7 @@ afresh), never refused for good.
 from __future__ import annotations
 
 from ouroboros.chat_chain import format_address, resolve_row, row_address
-from ouroboros.store import StoreError
+from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 
 TELEGRAM_SOURCE = "skill:telegram"  # the bundled owner bridge's authenticated ingress identity
 # The host's mark on a proven Telegram address (``proven_address``), never an ingress's: a room's binding drops it
@@ -82,7 +82,7 @@ def reference_from_row(row: dict) -> dict:
             "target_home": reply_target_home(row)}
 
 
-def resolve_reply(root, address: str) -> dict:
+def resolve_reply(root, address: str, *, strict_transient: bool = False) -> dict:
     """Resolve a transport-neutral Reply address once, at acceptance."""
     if not isinstance(address, str):
         raise ValueError("reply_to must be an address string")
@@ -103,6 +103,10 @@ def resolve_reply(root, address: str) -> dict:
             row, _resolution = resolve_row(root, address)
             if row is None:
                 row = resolve_progress_row(root, address)
+        except (StoreBusy, StoreMigrating):
+            if strict_transient:
+                raise
+            row = None
         except (ValueError, StoreError):
             row = None
         if row:
@@ -110,9 +114,9 @@ def resolve_reply(root, address: str) -> dict:
     return {"address": address, "unresolved": True}
 
 
-def ingress_reply(root, metadata: dict) -> dict:
+def ingress_reply(root, metadata: dict, *, strict_transient: bool = False) -> dict:
     """Shared web/HTTP/skill seam. Raw input is resolved, never trusted as a preview."""
-    return resolve_reply(root, metadata.get("reply_to", ""))
+    return resolve_reply(root, metadata.get("reply_to", ""), strict_transient=strict_transient)
 
 
 def origin_reply(root, task_id: str, metadata=None) -> dict:
@@ -165,7 +169,10 @@ def telegram_reply_room(root, ref: dict, ingress_chat: int) -> tuple:
         proven = _project_work_here(root, rooms, task, room) if home == TARGET_WORK and task else False
         if not proven:
             return 0, proven is not None
-    return (room if reserved_project_for_chat(root, room).get("lifecycle") == "active" else None), True
+    project = reserved_project_for_chat(root, room)
+    if not project and home == TARGET_ROOM:
+        return 0, True  # a written connector conversation is not itself a Project reservation
+    return (room if project.get("lifecycle") == "active" else None), True
 
 
 def _project_work_here(root, rooms, task: str, chat: int):
@@ -336,10 +343,21 @@ def turn_reply_transport(root, task_id: str, *, anchor: bool = True, strict: boo
         if strict:
             raise
         return {}
-    carried = meta.get(TURN_ADDRESS)
+    return reply_transport_from_metadata(root, meta, anchor=anchor)
+
+
+def reply_transport_from_metadata(root, metadata: dict, *, anchor: bool = True) -> dict:
+    """Read the host's per-turn surface by value, separate from the room's binding."""
+    carried = metadata.get(TURN_ADDRESS)
     if not (isinstance(carried, dict) and carried.get(ADDRESS) == REPLY_ADDRESS):
-        carried = late_answer_surface(root, meta.get("late_answer"))
-    return {key: value for key, value in carried.items() if anchor or key != "exact_reply"} if carried else {}
+        carried = late_answer_surface(root, metadata.get("late_answer"))
+    if not (carried.get("kind") == "telegram" and str(carried.get("conversation_id") or "").lstrip("-").isdigit()
+            and str(carried.get("bot_id") or "").isdigit()):
+        return {}
+    address = {key: carried[key] for key in ("kind", "conversation_id", "bot_id", ADDRESS)}
+    if anchor and isinstance(carried.get("exact_reply"), dict):
+        address["exact_reply"] = dict(carried["exact_reply"])
+    return address
 
 
 def late_answer_surface(root, late) -> dict:

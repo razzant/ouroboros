@@ -556,7 +556,19 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         correlated = {"operation_ref": operation_ref(chat_id, client_message_id)} if client_message_id else {}
         rejoined = False
         if client_message_id:
-            accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            from ouroboros.store import StoreBusy, StoreMigrating
+
+            try:
+                accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            except (StoreBusy, StoreMigrating):
+                from ouroboros.chat_references import exact_reply_ingress
+
+                if not (payload.get("reply_to") and exact_reply_ingress(
+                    ctx.data_dir, f"skill:{skill_name}", chat_id, client_message_id, payload.get("transport")
+                )):
+                    raise
+                return JSONResponse({"ok": False, "error": "the store was busy before this attempt was accepted",
+                                     "code": "not_accepted", **correlated}, status_code=503)
             inbound = accepted.row if accepted is not None else None
             if inbound is not None:
                 if str(inbound.get("source") or "") != f"skill:{skill_name}":

@@ -97,7 +97,8 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any], address: Optional[Dict[
         return {}
 
 
-def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
+def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any], *,
+                               notice_transport: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """What an ACK sent from these receipt fields says of the act's owner notice: ``{}`` for a quiet ACK; else the
     carrier the receipt selects. That is the ACK itself, with the owner message it answers, when its id names one.
     An ACK whose id names none annotates no chat row, so it is never the carrier: it names ``system``, the System
@@ -110,8 +111,8 @@ def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, 
         return {}
     if not _owner_message_receipt(evt.get("client_message_id")):
         return {"routing_notice_carrier": "system"}
-    address: Dict[str, Any] = {}
-    reply = _routing_notice_reply(ctx, evt, address)
+    address: Dict[str, Any] = dict(notice_transport or {})
+    reply = _routing_notice_reply(ctx, evt, None if address else address)
     return {"routing_notice_carrier": "routing_ack", "reply_to": reply, **({"transport": address} if address else {})}
 
 

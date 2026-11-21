@@ -47,7 +47,8 @@ from .lib.telegram_outbox import outbox_for
 from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
-    PollCursor, bot_id, park_until_settings_change, saved_server as _saved_server, server_fingerprint, update_key,
+    InjectNotAccepted, PollCursor, bot_id, handle_poll_batch, park_until_settings_change,
+    saved_server as _saved_server, server_fingerprint, update_key,
 )
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .lib.telegram_token import _report_failure, _wait_for_bot_token, binding_for, make_token_observer
@@ -82,6 +83,8 @@ def _bridge_client(api, event=None, chat_id: int = 0,
     if binding.state == "pending":
         binding.read_now(api)  # before the observer's first read: once, never per request
     token, generation = binding.snapshot()
+    if not token:
+        raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
     api_base_url, files_dir = server or _saved_server(api)
     client = TelegramClient(token, trust_env=_HONOR_ENV_PROXIES,
                             proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
@@ -371,10 +374,6 @@ async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict
     return int(response.status_code), (body if isinstance(body, dict) else {})
 
 
-class InjectNotAccepted(RuntimeError):
-    """The host answered that this attempt was not recorded (``503``, ``code: not_accepted``): it may come again."""
-
-
 def _panic_update(update: Dict[str, Any]) -> bool:
     """Whether an update is a /panic message: the one test for an owner Panic, early or in order; its sender is
     checked by the caller (``_authorized_owner``)."""
@@ -588,6 +587,160 @@ async def _start_poller(api):
         raise
 
 
+async def _handle_poll_callback(api, client, update, pinned_chat, command_mode, lang, confirm):
+    """Handle an authorized inline panel press and return the language for this poll."""
+    callback_query = update["callback_query"]
+    cb_id = str(callback_query.get("id") or "")
+    cb_data = str(callback_query.get("data") or "").strip()
+    cb_message = callback_query.get("message") or {}
+    cb_message_id = int(cb_message.get("message_id") or 0)
+    cb_chat = cb_message.get("chat") or {}
+    cb_chat_id = int(cb_chat.get("id") or 0)
+    cb_sender = callback_query.get("from") or {}
+    if (
+        not pinned_chat
+        or str(cb_chat_id) != pinned_chat
+        or str(cb_sender.get("id") or "") != pinned_chat
+    ):
+        await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["not_authorized"])
+        return lang
+
+    # --- Dynamic Tab Navigation (Category 1) ---
+    if cb_data.startswith("nav:"):
+        target = cb_data.split(":", 1)[1]
+        await client.answer_callback_query(cb_id)
+        if target == "menu":
+            header, keyboard = _build_menu_keyboard(command_mode, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        elif target == "status":
+            info_text = await _compile_status_text(api, lang)
+            header, keyboard = _build_menu_status(command_mode, lang, info_text)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        elif target == "mind":
+            bg_enabled = _is_bg_consciousness_active(api)
+            header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        elif target == "language":
+            header, keyboard = _build_language_keyboard(lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        elif target == "tasks":
+            header, keyboard = await asyncio.to_thread(
+                _build_menu_tasks, api, command_mode, lang
+            )
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        elif target == "settings":
+            header, keyboard = _build_menu_settings(api, command_mode, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        return lang
+
+    # --- Command Actions / Control (Category 2) ---
+    if cb_data.startswith("cmd_act:"):
+        action = cb_data.split(":", 1)[1]
+
+        if action == "update_status":
+            await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["updating_status"])
+            info_text = await _compile_status_text(api, lang)
+            header, keyboard = _build_menu_status(command_mode, lang, info_text)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+        elif action == "toggle_silent":
+            # Toggle TELEGRAM_SILENT_MODE and refresh the Settings panel.
+            # This is a display preference (no LLM injection), so it is
+            # allowed in every command_mode including strict.
+            local_settings = _load_settings(api)
+            currently_on = _is_silent_mode_enabled(local_settings)
+            new_value = "off" if currently_on else "on"
+            merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_SILENT_MODE": new_value})
+            confirm()  # the toggle is applied: a later token change must not replay it
+            # Clear any stale tracked message id for this chat so the
+            # next outbound starts a fresh bubble in either direction.
+            _clear_silent_msg(api, cb_chat_id)
+            toast_key = "quiet_toggled_on" if new_value == "on" else "quiet_toggled_off"
+            await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang][toast_key])
+            header, keyboard = _build_menu_settings(api, command_mode, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+        elif action == "bg_thoughts":
+            # The retired thoughts button of a panel sent earlier: settle its spinner
+            # and show the current panel, reading nothing.
+            await client.answer_callback_query(cb_id)
+            bg_enabled = _is_bg_consciousness_active(api)
+            header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+        elif action in ("bg_start", "bg_stop"):
+            if command_mode != _COMMAND_MODE_FULL:
+                await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["restricted_safe"])
+                return lang
+            await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["injecting_consciousness"])
+            translated = "/bg start" if action == "bg_start" else "/bg stop"
+            sender_name = _extract_sender_label(cb_sender, cb_chat_id)
+            sender_label = f"Telegram ({sender_name})"
+            await _inject(api, {
+                "text": translated,
+                "chat_id": cb_chat_id,
+                "user_id": int(cb_sender.get("id") or cb_chat_id or 1),
+                "source": "telegram",
+                "sender_label": sender_label,
+                "transport": {
+                    "kind": "telegram",
+                    "conversation_id": str(cb_chat_id),
+                    "sender_label": sender_label,
+                },
+                "image_base64": "",
+                "image_mime": "",
+                "image_caption": "",
+                # The press is the owner's; the command is this button's words, not theirs.
+                "ui_control": {"name": "telegram_mind_panel"},
+            })
+            confirm()  # the host took the command: it is not injected again
+            # Give it a tiny moment to commit setting then refresh mind panel
+            await asyncio.sleep(0.8)
+            bg_enabled = _is_bg_consciousness_active(api)
+            header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+    # --- Handle language selection buttons ---
+    if cb_data.startswith("set_lang:"):
+        requested = cb_data.split(":", 1)[1]
+
+        async def _toast(text: str, _cb_id: str = cb_id) -> None:
+            await client.answer_callback_query(_cb_id, text=text)
+
+        new_lang = await _choose_language(api, requested, lang, _toast)
+        confirm()  # the host settled the choice: it is not asked again
+        if new_lang or requested == "en":
+            lang = new_lang
+        # Smoothly return to menu panel in the language now in effect
+        header, keyboard = _build_menu_keyboard(command_mode, lang)
+        await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        return lang
+
+    # --- Quiz answers (#472): a tapped option reaches the host's
+    # decision ingress; the owner is already verified above.
+    if cb_data.startswith("qz:"):
+        await telegram_quiz.answer_from_callback(
+            api, client, cb_data, cb_id=cb_id,
+            request_key=update_key(update), lang=lang, post=_host_post,
+        )
+        return lang
+
+    if cb_data.startswith(("set_model:", "set_budget:")):
+        await client.answer_callback_query(
+            cb_id,
+            text=_LOCALIZED_TEXTS[lang]["use_miniapp"],
+        )
+        return lang
+
+    await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["unknown_command"])
+    return lang
+    return lang
+
+
 async def _poller(api) -> None:
     binding = binding_for(api)
 
@@ -634,8 +787,7 @@ async def _poller(api) -> None:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang, generation)  # it records ready
                 revalidating, validated, degraded = False, True, ""
-            offset, handled = cursor.offset, []
-            updates = await client.get_updates(offset)
+            updates = await client.get_updates(cursor.offset)
             if not binding.current(generation):
                 # Answered for the previous token: neither confirmed nor handled, so the same bot's
                 # rotated token receives these updates again and another bot never sees them.
@@ -650,223 +802,11 @@ async def _poller(api) -> None:
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
 
-            deferred = False
-            for index, update in enumerate(updates):
-                if not binding.current(generation):
-                    break  # the rest stays unconfirmed for the new token's client
-                authorized_chat, confirmed = None, (offset, len(handled))
-                try:  # Isolate one bad update without changing offset/retry semantics.
-                    if (not deferred and index >= max_updates) or (deferred and not _panic_update(update)):
-                        # Past the per-poll limit, or behind an update the host did not record, the rest of the
-                        # batch waits in order. Only a Panic already received in the batch goes now, past the
-                        # limit too (below); one Telegram has not returned yet (beyond its getUpdates page of at
-                        # most 100 updates from the held one) waits with the others.
-                        if cursor.is_replay(update):
-                            handled.append(update_key(update))  # one taken earlier (an early Panic) stays taken
-                        continue
-                    update_id = int(update.get("update_id") or 0)
-                    if update_id > 0 and not deferred:  # an early Panic is marked handled, the cursor stays
-                        # Confirm what the server returned, even below the offset: a server
-                        # that lost its queue answers from its oldest update, again each poll.
-                        offset = update_id + 1
-                    handled.append(update_key(update))
-                    if cursor.is_replay(update):
-                        continue
-
-                    authorized_chat = await _authorized_owner(api, client, update, pinned_chat, lang)
-                    if not authorized_chat:
-                        continue
-                    pinned_chat = authorized_chat
-
-                    # --- Handle callback queries (inline button presses) ---
-                    callback_query = update.get("callback_query")
-                    if callback_query:
-                        cb_id = str(callback_query.get("id") or "")
-                        cb_data = str(callback_query.get("data") or "").strip()
-                        cb_message = callback_query.get("message") or {}
-                        cb_message_id = int(cb_message.get("message_id") or 0)
-                        cb_chat = cb_message.get("chat") or {}
-                        cb_chat_id = int(cb_chat.get("id") or 0)
-                        cb_sender = callback_query.get("from") or {}
-                        if (
-                            not pinned_chat
-                            or str(cb_chat_id) != pinned_chat
-                            or str(cb_sender.get("id") or "") != pinned_chat
-                        ):
-                            await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["not_authorized"])
-                            continue
-
-                        # --- Dynamic Tab Navigation (Category 1) ---
-                        if cb_data.startswith("nav:"):
-                            target = cb_data.split(":", 1)[1]
-                            await client.answer_callback_query(cb_id)
-                            if target == "menu":
-                                header, keyboard = _build_menu_keyboard(command_mode, lang)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            elif target == "status":
-                                info_text = await _compile_status_text(api, lang)
-                                header, keyboard = _build_menu_status(command_mode, lang, info_text)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            elif target == "mind":
-                                bg_enabled = _is_bg_consciousness_active(api)
-                                header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            elif target == "language":
-                                header, keyboard = _build_language_keyboard(lang)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            elif target == "tasks":
-                                header, keyboard = await asyncio.to_thread(
-                                    _build_menu_tasks, api, command_mode, lang
-                                )
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            elif target == "settings":
-                                header, keyboard = _build_menu_settings(api, command_mode, lang)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            continue
-
-                        # --- Command Actions / Control (Category 2) ---
-                        if cb_data.startswith("cmd_act:"):
-                            action = cb_data.split(":", 1)[1]
-
-                            if action == "update_status":
-                                await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["updating_status"])
-                                info_text = await _compile_status_text(api, lang)
-                                header, keyboard = _build_menu_status(command_mode, lang, info_text)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                                continue
-
-                            elif action == "toggle_silent":
-                                # Toggle TELEGRAM_SILENT_MODE and refresh the Settings panel.
-                                # This is a display preference (no LLM injection), so it is
-                                # allowed in every command_mode including strict.
-                                local_settings = _load_settings(api)
-                                currently_on = _is_silent_mode_enabled(local_settings)
-                                new_value = "off" if currently_on else "on"
-                                merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_SILENT_MODE": new_value})
-                                confirmed = None  # the toggle is applied: a later token change must not replay it
-                                # Clear any stale tracked message id for this chat so the
-                                # next outbound starts a fresh bubble in either direction.
-                                _clear_silent_msg(api, cb_chat_id)
-                                toast_key = "quiet_toggled_on" if new_value == "on" else "quiet_toggled_off"
-                                await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang][toast_key])
-                                header, keyboard = _build_menu_settings(api, command_mode, lang)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                                continue
-
-                            elif action == "bg_thoughts":
-                                # The retired thoughts button of a panel sent earlier: settle its spinner
-                                # and show the current panel, reading nothing.
-                                await client.answer_callback_query(cb_id)
-                                bg_enabled = _is_bg_consciousness_active(api)
-                                header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                                continue
-
-                            elif action in ("bg_start", "bg_stop"):
-                                if command_mode != _COMMAND_MODE_FULL:
-                                    await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["restricted_safe"])
-                                    continue
-                                await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["injecting_consciousness"])
-                                translated = "/bg start" if action == "bg_start" else "/bg stop"
-                                sender_name = _extract_sender_label(cb_sender, cb_chat_id)
-                                sender_label = f"Telegram ({sender_name})"
-                                await _inject(api, {
-                                    "text": translated,
-                                    "chat_id": cb_chat_id,
-                                    "user_id": int(cb_sender.get("id") or cb_chat_id or 1),
-                                    "source": "telegram",
-                                    "sender_label": sender_label,
-                                    "transport": {
-                                        "kind": "telegram",
-                                        "conversation_id": str(cb_chat_id),
-                                        "sender_label": sender_label,
-                                    },
-                                    "image_base64": "",
-                                    "image_mime": "",
-                                    "image_caption": "",
-                                    # The press is the owner's; the command is this button's words, not theirs.
-                                    "ui_control": {"name": "telegram_mind_panel"},
-                                })
-                                confirmed = None  # the host took the command: it is not injected again
-                                # Give it a tiny moment to commit setting then refresh mind panel
-                                await asyncio.sleep(0.8)
-                                bg_enabled = _is_bg_consciousness_active(api)
-                                header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
-                                await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                                continue
-
-                        # --- Handle language selection buttons ---
-                        if cb_data.startswith("set_lang:"):
-                            requested = cb_data.split(":", 1)[1]
-
-                            async def _toast(text: str, _cb_id: str = cb_id) -> None:
-                                await client.answer_callback_query(_cb_id, text=text)
-
-                            new_lang = await _choose_language(api, requested, lang, _toast)
-                            confirmed = None  # the host settled the choice: it is not asked again
-                            if new_lang or requested == "en":
-                                lang = new_lang
-                            # Smoothly return to menu panel in the language now in effect
-                            header, keyboard = _build_menu_keyboard(command_mode, lang)
-                            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
-                            continue
-
-                        # --- Quiz answers (#472): a tapped option reaches the host's
-                        # decision ingress; the owner is already verified above.
-                        if cb_data.startswith("qz:"):
-                            await telegram_quiz.answer_from_callback(
-                                api, client, cb_data, cb_id=cb_id,
-                                request_key=update_key(update), lang=lang, post=_host_post,
-                            )
-                            continue
-
-                        if cb_data.startswith(("set_model:", "set_budget:")):
-                            await client.answer_callback_query(
-                                cb_id,
-                                text=_LOCALIZED_TEXTS[lang]["use_miniapp"],
-                            )
-                            continue
-
-                        await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["unknown_command"])
-                        continue
-
-                    # --- Handle regular messages ---
-                    await _handle_owner_message(api, client, update, update_id, command_mode, lang)
-                except TelegramBindingChanged:
-                    # Nothing more goes out through this token. An update stopped before its effect was
-                    # accepted (a download, a reply before the host took it) stays unconfirmed, so the same
-                    # bot's next client is given it again; the host accepts an owner message id and a quiz
-                    # request once. One whose local or host effect was applied here (``confirmed`` cleared)
-                    # stays confirmed: replaying it would apply that effect twice (a toggle would undo itself).
-                    if confirmed is not None:
-                        offset, handled = confirmed[0], handled[:confirmed[1]]
-                        api.log("info", "Telegram bot token changed while an update was handled; it stays unconfirmed.")
-                    else:
-                        api.log("info", "Telegram bot token changed after an update was applied; its reply was not sent.")
-                    break
-                except InjectNotAccepted:
-                    if confirmed is not None and not deferred:
-                        # The host said this attempt was not recorded (its store was busy before acceptance): this
-                        # update and the rest stay unconfirmed and are asked again, with the same ids, after a
-                        # pause. Only that answer brings an update back; an unknown outcome is never sent again.
-                        offset, handled = confirmed[0], handled[:confirmed[1]]
-                        deferred = True
-                        api.log("info", "The host did not record a Telegram update; it will be delivered again.")
-                        continue
-                    api.log("warning", "Telegram update was not accepted after its local effect; it is not retried.")
-                except Exception as exc:
-                    api.log(
-                        "warning",
-                        f"Telegram update processing failed ({type(exc).__name__}).",
-                    )
-                    if authorized_chat:
-                        try:
-                            notice = _LOCALIZED_TEXTS[lang]["update_failed"]
-                            await client.send_message(int(authorized_chat), notice)
-                        except Exception:
-                            api.log("warning", "Telegram update failure notice could not be delivered.")
-            if updates and (handled or offset != cursor.offset):
-                cursor.save(offset, handled)
+            deferred, lang = await handle_poll_batch(
+                api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode, lang,
+                authorize=_authorized_owner, is_panic=_panic_update, on_message=_handle_owner_message,
+                on_callback=_handle_poll_callback,
+            )
             await asyncio.sleep(_NOT_ACCEPTED_RETRY_SEC if deferred else 0.1)
         except (TelegramBindingChanged, TelegramTokenMissing):
             continue  # the next cycle builds the client of the accepted token, or waits for one
@@ -900,7 +840,7 @@ async def _poller(api) -> None:
 
 
 async def _handle_owner_message(
-    api, client, update: Dict[str, Any], update_id: int, command_mode: str, lang: str,
+    api, client, update: Dict[str, Any], update_id: int, command_mode: str, lang: str, *, reply_target=None,
 ) -> None:
     """One authorized owner message: local /menu /language /help, command-mode
     translation, a reply to a quiz card (#472), then text/photo/file relay (#668).
@@ -956,9 +896,14 @@ async def _handle_owner_message(
                 "text": "/panic", "chat_id": chat_id,
                 "sender_label": sender_label, "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label},
                 "user_id": int(sender.get("id") or chat_id), "source": "telegram"}), timeout=2)
+        except InjectNotAccepted:
+            raise
         except Exception:
             api.log("warning", "Immediate Telegram Panic was not confirmed; it will not be retried.")
-            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
+            try:
+                await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
+            except TelegramBindingChanged:
+                pass  # the notice lost its client; the unknown Panic is still not retried
         return
 
     # Local commands are done. Look up the replied-to card once, before any payload forwarding;
@@ -1016,7 +961,10 @@ async def _handle_owner_message(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
-    target = _reply_target(api, client.bot_id, chat_id, message)  # an unknown bubble: an ordinary turn, unquoted
+    def read_target():
+        return _reply_target(api, client.bot_id, chat_id, message)
+
+    target = reply_target(read_target) if reply_target is not None else read_target()
     photos = message.get("photo") or []
     image_base64 = ""
     image_mime = ""

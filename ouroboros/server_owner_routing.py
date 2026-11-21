@@ -547,6 +547,7 @@ def _record_routing_receipt(
     attachment_manifest: Optional[list] = None,
     task: Optional[Dict[str, Any]] = None,
     unnamed_label: str = "Task",
+    notice_transport: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Emit a typed bubble-free ack and optionally persist its presentation state.
 
@@ -579,7 +580,8 @@ def _record_routing_receipt(
             from supervisor.events_project_routing import _routing_notice_ack_fields
 
             # The same carrier fact the supervisor's receipt writer states (#966).
-            notice = _routing_notice_ack_fields(ctx, {"chat_id": chat_id, "client_message_id": client_message_id}, fields)
+            notice = _routing_notice_ack_fields(ctx, {"chat_id": chat_id, "client_message_id": client_message_id}, fields,
+                                                notice_transport=notice_transport)
             ack(chat_id, client_message_id=client_message_id, **fields, **notice)
         else:
             broadcast = getattr(bridge, "broadcast", None)
@@ -627,22 +629,26 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     telegram_room = (incoming.get("source") == "skill:telegram" and task_metadata.get("_host_operation") is True
                      and isinstance(reply_ref, dict) and reply_ref.get("telegram_room_chat_id", 0) != 0)
     ingress_chat = chat_id  # the owner's row, its receipts and refusals stay in the conversation he wrote in
-    from ouroboros.chat_references import TURN_ADDRESS, telegram_chat_row
+    from ouroboros.chat_references import TURN_ADDRESS, decided_reply_address, telegram_chat_row
 
     physical = not telegram_room and telegram_chat_row(incoming.get("source"), chat_id, client_message_id)
     if not telegram_room:  # only an exact Reply's own turn carries the address its acceptance gave it
         task_metadata.pop(TURN_ADDRESS, None)
+    decided_project = {}
     if telegram_room:
+        from ouroboros.project_admission import reserved_project_for_chat
+
         room = reply_ref["telegram_room_chat_id"]
         try:
-            if type(room) is not int or room <= 0 or _reserved_project_for_chat(ctx, room).get("lifecycle") != "active":
-                room = None
+            if type(room) is int and room > 0:
+                decided_project = reserved_project_for_chat(ctx.DRIVE_ROOT, room)
         except (OSError, ValueError):
-            room = None
-        if room is None:  # one notice (its ACK); the named operation ends refused where it was accepted
+            pass
+        if decided_project.get("lifecycle") != "active":
             _record_routing_receipt(bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
                                     action="project_route", status="project_unavailable",
-                                    reason="reply_target_unavailable")
+                                    reason="reply_target_unavailable",
+                                    notice_transport=decided_reply_address(incoming.get("accepted_source_row") or {}))
             _settle_refused(ctx, ingress_chat, client_message_id, "reply_target_unavailable")
             return
         chat_id = room
@@ -674,6 +680,12 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             "host_initiated": True,
         }
         metadata = task_metadata if isinstance(task_metadata, dict) else {}
+        if telegram_room:
+            from ouroboros.chat_references import reply_transport_from_metadata
+
+            event["project_id"] = decided_project["id"]
+            if transported := reply_transport_from_metadata(ctx.DRIVE_ROOT, metadata):
+                event[TURN_ADDRESS] = transported
         if isinstance(metadata.get("client_surface"), dict):
             event["client_surface"] = dict(metadata["client_surface"])
         if isinstance(metadata.get("ui_control"), dict):
@@ -705,7 +717,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # typed System row (host_initiated) plus that receipt.
         return
     try:  # the owner bot's own chat id is a Telegram address, never a room's: only a decided Reply leaves it
-        reserved_project = {} if physical else _reserved_project_for_chat(ctx, chat_id)
+        reserved_project = decided_project if telegram_room else ({} if physical else _reserved_project_for_chat(ctx, chat_id))
     except (OSError, ValueError) as exc:
         _record_routing_receipt(
             bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
@@ -846,7 +858,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     # Unknown roots, like unknown Projects, go to the decision lane, which is told so.
     needs_decision_lane = bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
     if needs_decision_lane:
-        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
+        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots,
+                                                decided_project_id=project_id)
 
     if realtime_turn is not None:
         # A live call keeps a thread of this process (``executor=inline_call``): its host port is process-local.

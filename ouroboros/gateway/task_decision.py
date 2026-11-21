@@ -525,7 +525,12 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     if action not in {"answer", "close", "dismiss"}:
         return _refused("action must be answer, close or dismiss", 400, reason_code="action_invalid")
     allowed = {"request_id", "decision_id", "option_index", "comment", "action", "reason"}
-    if any(key not in allowed | ({"surface"} if source == "skill:telegram" else set()) for key in body):
+    if "surface" in body:
+        from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+
+        if source == TELEGRAM_SOURCE and bundled_bridge(drive_root):
+            allowed.add("surface")
+    if body.keys() - allowed:
         return _refused(
             "decision accepts only {request_id, decision_id, option_index?, comment?, action?, reason?}",
             400, reason_code="unexpected_fields",

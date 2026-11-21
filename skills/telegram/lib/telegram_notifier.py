@@ -82,6 +82,8 @@ async def _push_notification(
     token, generation = binding.snapshot()  # one identity: its references and its requests are one bot's
     state_dir = Path(api.get_state_dir())
     try:
+        if not token:
+            raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
         client = TelegramClient(
             token, trust_env=trust_env,
             proxy=telegram_proxy(state_dir),

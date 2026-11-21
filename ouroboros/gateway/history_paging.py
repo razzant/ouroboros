@@ -340,7 +340,10 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
     keys = [("chat_id", chat) for chat in chats] + [("chat_id", None)]
     placed = place_room_chats(data_dir)
     spoken = [key for key in keys if key[1] not in placed]
-    return {"chat": RoomLens((*spoken, ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
+    # A Project number can also be the physical address of the owner bot. The indexed
+    # inbound candidates still pass the canonical row/room check, including for old rows.
+    telegram = tuple(("telegram_inbound_chat", chat) for chat in sorted(project_chat_ids))
+    return {"chat": RoomLens((*spoken, *telegram, ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
             "progress": RoomLens(tuple(keys))}
 
 

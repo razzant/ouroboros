@@ -812,7 +812,7 @@ def _dispatch(chain, row, monkeypatch):
     monkeypatch.setattr(routing, "_route_project_chat_to_running_task", elsewhere)
     monkeypatch.setattr(routing, "_route_main_followup", elsewhere)
     monkeypatch.setattr(routing, "addressable_roots", lambda _ctx: SimpleNamespace(rows=lambda *_a: [], gap=None))
-    monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots: meta)
+    monkeypatch.setattr(routing, "_decision_turn_metadata", lambda _ctx, _room, _cmid, meta, _roots, **_kw: meta)
     [incoming] = [item for item in chain.queued if item["client_message_id"] == row["client_message_id"]]
     source = build_owner_message_ref(chat_id=42, client_message_id=row["client_message_id"], ts=row["ts"],
                                      text=row["text"])

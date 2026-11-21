@@ -51,7 +51,7 @@ DISPATCH_STATES = ("none", "pending", "dispatched", "completed", "abandoned")
 _PROBE_INDEX = {"chat_id": "dialogue_room", "task_id": "dialogue_task", "parent_task_id": "dialogue_parent",
                 "root_task_id": "dialogue_root", "subagent_task_id": "dialogue_subagent", "origin": "dialogue_origin",
                 "client_message_id": "dialogue_named", "kind": "dialogue_kind",
-                "appearance": "room_appearances"}  # the derived index (``APPEARANCES_DDL``), not a dialogue column
+                "appearance": "room_appearances", "telegram_inbound_chat": "dialogue_inbound"}  # named non-column probes
 _TASK_KEYS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id")  # every identifier a task's row may carry
 SKIPPED_KINDS = ("invalid", "non_object")  # a line that is not JSON; valid JSON that is not an object
 _SCHEMA = """
@@ -1114,6 +1114,12 @@ def _probe_seqs(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str,
         bounds += (limit,)
     tail += ")"
     for column, listed in values.items() if limit is None or limit > 0 else ():
+        if column == "telegram_inbound_chat":  # old accepted rows too, without rebuilding the appearance index
+            found.update(json.loads(conn.execute(
+                "SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY dialogue_inbound "
+                "WHERE stream=? AND direction='in' AND chat_id IN (SELECT +value FROM json_each(?)) "
+                "AND client_message_id GLOB 'tg:*'" + tail, (stream, json.dumps(listed), *bounds)).fetchone()[0]))
+            continue
         select = (f"SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY {_PROBE_INDEX[column]} "
                   f"WHERE stream=? AND {column} ")
         if column == "appearance":  # one seek per key of the derived index; absent before its first row
@@ -1153,6 +1159,8 @@ def main_candidates(root: Any, stream: str, *, exclude_chats: Iterable[int], pin
         chats = [record["chat_id"] for record in conn.execute("SELECT chat_id FROM rooms ORDER BY chat_id")
                  if record["chat_id"] not in excluded]
         keys: List[Tuple[str, Any]] = [("chat_id", chat) for chat in chats] + [("chat_id", None)]
+        if stream == "chat":
+            keys.extend(("telegram_inbound_chat", chat) for chat in excluded)
         keys.extend(("kind", kind) for kind in pinned_kinds)
         probed = _probe(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=True)
     return _probed(*probed)
