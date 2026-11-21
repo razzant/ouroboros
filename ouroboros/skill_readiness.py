@@ -22,9 +22,9 @@ class SkillReadiness:
     # G3 (capinv-447): declared dependencies that need manual installation —
     # disclosed ("kind:package"), never silently dropped; not a hard blocker.
     manual_dependencies: List[str] = field(default_factory=list)
-    # Grant facts that keep nothing from running (``skill_grant_scope.grant_notes``): a key saved in Settings
-    # after the grant, not passed; a use-time permission waiting for the check of edited files.
-    grant_notes: List[str] = field(default_factory=list)
+    # Non-blocking facts beside the blockers (``skill_grant_scope.grant_notes``: a key saved in Settings after the
+    # grant, not passed; a use-time permission waiting for the check of edited files). They keep nothing from running.
+    notes: List[str] = field(default_factory=list)
     next_actions: List[Dict[str, str]] = field(default_factory=list)
 
 
@@ -375,6 +375,6 @@ def skill_readiness_for_execution(
         grant_status=grants,
         conflict=conflict,
         manual_dependencies=manual_dependencies,
-        grant_notes=notes,
+        notes=notes,
         next_actions=next_actions,
     )

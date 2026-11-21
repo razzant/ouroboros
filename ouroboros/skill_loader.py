@@ -1530,7 +1530,6 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             # `brew:ffmpeg` installed by a human is otherwise reported ready
             # and fails only at execution time.
             "manual_dependencies": list(getattr(readiness, "manual_dependencies", []) or []),
-            "grant_notes": list(getattr(readiness, "grant_notes", []) or []),
         })
         # Extension liveness is a different fact from script executability: the
         # same producer /api/extensions reads, so the catalogue and the HTTP

@@ -955,7 +955,7 @@ forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
 until the owner grants it: it is not passed, the skill keeps running with its other approvals and readiness names it
-(`grant_notes`). A granted key is read as currently saved: each
+in its non-blocking `notes`. A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,

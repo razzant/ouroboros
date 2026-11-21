@@ -1444,11 +1444,18 @@ def test_a_key_saved_after_the_grant_is_not_passed_and_unloads_nothing(tmp_path,
     assert later["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"]  # the new key is not passed
     assert later["missing_keys"] == ["TELEGRAM_PAIRING_CODE"] and later["pending_keys"] == ["TELEGRAM_PAIRING_CODE"]
     assert later["blocked"] is False and later["usable"] is True and later["all_granted"] is False
+    from ouroboros.skill_readiness import skill_readiness_for_execution
+
+    noted = skill_readiness_for_execution(drive_root, skill, require_enabled=False, skills=[skill])
+    assert noted.ready is True and not any(item.startswith("missing_grants") for item in noted.blockers)
+    assert [note.split(":")[0] for note in noted.notes] == ["key TELEGRAM_PAIRING_CODE not granted"]
     # A key the owner's decision covered but did not grant still blocks, as before.
     save_skill_grants(drive_root, skill.name, ["GOOGLE_OAUTH_CLIENT_ID"], content_hash="hash-a",
                       requested_keys=["GOOGLE_OAUTH_CLIENT_ID", "TELEGRAM_PAIRING_CODE"])
     declined = grant_status_for_skill(drive_root, skill)
     assert declined["pending_keys"] == [] and declined["blocked"] is True and declined["usable"] is False
+    blocked = skill_readiness_for_execution(drive_root, skill, require_enabled=False, skills=[skill])
+    assert blocked.notes == [] and any(item.startswith("missing_grants") for item in blocked.blockers)
 
 
 def test_grant_status_supports_extension_skills(tmp_path):
