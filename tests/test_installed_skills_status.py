@@ -147,3 +147,16 @@ def test_the_gate_adds_only_the_refusals_readiness_does_not_compute(tmp_path):
     repeated = _extension(desired_live=False, live_reason="missing_grants",
                           readiness={"ready": False, "blockers": ["missing_grants:keys=['K'],permissions=[]"]})
     assert skill_status(repeated)["reasons"] == ["missing_grants:keys=['K'],permissions=[]"]
+
+
+def test_a_reversible_off_is_named_by_the_actor_set_its_owner_keeps(tmp_path, monkeypatch):
+    """``off_state`` reads ``skill_lifecycle_actions._REVERSIBLE_DISABLE_ACTORS``: a second actor whose Off is not a
+    choice joins it there and is named here; a choice outside the set stays unexplained."""
+    _skill(tmp_path, "lost", enabled=False, actor="startup_revert")
+    _skill(tmp_path, "mine", enabled=False)
+    rows = {row["name"]: row for row in summarize_skills(tmp_path)["skills"]}
+    assert off_state(tmp_path, rows["lost"]) == ""
+    monkeypatch.setattr("ouroboros.skill_lifecycle_actions._REVERSIBLE_DISABLE_ACTORS",
+                        frozenset({"load_error_revert", "startup_revert"}))
+    assert off_state(tmp_path, rows["lost"]) == "turned off after it failed to load"
+    assert off_state(tmp_path, rows["mine"]) == ""

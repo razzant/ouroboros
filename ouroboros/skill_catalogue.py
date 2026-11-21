@@ -246,7 +246,8 @@ def skill_status(row: Any) -> dict:
 
 def off_state(drive_root: Any, row: Any) -> str:
     """Who left an installed skill Off, when it was not a choice: ``""`` when ``enabled.json`` holds an Off written
-    by anyone but a failed load's revert (``skill_lifecycle_actions._REVERSIBLE_DISABLE_ACTORS``)."""
+    by anyone but a failed load's revert (``skill_lifecycle_actions._REVERSIBLE_DISABLE_ACTORS``, read from there)."""
+    from ouroboros.skill_lifecycle_actions import _REVERSIBLE_DISABLE_ACTORS
     from ouroboros.skill_loader import skill_state_dir_path
     from ouroboros.utils import read_json_dict
 
@@ -262,7 +263,7 @@ def off_state(drive_root: Any, row: Any) -> str:
         return "its on/off record is unreadable (state unknown)"
     if choice.get("enabled"):
         return "switched on, but the host does not run it as on"
-    return "turned off after it failed to load" if choice.get("actor") == "load_error_revert" else ""
+    return "turned off after it failed to load" if choice.get("actor") in _REVERSIBLE_DISABLE_ACTORS else ""
 
 
 def _compact(row: dict, drive_root: Any = None) -> dict:
