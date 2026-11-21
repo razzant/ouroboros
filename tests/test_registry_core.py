@@ -834,3 +834,26 @@ def test_is_builtin_answers_registration_not_visibility(tmp_path):
     assert registry.is_builtin("read_file") and registry.get_schema_by_name("read_file") is not None
     for name in ("calendar", "mcp_srv__lookup", "ext_7_weather_forecast", ""):
         assert not registry.is_builtin(name), name
+
+
+def test_a_presence_ceiling_hides_tools_not_names_that_are_no_tool(tmp_path):
+    """Under a Presence ceiling a registered built-in outside it, and an MCP or extension name, are hidden by the
+    ceiling; a built-in-shaped name no catalog holds (a skill's name, a typo) is no tool, not a hidden one."""
+    from ouroboros import extension_loader
+    from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    ceiling = PresenceCapabilityCeiling(
+        skill_name="behavior", skill_content_hash="a" * 64, profile_fingerprint="b" * 64,
+        state_fingerprint="c" * 64, selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=3,
+        tool_grants=(PresenceToolGrant("read_file"),), resource_grants=(), digest="0" * 64)
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, task_id="presence",
+                                     task_contract={"capability_ceiling": presence_ceiling_payload(ceiling)}))
+    outside = "outside this presence task's positive capability ceiling"
+    for name in ("write_file", "mcp_srv__lookup", extension_loader.extension_surface_name("weather", "forecast")):
+        assert registry.policy_hidden_reason(name) == outside, name
+    assert registry.policy_hidden_reason("read_file") is None
+    for name in ("calendar", "definitely_not_a_tool"):
+        assert not registry.is_builtin(name) and registry.policy_hidden_reason(name) is None, name

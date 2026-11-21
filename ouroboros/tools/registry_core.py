@@ -31,7 +31,7 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
     protected_write_block_message,
 )
-from ouroboros.tool_policy import name_miss_guidance, tool_namespace, usable_selectors
+from ouroboros.tool_policy import BUILTIN_NAMESPACE, name_miss_guidance, tool_namespace, usable_selectors
 from ouroboros.tool_capabilities import (
     ACTING_SUBAGENT_MODE,
     acting_tool_names_for_context,
@@ -846,6 +846,10 @@ class ToolRegistry:
         if entry is None:
             if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
                 return _HIDDEN_REASON_TEXT["disabled"]
+            # A Presence ceiling hides tools; a built-in-shaped name no catalog holds (a skill's name, a
+            # typo) is no tool at all, so it is not reported as hidden by it.
+            if tool_namespace(requested) == BUILTIN_NAMESPACE:
+                return None
             return None if _presence_tool_allowed(self._ctx, requested) else _HIDDEN_REASON_TEXT["presence"]
         availability = _builtin_tool_availability(requested, self._ctx)
         cause = self._builtin_hidden(entry, self._builtin_view(), availability)
