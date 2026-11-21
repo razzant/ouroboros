@@ -1270,7 +1270,8 @@ class UpdateLetter(TypedDict):
     author: Dict[str, Any]  # {task_id, model, requested} — host-derived
     checked_key: Optional[Dict[str, Any]]
     material: Optional[Dict[str, Any]]  # {key, collected_at, text_bytes (query_data's count), commits, bodies_read, bodies_omitted}
-    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved}
+    request: Optional[Dict[str, Any]]  # {task_id, current_task_id, mode, key, requested_at, status (retry/Continue), saved,
+    #                                    cancel_state "pending" while a Stop is carried out (status stays as read)}
 
 
 class UpdateTransactionState(TypedDict, total=False):

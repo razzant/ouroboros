@@ -404,6 +404,35 @@ def test_failure_state_truncation_is_disclosed(tmp_path, monkeypatch):
     assert fact["failure_states_omitted"] == 1
 
 
+def test_all_failed_producer_binds_the_interrupted_first_attempt(tmp_path):
+    # R2 (Astra): the parity fixture pre-sets the fact; this drives the REAL producer —
+    # actual custody rows for an interrupted first run and a failed later run — and
+    # asserts the all-failed aggregate binds the first attempt's own typed state, so
+    # the sentence key and the card line read the producer's output, not a hand-set field.
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_bootstrap_identity import claim_initial_invocation
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.subagent_bootstrap import actor_first_unresolved_fact
+    from ouroboros.tool_error_words import first_attempt_cause_key
+
+    ctx = SimpleNamespace(task_id="actor-interrupted", drive_root=tmp_path, budget_drive_root=tmp_path,
+                          _configured_actor_bootstrap={"physical_started": True}, task_metadata={})
+    with custody.actor_decision_lock(tmp_path, "actor-interrupted"):
+        assert not claim_initial_invocation(tmp_path, "actor-interrupted", {"invocation_id": "initial"})
+    for name, state in (("initial", "interrupted"), ("later", "failed")):
+        assert custody.record_started(tmp_path, custody.RunCustody(
+            task_id="actor-interrupted", run_id=name, invocation_id=name))
+        assert custody.emit(tmp_path, custody.SETTLED, {"task_id": "actor-interrupted", "run_id": name, "state": state})
+    fact = actor_first_unresolved_fact(ctx, task_id="actor-interrupted", drive_root=tmp_path)
+    assert fact["status"] == "incomplete" and fact["reason"] == "delegated_runs_failed_without_success"
+    assert fact["initial_execution"]["state"] == "interrupted"
+    assert fact["initial_execution"]["run_id"] == "initial"
+    assert first_attempt_cause_key({"actor_first_terminal": fact}) == "configured_actor_first_interrupted"
+    record = {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {
+        "status": "degraded", "reason_code": "configured_actor_incomplete", "actor_first_terminal": fact}}}
+    assert _completion_verdict(record, {}) == "First coding attempt interrupted."
+
+
 def test_precustody_refusals_leave_a_durable_start_blocked_row(tmp_path):
     """D5 evidence collapse fix (owner 2026-08-30): every pre-custody refusal
     class in delegate_start_entry lands a START_BLOCKED row - without it the

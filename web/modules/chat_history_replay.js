@@ -1,5 +1,6 @@
 /** Historical rows enrich the existing timeline without acquiring live authority. */
 import { foldWaitRow } from './task_checkpoints.js';
+import { childLineCause } from './log_events.js';
 
 export function compareHistoryPosition(left, right) {
     if (!left || !right) return 0;
@@ -36,6 +37,49 @@ export function stampHistoryNode(node, id, position) {
         node.dataset.historySource = position.source;
         node.dataset.historyOffset = String(position.offset);
     }
+}
+
+// Cause facts only a frame that states them replaces: an absent key keeps the last stated value, an explicit
+// empty debt list clears it. A reason survives only while the frame also states no typed axes or review —
+// those are the new authoritative cause and drop the old reason with it.
+const CARRIED_CAUSE_FACTS = ['_result_text_present', 'delegated_runs_unreconciled'];
+const REASON_FACTS = ['reason_code', 'reason_detail'];
+const REASON_AXES = ['outcome_axes', 'terminal_plan_review_open', 'review_status', 'task_completion'];
+
+function mergeChildCause(stated, before) {
+    if (!before) return stated;
+    let merged = stated;
+    const carry = (key) => {
+        if (merged[key] === undefined && before[key] !== undefined) merged = { ...merged, [key]: before[key] };
+    };
+    for (const key of CARRIED_CAUSE_FACTS) carry(key);
+    if (!REASON_FACTS.some((key) => merged[key] !== undefined) && !REASON_AXES.some((key) => merged[key] !== undefined)) {
+        for (const key of REASON_FACTS) carry(key);
+    }
+    return merged;
+}
+
+/** What a line keeps across the frames that rewrite it. A child's ending carries two independent facts: its report and
+ * trace (`fullOutput` with their `outputPreview`, free of cause words, from the newest frame that carried them) and its
+ * cause facts (`childCause`, the newest frame's, with facts it does not restate carried). A frame of the outcome alone
+ * (task_done, a late review's current outcome) carries no report: the line keeps the one it holds and words that
+ * frame's cause beside it, an emptied cause included. The answer's presence stays as last stated until a frame states it again. */
+export function timelineReadFields(summary, previous = {}) {
+    const stated = summary.childCause, before = previous.childCause;
+    const cause = stated ? mergeChildCause(stated, before) : stated;
+    const read = {
+        fullRef: summary.fullRef || previous.fullRef || '',
+        truncated: summary.truncated || previous.truncated || false,
+        childCause: cause && before && JSON.stringify(cause) === JSON.stringify(before) ? before : cause,
+    };
+    if (!stated) return previous.fullOutput ? { ...read, fullOutput: '', outputPreview: '' } : read;
+    if (summary.fullOutput) return { ...read, fullOutput: summary.fullOutput, outputPreview: summary.outputPreview || '' };
+    const fullOutput = previous.fullOutput || '', outputPreview = previous.outputPreview || '';
+    // A status-only frame's fullBody is the cause detail composed from its own facts; word it from the
+    // carried facts instead, so an absent current debt does not drop a known open warning.
+    const detail = childLineCause(cause).detail;
+    return { ...read, fullOutput, outputPreview, body: summary.body || outputPreview,
+        fullBody: [fullOutput, detail].filter(Boolean).join('\n\n') };
 }
 
 export function mergeHistoricalTimelineItem(record, summary, row, ts) {
@@ -87,12 +131,20 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
             if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision < item.cardRowRevision
                 || summary.cardRowRevision === item.cardRowRevision && !newerReview) return adoptedSource;
         } else if (!Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
-                && compareHistoryPosition(row.history_position, existingPosition) < 0)) return adoptedSource;
+                && compareHistoryPosition(row.history_position, existingPosition) < 0)) {
+            // An older row still brings the report a newer frame of the outcome alone never carried: the line takes
+            // the report and keeps its newer cause (without a report its body and fullBody are that cause's words).
+            if (!(summary.childCause && summary.fullOutput && item.childCause && !item.fullOutput)) return adoptedSource;
+            Object.assign(item, timelineReadFields({ ...item, fullRef: summary.fullRef, truncated: summary.truncated },
+                { ...item, childCause: summary.childCause, fullOutput: summary.fullOutput, outputPreview: summary.outputPreview }));
+            return true;
+        }
         const update = { headline: summary.headline || item.headline,
             cardRowRevision: summary.cardRowRevision,
             cardReview: summary.cardReview || null, evidenceRef: summary.evidenceRef || null,
             fullHeadline: summary.fullHeadline || summary.headline || item.fullHeadline,
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
+            ...timelineReadFields(summary, item),
             phase: summary.phase || item.phase, sourceTs: row.ts || item.sourceTs,
             ts, ...source };
         if (Object.entries(update).every(([key, value]) => key === 'historyPosition'
@@ -115,7 +167,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
             phase: summary.phase || 'working', headline: summary.headline || 'Update',
             fullHeadline: summary.fullHeadline || summary.headline || 'Update',
             body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
-            fullRef: summary.fullRef || '', truncated: summary.truncated || false,
+            ...timelineReadFields(summary),
             evidenceRef: summary.evidenceRef || null,
             ts: ts || '', sourceTs: row.ts || '', count: 1, dedupeKey: key, ...activity, ...occurrence,
             ...(evolving ? source : { historyId: identity, historyPosition: row.history_position }),
