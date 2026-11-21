@@ -300,7 +300,7 @@
  * @property {string=} subagent_role
  * @property {boolean=} accepted
  * @property {number=} active_subagent_count
- * @property {number=} max_active_subagents
+ * @property {number=} max_active_subagents  // the owner's number per root; absent: no number
  * @property {boolean=} queued_behind_active_cap
  * @property {string[]=} required_capabilities
  * @property {string=} write_surface
