@@ -171,6 +171,13 @@ def test_extensions_import_only_this_interpreters_site_packages(tmp_path):
     for path in (mine, older):
         path.mkdir(parents=True)
     assert _isolated_python_site_dirs(tmp_path) == [mine.resolve()], "an older Python's packages are not importable here"
+    # Windows keeps one unversioned Lib/site-packages and records the minor only in pyvenv.cfg.
+    shared = env / "Lib" / "site-packages"
+    shared.mkdir(parents=True, exist_ok=True)
+    (env / "pyvenv.cfg").write_text("home = C:\\old\nversion = 3.1.0\n", encoding="utf-8")
+    assert shared.resolve() not in _isolated_python_site_dirs(tmp_path), "another minor's Lib is not importable here"
+    (env / "pyvenv.cfg").write_text("home = C:\\new\nversion = {}.{}.0\n".format(*sys.version_info[:2]), encoding="utf-8")
+    assert shared.resolve() in _isolated_python_site_dirs(tmp_path), "this minor's Lib still is"
 
 
 def test_a_half_repaired_env_is_not_current_and_only_package_skills_are_refused(skill, tmp_path):
