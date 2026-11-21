@@ -160,3 +160,38 @@ def test_a_reversible_off_is_named_by_the_actor_set_its_owner_keeps(tmp_path, mo
                         frozenset({"load_error_revert", "startup_revert"}))
     assert off_state(tmp_path, rows["lost"]) == "turned off after it failed to load"
     assert off_state(tmp_path, rows["mine"]) == ""
+
+
+def _unreadable(monkeypatch, path: pathlib.Path) -> None:
+    """``path`` cannot be stat-ed, as under a state folder whose permissions were taken away."""
+    real_stat = pathlib.Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", stat)
+
+
+def test_an_unreadable_on_off_record_is_said_and_a_missing_one_was_never_turned_on(tmp_path, monkeypatch):
+    _skill(tmp_path, "locked", enabled=False)
+    _skill(tmp_path, "fresh", reviewed=False, actor=None)
+    rows = {row["name"]: row for row in summarize_skills(tmp_path)["skills"]}
+    _unreadable(monkeypatch, tmp_path / "state" / "skills" / "locked" / "enabled.json")
+    assert off_state(tmp_path, rows["locked"]) == "its on/off record is unreadable (state unknown)"
+    assert off_state(tmp_path, rows["fresh"]) == "never turned on"
+
+
+def test_a_row_that_fails_to_render_is_the_read_failure_line_not_an_exception(tmp_path, monkeypatch):
+    _skill(tmp_path, "quiet", enabled=False)
+    assert "quiet" in _section(tmp_path).operative_view
+
+    def broken(*_args):
+        raise RuntimeError("off record")
+
+    monkeypatch.setattr("ouroboros.skill_catalogue.off_state", broken)
+    section = _section(tmp_path)
+    for text in (section.full_text, section.operative_view):
+        assert text.endswith("The skill list could not be read (RuntimeError); list_skills() reads it.")
+        assert "quiet" not in text

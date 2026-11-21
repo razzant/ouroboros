@@ -479,3 +479,26 @@ def test_broken_counts_every_load_error_its_rows_show(registry, worker_extension
         named = json.loads(registry.execute_result("list_skills", {"name": name}).text)
         assert named["skills"][0]["load_error"] == rows[name, "external"]["load_error"]
     assert not json.loads(registry.execute_result("list_skills", {"name": "healthy"}).text)["skills"][0]["load_error"]
+
+
+def test_list_skills_says_an_unreadable_on_off_record_instead_of_failing(registry, monkeypatch):
+    """The registered tool survives an on/off record it cannot read and says so; a missing record is a skill never
+    turned on (RV1 CARBON-3)."""
+    drive = registry._ctx.drive_root
+    _seed(registry, "locked")
+    _seed(registry, "fresh")
+    save_enabled(drive, "locked", False, actor="owner_ui")
+    summary = summarize_skills(drive)  # read before the record is locked, as a list taken a moment earlier
+    monkeypatch.setattr("ouroboros.tools.skill_exec.summarize_skills", lambda *_a, **_kw: summary)
+    locked = drive / "state" / "skills" / "locked" / "enabled.json"
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    rows = {row["name"]: row for row in json.loads(registry.execute_result("list_skills", {}).text)["skills"]}
+    assert rows["locked"]["off_state"] == "its on/off record is unreadable (state unknown)"
+    assert rows["fresh"]["off_state"] == "never turned on"

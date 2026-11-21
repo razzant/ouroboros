@@ -256,9 +256,13 @@ def off_state(drive_root: Any, row: Any) -> str:
     if row.get("load_error") and not row.get("manifest_file"):
         return "its manifest cannot be read"
     path = skill_state_dir_path(pathlib.Path(drive_root), str(row.get("name") or "")) / "enabled.json"
-    if not path.exists():
+    try:  # never raises: a record that cannot be read is said, like one that cannot be parsed
+        path.stat()
+        choice = read_json_dict(path)
+    except (FileNotFoundError, NotADirectoryError):
         return "never turned on"
-    choice = read_json_dict(path)
+    except OSError:
+        choice = None
     if not isinstance(choice, dict) or not isinstance(choice.get("enabled"), bool):
         return "its on/off record is unreadable (state unknown)"
     if choice.get("enabled"):
