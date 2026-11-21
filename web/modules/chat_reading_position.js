@@ -18,6 +18,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
     // returning: the claim of a ↓ still waiting for the present to be read (drawn busy on ↓).
     let approximate = false, dragging = '', claimed = null, scrolls = 0, arriving = null, returning = null, relayout = false;
+    let deferredScroll = -1;
     // The feed's box at a drag's release: the drag's own last scrolls arrive in it, a resize's clamp in another.
     let releasedBox = '';
     const feedBox = () => `${feed.clientWidth}x${feed.clientHeight}`;
@@ -36,7 +37,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         requestAnimationFrame(() => requestAnimationFrame(() => {
             if ((dragging === 'owed' || dragging === 'released') && token === generation && scrolls === seen) dragging = '';
             if (!relayout) return;
-            if (dragging !== 'owed') { relayout = false; if (alive()) state.reflow(); }
+            if (dragging !== 'owed') { relayout = false; deferredScroll = -1; if (alive()) state.reflow(); }
             else if (wait) owedEnd(true);
         }));
     };
@@ -138,11 +139,17 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     if (follow) {
                         if (forceFollow || height !== feed.scrollHeight) feed.scrollTop = feed.scrollHeight;
                         else if (feed.scrollTop !== top) feed.scrollTop = top;
+                    } else if (dragging === 'owed') {
+                        if (deferredScroll !== scrolls || !viewportAnchor) {
+                            viewportAnchor = anchor;
+                            deferredScroll = scrolls;
+                        }
+                        if (!relayout) { relayout = true; owedEnd(true); }
                     } else anchors.restore(anchor);
                     if (remoteContent && result && !follow) activity();
                     state.top = feed.scrollTop; state.stick = follow;
                     if (dragging === 'released' && state.top !== top) placed = state.top;
-                    state.remember();
+                    if (follow || dragging !== 'owed') state.remember();
                     updateButton();
                 }
             }
@@ -263,18 +270,20 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                     return;
                 }
                 state.cancel(); state.stick = false; state.ownMove = true;
+                if (direction > 0 && feed.scrollHeight > feed.clientHeight && !state.nearBottom()) dragging = 'owed';
                 const token = generation, own = ++gestures, since = event.timeStamp;
                 requestAnimationFrame(() => {
-                    if (!alive() || !visible() || token !== generation || own !== gestures) return;
+                    if (token !== generation || own !== gestures) return;
+                    if (!alive() || !visible()) { if (dragging === 'owed') dragging = ''; return; }
                     // A browser may move the box before it reports the gesture: when the
                     // box under it scrolled, the gesture was that box's after all.
                     for (let box = origin; boxScrolled?.at >= since - 50 && box && box !== feed; box = box.parentElement) {
-                        if (box === boxScrolled.box) { latched = true; absorb(); return; }
+                        if (box === boxScrolled.box) { if (dragging === 'owed') dragging = ''; latched = true; absorb(); return; }
                     }
                     state.stick = direction > 0 && feed.scrollHeight > feed.clientHeight && state.nearBottom();
                     // A key, wheel or swipe the engine animates may still be moving the feed:
                     // like a released drag, its own later scrolls decide until scrollend.
-                    if (direction > 0 && !state.stick) dragging = 'owed';
+                    dragging = direction > 0 && !state.stick ? 'owed' : (dragging === 'owed' ? '' : dragging);
                     state.top = feed.scrollTop;
                     navigate(direction);
                 });

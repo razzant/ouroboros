@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { cardRowView, createRoomWork, latestRepresentedRoot, workCard } from '../modules/room_work.js';
+import { createTimelineAnchors } from '../modules/chat_render_batch.js';
 import { markView } from '../modules/status_mark.js';
 import { desiredLiveCardPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, reconcileWorkState, roomStatusView } from '../modules/work_status.js';
@@ -1064,5 +1065,87 @@ for (const asPanel of [false, true]) for (const [words, expected] of [
         assert.equal(list.children[0].dataset.settled, '1');
         assert.equal(list.children[0].querySelector('.rw-focus').textContent, expected);
         assert.equal(list.children[0].querySelector('.rw-focus').hidden, !expected);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('Back to reading and bookmark serialization keep a straddling top card when a temporary neighbour below it disappears', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade;
+    try {
+        const node = (cls, parent) => { const el = document.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+        const page = node('page', mount);
+        const header = node('chat-page-header', page);
+        const titleRow = node('app-page-title-row', node('app-page-title-block', header));
+        const badge = node('status-badge thinking', node('app-page-actions ui-chrome-group', header));
+        const messages = node('chat-messages', page);
+        messages.offsetHeight = 750;
+        messages.clientHeight = 750;
+        let scrollTop = 2000;
+        Object.defineProperty(messages, 'scrollTop', {
+            get: () => scrollTop,
+            set: (value) => { scrollTop = Math.max(0, Math.min(4250, value)); },
+        });
+        messages.getBoundingClientRect = () => ({ top: 0, bottom: 750, left: 0, right: 600, width: 600, height: 750 });
+
+        const placeRow = (el, y, height) => {
+            el.getBoundingClientRect = () => ({ top: y - scrollTop, bottom: y - scrollTop + height, left: 0, right: 600, width: 600, height });
+            el.getClientRects = () => [el.getBoundingClientRect()];
+            el.closest = (selector) => {
+                if (selector === '[data-history-id]' && el.dataset.historyId) return el;
+                if (selector === '.chat-live-card' && el.classList.contains('chat-live-card')) return el;
+                return null;
+            };
+            return el;
+        };
+
+        const topCard = placeRow(node('chat-bubble chat-card-bubble', messages), 1700, 380);
+        topCard.dataset.historyId = 'card:top';
+        const tempQuestion = placeRow(node('chat-bubble project-question', messages), 2094, 140);
+        const targetCard = placeRow(node('chat-live-card', messages), 3800, 200);
+        targetCard.dataset.taskId = 't-jump';
+        messages.scrollHeight = 5000;
+
+        const records = new Map([['t-jump', { root: targetCard, groupId: 't-jump', phase: 'working' }]]);
+        const anchors = createTimelineAnchors({ messagesDiv: messages, liveCardRecords: records });
+        const pageLookups = [];
+        const historyPager = {
+            pageOf: (id) => { pageLookups.push(id); return id === 'card:top' ? 'replay:top-card' : null; },
+            revisit: async () => ({ status: 'applied' }),
+            around: async () => ({ status: 'applied' }),
+        };
+        const reading = { stick: false, nearBottom: () => false, cancel() {}, scroll() {}, claim: () => () => true };
+        shade = createRoomWork({
+            page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true }, reading, historyPager,
+            captureVisibleTimelineAnchor: anchors.captureVisibleTimelineAnchor,
+            restoreVisibleTimelineAnchor: anchors.restoreVisibleTimelineAnchor,
+            works: () => workState([running('t-jump', { name: 'Target work' })], room('working')),
+            liveCardRecords: records, pendingSubmissions: new Map(),
+        });
+
+        // Serialization keeps the straddling top card with its own offset (-300), while in-place capture still steps to tempQuestion.
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, tempQuestion, 'in-place capture still steps to the visible neighbour');
+        const serialized = anchors.serializeTimelineAnchor();
+        assert.equal(serialized.historyId, 'card:top');
+        assert.equal(serialized.offset, -300);
+
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const back = page.children.find((el) => el.classList.contains('rw-back'));
+        const live = page.children.find((el) => el.getAttribute('role') === 'status');
+
+        trigger.click();
+        list.children[0].querySelector('.rw-main').click();
+        assert.equal(scrollTop, 3780, 'jumped to target work card below 20px header band');
+        assert.equal(back.hidden, false);
+        assert.deepEqual(pageLookups, ['card:top'], 'departure resolves page cursor from the straddling top card');
+
+        // Answered on another device while the reader is away: temporary mirror disappears (chat_decision.js removeMirror).
+        tempQuestion.remove();
+        back.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(back.hidden, true, 'Back succeeds instead of showing Earlier place is no longer loaded');
+        assert.equal(live.textContent, 'Returned to where you were reading.');
+        assert.equal(scrollTop, 2000, 'restored original straddling top card at its -300 offset');
     } finally { shade?.destroy(); restoreDom(prior); }
 });

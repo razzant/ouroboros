@@ -544,7 +544,7 @@ function innerBox(node) {
  * offset after a mutation. Pure over the passed feed element.
  */
 export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
-    function captureVisibleTimelineAnchor(excludeNode = null) {
+    function captureVisibleTimelineAnchor(excludeNode = null, { inPlace = true } = {}) {
         // The Load-older control is excluded like .typing-bubble [GPT#13]:
         // anchoring must land on the first visible TIMESTAMPED node, or a
         // Load-older restore would pin the button itself and drift the view.
@@ -561,14 +561,14 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         }) || null;
         if (!topNode) return null;
         const firstShown = nodes.indexOf(topNode);
-        const followingVisible = () => nodes.find((item) => {
-            if (item === topNode) return false;
+        const followingVisible = () => nodes.find((item, index) => {
+            if (index <= firstShown) return false;
             const rect = item.getBoundingClientRect();
-            return rect.top >= messagesRect.top && rect.top < messagesRect.bottom;
+            return rect.width > 0 && rect.height > 0 && rect.top >= messagesRect.top && rect.top < messagesRect.bottom;
         }) || null;
         // Interactive cards swap faces/frames and transient bubble notes clear at the foot: when straddling the top
         // edge, anchor what follows so height changes above the viewport neither jump rows nor oscillate.
-        if (topNode.getBoundingClientRect().top < messagesRect.top
+        if (inPlace && topNode.getBoundingClientRect().top < messagesRect.top
             && (topNode.classList?.contains?.('chat-card-bubble')
                 || topNode.querySelector?.('.msg-routing-note, .msg-routing-actions, [data-ingress-unconfirmed]'))) {
             topNode = followingVisible() || topNode;
@@ -612,7 +612,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             const header = candidate => candidate.classList.contains('chat-live-card') || CARD_HEADER.some(role => candidate.matches(role));
             const content = header(node) ? belowTop.find(({ node: candidate }) => !header(candidate))?.node : null;
             if (content?.matches('.chat-live-line') && content.dataset?.expanded === '1') node = content;
-            if (node === topNode && topNode.getBoundingClientRect().top < messagesRect.top) {
+            if (inPlace && node === topNode && topNode.getBoundingClientRect().top < messagesRect.top) {
                 // The card's visible part holds nothing anchorable (a wait row, a
                 // block without work): keep the reader's view of what FOLLOWS the
                 // card. Pinning the card's own top, far above the viewport, would let
@@ -856,7 +856,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         return restoreNode(node, anchor.topOffset ?? anchor.offset);
     }
 
-    function serializeTimelineAnchor(anchor = captureVisibleTimelineAnchor()) {
+    function serializeTimelineAnchor(anchor = captureVisibleTimelineAnchor(null, { inPlace: false })) {
         if (!anchor) return null;
         const {
             node, topNode: _topNode, cardChain, fallbacks: _fallbacks,

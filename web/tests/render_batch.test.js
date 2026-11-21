@@ -921,3 +921,53 @@ test('restoring an anchor never cancels or reverses a scroll the reader made sin
     assert.equal(messages.scrollTop, 4850, 'reader +150 scroll preserved while compensating -100 collapse above');
     assert.equal(row.getBoundingClientRect().top - messages.getBoundingClientRect().top, 100);
 });
+
+test('captureVisibleTimelineAnchor ignores collapsed stack rows with zero rects before and after a straddling card', () => {
+    const feed = layoutNode({ y: 0, height: 844, scroll: 5000 });
+    feed.offsetHeight = 844;
+    const records = new Map();
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const makeHiddenStackRow = (id) => {
+        const hidden = layoutNode({
+            classes: ['chat-bubble', 'chat-relay-note'],
+            data: { 'data-history-id': id, 'data-deck-tucked': '1' },
+            y: 0, height: 0, parent: feed,
+        });
+        hidden.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 });
+        hidden.getClientRects = () => [];
+        return hidden;
+    };
+
+    const earlyStackRow = makeHiddenStackRow('stack:early');
+    const straddlingCard = layoutNode({
+        classes: ['chat-bubble', 'chat-card-bubble'],
+        data: { 'data-history-id': 'card:straddle' },
+        y: 1800, height: 300, parent: feed,
+    });
+    const middleStackRow = makeHiddenStackRow('stack:middle');
+    const visibleFollowing = layoutNode({
+        classes: ['chat-bubble'],
+        data: { 'data-history-id': 'row:visible' },
+        y: 2120, height: 120, parent: feed,
+    });
+    feed.scrollTop = 2000; // feed starts at y=0; straddlingCard is [-200..100], visibleFollowing is [120..240]
+
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    assert.notEqual(anchor.node, earlyStackRow, 'hidden stack row before topNode must not qualify at feed y=0');
+    assert.notEqual(anchor.node, middleStackRow, 'hidden stack row after topNode with zero rect must not qualify');
+    assert.equal(anchor.node, visibleFollowing, 'steps to the first rendered visible row after topNode');
+
+    // Also verify the live-card straddling branch (wait/footer area with nothing anchorable inside).
+    feed.children.length = 0;
+    feed.append(earlyStackRow);
+    const liveCard = layoutNode({
+        classes: ['chat-live-card'],
+        data: { 'data-task-id': 'wait-card' },
+        y: 1800, height: 300, parent: feed,
+    });
+    layoutNode({ data: { 'data-live-summary-button': '1' }, y: 0, height: 40, parent: liveCard });
+    feed.append(middleStackRow, visibleFollowing);
+    records.set('wait-card', { groupId: 'wait-card', root: liveCard, items: [] });
+    const liveAnchor = anchors.captureVisibleTimelineAnchor();
+    assert.equal(liveAnchor.node, visibleFollowing, 'live-card straddle also skips zero-rect collapsed stack rows');
+});

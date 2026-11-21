@@ -457,7 +457,10 @@ test('a resize while a downward key still animates neither writes under it nor e
     f.gesture({ type: 'keydown', key: 'End', target: body }); f.feed.scrollTop = 150; f.frame();
     const restored = f.restored();
     f.reading.reflow();
-    for (const top of [400, 580]) { f.feed.scrollTop = top; f.reading.scroll(); f.frame(); }
+    f.feed.scrollTop = 400; f.reading.scroll(); f.frame();
+    f.reading.mutate(() => true, { remoteContent: true });
+    assert.deepEqual([f.feed.scrollTop, f.restored()], [400, restored], 'mutate while owed neither restores nor writes scrollTop');
+    f.feed.scrollTop = 580; f.reading.scroll(); f.frame();
     f.reading.reflow();
     assert.deepEqual([f.feed.scrollTop, f.restored()], [580, restored], 'nothing writes under the animated scroll: a write stops it short');
     f.feed.scrollTop = 600; f.reading.scroll();

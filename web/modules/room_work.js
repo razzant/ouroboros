@@ -988,8 +988,9 @@ export function createRoomWork({
         arrive(row, target, departure());
     }
 
-    const departure = () => (history ? history.departure(captureVisibleTimelineAnchor())
-        : { anchor: captureVisibleTimelineAnchor() });
+    const captureReturnAnchor = () => captureVisibleTimelineAnchor(null, { inPlace: false });
+    const departure = () => (history ? history.departure(captureReturnAnchor())
+        : { anchor: captureReturnAnchor() });
 
     function arrive(row, target, place) {
         close({ restoreFocus: false });
@@ -1030,7 +1031,7 @@ export function createRoomWork({
     // Goes to the exact waited question and focuses the question itself, never its answer field.
     async function viewQuestion(row) {
         const intent = ++navigationIntent;
-        const anchor = captureVisibleTimelineAnchor();
+        const anchor = captureReturnAnchor();
         close({ restoreFocus: false });
         // The task that asked (a Continue or a helper), never the work's first root.
         const shown = await revealQuestion?.(row.question.taskId || row.id, row.question.quizId, { focus: 'question' });
