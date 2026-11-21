@@ -1734,6 +1734,10 @@ body.keyboard-open .ui-modal { margin-block: 0 auto; }
     justify-content: flex-end;
     gap: 8px;
 }
+/* Hidden or closed, the dialog takes no room and catches no press, in an author frame too, which loads this sheet
+   alone (the product's own sheet hides [hidden] for every element). */
+.ui-modal-backdrop[hidden], .ui-modal[hidden], .ui-modal-head[hidden], .ui-modal-body[hidden],
+.ui-modal-actions[hidden], dialog.ui-modal:not([open]) { display: none; }
 
 /* ---- The one hint (DESIGN "Hints", ui_hint.js) ---------------------------------------------------------------------
    What a control says about itself, on the popups' floating material: it stands above its control and over the page,

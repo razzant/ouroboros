@@ -290,6 +290,29 @@ function selectedClasses(css) {
     return classes;
 }
 
+/** The rules of `css` as `{ selectors, body }`: comments dropped, each selector list split at its top-level commas. */
+function cssRules(css) {
+    const plain = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const rules = [];
+    for (const [, prelude, body] of plain.matchAll(/(?<=^|[{};])\s*([^{};]+)\{([^{}]*)\}/g)) {
+        if (prelude.trim().startsWith('@')) continue;
+        const selectors = [];
+        let depth = 0, item = '';
+        for (const char of prelude) {
+            if (char === ',' && depth === 0) { selectors.push(item.trim()); item = ''; continue; }
+            depth += char === '(' ? 1 : char === ')' ? -1 : 0;
+            item += char;
+        }
+        selectors.push(item.trim());
+        rules.push({ selectors, body });
+    }
+    return rules;
+}
+
+/** The last `display` a rule of `css` gives exactly this selector, or ''. */
+const displayOf = (css, selector) => cssRules(css).filter((rule) => rule.selectors.includes(selector))
+    .map((rule) => rule.body.match(/(?:^|;)\s*display:\s*([^;]+)/)?.[1].trim()).filter(Boolean).at(-1) || '';
+
 /** The register in `css` (its "- <classes> — <job>" entries) against what `css` selects; [] when both ways hold. */
 function registerFaults(css) {
     const block = css.match(/\/\* ---- The register of parts[\s\S]*?\*\//)?.[0];
@@ -321,6 +344,20 @@ test('ui.css lists every shared part once, and the list and the sheet agree both
     // Comments, at-rules and keyframe steps hold no selector; a file name in a comment is not a class.
     assert.deepEqual([...selectedClasses('/* .ui-x see ui.js */ @keyframes k { 0%, 52.5% { opacity: 0; } } .ui-y::before { content: "."; }')],
         ['ui-y']);
+});
+
+test('a hidden or closed shared dialog stays hidden where ui.css is the only sheet (an author frame)', () => {
+    // The product's style.css hides [hidden] everywhere; an author frame gets ui.css alone, and a part that sets its own
+    // display would otherwise show a hidden veil over the page, or a closed native dialog.
+    for (const part of ['.ui-modal-backdrop', '.ui-modal', '.ui-modal-head', '.ui-modal-body', '.ui-modal-actions']) {
+        assert.equal(displayOf(sharedCss, part), 'flex', `${part} is shown while it is open`);
+        assert.equal(displayOf(sharedCss, `${part}[hidden]`), 'none', `${part}[hidden] is not shown`);
+    }
+    assert.equal(displayOf(sharedCss, 'dialog.ui-modal:not([open])'), 'none', 'a closed native dialog is not shown');
+    // The reader itself: the last display of exactly that selector, never a longer or a wrapped one.
+    const sheet = '.x { display: flex; }\n.x[hidden], dialog.x:not([open]) { display: none; }\n.y .x { display: grid; }\n.x { color: red; }';
+    assert.deepEqual([displayOf(sheet, '.x'), displayOf(sheet, '.x[hidden]'), displayOf(sheet, 'dialog.x:not([open])'),
+        displayOf(sheet, '.z')], ['flex', 'none', 'none', '']);
 });
 
 const moduleSources = Object.fromEntries(fs.readdirSync(new URL('../modules/', import.meta.url))
