@@ -287,6 +287,22 @@ class SkillUninstallResponse(TypedDict, total=False):
     error: str
 
 
+class StarterConnection(TypedDict, total=False):
+    """A built-in skill's declared connection card, carried on its starter item (the skill manifest's
+    ``connection_card``; DESIGN §7). ``token`` and ``pairing.code`` name the skill's secret fields; ``pairing.link``
+    holds ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint`` and
+    ``options`` ([{key, label, on, off, new_connection}]) are the skill's own words. The card checks a token with
+    ``POST /api/onboarding/connection/identity`` and its values ride the completion as ``connections``."""
+
+    skill: Required[str]
+    token: Required[str]
+    pairing: Required[Dict[str, str]]
+    title: str
+    pitch: str
+    steps: List[Dict[str, str]]
+    options: List[Dict[str, Any]]
+
+
 class StarterSkillItem(TypedDict, total=False):
     """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
     ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
@@ -304,6 +320,7 @@ class StarterSkillItem(TypedDict, total=False):
     builtin: bool
     recommended: bool
     needs_keys: List[str]
+    connection: StarterConnection
 
 
 class StarterSkillsResponse(TypedDict):
@@ -323,5 +340,5 @@ __all__ = [
     "SkillSourceChangeResponse", "SkillSourceProbeRequest", "SkillSourceProbeResponse", "SkillSourceRow",
     "SkillSourceSuggestion", "SkillSourcesResponse", "SkillUninstallResponse", "SkillUpdateRequest",
     "SkillUpdateResponse",
-    "StarterSkillItem", "StarterSkillsResponse",
+    "StarterConnection", "StarterSkillItem", "StarterSkillsResponse",
 ]

@@ -1536,6 +1536,27 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .skills-starter-pitch { color: var(--text-meta); }
 .skills-starter-needs { color: var(--text-secondary); }
 .skills-starter-trust { display: grid; gap: var(--space-2); }
+/* A skill's declared connection card leads the step: closed, one row like the others with its action; open, the
+   skill's numbered steps, its token field and, once checked, the QR beside the account, its link and its options. A
+   hairline under it sets it apart from the list, no box. The QR keeps its own white square (qr_svg.js). */
+.skills-connection { display: grid; gap: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
+.skills-connection-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.skills-connection-head .skills-starter-skill { flex: 1 1 auto; }
+.skills-connection-head .btn { flex: none; }
+.skills-connection-body { display: grid; gap: var(--space-2); padding-left: 22px; min-width: 0; }
+.skills-connection-steps { display: grid; gap: var(--space-2); margin: 0; padding-left: 1.4em; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); }
+.skills-connection-steps .btn { margin-left: var(--space-2); vertical-align: middle; }
+.skills-connection-token label { display: block; margin-bottom: var(--space-1); }
+.skills-connection-field { display: flex; gap: var(--space-2); max-width: 520px; }
+.skills-connection-field .ui-control { flex: 1 1 auto; min-width: 0; }
+.skills-connection-pair { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3); }
+.skills-connection-qr { flex: none; width: 148px; height: 148px; overflow: hidden; border-radius: 8px; }
+.skills-connection-qr svg { display: block; width: 100%; height: 100%; }
+.skills-connection-facts { display: grid; gap: var(--space-1); min-width: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.skills-connection-facts strong { color: var(--text-primary); font-size: var(--type-body); }
+.skills-connection-facts a { color: var(--text-primary); font-weight: 600; }
+.skills-connection-option { display: flex; align-items: flex-start; gap: 6px; margin-top: var(--space-1); color: var(--text-primary); cursor: pointer; }
+.skills-connection-option .ui-checkbox { flex: none; margin: 1px 0 0; }
 .skills-starter-trust-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-starter-trust-row strong { flex: 1 1 30%; min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-starter-trust .selection-pill { padding: 6px 12px; font-size: var(--type-meta); }
@@ -1544,10 +1565,10 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    data-arrive, so a repaint or a refresh never plays it again; the boxes answer from the first frame. Reduced motion
    shows the list as it ends. */
 @keyframes skills-starter-arrive { from { opacity: 0; transform: translateY(8px); } }
-.skills-starter-list[data-arrive] :is(.skills-starter-skill, .skills-starter-group h3, .skills-connection) {
+.skills-starter-list[data-arrive] :is(.skills-starter-group h3, .skills-starter-group .skills-starter-skill, .skills-connection) {
   animation: skills-starter-arrive var(--motion-open) var(--ease-sheet) both;
   animation-delay: calc(var(--arrive, 0) * 40ms);
 }
 @media (prefers-reduced-motion: reduce) {
-  .skills-starter-list[data-arrive] :is(.skills-starter-skill, .skills-starter-group h3, .skills-connection) { animation: none; }
+  .skills-starter-list[data-arrive] :is(.skills-starter-group h3, .skills-starter-group .skills-starter-skill, .skills-connection) { animation: none; }
 }

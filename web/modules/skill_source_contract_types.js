@@ -241,6 +241,20 @@
  */
 
 /**
+ * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` and
+ * `pairing.code` name its secret fields, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`,
+ * `pairing.hint` and `options` are the skill's own words.
+ * @typedef {Object} StarterConnection
+ * @property {string} skill
+ * @property {string} token
+ * @property {Object} pairing
+ * @property {string=} title
+ * @property {string=} pitch
+ * @property {Object[]=} steps
+ * @property {Object[]=} options
+ */
+
+/**
  * One skill the setup's Skills step offers; `title` and `pitch` are the catalog's optional words ("" when it has
  * none: show `name` and `description`), `needs` its prerequisite in words ("" none, null when the catalog says
  * nothing); `recommended` means ticked by the starter list.
@@ -256,6 +270,7 @@
  * @property {boolean=} builtin
  * @property {boolean=} recommended
  * @property {string[]=} needs_keys
+ * @property {StarterConnection=} connection
  */
 
 /**

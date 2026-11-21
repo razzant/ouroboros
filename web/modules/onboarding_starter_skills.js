@@ -6,15 +6,18 @@
 // first; the maintainer's recommended ones are ticked. A group says its name and count only; where the skills come from
 // and how the hub's install is one small sentence under the list, its choices behind it. Inside a group what works at
 // once leads and what needs a key comes last. The rows arrive in one short sequence on entering the step, never on a
-// repaint (DESIGN §7). Nothing installs here: the one atomic Finish carries the ticked ids and the trust choices, and
-// the host installs them in the background after start. Summary shows one row back to the step. A list that cannot
-// be read leaves the host's defaults in place and says so.
+// repaint (DESIGN §7). A skill that declares a connection card (`connection`) stands first, as that card
+// (onboarding_connection_card.js). Nothing installs here: the one atomic Finish carries the ticked ids, the trust
+// choices and a card's values, and the host installs them in the background after start. Summary shows one row back
+// to the step. A list that cannot be read leaves the host's defaults in place and says so.
 import { skillSourcesApi } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
+import { createConnectionCard, normalizeConnection } from './onboarding_connection_card.js';
 
 const BUILT_IN_TITLE = 'Built in';
 const ARRIVE_LAST = 12;  // rows from the twelfth on arrive together, so the whole entrance stays under a second
-const FOCUS_KEYS = ['starterItem', 'starterAll', 'starterTrustToggle', 'starterTrust'];
+const FOCUS_KEYS = ['starterItem', 'starterAll', 'starterTrustToggle', 'starterTrust', 'connectionToggle', 'connectionToken',
+    'connectionCheck', 'connectionOption'];
 
 /** Built-in skills lead as their own group; the rest keep the host's category order. */
 export function normalizeStarterGroups(groups = []) {
@@ -59,8 +62,8 @@ const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.t
 
 /** The step and its Summary row. `offered`: the bootstrap's `stepOrder` has the step (else it renders and sends
  * nothing and reads nothing); `open` returns to the step from Summary. `read()` defaults to GET
- * /api/onboarding/starter-skills. */
-export function createStarterSkillsStep({ offered = true, open = () => {}, keyLabels = {}, read = () => skillSourcesApi.starterSkills(), setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now } = {}) {
+ * /api/onboarding/starter-skills; `card` passes the connection card its check, randomness and encoder (tests). */
+export function createStarterSkillsStep({ offered = true, open = () => {}, keyLabels = {}, read = () => skillSourcesApi.starterSkills(), setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, card = {} } = {}) {
     const state = { status: 'loading', groups: [], ticked: new Set(), trust: {}, rows: [], sources: [], trustOpen: false, error: '', ticksChanged: false, untickNew: false };
     let host = null;
     let view = '';  // what the mounted node shows: the step's list, Summary's row, or nothing
@@ -69,6 +72,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     let destroyed = false;
     let timer = null;
     let deadline = null;
+    let connection = null;  // the first item's declared connection card, made once and kept until Finish
     const items = () => state.groups.flatMap((group) => group.items);
     const tickedItems = () => items().filter((item) => state.ticked.has(item.id));
     const hubs = () => state.sources.filter((source) => source.kind === 'hub' || state.rows.some((row) => row.id === source.id));
@@ -96,6 +100,11 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             for (const row of state.rows) state.trust[row.id] ??= row.trust === 'trusted' ? 'trusted' : 'review';
             state.status = items().length || state.rows.length ? 'ready' : 'empty';
             state.error = '';
+            const declared = !connection && items().find((item) => normalizeConnection(item.connection));
+            if (declared) {
+                connection = createConnectionCard(declared, normalizeConnection(declared.connection), { ...card, repaint: () => paint(),
+                    ticked: () => state.ticked.has(declared.id), tick: () => { state.ticksChanged = true; state.ticked.add(declared.id); } });
+            }
         } catch (error) {
             if (destroyed) return;
             if (state.status === 'loading') state.status = 'error';
@@ -120,15 +129,19 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const value = { loading: 'Reading the list…', error: 'The recommended set', empty: 'None offered' }[state.status]
             || (count ? `${count} will install` : 'None will install');
         const sub = state.status === 'error' ? unreadText() : pendingText();
+        const card = connection?.summary();
         return `<div class="summary-kv skills-starter-row"><strong>Skills</strong><span class="skills-starter-summary">
             <span class="skills-starter-value">${escapeHtml(value)} · <button type="button" class="skills-starter-change" data-starter-change>Change</button></span>
-            ${sub ? `<span class="skills-starter-sub" role="status">${escapeHtml(sub)}</span>` : ''}</span></div>`;
+            ${sub ? `<span class="skills-starter-sub" role="status">${escapeHtml(sub)}</span>` : ''}</span></div>${card ? `
+            <div class="summary-kv skills-starter-row"><strong>${escapeHtml(card[0])}</strong><span class="skills-starter-summary">
+            <span class="skills-starter-value">${escapeHtml(card[1])} · <button type="button" class="skills-starter-change" data-starter-change>Change</button></span></span></div>` : ''}`;
     }
 
     // Inside a group: recommended skills that work at once, then the rest that do, then those that need something first.
     const rank = (item) => (needsText(item, keyLabels) ? 2 : 0) + (item.recommended ? 0 : 1);
     const label = (item) => String(item.title || item.name || '');
-    const shown = (group) => [...group.items].sort((a, b) => rank(a) - rank(b) || label(a).localeCompare(label(b), 'en'));
+    const shown = (group) => group.items.filter((item) => item !== connection?.item && item.id !== connection?.item.id)
+        .sort((a, b) => rank(a) - rank(b) || label(a).localeCompare(label(b), 'en'));
 
     // One row: the box, the title and, muted on the same line (wrapping whole under it where the line is short), what it
     // gives and, quieter, what it needs first.
@@ -172,12 +185,14 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         let order = 0;
         const next = () => Math.min(order++, ARRIVE_LAST);
         const pending = pendingText();
-        // A group is its name and count over its rows. What is still being read stands under the list, where the hub's
-        // skills will join it: its going moves no row.
+        // A declared connection card leads; a group is its name and count over its rows. What is still being read
+        // stands under the list, where the hub's skills will join it: its going moves no row.
+        const groups = state.groups.map((group) => [group, shown(group)]).filter(([, rows]) => rows.length);
         return `<div class="skills-starter-list"${arrive ? ' data-arrive' : ''}>
+            ${connection ? connection.html(next()) : ''}
             ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status">${countText()}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
-            <div class="skills-starter-groups">${state.groups.map((group) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span> · ${group.items.length}</span></h3>
-                ${shown(group).map((item) => skillHtml(item, next())).join('')}</section>`).join('')}</div>
+            <div class="skills-starter-groups">${groups.map(([group, rows]) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span> · ${rows.length}</span></h3>
+                ${rows.map((item) => skillHtml(item, next())).join('')}</section>`).join('')}</div>
             ${pending ? `<p class="skills-starter-sub" role="status">${escapeHtml(pending)}</p>` : ''}
             ${trustHtml()}
         </div>`;
@@ -189,10 +204,13 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const active = host.ownerDocument?.activeElement;
         const key = active && host.contains(active) ? FOCUS_KEYS.find((name) => active.dataset?.[name] !== undefined) : '';
         const focus = key ? `[${dataAttr(key)}="${quote(active.dataset[key])}"]${key === 'starterTrust' ? `[data-trust="${quote(active.dataset.trust)}"]` : ''}` : '';
+        const caret = focus && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
         const row = [...host.querySelectorAll('[data-starter-skill]')].find((node) => node.getBoundingClientRect().bottom > 0);
         const anchor = row && { id: row.dataset.starterSkill, top: layoutTop(row) };
         return () => {
-            if (focus) host.querySelector(focus)?.focus({ preventScroll: true });
+            const field = focus && host.querySelector(focus);
+            field?.focus({ preventScroll: true });
+            if (caret && field?.setSelectionRange) field.setSelectionRange(...caret);  // typing goes on where it was
             const again = anchor && host.querySelector(`[data-starter-skill="${quote(anchor.id)}"]`);
             const moved = again ? layoutTop(again) - anchor.top : 0;
             if (moved) host.ownerDocument?.defaultView?.scrollBy(0, moved);
@@ -213,6 +231,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
 
     function onClick(event) {
         if (event.target.closest('[data-starter-change]')) { open(); return; }
+        if (connection?.click(event.target)) return;
         if (event.target.closest('[data-starter-trust-toggle]')) { state.trustOpen = !state.trustOpen; paint(); return; }
         const bulk = event.target.closest('[data-starter-all]');
         if (bulk) {
@@ -227,6 +246,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     }
 
     function onChange(event) {
+        if (connection?.change(event.target)) return;
         const box = event.target.closest('[data-starter-item]');
         if (!box) return;
         state.ticksChanged = true;
@@ -235,6 +255,10 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const count = host.querySelector('.skills-starter-count');
         if (count) count.textContent = countText();
     }
+    const onInput = (event) => connection?.input(event);
+    const onKeydown = (event) => connection?.keydown(event);
+    const listen = (node, on) => [['click', onClick], ['change', onChange], ['input', onInput], ['keydown', onKeydown]]
+        .forEach(([type, fn]) => node?.[on ? 'addEventListener' : 'removeEventListener'](type, fn));
 
     return {
         loading,
@@ -250,8 +274,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
          * survive re-renders, and the rows arrive once each time the step is entered. */
         mount(node) {
             if (host === node) return;
-            host?.removeEventListener('click', onClick);
-            host?.removeEventListener('change', onChange);
+            listen(host, false);
             host = offered && node ? node : null;
             const next = !host ? '' : host.dataset?.starterSkills === 'step' ? 'step' : 'row';
             if (next === 'step' && view !== 'step') arrived = false;
@@ -262,24 +285,25 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
                 deadline = now() + 180_000;
                 if (state.status !== 'loading' && reading()) timer = setTimer(refresh, 3000);
             }
-            host.addEventListener('click', onClick);
-            host.addEventListener('change', onChange);
+            listen(host, true);
             paint();
         },
-        /** What the one atomic Finish carries; nothing when the step is not offered or the list could not be read. */
+        /** What the one atomic Finish carries; nothing when the step is not offered or the list could not be read. A
+         * connection card's values ride as `connections`, apart from the settings (DESIGN §7). */
         payload() {
             if (!offered || state.status !== 'ready') return {};
+            const connections = connection?.payload();
             return {
                 ...(useDefaults() ? {} : { starter_skills: tickedItems().map((item) => item.id) }),
                 skill_source_trust: { ...state.trust },
+                ...(connections ? { connections } : {}),
             };
         },
-        snapshot: () => ({ ...state, ticked: [...state.ticked], view, arrived }),
+        snapshot: () => ({ ...state, ticked: [...state.ticked], view, arrived, connection: connection?.snapshot() || null }),
         destroy() {
             destroyed = true;
             clearTimer(timer);
-            host?.removeEventListener('click', onClick);
-            host?.removeEventListener('change', onChange);
+            listen(host, false);
             host = null;
         },
     };

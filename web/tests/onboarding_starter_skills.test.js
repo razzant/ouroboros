@@ -5,8 +5,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import { createStarterSkillsStep, needsText, normalizeStarterGroups } from '../modules/onboarding_starter_skills.js';
+import { checkIdentity, normalizeConnection, pairingCode } from '../modules/onboarding_connection_card.js';
+import { qrSvg } from '../modules/qr_svg.js';
+
+// The vendored encoder as a page loads it: a classic script that defines the global `qrcodegen`.
+vm.runInThisContext(readFileSync(new URL('../vendor/qrcodegen/qrcodegen.js', import.meta.url), 'utf8'));
 
 const STARTER = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/onboarding_starter_skills.json', import.meta.url), 'utf8'));
 
@@ -326,4 +332,128 @@ test('the polling window starts when the step (or Summary) first shows after a l
     poll.step.mount(fakeHost());
     assert.equal(poll.timers.size, 0, 'remounting does not renew the bounded window');
     poll.step.destroy();
+});
+
+// A skill's declared connection card (the agreed manifest shape, with the skill's own words) on its starter item.
+const CARD = {
+    skill: 'telegram', token: 'botToken',
+    pairing: { code: 'pairingCode', link: 'https://t.me/{username}?start={code}', hint: 'Scan it with your phone, then press Start in Telegram.' },
+    title: 'Phone via Telegram', pitch: 'Write to Ouroboros and get its results on your phone',
+    steps: [{ text: 'Open @BotFather in Telegram', link: 'https://t.me/BotFather', action: 'Open @BotFather' }, { text: 'Send it /newbot' },
+        { text: 'Give the bot a name, then a username ending in “bot”' }],
+    options: [{ key: 'TELEGRAM_NOTIFY_TASKS', label: 'Send results and errors of work here', on: 'on', off: 'off', new_connection: true,
+        store: 'skill_settings', route: 'settings/save' }],
+};
+const TOKEN = '123456789:AAF-secret-token-value';
+function withCard(declaration = CARD) {
+    const answer = structuredClone(STARTER);
+    answer.groups.flatMap((group) => group.items).find((item) => item.id === 'builtin/telegram').connection = declaration;
+    return answer;
+}
+const settle = () => new Promise((done) => setTimeout(done, 0));
+async function cardStep(answer, check) {
+    const checks = [];
+    const step = createStarterSkillsStep({ read: async () => answer, card: { random: (bytes) => bytes.fill(7), encoder: async () => globalThis.qrcodegen,
+        check: async (skill, token) => { checks.push([skill, token]); return check(token); } } });
+    await step.loading;
+    const host = fakeHost();
+    step.mount(host);
+    return { step, host, checks };
+}
+const paste = (host, value) => host.handlers.input({ target: target({ '[data-connection-token]': { value } }), inputType: 'insertFromPaste' });
+const cardOf = (html) => html.split('<div class="skills-starter-bar">')[0];
+
+test('a declared connection card leads the step as one row with Connect; its skill leaves its group, not the count', async () => {
+    const { host } = await cardStep(withCard(), () => ({ status: 'ok', username: 'my_ouro_bot' }));
+    const card = cardOf(host.innerHTML);
+    assert.match(text(card), /^Phone via Telegram Write to Ouroboros and get its results on your phone Connect$/);
+    assert.match(card, /class="skills-connection" data-connection="telegram" style="--arrive: 0"/);
+    assert.match(card, /data-starter-item="builtin\/telegram" checked/, 'its box is the skill’s starter tick');
+    assert.match(text(host.innerHTML), /6 of 10 ticked Tick all · Untick all Built in · 1 /);
+    assert.equal((host.innerHTML.match(/data-starter-skill="builtin\/telegram"/g) || []).length, 1);
+    // Without a declaration, or with one the card cannot show, the skill stays a row of its group.
+    for (const broken of [undefined, { ...CARD, pairing: { ...CARD.pairing, link: 'https://t.me/bot' } }, { ...CARD, token: '' }]) {
+        const plain = await cardStep(broken ? withCard(broken) : STARTER, () => ({ status: 'ok', username: 'x' }));
+        assert.doesNotMatch(plain.host.innerHTML, /skills-connection/);
+        assert.match(text(plain.host.innerHTML), /Built in · 2 /);
+    }
+    assert.equal(normalizeConnection({ ...CARD, pairing: { ...CARD.pairing, link: 'http://t.me/{username}?start={code}' } }), null, 'https only');
+});
+
+test('Connect opens the skill’s steps and its token field; a checked token shows the QR of the link with a code made here', async () => {
+    const { step, host, checks } = await cardStep(withCard(), () => ({ status: 'ok', username: 'my_ouro_bot' }));
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    const code = step.snapshot().connection.code;
+    assert.equal(code, pairingCode((bytes) => bytes.fill(7)));
+    assert.match(code, /^[A-Za-z0-9_-]{22}$/);
+    let card = cardOf(host.innerHTML);
+    assert.match(text(card), /Phone via Telegram .* Hide Open @BotFather in Telegram Open @BotFather Send it \/newbot Give the bot a name, then a username ending in “bot” Bot token Check$/);
+    assert.match(card, /href="https:\/\/t\.me\/BotFather" target="_blank" rel="noopener noreferrer"/);
+    assert.match(card, /type="password" autocomplete="off" spellcheck="false" data-connection-token/);
+    assert.doesNotMatch(card, /<svg|data-connection-account/, 'no QR before a token is checked');
+    paste(host, TOKEN);
+    await settle();
+    assert.deepEqual(checks, [['telegram', TOKEN]]);
+    card = cardOf(host.innerHTML);
+    const link = `https://t.me/my_ouro_bot?start=${code}`;
+    assert.ok(card.includes(qrSvg(link, { label: 'QR code for @my_ouro_bot' })), 'the QR is the link with this card’s code');
+    assert.match(text(card), /@my_ouro_bot Scan it with your phone, then press Start in Telegram\. It connects when you finish setup\. On this device\? Open @my_ouro_bot Send results and errors of work here$/);
+    assert.match(card, new RegExp(`href="${link.replace(/[.?]/g, '\\$&')}" target="_blank" rel="noopener noreferrer" data-connection-link`));
+    assert.match(card, /data-connection-option="TELEGRAM_NOTIFY_TASKS" checked/, 'on for a new connection');
+    assert.equal(card.split(TOKEN).length - 1, 1, 'the token is the field’s own value only: never in the QR or a link');
+    // The code is made once: hiding and opening again, or checking again, keeps it.
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    assert.match(text(cardOf(host.innerHTML)), /^Phone via Telegram @my_ouro_bot · connects when you finish setup Change$/);
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    host.handlers.click({ target: target({ '[data-connection-check]': {} }) });
+    await settle();
+    assert.equal(step.snapshot().connection.code, code);
+    assert.equal(checks.length, 1, 'a settled answer for this token is not asked again');
+    // Its values ride the one completion apart from the settings, the option as the box says.
+    host.handlers.change({ target: target({ '[data-connection-option]': { checked: false, dataset: { connectionOption: 'TELEGRAM_NOTIFY_TASKS' } } }) });
+    const payload = step.payload();
+    assert.deepEqual(payload.connections, { telegram: { fields: { botToken: TOKEN, pairingCode: code }, options: { TELEGRAM_NOTIFY_TASKS: 'off' } } });
+    assert.ok(!Object.keys(payload).some((key) => key.startsWith('TELEGRAM_')), 'nothing of the card in the settings part');
+    const row = fakeHost('row');
+    step.mount(row);
+    assert.match(text(row.innerHTML), /^Skills 6 will install · Change Phone via Telegram @my_ouro_bot · Change$/);
+    // Unticked, the skill is not installed and its card sends nothing.
+    step.mount(host);
+    host.handlers.change({ target: { closest: (selector) => (selector === '[data-starter-item]' ? { checked: false, dataset: { starterItem: 'builtin/telegram' } } : null) } });
+    assert.equal(step.payload().connections, undefined);
+});
+
+test('each failure says only its own cause and never blocks; a token the service refused is not sent', async () => {
+    const words = {};
+    for (const answer of [{ status: 'refused' }, { status: 'unreachable' }, { status: 'unavailable', reason: 'HTTP 404' }]) {
+        const { step, host } = await cardStep(withCard(), () => answer);
+        host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        paste(host, TOKEN);
+        await settle();
+        words[answer.status] = text(cardOf(host.innerHTML)).replace(/^.* Check /, '');
+        assert.doesNotMatch(host.innerHTML, /<svg/);
+        assert.equal(Boolean(step.payload().connections), answer.status !== 'refused');
+    }
+    assert.match(words.refused, /^Telegram did not accept this token; it is not saved\.$/);
+    assert.match(words.unreachable, /^Could not reach Telegram from here\. The token is still saved when you finish\. Send results and errors of work here$/);
+    assert.match(words.unavailable, /^The token could not be checked \(HTTP 404\)\. It is still saved when you finish\. Send results and errors of work here$/);
+    assert.doesNotMatch(words.refused, /reach|checked/);
+    assert.doesNotMatch(words.unreachable, /accept/);
+});
+
+test('the host’s identity check: its two causes, its answer and anything else as a check that did not run', async () => {
+    const answer = (status, body) => async (url, init) => {
+        assert.equal(url, '/api/onboarding/connection/identity');
+        assert.deepEqual(JSON.parse(init.body), { skill: 'telegram', token: TOKEN });
+        return { ok: status < 400, status, json: async () => body };
+    };
+    assert.deepEqual(await checkIdentity('telegram', TOKEN, answer(200, { ok: true, username: 'my_ouro_bot' })), { status: 'ok', username: 'my_ouro_bot' });
+    assert.deepEqual(await checkIdentity('telegram', TOKEN, answer(200, { ok: false, cause: 'refused' })), { status: 'refused' });
+    assert.deepEqual(await checkIdentity('telegram', TOKEN, answer(200, { ok: false, cause: 'unreachable' })), { status: 'unreachable' });
+    assert.deepEqual(await checkIdentity('telegram', TOKEN, answer(404, { error: 'Not Found' })), { status: 'unavailable', reason: 'HTTP 404' });
+    assert.deepEqual(await checkIdentity('telegram', TOKEN, answer(200, { ok: true, username: 'not an account' })),
+        { status: 'unavailable', reason: 'an answer it could not read' });
+    const failed = await checkIdentity('telegram', TOKEN, async () => { throw new Error(`fetch ${TOKEN}`); });
+    assert.deepEqual(failed, { status: 'unavailable', reason: 'the request did not complete' }, 'never the token or the error text');
+    assert.notEqual(pairingCode(), pairingCode());
 });
