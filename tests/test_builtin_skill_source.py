@@ -376,10 +376,11 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.17" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.18" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py", "lib/telegram_copies.py",
-                 "lib/telegram_health.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
-                 "lib/telegram_state.py", "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
+                 "lib/telegram_health.py", "lib/telegram_outbox.py", "lib/telegram_owner.py", "lib/telegram_pairing.py",
+                 "lib/telegram_quiz.py", "lib/telegram_share.py", "lib/telegram_state.py", "lib/telegram_token.py",
+                 "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
 

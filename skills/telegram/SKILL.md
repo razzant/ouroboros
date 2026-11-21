@@ -1,16 +1,22 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.17
+version: 1.4.18
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
 runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
-env_from_settings: [TELEGRAM_BOT_TOKEN]
+env_from_settings: [TELEGRAM_BOT_TOKEN, TELEGRAM_PAIRING_CODE]
 secret_fields:
   botToken: TELEGRAM_BOT_TOKEN
+  pairingCode: TELEGRAM_PAIRING_CODE
+connection_card:
+  token: botToken
+  pairing: {code: pairingCode, new_code: "lib/telegram_pairing.py:new_code", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status"}
+  options:
+    - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off", new_connection: true, store: skill_settings, route: settings/save}
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.

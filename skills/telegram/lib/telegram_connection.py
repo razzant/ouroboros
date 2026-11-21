@@ -467,6 +467,12 @@ def _connection_fields(api) -> Dict[str, Any]:
         mini_words = "Applying the token once the old Mini App has stopped"
     elif binding.companion == "start_failed":
         mini_words = "Couldn't start with the saved token; retrying"
+    from .telegram_owner import saved_code  # while a pairing code waits only its link binds, not a private message
+    from .telegram_pairing import pending
+    if not bridge.get("owner_bound") and pending(api.get_state_dir(), saved_code(api) or ""):
+        bridge_words = ("Connected; waiting for the pairing link (the QR code on the Telegram card) to be opened"
+                        if bridge["state"] == "waiting_owner" else bridge_words)
+        mini_words = "Waiting for the pairing link to be opened in Telegram" if mini_state == "waiting_owner" else mini_words
     token_words = _TOKEN_WORDS.get(bridge.get("token", ""), "Unknown")
     if bridge.get("token") == "unknown" and binding.snapshot()[0]:
         token_words += _KEPT_TOKEN  # only when a token was accepted before: a cold start has none to keep

@@ -1,9 +1,15 @@
 import asyncio
+import contextlib
 import importlib.util
 import json
 import sys
+import threading
+import time
 import types
 from pathlib import Path
+
+import httpx
+import pytest
 
 
 def _park_stops(plugin, monkeypatch):
@@ -786,3 +792,311 @@ def test_model_and_budget_buttons_defer_to_miniapp(tmp_path, monkeypatch):
     }
     assert _run_callback(plugin, monkeypatch, tmp_path, settings, "set_model:0") == []
     assert _run_callback(plugin, monkeypatch, tmp_path, settings, "set_budget:100") == []
+
+
+# --- Pairing by one-time code; the first /panic after any owner binding (lib/telegram_owner.py) ---------------
+
+CODE = "Pair-Code_0123456789abcdefghijkl"
+GREETING = "✅ Connected: this chat now talks with Ouroboros. /menu opens the controls; /panic is the emergency stop."
+LINK_INVALID = "This link is no longer valid. Open the Telegram card in Ouroboros for a fresh QR code."
+
+
+class PairingApi(FakeApi):
+    """The bridge's API over saved core Settings: the bot token and, when given, a pairing code. ``readable=False``
+    is a saved code this skill holds no grant for (the host leaves it out of every read); ``status`` answers the
+    code's own reads (the token stays readable), as a document unreadable at that moment would."""
+
+    def __init__(self, state_dir, data_dir, code=None, *, readable=True, status="ok"):
+        super().__init__(state_dir)
+        self.data_dir, self.code, self.readable, self.status = Path(data_dir), code, readable, status
+        self.routes = {}
+
+    def get_runtime_info(self):
+        return {"data_dir": str(self.data_dir)}
+
+    def get_settings_state(self, keys):
+        if self.status != "ok" and list(keys) == ["TELEGRAM_PAIRING_CODE"]:
+            return {"status": self.status, "values": {}, "missing": []}
+        saved = {"TELEGRAM_BOT_TOKEN": "123:secret-token"}
+        if self.code and self.readable:
+            saved["TELEGRAM_PAIRING_CODE"] = self.code
+        return {"status": "ok", "values": {key: saved[key] for key in keys if key in saved}, "missing": []}
+
+    def register_route(self, path, handler, methods=("GET",)):
+        self.routes[path] = (handler, methods)
+
+
+def _update(update_id, chat, text, *, sender=None, chat_type="private", date=0):
+    return {"update_id": update_id, "message": {"message_id": 100 + update_id, "date": date, "text": text,
+                                                "chat": {"id": chat, "type": chat_type},
+                                                "from": {"id": chat if sender is None else sender}}}
+
+
+def _drive(plugin, monkeypatch, api, updates, until, *, post=None):
+    """Run the shipped poller over ``updates`` (served once) until ``until(client)``; returns that client."""
+    built = []
+
+    class Client(FakeTelegramClient):
+        bot_id = "123"
+        served = False
+
+        def __init__(self, token, **kwargs):
+            super().__init__(token, **kwargs)
+            built.append(self)
+
+        async def call(self, method, **kwargs):
+            return {"ok": True, "result": {"id": 123, "username": "pair_bot"} if method == "getMe" else True}
+
+        async def get_updates(self, offset):
+            if type(self).served:
+                await asyncio.sleep(0.01)
+                return []
+            type(self).served = True
+            return list(updates)
+
+    monkeypatch.setattr(plugin, "TelegramClient", Client)
+    if post is not None:
+        monkeypatch.setattr(plugin, "_host_post", post)
+
+    async def main():
+        task = asyncio.create_task(plugin._poller(api))
+        deadline = time.monotonic() + 20
+        try:
+            while not (built and until(built[-1])) and not task.done():
+                assert time.monotonic() < deadline, "the poller did not reach the expected state"
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(main())
+    return built[-1]
+
+
+def _settings(tmp_path, name="bridge", **values):
+    bridge = tmp_path / name
+    bridge.mkdir(exist_ok=True)
+    (bridge / "settings.json").write_text(json.dumps({"TELEGRAM_MAX_UPDATES_PER_POLL": 20, **values}), encoding="utf-8")
+    return bridge
+
+
+def _owner(bridge):
+    return json.loads((bridge / "settings.json").read_text(encoding="utf-8")).get("TELEGRAM_CHAT_ID")
+
+
+def _handled(bridge):
+    return lambda _client: (bridge / "poll_offset.json").exists()
+
+
+@pytest.fixture
+def host_world(tmp_path, monkeypatch):
+    """The real Host Service (its /owner/external and /chat/inject) over an isolated, initialized core state and
+    the real emergency door; ordinary injected messages are only recorded."""
+    from ouroboros.gateway.host_service import create_host_service_app
+    from ouroboros.server_control import PanicIngress
+    from supervisor import state
+    from tests.test_host_service_api import FakeBridge, _seed_token
+
+    data = tmp_path / "data"
+    data.mkdir()
+    for name in ("DRIVE_ROOT", "STATE_PATH", "STATE_LAST_GOOD_PATH", "STATE_LOCK_PATH"):
+        monkeypatch.setattr(state, name, getattr(state, name))
+    state.init(data)
+    state.init_state()
+    _seed_token(data, skill="telegram", token="skill-token", permissions=["inject_chat"])
+    bridge = FakeBridge()
+    bridge.stopped = threading.Event()
+    bridge.panic = PanicIngress(bridge.stopped.set)
+    monkeypatch.setattr("ouroboros.panic_source.record_source", lambda *a, **kw: None)
+    world = types.SimpleNamespace(data=data, bridge=bridge, state=state, injected=[], asked=[],
+                                  app=create_host_service_app(data, bridge_getter=lambda: bridge))
+
+    async def post(api, path, payload):
+        world.asked.append((path, dict(payload)))
+        if path == "/chat/inject" and not str(payload.get("text") or "").strip().lower().startswith("/panic"):
+            world.injected.append(payload)  # ordinary intake is not under test here
+            return 202, {"ok": True}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=world.app), base_url="http://host") as client:
+            response = await client.post(path, headers={"X-Skill-Token": api.get_skill_token().use_in_request()},
+                                         json=payload)
+        return response.status_code, response.json()
+
+    world.post = post
+    yield world
+    for thread in threading.enumerate():
+        if thread.name == "panic-ingress":
+            thread.join(timeout=3)
+
+
+def _external_pair(world):
+    current = world.state.load_state()
+    return current.get("owner_external_id"), current.get("owner_external_chat_id")
+
+
+def test_a_pending_code_binds_only_the_chat_that_opens_its_link_and_both_slots_at_once(tmp_path, monkeypatch,
+                                                                                       host_world):
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path, TELEGRAM_COMMAND_MODE="full_access")
+    api = PairingApi(bridge, host_world.data, CODE)
+    updates = [_update(1, 77, "hello, I found this bot"), _update(2, 77, "/start"),
+               _update(3, 77, f"/start {CODE[:-1]}x"), _update(4, 42, f"/start {CODE}")]
+    client = _drive(plugin, monkeypatch, api, updates, lambda client: (42, GREETING) in client.sent,
+                    post=host_world.post)
+
+    # The stranger who wrote first bound nothing and reached nobody; the chat that opened the link owns the bridge
+    # AND the core's emergency stop, and its /start never reached the Main chat.
+    assert _owner(bridge) == "42"
+    assert _external_pair(host_world) == (42, 42) and host_world.bridge.panic._owner[1] == (42, 42)
+    assert host_world.injected == [] and host_world.bridge.messages == []
+    assert client.sent == [(77, LINK_INVALID), (42, GREETING)]  # one line for the wrong code, one greeting
+    pairing = sys.modules["telegram_bridge_test.lib.telegram_pairing"]
+    assert pairing.pending(bridge, CODE) is False  # consumed: the same link never binds again
+    consumed = json.loads((bridge / "pairing_consumed.json").read_text(encoding="utf-8"))
+    assert consumed["digest"] == pairing.code_digest(CODE) and CODE not in json.dumps(consumed)
+    assert ("info", "Telegram owner bound by the pairing link.", {}) in api.logs
+
+
+def test_a_group_chat_and_a_used_or_wrong_code_bind_nothing(tmp_path, monkeypatch):
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path, TELEGRAM_COMMAND_MODE="strict")
+    asked = []
+
+    async def post(_api, path, payload):
+        asked.append((path, payload))
+        return 200, {"ok": True, "owner": "bound"}
+
+    updates = [_update(1, -100123, f"/start@pair_bot {CODE}", sender=42, chat_type="supergroup"),
+               _update(2, 55, f"/start {CODE}", chat_type="group"),  # a group never binds, whatever its id
+               _update(3, 42, f"/start {CODE}"), _update(4, 43, f"/start {CODE}"), _update(5, 44, "/start wrong")]
+    client = _drive(plugin, monkeypatch, PairingApi(bridge, tmp_path / "data", CODE), updates, _handled(bridge),
+                    post=post)
+
+    assert _owner(bridge) == "42"
+    assert client.sent == [(42, GREETING), (43, LINK_INVALID), (44, LINK_INVALID)]
+    assert asked == [("/owner/external", {"user_id": 42, "chat_id": 42})]  # registered once, at the pairing
+
+
+@pytest.mark.parametrize("code,readable,status,binds", [
+    (None, True, "ok", True),           # no code saved: the first private writer binds, as before
+    (CODE, False, "ok", True),          # a code this skill holds no grant for is no code
+    ("not a code!", True, "ok", True),  # nor is one a start parameter cannot carry
+    (CODE, True, "ok", False),          # a pending code: nothing but its link binds
+    (None, True, "unknown", False),     # unreadable settings: nothing binds now, the next update asks again
+])
+def test_only_a_pending_code_stops_the_first_private_writer_from_binding(tmp_path, monkeypatch, code, readable,
+                                                                         status, binds):
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path, TELEGRAM_COMMAND_MODE="full_access")
+    injected = []
+
+    async def fake_inject(_api, payload):
+        injected.append(payload["text"])
+
+    monkeypatch.setattr(plugin, "_inject", fake_inject)
+    api = PairingApi(bridge, tmp_path / "data", code, readable=readable, status=status)
+    _drive(plugin, monkeypatch, api, [_update(1, 42, "hello")], _handled(bridge))
+
+    assert (_owner(bridge) == "42") is binds
+    assert injected == (["hello"] if binds else [])
+
+
+@pytest.mark.parametrize("mode", ["strict", "safe_commands", "full_access"])
+def test_start_is_the_bridges_own_in_every_command_mode(tmp_path, monkeypatch, mode):
+    """The owner's /start (bare, addressed, or with a stale code) is greeted again in every mode: never refused
+    as a slash command, never forwarded for the core to answer, and no binding moves."""
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path, TELEGRAM_COMMAND_MODE=mode, TELEGRAM_CHAT_ID="42")
+    injected = []
+
+    async def fake_inject(_api, payload):
+        injected.append(payload["text"])
+
+    monkeypatch.setattr(plugin, "_inject", fake_inject)
+    client = _drive(plugin, monkeypatch, PairingApi(bridge, tmp_path / "data"),
+                    [_update(1, 42, "/start"), _update(2, 42, "/start@pair_bot"), _update(3, 42, "/start old-code"),
+                     _update(4, 42, "after")], lambda _client: bool(injected))
+
+    assert client.sent == [(42, GREETING)] * 3
+    assert injected == ["after"] and _owner(bridge) == "42"
+
+
+@pytest.mark.parametrize("mode", ["strict", "safe_commands", "full_access"])
+def test_the_first_panic_after_pairing_stops_in_every_command_mode(tmp_path, monkeypatch, host_world, mode):
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path, TELEGRAM_COMMAND_MODE=mode)
+    fresh = int(plugin._POLL_GENERATION_STARTED) + 1
+    client = _drive(plugin, monkeypatch, PairingApi(bridge, host_world.data, CODE),
+                    [_update(1, 42, f"/start {CODE}"), _update(2, 42, "/panic", date=fresh)],
+                    lambda _client: host_world.bridge.stopped.is_set(), post=host_world.post)
+
+    assert host_world.bridge.stopped.wait(3)
+    assert [path for path, _payload in host_world.asked] == ["/owner/external", "/chat/inject"]
+    assert host_world.asked[-1][1]["text"] == "/panic"
+    assert all(text != plugin._LOCALIZED_TEXTS["en"]["panic_unconfirmed"] for _chat, text in client.sent)
+
+
+@pytest.mark.parametrize("mode", ["strict", "safe_commands", "full_access"])
+def test_an_owner_bound_earlier_registers_with_the_emergency_stop_at_their_next_message(tmp_path, monkeypatch,
+                                                                                        host_world, mode):
+    """An install bound by the first writer before this release, whose core slot is still empty: the owner's next
+    message registers them and their first /panic stops, in every mode. A core slot another chat holds is never
+    taken over: that owner's /panic stays refused, and the bridge logs why."""
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path, TELEGRAM_COMMAND_MODE=mode, TELEGRAM_CHAT_ID="42")
+    fresh = int(plugin._POLL_GENERATION_STARTED) + 1
+    _drive(plugin, monkeypatch, PairingApi(bridge, host_world.data),
+           [_update(1, 42, "hello"), _update(2, 42, "/panic", date=fresh)],
+           lambda _client: host_world.bridge.stopped.is_set(), post=host_world.post)
+    assert host_world.bridge.stopped.wait(3) and _external_pair(host_world) == (42, 42)
+
+    other = _settings(tmp_path, "other", TELEGRAM_COMMAND_MODE=mode, TELEGRAM_CHAT_ID="43")
+    api = PairingApi(other, host_world.data)
+    client = _drive(plugin, monkeypatch, api, [_update(1, 43, "/panic", date=fresh)],
+                    lambda client: bool(client.sent), post=host_world.post)
+    assert _external_pair(host_world) == (42, 42)  # never replaced
+    assert client.sent == [(43, plugin._LOCALIZED_TEXTS["en"]["panic_unconfirmed"])]
+    assert any("emergency stop is bound to another chat" in message for _level, message, _f in api.logs)
+
+
+def test_pairing_status_names_the_bot_and_a_waiting_code_never_the_code_or_token(tmp_path):
+    plugin = _load_plugin(tmp_path)
+    owner_mod = sys.modules["telegram_bridge_test.lib.telegram_owner"]
+    api = PairingApi(_settings(tmp_path), tmp_path / "data", CODE)
+    plugin.register_pairing(api)
+    handler, methods = api.routes["pairing/status"]
+    assert methods == ("GET",)
+
+    def status():
+        return json.loads(asyncio.run(handler(None)).body)
+
+    assert status() == {"bot_username": None, "owner_bound": False, "pending": True}
+    owner_mod.note_identity(api, "123", {"ok": True, "result": {"id": 123, "username": "pair_bot"}})
+    answer = status()
+    assert answer == {"bot_username": "pair_bot", "owner_bound": False, "pending": True}
+    assert CODE not in json.dumps(answer) and "secret-token" not in json.dumps(answer)
+    api.readable = False  # a code this skill may not read is not waiting
+    assert status()["pending"] is False
+    owner_mod.note_identity(api, "999", {"ok": True, "result": {"username": "another_bot"}})
+    assert status()["bot_username"] is None  # a name another bot's getMe gave is never shown for this token
+
+
+def test_the_connection_form_says_what_binds_while_a_code_waits(tmp_path):
+    """While a pairing code waits a private message binds nothing, so the status no longer asks for one."""
+    plugin = _load_plugin(tmp_path)
+    bridge = _settings(tmp_path)
+
+    def fields(code):
+        api = PairingApi(bridge, tmp_path / "data", code)
+        binding = plugin.binding_for(api)
+        binding.read_now(api)
+        generation = binding.snapshot()[1]
+        binding.mark_validated(generation)
+        binding.note(generation, "ready")
+        return plugin._connection_fields(api)
+
+    waiting, unpaired = fields(CODE), fields(None)
+    assert waiting["bridge"]["state"] == unpaired["bridge"]["state"] == "waiting_owner"
+    assert waiting["bridge_status"] == ("Connected; waiting for the pairing link (the QR code on the Telegram card) "
+                                        "to be opened")
+    assert unpaired["bridge_status"] == "Connected; send the bot a private message to bind its owner"

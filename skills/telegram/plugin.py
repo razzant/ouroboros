@@ -51,6 +51,7 @@ from .lib.telegram_poll_binding import (
 )
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .lib.telegram_token import _report_failure, _wait_for_bot_token, binding_for, make_token_observer
+from .lib.telegram_owner import note_identity, owner_gate, register_pairing  # the owner: pairing code or first writer
 from .lib.telegram_connection import (  # status of the token, the bridge and the Mini App
     _COMMAND_MODE_FULL, _COMMAND_MODE_STRICT, _VALID_COMMAND_MODES, _fail_permanent_poll_rejection,
     _make_status, _save_bridge_status, connection_components, poll_failure_reason, register_connection,
@@ -474,33 +475,6 @@ def _poller_preferences(api):
     return settings, pinned, maximum, mode, telegram_i18n.language()
 
 
-async def _authorized_owner(api, client, update, pinned_chat: str, lang: str) -> str | None:
-    callback = update.get("callback_query") or {}
-    message = update.get("message") or {}
-    chat = ((callback.get("message") or {}).get("chat") or (message.get("chat") or {}))
-    sender = callback.get("from") or message.get("from") or {}
-    chat_id = int(chat.get("id") or 0)
-    user_id = int(sender.get("id") or 0)
-    if chat_id <= 0 or user_id <= 0:
-        return None
-    if not pinned_chat:
-        if str(chat.get("type") or "") != "private" or chat_id != user_id:
-            return None
-        merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_CHAT_ID": str(chat_id)})
-        pinned_chat = str(chat_id)
-    if str(chat_id) == pinned_chat and str(user_id) == pinned_chat:
-        return pinned_chat
-    if callback:
-        try:
-            await client.answer_callback_query(
-                str(callback.get("id") or ""),
-                text=_LOCALIZED_TEXTS[lang]["not_authorized"],
-            )
-        except Exception:
-            pass
-    return None
-
-
 async def _edit_panel(api, client, chat_id: int, message_id: int, text: str, keyboard: list[list[dict]]) -> None:
     if await client.edit_message_text_with_inline_keyboard(chat_id, message_id, text, keyboard):
         return
@@ -510,7 +484,7 @@ async def _edit_panel(api, client, chat_id: int, message_id: int, text: str, key
 
 async def _validate_bot(api, client, command_mode: str, lang: str, generation: int | None = None) -> None:
     """Validate the token (getMe) and finish bridge startup bookkeeping; ready names the exact binding proved."""
-    await client.call("getMe")
+    note_identity(api, client.bot_id, await client.call("getMe"))  # the bot's username, for pairing/status
     # Menu discovery follows command mode; owner Panic has its own immediate door.
     try:
         await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang))})
@@ -647,10 +621,10 @@ async def _poller(api) -> None:
                     if cursor.is_replay(update):
                         continue
 
-                    authorized_chat = await _authorized_owner(api, client, update, pinned_chat, lang)
-                    if not authorized_chat:
+                    authorized_chat, answered = await owner_gate(api, client, update, pinned_chat, lang, _host_post)
+                    pinned_chat = authorized_chat or pinned_chat
+                    if answered or not authorized_chat:
                         continue
-                    pinned_chat = authorized_chat
 
                     # --- Handle callback queries (inline button presses) ---
                     callback_query = update.get("callback_query")
@@ -868,7 +842,7 @@ async def _handle_owner_message(
 ) -> None:
     """One authorized owner message: local /menu /language /help, command-mode
     translation, a reply to a quiz card (#472), then text/photo/file relay (#668).
-    Owner binding is already enforced by the caller (TOFU for every command mode).
+    Owner binding is already enforced by the caller (lib/telegram_owner.py, every command mode).
     """
     message = update.get("message") or {}
     chat = message.get("chat") or {}
@@ -876,8 +850,8 @@ async def _handle_owner_message(
     chat_id = int(chat.get("id") or 0)
     _owner_message_seen(api, client.bot_id, chat_id, int(message.get("message_id") or 0))
     # Owner binding + filtering is already enforced at the top of
-    # the update loop (TOFU for all command modes), so chat_id is
-    # guaranteed to equal the pinned owner chat here.
+    # the update loop (owner_gate, every command mode; it answers /start), so
+    # chat_id is guaranteed to equal the pinned owner chat here.
     text = str(message.get("text") or message.get("caption") or "").strip()
     caption = str(message.get("caption") or "").strip()
     # Handle /menu command locally — always allowed
@@ -1481,6 +1455,7 @@ def register(api):
     # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
     api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
     register_connection(api)  # Connection's status and its kept-copies form
+    register_pairing(api)  # pairing/status: the bot's name, owner bound, a pairing code waiting (never the code)
     api.register_settings_section(
         "telegram",
         title="Telegram",

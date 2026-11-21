@@ -29,6 +29,7 @@ import weakref
 from .telegram_api import OUTBOUND_JOURNAL, TelegramBindingChanged, TelegramTokenMissing
 
 TOKEN_KEY = "TELEGRAM_BOT_TOKEN"
+CODE_KEY = "TELEGRAM_PAIRING_CODE"  # lib/telegram_pairing.py; the Mini App never uses it, so it never restarts it
 WATCH_SEC = 2.0
 # Outcomes after which this generation needs no further refresh (PluginAPI 2.4's closed set); the rest are
 # asked again next read: not_started, retained, stop_unconfirmed, settings_unknown, settings_changed.
@@ -145,12 +146,13 @@ def accepted_token(api) -> str:
 
 
 def read_token_state(api) -> dict:
-    """The saved token's strict state; a host without PluginAPI 2.4 answers through ``get_settings``,
-    which cannot tell an unreadable settings document from a missing token."""
+    """The saved token's strict state, read with the pairing code (the Mini App's other settings key, for the
+    observer's confirmations); a host without PluginAPI 2.4 answers through ``get_settings``, which cannot tell
+    an unreadable settings document from a missing token."""
     reader = getattr(api, "get_settings_state", None)
     if reader is None:
-        return {"status": "ok", "values": dict(api.get_settings([TOKEN_KEY]) or {}), "missing": []}
-    return reader([TOKEN_KEY])
+        return {"status": "ok", "values": dict(api.get_settings([TOKEN_KEY, CODE_KEY]) or {}), "missing": []}
+    return reader([TOKEN_KEY, CODE_KEY])
 
 
 _BINDINGS: "weakref.WeakKeyDictionary[object, TokenBinding]" = weakref.WeakKeyDictionary()
@@ -246,6 +248,7 @@ def make_token_observer(api, companion: str = "", on_change=None):
 
     async def observe() -> None:
         settled = -1  # the generation whose companion refresh concluded
+        carried = ""  # the pairing code read for that refresh: confirmations name it, so a new code restarts nothing
         failing = ""  # the operating-system failure already logged, until a tick succeeds again
         while True:
             try:
@@ -262,9 +265,12 @@ def make_token_observer(api, companion: str = "", on_change=None):
             token, generation = binding.snapshot()
             confirm = settled == generation and binding.companion in _APPLIED
             if companion and binding.state != "unknown" and (settled != generation or confirm):
+                # A confirmation must name every settings key the companion is given; it names the code it was given.
+                expected = {TOKEN_KEY: token, CODE_KEY: carried} if confirm else {TOKEN_KEY: token}
+                carried = carried if confirm else str(((reply or {}).get("values") or {}).get(CODE_KEY) or "")
                 try:
                     outcome = await asyncio.to_thread(api.refresh_companion_process, companion,
-                                                      expected={TOKEN_KEY: token}, only_if_differs=confirm)
+                                                      expected=expected, only_if_differs=confirm)
                 except OSError as exc:
                     # A process start the system refused (fork under memory pressure, a missing executable)
                     # is retried at the next tick, never spends this observer's restarts: Off, a revoked
