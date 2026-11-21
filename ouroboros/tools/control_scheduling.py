@@ -803,6 +803,14 @@ def _route_refusal(fields: Dict[str, Any], route: Dict[str, Any]) -> tuple[str, 
 
 
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
+    if "title" in params and str(params.get("objective") or "").strip():  # without objective: the shape refusal
+        from ouroboros.tools.arg_feedback import ignored_argument_note, with_argument_notes
+
+        title, role = str(params.pop("title") or "").strip(), str(params.get("role") or "").strip()
+        params["role"] = role or title
+        return with_argument_notes(ctx, _schedule_task(ctx, internal, **params), [
+            f"title={title!r} taken as role, the child's lineage/UI label" if title and not role else
+            ignored_argument_note("title", title, "role names the child" if role else "empty optional value")])
     allowed_params = schedule_subagent_param_names() | HIDDEN_LEGACY_SCHEDULE_PARAMS
     unsupported = sorted(str(key) for key in params if key not in allowed_params)
     internal = dict(internal or {})
@@ -1205,4 +1213,5 @@ def maybe_emit_delegated_run_fanout(ctx: ToolContext, *, run_id: str, route_id: 
         log.debug("Failed to emit delegated-run swarm_fanout telemetry", exc_info=True)
 
 
-HIDDEN_LEGACY_SCHEDULE_PARAMS: frozenset[str] = frozenset({"model_lane", "executor"})
+# ``title`` is no former field: it is the start_task spelling of a child's label (DEVELOPMENT 02).
+HIDDEN_LEGACY_SCHEDULE_PARAMS: frozenset[str] = frozenset({"model_lane", "executor", "title"})

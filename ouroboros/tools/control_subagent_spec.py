@@ -233,7 +233,10 @@ def _shape_problems(params: Dict[str, Any], unsupported: Any) -> tuple[list[str]
                             "finalize before doing any work.")
     for field in ("objective", "expected_output"):
         if not str(params.get(field) or "").strip():
-            problems.append(f"{field} is required.")
+            problems.append(f"{field} is required." if field != "objective" or "title" not in params else
+                            f"objective is required: title={params['title']!r} names no work here; the work is the "
+                            "objective and the child's label its role: schedule_subagent(objective=<the work>, "
+                            f"expected_output=<the result>, role={str(params['title'] or '')!r}).")
     raw_claims = params.get("acceptance_claims")
     if raw_claims is not None and (not isinstance(raw_claims, list) or any(not isinstance(item, str) for item in raw_claims)):
         problems.append("acceptance_claims must be an array of plain strings (one checkable claim per entry).")

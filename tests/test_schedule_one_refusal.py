@@ -27,16 +27,16 @@ def test_independent_shape_problems_come_back_in_one_refusal_before_any_route(tm
         unrouted.setattr(control_scheduling, "select_subagent_snapshot",
                          lambda *_a, **_k: pytest.fail("a call with shape problems selects no route"))
         refused = _published(ctx, "schedule_subagent", lambda: control._schedule_task(
-            ctx, subagent_id=selected, objective="Examine the change", title="A title", mode="invented",
+            ctx, subagent_id=selected, objective="Examine the change", max_seconds=60, mode="invented",
             deadline_at="2020-01-01T00:00:00Z"))
         alone = control._schedule_task(ctx, subagent_id=selected, objective="Examine the change")
 
     assert refused.code == "TOOL_ARG_ERROR" and refused.text == (
-        "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): title. Use the strict schema: subagent_id, "
-        "objective, expected_output, optional role/context/constraints/memory_mode/workspace_root/effort and (for "
-        "mutative children) write_surface/write_root/protected_paths_grant/external_tool_grants; mode must be ask, "
-        "plan or agent; deadline_at is already in the past (2020-01-01T00:00:00Z); a child bound to it would finalize "
-        "before doing any work; expected_output is required.")
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): max_seconds. Use the strict schema: "
+        "subagent_id, objective, expected_output, optional role/context/constraints/memory_mode/workspace_root/effort "
+        "and (for mutative children) write_surface/write_root/protected_paths_grant/external_tool_grants; mode must be "
+        "ask, plan or agent; deadline_at is already in the past (2020-01-01T00:00:00Z); a child bound to it would "
+        "finalize before doing any work; expected_output is required.")
     assert alone == "⚠️ TOOL_ARG_ERROR (schedule_subagent): expected_output is required."
     assert not ctx.pending_events
     control._schedule_task(ctx, subagent_id=selected, objective="Examine the change", expected_output="An explanation")
@@ -137,3 +137,32 @@ def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path
     [event] = ctx.pending_events
     assert event["type"] == "schedule_subagent"
     assert event["task_contract"]["resource_policy"]["allowed_origins"] == ["https://studio.example:443"]
+
+
+def test_title_labels_the_child_where_objective_names_the_work(tmp_path, monkeypatch):
+    """`title` is outside the schema; it is start_task's spelling of the label that role carries here. Beside an
+    objective and no role it becomes the role, said in the result; beside a role it is ignored, said too; with no
+    objective the shape refusal names objective and the ready call; a plain call reads as it always did."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    selected = configure_test_subagent(monkeypatch)
+    ctx = _ctx(tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path / "data")
+    registry.set_context(ctx)
+    base = {"subagent_id": selected, "objective": "Examine the change", "expected_output": "Findings"}
+
+    labelled = registry.execute("schedule_subagent", {**base, "title": "Change review"})
+    assert "title='Change review' taken as role, the child's lineage/UI label" in labelled, labelled
+    named = registry.execute("schedule_subagent", {**base, "role": "reviewer", "title": "Change review"})
+    assert "title='Change review' ignored: role names the child" in named, named
+    plain = registry.execute("schedule_subagent", base)
+    assert "title" not in plain
+    assert [(event["type"], event.get("role")) for event in ctx.pending_events] == [
+        ("schedule_subagent", "Change review"), ("schedule_subagent", "reviewer"), ("schedule_subagent", "")]
+
+    refused = registry.execute("schedule_subagent", {"subagent_id": selected, "title": "Change review"})
+    assert refused == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required: title='Change review' names no work here; "
+        "the work is the objective and the child's label its role: schedule_subagent(objective=<the work>, "
+        "expected_output=<the result>, role='Change review'); expected_output is required.")
+    assert len(ctx.pending_events) == 3
