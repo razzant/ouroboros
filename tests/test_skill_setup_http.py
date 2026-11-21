@@ -89,6 +89,28 @@ def test_legacy_reconcile_does_not_reenter_the_callers_lifecycle_lane(setup_http
     assert not thread.is_alive()
 
 
+def test_reconcile_receipt_keeps_retained_process_beside_load_error(setup_http, monkeypatch):
+    app, _drive = setup_http
+    app.router.routes.extend(route for route in extensions.skill_setup_routes() if route.path.endswith('/reconcile'))
+    retained = {'beta': 'stop requested'}
+    monkeypatch.setattr('ouroboros.extension_loader.reconcile_extension', lambda *a, **k: {
+        'action': 'extension_load_error', 'reason': 'load_error', 'live_loaded': False,
+        'load_error': 'Alpha failed to import', 'process': 'server', 'server_reconcile': '',
+        'retained_companions': retained,
+    })
+
+    async def journey():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://testserver') as client:
+            response = await client.post('/api/skills/demo/reconcile')
+        assert response.status_code == 200 and response.json() == {
+            'skill': 'demo', 'extension_action': 'extension_load_error', 'extension_reason': 'load_error',
+            'live_loaded': False, 'load_error': 'Alpha failed to import', 'process': 'server', 'server_reconcile': '',
+            'retained_companions': retained,
+        }
+
+    asyncio.run(journey())
+
+
 @pytest.mark.parametrize('install_failure', [False, True])
 def test_held_lane_returns_a_real_job_then_terminal_result(setup_http, monkeypatch, install_failure):
     app, drive = setup_http

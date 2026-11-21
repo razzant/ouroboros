@@ -65,9 +65,9 @@ Receipt negotiation: `CREATING_SKILLS.md` “Reporting actual Presence delivery�
 
 ### Companion processes
 
-Reviewed descriptors reconcile on lifecycle/restart, stop on disable/unload/panic. `state/extension_generation.json` publishes the live set; workers adopt once at start, name miss or stale descriptor. Timeout, handler, guards and Safety share one descriptor and its declaration; replaced out-of-process calls refuse. Workers write `state/extension_reconcile/` requests, never own server children; pickup reconciles each skill once (PERSISTENCE.md), naming the answering process.
+Reviewed companions reconcile on lifecycle/restart, stop on disable/unload/Panic. Workers adopt the live set (`state/extension_generation.json`) at start, name miss or stale descriptor. Timeout, handler, guards and Safety use one descriptor and declaration. Stale out-of-process calls fail. Workers queue in `state/extension_reconcile/`. The server owns children and reconciles once per skill per pass. Receipts name the process.
 
-Skills health uses server facts; workers only qualify them, never advance `last_known_good` on failed handoff. Exhaustion ends on successful start. `refresh_companion_process` replaces changed `env_from_settings` after observed death and strict read. Delayed restarts require the current descriptor under lock; stop forgets pending ones. Reviewed payload; snapshot: `state/extension_companions.json`.
+Server reconciles advance `last_known_good` only with no known failed or missing start. Workers report local registration; `list_skills` adds recorded failures. Lists and receipts read `health.json` alike; history: `events.jsonl`. Only server lists show pending exits, by directory. `refresh_companion_process` replaces changed `env_from_settings` after observed exit and strict read. Its claim remembers an intentional stop across retries. That claim or Stop withdraws the monitor’s restart, not its exit history.
 
 ### Chat-id delivery
 
