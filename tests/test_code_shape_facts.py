@@ -60,10 +60,16 @@ def test_a_module_handle_is_a_zero_argument_function_returning_the_module_it_imp
 
         def run():
             _loop().step(); _loop().LIMIT = 3; _git().run_cmd(); _queue().PENDING; _const().real; _loop()()
+            q = _queue()  # a local holding the module is not followed (the extraction table's unit)
+            q.RUNNING
+
+
+        def shadowed(_loop):  # a parameter hides the module-level handle
+            return _loop().step
     ''', path="ouroboros/tools/leaf.py")
     assert shape == {("handle", "_loop"): 1, ("handle", "_git"): 1, ("handle", "_queue"): 1,
-                     ("call", "_loop", "step"): 1, ("call", "_loop", "LIMIT"): 1,
-                     ("call", "_git", "run_cmd"): 1, ("call", "_queue", "PENDING"): 1}
+                     ("call", "_loop", "step"): 1, ("call", "_loop", "LIMIT"): 1, ("call", "_git", "run_cmd"): 1,
+                     ("call", "_queue", "PENDING"): 1}
 
 
 def test_every_leaf_the_extraction_table_pins_reads_as_its_handle_and_its_declared_calls():
@@ -94,19 +100,35 @@ def test_a_reexport_is_a_name_a_marked_top_level_from_import_binds():
         def inner():
             from ouroboros.loop import hidden  # noqa: F401
     ''', path="ouroboros/tools/facade.py")
+    # Each name of a marked statement, its source resolved (the facade inventory's unit and reader).
     assert shape == {("re-export", "ouroboros.loop", "run_loop", ""): 1,
-                     ("re-export", "ouroboros.loop", "step", "one_step"): 1, ("re-export", ".", "git", ""): 1}
+                     ("re-export", "ouroboros.loop", "step", "one_step"): 1, ("re-export", "ouroboros.tools", "git", ""): 1}
+    assert _shape("from ouroboros.tools import git  # noqa: F401\n", path="ouroboros/tools/facade.py") == {
+        ("re-export", "ouroboros.tools", "git", ""): 1}  # absolute and relative spellings are one name
 
 
-def test_a_test_source_counts_patched_product_module_names_and_git_init():
+def test_a_test_source_counts_patched_product_names_and_git_init_call_sites():
     shape = _shape('''
+        import importlib
         import subprocess
         from unittest import mock
         from unittest.mock import patch
 
         from ouroboros import config
         from ouroboros.tools import git as git_tool
+        from ouroboros.loop import Runner
         import supervisor.queue
+        from tests import _helpers as shared
+
+        real_run = subprocess.run
+
+
+        def _git(repo, *args):  # a Git helper this module defines
+            return subprocess.run(["git", "-C", str(repo), *args], check=True)
+
+
+        def run(cmd, cwd=None):  # a command runner this module defines
+            return subprocess.run(cmd, cwd=cwd, check=True)
 
 
         @mock.patch("ouroboros.loop._step")
@@ -115,6 +137,8 @@ def test_a_test_source_counts_patched_product_module_names_and_git_init():
             monkeypatch.setattr(config, "DATA_DIR", tmp_path)
             monkeypatch.delattr(git_tool, "run_cmd")
             monkeypatch.setattr(supervisor.queue, "PENDING", [])
+            monkeypatch.setattr(Runner, "step", None)      # a class a product module defines
+            monkeypatch.setattr(config.os, "environ", {})  # a name reached through a product module
             monkeypatch.setattr("os.environ", {})          # not a product module
             monkeypatch.setattr(subprocess, "run", None)   # nor this one
             setattr(config, "OTHER", 1)                    # the builtin is no monkeypatch
@@ -122,18 +146,47 @@ def test_a_test_source_counts_patched_product_module_names_and_git_init():
                 pass
             client = object()
             client.patch("/api/x")                         # an HTTP PATCH, not a patch target
+            monkeypatch.setattr(client, "x", 1)            # a local object, not a product name
             subprocess.run(["git", "init", "-q"], cwd=tmp_path)
             subprocess.run(["git", "-C", str(tmp_path), "-c", "init.defaultBranch=main", "init"])
             subprocess.run(["git", "-c", "user.name=T", "commit", "-m", "init"])  # a commit named init
             _git(tmp_path, "init", "-q")
             shared.git(tmp_path, "init")
+            run(["git", "init"], cwd=tmp_path)
+            real_run(["git", "init", "--bare", "remote"])
             subprocess.check_call("cd x && git init -q", shell=True)
+            for args in (("init", "-q"), ("add", "-A")):
+                subprocess.run(["git", *args], cwd=tmp_path)
+            for cmd in (["git", "init"], ["git", "status"]):
+                subprocess.run(cmd, cwd=tmp_path)
             pytest.param("git init /tmp/proj", id="a command as data, never run")
+            CASES = [pytest.param(["git", "init"]), ("git", "init")]  # data too
+            fake_run(["git", "init"])                      # nothing here runs it
+
+
+        def test_scopes(monkeypatch, config):
+            monkeypatch.setattr(config, "DATA_DIR", None)  # the parameter hides the module's import
+            review = importlib.import_module("ouroboros.review")
+            monkeypatch.setattr(review, "subprocess", None)
+
+            def inner():
+                monkeypatch.setattr(review, "tempfile", None)  # an enclosing function's binding
+
+            from supervisor import queue as config_q
+            monkeypatch.setattr(config_q, "RUNNING", {})
+
+
+        def unrelated():
+            import os as git_tool  # rebinds the name in this function only
+            return git_tool
     ''', path="tests/test_leaf.py")
     assert shape == {("patch", "ouroboros.loop._step"): 1, ("patch", "ouroboros.loop.LIMIT"): 1,
                      ("patch", "ouroboros.config.DATA_DIR"): 1, ("patch", "ouroboros.tools.git.run_cmd"): 1,
-                     ("patch", "supervisor.queue.PENDING"): 1, ("patch", "ouroboros.config.LOADED"): 1,
-                     ("patch", "ouroboros.config.load"): 1, ("git init",): 5}
+                     ("patch", "supervisor.queue.PENDING"): 1, ("patch", "ouroboros.loop.Runner.step"): 1,
+                     ("patch", "ouroboros.config.os.environ"): 1, ("patch", "ouroboros.config.LOADED"): 1,
+                     ("patch", "ouroboros.config.load"): 1, ("patch", "ouroboros.review.subprocess"): 1,
+                     ("patch", "ouroboros.review.tempfile"): 1, ("patch", "supervisor.queue.RUNNING"): 1,
+                     ("git init",): 9}
     # The groups follow the path: a product module holds no test facts, a test source no handles.
     assert _shape('subprocess.run(["git", "init"])\nmonkeypatch.setattr("ouroboros.loop.X", 1)\n') == {}
     assert _shape("def _loop():\n    from ouroboros import loop\n    return loop\n", path="tests/test_a.py") == {}
@@ -146,19 +199,26 @@ def test_the_line_states_what_the_change_added_and_removed_and_names_what_it_cou
     rows = [("ouroboros/leaf.py", leaf_before, leaf_after), ("ouroboros/facade.py", facade, None),
             ("tests/test_a.py", None, 'monkeypatch.setattr("ouroboros.loop.a", 1)\n')]
     assert pulse_line(rows, MODULES, MODULES) == (
-        "Code shape: module handles +0/-0, calls through them +2/-0, re-exports +0/-2; "
-        "tests: patched product-module names +1/-0, git init +0/-0.")
+        "Code shape: module handles +0/-0, calls through them +2/-0, re-exported names +0/-2; "
+        "tests: patched product-module names +1/-0, git init call sites +0/-0.")
     # The same call renamed is one added and one removed, not nothing.
     assert "calls through them +1/-1," in pulse_line(
         [("ouroboros/leaf.py", leaf_before, leaf_before.replace("().a", "().c"))], MODULES, MODULES)
     # Unknown is never zero: a side that does not parse, or was not read, is named instead of counted.
     broken = [("ouroboros/leaf.py", leaf_before, "def broken(:\n"), ("ouroboros/facade.py", facade, None)]
     assert pulse_line(broken, MODULES, MODULES) == (
-        "Code shape: module handles +0/-0, calls through them +0/-0, re-exports +0/-2, "
+        "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-2, "
         "1 unreadable not counted: ouroboros/leaf.py.")
     assert pulse_line(broken[:1], MODULES, MODULES) == (
-        "Code shape: module handles, calls through them, re-exports unknown (1 unreadable: ouroboros/leaf.py).")
+        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: ouroboros/leaf.py).")
     assert pulse_line(rows[2:], MODULES, MODULES, unreadable=["tests/test_a.py"]) == (
-        "Code shape: tests: patched product-module names, git init unknown (1 unreadable: tests/test_a.py).")
+        "Code shape: tests: patched product-module names, git init call sites unknown (1 unreadable: tests/test_a.py).")
     assert pulse_line(rows[:1], None, MODULES).endswith("unknown (1 unreadable: ouroboros/leaf.py).")
     assert pulse_line([], MODULES, MODULES) == ""
+    # Too deep to parse is unknown too, never an error out of the pulse (CPython raises MemoryError or
+    # RecursionError for such text).
+    deep = [("ouroboros/deep.py", None, "X = " + "-" * 200_000 + "1\n"),
+            ("tests/test_deep.py", None, "x = " + " + ".join(["1"] * 20_000) + "\n")]
+    assert pulse_line(deep, MODULES, MODULES) == (
+        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: ouroboros/deep.py); "
+        "tests: patched product-module names, git init call sites unknown (1 unreadable: tests/test_deep.py).")

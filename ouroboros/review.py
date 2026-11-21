@@ -1342,7 +1342,7 @@ def _suite_facts(
         try:
             items, had = _declared_tests(at_base.get(path) or "", path)
             count, has = _declared_tests(text or "", path)
-        except (SyntaxError, ValueError):  # mid-edit text: unread, never counted as none
+        except (SyntaxError, ValueError, RecursionError, MemoryError):  # mid-edit or too deep: unread, never none
             unreadable += 1
             continue
         added, removed = added + max(count - items, 0), removed + max(items - count, 0)
@@ -1389,8 +1389,8 @@ def diff_pulse(
 
     for base in ((merge_base, "HEAD") if merge_base else ("HEAD",)):
         numstat = diff(base, "--numstat")
-        created = diff(base, "--name-only", "--diff-filter=A") if numstat is not None else None
-        if created is not None:
+        status = diff(base, "--name-status") if numstat is not None else None
+        if status is not None:
             break
     else:  # nothing to diff against here; the touched books keep whatever balance they have
         return book_balance_note(root, [str(path) for path in paths or ()])
@@ -1400,7 +1400,10 @@ def diff_pulse(
         minus, _, path = rest.partition("\t")
         if path:  # a binary file's "-" counts no lines
             changed[path] = (int(plus) if plus.isdigit() else 0, int(minus) if minus.isdigit() else 0)
-    new = [path for path in created.decode("utf-8", "replace").split("\0") if path]
+    fields = status.decode("utf-8", "replace").split("\0")  # `<A|D|M|T>\0<path>\0` per changed path
+    states = dict(zip(fields[1::2], fields[0::2]))
+    new = [path for path, state in states.items() if state == "A"]
+    gone = {path for path, state in states.items() if state == "D"}
     if not staged:
         untracked = _git_bytes(root, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z")
         for path in (untracked or b"").decode("utf-8", "replace").split("\0"):
@@ -1436,10 +1439,10 @@ def diff_pulse(
         listing = _git_bytes(root, "--no-optional-locks", "ls-tree", "-r", "--name-only", "-z", base)
         before = None if listing is None else module_names(listing.decode("utf-8", "replace").split("\0"))
         created = set(new)
-        # A side the file has but that was not read: one held at base, or one given added lines.
+        # A side the file has but that was not read is unknown, never a deletion.
         unread = [path for path in python if at_base[path] is None and path not in created
-                  or current[path] is None and changed[path][0]]
-        after = None if before is None else before | module_names(created)
+                  or current[path] is None and path not in gone]
+        after = None if before is None else (before - module_names(gone)) | module_names(created)
         shape = pulse_line([(path, at_base[path], current[path]) for path in python], before, after,
                            unreadable=unread, limit=limit)
 
