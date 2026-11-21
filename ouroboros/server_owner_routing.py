@@ -88,6 +88,16 @@ def _start_order(row: Dict[str, Any]) -> tuple:
     return started, str(row.get("task_id") or "")
 
 
+def _carry_project_room_context(drive_root, chat_id, project_id, ingress_chat, client_message_id, roots, routed_to):
+    """A numeric chat match is only a candidate; context belongs to the decided Project."""
+    from ouroboros.owner_relay import carry_room_context
+    from ouroboros.projects_registry import project_id_for_task
+
+    members = [root for root in roots.rows(chat_id) if
+               (project_id_for_task(drive_root, root["task_id"]) or root.get("project_id")) == project_id]
+    carry_room_context(drive_root, ingress_chat, client_message_id, members, routed_to)
+
+
 def _route_project_chat_to_running_task(
     ctx: Any,
     chat_id: int,
@@ -794,12 +804,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     # is chosen to answer it, and its delivery address stays its own turn's.
     if telegram_room:
         if project_id and not press:
-            from ouroboros.owner_relay import carry_room_context
-            from ouroboros.projects_registry import project_id_for_task
-
-            members = [root for root in roots.rows(chat_id) if
-                       (project_id_for_task(ctx.DRIVE_ROOT, root["task_id"]) or root.get("project_id")) == project_id]
-            carry_room_context(ctx.DRIVE_ROOT, ingress_chat, client_message_id, members, "")
+            _carry_project_room_context(ctx.DRIVE_ROOT, chat_id, project_id, ingress_chat, client_message_id, roots, "")
     elif realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
@@ -814,9 +819,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # The room's other live roots hear my human's words as context, whichever return routed them, a late answer
         # included; a press is a typed act on a card, not words: it reaches its author's thread and no other reader.
         if project_id and not press:
-            from ouroboros.owner_relay import carry_room_context
-
-            carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
+            _carry_project_room_context(ctx.DRIVE_ROOT, chat_id, project_id, chat_id, client_message_id, roots,
+                                        routed_to_task)
     elif realtime_turn is None and not (project_id or late or press or task_constraint):
         # Main: my human's next words reach the one turn already answering them in this chat, else their own turn.
         routed_to_task = _route_main_followup(ctx, chat_id, text or image_caption, client_message_id,

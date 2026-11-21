@@ -114,6 +114,31 @@ def test_a_busy_store_is_a_disclosed_gap_and_the_message_still_gets_its_turn(mai
     assert metadata["main_routing_manifest"]["omissions"]["root_tasks"] is None  # unknown, not zero
 
 
+def test_web_project_context_requires_membership_when_numeric_chat_matches(tmp_path, monkeypatch):
+    from ouroboros import owner_relay
+
+    room = create_project(tmp_path, "relay-members")
+    chat = room["chat_id"]
+    bind_task_to_project(tmp_path, "bound-member", room["id"], origin={"absent": "system"})
+    roots = routing.RootSnapshot(pairs=tuple((row, frozenset({chat})) for row in (
+        {"task_id": "bound-member"},
+        {"task_id": "admitted-member", "project_id": room["id"]},
+        {"task_id": "unrelated-private"},
+    )))
+    relays = []
+    ctx = _ctx(tmp_path, direct=lambda *_a, **_kw: None)
+    monkeypatch.setattr(server_owner_routing, "addressable_roots", lambda _ctx: roots)
+    monkeypatch.setattr(server_owner_routing, "_route_project_chat_to_running_task", lambda *_a, **_kw: "")
+    monkeypatch.setattr(routing, "_recent_root_results", lambda *_a: ([], {}))
+    monkeypatch.setattr(owner_relay, "carry_room_context",
+                        lambda _drive, source, message, members, routed_to:
+                        relays.append((source, message, [row["task_id"] for row in members], routed_to)))
+
+    _route(ctx, "m-members", chat_id=chat)
+
+    assert relays == [(chat, "m-members", ["bound-member", "admitted-member"], "")]
+
+
 def test_a_room_row_reaches_the_other_live_roots_as_context_once_whatever_the_routing_outcome(tmp_path, monkeypatch):
     """Two live readers: the row is addressed to none and a labelled context entry lands in both, no corpus and no
     seal generation moves; a sole reader gets the addressed mail and the other root the context entry naming it;
