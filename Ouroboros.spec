@@ -2,11 +2,10 @@
 """PyInstaller spec for Ouroboros (macOS, Linux, Windows).
 
 Bundles launcher.py as the entry point. The app ships an embedded managed git
-bootstrap artifact (``repo.bundle`` + ``repo_bundle_manifest.json``) and still
-includes the repo data tree the launcher/runtime reads from the bundle directory
-(web assets, docs, prompts, bundled skills, etc.); the repository's ``tests`` tree
-is not part of it, because the managed checkout, which carries ``tests``, comes from
-``repo.bundle``. On first run the launcher materializes a
+bootstrap artifact (``repo.bundle`` + ``repo_bundle_manifest.json``) beside copies
+of the repo data trees (web assets, docs, prompts, bundled skills, etc.); the
+repository's ``tests`` tree is not among them, because the managed checkout, which
+carries ``tests``, comes from ``repo.bundle``. On first run the launcher materializes a
 real git repo under ``~/Ouroboros/repo`` from the embedded bundle; the embedded
 python-standalone interpreter then runs the agent as a subprocess.
 """
