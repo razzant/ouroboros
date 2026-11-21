@@ -302,20 +302,21 @@ def test_new_or_reentered_band_path_requires_nonblank_rationale(rationale: str |
     )
 
     assert validate_manifest_transition(current, previous) == [
-        "new or re-entered 1001-1500 path needs a nonblank rationale: legacy.py"
+        "new or re-entered 1001-1600 path needs a nonblank rationale: legacy.py"
     ]
 
 
-def test_surviving_band_rationale_is_preserved() -> None:
+def test_a_band_rationale_may_be_replaced_but_never_dropped() -> None:
+    """Owner 2A (2026-11-06): a recorded reason may give way to a better one, Git keeps the old text;
+    a reason once recorded never returns to none, and a baseline ``None`` may take a reason."""
     previous = _manifest(band_paths={"feature.py": "owner-approved extraction seam"})
-    current = _manifest(band_paths={"feature.py": "rewritten"})
-
-    assert validate_manifest_transition(current, previous) == ["surviving band rationale is immutable: feature.py"]
-    previous_none = _manifest(band_paths={"feature.py": None})
-    current_fabricated = _manifest(band_paths={"feature.py": "fabricated later"})
-    assert validate_manifest_transition(current_fabricated, previous_none) == [
-        "surviving band rationale is immutable: feature.py"
+    assert validate_manifest_transition(_manifest(band_paths={"feature.py": "rewritten"}), previous) == []
+    assert validate_manifest_transition(_manifest(band_paths={"feature.py": None}), previous) == [
+        "band rationale dropped: feature.py"
     ]
+    previous_none = _manifest(band_paths={"feature.py": None})
+    assert validate_manifest_transition(_manifest(band_paths={"feature.py": "written later"}), previous_none) == []
+    assert validate_manifest_transition(previous_none, previous_none) == []
 
 
 def test_byte_debt_cannot_grow_or_reenter() -> None:
@@ -389,8 +390,8 @@ def test_band_entry_stays_only_while_its_module_sits_above_the_band(tmp_path: Pa
 def test_band_entry_kept_above_the_band_returns_with_its_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """1504 -> 1450 lines needs no new reason: the entry never left. The adjacent rule that a
-    surviving reason is immutable is unchanged."""
+    """1504 -> 1450 lines needs no new reason: the entry never left. A new reason may replace it, and the
+    regenerator keeps the one written on disk."""
     repo = _band_repo(tmp_path, {"mod.py": 1504}, _manifest(band_paths={"mod.py": "extraction seam"}))
     assert collect_size_ratchet_inventory_at_ref(repo, "HEAD").above_band_paths == frozenset({"mod.py"})
     _write_lines(repo / "mod.py", 1450)
@@ -399,7 +400,76 @@ def test_band_entry_kept_above_the_band_returns_with_its_reason(
     assert validate_size_ratchet(repo) == []
     assert regenerate._next_manifest({}).band_paths == {"mod.py": "extraction seam"}
     _write_manifest(repo, _manifest(band_paths={"mod.py": "a new reason"}))
-    assert validate_size_ratchet(repo) == ["surviving band rationale is immutable: mod.py"]
+    assert validate_size_ratchet(repo) == []
+    assert regenerate.main([]) == 0
+    assert parse_size_ratchet_manifest((repo / "ouroboros/size_ratchet_manifest.py").read_text(
+        encoding="utf-8")).band_paths == {"mod.py": "a new reason"}
+
+
+def test_a_touched_module_of_1001_to_1600_lines_needs_a_band_rationale() -> None:
+    """Owner 2A (2026-11-06): above 1000 lines a record with its reason, owed by the change that touches
+    the module; an untouched 1501-1600 module needs no entry and a baseline ``None`` may stay."""
+    from ouroboros.review import touched_band_errors
+
+    manifest = _manifest(band_paths={"none.py": None, "kept.py": "a reason", "top.py": None, "blank.py": " "})
+    lines = {"gap.py": 1550, "none.py": 1200, "kept.py": 1550, "band.py": 1200, "low.py": 1000,
+             "giant.py": 1601, "top.py": 1600, "blank.py": 1300}
+    assert touched_band_errors(manifest, lines, lines) == [
+        "touched 1300-line module needs a nonblank band rationale: blank.py",  # an in-memory blank is no reason
+        "touched 1550-line module needs a nonblank band rationale: gap.py",
+        "touched 1200-line module needs a nonblank band rationale: none.py",
+        "touched 1600-line module needs a nonblank band rationale: top.py",
+    ]
+    assert touched_band_errors(manifest, lines, ["kept.py", "low.py", "giant.py", "gone.py"]) == []
+    assert touched_band_errors(manifest, lines, []) == []
+    # A touched band module without any entry is the exactness check's missing live entry, said once.
+    assert touched_band_errors(manifest, lines, ["band.py"]) == []
+
+
+def test_the_rule_reads_what_the_candidate_touched_and_an_unchanged_tree_stays_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = "ouroboros/size_ratchet_manifest.py"
+    repo = _band_repo(tmp_path, {"gap.py": 1550, "legacy.py": 1200},
+                      _manifest(band_baseline_paths=frozenset({"legacy.py"}), band_paths={"legacy.py": None}))
+    assert validate_size_ratchet(repo) == []  # untouched: no entry owed, the baseline None stays
+    monkeypatch.setattr(regenerate, "REPO_ROOT", repo)
+
+    _write_lines(repo / "gap.py", 1551)
+    _write_lines(repo / "legacy.py", 1201)
+    _git(repo, "add", "legacy.py")
+    gap = "touched 1551-line module needs a nonblank band rationale: gap.py"
+    legacy = "touched 1201-line module needs a nonblank band rationale: legacy.py"
+    assert validate_size_ratchet(repo) == [gap, legacy, f"staged: {legacy}"]
+    before = (repo / manifest_path).read_bytes()
+    assert regenerate.main([]) == 2 and (repo / manifest_path).read_bytes() == before
+    assert regenerate.main(["--band-rationale", "gap.py=one parser", "--band-rationale", "legacy.py=its reason"]) == 2
+    _git(repo, "add", manifest_path)  # written; only the staged copy lagged
+    assert validate_size_ratchet(repo) == []
+    assert regenerate.main([]) == 0  # a run without the flags keeps the reasons written on disk
+    assert parse_size_ratchet_manifest((repo / manifest_path).read_text(encoding="utf-8")).band_paths == {
+        "gap.py": "one parser", "legacy.py": "its reason"}
+    assert regenerate.main(["--band-rationale", "low.py=no such module"]) == 2
+
+
+def test_the_pairwise_check_reads_touched_modules_when_the_manifest_did_not_change(tmp_path: Path) -> None:
+    repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "README.md").write_text("unrelated\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "unrelated")
+    assert validate_size_ratchet_transition_against_base(repo, base) == []
+    _write_lines(repo / "gap.py", 1551)
+    _git(repo, "commit", "-qam", "touch gap.py, manifest unchanged")
+
+    touched = ["touched 1551-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, base) == touched
+    assert validate_size_ratchet_transition_against_base(repo, None) == touched  # the degraded parent base
+    assert validate_size_ratchet(repo) == []  # the committed tree is clean against its own HEAD
+    _write_manifest(repo, _manifest(band_paths={"gap.py": "one parser"}))
+    _git(repo, "commit", "-qam", "its reason")
+    assert validate_size_ratchet_transition_against_base(repo, base) == []
+    assert validate_size_ratchet(repo) == []
 
 
 def test_tree_validation_reads_staged_bytes_not_unstaged_worktree_bytes(tmp_path: Path) -> None:
@@ -836,10 +906,9 @@ def test_pairwise_degraded_red_parent_lends_the_tip_no_debt(tmp_path: Path) -> N
 
 
 def test_interval_rationale_form_allows_legal_reentry_and_blocks_drops(tmp_path: Path) -> None:
-    """Across an interval a band path may legally retire and re-enter with a
-    fresh rationale (every adjacent step green): the pairwise interval form
-    accepts the changed rationale and rejects a dropped or blank one. The
-    adjacent form keeps byte-equality."""
+    """Across an interval a band path may retire and re-enter with a fresh rationale, and between
+    adjacent manifests a reason may be replaced: one rule accepts the changed rationale and rejects a
+    dropped or blank one."""
     from ouroboros.review import parse_size_ratchet_manifest, validate_manifest_transition
     import scripts.regenerate_size_ratchet as regen
 
@@ -850,22 +919,15 @@ def test_interval_rationale_form_allows_legal_reentry_and_blocks_drops(tmp_path:
     def _parse(manifest):
         return parse_size_ratchet_manifest(regen._render(manifest))
 
-    assert validate_manifest_transition(_parse(tip_fresh), _parse(base), adjacent=False) == []
-    assert validate_manifest_transition(_parse(tip_fresh), _parse(base)) == [
-        "surviving band rationale is immutable: mod.py"
-    ]
-    assert validate_manifest_transition(_parse(tip_dropped), _parse(base), adjacent=False) == [
-        "band rationale dropped across the interval: mod.py"
-    ]
+    assert validate_manifest_transition(_parse(tip_fresh), _parse(base)) == []
+    assert validate_manifest_transition(_parse(tip_dropped), _parse(base)) == ["band rationale dropped: mod.py"]
     # Blank strings are refused at the parse boundary ("nonblank or None"), so
     # a rendered manifest can never carry one; the transition guard still
     # treats a directly constructed blank rationale as a drop (defense in
     # depth for in-memory candidates that bypass the parser).
     for blank in ("", "   "):
         tip_blank = _manifest(band_paths={"mod.py": blank}, sha="a" * 40)
-        assert validate_manifest_transition(tip_blank, _parse(base), adjacent=False) == [
-            "band rationale dropped across the interval: mod.py"
-        ]
+        assert validate_manifest_transition(tip_blank, _parse(base)) == ["band rationale dropped: mod.py"]
 
 
 def _merge_commit_without_manifest(repo: Path, manifest: SizeRatchetManifest) -> str:

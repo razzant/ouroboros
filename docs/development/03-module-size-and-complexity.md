@@ -12,8 +12,8 @@ excluded) target roughly 1000 lines; test modules are outside the module band (t
 function cap stays). The gates read exact-path debt from
 `ouroboros/size_ratchet_manifest.py`, the same for Python and JavaScript: 1600 lines per
 module (`GIANT_PATHS`), 200,000 canonical UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the
-1001–1500 band (`BAND_PATHS`; a new entry needs a nonblank rationale), and 300 lines
-per non-grandfathered runtime-Python function
+1001–1500 band (`BAND_PATHS`; a touched module of 1001–1600 lines owes a reason,
+replaceable, never dropped), and 300 lines per non-grandfathered runtime-Python function
 (`FUNCTION_DEBT`; `FUNCTION_COUNT_EXCLUDED_FILES` names the skipped files).
 A stale or newly oversized entry fails; regenerate with
 `scripts/regenerate_size_ratchet.py` (mechanics: ARCHITECTURE §6 "Review stack").

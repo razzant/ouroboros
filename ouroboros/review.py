@@ -575,17 +575,10 @@ GRANDFATHERED_OVERSIZED_FUNCTIONS = FUNCTION_DEBT
 def validate_manifest_transition(
     current: SizeRatchetManifest,
     previous: SizeRatchetManifest,
-    *,
-    adjacent: bool = True,
 ) -> list[str]:
-    """Validate shrink-only debt and rationale authority against the parent tree.
-
-    ``adjacent=False`` is the PAIRWISE (interval) form: byte-equality of a
-    surviving band rationale is only sound between adjacent manifests — across
-    an interval a path may legally retire and re-enter with a fresh rationale
-    (every intermediate step green) — so the interval form requires a nonblank
-    tip rationale instead of equality (Q18-A: interval archaeology is out of
-    scope; interval FALSE POSITIVES are not)."""
+    """Validate shrink-only debt and rationale authority against a previous manifest (the parent's,
+    or the event base's across an interval). A recorded band rationale may be replaced by another
+    (Git keeps the old text), never dropped; a new entry needs one."""
     errors: list[str] = []
     if current.baseline_source_sha != previous.baseline_source_sha:
         errors.append("BASELINE_SOURCE_SHA is immutable")
@@ -614,20 +607,12 @@ def validate_manifest_transition(
 
     previous_band = set(previous.band_paths)
     for path in sorted(set(current.band_paths) - previous_band):
-        rationale = current.band_paths[path]
-        if not isinstance(rationale, str) or not rationale.strip():
-            errors.append(f"new or re-entered 1001-1500 path needs a nonblank rationale: {path}")
+        if not (current.band_paths[path] or "").strip():
+            errors.append(f"new or re-entered 1001-1600 path needs a nonblank rationale: {path}")
     for path in sorted(set(current.band_paths) & previous_band):
-        old = previous.band_paths[path]
-        new = current.band_paths[path]
-        if adjacent:
-            if new != old:
-                errors.append(f"surviving band rationale is immutable: {path}")
-        elif old is not None and (new is None or not new.strip()):
-            # Interval form: a rewrite is legal (retire+re-enter), but DROPPING
-            # a recorded rationale — to None or to a blank string — across the
-            # interval launders the justification away.
-            errors.append(f"band rationale dropped across the interval: {path}")
+        # A blank string never parses; the check still holds for an in-memory candidate.
+        if previous.band_paths[path] is not None and not (current.band_paths[path] or "").strip():
+            errors.append(f"band rationale dropped: {path}")
 
     for path in sorted(set(current.byte_debt) - set(previous.byte_debt)):
         errors.append(f"new or re-entered module debt above {MAX_MODULE_BYTES} UTF-8 bytes: {path}")
@@ -658,6 +643,53 @@ def _manifest_inventory_errors(
     if dict(inventory.byte_debt) != dict(manifest.byte_debt):
         errors.append(f"BYTE_DEBT differs from live exact counts: live={dict(inventory.byte_debt)!r}")
     return errors
+
+
+def touched_band_errors(
+    manifest: SizeRatchetManifest, line_counts: Mapping[str, int], touched: Iterable[str],
+) -> list[str]:
+    """A module of 1001-1600 lines whose file a change touched carries a nonblank band rationale.
+
+    Untouched modules keep the record they have (a 1501-1600 module needs none, a baseline entry
+    may stay ``None``), so a check of an unchanged tree never turns red; a touched 1001-1500 module
+    without an entry is already the exactness check's missing live entry."""
+    errors: list[str] = []
+    for path in sorted(set(touched)):
+        lines = line_counts.get(path)
+        if (lines is None or not TARGET_MODULE_LINES < lines <= MAX_MODULE_LINES
+                or (manifest.band_paths.get(path) or "").strip()):
+            continue
+        if lines > BAND_MODULE_MAX_LINES or path in manifest.band_paths:
+            errors.append(f"touched {lines}-line module needs a nonblank band rationale: {path}")
+    return errors
+
+
+def _touched_paths(root: pathlib.Path, base: str, candidate: str | None) -> frozenset[str]:
+    """Paths whose file differs between ``base`` and ``candidate`` (a tree-ish; ``None`` is the
+    worktree with its untracked files); a Git failure raises."""
+    def names(*args: str) -> set[str]:
+        out = subprocess.run(["git", "--no-optional-locks", *args], cwd=root, check=True, capture_output=True).stdout
+        return {item.decode("utf-8") for item in out.split(b"\0") if item}
+
+    if candidate is not None:
+        return frozenset(names("diff-tree", "-r", "--no-renames", "--name-only", "-z", base, candidate))
+    return frozenset(names("diff", "--no-renames", "--name-only", "-z", base, "--")
+                     | names("ls-files", "--others", "--exclude-standard", "-z"))
+
+
+def _touched_findings(
+    root: pathlib.Path, manifest: SizeRatchetManifest, inventory: SizeRatchetInventory,
+    base: str, candidate: str | None, *, staged: bool = False,
+) -> list[str]:
+    """``touched_band_errors`` of a candidate's inventory against ``base``, or a ``partial:``
+    finding when Git cannot list what the candidate touched."""
+    label = "staged " if staged else ""
+    try:
+        touched = _touched_paths(root, base, candidate)
+    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
+        return [_partial_finding(f"{label}touched-file list", exc, "band rationales of touched modules")]
+    lines = {module.path: module.line_count for module in inventory.modules}
+    return [f"{'staged: ' if staged else ''}{error}" for error in touched_band_errors(manifest, lines, touched)]
 
 
 def _parent_base_fabrication_errors(
@@ -851,8 +883,10 @@ def _validate_manifest_candidate(
         return errors
     if previous is None:
         errors.extend(f"bootstrap: {error}" for error in _bootstrap_baseline_errors(current, inventory))
-    elif current_text != previous_text:
-        errors.extend(validate_manifest_transition(current, previous))
+    else:
+        if current_text != previous_text:
+            errors.extend(validate_manifest_transition(current, previous))
+        errors.extend(_touched_findings(root, current, inventory, "HEAD", None))
 
     if not include_staged:
         return errors
@@ -886,8 +920,10 @@ def _validate_manifest_candidate(
         errors.extend(
             f"staged bootstrap: {error}" for error in _bootstrap_baseline_errors(staged, staged_inventory)
         )
-    elif staged_text != previous_text:
+        return errors
+    if staged_text != previous_text:
         errors.extend(f"staged: {error}" for error in validate_manifest_transition(staged, previous))
+    errors.extend(_touched_findings(root, staged, staged_inventory, head_tree, index_tree, staged=True))
     return errors
 
 
@@ -901,7 +937,8 @@ def validate_size_ratchet(
 
     Enforcement contract: the OFFICIAL repository's CI ``size_ratchet`` lane
     BLOCKS on these findings (tip exactness, except that a band entry may stay
-    while its module sits at 1501-1600 lines, plus the pairwise base-vs-tip
+    while its module sits at 1501-1600 lines, the rationale of each module the
+    candidate touched against ``HEAD``, plus the pairwise base-vs-tip
     transition); every local surface (default pytest lanes exclude the marker;
     ``check_worktree_readiness`` and ``codebase_health`` report the findings)
     only WARNS. There is no committed-history replay: the previous manifest
@@ -959,7 +996,9 @@ def validate_size_ratchet_transition_against_base(
     validated against the parent's own tree (fabricated bases are refused);
     no parent manifest at all = bootstrap, transition skipped. An unreadable
     tip, base or parent raises rather than passing as absent; unavailable
-    parent inventory produces a failing finding, never a false PASS."""
+    parent inventory produces a failing finding, never a false PASS. A module
+    whose file differs from the base answers ``touched_band_errors`` even when
+    the manifest did not change."""
     root = pathlib.Path(repo_dir).resolve()
     tip_text = _git_show_manifest(root, "HEAD", manifest_path)
     if tip_text is None:
@@ -969,6 +1008,7 @@ def validate_size_ratchet_transition_against_base(
     if ref and not ref.strip("0"):
         ref = ""  # all-zeros: no event base — fall through to the parent degradation
     base_text: str | None = None
+    base_commit = ""
     validate_parent_tree = False
     if ref:
         resolved = subprocess.run(
@@ -979,7 +1019,8 @@ def validate_size_ratchet_transition_against_base(
             text=True,
         )
         if resolved.returncode == 0:
-            base_text = _git_show_manifest(root, resolved.stdout.strip(), manifest_path)
+            base_commit = resolved.stdout.strip()
+            base_text = _git_show_manifest(root, base_commit, manifest_path)
             if base_text is None:
                 return [
                     f"pairwise: base {resolved.stdout.strip()[:12]} does not carry the "
@@ -995,7 +1036,7 @@ def validate_size_ratchet_transition_against_base(
             base_text = _git_show_manifest(root, parent, manifest_path)
             if base_text is not None:
                 validate_parent_tree = True  # the degraded parent base is always tree-verified
-                parent_ref = parent
+                base_commit = parent
                 break
     if base_text is None:
         return []
@@ -1005,7 +1046,7 @@ def validate_size_ratchet_transition_against_base(
         # pre-declares the tip's debt is byte-identical to the tip's manifest —
         # equality is exactly what the laundering constructs.
         try:
-            parent_inventory = collect_size_ratchet_inventory_at_ref(root, parent_ref)
+            parent_inventory = collect_size_ratchet_inventory_at_ref(root, base_commit)
             parent_errors = _parent_base_fabrication_errors(previous, parent_inventory)
         except Exception as exc:
             parent_errors = [f"pairwise-parent: inventory failed: {type(exc).__name__}: {exc}"]
@@ -1014,11 +1055,13 @@ def validate_size_ratchet_transition_against_base(
                 "pairwise: the degraded parent-base manifest does not match the parent's own tree "
                 "(a fabricated base cannot authorize a transition): " + "; ".join(parent_errors[:3])
             ]
-    if base_text == tip_text:
-        return []
-    return validate_manifest_transition(
-        parse_size_ratchet_manifest(tip_text), previous, adjacent=False
-    )
+    tip = parse_size_ratchet_manifest(tip_text)
+    errors = [] if base_text == tip_text else validate_manifest_transition(tip, previous)
+    touched = _touched_paths(root, base_commit, "HEAD")
+    gated = [path for path in sorted(touched) if _is_gated_module_path(path)]
+    texts = _blob_texts(root, [f"HEAD:{path}" for path in gated])
+    lines = {path: len(text.splitlines()) for path in gated if (text := texts.get(f"HEAD:{path}")) is not None}
+    return errors + touched_band_errors(tip, lines, touched)
 
 
 def _metrics_from_inventory(inventory: SizeRatchetInventory) -> Dict[str, Any]:
