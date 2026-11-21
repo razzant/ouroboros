@@ -91,15 +91,17 @@ def test_activity_background_lists_the_gateways_kept_services_and_stops_one_by_i
     from starlette.testclient import TestClient
 
     from ouroboros.gateway.kept_services import kept_service_routes
+    from ouroboros.launch_custody import open_local_service_log
     from tests._launch_stop_shared import _answers, _ledgered_service, _settle, write_scripts
 
     if os.name == "nt":
         pytest.skip("kept-service custody is read by the POSIX launch census")
     leader, (port, pid, birth) = _ledgered_service(tmp_path, write_scripts(tmp_path), "storybook-preview",
                                                    owner_task="producer", drive=tmp_path)
-    log = tmp_path / "services" / "producer" / "storybook-preview.log"
-    log.parent.mkdir(parents=True)
-    log.write_text("Storybook started on http://localhost:6006/\n", encoding="utf-8")
+    _, stream = open_local_service_log(tmp_path, "producer", "storybook-preview",
+                                       leader._ouroboros_custody["scope_marker"], keep_alive=True)
+    with stream:
+        stream.write(b"Storybook started on http://localhost:6006/\n")
     write_task_result(tmp_path, "producer", "completed", title="Redesign the retention banner")
     app = Starlette(routes=kept_service_routes())
     app.state.drive_root = tmp_path

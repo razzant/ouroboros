@@ -1,5 +1,7 @@
 import { causeOf, mapsOf } from './context_observation.js';
-import { fmt } from './i18n.js';
+import { fmt, tr } from './i18n.js';
+import { taskArtifactDownloadUrl } from './api_client.js';
+import { escapeHtml, escapeHtmlAttr } from './utils.js';
 import { statusMarkHtml } from './status_mark.js';
 
 // Producer census: loop_model_call/round_limits/nudges/budget, task_pacing,
@@ -23,6 +25,7 @@ export const CHECKPOINT_LABELS = {
     nanny_economics_reminder: 'Economics reminder',
     nanny_finalization_nudge: 'Finalization nudge',
     budget_scope_paused: 'Budget scope paused',
+    service_stop: 'Background service stop',
     services_stopped: 'Background services stopped',
     services_kept: 'Background services kept',
     service_finalization_error: 'Background service cleanup unconfirmed',
@@ -189,9 +192,35 @@ export function taskCheckpointLabel(evt = {}) {
         : kind ? `Checkpoint · ${kind}` : 'Task checkpoint');
 }
 
-/** What tells one checkpoint row from another of its kind. A threshold crossing is the bound
- *  it measured and the threshold it crossed (its payload carries no round, so a round could
- *  not tell 50% from 25%); a wait is its episode and phase; any other is its number or round. */
+/** Same typed receipt for Details (live and replay) and Logs. No process control or diagnostic text. */
+export function serviceCheckpointFacts(evt = {}) {
+    const stop = evt.service_stop;
+    if (evt.checkpoint_kind !== 'service_stop' || !/^launch-[0-9a-f]+$/.test(stop?.launch_id || '')) return null;
+    const process = stop.process?.state === 'stopped' ? tr('service.stop.stopped', 'Stopped')
+        : tr('service.stop.unconfirmed', 'Stop unconfirmed');
+    const code = Number.isInteger(stop.process?.returncode)
+        ? fmt('service.stop.exit_code', { code: stop.process.returncode }, 'exit {code}') : '';
+    const states = { saved: 'saved', retained: 'retained', unavailable: 'unavailable', unknown: 'unknown',
+        failed: 'not saved', partial: 'partially saved', pending: 'not captured yet' };
+    const word = (state) => tr(`service.stop.state.${state}`, Object.hasOwn(states, state) ? states[state] : 'unknown');
+    const outputs = Array.isArray(stop.outputs) ? stop.outputs : [];
+    const lines = [[process, code].filter(Boolean).join(' · '),
+        fmt('service.stop.journal', { state: word(stop.journal?.state) }, 'Journal: {state}'),
+        ...outputs.map((row) => `${row.name}: ${word(row.state)}`)];
+    const links = outputs.flatMap((row) => Array.isArray(row.files) ? row.files : []).filter((file) => {
+        const known = taskArtifactDownloadUrl(evt.task_id, file.path);
+        return known && file.download_url === known;
+    });
+    const full = lines.join('\n');
+    return { launchId: stop.launch_id, headline: `${taskCheckpointLabel(evt)} · ${stop.name}`,
+        body: full.length > 400 ? `${full.slice(0, 399)}…` : full, full, links };
+}
+
+export function serviceOutputLinksHtml(links = []) {
+    return links.map(({ name, download_url: href }) => `<p class="chat-live-line-evidence service-stop-output"><a class="md-link" href="${escapeHtmlAttr(href)}" download="${escapeHtmlAttr(name)}">${escapeHtml(name)}</a></p>`).join('');
+}
+
+/** Threshold crossings key by bound; waits by episode and phase; other checkpoints by number or round. */
 export function taskCheckpointIdentity(evt = {}) {
     if (Object.hasOwn(WAIT_LABELS, evt.checkpoint_kind)) return `${evt.episode_id || evt.ts || ''}:${evt.phase}`;
     if (evt.milestone || evt.budget_axis) return `${evt.budget_axis || ''}:${evt.milestone || ''}`;

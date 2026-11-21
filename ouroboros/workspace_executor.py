@@ -563,7 +563,7 @@ def _register_service_process(drive_root: pathlib.Path | None, record: _Executor
             "skill_name": record.skill_name,
             "cmd": _redacted_cmd(record.cmd, record.secret_values),
             "keep_alive": bool(record.keep_alive),
-            **({"scope_marker": record.scope_marker} if record.scope_marker else {}),
+            **({"scope_marker": record.scope_marker} if record.scope_marker and record.executor.kind == "local" else {}),
             **({"host_birth": record.leader_birth} if record.scope_marker and record.leader_birth else {}),
         },
     )
@@ -880,6 +880,7 @@ def start_service(
                 raise RuntimeError("another call still holds this service name")
     backend_cwd = map_host_path(executor, host_cwd)
     from ouroboros.body_candidate import executor_environment
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, birth_text, mint_marker
     candidate_env = executor_environment(ctx, host_cwd, executor=executor, map_path=map_host_path)
     record = _ExecutorService(
         service_id=key,
@@ -901,15 +902,16 @@ def start_service(
         env=env,
         secret_values=secret_values,
         drive_root=drive_root,
+        scope_marker=mint_marker(LAUNCH_SCOPE_PREFIX),
     )
     if executor.kind == "local":
+        from ouroboros.launch_custody import open_local_service_log
         from ouroboros.maintenance_retirement import artifact_changed
         from ouroboros.process_custody import spawn_supervised
         # A service inside the bound body candidate runs isolated; a refusal precedes any log.
         base_env = candidate_env if candidate_env is not None else _executor_service_env()
-        log_path = drive_root / "services" / record.task_id / f"{name}.executor.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = log_path.open("ab")
+        log_path, log_fh = open_local_service_log(drive_root, record.task_id, name, record.scope_marker,
+                                                  keep_alive=record.keep_alive, executor=True)
         artifact_changed(drive_root)
 
         from ouroboros.owner_pause import _member_coordinates
@@ -921,10 +923,6 @@ def start_service(
         scope_root, _, scope_task = _member_coordinates(ctx)
         scope_target = None if record.keep_alive else task_launch_target(
             invocation_binding(), drive_root=scope_root, task_id=scope_task)
-        from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, birth_text, mint_marker
-
-        record.scope_marker = mint_marker(LAUNCH_SCOPE_PREFIX)  # this launch's own: its stop's reach, never a task's
-
         def publish_process(proc):
             record.local_proc = proc
             record.backend_pid = str(proc.pid)
@@ -1383,6 +1381,7 @@ def _docker_stop_group_shell() -> str:
 
 
 def _service_payload(record: _ExecutorService, *, state: str | None = None, note: str = "") -> dict[str, Any]:
+    from ouroboros.process_census import launch_id
     actual_state = state if state is not None else _safe_service_state(record)
     if actual_state == "running":
         _refresh_executor_service_readiness(record)
@@ -1390,8 +1389,6 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         # process can settle during the scan, so re-poll before serializing a
         # running+ready claim (for both local and Docker backends).
         actual_state = _safe_service_state(record)
-    else:
-        record.ready = False
     if actual_state != "running":
         record.ready = False
     payload = {
@@ -1410,6 +1407,8 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         "backend_pid": record.backend_pid,
         "backend_cwd": record.backend_cwd,
         "host_cwd": str(record.host_cwd),
+        "launch_id": launch_id(getattr(record, "scope_marker", "")),
+        "returncode": getattr(getattr(record, "local_proc", None), "returncode", None),
         "cwd_root": record.cwd_root,
         "cwd_base": record.cwd_base,
         "cwd_source": record.cwd_source,
