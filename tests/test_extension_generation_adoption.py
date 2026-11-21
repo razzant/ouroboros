@@ -255,7 +255,7 @@ def test_parallel_same_name_calls_each_dispatch_the_descriptor_their_own_timeout
 
     monkeypatch.setattr(extension_dispatch, "_extension_dispatch_candidate", candidate)
     monkeypatch.setattr(extension_dispatch, "_dispatch_extension_tool_result", dispatch)
-    monkeypatch.setattr(loop_tool_execution, "tool_calls_can_run_parallel", lambda calls: True)
+    monkeypatch.setattr(loop_tool_execution, "call_segments", lambda names: [list(range(len(names)))])  # one group
     monkeypatch.setattr(loop_tool_execution, "load_settings", lambda: {})  # no global floor hides the per-call timeout
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     drive_root = tmp_path / "drive"

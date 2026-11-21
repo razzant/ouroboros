@@ -222,8 +222,10 @@ class DeterministicPool:
 
 
 def parallel(monkeypatch):
+    """The whole batch is one group under the pool's own rule for an escaped exception."""
     from ouroboros import loop_tool_execution as execution
-    monkeypatch.setattr(execution, 'tool_calls_can_run_parallel', lambda calls: True)
+    monkeypatch.setattr(execution, 'call_segments', lambda names: [list(range(len(names)))])
+    monkeypatch.setattr(execution, 'escaped_errors_become_rows', lambda calls: True)
     return execution
 
 
@@ -340,3 +342,152 @@ def test_an_ordinary_parallel_batch_without_control_returns_results_in_request_o
     assert results[0]['result'] == 'First.' and results[2]['result'] == 'Second.'
     assert results[1]['is_error'] and results[1]['tool_result'].code == 'EXECUTOR_ERROR'
     assert 'TOOL_ERROR' in results[1]['result'] and 'Synthetic worker failure' in results[1]['result']
+
+
+# --- groups: consecutive calls of the together class run at once, everything else alone, in order -------------------
+
+
+def batch_of(host, calls):
+    from ouroboros.loop_tool_execution import execute_tool_batch
+    return execute_tool_batch(calls, host.tools.copy_for(host.ctx), host.ctx.drive_root / 'logs', host.ctx.task_id,
+                              host.executor, host.trace)
+
+
+def test_a_group_runs_at_once_and_a_single_call_starts_only_after_everything_before_it(host_world, monkeypatch):
+    host = host_world.host
+    barrier, lock, log = threading.Barrier(2, timeout=10), threading.Lock(), []
+
+    def alone(text):
+        def behaviour(registry):
+            with lock:
+                log.append(('start', text))
+            with lock:
+                log.append(('end', text))
+            return completed(text)(registry)
+        return behaviour
+
+    def together(text):
+        def behaviour(registry):
+            with lock:
+                log.append(('start', text))
+            barrier.wait()  # only a partner running at the same time releases it
+            with lock:
+                log.append(('end', text))
+            return completed(text)(registry)
+        return behaviour
+    effects(monkeypatch, {'edit_text': alone('Edited.'), 'read_file': together('Read.'),
+                          'knowledge_read': together('Note.'), 'write_file': alone('Written.')})
+    calls = [invocation('edit', 'edit_text', path='s'), invocation('read', 'read_file', path='s'),
+             invocation('note', 'knowledge_read', topic='t'), invocation('write', 'write_file', path='s', content='c')]
+    results, control = batch_of(host, calls)
+    assert control is None
+    assert [row['tool_call_id'] for row in results] == ['edit', 'read', 'note', 'write'], 'request order'
+    assert [row['result'] for row in results] == ['Edited.', 'Read.', 'Note.', 'Written.']
+    assert log[:2] == [('start', 'Edited.'), ('end', 'Edited.')], 'the group starts after the edit returned'
+    assert {entry[0] for entry in log[2:4]} == {'start'} and {entry[0] for entry in log[4:6]} == {'end'}, (
+        'both members were inside their handlers at once')
+    assert log[6:] == [('start', 'Written.'), ('end', 'Written.')], 'the write starts after the group ended'
+
+
+@pytest.mark.parametrize('control', [ModelWaitInterrupted('owner_stop'), BudgetExceeded('Synthetic spend limit reached')],
+                         ids=['stop', 'budget'])
+def test_a_control_in_a_group_lets_started_members_finish_and_starts_nothing_after(host_world, monkeypatch, control):
+    host = host_world.host
+    raised_control = threading.Event()
+
+    def interrupt(registry):
+        raised_control.set()
+        raise control
+
+    def sibling(registry):
+        assert raised_control.wait(10)
+        return completed('Member finished after the control.')(registry)
+    entered = effects(monkeypatch, {'read_file': sibling, 'knowledge_read': interrupt, 'write_file': completed('Never.')})
+    calls = [invocation('done', 'read_file', path='s'), invocation('cut', 'knowledge_read', topic='t'),
+             invocation('left', 'write_file', path='s', content='c')]
+    results, raised = batch_of(host, calls)
+    assert raised is control and sorted(entered) == ['knowledge_read', 'read_file'], 'the next segment never began'
+    rows = {row['tool_call_id']: row['result'] for row in results}
+    assert rows['done'] == 'Member finished after the control.', 'a started member keeps its exact result'
+    assert 'may' in rows['cut'] and 'NOT STARTED' not in rows['cut']
+    assert 'NOT STARTED' in rows['left']
+    with pytest.raises(type(control)):
+        ordinary_batch(host, calls)
+
+
+@pytest.mark.parametrize('shape', ['mixed', 'older-reads', 'old-new', 'new-new'])
+def test_an_exception_escaping_a_group_member_keeps_the_rule_the_response_had(host_world, monkeypatch, shape):
+    """A response of only the older reads keeps the pool's row; any other response, a group of newer names included,
+    ends where the exception escaped, its started members still settle and the segment after it never begins."""
+    from ouroboros import loop_tool_execution as execution
+    host = host_world.host
+    failure = RuntimeError('Synthetic staging failure')
+    original = execution._execute_with_timeout
+
+    def execute(tools, call, *args):
+        if call['id'] == 'broken':
+            raise failure
+        return original(tools, call, *args)
+    monkeypatch.setattr(execution, '_execute_with_timeout', execute)
+    first, member, last = {'mixed': ('read_file', 'knowledge_read', 'write_file'),
+                           'older-reads': ('read_file', 'search_code', 'search_code'),
+                           'old-new': ('read_file', 'knowledge_read', None), 'new-new': ('tree_read', 'knowledge_read', None)}[shape]
+    entered = effects(monkeypatch, {first: completed('Read.'), member: completed('Unused.'), last: completed('Last.')})
+    calls = [invocation('read', first, path='s'), invocation('broken', member, query='s'),
+             *([invocation('last', last, path='s')] if last else [])]
+    results, raised = batch_of(host, calls)
+    rows = {row['tool_call_id']: row for row in results}
+    assert rows['read']['result'] == 'Read.'
+    if shape == 'older-reads':
+        assert execution.call_segments([call['function']['name'] for call in calls]) == [[0, 1, 2]]
+        assert raised is None and rows['last']['result'] == 'Last.'
+        assert rows['broken']['tool_result'].code == 'EXECUTOR_ERROR' and 'Synthetic staging failure' in rows['broken']['result']
+        return
+    assert raised is failure and 'may' in rows['broken']['result'], 'the escaped exception ends the response, as before'
+    if shape != 'mixed':
+        assert execution.call_segments([call['function']['name'] for call in calls]) == [[0, 1]]
+        return
+    assert execution.call_segments([call['function']['name'] for call in calls]) == [[0, 1], [2]]
+    assert 'write_file' not in entered and 'NOT STARTED' in rows['last']['result'], 'the next segment never began'
+
+
+@pytest.mark.parametrize('with_write', [True, False], ids=['spawns-and-a-write', 'spawns-only'])
+def test_neighbours_refused_by_one_pause_say_not_started_and_why(host_world, monkeypatch, with_write):
+    """The owner presses Pause while three spawns of one response enter: the first was scheduled, the two refused at
+    their entry (the custody row ``submit_tool_future`` writes, which re-raises a Pause refusal) say NOT STARTED with
+    the Pause, never an unexpected error, so after Resume the mind knows which helper exists; a write after them is
+    never entered."""
+    from ouroboros import loop_tool_execution as execution
+    from ouroboros.owner_pause import OwnerPauseRefused
+    host = host_world.host
+    original, scheduled = execution._execute_with_timeout, threading.Event()
+
+    def execute(tools, call, *args):
+        if call['id'] == 'spawn-1':
+            try:
+                return original(tools, call, *args)
+            finally:
+                scheduled.set()
+        if call['id'].startswith('spawn-'):
+            assert scheduled.wait(10)  # Pause closed after the first spawn entered
+            refused = OwnerPauseRefused('owner_pause')
+            refused.invocation_not_started = True
+            raise refused
+        return original(tools, call, *args)
+    monkeypatch.setattr(execution, '_execute_with_timeout', execute)
+    entered = effects(monkeypatch, {'schedule_subagent': completed('Scheduled helper one.'), 'write_file': completed('Never.')})
+    calls = [invocation(f'spawn-{i}', 'schedule_subagent', objective=f'helper {i}') for i in (1, 2, 3)]
+    calls += [invocation('write', 'write_file', path='s', content='c')] if with_write else []
+    results, raised = batch_of(host, calls)
+    rows = {row['tool_call_id']: row for row in results}
+    assert rows['spawn-1']['result'] == 'Scheduled helper one.'
+    for key in ('spawn-2', 'spawn-3'):
+        text = rows[key]['result']
+        assert 'NOT STARTED' in text and 'Pause' in text and 'Unexpected error' not in text, text
+        assert rows[key]['tool_result'].code == 'OWNER_PAUSE_NOT_STARTED'
+    assert entered == ['schedule_subagent'], 'only the scheduled spawn entered its handler'
+    if with_write:
+        assert isinstance(raised, OwnerPauseRefused), 'a response with a write keeps the sequential rule'
+        assert 'NOT STARTED' in rows['write']['result'] and 'write_file' not in entered
+    else:
+        assert raised is None, 'a response of only spawns keeps the pool rule: the refusals are rows'

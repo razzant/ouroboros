@@ -585,8 +585,8 @@ def test_registered_and_parallel_control_reaches_loop_owner(monkeypatch, ctx, pa
     def handler(_ctx):
         raise error
     registry.override_handler(name, handler)
-    monkeypatch.setattr(execution, "_PARALLEL_SAFE_TOOLS", frozenset({name}))
     calls = [{"id": f"control-{i}", "function": {"name": name, "arguments": "{}"}} for i in range(2 if parallel else 1)]
+    assert execution.call_segments([name] * len(calls)) == [list(range(len(calls)))]  # two calls run as one group
     with pytest.raises(type(error)) as caught:
         execution.handle_tool_calls(calls, registry, ctx.drive_root / "logs", ctx.task_id,
                                     object(), [], {"tool_calls": []}, lambda _: None)

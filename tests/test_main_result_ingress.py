@@ -41,8 +41,8 @@ def _register_results(fixture, monkeypatch, outputs):
         handler=result,
     ))
     # The fixture is pure/read-only; exercise the existing parallel batch path.
-    monkeypatch.setattr(loop_tool_execution, "_PARALLEL_SAFE_TOOLS",
-                        loop_tool_execution._PARALLEL_SAFE_TOOLS | {TOOL})
+    from ouroboros import tool_capabilities
+    monkeypatch.setattr(tool_capabilities, "RUN_TOGETHER_TOOLS", tool_capabilities.RUN_TOGETHER_TOOLS | {TOOL})
     return calls
 
 
@@ -108,7 +108,7 @@ def test_main_parallel_results_share_room_and_keep_sources_and_outcomes(main_loo
     measurements = _observe_measurements(monkeypatch, minimum_unfit=minimum_unfit)
     request = call(TOOL, {"name": "ok"}, "large-ok")
     request["tool_calls"].extend(call(TOOL, {"name": "error"}, "large-error")["tool_calls"])
-    assert loop_tool_execution.tool_calls_can_run_parallel(request["tool_calls"])
+    assert loop_tool_execution.call_segments([TOOL, TOOL]) == [[0, 1]]
 
     answer, _, trace = f.run([request, {"content": "done"}])
 

@@ -288,7 +288,8 @@ def test_phantom_ids_never_arm_and_the_roster_names_the_real_children(tmp_path):
 
 
 def test_one_wait_per_turn_is_kept_through_a_real_batch_and_closing_a_question_stays_allowed(tmp_path):
-    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls, tool_calls_can_run_parallel
+    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls
+    from ouroboros.tool_capabilities import call_segments
     from ouroboros.owner_quiz import quiz_states
     from ouroboros.tools.control_task_results import _wait_for_task
     from ouroboros.tools.core_artifacts import _escalate
@@ -309,7 +310,7 @@ def test_one_wait_per_turn_is_kept_through_a_real_batch_and_closing_a_question_s
         ctx.owner_wait_callback = lambda *_a: "unknown"
         calls = [{"id": f"arm-{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(
             arguments[name])}} for i, name in enumerate(pair)]
-        assert not tool_calls_can_run_parallel(calls), "the batch runs serially"
+        assert call_segments(list(pair)) == [[0], [1]], "the batch runs serially"
         messages = [{"role": "assistant", "content": "", "tool_calls": calls}]
         handle_tool_calls(calls, registry, tmp_path / "logs", "parent", StatefulToolExecutor(), messages,
                           {"tool_calls": []}, lambda *_a, **_kw: None)

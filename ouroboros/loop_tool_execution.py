@@ -31,8 +31,7 @@ from ouroboros.tool_call_log import (
     worker_position,
 )
 from ouroboros.tool_capabilities import (
-    FOREGROUND_MUTATIVE_TOOLS, PARALLEL_SAFE_ENQUEUE_TOOLS,
-    READ_ONLY_PARALLEL_TOOLS,
+    FOREGROUND_MUTATIVE_TOOLS, POOL_EXCEPTION_ROW_TOOLS, call_segments,
     REVIEWED_MUTATIVE_TOOLS,
     STATEFUL_BROWSER_TOOLS,
     requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
@@ -1135,22 +1134,16 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
     return settlement_target, on_settled
 
 
-_PARALLEL_SAFE_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS
+def _call_name(tc: Dict[str, Any]) -> str:
+    return str(tc.get("function", {}).get("name") or "").strip()
 
 
-def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]]) -> bool:
-    """True when a tool-call round may execute in the shared ThreadPool.
-
-    Read-only-parallel tools plus fire-and-forget enqueue tools
-    (schedule_subagent) qualify; any other tool forces sequential execution.
-    """
-    return (
-        len(tool_calls) > 1
-        and all(
-            str(tc.get("function", {}).get("name") or "").strip() in _PARALLEL_SAFE_TOOLS
-            for tc in tool_calls
-        )
-    )
+def escaped_errors_become_rows(tool_calls: List[Dict[str, Any]]) -> bool:
+    """Whether an exception escaping one call of this response becomes that call's error row while the rest settle,
+    instead of ending the batch. It is the rule of the response that, before calls ran in groups
+    (``tool_capabilities.call_segments``), ran whole in the pool: more than one call, every one named in the frozen
+    ``POOL_EXCEPTION_ROW_TOOLS``. It no longer decides how calls run."""
+    return len(tool_calls) > 1 and all(_call_name(tc) in POOL_EXCEPTION_ROW_TOOLS for tc in tool_calls)
 
 
 def handle_tool_calls(
@@ -1184,10 +1177,11 @@ def handle_tool_calls(
     return errors
 
 
-def _batch_error_result(tools: ToolRegistry, tc: Dict[str, Any], text: str) -> Dict[str, Any]:
+def _batch_error_result(tools: ToolRegistry, tc: Dict[str, Any], text: str,
+                        tool_result: Optional[ToolResult] = None) -> Dict[str, Any]:
     """A result only the batch can state about one of its calls, in the shape of any other."""
     fn_name = str(tc.get("function", {}).get("name", "unknown") or "").strip()
-    tool_result = ToolResult(status="error", code="EXECUTOR_ERROR", text=text)
+    tool_result = tool_result or ToolResult(status="error", code="EXECUTOR_ERROR", text=text)
     return {
         "round_id": getattr(tools._ctx, "_current_llm_call_meta", {}).get("round_id"),
         "tool_call_id": tc.get("id", ""),
@@ -1216,14 +1210,25 @@ def _left_by_control(tools: ToolRegistry, tc: Dict[str, Any], control: BaseExcep
         f"⚠️ TOOL_ERROR ({fn_name}): NOT STARTED: {reason} ended this batch before the handler was entered."))
 
 
-def _sibling_after_control(tools: ToolRegistry, tc: Dict[str, Any], future: Any, control: BaseException) -> Dict[str, Any]:
+def _escaped_row(tools: ToolRegistry, tc: Dict[str, Any], error: BaseException) -> Dict[str, Any]:
+    """A pooled call's escaped exception as its row; a refused entry (Pause, the store) says NOT STARTED and why."""
+    if getattr(error, "invocation_not_started", None) is not True:
+        return _unexpected_batch_error(tools, tc, error)
+    from ouroboros.tools.tool_result import launch_refusal_result
+    refused = launch_refusal_result(error, not_started=True)
+    return _batch_error_result(tools, tc, refused.text, refused)
+
+
+def _sibling_after_control(tools: ToolRegistry, tc: Dict[str, Any], future: Any, control: BaseException,
+                           control_errors: Tuple[type, ...]) -> Dict[str, Any]:
     """A parallel call once its pool has settled: the shutdown cancelled only those still queued."""
     if future.cancelled():
         return _left_by_control(tools, tc, control, started=False)
     error = future.exception()
-    if isinstance(error, (UsageAccountingError, ModelWaitInterrupted)):
+    if isinstance(error, (UsageAccountingError, ModelWaitInterrupted)) or (
+            isinstance(error, control_errors) and getattr(error, "invocation_not_started", None) is not True):
         return _left_by_control(tools, tc, error, started=not getattr(error, "invocation_not_started", False))
-    return future.result() if error is None else _unexpected_batch_error(tools, tc, error)
+    return future.result() if error is None else _escaped_row(tools, tc, error)
 
 
 def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
@@ -1280,40 +1285,36 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
             result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)
         return result
 
-    can_parallel = tool_calls_can_run_parallel(tool_calls)
+    # Which escaped exception ends the batch is the response's rule, chosen once; a group's own pool never changes it.
+    control_errors = ((UsageAccountingError, ModelWaitInterrupted) if escaped_errors_become_rows(tool_calls)
+                      else (Exception,))
     results: List[Any] = [None] * len(tool_calls)
     control: Optional[Exception] = None
 
-    if not can_parallel:
-        for idx, tc in enumerate(tool_calls):
+    for segment in call_segments([_call_name(tc) for tc in tool_calls]):
+        if len(segment) == 1:  # alone, in the caller's context, after everything before it has returned
+            idx, tc = segment[0], tool_calls[segment[0]]
             try:
                 results[idx] = _execute(tc)
             except Exception as exc:
                 control = exc
                 results[idx] = _left_by_control(tools, tc, exc, started=not getattr(exc, "invocation_not_started", False))
                 break
-    else:
-        max_workers = min(len(tool_calls), 8)
-        executor = ThreadPoolExecutor(max_workers=max_workers)
+            continue
+        executor = ThreadPoolExecutor(max_workers=min(len(segment), 8))
+        batch_raised = True
         try:
-            future_to_index = {
-                executor.submit(
-                    contextvars.copy_context().run,
-                    _execute,
-                    tc,
-                ): idx
-                for idx, tc in enumerate(tool_calls)
-            }
-            batch_raised = True
+            future_to_index = {executor.submit(contextvars.copy_context().run, _execute, tool_calls[idx]): idx
+                               for idx in segment}
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
                 try:
                     results[idx] = future.result()
-                except (UsageAccountingError, ModelWaitInterrupted) as exc:
+                except control_errors as exc:
                     control = exc
                     break
                 except Exception as exc:
-                    results[idx] = _unexpected_batch_error(tools, tool_calls[idx], exc)
+                    results[idx] = _escaped_row(tools, tool_calls[idx], exc)
             else:
                 batch_raised = False
         finally:
@@ -1325,8 +1326,9 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
         if control is not None:
             for future, idx in future_to_index.items():
                 if results[idx] is None:
-                    results[idx] = _sibling_after_control(tools, tool_calls[idx], future, control)
-    if control is not None:  # a sequential batch's remainder was never entered
+                    results[idx] = _sibling_after_control(tools, tool_calls[idx], future, control, control_errors)
+            break
+    if control is not None:  # the segments after the one control ended were never entered
         results = [row or _left_by_control(tools, tc, control, started=False) for row, tc in zip(results, tool_calls)]
     return results, control
 

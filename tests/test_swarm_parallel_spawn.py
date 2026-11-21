@@ -4,10 +4,11 @@ from __future__ import annotations
 import threading
 import types
 
-from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
+from ouroboros.loop_tool_execution import escaped_errors_become_rows
 from ouroboros.tool_capabilities import (
     PARALLEL_SAFE_ENQUEUE_TOOLS,
     READ_ONLY_PARALLEL_TOOLS,
+    call_segments,
 )
 from ouroboros.tools.control import _emit_control_event, _record_scheduled_subagent
 
@@ -23,23 +24,39 @@ def test_schedule_subagent_parallel_safe_not_readonly():
 
 
 def test_burst_of_spawns_runs_parallel():
-    assert tool_calls_can_run_parallel([_call("schedule_subagent")] * 4) is True
+    assert call_segments(["schedule_subagent"] * 4) == [[0, 1, 2, 3]]
+    assert escaped_errors_become_rows([_call("schedule_subagent")] * 4) is True
 
 
 def test_mixed_reads_and_spawns_runs_parallel():
-    assert tool_calls_can_run_parallel(
+    assert call_segments(["read_file", "schedule_subagent", "search_code"]) == [[0, 1, 2]]
+    assert escaped_errors_become_rows(
         [_call("read_file"), _call("schedule_subagent"), _call("search_code")]
     ) is True
 
 
 def test_any_non_parallel_tool_forces_sequential():
-    assert tool_calls_can_run_parallel(
+    """A call outside the class runs alone; the spawn before it is a group of one, the single-call path."""
+    assert call_segments(["schedule_subagent", "write_file"]) == [[0], [1]]
+    assert escaped_errors_become_rows(
         [_call("schedule_subagent"), _call("write_file")]
     ) is False
 
 
+def test_the_exception_rule_reads_frozen_history_not_the_live_read_set(monkeypatch):
+    """Old+old keeps the pool's row; old+new and new+new end on the exception, as sequential responses did; naming a
+    read in the live set later changes neither."""
+    from ouroboros import tool_capabilities
+    monkeypatch.setattr(tool_capabilities, "READ_ONLY_PARALLEL_TOOLS", READ_ONLY_PARALLEL_TOOLS | {"knowledge_read"})
+    assert escaped_errors_become_rows([_call("read_file"), _call("search_code")]) is True
+    assert escaped_errors_become_rows([_call("read_file"), _call("knowledge_read")]) is False
+    assert escaped_errors_become_rows([_call("tree_read"), _call("knowledge_read")]) is False
+    assert call_segments(["read_file", "knowledge_read"]) == call_segments(["tree_read", "knowledge_read"]) == [[0, 1]]
+
+
 def test_single_call_is_not_parallel():
-    assert tool_calls_can_run_parallel([_call("schedule_subagent")]) is False
+    assert call_segments(["schedule_subagent"]) == [[0]]
+    assert escaped_errors_become_rows([_call("schedule_subagent")]) is False
 
 
 # --- WS4: parent-side thread safety (no lost updates under concurrency) ---

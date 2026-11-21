@@ -204,10 +204,82 @@ def test_frozen_registry_includes_pr_integration_tools(tmp_path, monkeypatch):
 
 
 def test_loop_execution_parallel_tools_from_capabilities():
-    """READ_ONLY_PARALLEL_TOOLS in loop_tool_execution is from capabilities."""
-    from ouroboros.loop_tool_execution import READ_ONLY_PARALLEL_TOOLS as loop_set
-    from ouroboros.tool_capabilities import READ_ONLY_PARALLEL_TOOLS as cap_set
-    assert loop_set is cap_set
+    """The executor's name sets come from capabilities: the frozen exception-rule history and the plan."""
+    from ouroboros import loop_tool_execution as loop, tool_capabilities as cap
+    assert loop.POOL_EXCEPTION_ROW_TOOLS is cap.POOL_EXCEPTION_ROW_TOOLS and loop.call_segments is cap.call_segments
+
+
+def test_consecutive_calls_of_the_together_class_form_groups_and_every_other_call_runs_alone():
+    from ouroboros.tool_capabilities import call_segments
+
+    assert call_segments(["read_file", "knowledge_read", "run_command", "search_code", "tree_read"]) == [
+        [0, 1], [2], [3, 4]]
+    assert call_segments(["edit_text", "read_file"]) == [[0], [1]], "a read after a write waits for it"
+    assert call_segments(["read_file", "edit_text", "read_file"]) == [[0], [1], [2]]
+    assert call_segments(["plan_task", "plan_task"]) == [[0], [1]]
+    assert call_segments([]) == [] and call_segments(["read_file"]) == [[0]]
+    for wait in ("wait_task", "wait_tasks", "await_messages", "delegate_wait", "finish_task", "escalate"):
+        assert call_segments(["read_file", wait, "read_file"]) == [[0], [1], [2]], wait
+    for alone in ("github_read", "browse_page", "view_image", "delegate_start", "list_available_tools",
+                  "ext_7_probe_read", "mcp_probe__lookup"):
+        assert call_segments(["knowledge_read", alone, "memory_read"]) == [[0], [1], [2]], alone
+
+
+def test_the_together_class_is_its_closed_names_and_the_older_sets_keep_their_members():
+    """The two older sets have other readers (cards, the check journal, Presence speech), so they stay as they were;
+    the class adds a closed list beside them. Each name left out is left out for its stated reason."""
+    from ouroboros.tool_capabilities import (
+        PARALLEL_SAFE_ENQUEUE_TOOLS, PURE_READ_TOOLS, READ_ONLY_PARALLEL_TOOLS, RUN_TOGETHER_EXTRA_TOOLS,
+        RUN_TOGETHER_TOOLS,
+    )
+
+    assert isinstance(RUN_TOGETHER_EXTRA_TOOLS, frozenset) and isinstance(RUN_TOGETHER_TOOLS, frozenset)
+    assert RUN_TOGETHER_TOOLS == READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS | RUN_TOGETHER_EXTRA_TOOLS
+    assert len(READ_ONLY_PARALLEL_TOOLS) == 18 and PARALLEL_SAFE_ENQUEUE_TOOLS == {"schedule_subagent"}
+    from ouroboros.tool_capabilities import POOL_EXCEPTION_ROW_TOOLS
+    assert POOL_EXCEPTION_ROW_TOOLS == {  # history as frozen 21.11.2026, never the live sets above
+        "inspect_harness", "inspect_subagent", "read_file", "list_files", "read_archive", "search_code", "query_code",
+        "query_data", "recent_tasks", "web_search", "chat_history", "vcs_read", "service_status", "service_logs",
+        "get_task_result", "list_projects", "memory_read", "search_ui_translations", "schedule_subagent"}
+    assert PURE_READ_TOOLS - READ_ONLY_PARALLEL_TOOLS == {
+        "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript", "workpad_read"}
+    kept_alone = {
+        "github_read": "a download or a large answer publishes a file a following artifact_store listing sees",
+        "list_available_tools": "registry.schemas() rebuilds the registry's shared capability-omission list",
+        "browse_page": "it changes the current page of the task's one sticky browser",
+        "view_image": "it appends to ctx.messages from the call thread",
+        "extract_video_frames": "a producer", "vlm_query": "a model call that produces", "analyze_screenshot":
+        "it reads the page a neighbouring browser call leaves", "ocr_pdf": "heavy", "extract_pdf_text": "heavy",
+        "codebase_health": "heavy", "skill_search": "it refreshes a source cache", "skill_sources": "it edits sources",
+        "delegate_start": "a later step, with the folder registration it holds",
+    }
+    for name, reason in kept_alone.items():
+        assert name not in RUN_TOGETHER_TOOLS, f"{name} runs alone: {reason}"
+    assert not any(name.startswith(("ext_", "mcp_")) for name in RUN_TOGETHER_TOOLS), "extension and MCP calls run alone"
+
+
+def test_every_together_call_is_an_unchecked_silent_call_by_its_real_declarations(tmp_path):
+    """A group never asks the Safety model several times at once or holds declared words: every name's effective
+    policy is ``skip`` (TOOL_POLICY, else its own ToolEntry.safety_policy), no action of it is checked, and it
+    declares no speech. ``safety`` is only read here."""
+    from ouroboros import safety
+    from ouroboros.tool_capabilities import RUN_TOGETHER_TOOLS
+    from ouroboros.tool_effects import effect_of
+    from ouroboros.tools.registry import ToolRegistry
+
+    entries = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")._entries
+
+    def unchecked_silent(name):
+        entry = entries[name]
+        policy = safety.TOOL_POLICY.get(name) or entry.safety_policy
+        return (policy == safety.POLICY_SKIP and name not in safety.CHECKED_ACTIONS
+                and not safety._declared_speech(name, effect_of(name)))
+
+    for name in sorted(RUN_TOGETHER_TOOLS):
+        assert name in entries, f"{name} is not a registered tool"
+        assert unchecked_silent(name), name
+    # The check itself tells such calls apart: a conditionally checked command and a checked action are not.
+    assert not unchecked_silent("run_command") and not unchecked_silent("manage_schedules")
 
 
 def test_extract_video_frames_visible_where_media_siblings_are_visible():
