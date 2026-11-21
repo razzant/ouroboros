@@ -23,11 +23,29 @@ def test_the_tool_list_names_every_tool_sorted_whatever_the_registration_order(m
     [line] = [line for line in first.splitlines() if line.startswith('  Tools:')]
     assert line == '  Tools: ' + ', '.join(f'ext_19_r_unix_computer_use_{n}' for n in sorted(names))
     assert 'more' not in line
-    assert first.splitlines()[1] == ('A skill\'s "Tools" line names every tool it registers; enable_tools("<skill '
-                                     'name>") loads all of them in one call where their schemas are not in the '
-                                     'request yet.')
+    assert first.splitlines()[1] == ('A "Tools" line that lists a skill\'s registered tools names all of them; '
+                                     'enable_tools("<skill name>") loads them in one call where their schemas are '
+                                     'not in the request yet.')
 
 
-def test_a_skill_without_registered_tools_adds_no_loading_sentence(monkeypatch, tmp_path):
-    text = _section(monkeypatch, tmp_path, [])
-    assert 'enable_tools' not in text and '  Tools:' not in text
+def test_the_loading_hint_reaches_both_forms_only_beside_registered_tools(monkeypatch, tmp_path):
+    """A skill_exec skill registers no tool, so its name loads nothing: alone it gets no loading hint, beside an
+    extension the hint is in the full and the compact form, and every skill keeps its name in both forms."""
+    hint = 'enable_tools("<skill name>") loads'
+    script = dict(name='script_tool', enabled=True, executable_review=True, type='script', version='1',
+                  review_status='pass', description='Runs a script.', when_to_use='When asked.',
+                  runnable_via_skill_exec=True, tool_surfaces=[])
+    monkeypatch.setattr('ouroboros.skill_loader.summarize_skills', lambda *_: {'skills': [script]})
+    alone = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
+    assert '  Tools: skill_exec' in alone and hint not in alone and hint not in alone.operative_view
+    assert all('script_tool' in form for form in (alone, alone.operative_view))
+
+    extension = _section(monkeypatch, tmp_path, ['screenshot'])
+    rows = [script, dict(name='unix_computer_use', enabled=True, executable_review=True, type='extension',
+                         description='Desktop tools.', when_to_use='When asked.',
+                         tool_surfaces=[{'name': 'ext_19_r_unix_computer_use_screenshot'}])]
+    monkeypatch.setattr('ouroboros.skill_loader.summarize_skills', lambda *_: {'skills': rows})
+    mixed = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
+    for form in (extension, extension.operative_view, mixed, mixed.operative_view):
+        assert hint in form and 'unix_computer_use' in form
+    assert 'script_tool' in mixed.operative_view

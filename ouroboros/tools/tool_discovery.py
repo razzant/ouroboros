@@ -183,20 +183,34 @@ def list_available_tools(
     return "\n".join(lines)
 
 
-def _skill_tools(name: str) -> List[str]:
-    """Every registered extension tool of the skill ``name`` gives, by its skill name or its extension
-    namespace, sorted; empty when no loaded extension answers to it (not installed, disabled or not live)."""
-    from ouroboros.extension_loader import _lock as ext_lock, _tools as ext_tools
+def _skill_tools(registry: "ToolRegistry", name: str) -> List[str]:
+    """The live extension tools of the skill ``name`` gives, sorted: its exact namespace (``ext_<n>_<token>``)
+    first, else the skill named so. Like a single surface name (``_extension_dispatch_candidate``) it first
+    takes the bounded adoption of the published generation, so a skill enabled or updated after this worker
+    spawned is seen; a registered skill that is not live (disabled, revoked, stale review) gives nothing."""
+    from types import SimpleNamespace
+    from ouroboros.extension_loader import _lock as ext_lock, _tools as ext_tools, is_extension_live
+    from ouroboros.tools.extension_dispatch import _adopt_extension_generation, _extension_capability_root
 
+    ctx = getattr(registry, "_ctx", None) or SimpleNamespace()
+    try:
+        _adopt_extension_generation(ctx)
+    except Exception:
+        log.debug("Extension generation adoption failed before a skill load", exc_info=True)
+    root, live = _extension_capability_root(ctx), {}
     with ext_lock:
-        rows = [(str(tool.get("name") or ""), str(tool.get("skill") or "")) for tool in ext_tools.values()]
-    return sorted(tool for tool, skill in rows if skill and name in (skill, tool_namespace(tool)))
+        rows = [(str(tool.get("name") or ""), str(tool.get("skill") or ""),
+                 str(tool.get("skills_repo_path") or "") or None) for tool in ext_tools.values()]
+    rows = [(tool, skill) for tool, skill, repo in rows if skill and name in (skill, tool_namespace(tool))
+            and live.setdefault((skill, repo), bool(is_extension_live(skill, root, repo_path=repo)))]
+    return sorted([tool for tool, _skill in rows if tool_namespace(tool) == name]
+                  or [tool for tool, skill in rows if skill == name])
 
 
 def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
-    """Resolve names in request order; ``mcp_<server>`` stands for every tool of it this actor may call,
-    and a skill's name (or its extension namespace) for each of its tools, every one resolved exactly as
-    when named alone. A skill's tools this actor cannot call are counted, never named."""
+    """Resolve names in request order: a tool, then a policy-hidden tool, then ``mcp_<server>`` (every tool of
+    that server this actor may call), then a live skill's name or extension namespace (each of its tools
+    resolved exactly as when named alone; those this actor cannot call are counted, never named)."""
     wanted: Dict[str, Dict[str, Any]] = {}
     servers, hidden, not_found, visible, partial = {}, [], [], None, []
     for name in names:
@@ -204,16 +218,17 @@ def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
             visible = registry.schemas() if visible is None else visible
             members = sorted(schema["function"]["name"] for schema in visible
                              if tool_namespace(schema["function"]["name"]) == name)
-            servers[name] = members
-            for member in members:
-                wanted.setdefault(member, next(s for s in visible if s["function"]["name"] == member))
-            if not members:
-                not_found.append(name)
-            continue
+            if members:  # a real server wins; an empty one leaves the name to a skill called mcp_<slug>
+                servers[name] = members
+                for member in members:
+                    wanted.setdefault(member, next(s for s in visible if s["function"]["name"] == member))
+                continue
         schema = registry.get_schema_by_name(name)
         if schema is not None:
             wanted.setdefault(name, schema)
-        elif members := _skill_tools(name):
+        elif reason := registry.policy_hidden_reason(name):  # F3 (2026-08-10 saga): policy-filtered is not a typo
+            hidden.append(f"{name} — {reason}")
+        elif members := _skill_tools(registry, name):
             schemas = {member: registry.get_schema_by_name(member) for member in members}
             servers[name] = [member for member in members if schemas[member] is not None]
             for member in servers[name]:
@@ -221,8 +236,6 @@ def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
             if withheld := len(members) - len(servers[name]):
                 (partial if servers[name] else hidden).append(
                     f"{name} — {withheld} of its {len(members)} tools are not callable in this task (names withheld)")
-        elif reason := registry.policy_hidden_reason(name):  # F3 (2026-08-10 saga): policy-filtered is not a typo
-            hidden.append(f"{name} — {reason}")
         else:
             not_found.append(name)
     return wanted, servers, hidden, not_found, partial
@@ -540,7 +553,8 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "tools": {
                             "type": "string",
-                            "description": "Comma-separated tool names, or mcp_<server> for a whole server",
+                            "description": ("Comma-separated tool names, mcp_<server> for a whole server, "
+                                            "or a skill's name for all its tools"),
                         }
                     },
                     "required": ["tools"],

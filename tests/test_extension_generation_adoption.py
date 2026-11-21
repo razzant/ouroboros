@@ -126,6 +126,30 @@ def test_dispatching_an_unknown_extension_surface_adopts_before_answering(
     assert descriptor.get("skill") == "genprobe"
 
 
+def test_a_skill_name_loads_what_a_late_enable_published_and_nothing_once_disabled(tmp_path, monkeypatch):
+    """enable_tools("<skill>") sees the skill as a single surface name does: a worker spawned before the enable
+    adopts the published generation and loads the whole skill; once the owner disables it, the descriptor this
+    worker still holds is not live and the name answers Not found, never Hidden by policy."""
+    from ouroboros.tools import tool_discovery as td
+    from ouroboros.tools.registry import ToolRegistry
+
+    loaded, repo_root, drive_root, surface, _empty, _published = _published_by_a_server_that_loaded_it(tmp_path)
+    _settings_and_repo(monkeypatch, repo_root)
+    clean_extension_runtime_state()
+    _as_worker()
+    assert extension_loader.get_tool(surface) is None, "premise: the worker spawned before the enable"
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+
+    resident: list = []
+    out = td.enable_tools(registry, registry._ctx, loaded.name, resident, set())
+    assert [schema["function"]["name"] for schema in resident] == [surface], out
+
+    save_enabled(drive_root, loaded.name, False)
+    untouched: list = []
+    refusal = td.enable_tools(registry, registry._ctx, loaded.name, untouched, set())
+    assert untouched == [] and f"Not found: {loaded.name}." in refusal and "Hidden by policy" not in refusal
+
+
 _SLOW_PLUGIN = _PROBE_PLUGIN.replace("schema={})", "schema={}, timeout_sec=1200)")
 
 

@@ -688,48 +688,71 @@ def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
     """The 27.10 call enabled 7 of 24 desktop tools one name at a time and told the owner the rest did not
     exist. A skill's name (or its extension namespace) now loads each of its tools exactly as naming it alone
     would: the request's tools change once, a withheld tool is counted and never named, resident schemas
-    answer "already loaded", and a skill that is not loaded or a stray name loads nothing."""
+    answer "already loaded", and a skill that is not live or a stray name loads nothing. A tool, then a
+    policy-hidden tool, then an MCP server with tools, then the exact namespace keep their answer before a
+    same-named skill; a skill called mcp_<slug> loads when no such server has tools."""
     from ouroboros import extension_loader
     from ouroboros.extension_surface_names import extension_surface_name
+    from ouroboros.tools import extension_dispatch
     from ouroboros.tools import tool_discovery as td
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    shorts = ("screenshot", "click", "key", "type_text", "scroll")
-    names = [extension_surface_name("unix_computer_use", short) for short in shorts]
-    for name in names:
-        monkeypatch.setitem(extension_loader._tools, name, {
-            "name": name, "handler": lambda ctx, **kwargs: "ok", "description": f"{name} tool",
-            "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": "unix_computer_use"})
-    monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    def register(skill, *shorts):
+        made = [extension_surface_name(skill, short) for short in shorts]
+        for name in made:
+            monkeypatch.setitem(extension_loader._tools, name, {
+                "name": name, "handler": lambda ctx, **kwargs: "ok", "description": f"{name} tool",
+                "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": skill})
+        return made
+
+    names = register("unix_computer_use", "screenshot", "click", "key", "type_text", "scroll")
+    namespace = td.tool_namespace(names[0])
+    dead = register("dead_skill", "probe")
+    mcp_named = register("mcp_probe", "ping")
+    shadow = register(namespace, "other")  # a skill named after another skill's exact namespace
+    hidden_twin = register("write_file", "ghost")  # a skill named after a policy-hidden built-in
+    monkeypatch.setattr(extension_loader, "is_extension_live", lambda skill, *_a, **_k: skill != "dead_skill")
+    adoptions = []
+    monkeypatch.setattr(extension_dispatch, "_adopt_extension_generation", lambda ctx: adoptions.append(ctx) or {})
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
-    ctx.task_contract = {"disabled_tools": [names[4]]}
+    ctx.task_contract = {"disabled_tools": [names[4], "write_file"]}
     registry.set_context(ctx)
-    resident = [registry.get_schema_by_name("read_file")]
-    enabled = set()
+    fresh = lambda: [registry.get_schema_by_name("read_file")]  # noqa: E731
+    resident, enabled = fresh(), set()
 
     out = td.enable_tools(registry, ctx, "unix_computer_use", resident, enabled)
     loaded = sorted(names[:4])
     assert [s["function"]["name"] for s in resident[1:]] == loaded and enabled == set(loaded)
-    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out
+    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out and adoptions
     assert "unix_computer_use — 1 of its 5 tools are not callable in this task (names withheld)" in out
     assert names[4] not in out
     # Every member resolves exactly as when named alone: the withheld one is refused, the others load.
     assert td._load_set(registry, [names[4]])[0] == {}
     assert set(td._load_set(registry, names[:4])[0]) == set(loaded)
 
-    again = td.enable_tools(registry, ctx, td.tool_namespace(names[0]), resident, enabled)
+    again = td.enable_tools(registry, ctx, namespace, resident, enabled)
     assert "Already loaded: " in again and "Call schemas loaded" not in again and len(resident) == 5
+    assert shadow[0] not in again and len(td._load_set(registry, [namespace])[0]) == 4
 
-    one = [registry.get_schema_by_name("read_file")]
+    one = fresh()
     single = td.enable_tools(registry, ctx, names[1], one, set())
     assert [s["function"]["name"] for s in one] == ["read_file", names[1]] and "(all" not in single
 
-    for missing in ("windows_computer_use", "definitely_not_a_tool"):
-        untouched = [registry.get_schema_by_name("read_file")]
+    for missing in ("dead_skill", "windows_computer_use", "definitely_not_a_tool"):
+        untouched = fresh()
         refusal = td.enable_tools(registry, ctx, missing, untouched, set())
         assert f"❌ Not found: {missing}." in refusal and "only while that skill is enabled" in refusal
-        assert len(untouched) == 1
+        assert "Hidden by policy" not in refusal and dead[0] not in refusal and len(untouched) == 1
+
+    by_mcp_name = fresh()
+    assert "mcp_probe (all 1 tools)" in td.enable_tools(registry, ctx, "mcp_probe", by_mcp_name, set())
+    assert [s["function"]["name"] for s in by_mcp_name[1:]] == mcp_named
+
+    twin = fresh()
+    refusal = td.enable_tools(registry, ctx, "write_file", twin, set())
+    assert "write_file — disabled by this task's contract" in refusal and hidden_twin[0] not in refusal
+    assert len(twin) == 1
 
 
 def test_every_catalog_that_names_extract_pdf_text_names_read_archive():

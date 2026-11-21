@@ -329,9 +329,11 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
         count += 1
     if count == 0:
         return ""
-    if listed:
-        lines.insert(1, 'A skill\'s "Tools" line names every tool it registers; enable_tools("<skill name>") loads '
-                        "all of them in one call where their schemas are not in the request yet.")
+    if listed:  # a skill_exec line names no registered tool, and its skill's name loads nothing
+        lines.insert(1, 'A "Tools" line that lists a skill\'s registered tools names all of them; '
+                        'enable_tools("<skill name>") loads them in one call where their schemas are not in the '
+                        "request yet.")
+        operative.insert(1, 'enable_tools("<skill name>") loads all tools a skill registers in one call.')
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 
