@@ -1578,8 +1578,8 @@ that saved no choice reads `until it is woken`), unless a subagent its sleep cho
 that subagent (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier subagent is just
 `paused`), with no new control or turn; subagents an earlier attempt left running
-read as `Working`, with their count; `Queued` carries no cause when the scheduler
-recorded none, never a free-worker claim; an
+read as `Working`, with their count; `Queued` names the recorded writer
+ahead (`behind “…”`), never a free worker; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
 quiet, at most two lines. A finished row shows the author’s closing sentence,

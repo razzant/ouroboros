@@ -142,6 +142,25 @@ CASES = {
         {"st": {"_budget_pause": {"reason": "sleep", "sleep": {"mode": "cold", "wake_at": "2026-10-17T18:05:00+00:00",
                                                                "any_mail": True}}}}, {}, {},
     ),
+    # Owner 21.11.2026 («5A»): a queued root says behind which listed work it stands, by that work's name, as the
+    # chooser recorded it (``project_lease.note_lane_wait``): its Project's lane, or a folder's another Project holds.
+    "queued_behind_project": (
+        [_row("qh", suggested_name="Add Ollama support"), _row("qp", "queued", started_at=90.0)],
+        {"qh": {**_RUNNING, "suggested_name": "Add Ollama support"},
+         "qp": {"suggested_name": "Check CI after the merge",
+                "_lane_wait": {"lane": "project", "task_id": "qh", "project_id": "nano"}}}, {}, {},
+    ),
+    "queued_behind_folder": (
+        [_row("qh", suggested_name="Add Ollama support"), _row("qf", "queued", started_at=90.0)],
+        {"qh": {**_RUNNING, "suggested_name": "Add Ollama support"},
+         "qf": {"_lane_wait": {"lane": "folder", "task_id": "qh", "project_id": "nano", "folder": "/work/shared"}}},
+        {}, {},
+    ),
+    # The holder the note names is not a work the census lists: nothing is claimed.
+    "queued_behind_unlisted": (
+        [_row("qu", "queued", started_at=90.0)],
+        {"qu": {"_lane_wait": {"lane": "project", "task_id": "gone", "project_id": "nano"}}}, {}, {},
+    ),
     "unknown": ([_row("u", "unknown")], {}, {}, {}),
     "ended_with_runs": ([], {}, {"r": {"task_id": "r", "status": "done", "chat_id": 42}}, {"r": ["run-1", "run-2"]}),
     # The parent finished while its helper still works: its episode is not live, its tree's Stop still stands.

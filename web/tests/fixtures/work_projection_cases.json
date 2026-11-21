@@ -2458,6 +2458,434 @@
    "works_complete": true,
    "works_gaps": []
   },
+  "queued_behind_project": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Add Ollama support",
+     "episode": {
+      "task_id": "qh",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh"
+      ],
+      "states": {
+       "qh": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh"
+      },
+      {
+       "action": "hurry",
+       "target": "qh"
+      },
+      {
+       "action": "pause",
+       "target": "qh"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qp",
+     "room": 42,
+     "name": "Check CI after the merge",
+     "episode": {
+      "task_id": "qp",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "project",
+        "name": "Add Ollama support"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qp"
+      ],
+      "states": {
+       "qp": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "project",
+           "name": "Add Ollama support"
+          }
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qp"
+      },
+      {
+       "action": "stop",
+       "target": "qp",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qp"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_folder": {
+   "works": [
+    {
+     "work_id": "qh",
+     "room": 42,
+     "name": "Add Ollama support",
+     "episode": {
+      "task_id": "qh",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "because": [],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qh"
+      ],
+      "states": {
+       "qh": {
+        "activity": "working",
+        "transition": "none",
+        "call": "working",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "task",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "qh"
+      },
+      {
+       "action": "hurry",
+       "target": "qh"
+      },
+      {
+       "action": "pause",
+       "target": "qh"
+      },
+      {
+       "action": "stop",
+       "target": "qh",
+       "scope": "cascade"
+      }
+     ]
+    },
+    {
+     "work_id": "qf",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qf",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": "behind “Add Ollama support”",
+       "behind": {
+        "task_id": "qh",
+        "lane": "folder",
+        "name": "Add Ollama support",
+        "folder": "/work/shared"
+       }
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qf"
+      ],
+      "states": {
+       "qf": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": "behind “Add Ollama support”",
+          "behind": {
+           "task_id": "qh",
+           "lane": "folder",
+           "name": "Add Ollama support",
+           "folder": "/work/shared"
+          }
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qf"
+      },
+      {
+       "action": "stop",
+       "target": "qf",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "working",
+     "transition": "none",
+     "call": "working",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "qh",
+      "qf"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
+  "queued_behind_unlisted": {
+   "works": [
+    {
+     "work_id": "qu",
+     "room": 42,
+     "name": "",
+     "episode": {
+      "task_id": "qu",
+      "live": true
+     },
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "because": [
+      {
+       "code": "queued",
+       "text": ""
+      }
+     ],
+     "tails": [],
+     "live": false,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "qu"
+      ],
+      "states": {
+       "qu": {
+        "activity": "queued",
+        "transition": "none",
+        "call": "",
+        "live": false,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "queued",
+          "text": ""
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "still",
+     "kind": "task",
+     "project_id": "",
+     "since": 90.0,
+     "controls": [
+      {
+       "action": "pause",
+       "target": "qu"
+      },
+      {
+       "action": "stop",
+       "target": "qu",
+       "scope": "cascade"
+      }
+     ]
+    }
+   ],
+   "rooms": {
+    "42": {
+     "activity": "queued",
+     "transition": "none",
+     "call": "",
+     "turn": [],
+     "amber": false,
+     "mark": "still",
+     "confirmed": true,
+     "works": [
+      "qu"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 0,
+     "queued": 1,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
   "unknown": {
    "works": [
     {

@@ -241,6 +241,39 @@ def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
     assert work["because"][0]["text"] == "Sleeping until the task it chose finishes or a message arrives"
 
 
+def test_a_queued_root_says_the_live_census_work_it_stands_behind_and_nothing_else():
+    """Owner 21.11.2026 («5A»): beside Queued a quiet line says behind which work the row stands, as the chooser
+    recorded it (``project_lease.note_lane_wait``) and only by a work the census lists under its name."""
+    from ouroboros.gateway.state import _raw_work_facts
+    from tests._work_projection_shared import work_fields
+
+    project = {"lane": "project", "task_id": "holder", "project_id": "p"}
+    folder = {"lane": "folder", "task_id": "holder", "project_id": "other", "folder": "/work/shared"}
+    assert _raw_work_facts({"id": "q", "_lane_wait": folder})["_lane_wait"] == folder  # the census carries the note
+    holder = row("holder", suggested_name="Add Ollama support")
+    live = {"holder": {"running": True, "suggested_name": "Add Ollama support"}}
+    for wait, behind in ((project, {"task_id": "holder", "lane": "project", "name": "Add Ollama support"}),
+                         (folder, {"task_id": "holder", "lane": "folder", "name": "Add Ollama support",
+                                   "folder": "/work/shared"})):
+        works = work_fields([holder, row("q", "queued", chat_id=1)], {**live, "q": {"_lane_wait": wait}})["works"]
+        (queued,) = [work for work in works if work["activity"] == "queued"]
+        assert queued["because"] == [{"code": "queued", "text": "behind \u201cAdd Ollama support\u201d", "behind": behind}]
+    # A holder the census does not list, or lists without a name, or no note at all: no cause, as before.
+    for owners, raw in (([row("q", "queued")], {"q": {"_lane_wait": project}}),
+                        ([row("holder"), row("q", "queued", chat_id=1)], {"holder": {"running": True},
+                                                                          "q": {"_lane_wait": project}}),
+                        ([holder, row("q", "queued", chat_id=1)], live)):
+        (queued,) = [work for work in work_fields(owners, raw)["works"] if work["activity"] == "queued"]
+        assert queued["because"] == [{"code": "queued", "text": ""}]
+    # Only Queued says it: a waiting, paused or working row carrying a stale note never does.
+    names = {"holder": "Add Ollama support"}
+    for member in (row("t", "queued", project_admission_hold={"label": "Waiting for Project verification"}),
+                   row("t", "budget_paused", pause_cause="owner", can_resume=False), row("t")):
+        said = ws.classify_member(member, {"_lane_wait": project}, names)["reasons"]
+        assert all("behind" not in entry and "Add Ollama" not in entry["text"] for entry in said), member["phase"]
+    assert ws.classify_member(row("t", "queued"), {"_lane_wait": project}, names)["reasons"][0]["behind"]["lane"] == "project"
+
+
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
     owner = {"pause_by": {"actor": "owner"}}
     member = lambda task_id, **raw: ws.classify_member(  # noqa: E731

@@ -28,8 +28,8 @@ import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js'
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 import { closeTaskControlMenu, createTaskResumeButton, requestStop, taskControlBusy } from './task_control_menu.js';
 import {
-    OUTCOME_TONES, amberNote, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions, workQuestion,
-    workRowView,
+    OUTCOME_TONES, amberNote, behindWords, clock, openWorkControls, resumeAttemptWords, workControls, workMenuActions,
+    workQuestion, workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { errorWords } from './ui_primitives.js';
@@ -456,6 +456,9 @@ export function createRoomWork({
         const attempt = row.confirmed ? resumeAttemptWords(row.work?.last_resume) : '';
         if (attempt) lines.push([row.work.last_resume.by?.actor === 'host' ? tr('room_work.detail.last_start', 'Last start')
             : tr('room_work.detail.last_resume', 'Last Resume'), attempt]);
+        // The work a queued one stands behind, as the scheduler recorded it: its id and the lane (its line names it).
+        const behind = row.confirmed ? behindWords(row.work) : '';
+        if (behind) lines.push([tr('room_work.detail.behind', 'Behind'), behind]);
         const what = row.kind === 'pending' ? tr('room_work.what.pending', 'Your message, being sent')
             : row.kind === 'question' ? tr('room_work.what.question', 'A question that waits for you')
             : row.kind === 'direct' ? (row.cmid ? tr('room_work.what.reply', 'A reply to your message')

@@ -58,7 +58,7 @@ REASON_TEXT = {
     "model_access": "The model needs you: sign in or restore access",
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
-    "queued": "",  # a queued row records no cause: never claim one (a free worker)
+    "queued": "",  # no recorded cause: never claim one (a free worker); ``queued_reason`` names a recorded one
     "review_work_finishing": "Review work finishing",
     "external_runs_unconfirmed": ("1 external run may still be running", "{count} external runs may still be running"),
     # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).
@@ -138,6 +138,26 @@ def sleep_reason(sleep: Any, names: Mapping[str, str], **base: Any) -> Dict[str,
     wake = sleep_wake(sleep, names)
     if wake:
         entry.update(text="Sleeping until " + " or ".join(map(_clause, wake)), wake=wake)
+    return entry
+
+
+# A queued root the chooser recorded behind another tree's Project or folder lane (``project_lease.note_lane_wait``),
+# said by that work's census name. Browser twin: work_status.js reasonText (the web fixture pins both).
+QUEUED_BEHIND = "behind “{name}”"
+
+
+def queued_reason(wait: Any, names: Mapping[str, str]) -> Dict[str, Any]:
+    """The ``queued`` reason. When the chooser recorded which tree keeps this row out of its lane and the census lists
+    that work under a name (``names``), it says so by that name, with ``behind`` (its id, lane and, for a folder, the
+    path) for the details; otherwise it records no cause, never a free worker, a position or a time."""
+    entry = reason("queued")
+    wait = wait if isinstance(wait, Mapping) else {}
+    holder, lane = str(wait.get("task_id") or ""), str(wait.get("lane") or "")
+    name = names.get(holder, "") if holder and lane in {"project", "folder"} else ""
+    if name:
+        folder = str(wait.get("folder") or "") if lane == "folder" else ""
+        entry.update(text=QUEUED_BEHIND.format(name=name),
+                     behind={"task_id": holder, "lane": lane, "name": name, **({"folder": folder} if folder else {})})
     return entry
 
 
@@ -233,7 +253,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     ``sent_review`` while a review it sent from a warm park still runs, ``cancel_pending`` while a live inline
     turn's recorded Stop waits for its next stop check, the latest ``resume_attempt``, and ``tail_unknown`` while only
     what nobody can confirm holds an answered root's requested Pause; ``names`` are the census rows' work names, which
-    a sleep says what it waits for by (``sleep_reason``). Returns the member's own state only; ``live`` says whether
+    a sleep says what it waits for by (``sleep_reason``) and a queued root the work it stands behind by
+    (``queued_reason``, from its queue row's ``_lane_wait``). Returns the member's own state only; ``live`` says whether
     the member itself executes now: under a settling Pause only a running member the Pause has not parked does, never
     a queued one or one that already saved its place. A held member's refused attempt about the control holding it
     now is ``last_resume``: dated history beside the reason, never one, except the host's own start of a Continue
@@ -325,7 +346,7 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase == "queued":
         state["activity"] = "queued"
-        state["reasons"].append(reason("queued"))
+        state["reasons"].append(queued_reason(raw.get("_lane_wait"), names))
         return state
     if phase == "finalizing":
         state.update(activity="working", transition="finalizing", live=True)
