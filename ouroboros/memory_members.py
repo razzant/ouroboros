@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, legacy_frontier, row_lineage
@@ -98,10 +98,12 @@ def read_members(root: Path, *, room_id: Any = None, node_id: Any = None, start:
     with capture(root, tail="none"):  # one state of the chronicle for every line of the answer
         lister = _Lister(root, store)
         head, entries = lister.room(room) if room is not None else lister.node(node)
-        query = _query(words)
-        shown = [entry for entry in entries if query is None or query(entry.line)]
-        if query is not None:
-            head += f"; words {words!r}: {len(shown)} of {len(entries)} listed lines match (applied before paging)"
+        shown = entries if words is None else _filtered(entries, words)
+        if words is not None:
+            told = [entry for entry in entries if entry.words is not None]
+            head += (f"; words {words!r}: {sum(1 for entry in shown if entry.words is not None)} of {len(told)} listed "
+                     "records match in their own words and corrections (applied before paging); row runs are not "
+                     "filtered here")
         text = "\n".join(entry.line for entry in shown)
         reader = f"room_id='{room}'" if room is not None else f"node_id='{node}'"
         also = f", words={words!r}" if words is not None else ""
@@ -109,27 +111,66 @@ def read_members(root: Path, *, room_id: Any = None, node_id: Any = None, start:
         def resume(end: int) -> str:
             return f"memory_read(members=true, {reader}{also}, start={end})"
 
-        if query is None and shown:  # the widest continuation line ``result_window`` may print for a one-page answer
+        if words is None and shown:  # the widest continuation line ``result_window`` may print for a one-page answer
             widest = len(f"chars {limit}–{limit} of {limit}; next_start={limit} ({_ORDER}); " + resume(limit))
             text += lister.context(shown, limit - len(head) - widest - 2 - len(text))
     return result_window(head, text, start, limit, resume, _ORDER)
 
 
-def _query(words: Optional[List[str]]) -> Optional[Callable[[str], bool]]:
-    if words is None:
-        return None
+def _filtered(entries: List["_Entry"], words: List[str]) -> List["_Entry"]:
+    """The listed set under ``words``: a record stays when its own words or a correction under it match (never its id,
+    facts or readers), with an excerpt when the match is not in its printed opening; runs of rows, whose words this
+    listing never reads, become one line per room naming the word search over them; any other line stays."""
     from ouroboros.dialogue_words import match_text, parse
 
-    parsed = parse(words)
-    return lambda line: match_text(parsed, line)
+    query, kept, runs = parse(words), [], {}
+    for entry in entries:
+        if entry.run is not None:
+            if entry.run[1] not in runs:
+                runs[entry.run[1]] = [entry.run[0], entry.run[1], []]
+                kept.append(runs[entry.run[1]])
+            runs[entry.run[1]][2].append(entry.run[2])
+        elif entry.words is None:
+            kept.append(entry)
+        elif match_text(query, entry.words):
+            opening = first_sentence(" ".join(str(entry.record.get("text") or "").split())) if entry.record else ""
+            near = "" if match_text(query, opening) else _excerpt(query, entry.words)
+            kept.append(_Entry(entry.line + (f"; excerpt: «{near}»" if near else ""), entry.record, entry.words))
+    return [item if isinstance(item, _Entry) else _Entry(_search_line(words, *item)) for item in kept]
+
+
+def _search_line(words: List[str], what: str, room: str, runs: List[List[memory_inventory.Entry]]) -> str:
+    stamps = [str(meta.get("ts") or "") for run in runs for _address, meta, _pos in run if meta.get("ts")]
+    dates = f", date_from='{min(stamps)}', date_to='{max(stamps)}'" if stamps else ""
+    return (f"- {what} rows of room:{room}: {_n(sum(len(run) for run in runs), 'row')} in {_n(len(runs), 'run')}, not "
+            f"filtered by words here (this listing reads no row's words); their word search: "
+            f"chat_history(words={words!r}, room_id='{room}'{dates})")
+
+
+def _excerpt(query: Any, text: str) -> str:
+    """About 200 characters around the first word of ``text`` an alternative of ``query`` asks for."""
+    import re
+
+    from ouroboros.dialogue_words import match_text, normalize
+
+    wanted = [(prefix, False) for alt in query.alternatives if match_text(query._replace(alternatives=(alt,)), text)
+              for prefix in alt.prefixes] + [(phrase[0], True) for alt in query.alternatives for phrase in alt.phrases]
+    for found in re.finditer(r"\w+", text):
+        token = normalize(found.group())
+        if any(token == word if exact else token.startswith(word) for word, exact in wanted):
+            start, end = max(found.start() - 100, 0), min(found.start() + 100, len(text))
+            return ("…" if start else "") + " ".join(text[start:end].split()) + ("…" if end < len(text) else "")
+    return ""
 
 
 class _Entry:
-    """One listed line and, for a record with a relation, the record whose members stand under it."""
-    __slots__ = ("line", "record")
+    """One listed line; for a record its own words (what ``words`` judges) and, with a relation, the record whose
+    members stand under it; for a run of rows ``(what, room, run)``."""
+    __slots__ = ("line", "record", "words", "run")
 
-    def __init__(self, line: str, record: Optional[Dict[str, Any]] = None):
-        self.line, self.record = line, record
+    def __init__(self, line: str, record: Optional[Dict[str, Any]] = None, words: Optional[str] = None,
+                 run: Optional[Tuple[str, str, List[memory_inventory.Entry]]] = None):
+        self.line, self.record, self.words, self.run = line, record, words, run
 
 
 class _Lister:
@@ -145,10 +186,14 @@ class _Lister:
     def room(self, room: str) -> Tuple[str, List[_Entry]]:
         head = (f"members of room:{room}: its acting tellings in publication order, then its untold rows as runs in "
                 "the room's reading order")
-        records = self.store.room_records(room)
+        sealed = self.store.sealed_row_refs(room)  # a page recorded in another room that seals rows here is a telling here
+        elsewhere = [page for page in self.store.records(kinds=["page"]) if str(page.get("room_id")) != room
+                     and sealed & {str(ref) for ref in _rooms_of(page).get(room, ())}]
+        records = sorted(self.store.room_records(room) + (self.store.interpret(elsewhere) if elsewhere else []),
+                         key=lambda record: record["sequence"])
         withdrawn = [record for record in self.store.interpreted(room, kinds=("page", "part"))
                      if record.get("status") in ("rejected", "candidate")]
-        entries = self._record_entries(records)
+        entries = self._record_entries(records, here=room)
         if withdrawn:
             head += "; not acting, not listed: " + ", ".join(
                 f"{'withdrawn' if record['status'] == 'rejected' else 'candidate'} {record['kind']} {record['id']}"
@@ -171,7 +216,7 @@ class _Lister:
             head += ("; this room reads by send time: rows=true between a run's bounds reads stored order and may "
                      "show other rows")
         head += f"; untold rows: {sum(len(run) for run in runs)} in {_n(len(runs), 'run')}" if runs else "; untold rows: none"
-        return head, entries + [_Entry(self._run_line("untold", room, run)) for run in runs]
+        return head, entries + [_Entry(self._run_line("untold", room, run), run=("untold", room, run)) for run in runs]
 
     def node(self, node_id: str) -> Tuple[str, List[_Entry]]:
         record = self.store.get(node_id)
@@ -191,7 +236,7 @@ class _Lister:
 
     def _under_page(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
         covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
-        rooms = covers.get("rooms") if isinstance(covers.get("rooms"), dict) else {record["room_id"]: covers.get("rows") or []}
+        rooms = _rooms_of(record)
         entries: List[_Entry] = []
         notes: List[str] = []
         count = 0
@@ -212,7 +257,7 @@ class _Lister:
                 continue
             runs = self._runs(rows, wanted)
             count += sum(len(run) for run in runs)
-            entries += [_Entry(self._run_line("sealed", room, run)) for run in runs]
+            entries += [_Entry(self._run_line("sealed", room, run), run=("sealed", room, run)) for run in runs]
         found = [note for ident in notes if (note := self.store.get(ident)) is not None]
         entries += self._record_entries(self.store.interpret(found) if found else [])
         missing = len(notes) - len(found)
@@ -246,7 +291,7 @@ class _Lister:
             source = acting[str(src["id"])]
             entries.append(_Entry(self._record_line(source, extra=[cited, *filter(None, since)],
                                                     reader=f"memory_read(node_id='{src['id']}', revision='{src.get('revision')}')"),
-                                  source if source["kind"] in RELATIONS else None))
+                                  source if source["kind"] in RELATIONS else None, self._words(source)))
         return f"{_n(len(sources), 'source version')}, in its recorded order; nothing sealed or folded", entries
 
     def _under_selection(self, record: Dict[str, Any]) -> Tuple[str, List[_Entry]]:
@@ -273,18 +318,25 @@ class _Lister:
 
     # --- lines ----------------------------------------------------------------------------------------
 
-    def _record_entries(self, records: Iterable[Dict[str, Any]]) -> List[_Entry]:
+    def _record_entries(self, records: Iterable[Dict[str, Any]], *, here: str = "") -> List[_Entry]:
         records = list(records)
         from ouroboros.memory_view_account import told_by
 
         told = told_by(self.store, [record["id"] for record in records]) if records else {}
-        return [_Entry(self._record_line(record, told=told.get(record["id"]) or ""),
-                       record if record["kind"] in RELATIONS else None) for record in records]
+        return [_Entry(self._record_line(record, told=told.get(record["id"]) or "", here=here),
+                       record if record["kind"] in RELATIONS else None, self._words(record)) for record in records]
 
-    def _record_line(self, record: Dict[str, Any], *, told: str = "", extra: Iterable[str] = (), reader: str = "") -> str:
+    def _words(self, record: Mapping[str, Any]) -> str:
+        """What a record says: its own text and the text of every correction standing under it."""
+        fixes = [fix for item in record.get("corrections") or () if (fix := self.store.get(str(item.get("id")))) is not None]
+        return "\n\n".join([str(record.get("text") or ""), *(str(fix.get("text") or "") for fix in fixes)])
+
+    def _record_line(self, record: Dict[str, Any], *, told: str = "", extra: Iterable[str] = (), reader: str = "",
+                     here: str = "") -> str:
         kind, ident = record["kind"], record["id"]
         status = record.get("status")
-        facts = [f"room:{record.get('room_id')}",
+        facts = [f"room:{record.get('room_id')}" if not here or str(record.get("room_id")) == here else
+                 f"recorded in room:{record.get('room_id')}, seals rows of room:{here}",
                  {"draft": f"draft by {draft_signer(record.get('author'))}, not yet accepted", "accepted": "accepted draft",
                   "candidate": "candidate, not acting", "rejected": "withdrawn"}.get(str(status), ""),
                  f"by {memory_inventory.record_byline(record)}", self._period(record), _counts(record),
@@ -333,14 +385,11 @@ class _Lister:
     # --- runs -----------------------------------------------------------------------------------------
 
     def _untold_runs(self, room: str, gaps: set) -> Tuple[List[List[memory_inventory.Entry]], bool]:
-        """The runs of the room's open rows (the one computation) among every row of the room after the frontier."""
-        untold = {address["row_sha256"] for address, _meta, _pos in memory_inventory.open_room_rows(self.root, room,
-                                                                                                    gaps=gaps)}
-        if not untold:
-            return [], False
-        every = memory_inventory._room_entries(self.root, self.store, room)  # sealed rows too: what breaks a run
-        timed = bool(rooms_read_by_time(self.root, (meta for _address, meta, _pos in every)))
-        return self._runs(every, untold), timed
+        """The runs of the room's open rows, collected by the one open-row computation from its own single read."""
+        runs: List[List[memory_inventory.Entry]] = []
+        memory_inventory.open_room_rows(self.root, room, gaps=gaps, runs=runs)  # one read of the room's rows
+        rows = [meta for run in runs for _address, meta, _pos in run]
+        return runs, bool(rows) and bool(rooms_read_by_time(self.root, rows))
 
     def _runs(self, entries: List[memory_inventory.Entry], members: set) -> List[List[memory_inventory.Entry]]:
         """The maximal consecutive runs of ``members`` (row_sha256) among ``entries`` in their room's reading order."""
@@ -410,6 +459,13 @@ def _counts(record: Mapping[str, Any]) -> str:
     if kind == "note":
         return f"task {record.get('task_id') or 'not recorded'}"
     return ""
+
+
+def _rooms_of(page: Mapping[str, Any]) -> Dict[str, Any]:
+    """The row refs a page seals, by room: a conversation page's ``covers.rooms``, any other page's own room."""
+    covers = page.get("covers") if isinstance(page.get("covers"), Mapping) else {}
+    rooms = covers.get("rooms")
+    return dict(rooms) if isinstance(rooms, Mapping) else {str(page.get("room_id")): covers.get("rows") or []}
 
 
 def _n(count: Any, word: str) -> str:

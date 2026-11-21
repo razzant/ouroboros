@@ -109,12 +109,24 @@ def test_a_room_lists_its_tellings_in_publication_order_then_its_untold_rows_as_
 
 
 def test_untold_rows_are_the_one_open_row_computation(tmp_path, monkeypatch):
-    """The runs are taken from ``memory_inventory.open_room_rows``, never computed a second way: its answer is what
-    the room lists, so a narrower answer from it narrows the runs."""
+    """The runs are collected by ``memory_inventory.open_room_rows`` from its own one read, never computed a second
+    way: what it collects is what the room lists, so a narrower collection narrows the runs."""
     ctx, rows, _page, _note = install(tmp_path)
     assert "untold rows: 3 in 2 runs" in members(ctx, room_id="1").split("\n")[0]
-    one = memory_inventory.open_room_rows(tmp_path, "1")[:1]
-    monkeypatch.setattr(memory_inventory, "open_room_rows", lambda root, room, gaps=None: list(one))
+    runs: list = []
+    assert [entry[0] for run in (memory_inventory.open_room_rows(tmp_path, "1", runs=runs),) for entry in run] == [
+        entry[0] for run in runs for entry in run]  # the open set and its runs: the same rows, one read
+    assert [len(run) for run in runs] == [1, 2]
+    real = memory_inventory.open_room_rows
+
+    def narrow(root, room, gaps=None, *, runs=None):
+        found: list = []
+        kept = real(root, room, gaps, runs=found)
+        if runs is not None:
+            runs.append(found[0][:1])
+        return kept[:1]
+
+    monkeypatch.setattr(memory_inventory, "open_room_rows", narrow)
     text = members(ctx, room_id="1")
     assert "untold rows: 1 in 1 run" in text.split("\n")[0]
     assert [line for line in listed(text) if line.startswith("- untold")] == [
@@ -316,11 +328,17 @@ def test_words_drop_non_matching_listed_lines_over_the_whole_list_before_paging(
     whole = members(ctx, room_id="1")
     assert len(listed(whole)) == 14  # page, 11 notes, two untold runs
     text = members(ctx, room_id="1", words=["flak"])
-    assert "words ['flak']: 11 of 14 listed lines match (applied before paging)" in text.split("\n")[0]
-    assert [line.split(" ")[1] for line in listed(text)] == ["note"] * 11 and "context, level" not in text
+    assert ("words ['flak']: 11 of 12 listed records match in their own words and corrections (applied before "
+            "paging); row runs are not filtered here") in text.split("\n")[0]
+    lines = listed(text)
+    assert [line.split(" ")[1] for line in lines[:-1]] == ["note"] * 11 and "context, level" not in text
+    # The runs' rows were not read, so they are not called non-matching: one line names their word search.
+    assert lines[-1] == ("- untold rows of room:1: 3 rows in 2 runs, not filtered by words here (this listing reads no "
+                         "row's words); their word search: chat_history(words=['flak'], room_id='1', "
+                         f"date_from='{ts(0)}', date_to='{ts(4)}')")
     both = members(ctx, room_id="1", words=["build red", "flaky test"])
-    assert [line.split(" ", 3)[2] for line in listed(both)] == [page, note]
-    assert listed(members(ctx, room_id="1", words=["нет такого"])) == [""]
+    assert [line.split(" ", 3)[2] for line in listed(both)[:2]] == [page, note]
+    assert [line for line in listed(members(ctx, room_id="1", words=["нет такого"])) if "untold" not in line] == []
     monkeypatch.setattr(chronicle, "tool_result_limit", lambda _name: 700)
     seen, start = "", 0
     while True:
@@ -335,3 +353,48 @@ def test_words_drop_non_matching_listed_lines_over_the_whole_list_before_paging(
     assert seen == "\n".join(text.split("\n")[2:])
     for bad in (["   "], [], "flaky", [3]):
         assert "TOOL_ARG_ERROR" in members(ctx, room_id="1", words=bad), bad
+
+
+def test_words_judge_what_a_record_says_never_its_id_facts_or_readers(tmp_path):
+    """A word found only in reader syntax, an id or a byline matches nothing; a word in the body or in a correction
+    standing under the record, though not in its printed opening, keeps the line with an excerpt showing why."""
+    ctx, _rows, page, note = install(tmp_path)
+    for words in (["members"], ["memory_read"], [page[:8]], ["mind"], ["seals"], ["node_id"]):
+        text = members(ctx, room_id="1", words=words)
+        assert ": 0 of 2 listed records match" in text.split("\n")[0], words
+        assert not any(line.startswith(("- page", "- note")) for line in listed(text)), words
+    body = listed(members(ctx, room_id="1", words=["fixed"]))
+    assert body[0].startswith(f"- page {page} [") and body[0].endswith("; excerpt: «I found the build red. Then I fixed it.»")
+    assert len([line for line in body if line.startswith(("- page", "- note"))]) == 1
+    led = listed(members(ctx, room_id="1", words=["found build"]))[0]  # in the printed opening: no excerpt
+    assert led.startswith(f"- page {page} [") and "excerpt" not in led
+    write(ctx, kind="correction", target_id=note, text="The runner was the cause, not the test.")
+    fixed = listed(members(ctx, room_id="1", words=["runner cause"]))
+    assert fixed[0].startswith(f"- note {note} [") and "excerpt: «" in fixed[0] and "runner was the cause" in fixed[0]
+    sealed = listed(members(ctx, node_id=page, words=["build"]))
+    assert sealed == [("- sealed rows of room:1: 2 rows in 1 run, not filtered by words here (this listing reads no "
+                       "row's words); their word search: chat_history(words=['build'], room_id='1', "
+                       f"date_from='{ts(1)}', date_to='{ts(2)}')")]
+
+
+def test_a_page_recorded_in_another_room_stands_on_the_rung_of_each_room_it_seals(tmp_path):
+    """A conversation page is recorded in one room and seals rows of several: each sealed room lists it, saying where
+    it is recorded; a room it seals nothing of does not."""
+    from tests.test_chronicle_tools import _github_row
+
+    shared.world(tmp_path)
+    ctx = ctx_for(tmp_path)
+    rows = [_github_row("repo.1", "i1", 1, "first issue"), _github_row("repo.1", "i2", 2, "second issue"),
+            _github_row("repo.2", "i9", 3, "another repository")]
+    for row in rows:
+        dialogue_store.append(tmp_path, "chat", row)
+    i1, i2, other = (str(row["chat_id"]) for row in rows)
+    page = write(ctx, kind="page", room_id=i2, text="Two issues read; the repository is quiet.",
+                 covers={"to": addr(rows[1]), "conversation": True})["node_id"]
+    there = [line for line in listed(members(ctx, room_id=i1)) if line.startswith(f"- page {page} [")]
+    assert len(there) == 1 and f"[recorded in room:{i2}, seals rows of room:{i1};" in there[0]
+    own = [line for line in listed(members(ctx, room_id=i2)) if line.startswith(f"- page {page} [")]
+    assert len(own) == 1 and f"[room:{i2};" in own[0]
+    assert not any(page in line for line in listed(members(ctx, room_id=other)))
+    under = members(ctx, node_id=page)
+    assert f"(room:{i1}, room:{i2})" in under.split("\n")[0] or f"(room:{i2}, room:{i1})" in under.split("\n")[0]
