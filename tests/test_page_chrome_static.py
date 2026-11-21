@@ -60,7 +60,6 @@ def test_server_navigation_and_chat_static_contracts():
     server_source = _read("server.py")
     state_source = _read("ouroboros/gateway/state.py")
     control_source = _read("ouroboros/gateway/control.py")
-    app_source = _read("web/app.js")
     evo_source = _read("web/modules/evolution.js")
     chat_source = _read("web/modules/chat.js")
     css = _read("web/style.css")
@@ -71,7 +70,7 @@ def test_server_navigation_and_chat_static_contracts():
     assert '"evolution_state": evolution_state,' in state_source
     assert '"bg_consciousness_state": snap.get("bg_state") or {},' in _read("ouroboros/gateway/state_publication.py")
     assert 'request.query_params.get("force")' in control_source
-    assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));" in app_source
+    # The page-shown payload on forward navigation and Back is exercised in test_extensions_routes_browser.py.
     # Evolution names Consciousness once, as a pointer to its own tab (its detail is that tab's).
     assert "openDashboardTab?.('consciousness')" in evo_source and "evo-consciousness-detail" not in evo_source
     # A room's bar says consciousness and a running campaign by its chip (DESIGN "Page header"); no More menu repeats them.
