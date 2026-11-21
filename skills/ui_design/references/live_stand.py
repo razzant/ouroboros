@@ -207,13 +207,12 @@ def _changed_classes(old: str, new: str):
     before, after = Counter(_css_rules(old)), Counter(_css_rules(new))
     named = set()
     for selector, body in ((before - after) + (after - before)).elements():
-        if _CUSTOM_PROPERTY.search(body):
-            return None, f"a token changed in '{selector[:60]}'"
         for one in (part.strip() for part in selector.split(",")):
             found = _SELECTOR_CLASS.findall(one)
-            if one and not found:
-                return None, f"'{one[:60]}' names no class"
-            named.update(found)
+            if one and not found:   # :root, an element: a token or a rule for everything
+                return None, (f"a token changed in '{one[:60]}'" if _CUSTOM_PROPERTY.search(body)
+                              else f"'{one[:60]}' names no class")
+            named.update(found)   # a custom property on a class reaches only where that class stands
     return named, ""
 
 

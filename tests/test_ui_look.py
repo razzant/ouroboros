@@ -116,16 +116,19 @@ def test_named_changes_touch_their_places(tmp_path, changed, pages, classes, eve
     (lambda css: css.replace("gap: 2px", "gap: 3px"), ["beta"], [], False),
     (lambda css: css.replace("gap: 1px", "gap: 9px"), [], ["panel-own"], False),
     (lambda css: css + ".drawn-nowhere { color: red; }\n", [], ["drawn-nowhere"], False),
-    (lambda css: css + ":root { --tone: red; }\n", [], [], True),
-    (lambda css: css + "button { color: red; }\n", [], [], True),
+    (lambda css: css + ".alpha-card { --card-gap: 4px; }\n", ["alpha"], [], False),
+    (lambda css: css + ":root { --tone: red; }\n", [], [], "a token changed in ':root'"),
+    (lambda css: css + "button { color: red; }\n", [], [], "'button' names no class"),
 ])
 def test_a_draft_stylesheet_touches_where_its_changed_rules_stand(tmp_path, edit, pages, classes, every):
     served, draft = _web(tmp_path / "served"), _web(tmp_path / "draft")
     (draft / "style.css").write_text(edit((served / "style.css").read_text(encoding="utf-8")), encoding="utf-8")
     (draft / "tests" / "a.test.js").write_text("changed, but no part of the interface\n", encoding="utf-8")
     plan = stand.place_plan(draft, served)
-    assert (plan["pages"], plan["classes"], plan["all"]) == (pages, classes, every), plan
+    assert (plan["pages"], plan["classes"], plan["all"]) == (pages, classes, bool(every)), plan
     assert plan["changed"] == ([] if (pages, classes, every) == ([], [], False) else ["style.css"])
+    if every:
+        assert plan["why"] == [f"style.css: {every}, so every place"]
 
 
 def test_the_plan_reads_the_real_interface_and_no_diff_means_every_place(tmp_path):
