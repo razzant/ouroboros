@@ -68,7 +68,7 @@ def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscri
     assert page.locator(".skills-starter-count").inner_text() == "6 of 10 ticked"
     # A group's head is its name and count only.
     assert page.locator(".skills-starter-group h3").all_inner_texts() == [
-        "Built in · 2", "Messaging · 1", "Documents · 2", "Search & research · 3", "About Ouroboros · 1", "Writing & review · 1"]
+        "Built in", "Documents", "Search & research", "More"], "no counts; the categories of one skill close as «More»"
     assert page.locator("[data-starter-skill] input:checked").count() == 6
     # A row has no surface of its own, ticked or not (owner 21.11: «слишком крупные карточки»): the box says it.
     assert set(page.locator("[data-starter-skill]").evaluate_all(
@@ -78,8 +78,13 @@ def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscri
     assert page.locator('.skills-starter-group').first.locator('[data-starter-item]').evaluate_all(
         "boxes => boxes.map((box) => box.dataset.starterItem)") == ["builtin/unix_computer_use", "builtin/telegram"]
     telegram = _row(page, "builtin/telegram").inner_text()
-    assert "Telegram" in telegram and "Chat with Ouroboros from your phone in Telegram" in telegram
-    assert "Needs a Telegram bot token" in telegram and "Built in" not in telegram and "Official" not in telegram
+    assert "Telegram" in telegram and "Chat with Ouroboros from your phone" in telegram
+    assert "Built in" not in telegram and "Official" not in telegram
+    # What it lacks shows in a few words; the whole sentence is what a screen reader hears instead.
+    assert _row(page, "builtin/telegram").locator(".skills-starter-needs").inner_text() == "· bot token"
+    assert _row(page, "builtin/telegram").locator(".skills-starter-needs").get_attribute("aria-hidden") == "true"
+    assert _row(page, "builtin/telegram").locator(".skills-starter-sr").text_content() == "Needs a Telegram bot token"
+    assert _row(page, "builtin/telegram").locator(".skills-starter-sr").evaluate("el => el.getBoundingClientRect().width") <= 1
     needs = _row(page, "builtin/telegram").locator(".skills-starter-needs")
     pitch = _row(page, "builtin/telegram").locator(".skills-starter-pitch")
     assert needs.evaluate("el => getComputedStyle(el).color") != pitch.evaluate("el => getComputedStyle(el).color")
@@ -87,7 +92,8 @@ def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscri
     assert page.locator(STEP).inner_text().count("Official") == 1, "where a skill comes from is said once, under the list"
     # Without the catalog's words the card keeps the skill's name and its author's text; a key shows in words.
     assert "unix_computer_use" in _row(page, "builtin/unix_computer_use").inner_text()
-    assert "Uses your OpenRouter API Key" in _row(page, "ouroboros/perplexity").inner_text()
+    assert _row(page, "ouroboros/perplexity").locator(".skills-starter-needs").inner_text() == "· needs setup"
+    assert _row(page, "ouroboros/perplexity").locator(".skills-starter-sr").text_content() == "Uses your OpenRouter API Key"
     assert _row(page, "ouroboros/keenable").locator(".skills-starter-needs").count() == 0
     trust = page.locator(".skills-starter-trust")
     assert trust.inner_text().startswith(
@@ -292,18 +298,20 @@ def test_the_step_still_polls_after_five_minutes_in_earlier_setup(starter_ui):
     capture(page, f"skills-{ui['engine']}-390-r2-delayed-step")
 
 
-ARRIVAL = """() => [...document.querySelectorAll('.skills-starter-group .skills-starter-skill')].slice(0, 14).map((el) => {
+ARRIVAL = """() => [...document.querySelectorAll('.skills-starter-group h3, .skills-starter-group .skills-starter-skill')].map((el) => {
     const style = getComputedStyle(el);
     return {name: style.animationName, delay: parseFloat(style.animationDelay) * (style.animationDelay.endsWith('ms') ? 1 : 1000),
-            duration: parseFloat(style.animationDuration) * (style.animationDuration.endsWith('ms') ? 1 : 1000)};
+            duration: parseFloat(style.animationDuration) * (style.animationDuration.endsWith('ms') ? 1 : 1000),
+            column: Math.round(el.getBoundingClientRect().left)};
 })"""
 
 
 @pytest.mark.parametrize('motion', ['no-preference', 'reduce'])
 def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui, motion):
-    """Entering the step plays one short staggered entrance (each card a surface that comes on the sheet curve, the
-    whole under a second); its boxes answer at once; a repaint never plays it again, leaving and coming back does.
-    Under reduced motion the list stands as it ends."""
+    """Entering the step plays one short staggered entrance (each row comes on the sheet curve a beat after the one
+    above it in its own column, so both columns start at once and build at one pace, 700 ms in all); its boxes answer
+    at once; a repaint never plays it again, leaving and coming back does. Under reduced motion the list stands as it
+    ends."""
     ui = starter_ui
     ui['page'].emulate_media(reduced_motion=motion)
     page = _skills_step(ui)
@@ -315,9 +323,12 @@ def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui
         assert {card['name'] for card in arrival} == {'none'}, arrival
     else:
         assert {card['name'] for card in arrival} == {'skills-starter-arrive'}, arrival
-        delays = [card['delay'] for card in arrival]
-        assert delays == sorted(delays) and delays[0] == 0 and delays[1] > 0, delays
-        assert max(card['delay'] + card['duration'] for card in arrival) < 1000, arrival
+        columns = {}
+        for card in arrival:
+            columns.setdefault(card['column'], []).append(card['delay'])
+        for delays in columns.values():  # each column from the start, at one beat
+            assert delays[0] == 0 and delays == sorted(delays) and (len(delays) < 2 or delays[1] == 30), columns
+        assert max(card['delay'] + card['duration'] for card in arrival) <= 701, arrival
     page.locator('[data-starter-all="1"]').click()  # a repaint: the entrance is not played again
     assert page.locator('.skills-starter-list[data-arrive]').count() == 0
     assert {card['name'] for card in page.evaluate(ARRIVAL)} == {'none'}
@@ -332,10 +343,12 @@ def test_the_cards_arrive_once_per_entry_and_not_under_reduced_motion(starter_ui
 CARD = {  # the Telegram skill's declared connection card as the host carries it on its starter item
     "skill": "telegram", "token": "botToken",
     "pairing": {"code": "pairingCode", "link": "https://t.me/{username}?start={code}",
-                "hint": "Scan it with your phone, then press Start in Telegram."},
+                "hint": "Scan it with your phone\u2019s camera, then press Start in Telegram.",
+                "note": "You can finish setup now; the bot answers once Ouroboros starts."},
     "title": "Phone via Telegram", "pitch": "Write to Ouroboros and get its results on your phone",
     "steps": [{"text": "Open @BotFather in Telegram", "link": "https://t.me/BotFather", "action": "Open @BotFather"},
-              {"text": "Send it /newbot"}],
+              {"text": "Send /newbot"}, {"text": "Choose a name, then a username ending in \u201cbot\u201d"},
+              {"text": "BotFather replies with a token: paste it here and press Check"}],
     "options": [{"key": "TELEGRAM_NOTIFY_TASKS", "label": "Send results and errors of work here", "on": "on", "off": "off",
                  "new_connection": True, "store": "skill_settings", "route": "settings/save"}],
 }
@@ -371,7 +384,7 @@ def test_the_connection_card_checks_a_token_draws_its_qr_and_rides_the_completio
     card = page.locator(".skills-connection")
     card.wait_for()
     assert card.locator("[data-starter-item]").get_attribute("data-starter-item") == "builtin/telegram"
-    assert page.locator(".skills-starter-group").first.locator("[data-starter-item]").count() == 1, "its skill leaves its group"
+    assert page.locator('.skills-starter-groups [data-starter-item="builtin/telegram"]').count() == 0, "its skill leaves its group"
     assert page.locator(".skills-starter-count").inner_text() == "6 of 10 ticked"
     card.locator("[data-connection-toggle]").click()
     assert card.locator('a[href="https://t.me/BotFather"]').is_visible()
@@ -387,6 +400,10 @@ def test_the_connection_card_checks_a_token_draws_its_qr_and_rides_the_completio
     link = card.locator("[data-connection-link]").get_attribute("href")
     assert link.startswith("https://t.me/my_ouro_bot?start=") and len(link.split("start=")[1]) == 22, link
     assert card.locator("[data-connection-account]").inner_text() == "@my_ouro_bot"
+    assert "You can finish setup now; the bot answers once Ouroboros starts." in card.inner_text()
+    # The field fits its card at every width (the button moves under it on a phone); a long token ends in an ellipsis.
+    assert field.evaluate("el => el.getBoundingClientRect().right <= el.closest('.skills-connection').getBoundingClientRect().right + 0.5")
+    assert field.evaluate("el => getComputedStyle(el).textOverflow") == "ellipsis"
     assert card.locator('[data-connection-option="TELEGRAM_NOTIFY_TASKS"]').is_checked()
     assert checks == [{"skill": "telegram", "token": "123:wrong"}, {"skill": "telegram", "token": TOKEN}]
     assert page.evaluate("document.activeElement?.dataset.connectionToken") == "", "the field keeps focus through its repaint"

@@ -31,7 +31,7 @@ const target = (attrs) => ({ closest: (selector) => {
     return key ? attrs[key] : null;
 } });
 const text = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-const rowOf = (html, id) => html.split('<label ').find((part) => part.includes(`data-starter-skill="${id}"`)) || '';
+const rowOf = (html, id) => (html.split('<label ').find((part) => part.includes(`data-starter-skill="${id}"`)) || '').split('</label>')[0];
 
 test('built-ins lead as their own group; the host’s category order stays', () => {
     const lifted = normalizeStarterGroups([
@@ -66,26 +66,29 @@ test('the step: the contract’s header over one list of rows with titles, pitch
     const host = fakeHost();
     step.mount(host);
     const html = host.innerHTML;
-    assert.match(text(html), /^6 of 10 ticked Tick all · Untick all Built in · 2/);
-    // A group's head is its name and count, nothing else.
-    assert.match(html, /<h3 style="--arrive: 0">Built in<span> · 2<\/span><\/h3>/);
-    // One row: the box, the title, then what it gives and what it needs first on the same line; no box of its own.
-    // The catalog's words translate; a slug and an author's description keep their own words.
-    assert.match(rowOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong>\s*<span class="skills-starter-pitch">Chat with Ouroboros from your phone in Telegram<\/span>\s*<span class="skills-starter-needs">· Needs a Telegram bot token<\/span><\/span>/);
+    assert.match(text(html), /^6 of 10 ticked Tick all · Untick all Built in unix_computer_use /);
+    // A group's head is its name, no count; the categories of one skill (Messaging, About Ouroboros, Writing & review
+    // here) close the list together as «More».
+    assert.deepEqual((html.match(/<h3[^>]*>[^<]*<\/h3>/g) || []).map((head) => text(head)), ['Built in', 'Documents', 'Search &amp; research', 'More']);
+    // One row: the box, the title, then what it gives and, in a few words, what it lacks; no box of its own. The
+    // whole sentence is read out in place of the mark. The catalog's words translate; a slug and an author's
+    // description keep their own words.
+    assert.match(rowOf(html, 'builtin/telegram'), /<strong>Telegram<\/strong>\s*<span class="skills-starter-pitch">Chat with Ouroboros from your phone<\/span>\s*<span class="skills-starter-needs" aria-hidden="true">· bot token<\/span><span class="skills-starter-sr">Needs a Telegram bot token<\/span><\/span>/);
     assert.match(rowOf(html, 'builtin/unix_computer_use'), /<strong data-i18n-authored>unix_computer_use<\/strong>[\s\S]*<span class="skills-starter-pitch" data-i18n-authored>Desktop control: screenshots/);
     assert.doesNotMatch(rowOf(html, 'ouroboros/keenable'), /skills-starter-needs/, 'its key is optional: no line');
-    assert.match(rowOf(html, 'ouroboros/slack-bridge'), /<span class="skills-starter-needs" data-i18n-authored>· Uses your Slack bot token and 1 more setting<\/span>/);
+    // Without the catalog's mark the row says «needs setup» and reads out what the skill reads.
+    assert.match(rowOf(html, 'ouroboros/slack-bridge'), /<span class="skills-starter-needs" aria-hidden="true">· needs setup<\/span><span class="skills-starter-sr" data-i18n-authored>Uses your Slack bot token and 1 more setting<\/span>/);
     // A ticked row is the box alone: no card, no chosen fill.
     assert.match(rowOf(html, 'ouroboros/duckduckgo'), /^class="skills-starter-skill"[\s\S]*data-starter-item="ouroboros\/duckduckgo" checked/);
     assert.doesNotMatch(html, /wizard-choice|skills-starter-skill active/);
     // Where they come from is said once, never per row: the built-in group's head, the one sentence under the list.
     assert.doesNotMatch(html, /data-mark="official"|skills-chip|skills-starter-marks|maintainer vouches/);
     assert.equal((html.match(/Official skills from the Ouroboros hub/g) || []).length, 1);
-    assert.match(text(html), /Built in · 2 .* Messaging · 1 /);
+    assert.match(text(html), /Built in .* More Better writing /);
     // Inside a group what works at once leads (recommended first) and what needs something comes last.
     const order = [...html.matchAll(/data-starter-skill="([^"]+)"/g)].map((match) => match[1]);
-    assert.deepEqual(order, ['builtin/unix_computer_use', 'builtin/telegram', 'ouroboros/slack-bridge', 'ouroboros/pdf_tools',
-        'ouroboros/word_tools', 'ouroboros/duckduckgo', 'ouroboros/keenable', 'ouroboros/perplexity', 'ouroboros/memory-atlas', 'ouroboros/anti-slop']);
+    assert.deepEqual(order, ['builtin/unix_computer_use', 'builtin/telegram', 'ouroboros/pdf_tools', 'ouroboros/word_tools',
+        'ouroboros/duckduckgo', 'ouroboros/keenable', 'ouroboros/perplexity', 'ouroboros/anti-slop', 'ouroboros/memory-atlas', 'ouroboros/slack-bridge']);
     // Where the hub's skills come from and how they install is one sentence under the list, in plain words; its
     // choices open in place, in Settings' words.
     assert.match(text(html), /Official skills from the Ouroboros hub install without a review; skills from the community are reviewed first\. Change$/);
@@ -161,8 +164,8 @@ test('the rows arrive once per entry: never on a re-render or a refresh, again a
     const first = fakeHost();
     step.mount(first);
     assert.match(first.innerHTML, /<div class="skills-starter-list" data-arrive>/);
-    assert.match(rowOf(first.innerHTML, 'ouroboros/anti-slop'), /style="--arrive: 9"/);
-    assert.match(first.innerHTML, /<h3 style="--arrive: 2">Messaging/, 'a group head arrives before its rows');
+    assert.match(rowOf(first.innerHTML, 'ouroboros/slack-bridge'), /style="--arrive: 9"/);
+    assert.match(first.innerHTML, /<h3 style="--arrive: 2">Documents/, 'a group head arrives before its rows');
     const rerendered = fakeHost();  // the wizard re-renders the step it is on: a new node, the same entry
     step.mount(rerendered);
     assert.match(rerendered.innerHTML, /<div class="skills-starter-list">/);
@@ -337,10 +340,11 @@ test('the polling window starts when the step (or Summary) first shows after a l
 // A skill's declared connection card (the agreed manifest shape, with the skill's own words) on its starter item.
 const CARD = {
     skill: 'telegram', token: 'botToken',
-    pairing: { code: 'pairingCode', link: 'https://t.me/{username}?start={code}', hint: 'Scan it with your phone, then press Start in Telegram.' },
+    pairing: { code: 'pairingCode', link: 'https://t.me/{username}?start={code}', hint: 'Scan it with your phone’s camera, then press Start in Telegram.',
+        note: 'You can finish setup now; the bot answers once Ouroboros starts.' },
     title: 'Phone via Telegram', pitch: 'Write to Ouroboros and get its results on your phone',
-    steps: [{ text: 'Open @BotFather in Telegram', link: 'https://t.me/BotFather', action: 'Open @BotFather' }, { text: 'Send it /newbot' },
-        { text: 'Give the bot a name, then a username ending in “bot”' }],
+    steps: [{ text: 'Open @BotFather in Telegram', link: 'https://t.me/BotFather', action: 'Open @BotFather' }, { text: 'Send /newbot' },
+        { text: 'Choose a name, then a username ending in “bot”' }, { text: 'BotFather replies with a token: paste it here and press Check' }],
     options: [{ key: 'TELEGRAM_NOTIFY_TASKS', label: 'Send results and errors of work here', on: 'on', off: 'off', new_connection: true,
         store: 'skill_settings', route: 'settings/save' }],
 };
@@ -369,13 +373,14 @@ test('a declared connection card leads the step as one row with Connect; its ski
     assert.match(text(card), /^Phone via Telegram Write to Ouroboros and get its results on your phone Connect$/);
     assert.match(card, /class="skills-connection" data-connection="telegram" style="--arrive: 0"/);
     assert.match(card, /data-starter-item="builtin\/telegram" checked/, 'its box is the skill’s starter tick');
-    assert.match(text(host.innerHTML), /6 of 10 ticked Tick all · Untick all Built in · 1 /);
+    // Its built-in neighbour is left alone in its group, so it joins «More» at the end.
+    assert.match(text(host.innerHTML), /6 of 10 ticked Tick all · Untick all Documents .* More .*unix_computer_use/);
     assert.equal((host.innerHTML.match(/data-starter-skill="builtin\/telegram"/g) || []).length, 1);
     // Without a declaration, or with one the card cannot show, the skill stays a row of its group.
     for (const broken of [undefined, { ...CARD, pairing: { ...CARD.pairing, link: 'https://t.me/bot' } }, { ...CARD, token: '' }]) {
         const plain = await cardStep(broken ? withCard(broken) : STARTER, () => ({ status: 'ok', username: 'x' }));
         assert.doesNotMatch(plain.host.innerHTML, /skills-connection/);
-        assert.match(text(plain.host.innerHTML), /Built in · 2 /);
+        assert.match(text(plain.host.innerHTML), /Tick all · Untick all Built in unix_computer_use .* Telegram /);
     }
     assert.equal(normalizeConnection({ ...CARD, pairing: { ...CARD.pairing, link: 'http://t.me/{username}?start={code}' } }), null, 'https only');
 });
@@ -387,7 +392,9 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     assert.equal(code, pairingCode((bytes) => bytes.fill(7)));
     assert.match(code, /^[A-Za-z0-9_-]{22}$/);
     let card = cardOf(host.innerHTML);
-    assert.match(text(card), /Phone via Telegram .* Hide Open @BotFather in Telegram Open @BotFather Send it \/newbot Give the bot a name, then a username ending in “bot” Bot token Check$/);
+    assert.match(text(card), /Phone via Telegram .* Hide Open @BotFather in Telegram Open @BotFather Send \/newbot Choose a name, then a username ending in “bot” BotFather replies with a token: paste it here and press Check Bot token Check$/);
+    // The field stands under the skill's last step, which says what to paste; its own name is read out, not shown.
+    assert.match(card, /<li class="skills-connection-token"><span data-i18n-authored>BotFather replies with a token: paste it here and press Check<\/span><label for="connection-telegram-token" class="skills-starter-sr">Bot token<\/label>/);
     assert.match(card, /href="https:\/\/t\.me\/BotFather" target="_blank" rel="noopener noreferrer"/);
     assert.match(card, /type="password" autocomplete="off" spellcheck="false" data-connection-token/);
     assert.doesNotMatch(card, /<svg|data-connection-account/, 'no QR before a token is checked');
@@ -397,7 +404,7 @@ test('Connect opens the skill’s steps and its token field; a checked token sho
     card = cardOf(host.innerHTML);
     const link = `https://t.me/my_ouro_bot?start=${code}`;
     assert.ok(card.includes(qrSvg(link, { label: 'QR code for @my_ouro_bot' })), 'the QR is the link with this card’s code');
-    assert.match(text(card), /@my_ouro_bot Scan it with your phone, then press Start in Telegram\. It connects when you finish setup\. On this device\? Open @my_ouro_bot Send results and errors of work here$/);
+    assert.match(text(card), /@my_ouro_bot Scan it with your phone’s camera, then press Start in Telegram\. You can finish setup now; the bot answers once Ouroboros starts\. On this device\? Open @my_ouro_bot Send results and errors of work here$/);
     assert.match(card, new RegExp(`href="${link.replace(/[.?]/g, '\\$&')}" target="_blank" rel="noopener noreferrer" data-connection-link`));
     assert.match(card, /data-connection-option="TELEGRAM_NOTIFY_TASKS" checked/, 'on for a new connection');
     assert.equal(card.split(TOKEN).length - 1, 1, 'the token is the field’s own value only: never in the QR or a link');
@@ -456,4 +463,22 @@ test('the host’s identity check: its two causes, its answer and anything else 
     const failed = await checkIdentity('telegram', TOKEN, async () => { throw new Error(`fetch ${TOKEN}`); });
     assert.deepEqual(failed, { status: 'unavailable', reason: 'the request did not complete' }, 'never the token or the error text');
     assert.notEqual(pairingCode(), pairingCode());
+});
+
+test('categories of one skill close the list together as «More»; a list without them has none', async () => {
+    const pairs = structuredClone(STARTER);
+    pairs.groups = [{ category: 'a', label: 'A', items: [{ id: 'h/a1', name: 'a1' }, { id: 'h/a2', name: 'a2' }] },
+        { category: 'b', label: 'B', items: [{ id: 'h/b1', name: 'b1' }, { id: 'h/b2', name: 'b2' }] }];
+    const even = createStarterSkillsStep({ read: async () => pairs });
+    await even.loading;
+    const host = fakeHost();
+    even.mount(host);
+    assert.deepEqual((host.innerHTML.match(/<h3[^>]*>[^<]*<\/h3>/g) || []).map((head) => text(head)), ['A', 'B']);
+    pairs.groups.push({ category: 'c', label: 'C', items: [{ id: 'h/c1', name: 'c1' }] });
+    const lone = createStarterSkillsStep({ read: async () => pairs });
+    await lone.loading;
+    const other = fakeHost();
+    lone.mount(other);
+    assert.deepEqual((other.innerHTML.match(/<h3[^>]*>[^<]*<\/h3>/g) || []).map((head) => text(head)), ['A', 'B', 'More']);
+    assert.doesNotMatch(other.innerHTML, /<h3[^>]*>C</);
 });

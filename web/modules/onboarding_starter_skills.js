@@ -2,11 +2,12 @@
 // много крутых скилов анимированным списком, но юзер может поснимать галочки»; it replaces the Summary row his 4A of
 // 2026-10-17 chose). The server offers it only where completion honors the ticks (`stepOrder`: this data root's
 // starter list never ran). One categorized list, built-ins first, one row per skill (his 21.11 «слишком крупные
-// карточки»: rows, not boxes): its box, its human title and, muted on the same line, what it gives and what it needs
-// first; the maintainer's recommended ones are ticked. A group says its name and count only; where the skills come from
-// and how the hub's install is one small sentence under the list, its choices behind it. Inside a group what works at
-// once leads and what needs a key comes last. The rows arrive in one short sequence on entering the step, never on a
-// repaint (DESIGN §7). A skill that declares a connection card (`connection`) stands first, as that card
+// карточки»: rows, not boxes): its box, its human title and, muted on one line with it, what it gives and, in a few
+// words, what it lacks («· Gemini key»; the full sentence is the row's accessible text); the maintainer's recommended
+// ones are ticked. A group says its name only, and categories of one skill close the list together as «More». Where
+// the skills come from and how the hub's install is one small sentence under the list, its choices behind it. Inside a
+// group what works at once leads and what needs a key comes last. The rows arrive in one short sequence on entering
+// the step, both columns at one pace, never on a repaint (DESIGN §7). A skill that declares a connection card (`connection`) stands first, as that card
 // (onboarding_connection_card.js). Nothing installs here: the one atomic Finish carries the ticked ids, the trust
 // choices and a card's values, and the host installs them in the background after start. Summary shows one row back
 // to the step. A list that cannot be read leaves the host's defaults in place and says so.
@@ -15,7 +16,8 @@ import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { createConnectionCard, normalizeConnection } from './onboarding_connection_card.js';
 
 const BUILT_IN_TITLE = 'Built in';
-const ARRIVE_LAST = 12;  // rows from the twelfth on arrive together, so the whole entrance stays under a second
+const MORE = { category: 'more', label: 'More' };  // where categories of a single skill close the list together
+const ARRIVE_LAST = 12;  // a column's twelfth place and later arrive together: the whole entrance stays within 700 ms
 const FOCUS_KEYS = ['starterItem', 'starterAll', 'starterTrustToggle', 'starterTrust', 'connectionToggle', 'connectionToken',
     'connectionCheck', 'connectionOption'];
 
@@ -143,13 +145,15 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
     const shown = (group) => group.items.filter((item) => item !== connection?.item && item.id !== connection?.item.id)
         .sort((a, b) => rank(a) - rank(b) || label(a).localeCompare(label(b), 'en'));
 
-    // One row: the box, the title and, muted on the same line (wrapping whole under it where the line is short), what it
-    // gives and, quieter, what it needs first.
+    // One row: the box, the title and, muted on one line with it (wrapping whole under it where the line is short), what
+    // it gives and, quieter, what it lacks in a few words: the catalog's `mark`, else «needs setup»; the whole sentence
+    // stays the row's accessible text.
     function skillHtml(item, order) {
         const on = state.ticked.has(item.id);
         const title = String(item.title || '').trim();
         const pitch = String(item.pitch || '').trim();
         const needs = needsText(item, keyLabels);
+        const mark = needs ? String(item.mark || '').trim() : '';
         // The catalog's own words translate (the interface layer); a name, a skill author's text and a line composed
         // from setting names stay as they are.
         const authored = (own) => (own ? '' : ' data-i18n-authored');
@@ -157,8 +161,17 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             <input type="checkbox" class="ui-checkbox" data-starter-item="${escapeHtml(item.id)}"${on ? ' checked' : ''}>
             <span class="skills-starter-words"><strong${authored(title)}>${escapeHtml(title || item.name)}</strong>
                 <span class="skills-starter-pitch"${authored(pitch)}>${escapeHtml(pitch || item.description || '')}</span>${needs ? `
-                <span class="skills-starter-needs"${authored(typeof item.needs === 'string')}>· ${escapeHtml(needs)}</span>` : ''}</span>
+                <span class="skills-starter-needs" aria-hidden="true">· ${escapeHtml(mark || 'needs setup')}</span><span class="skills-starter-sr"${authored(typeof item.needs === 'string')}>${escapeHtml(needs)}</span>` : ''}</span>
         </label>`;
+    }
+
+    // The list's groups: each category with its rows; categories of one skill close it together as «More».
+    function listed() {
+        const groups = state.groups.map((group) => [group, shown(group)]).filter(([, rows]) => rows.length);
+        const single = groups.filter(([, rows]) => rows.length === 1).flatMap(([, rows]) => rows);
+        if (!single.length) return groups;
+        return [...groups.filter(([, rows]) => rows.length > 1),
+            [MORE, single.sort((a, b) => rank(a) - rank(b) || label(a).localeCompare(label(b), 'en'))]];
     }
 
     // Where the hub's skills come from and how they install, in plain words and said once, under the list: e.g.
@@ -187,11 +200,11 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const pending = pendingText();
         // A declared connection card leads; a group is its name and count over its rows. What is still being read
         // stands under the list, where the hub's skills will join it: its going moves no row.
-        const groups = state.groups.map((group) => [group, shown(group)]).filter(([, rows]) => rows.length);
+        const groups = listed();
         return `<div class="skills-starter-list"${arrive ? ' data-arrive' : ''}>
             ${connection ? connection.html(next()) : ''}
             ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status">${countText()}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
-            <div class="skills-starter-groups">${groups.map(([group, rows]) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}<span> · ${rows.length}</span></h3>
+            <div class="skills-starter-groups">${groups.map(([group, rows]) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}</h3>
                 ${rows.map((item) => skillHtml(item, next())).join('')}</section>`).join('')}</div>
             ${pending ? `<p class="skills-starter-sub" role="status">${escapeHtml(pending)}</p>` : ''}
             ${trustHtml()}
@@ -226,7 +239,21 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         host.innerHTML = arrive ? stepHtml(true) : html;
         painted = html;
         arrived ||= arrive;
+        if (arrive) paceColumns();
         restore?.();
+    }
+
+    // Both columns build at one pace: a group's head and rows take their place within their own column (the card and
+    // anything above the columns come first), set before the first frame so the entrance starts with them.
+    function paceColumns() {
+        if (typeof host.querySelectorAll !== 'function') return;
+        const places = new Map();
+        for (const node of host.querySelectorAll('.skills-starter-group h3, .skills-starter-group .skills-starter-skill')) {
+            const column = Math.round(node.getBoundingClientRect().left);
+            const place = places.get(column) || 0;  // each column's head starts with the card, at once
+            places.set(column, place + 1);
+            node.style.setProperty('--arrive', String(Math.min(place, ARRIVE_LAST)));
+        }
     }
 
     function onClick(event) {
