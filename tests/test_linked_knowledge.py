@@ -546,9 +546,9 @@ def test_read_shows_outgoing_link_facts_and_keeps_unlinked_notes_identical(tmp_p
 def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unresolvable_names(tmp_path, monkeypatch):
     """Range pages after the first carry no link lines; an entity- or backslash-spelled link still joins as a
     backlink; a link whose resolution raises an OS error names its outgoing links unavailable, never fails the read.
-    A name longer than a volume allows: the read must give exactly this system's own answer for that file (on POSIX
-    is_file() raises ENAMETOOLONG; Windows may call it no file, a gap), and an OS error from is_file() is then
-    pinned as unavailable on every system."""
+    A name longer than a volume allows gives exactly this system's own answer for that file (on POSIX is_file()
+    raises ENAMETOOLONG; Windows may call it no file, a gap under the written name), and an OS error from either
+    resolve() or is_file() on an ordinary link is pinned as unavailable on every system."""
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     target = address(tmp_path, "a&b")
     target.shelf.mkdir(parents=True)
@@ -566,29 +566,29 @@ def test_link_facts_ride_a_read_from_the_start_and_survive_odd_spellings_and_unr
     reply = tools._knowledge_read(ctx, "long-link")
     source = long_name.path.read_bytes().decode("utf-8")  # the bytes on disk: Windows text mode wrote CRLF
     assert reply.endswith(source), reply[-200:]
-    far, resolved = long_name.shelf / ("n" * 300 + ".md"), False  # this system's own answer, outside the product
-    try:
-        far, resolved = far.resolve(), True
-        assert not far.is_file()
-        try:  # the gap names its address, or the written link where the name is no knowledge address
-            gap = {key: address(tmp_path, "n" * 300, "global").as_dict()[key] for key in ("scope", "topic")}
-        except (OSError, ValueError, RuntimeError):
-            gap = "n" * 300 + ".md"
-        expected = {"unwritten": [gap]}
+    gap = {"unwritten": [{"scope": "global", "topic": "n" * 300}]}  # the written name, never reshaped
+    try:  # this system's own answer for that file, asked outside the product
+        native = gap if not (long_name.shelf / ("n" * 300 + ".md")).resolve().is_file() else None
     except OSError as exc:  # POSIX: is_file() raises ENAMETOOLONG
-        expected = {"unavailable": type(exc).__name__}
-    assert _link_header(reply, "links") == expected, (_link_header(reply, "links"), expected)
-    real_is_file = Path.is_file  # where POSIX raises for this name, now on every system
+        native = {"unavailable": type(exc).__name__}
+    assert _link_header(reply, "links") == native, (_link_header(reply, "links"), native)
+    (target.shelf / "near.txt").write_text("Near.\n", encoding="utf-8")  # present, outside the note inventory
+    near = address(tmp_path, "near-link")
+    near.path.write_text("[near](near.txt)\nBody kept.\n", encoding="utf-8")
+    body = near.path.read_bytes().decode("utf-8")
+    assert _link_header(tools._knowledge_read(ctx, "near-link"), "links") == {"present": ["near.txt"]}
+    for call in ("resolve", "is_file"):  # an OS error from either check names the link unavailable
+        real = getattr(Path, call)
 
-    def stat_raises(path):
-        if len(path.name) > 255:
-            raise OSError(errno.ENAMETOOLONG, "File name too long")
-        return real_is_file(path)
+        def raises(path, *args, real=real, **kwargs):
+            if path.name == "near.txt":
+                raise OSError(errno.EIO, "I/O error")
+            return real(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "is_file", stat_raises)
-    reply = tools._knowledge_read(ctx, "long-link")
-    pinned = {"unavailable": "OSError"} if resolved else expected  # a raising resolve() never reaches is_file()
-    assert reply.endswith(source) and _link_header(reply, "links") == pinned, (_link_header(reply, "links"), pinned)
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, call, raises)
+            reply = tools._knowledge_read(ctx, "near-link")
+        assert reply.endswith(body) and _link_header(reply, "links") == {"unavailable": "OSError"}, (call, reply[-300:])
 
 
 def test_read_backlinks_join_exact_addresses_only_on_readable_shelves(tmp_path, monkeypatch):
