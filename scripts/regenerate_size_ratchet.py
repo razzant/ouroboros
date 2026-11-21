@@ -141,7 +141,7 @@ def _next_manifest(
             byte_baseline_debt=previous.byte_baseline_debt,
             byte_debt=dict(inventory.byte_debt),
         )
-        transition_errors = validate_manifest_transition(current, previous)
+        transition_errors = validate_manifest_transition(current, previous, inventory.line_counts())
         if transition_errors:
             raise ValueError("\n".join(transition_errors))
 

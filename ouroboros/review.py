@@ -110,6 +110,9 @@ class SizeRatchetInventory:
     # Modules between the band and the hard gate (1501-1600 lines).
     above_band_paths: frozenset[str] = frozenset()
 
+    def line_counts(self) -> dict[str, int]:
+        return {module.path: module.line_count for module in self.modules}
+
 
 def _exact_repo_relative_path(raw: str | pathlib.Path) -> str:
     text = str(raw)
@@ -220,9 +223,13 @@ def iter_gated_modules(
             path.resolve().relative_to(root)
         except ValueError as exc:
             raise ValueError(f"gated source path escapes repository: {rel}") from exc
-        raw = path.read_bytes()
-        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        text = _canonical_text(path.read_bytes())
         yield GatedModule(rel, len(text.splitlines()), len(text.encode("utf-8")), text)
+
+
+def _canonical_text(raw: bytes) -> str:
+    """A gated module's text as the inventory counts it: strict UTF-8 with LF line ends."""
+    return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _iter_lexical_functions(tree: ast.AST, path: str) -> Iterator[GatedFunction]:
@@ -332,78 +339,91 @@ def collect_size_ratchet_inventory(
     )
 
 
+def _gated_blobs(root: pathlib.Path, ref: str, wanted: frozenset[str] | None = None) -> Iterator[tuple[str, bytes]]:
+    """``(path, bytes)`` of each gated source in ``ref``'s tree, of ``wanted`` alone when given, read in
+    one ``git cat-file --batch``: a path the tree lacks is absent; an object the local store lacks
+    raises ``SizeRatchetRefUnavailable``; a non-regular gated entry or malformed output ``ValueError``."""
+    tree = subprocess.run(
+        ["git", "ls-tree", "-rz", "--full-tree", ref],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    entries: list[tuple[str, bytes]] = []
+    for record in tree.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError(f"git ls-tree returned a malformed entry at {ref}") from exc
+        path = _exact_repo_relative_path(raw_path.decode("utf-8"))
+        if not _is_gated_module_path(path) or wanted is not None and path not in wanted:
+            continue
+        if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+            raise ValueError(f"gated source at {ref} must be a regular file: {path}")
+        entries.append((path, object_id))
+
+    # Avoid the observed parent/Git mutual pipe-write wait; blob validation stays below.
+    with tempfile.TemporaryFile() as source_ids:
+        source_ids.write(b"".join(object_id + b"\n" for _path, object_id in entries))
+        source_ids.seek(0)
+        batch = subprocess.run(
+            ["git", "cat-file", "--batch"],
+            cwd=root,
+            check=True,
+            stdin=source_ids,
+            capture_output=True,
+        ).stdout
+    cursor = 0
+    for path, expected_id in entries:
+        header_end = batch.find(b"\n", cursor)
+        if header_end < 0:
+            raise ValueError(f"git cat-file omitted the header for {path} at {ref}")
+        header = batch[cursor:header_end].split(b" ")
+        if header == [expected_id, b"missing"]:
+            raise SizeRatchetRefUnavailable(
+                f"git cat-file: object {expected_id.decode('ascii', errors='replace')} "
+                f"for {path} at {ref} is not in the local object store"
+            )
+        if len(header) != 3 or header[0] != expected_id:
+            raise ValueError(f"git cat-file returned a malformed header for {path} at {ref}")
+        if header[1] != b"blob":
+            raise ValueError(
+                f"git cat-file returned a non-blob object for {path} at {ref}: {header[1]!r}"
+            )
+        try:
+            size = int(header[2])
+        except ValueError as exc:
+            raise ValueError(f"git cat-file returned an invalid size for {path} at {ref}") from exc
+        blob_start = header_end + 1
+        blob_end = blob_start + size
+        if blob_end >= len(batch) or batch[blob_end : blob_end + 1] != b"\n":
+            raise ValueError(f"git cat-file returned a truncated blob for {path} at {ref}")
+        yield path, batch[blob_start:blob_end]
+        cursor = blob_end + 1
+    if cursor != len(batch):
+        raise ValueError(f"git cat-file returned unexpected trailing data at {ref}")
+
+
 @contextlib.contextmanager
 def _git_source_snapshot(repo_dir: pathlib.Path, ref: str) -> Iterator[tuple[pathlib.Path, tuple[str, ...]]]:
     root = pathlib.Path(repo_dir).resolve()
     with tempfile.TemporaryDirectory(prefix="ouroboros-size-ratchet-") as raw_temp:
         snapshot = pathlib.Path(raw_temp)
-        tree = subprocess.run(
-            ["git", "ls-tree", "-rz", "--full-tree", ref],
-            cwd=root,
-            check=True,
-            capture_output=True,
-        )
-        entries: list[tuple[str, bytes]] = []
-        for record in tree.stdout.split(b"\0"):
-            if not record:
-                continue
-            try:
-                metadata, raw_path = record.split(b"\t", 1)
-                mode, object_type, object_id = metadata.split(b" ", 2)
-            except ValueError as exc:
-                raise ValueError(f"git ls-tree returned a malformed entry at {ref}") from exc
-            path = _exact_repo_relative_path(raw_path.decode("utf-8"))
-            if not _is_gated_module_path(path):
-                continue
-            if object_type != b"blob" or mode not in {b"100644", b"100755"}:
-                raise ValueError(f"gated source at {ref} must be a regular file: {path}")
-            entries.append((path, object_id))
-
-        # Avoid the observed parent/Git mutual pipe-write wait; blob validation stays below.
-        with tempfile.TemporaryFile() as source_ids:
-            source_ids.write(b"".join(object_id + b"\n" for _path, object_id in entries))
-            source_ids.seek(0)
-            batch = subprocess.run(
-                ["git", "cat-file", "--batch"],
-                cwd=root,
-                check=True,
-                stdin=source_ids,
-                capture_output=True,
-            ).stdout
-        cursor = 0
         paths: list[str] = []
-        for path, expected_id in entries:
-            header_end = batch.find(b"\n", cursor)
-            if header_end < 0:
-                raise ValueError(f"git cat-file omitted the header for {path} at {ref}")
-            header = batch[cursor:header_end].split(b" ")
-            if header == [expected_id, b"missing"]:
-                raise SizeRatchetRefUnavailable(
-                    f"git cat-file: object {expected_id.decode('ascii', errors='replace')} "
-                    f"for {path} at {ref} is not in the local object store"
-                )
-            if len(header) != 3 or header[0] != expected_id:
-                raise ValueError(f"git cat-file returned a malformed header for {path} at {ref}")
-            if header[1] != b"blob":
-                raise ValueError(
-                    f"git cat-file returned a non-blob object for {path} at {ref}: {header[1]!r}"
-                )
-            try:
-                size = int(header[2])
-            except ValueError as exc:
-                raise ValueError(f"git cat-file returned an invalid size for {path} at {ref}") from exc
-            blob_start = header_end + 1
-            blob_end = blob_start + size
-            if blob_end >= len(batch) or batch[blob_end : blob_end + 1] != b"\n":
-                raise ValueError(f"git cat-file returned a truncated blob for {path} at {ref}")
+        for path, data in _gated_blobs(root, ref):
             destination = snapshot.joinpath(*pathlib.PurePosixPath(path).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(batch[blob_start:blob_end])
+            destination.write_bytes(data)
             paths.append(path)
-            cursor = blob_end + 1
-        if cursor != len(batch):
-            raise ValueError(f"git cat-file returned unexpected trailing data at {ref}")
         yield snapshot, tuple(paths)
+
+
+def _tree_line_counts(root: pathlib.Path, ref: str, paths: Iterable[str]) -> dict[str, int]:
+    """The inventory's line count of each gated module among ``paths`` that ``ref``'s tree holds."""
+    return {path: len(_canonical_text(data).splitlines()) for path, data in _gated_blobs(root, ref, frozenset(paths))}
 
 
 def collect_size_ratchet_inventory_at_ref(repo_dir: pathlib.Path, ref: str) -> SizeRatchetInventory:
@@ -575,10 +595,13 @@ GRANDFATHERED_OVERSIZED_FUNCTIONS = FUNCTION_DEBT
 def validate_manifest_transition(
     current: SizeRatchetManifest,
     previous: SizeRatchetManifest,
+    line_counts: Mapping[str, int] | None = None,
 ) -> list[str]:
     """Validate shrink-only debt and rationale authority against a previous manifest (the parent's,
     or the event base's across an interval). A recorded band rationale may be replaced by another
-    (Git keeps the old text), never dropped; a new entry needs one."""
+    (Git keeps the old text), never dropped; a new entry needs one. ``line_counts`` are the
+    candidate tree's module lines: an entry with a reason leaves with its module or with the band,
+    never while the module holds 1001-1600 lines."""
     errors: list[str] = []
     if current.baseline_source_sha != previous.baseline_source_sha:
         errors.append("BASELINE_SOURCE_SHA is immutable")
@@ -609,9 +632,12 @@ def validate_manifest_transition(
     for path in sorted(set(current.band_paths) - previous_band):
         if not (current.band_paths[path] or "").strip():
             errors.append(f"new or re-entered 1001-1600 path needs a nonblank rationale: {path}")
-    for path in sorted(set(current.band_paths) & previous_band):
+    for path in sorted(path for path in previous_band if previous.band_paths[path] is not None):
+        lines = (line_counts or {}).get(path, 0)
+        if path not in current.band_paths and TARGET_MODULE_LINES < lines <= MAX_MODULE_LINES:
+            errors.append(f"band rationale dropped: {path} (entry removed at {lines} lines)")
         # A blank string never parses; the check still holds for an in-memory candidate.
-        if previous.band_paths[path] is not None and not (current.band_paths[path] or "").strip():
+        elif path in current.band_paths and not (current.band_paths[path] or "").strip():
             errors.append(f"band rationale dropped: {path}")
 
     for path in sorted(set(current.byte_debt) - set(previous.byte_debt)):
@@ -688,8 +714,8 @@ def _touched_findings(
         touched = _touched_paths(root, base, candidate)
     except (OSError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
         return [_partial_finding(f"{label}touched-file list", exc, "band rationales of touched modules")]
-    lines = {module.path: module.line_count for module in inventory.modules}
-    return [f"{'staged: ' if staged else ''}{error}" for error in touched_band_errors(manifest, lines, touched)]
+    return [f"{'staged: ' if staged else ''}{error}"
+            for error in touched_band_errors(manifest, inventory.line_counts(), touched)]
 
 
 def _parent_base_fabrication_errors(
@@ -885,7 +911,7 @@ def _validate_manifest_candidate(
         errors.extend(f"bootstrap: {error}" for error in _bootstrap_baseline_errors(current, inventory))
     else:
         if current_text != previous_text:
-            errors.extend(validate_manifest_transition(current, previous))
+            errors.extend(validate_manifest_transition(current, previous, inventory.line_counts()))
         errors.extend(_touched_findings(root, current, inventory, "HEAD", None))
 
     if not include_staged:
@@ -922,7 +948,8 @@ def _validate_manifest_candidate(
         )
         return errors
     if staged_text != previous_text:
-        errors.extend(f"staged: {error}" for error in validate_manifest_transition(staged, previous))
+        errors.extend(f"staged: {error}" for error in validate_manifest_transition(
+            staged, previous, staged_inventory.line_counts()))
     errors.extend(_touched_findings(root, staged, staged_inventory, head_tree, index_tree, staged=True))
     return errors
 
@@ -997,8 +1024,10 @@ def validate_size_ratchet_transition_against_base(
     no parent manifest at all = bootstrap, transition skipped. An unreadable
     tip, base or parent raises rather than passing as absent; unavailable
     parent inventory produces a failing finding, never a false PASS. A module
-    whose file differs from the base answers ``touched_band_errors`` even when
-    the manifest did not change."""
+    HEAD changed since its merge-base with the base answers ``touched_band_errors``
+    even when the manifest did not change (a moved-on base, ahead of HEAD, lends
+    HEAD none of its own touches); HEAD's line counts are read strictly, and a
+    blob or touched list Git cannot give is a ``partial:`` finding, never absence."""
     root = pathlib.Path(repo_dir).resolve()
     tip_text = _git_show_manifest(root, "HEAD", manifest_path)
     if tip_text is None:
@@ -1056,12 +1085,24 @@ def validate_size_ratchet_transition_against_base(
                 "(a fabricated base cannot authorize a transition): " + "; ".join(parent_errors[:3])
             ]
     tip = parse_size_ratchet_manifest(tip_text)
-    errors = [] if base_text == tip_text else validate_manifest_transition(tip, previous)
-    touched = _touched_paths(root, base_commit, "HEAD")
-    gated = [path for path in sorted(touched) if _is_gated_module_path(path)]
-    texts = _blob_texts(root, [f"HEAD:{path}" for path in gated])
-    lines = {path: len(text.splitlines()) for path in gated if (text := texts.get(f"HEAD:{path}")) is not None}
-    return errors + touched_band_errors(tip, lines, touched)
+    # HEAD's own change runs from its fork point with the base, the base itself for CI's bases (ancestors
+    # of HEAD): a base ahead of HEAD (a target that moved on) lends HEAD neither its touches nor its reasons.
+    fork = subprocess.run(["git", "merge-base", base_commit, "HEAD"], cwd=root, capture_output=True, text=True)
+    since = fork.stdout.strip() if fork.returncode == 0 and fork.stdout.strip() else base_commit
+    try:
+        touched = _touched_paths(root, since, "HEAD")
+        forked = base_text if since == base_commit else _git_show_manifest(root, since, manifest_path)
+        recorded = set(parse_size_ratchet_manifest(forked).band_paths) if forked else set()
+        removed = (set(previous.band_paths) & recorded) - set(tip.band_paths)
+        lines = _tree_line_counts(root, "HEAD", touched | removed)
+        unread: list[str] = []
+    except (OSError, subprocess.CalledProcessError, SizeRatchetRefUnavailable) as exc:  # never read as absent
+        touched, removed, lines = frozenset(), set(), {}
+        unread = [_partial_finding("pairwise touched or recorded modules at HEAD", exc,
+                                   "band rationales of touched modules and removed entries")]
+    errors = [] if base_text == tip_text else validate_manifest_transition(
+        tip, previous, {path: lines[path] for path in removed if path in lines})
+    return errors + touched_band_errors(tip, lines, touched) + unread
 
 
 def _metrics_from_inventory(inventory: SizeRatchetInventory) -> Dict[str, Any]:

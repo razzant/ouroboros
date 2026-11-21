@@ -472,6 +472,77 @@ def test_the_pairwise_check_reads_touched_modules_when_the_manifest_did_not_chan
     assert validate_size_ratchet(repo) == []
 
 
+def test_a_recorded_reason_leaves_only_with_its_module_or_the_band(tmp_path: Path) -> None:
+    """Owner 2A: a reason is replaceable, never dropped. Deleting the entry of a module that still holds
+    1001-1600 lines drops it (candidate, live, pairwise); a module deleted or out of the band retires it."""
+    dropped = "band rationale dropped: gap.py (entry removed at 1550 lines)"
+    previous = _manifest(band_paths={"gap.py": "one parser"})
+    assert validate_manifest_transition(_manifest(), previous, {"gap.py": 1550}) == [dropped]
+    for lines in ({"gap.py": 1601}, {"gap.py": 1000}, {}):  # a giant now, out of the band, deleted
+        assert validate_manifest_transition(_manifest(), previous, lines) == []
+    assert validate_manifest_transition(_manifest(), _manifest(band_paths={"gap.py": None}), {"gap.py": 1550}) == []
+
+    kept = {"band.py": "a seam", "gone.py": "a reason", "low.py": "a reason"}
+    repo = _band_repo(tmp_path, {"gap.py": 1550, "band.py": 1200, "gone.py": 1300, "low.py": 1400},
+                      _manifest(band_paths={"gap.py": "one parser", **kept}))
+    base = _git(repo, "rev-parse", "HEAD")
+    without_gap = regenerate._render(_manifest(band_paths=kept))
+    assert validate_size_ratchet_candidate(repo, without_gap) == [dropped]
+    (repo / "ouroboros/size_ratchet_manifest.py").write_text(without_gap, encoding="utf-8")
+    assert validate_size_ratchet(repo) == [dropped]  # gap.py itself is untouched
+    _git(repo, "commit", "-qam", "drop the reason of a 1550-line module")
+    assert validate_size_ratchet_transition_against_base(repo, base) == [dropped]
+    assert validate_size_ratchet_transition_against_base(repo, None) == [dropped]
+
+    _git(repo, "reset", "-q", "--hard", base)
+    (repo / "gone.py").unlink()
+    _write_lines(repo / "low.py", 900)
+    _write_manifest(repo, _manifest(band_paths={"gap.py": "one parser", "band.py": "a seam"}))
+    assert validate_size_ratchet(repo) == []
+    _git(repo, "commit", "-qam", "two entries leave with their modules")
+    assert validate_size_ratchet_transition_against_base(repo, base) == []
+
+
+def test_a_tip_blob_git_cannot_give_is_a_partial_finding_never_an_absent_module(tmp_path: Path) -> None:
+    repo = _band_repo(tmp_path, {"gap.py": 1550, "kept.py": 1550}, _manifest())
+    base = _git(repo, "rev-parse", "HEAD")
+    _write_lines(repo / "gap.py", 1551)
+    (repo / "kept.py").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "touch gap.py, delete kept.py")
+    touched = ["touched 1551-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, base) == touched  # a deletion owes nothing
+    blob = _git(repo, "rev-parse", "HEAD:gap.py")
+    loose = repo / ".git" / "objects" / blob[:2] / blob[2:]
+    loose.chmod(0o600)  # Git writes loose objects read-only; Windows refuses to unlink those.
+    loose.unlink()
+    [finding] = validate_size_ratchet_transition_against_base(repo, base)
+    assert finding.startswith("partial: pairwise touched or recorded modules at HEAD unavailable "
+                              "(SizeRatchetRefUnavailable: ")
+    assert finding.endswith("not checked: band rationales of touched modules and removed entries")
+
+
+def test_touched_runs_from_the_fork_point_of_a_base_that_moved_on(tmp_path: Path) -> None:
+    """A base ahead of HEAD (a target that moved on) lends HEAD neither the modules it touched nor the
+    reasons it recorded; HEAD's own touches still owe theirs, against either base."""
+    repo = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    fork = _git(repo, "rev-parse", "HEAD")
+    _write_lines(repo / "gap.py", 1551)
+    _write_manifest(repo, _manifest(band_paths={"gap.py": "a reason"}))
+    _git(repo, "commit", "-qam", "the target touches gap.py and records why")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feature", fork)
+    (repo / "README.md").write_text("feature\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "an unrelated change")
+    assert validate_size_ratchet_transition_against_base(repo, target) == []
+    _write_lines(repo / "gap.py", 1549)
+    _git(repo, "commit", "-qam", "the feature touches gap.py")
+    touched = ["touched 1549-line module needs a nonblank band rationale: gap.py"]
+    assert validate_size_ratchet_transition_against_base(repo, target) == touched
+    assert validate_size_ratchet_transition_against_base(repo, fork) == touched
+
+
 def test_tree_validation_reads_staged_bytes_not_unstaged_worktree_bytes(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     baseline = _bootstrap_repo(repo)
