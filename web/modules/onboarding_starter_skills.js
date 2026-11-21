@@ -208,7 +208,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const row = [...host.querySelectorAll('[data-starter-skill]')].find((node) => node.getBoundingClientRect().bottom > 0);
         const anchor = row && { id: row.dataset.starterSkill, top: layoutTop(row) };
         return () => {
-            const field = focus && host.querySelector(focus);
+            const field = focus ? host.querySelector(focus) : null;
             field?.focus({ preventScroll: true });
             if (caret && field?.setSelectionRange) field.setSelectionRange(...caret);  // typing goes on where it was
             const again = anchor && host.querySelector(`[data-starter-skill="${quote(anchor.id)}"]`);

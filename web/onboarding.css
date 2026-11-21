@@ -1490,6 +1490,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    skills come from and how they install. Summary keeps one row back to the step. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
 [data-starter-skills]:empty { display: none; }
+[data-starter-skills="row"] { display: flex; flex-direction: column; gap: 10px; }  /* the Skills row and a card's, spaced as their neighbours */
 .skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
 /* Summary's row reads as its neighbours do: the value at their size. */
 .skills-starter-value { color: var(--text-primary); }
@@ -1545,7 +1546,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .skills-connection-head .btn { flex: none; }
 .skills-connection-body { display: grid; gap: var(--space-2); padding-left: 22px; min-width: 0; }
 .skills-connection-steps { display: grid; gap: var(--space-2); margin: 0; padding-left: 1.4em; color: var(--text-primary); font-size: var(--type-meta); line-height: var(--line-meta); }
-.skills-connection-steps .btn { margin-left: var(--space-2); vertical-align: middle; }
+.skills-connection-steps .btn { display: inline-flex; margin-left: var(--space-2); vertical-align: middle; text-decoration: none; }
 .skills-connection-token label { display: block; margin-bottom: var(--space-1); }
 .skills-connection-field { display: flex; gap: var(--space-2); max-width: 520px; }
 .skills-connection-field .ui-control { flex: 1 1 auto; min-width: 0; }
