@@ -216,6 +216,7 @@ CONTEXT_OVERFLOW_CODES = frozenset({
     "prompt_too_long",
     "input_too_long",
     "string_above_max_length",
+    "1261",  # Z.ai "Prompt too long" (HTTP 400): input above the model's context window, no token numbers
 })
 #: A refusal of one input string's length (OpenAI's 10 MiB text limit, 07.11.2026) teaches no token window.
 INPUT_STRING_LENGTH_CODES = frozenset({"string_above_max_length"})
@@ -224,6 +225,7 @@ CONTEXT_OVERFLOW_MESSAGE_MARKERS = (
     "context length",
     "maximum context",
     "prompt is too long",
+    "prompt too long",  # Z.ai error 1261 wording (no "is", no numbers); the Anthropic form has "is" and stays distinct
     "exceeds the context",
     "exceed context limit",
     "context window",

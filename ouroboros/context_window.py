@@ -447,7 +447,8 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
     ``refused_input`` under ``basis``: ``anchored_estimate``, or ``exact_local_count`` where a local instance counted it.
 
     ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
-    accepted request of this conversation), passed only when measured: Codex states no number, and a
+    accepted request of this conversation, or measured by a fresh exact-route/model density witness),
+    passed only when measured: Codex states no number, and a
     route that never records its refusals keeps planning at a larger acceptance and is refused again.
     A numberless refusal of a request sent inside the reply reservation of a stated total says that total holds the
     reply too, so it is recorded as the total's own refusal (``WindowRecord.admitted`` then charges the reserve).

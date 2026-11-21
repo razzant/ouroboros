@@ -1446,8 +1446,13 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None, 
         slack = refused.predicted_slack_tokens
         return max(0, -predicted_free) + slack, slack
     stated, size, slack, reply, sent = _refusal_window(ctx, fit, refused)
+    # A fresh exact-route/model density witness measures the estimate as surely as this conversation's
+    # own anchor: a new conversation's first request is then a measured size too, and its numberless
+    # refusal binds the route instead of being re-sent in full by every new conversation.
+    measured = (measurement.anchor_input_tokens is not None
+                or str(getattr(measurement, "measurement_basis", "") or "") in {"fresh_route_usage", "fresh_model_usage"})
     record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size,  # the provider's count when stated
-                         measured=measurement.anchor_input_tokens is not None, candidate=refused)  # names a local count
+                         measured=measured, candidate=refused)  # names a local count
     shed = max(0, sent - measurement.estimated_input_tokens) if rebound else 0  # a view rebound since already dropped it
     if stated:
         return max(0, size + reply - stated - shed) + slack, slack

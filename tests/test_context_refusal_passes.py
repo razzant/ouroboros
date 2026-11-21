@@ -42,6 +42,46 @@ def _refused_size(ctx):
     return size
 
 
+def test_a_fresh_route_density_witness_measures_a_new_conversations_first_refusal(tmp_path, monkeypatch):
+    """A fresh conversation has no anchor of its own, but its route's exact density witness (fresh_route_usage,
+    a comparable same-route settlement inside the TTL) measures the estimate as surely: the numberless
+    refusal of the conversation's first full-view request is then a measured size and binds the route,
+    instead of being re-sent whole by every new conversation (zai 1261, 21.11: ~548k full view refused
+    numberless each morning because no acceptance may establish a window)."""
+    from ouroboros import context_window as cw
+    from ouroboros import capability_evidence as ce
+
+    monkeypatch.setattr("ouroboros.capability_evidence.canonical_evidence_root", lambda: tmp_path)
+    plan = SimpleNamespace(route_fp="r", window_witness_bound=True, provider="zai", model="zai::glm-5.3")
+    evidence = ce.CapabilityEvidence(0, "unprobeable", "none", "r")
+    assert cw.resolve_window(evidence, 65_536, root=tmp_path).usable is None  # nothing stated, nothing accepted
+    fit = SimpleNamespace(measurement=SimpleNamespace(
+        estimated_input_tokens=548_000, anchor_input_tokens=None, accepted_input_tokens=545_854,
+        capacity_total_tokens=None, window_reading_tokens=None, reply_allowance_tokens=65_536,
+        capacity_deficit_tokens=None, probes_reply_reservation=False, window={"tokens": 0},
+        measurement_basis="fresh_route_usage", measurement_density=1.0,
+        route_fp="r", round_id="first", profile="owner_max", rendered_mode="max",
+        anchor_round=None, anchor_rewritten=False, window_witness_bound=True, window_observation_fp="r",
+        required_book_tokens=0, preferred_mode="max", mode_cause="", no_memory_tokens=None,
+        raw_input_tokens=548_000, target_total_tokens=None, target_deficit_tokens=None,
+        reclaim_goal_tokens=0, low_water_margin_tokens=0))
+    ctx = _ctx("Prompt too long")
+    ctx.context_fit_plan = plan
+    lmc._refusal_target(ctx, fit, None)
+    window = cw.resolve_window(evidence, 65_536, root=tmp_path)
+    assert window.input is not None and window.input.tokens == 548_000  # the refusal bound the route
+    assert window.input.source == "refusal"
+    # A cold estimate still measures nothing: the route keeps no ceiling from an unmeasured refusal.
+    cold = cw.CapabilityEvidence(0, "unprobeable", "none", "cold-route") if hasattr(cw, "CapabilityEvidence") else None
+    cold_fit = SimpleNamespace(**{**vars(fit.measurement), "measurement_basis": "cold_estimate", "route_fp": "cold-route"})
+    cold_ctx = _ctx("Prompt too long")
+    cold_ctx.context_fit_plan = SimpleNamespace(route_fp="cold-route", window_witness_bound=True,
+                                                provider="zai", model="zai::glm-5.3")
+    lmc._refusal_target(cold_ctx, SimpleNamespace(measurement=cold_fit), None)
+    cold_evidence = ce.CapabilityEvidence(0, "unprobeable", "none", "cold-route")
+    assert cw.resolve_window(cold_evidence, 65_536, root=tmp_path).input is None
+
+
 def test_the_target_is_measured_on_this_conversation_or_stays_unknown():
     ctx = _ctx()
     # 86aa r1482: E = its raw 848,751 at its own density 874,829/795,458; A = the largest input Codex accepted.
