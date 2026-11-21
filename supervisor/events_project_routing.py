@@ -295,12 +295,19 @@ def _publish_routing_ack(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) 
             chat_id = 0
         ack = getattr(getattr(ctx, "bridge", None), "send_routing_ack", None)
         if callable(ack):
-            notice = _routing_notice_ack_fields(ctx, evt, fields)
+            notice = _routing_notice_ack_fields(ctx, evt, fields, notice_transport=_promotion_notice_transport(ctx, evt))
             ack(chat_id, client_message_id=str(evt.get("client_message_id") or "").strip(), **fields, **notice)
             return str(notice.get("routing_notice_carrier") or "")
     except Exception:
         log.debug("Routing typed ack failed", exc_info=True)
     return ""
+
+
+def _promotion_notice_transport(ctx: Any, evt: Dict[str, Any]) -> dict:
+    """Use the supervisor event's admitted turn address even when its quote cannot be read."""
+    from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+    return reply_transport_from_metadata(ctx.DRIVE_ROOT, evt, anchor=False) if TURN_ADDRESS in evt else {}
 
 
 def _handle_project_digest(evt: Dict[str, Any], ctx: Any) -> None:
@@ -810,12 +817,14 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
         title = str(evt.get("title") or evt.get("suggested_name") or "").strip() or first_line or "Task"
         action = "route_to_project" if bool(evt.get("routed_from_main")) else "promote_chat_to_task"
         reason = str(outcome.get("reason") or ("admission_rejected" if status == "needs_manual_target" else ""))
+        address = _promotion_notice_transport(ctx, evt)
+        reply_to = _routing_notice_reply(ctx, evt)
         ctx.send_with_budget(
             chat, f"{title} · {routing_refusal_cause(action, status, reason, None)}", role="system",
             system_type="task_start_unconfirmed" if status == "unconfirmed" else "task_not_started",
             task_id=str(outcome.get("task_id") or evt.get("task_id") or ""),
             progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
-                           "reply_to": _routing_notice_reply(ctx, evt)},
+                           "reply_to": reply_to, **({"transport": address} if address else {})},
         )
     except Exception:
         log.warning("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)

@@ -147,13 +147,15 @@ class PollCursor:
             self._early.setdefault(self.base, {})[key] = uid
 
     def held_target(self, update: dict):
-        held = self._held.get(self.base, {})
-        if held.get("key") == update_key(update) and held.get("update_id") == update.get("update_id"):
-            return held["target"]
-        return None
+        key = update_key(update)
+        return next((held["target"] for held in self._held.values() if key and held.get("key") == key), None)
 
     def hold_target(self, update: dict, target: dict) -> None:
         self._held[self.base] = {"key": update_key(update), "update_id": update["update_id"], "target": target}
+
+    def retire_target(self, key: str) -> None:
+        if key:
+            self._held = {base: held for base, held in self._held.items() if held.get("key") != key}
 
     def save(self, offset: int, handled: list[str]) -> None:
         self.offset = offset
@@ -208,9 +210,11 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
                 offset = update_id + 1  # retain the existing recovery for a restarted server's numbering
             handled.append(key)
             if replay:
+                cursor.retire_target(key)
                 continue
             authorized_chat = await authorize(api, client, update, pinned_chat, lang)
             if not authorized_chat:
+                cursor.retire_target(key)
                 continue
             pinned_chat = authorized_chat
             if update.get("callback_query"):
@@ -222,6 +226,7 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
                 offset, handled = confirmed[0], handled[:confirmed[1]]
                 api.log("info", "Telegram bot token changed while an update was handled; it stays unconfirmed.")
             else:
+                cursor.retire_target(key)
                 api.log("info", "Telegram bot token changed after an update was applied; its reply was not sent.")
             break
         except InjectNotAccepted:
@@ -240,6 +245,7 @@ async def handle_poll_batch(api, client, updates, cursor, binding, generation, p
                     await client.send_message(int(authorized_chat), _LOCALIZED_TEXTS[lang]["update_failed"])
                 except Exception:
                     api.log("warning", "Telegram update failure notice could not be delivered.")
+        cursor.retire_target(key)
         if early:
             cursor.remember_early(update)
     if updates and (handled or deferred or offset != cursor.offset):

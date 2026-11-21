@@ -795,8 +795,11 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     if telegram_room:
         if project_id and not press:
             from ouroboros.owner_relay import carry_room_context
+            from ouroboros.projects_registry import project_id_for_task
 
-            carry_room_context(ctx.DRIVE_ROOT, ingress_chat, client_message_id, roots.rows(chat_id), "")
+            members = [root for root in roots.rows(chat_id) if
+                       (project_id_for_task(ctx.DRIVE_ROOT, root["task_id"]) or root.get("project_id")) == project_id]
+            carry_room_context(ctx.DRIVE_ROOT, ingress_chat, client_message_id, members, "")
     elif realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,

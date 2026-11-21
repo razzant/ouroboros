@@ -1033,6 +1033,57 @@ def test_an_exact_replys_turn_takes_its_own_address_first_and_leaves_the_rooms_b
     assert (method, form["reply_to_message_id"], form["allow_sending_without_reply"]) == ("sendMessage", card, False)
 
 
+@pytest.mark.parametrize("root_state", ["live", "saved"])
+def test_d8_helper_uses_its_project_reply_roots_telegram_destination(owner_bot, monkeypatch, root_state):
+    from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ
+    from ouroboros.owner_quiz import record_asked
+    from ouroboros.subagent_messages import subagent_message_meta
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import queue
+    from supervisor.message_bus import send_with_budget
+
+    chain = owner_bot
+    room = chain.project["chat_id"]
+    slack = {"kind": "slack", "conversation_id": "C1"}
+    chain.bus.activate_update_transport({"chat_id": room, "transport": slack})
+    card = _helper_card(chain, "scheduled", "🗓️ Scheduled subagent helper (reviewer): check the tables")
+    [(_, kwargs)], source = _dispatch(chain, chain.says(67, "Which tables?", reply=card), monkeypatch)
+    metadata = dict(kwargs["task_metadata"])
+    if root_state == "live":
+        queue.RUNNING["reply-parent"] = {"task": {"id": "reply-parent", "metadata": metadata, "chat_id": room}}
+    else:
+        write_task_result(chain.data, "reply-parent", "completed", chat_id=room,
+                          origin_message_ref=source, metadata=metadata)
+    write_task_result(chain.data, "reply-child", "running", chat_id=room, delegation_role="subagent",
+                      root_task_id="reply-parent", parent_task_id="reply-parent")
+
+    chain.plugin.merge_settings(Path(chain.api.get_state_dir()), {"TELEGRAM_MIRROR_PROGRESS": "on"})
+    start, sent_before = len(chain.events), len(chain.calls)
+    send_with_budget(room, "Reading the cells.", is_progress=True, task_id="reply-child")
+    meta = subagent_message_meta(load_task_result(chain.data, "reply-child"), task_id="reply-child", event="scheduled")
+    send_with_budget(room, "🗓️ Scheduled subagent reply-child (reader): read cells", is_progress=True,
+                     task_id="reply-child", progress_meta=meta)
+    chain.bus.send_photo(room, b"\x89PNG\r\n\x1a\n" + b"0" * 16, caption="the cells", task_id="reply-child")
+    record_asked(chain.data, "reply-child", quiz_id="q-child", question="Which columns?", options=["A", "B"],
+                 assumption="A meanwhile")
+    assert chain.bus.send_quiz(room, "q-child", "Which columns?", [{"label": "A"}, {"label": "B"}],
+                               assumption="A meanwhile", task_id="reply-child")[0]
+    events = [(topic, event) for topic, event in chain.events[start:] if topic in (CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ)]
+    assert [topic for topic, _event in events] == [CHAT_OUTBOUND, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_QUIZ]
+    bare = {**_ROOT_ADDRESS, "host_address": "reply"}
+    for topic, event in events:
+        destination = event["transport"]
+        assert destination.get("telegram_root", destination) == bare
+        if topic == CHAT_PHOTO:
+            asyncio.run(chain.plugin._make_photo(chain.api)(event))
+        elif topic == CHAT_QUIZ:
+            asyncio.run(chain.plugin._make_quiz(chain.api)(event))
+    sent = chain.calls[sent_before:]
+    assert [method for method, _form, _mid in sent] == ["sendMessage", "sendMessage", "sendPhoto", "sendMessage"]
+    assert all(form["chat_id"] == "42" and "reply_to_message_id" not in form for _method, form, _mid in sent)
+    assert chain.bus.chat_transport(room) == slack
+
+
 def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(owner_bot, monkeypatch):
     """The question as the bus publishes it (``LocalChatBridge.send_quiz``): every part names its stored row, so a
     Reply to an earlier part quotes the question as an ordinary reference here (its card is the answer's door),

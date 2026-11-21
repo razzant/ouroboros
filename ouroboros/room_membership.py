@@ -240,6 +240,10 @@ def row_rooms(entry_chat: int, row: Mapping[str, Any], project_chat_ids, rooms: 
         work = bound_room_chat(rooms, row) if kind == "task_summary" else 0
         return frozenset(({entry_chat} if entry_chat != 1 else set()) | ({work} if work in project_chat_ids else set()))
     speech = kind in WORK_SPEECH_ELSEWHERE_TYPES
+    if row.get("direction") == "out" and row.get("logical_room_chat_id") == 1 and not kind:
+        task = str(row.get("task_id") or "")
+        if task not in getattr(rooms, "bindings", {}):
+            return frozenset({1, *({entry_chat} if entry_chat not in project_chat_ids else ())})
     bound = 0 if speech or kind in ORIGIN_ADDRESSED_NOTICE_TYPES else bound_room_chat(rooms, row)
     lifecycle = kind in MAIN_PINNED_ROW_TYPES
     found = set()
@@ -271,6 +275,8 @@ def appearance_keys(row: Mapping[str, Any], project_chat_ids, rooms: Callable[..
         written = int(row.get("chat_id", 1))
     except (TypeError, ValueError):
         written = 1
+    if written != 1 and row.get("direction") == "out" and row.get("logical_room_chat_id") == 1:
+        return ["room:1"]  # membership still follows a later Project binding, if any
     keys: set = set()
     if row.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(dict(row)):
         keys.add(bound_room_chat(rooms, row))

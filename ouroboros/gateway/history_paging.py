@@ -343,7 +343,8 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
     # A Project number can also be the physical address of the owner bot. The indexed
     # inbound candidates still pass the canonical row/room check, including for old rows.
     telegram = tuple(("telegram_inbound_chat", chat) for chat in sorted(project_chat_ids))
-    return {"chat": RoomLens((*spoken, *telegram, ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
+    return {"chat": RoomLens((*spoken, *telegram, ("appearance", "room:1"),
+                              ("kind", "quiz"), ("kind", "quiz_answer"), ("kind", "quiz_closed"))),
             "progress": RoomLens(tuple(keys))}
 
 

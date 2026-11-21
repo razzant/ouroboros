@@ -738,7 +738,6 @@ async def _handle_poll_callback(api, client, update, pinned_chat, command_mode, 
 
     await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang]["unknown_command"])
     return lang
-    return lang
 
 
 async def _poller(api) -> None:

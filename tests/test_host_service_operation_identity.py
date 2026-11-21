@@ -105,6 +105,80 @@ def test_c1_transient_reply_reads_return_not_accepted_before_any_write(tmp_path,
     assert chat_rows(tmp_path)[-1]["reply_to"]["address"] == address
 
 
+def _telegram_injection(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+    from ouroboros.gateway.host_service import create_host_service_app
+    from tests.test_host_service_api import _seed_token
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    _seed_token(tmp_path, skill="telegram", permissions=["inject_chat"], bundled=True)
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: bridge))
+
+    def post():
+        return client.post("/chat/inject", headers={"X-Skill-Token": "token"}, json={
+            "chat_id": 42, "text": "About the report", "client_message_id": "tg:123:42:50", "reply_to": "task:helper",
+            "transport": {"kind": "telegram", "conversation_id": "42", "bot_id": "123", "owner_message_id": 50},
+        })
+
+    return bridge, post
+
+
+def test_d1_reply_to_task_after_store_export_accepts_an_unresolved_quote(tmp_path, monkeypatch):
+    from ouroboros import store, store_import, store_switch
+    from tests.test_chat_references import _reply_world, _route
+
+    _reply_world(tmp_path)
+    bridge, post = _telegram_injection(tmp_path, monkeypatch)
+    with store.open_store(tmp_path, write=True, service=True) as txn:
+        txn.set_meta("phase", store.EXPORTING)
+    store_import.export_facts(tmp_path)
+    store_switch._retire(tmp_path)
+    with pytest.raises(store.StoreRetired):
+        with store.open_store(tmp_path, write=False):
+            pass
+
+    accepted = post()
+    assert accepted.status_code == 202, accepted.text
+    [row] = chat_rows(tmp_path)
+    assert row["chat_id"] == 42 and row["text"] == "About the report"
+    assert row["reply_to"] == {"address": "task:helper", "unresolved": True}
+    [(args, kwargs)], followups, receipts = _route(bridge, tmp_path, monkeypatch, row)
+    assert args[0] == 42 and not kwargs["task_metadata"].get("project_id")
+    assert followups == [42] and not receipts
+
+
+@pytest.mark.parametrize("unavailable", ["importing", "noncontention-busy"])
+def test_d2_project_lineage_unavailable_retries_before_acceptance(tmp_path, monkeypatch, unavailable):
+    from ouroboros import projects_registry as pr, store
+    from tests.test_chat_references import _reply_world
+
+    project = _reply_world(tmp_path)
+    bridge, post = _telegram_injection(tmp_path, monkeypatch)
+    real_open = pr.open_store
+    importing_root = tmp_path / "lineage-import"
+    importing_root.mkdir()
+
+    def lineage_store(_root, **kwargs):
+        if unavailable == "noncontention-busy":
+            raise store.StoreBusy("lineage unavailable without lock contention")
+        # The task lookup above sees the published fixture, while the indexed lineage read sees an
+        # importing store that has not published its database yet.
+        with store.importing(importing_root):
+            with real_open(importing_root, **kwargs):
+                pytest.fail("strict lineage opened a store inside its import window")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(pr, "open_store", lineage_store)
+        refused = post()
+    assert refused.status_code == 503 and refused.json()["code"] == "not_accepted", refused.text
+    assert bridge._inbox.empty() and chat_rows(tmp_path) == []
+    accepted = post()
+    assert accepted.status_code == 202 and bridge._inbox.qsize() == 1, accepted.text
+    [row] = chat_rows(tmp_path)
+    assert row["reply_to"]["telegram_room_chat_id"] == project["chat_id"]
+
+
 def test_c9_only_the_bundled_bridge_accepts_the_optional_decision_surface(tmp_path):
     import asyncio
     from ouroboros.gateway.task_decision import answer_decision

@@ -68,13 +68,14 @@ earlier parts, a row the store cannot read now, quoted as a reference Ouroboros
 interprets; to a bot message no map knows (evicted, older, /help), unquoted. Answers to
 an earlier owner message from this Telegram chat use a native reply; answers to its
 latest owner message stay unquoted. A Project Reply's turn (its answer, questions,
-media, cards, progress, typing and completion notice) stays in the bot and chat that
-took the Reply, as does a refusal when its Project is unavailable. A new Project work started from that turn retains
-its address; Continue keeps the address without the old message anchor. The turn answers with a strict native reply on the card the owner pressed,
+media, cards, progress, typing and completion notice) and its helpers stay with
+the bot and chat that took the Reply, without replacing the room's binding.
+Refusals use that same address. A new Project work retains it; Continue and helpers
+do not reuse the anchor. The turn answers with a strict native reply on the card the owner pressed,
 however old, else on the card of the helper the replied notice is about, else on his
 message; its parts keep that anchor, and only when Telegram definitely says the card
 is gone before any part arrived does the owner's own message take its place, once.
-While acceptance is explicitly deferred, the poller keeps the original quote and native target for that update.
+A deferred update keeps its original quote and card for that bot, even if the server URL changes.
 Relay success stays silent; a host-reported failure arrives as one line. A relayed row quotes the owner's words verbatim as
 plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.

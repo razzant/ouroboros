@@ -289,6 +289,8 @@ def _chat_record(
             record["ui_control"] = {"name": str(meta["ui_control"]["name"])}
         if isinstance(meta.get("execution_transport"), dict):
             record["execution_transport"] = dict(meta["execution_transport"])
+        if direction == "out" and meta.get("logical_room_chat_id") == 1:
+            record["logical_room_chat_id"] = 1
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
             meta["reply_to"] = origin_reply(root, task_id)

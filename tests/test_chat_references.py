@@ -309,7 +309,8 @@ def test_only_the_accepted_exact_reply_gives_its_turn_a_physical_address(tmp_pat
     assert proven_address({**plain, "chat_id": 1}) == {}, "accepted in another chat than the one it names"
 
 
-def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42, real_metadata=False, real_ack=False):
+def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42, real_metadata=False, real_ack=False,
+           source_channel="skill:telegram"):
     """The accepted row through the owner router, as server.py hands it over: (turns, follow-ups, receipts).
     ``live``: the live roots each chat may address (``addressable_roots``), by chat id."""
     from types import SimpleNamespace
@@ -321,6 +322,8 @@ def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42, 
     started, followups, receipts = [], [], []
 
     def running_work(*_args, **_kwargs):
+        if source_channel == "web":
+            return ""
         pytest.fail("the owner bot's words are never a running Project work's input")
 
     monkeypatch.setattr(routing, "_route_project_chat_to_running_task", running_work)
@@ -342,7 +345,7 @@ def _route(bridge, root, monkeypatch, row, *, open_turn="", live=None, chat=42, 
         "chat_id": chat, "text": row["text"], "log_text": row["text"], "image_caption": "", "image_data": None,
         "client_message_id": row["client_message_id"], "task_constraint": None, "origin_message_ref": source,
         "task_metadata": {**(queued.get("task_metadata") or {}), "_host_operation": True},
-        "source": "skill:telegram", "received_at": row["ts"], "accepted_source_row": row})
+        "source": source_channel, "received_at": row["ts"], "accepted_source_row": row})
     return started, followups, receipts
 
 
@@ -637,7 +640,7 @@ def test_a_proven_project_work_bearing_the_private_chats_number_stays_that_proje
     assert followups == [chat] and [kwargs["task_metadata"].get("project_id", "") for _args, kwargs in started] == [""]
 
 
-def test_c6_c10_same_number_uses_the_decided_project_and_main_lanes(tmp_path, monkeypatch):
+def test_d6_web_project_and_physical_telegram_keep_distinct_lanes_at_the_same_number(tmp_path, monkeypatch):
     from supervisor import state
 
     bridge, _ = _web_bridge(tmp_path, monkeypatch)
@@ -655,6 +658,33 @@ def test_c6_c10_same_number_uses_the_decided_project_and_main_lanes(tmp_path, mo
         assert meta["routing_contract"]["source_lane"] == lane
         assert (meta.get("project_id") or "") == (project["id"] if address else "")
         assert followups == ([] if address else [chat]) and receipts == []
+    row, _ = message_bus.accept_local_message(bridge, tmp_path, "From the Project tab", chat_id=chat, user_id=chat,
+                                              client_message_id="web-project-reply", source="web")
+    started, followups, _ = _route(bridge, tmp_path, monkeypatch, row, chat=chat, real_metadata=True,
+                                   source_channel="web")
+    [(_, kwargs)] = started
+    meta = kwargs["task_metadata"]
+    assert followups == [] and meta["project_id"] == project["id"]
+    assert meta["routing_contract"]["source_lane"] == "project"
+
+
+def test_d4_confirmed_project_context_goes_to_members_only_at_a_colliding_number(tmp_path, monkeypatch):
+    bridge, _ = _web_bridge(tmp_path, monkeypatch)
+    project = _reply_world(tmp_path)  # project-root was admitted in Main and has since been bound here
+    chat = project["chat_id"]
+    row, _ = message_bus.accept_local_message(
+        bridge, tmp_path, "About the report", chat_id=chat, user_id=chat, client_message_id=f"tg:123:{chat}:50",
+        source="skill:telegram", transport={"kind": "telegram", "conversation_id": str(chat), "bot_id": "123",
+                                           "owner_message_id": 50}, task_metadata={"reply_to": "task:helper"})
+    assert row["reply_to"]["telegram_room_chat_id"] == chat
+    live = {chat: [{"task_id": "private-turn"}, {"task_id": "project-root"},
+                   {"task_id": "admitted-project", "project_id": project["id"]}]}
+    started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row, live=live, chat=chat)
+    assert len(started) == 1 and not followups and not receipts
+    assert _mail(tmp_path, "private-turn") == []
+    for tid in ("project-root", "admitted-project"):
+        [context] = [entry for entry in _mail(tmp_path, tid) if entry.get("host_carried")]
+        assert context["owner_rows"][0]["client_message_id"] == row["client_message_id"]
 
 
 def test_c5_refusal_transport_survives_an_unreadable_quote(tmp_path, monkeypatch):
@@ -696,18 +726,61 @@ def test_c7_connector_command_reply_only_refuses_an_inactive_reservation(tmp_pat
     assert row["reply_to"]["telegram_room_chat_id"] == (None if inactive else 0)
 
 
-def test_c8_paged_main_history_keeps_the_physical_row_in_a_same_number_project(tmp_path, monkeypatch):
+def test_a3_a4_paged_main_keeps_both_sides_of_physical_telegram_at_a_colliding_number(tmp_path, monkeypatch):
+    from ouroboros.chat_chain import room_keys
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from tests._dialogue import chat_rows
+
     bridge, _ = _web_bridge(tmp_path, monkeypatch)
     chat = _reply_world(tmp_path)["chat_id"]
     mid = f"tg:123:{chat}:20"
-    message_bus.accept_local_message(bridge, tmp_path, "Physical conversation", chat_id=chat, user_id=chat,
-                                     client_message_id=mid, source="skill:telegram",
-                                     transport={"kind": "telegram", "conversation_id": str(chat), "bot_id": "123"})
+    row, _ = message_bus.accept_local_message(
+        bridge, tmp_path, "Physical conversation", chat_id=chat, user_id=chat, client_message_id=mid,
+        source="skill:telegram", transport={"kind": "telegram", "conversation_id": str(chat), "bot_id": "123"})
+    ref = build_owner_message_ref(chat_id=chat, client_message_id=mid, ts=row["ts"], text=row["text"])
+    assert ref
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    message_bus.send_with_budget(chat, "Physical conversation answer", task_id="ordinary-turn",
+                                 progress_meta={"origin_message_ref": ref})
     message_bus.log_chat("in", chat, 0, "Written in project", source="web", client_message_id="web-room-row")
-    main_ids = {row.get("client_message_id") for row in _history(tmp_path, 1)}
-    project_ids = {row.get("client_message_id") for row in _history(tmp_path, chat)}
+    [saved] = [row for row in chat_rows(tmp_path) if row.get("text") == "Physical conversation answer"]
+    assert saved["chat_id"] == chat and saved.get("logical_room_chat_id") == 1, saved
+    main = _history(tmp_path, 1)
+    project = _history(tmp_path, chat)
+    main_ids = {row.get("client_message_id") for row in main}
+    project_ids = {row.get("client_message_id") for row in project}
     assert mid in main_ids and "web-room-row" not in main_ids
     assert mid not in project_ids and "web-room-row" in project_ids
+    [answer] = [row for row in main if row.get("text") == "Physical conversation answer"]
+    assert answer["text"] == saved["text"]
+    assert all(row.get("text") != "Physical conversation answer" for row in project)
+    assert ("telegram_inbound_chat", chat) in room_keys(tmp_path, 1)[0]
+
+
+def test_a6_appearance_maintenance_builds_the_selective_index_for_existing_rows(tmp_path, monkeypatch):
+    from ouroboros import dialogue_store as ds, room_appearances
+
+    bridge, _ = _web_bridge(tmp_path, monkeypatch)
+    chat = _reply_world(tmp_path)["chat_id"]
+    mid = f"tg:123:{chat}:20"
+    message_bus.accept_local_message(
+        bridge, tmp_path, "Physical conversation", chat_id=chat, user_id=chat, client_message_id=mid,
+        source="skill:telegram", transport={"kind": "telegram", "conversation_id": str(chat), "bot_id": "123"})
+    message_bus.log_chat("in", chat, 0, "Written in project", source="web", client_message_id="web-row")
+    room_appearances.run(tmp_path, lambda: False)
+    assert not room_appearances.owed(tmp_path)
+    with ds.transaction(tmp_path, write=True) as conn:
+        conn.execute("DROP INDEX dialogue_telegram_inbound")  # synthetic database from an older body
+    assert room_appearances.owed(tmp_path)
+    assert mid in {row.get("client_message_id") for row in _history(tmp_path, 1)}
+    room_appearances.run(tmp_path, lambda: False)
+    with ds.transaction(tmp_path, write=False) as conn:
+        assert ds.has_telegram_inbound_index(conn)
+        records = conn.execute("SELECT client_message_id FROM dialogue INDEXED BY dialogue_telegram_inbound "
+                               "WHERE stream='chat' AND chat_id=? AND direction='in' AND client_message_id GLOB 'tg:*'",
+                               (chat,)).fetchall()
+    assert [record[0] for record in records] == [mid]
+    assert not room_appearances.owed(tmp_path)
 
 
 def test_c4_room_binding_discards_turn_and_root_marks():

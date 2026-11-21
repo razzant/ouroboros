@@ -767,10 +767,16 @@ def test_a_panic_already_received_goes_while_an_earlier_update_waits_and_only_on
     assert _cursor(state)["offset"] == 15
 
 
-def test_c2_lost_panic_answer_is_not_replayed_after_a_partial_cursor_save(tmp_path, monkeypatch):
+@pytest.mark.parametrize("remember_early", [True, False], ids=["fixed", "mutation-control"])
+def test_d3_lost_panic_answer_survives_rotation_inside_retried_batch(tmp_path, monkeypatch, remember_early):
     plugin, _, _ = _load()
     monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
     monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.01)
+    if not remember_early:
+        from importlib import import_module
+
+        cursor = import_module(plugin.__package__ + ".lib.telegram_poll_binding").PollCursor
+        monkeypatch.setattr(cursor, "remember_early", lambda *_: None)
     posts = []
 
     async def host_post(_api, path, payload):
@@ -785,21 +791,41 @@ def test_c2_lost_panic_answer_is_not_replayed_after_a_partial_cursor_save(tmp_pa
         return 202, {"ok": True, "status": "queued"}
 
     monkeypatch.setattr(plugin, "_host_post", host_post)
+    original_message = plugin._handle_owner_message
+    rotations = []
+    rotated_token = _TOKEN.split(":", 1)[0] + ":new-test-token"
+
+    async def rotate_after_accepting_first(api, client, update, *args, **kwargs):
+        await original_message(api, client, update, *args, **kwargs)
+        if update["message"]["text"] == "first":
+            binding = plugin.binding_for(api)
+            previous = binding.snapshot()[1]
+            api.granted["TELEGRAM_BOT_TOKEN"] = rotated_token
+            assert binding.read_now(api) and not binding.current(previous)
+            rotations.append(previous)
+
+    monkeypatch.setattr(plugin, "_handle_owner_message", rotate_after_accepting_first)
 
     async def scenario():
         async with _CloudServer(first_update_id=10) as server:
+            respond = server.respond
+            server.respond = lambda method, path, form: respond(method, path.replace(rotated_token, _TOKEN, 1), form)
             state, api = _state(tmp_path, TELEGRAM_API_BASE=server.origin, TELEGRAM_MAX_UPDATES_PER_POLL=1)
             for text in ("first", "second", "third", "/panic", "fourth"):
                 server.push(_owner_message(text))
-            await _poll(plugin, api, lambda: len(posts) >= 3 and _cursor(state)["offset"] >= 11)
-            api.granted["TELEGRAM_BOT_TOKEN"] = _TOKEN.split(":", 1)[0] + ":new-test-token"
             await _poll(plugin, api, lambda: "fourth" in posts and _cursor(state)["offset"] == 15)
 
     asyncio.run(scenario())
-    assert posts == ["first", "/panic", "first", "second", "third", "fourth"]
+    assert len(rotations) == 1
+    assert [text for text in posts if text != "/panic"] == ["first", "first", "second", "third", "fourth"]
+    assert posts[:3] == ["first", "/panic", "first"]
+    if remember_early:
+        assert posts.count("/panic") == 1, posts
+    else:
+        assert posts.count("/panic") > 1, posts  # the same assertion above fails with the early record disabled
 
 
-def test_c11_held_reply_keeps_its_row_and_native_card_after_restart(tmp_path, monkeypatch):
+def test_d7_held_reply_keeps_its_row_and_native_card_after_restart_at_server_alias(tmp_path, monkeypatch):
     plugin, _, _ = _load()
     monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
     monkeypatch.setattr(plugin, "_NOT_ACCEPTED_RETRY_SEC", 0.5)
@@ -814,9 +840,11 @@ def test_c11_held_reply_keeps_its_row_and_native_card_after_restart(tmp_path, mo
             update["message"]["reply_to_message"] = {"message_id": 8, "from": {"id": 123, "is_bot": True}}
             server.push(update)
             await _poll(plugin, api, lambda: bool(posts) and bool(_cursor(state).get("held")))
-            targets.update(address="task:second-card", child="second-card", card_message_id=9)
+            targets.clear()  # neither the Project reference nor the native card is in the mutable lookup now
+            plugin.merge_settings(state, {"TELEGRAM_API_BASE": server.origin.replace("127.0.0.1", "localhost")})
             await _poll(plugin, api, lambda: bool(accepted))
             assert not _cursor(state).get("held")
+            assert _cursor(state)["base"] != server.origin and _cursor(state)["offset"] == 11
 
     asyncio.run(scenario())
     assert len(posts) == 2 and len(accepted) == 1

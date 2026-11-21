@@ -733,7 +733,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
                 agent.env.drive_root, task_id, STATUS_CANCELLED if stopped else STATUS_FAILED,
                 _field_projector=lambda current, incoming: (None if current.get("status") in _TRULY_TERMINAL_STATUSES
                                                             else incoming),
-                _terminal_observed=True, result=text, reason_code=control,
+                _terminal_observed=True, result=text, reason_code=control, metadata=metadata,
                 outcome_axes=infra_failed_axes(control, lifecycle="cancelled" if stopped else "failed",
                                                review_trigger="before_task_start"),
                 **origin, **effort_result_fields(task))
@@ -750,6 +750,8 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
     if "origin_message_ref" in correlation:  # an explicit key: the outbound contract scan vouches for the set
         progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
+    if "transport" in correlation:
+        progress_meta["transport"] = correlation["transport"]
     if metadata.get("initiator"):
         progress_meta["initiator"] = str(metadata["initiator"])
     try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
@@ -1033,6 +1035,8 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
         progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
         if "origin_message_ref" in correlation:
             progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
+        if "transport" in correlation:
+            progress_meta["transport"] = correlation["transport"]
         initiator = str((task_metadata or {}).get("initiator") or "")
         if initiator:
             progress_meta["initiator"] = initiator

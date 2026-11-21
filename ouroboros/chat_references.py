@@ -91,7 +91,14 @@ def resolve_reply(root, address: str, *, strict_transient: bool = False) -> dict
     if address.startswith("task:"):
         from ouroboros.task_status import load_effective_task_result
         task_id = address[5:]
-        task = load_effective_task_result(root, task_id, materialize_artifacts=False) if task_id else None
+        try:
+            task = load_effective_task_result(root, task_id, materialize_artifacts=False) if task_id else None
+        except (StoreBusy, StoreMigrating):
+            if strict_transient:
+                raise
+            task = None
+        except (OSError, StoreError):
+            task = None
         if task:
             return {"address": address, "chat_id": int(task.get("chat_id") or 1), "role": "assistant",
                     "author_label": "Ouroboros", "kind": "work_card",
@@ -123,17 +130,21 @@ def origin_reply(root, task_id: str, metadata=None) -> dict:
     """The answer's host reference to the owner message that began its turn.
 
     Best-effort enrichment: a busy or unreadable store omits the reference, never the message."""
+    row = _origin_row(root, task_id, metadata)
+    return reference_from_row(row) if row else {}
+
+
+def _origin_row(root, task_id: str, metadata=None):
     if not task_id or not root:
-        return {}
+        return None
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.project_dialogue import resolve_owner_message_source
     try:
         task = metadata or load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
         ref = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
-        row = resolve_owner_message_source(root, ref) if ref else None
+        return resolve_owner_message_source(root, ref) if ref else None
     except StoreError:
-        return {}
-    return reference_from_row(row) if row else {}
+        return None
 
 
 def telegram_reply_room(root, ref: dict, ingress_chat: int) -> tuple:
@@ -237,7 +248,10 @@ def keeps_binding(msg: dict) -> bool:
     there, so it neither binds that room to Telegram nor clears another connector's binding (its turn's own address:
     ``turn_reply_transport``)."""
     meta = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else {}
-    return msg.get("source") == TELEGRAM_SOURCE and bool(meta.get("late_answer") or meta.get("card_press"))
+    reply = (msg.get("accepted_source_row") or {}).get("reply_to")
+    return msg.get("source") == TELEGRAM_SOURCE and bool(
+        meta.get("late_answer") or meta.get("card_press") or
+        (isinstance(reply, dict) and type(reply.get("telegram_room_chat_id")) is int and reply["telegram_room_chat_id"] > 0))
 
 
 def proven_address(row: dict) -> dict:
@@ -315,16 +329,19 @@ def with_turn_address(metadata, row: dict) -> dict:
     return {**meta, TURN_ADDRESS: exact} if exact else meta
 
 
-def _turn_metadata(root, task_id: str) -> dict:
-    """``task_id``'s own metadata: as its running task holds it, else its stored result."""
+def _turn_task(root, task_id: str) -> dict:
+    """The running task or stored result, including its host-owned lineage."""
     from ouroboros.task_status import load_effective_task_result
     from supervisor import queue
 
     with queue._queue_lock:
         running = queue.RUNNING.get(task_id)
-    task = (running or {}).get("task") if running is not None else load_effective_task_result(
-        root, task_id, materialize_artifacts=False)
-    meta = (task or {}).get("metadata")
+    return ((running or {}).get("task") if running is not None else load_effective_task_result(
+        root, task_id, materialize_artifacts=False)) or {}
+
+
+def _turn_metadata(task: dict) -> dict:
+    meta = task.get("metadata")
     return meta if isinstance(meta, dict) else {}
 
 
@@ -333,17 +350,23 @@ def turn_reply_transport(root, task_id: str, *, anchor: bool = True, strict: boo
     end's notice without the anchor, ``anchor`` False), when the owner's Telegram chat began it: an accepted exact
     Reply's address with its strict anchor, as the host accepted it and the turn carries it from its start
     (``TURN_ADDRESS``), so no read of the source row is needed; his late answer to a question there, the bot and
-    chat that answer came from (``late_answer_surface``). ``{}`` for every other turn: the room's binding, as before.
+    chat that answer came from (``late_answer_surface``). A helper inherits its root's surface without the root's
+    anchor. ``{}`` for every other turn: the room's binding, as before.
     A record that cannot be read answers ``{}`` too, or raises for ``strict``."""
     if not root or not task_id:
         return {}
     try:
-        meta = _turn_metadata(root, task_id)
+        task = _turn_task(root, task_id)
+        address = reply_transport_from_metadata(root, _turn_metadata(task), anchor=anchor)
+        if not address and task.get("delegation_role") == "subagent":
+            root_id = str(task.get("root_task_id") or task.get("parent_task_id") or "")
+            if root_id and root_id != task_id:
+                address = reply_transport_from_metadata(root, _turn_metadata(_turn_task(root, root_id)), anchor=False)
+        return address
     except (OSError, ValueError, TypeError, StoreError):
         if strict:
             raise
         return {}
-    return reply_transport_from_metadata(root, meta, anchor=anchor)
 
 
 def reply_transport_from_metadata(root, metadata: dict, *, anchor: bool = True) -> dict:
@@ -394,11 +417,15 @@ def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool) -> No
     ``live_transport``'s."""
     if is_progress:
         return
-    reply = origin_reply(root, task_id, meta if meta.get("origin_message_ref") else None)
+    row = _origin_row(root, task_id, meta if meta.get("origin_message_ref") else None)
+    reply = reference_from_row(row) if row else {}
     if reply:
         meta.setdefault("reply_to", reply)
     if (not reply or meta["reply_to"] is reply) and (exact := turn_reply_transport(root, task_id)):
         meta.setdefault("transport", exact)
+    elif (row and telegram_chat_row(row.get("source"), row.get("chat_id"), row.get("client_message_id"))
+          and not (row.get("reply_to") or {}).get("telegram_room_chat_id")):
+        meta["logical_room_chat_id"] = 1  # physical owner turn, independent of a coincident Project number
 
 
 def live_transport(root, meta: dict, bound: dict, task_id: str, *, role: str, system_type: str,
@@ -423,7 +450,8 @@ def helper_card_address(root, meta: dict, *, role: str, system_type: str, is_pro
                         or (not is_progress and role != "system" and bool(system_type)))
     if not (meta.get("subagent_event") or notice):
         return {}
-    return telegram_root_address(root, str(meta.get("root_task_id") or meta.get("parent_task_id") or ""))
+    root_id = str(meta.get("root_task_id") or meta.get("parent_task_id") or "")
+    return turn_reply_transport(root, root_id, anchor=False) or telegram_root_address(root, root_id)
 
 
 def telegram_root_address(root, root_task_id: str) -> dict:

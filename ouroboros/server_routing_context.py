@@ -798,33 +798,10 @@ def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
     return ""
 
 
-def _main_lane_chat(chat_id: int) -> bool:
-    """Host-attested absence of a Project room, answered without the registry.
-
-    Ids below the Project floor are Main, hidden or A2A. A transport id shares
-    the numeric range, so only the positively bound external owner slot (written
-    by that transport's own slash command) proves its chat is the owner's Main;
-    any other id at or above the floor still needs the strict registry read.
-    """
-    from ouroboros.contracts.chat_id_policy import is_project_chat_id
-
-    cid = int(chat_id or 0)
-    if not is_project_chat_id(cid):
-        return True
-    try:
-        from supervisor.state import control_value, load_state
-
-        known, bound = control_value(load_state(), "owner_external_chat_id")
-    except Exception:
-        return False  # an unreadable binding proves nothing
-    return known and type(bound) is int and bound == cid
-
-
 def _reserved_project_for_chat(ctx: Any, chat_id: int) -> Dict[str, Any]:
-    """Execution routing requires positive absence, not an unavailable display lens."""
+    """Resolve a logical room; the caller handles proven physical ingress separately."""
+    from ouroboros.contracts.chat_id_policy import is_project_chat_id
     from ouroboros.project_admission import reserved_project_for_chat
 
     cid = int(chat_id or 0)
-    if _main_lane_chat(cid):
-        return {}  # Host-attested: this chat cannot belong to a Project room.
-    return reserved_project_for_chat(ctx.DRIVE_ROOT, cid)
+    return reserved_project_for_chat(ctx.DRIVE_ROOT, cid) if is_project_chat_id(cid) else {}

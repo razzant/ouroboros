@@ -2821,6 +2821,31 @@ def test_host_initiated_workspace_refusal_sends_one_typed_row_to_the_owner_chat(
     assert host.bridge.acks[-1]["cause"] == "Not started: the working folder can't be used"
 
 
+def test_d5_promotion_refusal_keeps_admitted_telegram_destination_without_readable_quote(swarm_host, monkeypatch):
+    from ouroboros.chat_references import TURN_ADDRESS
+    from ouroboros.store import StoreBusy
+    from supervisor import message_ingress
+
+    host = swarm_host
+    bare = {"kind": "telegram", "host_address": "reply", "conversation_id": "42", "bot_id": "123"}
+
+    def quote_unavailable(*_args, **_kwargs):
+        raise StoreBusy("reading the quote")
+
+    monkeypatch.setattr(message_ingress, "accepted_chat_message", quote_unavailable)
+    evt, outcome = _host_promote(
+        host, monkeypatch, host_initiated=True, chat_id=146, client_message_id="tg:123:42:55",
+        workspace="", workspace_root=str(host.root / "missing-folder"),
+        **{TURN_ADDRESS: {**bare, "exact_reply": {"owner_message_id": 55, "card_message_id": 54}}},
+    )
+    assert outcome["status"] == "needs_manual_target"
+    ack = host.bridge.acks[-1]
+    assert ack["transport"] == bare and ack["reply_to"] == {}
+    [notice] = host.notices
+    assert notice["chat_id"] == evt["chat_id"] and notice["progress_meta"]["transport"] == bare
+    assert notice["progress_meta"]["reply_to"] == {}
+
+
 def test_tool_issued_workspace_refusal_sends_nothing(swarm_host, monkeypatch):
     """Q1=A: a model turn waits on the receipt and narrates; the receipt (with
     its cause) and the failed call are the record — no host chat text at all."""
