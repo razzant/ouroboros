@@ -22,6 +22,7 @@ import pytest
 
 import ouroboros.loop as loop
 from ouroboros.tools.registry import ToolRegistry
+from tests._delivery_candidate_shared import holds  # noqa: F401  (the shared rows reader, kept importable from here)
 from tests.test_presence_owner_contact import contact_runtime as _contact_runtime
 from tests.test_presence_owner_contact import focus  # noqa: F401  (the fixture contact_runtime requests)
 from tests.test_presence_owner_stop import owner_stop as _owner_stop  # the public Stop over a live turn
@@ -56,13 +57,6 @@ def act(name, **arguments):
 def write_round():
     """A round that changes the result (a reviewable write) and leaves it unexamined."""
     return act("write_file", path="report.md", content="Report")
-
-
-def holds(root):
-    """The completion_held rows of the events log under ``root`` (absent file: none)."""
-    path = root / "logs" / "events.jsonl"
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
-    return [row for row in rows if row.get("type") == "task_checkpoint" and row.get("checkpoint_kind") == "completion_held"]
 
 
 def facts(row):

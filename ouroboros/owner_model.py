@@ -352,6 +352,10 @@ def apply_current(ctx: Any) -> bool:
         ctx._lead_return_from = ctx._lead_episode = ctx._lead_role = ctx._primary_view = None
     else:
         primary_action(ctx, action)
+    if ctx.active_model_override != getattr(ctx, "active_model", None):
+        # The same durable writer serves the card and the mind's work switch with a stamped cite.
+        cited_switch = action == "set" and carrier and carrier["source"] in route_choice.CITED_LEAD_SOURCES
+        ctx._pending_handover_reason = "mind_switch" if cited_switch else "owner_model"
     ctx._owner_model_primary_changed = changed_primary
     ctx._owner_model_request_id = request_id
     words = {"follow": "set this work to follow Main", "return": "requested a return to this work's primary",

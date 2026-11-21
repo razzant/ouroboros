@@ -759,7 +759,7 @@ def _check_under(registry, tmp_path, monkeypatch, ceiling, streams=THREE_LINES):
 def test_a_reader_this_task_would_rebind_or_refuse_is_not_offered(registry, tmp_path, monkeypatch, ceiling, code, said):
     content, receipt, calls = _check_under(registry, tmp_path, monkeypatch, ceiling)
     assert "read_file(" not in content and receipt["output_source_call_unavailable"] == code
-    assert f"cannot read its end through the named call: " in content and said in content
+    assert "cannot read its end through the named call: " in content and said in content
     assert "output_source_unavailable" not in receipt and TAIL_LINE not in receipt["summary"] and len(calls) == 1
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from ouroboros.config import runtime_setting
 from ouroboros.tool_access_reads import canonical_runtime_reader as _canonical_runtime_reader
 
+import hashlib
 import json
 import logging
 import os
@@ -787,6 +788,29 @@ def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
         return text, text
 
 
+_BASE_PROMPT_PATH = "prompts/SYSTEM.md"
+
+
+def _read_base_prompt(env: Any) -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
+    """The base prompt as this capture reads it, and the witness the send seal checks it by.
+
+    The witness is ``(path, file SHA-256, normalized length, normalized SHA-256)``
+    (``model_send_seal._file_trace``). An empty prompt has none; one that cannot be
+    read or decoded has none and the capture uses the fallback text.
+    """
+    try:
+        raw = env.repo_path(_BASE_PROMPT_PATH).read_bytes()
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except (OSError, UnicodeError) as exc:
+        if not isinstance(exc, FileNotFoundError):  # a missing prompt stays quiet, as ``safe_read`` left it
+            log.warning("Base prompt %s could not be read (%s); using fallback", _BASE_PROMPT_PATH, type(exc).__name__)
+        return "You are Ouroboros. Your base prompt could not be loaded.", None
+    if not text:
+        return text, None
+    return text, (_BASE_PROMPT_PATH, hashlib.sha256(raw).hexdigest(), len(text),
+                  hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
 def _capture_context_core(
     env: Any,
     memory: Memory,
@@ -802,10 +826,7 @@ def _capture_context_core(
         _validate_declared_input_task(task)
     captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
     supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt = safe_read(
-        env.repo_path("prompts/SYSTEM.md"),
-        fallback="You are Ouroboros. Your base prompt could not be loaded."
-    )
+    base_prompt, base_prompt_source = _read_base_prompt(env)
     bible_md = safe_read(env.repo_path("BIBLE.md"))
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
@@ -1060,6 +1081,7 @@ def _capture_context_core(
 
     return _ContextCore(
         base_prompt=base_prompt,
+        base_prompt_source=base_prompt_source,
         bible_md=bible_md,
         architecture_md=architecture_md,
         development_md=development_md,

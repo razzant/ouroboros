@@ -30,7 +30,7 @@ import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
 import { noteOrigin } from './task_origin.js';
 import { continueControlSuccessor } from './task_continue.js';
-import { closingLine } from './settled_card.js';
+import { closingLine, readCardDetail } from './settled_card.js';
 
 const key = (value) => String(value || '').trim();
 export const isPortal = (record) => record?.root?.dataset?.portal === '1';
@@ -289,7 +289,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const pair = `${record?.groupId}|${rootId}`;
         if (!record || !rootId || asked.has(pair)) return;
         asked.add(pair);
-        void fetchTaskDetailStrict(record.groupId).then((detail) => {
+        void readCardDetail(record, { fresh: true }).then((detail) => {
             if (detail?.continued_by?.successor_task_id === rootId && !admittedSuccessor(detail)) asked.delete(pair);
             if (detail && record.root?.isConnected) onDomWrite(() => card.note(record, detail));
         }, () => asked.delete(pair));

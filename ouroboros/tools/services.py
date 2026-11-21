@@ -285,18 +285,31 @@ def _finalize_service_log_for_drive(
     unconfirmed stop keeps the record for a later cleanup.
     """
     result: Dict[str, Any] = {"deleted_live_log": False, "full_log_ref": {}, "tail": "", "errors": []}
-    log_path = log_path if log_path is not None else record.log_path
+    target = log_path if log_path is not None else getattr(record, "log_path", None)
+    if target is None:
+        result["errors"].append("capture: ValueError")
+        return result
+    log_path = pathlib.Path(target)
+    missing = False
+    mtime: float | None = None
     try:
-        size = log_path.stat().st_size if log_path.exists() else 0
-        result["tail"] = _service_diagnostic(record, _tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS))
-        if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
-            text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-            result["full_log_ref"] = write_blob(pathlib.Path(drive_root), _service_diagnostic(record, text), kind="txt")
-        else:
-            result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
+        try:
+            st = log_path.stat()
+            size, mtime = st.st_size, st.st_mtime
+        except FileNotFoundError:
+            missing, size = True, 0
+        if not missing:
+            tail = _service_diagnostic(record, _tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS))
+            if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
+                masked = _service_diagnostic(record, log_path.read_text(encoding="utf-8", errors="replace"))
+                result["tail"] = tail
+                result["full_log_ref"] = write_blob(pathlib.Path(drive_root), masked, kind="txt")
+            else:
+                result["tail"] = tail
+                result["full_log_omitted"] = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
     except Exception as exc:
-        result["errors"].append(f"capture: {type(exc).__name__}: {exc}")
-    should_delete = bool((result.get("full_log_ref") or {}).get("sha256")) or not log_path.exists()
+        result["errors"].append(f"capture: {type(exc).__name__}")
+    should_delete = bool((result.get("full_log_ref") or {}).get("sha256")) or missing
     if should_delete:
         try:
             log_path.unlink(missing_ok=True)
@@ -305,11 +318,15 @@ def _finalize_service_log_for_drive(
             if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
         except Exception as exc:
-            result["errors"].append(f"delete: {type(exc).__name__}: {exc}")
-    elif log_path.exists():
+            result["errors"].append(f"delete: {type(exc).__name__}")
+    if not result["deleted_live_log"] and not missing:
         result["retained_live_log_path"] = str(log_path)
-        from ouroboros.maintenance_retirement import artifact_changed
-        artifact_changed(drive_root, timestamp=log_path.stat().st_mtime)
+        try:
+            from ouroboros.maintenance_retirement import artifact_changed
+
+            artifact_changed(drive_root, timestamp=mtime)
+        except Exception:
+            pass
     return result
 
 

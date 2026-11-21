@@ -4,6 +4,7 @@
 import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
+import { modelHandoverFact } from './model_handover.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
 import { childLineCause, compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
@@ -1441,9 +1442,9 @@ function metaLineHtml(parts) {
 function paintLiveFacts(record, rows) {
     const el = ownLiveDetail(record, 'liveFacts');
     if (!el) return false;
-    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
-    const html = rows.filter(([, value]) => value).map(([label, value]) =>
-        `<div class="chat-live-fact"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
+    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld) && !record.episodeHeadingWords?.includes(record.wakeSummary)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
+    const html = rows.filter(([, value]) => value).map(([label, value, translated]) =>
+        `<div class="chat-live-fact"${translated ? ' data-i18n-fmt=""' : ''}><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
     if (el.innerHTML === html && el.hidden === !html) return false;
     if (el.innerHTML !== html) el.innerHTML = html;
     el.hidden = !html;
@@ -1520,6 +1521,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         [chip ? 'Coordinator' : 'Agent model', coordinator ? escapeHtml(provenance ? `${coordinator} (${provenance})` : coordinator) : ''],
         // An unobserved execution of a card without an executor is its compact model fact already.
         [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
+        ...(record.handoverRows?.length ? [modelHandoverFact(record.handoverRows)] : []),
         ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
         ...(!record.isSubagent && record.originRows || []),  // the place that called it, what called it and who (task_origin.js)
         ['Continued by', { owner: 'You', ouroboros: 'Ouroboros', unknown: 'Not recorded' }[record.continueRequester] || ''],
@@ -1584,14 +1586,11 @@ export function ensureLiveActionsEl(record) {
         actions = document.createElement('div');
         actions.className = 'chat-live-actions';
         const end = ownFootEnd(record);
-        if (end) {
-            end.appendChild(actions);
-        } else {
-            const timeline = record.timelineEl && record.timelineEl.parentElement === record.root
-                ? record.timelineEl
-                : null;
-            record.root.insertBefore(actions, timeline);
-        }
+        // The row lives in the card's own foot; without one it stands in the card's own root,
+        // before the card's OWN timeline — never before a child's.
+        const container = end || record.root;
+        const anchor = !end && record.timelineEl?.parentElement === record.root ? record.timelineEl : null;
+        container.insertBefore(actions, anchor);
     }
     return actions;
 }

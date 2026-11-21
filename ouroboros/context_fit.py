@@ -349,6 +349,8 @@ class ContextCore:
     # This task's own direct requirement of the whole handbook (``development_required``), beside
     # ``docs_need_development``, which then holds what the subject alone says for Max.
     development_required: bool = False
+    # Repo-relative path, raw digest, normalized character count and digest.
+    base_prompt_source: Optional[Tuple[str, str, int, str]] = None
     held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
@@ -1428,7 +1430,7 @@ def build_context_fit_plan(
     )
 
 
-def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
+def _physical_context_for_fit(disposition: Any, plan: Any = None) -> PhysicalAttemptContext:
     from ouroboros.usage_accounting import PhysicalAttemptContext
 
     measurement = disposition.measurement
@@ -1449,4 +1451,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         window_observation_fp=measurement.window_observation_fp,
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
         mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
+        base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
     )
