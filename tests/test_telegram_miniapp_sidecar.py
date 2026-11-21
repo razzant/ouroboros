@@ -268,6 +268,120 @@ def test_bootstrap_default_deny_auth_cookie_and_raw_http_proxy() -> None:
     asyncio.run(scenario())
 
 
+def test_only_an_owner_builtin_static_file_keeps_its_revalidation_and_bodies_pass_raw() -> None:
+    import gzip
+
+    mark = "private, no-cache, must-revalidate"
+    files = {"/static/app.js": (b"export const v = 1;\n", '"v1"', mark), "/static/own.js": (b"own", '"o"', "no-cache")}
+    seen: list[httpx.Request] = []
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body, etag, cache = files.get(request.url.path, (b"missing", '"m"', mark))
+        status = 404 if request.url.path not in files else 304 if request.headers.get("if-none-match") == etag else 200
+        if request.url.path == "/api/state":  # an answer that copies the mark is still not a builtin file
+            status, body = 200, gzip.compress(b'{"state": 1}')
+        headers = {"Cache-Control": cache, "ETag": etag, "Content-Type": "text/javascript"}
+        if request.url.path == "/api/state":
+            headers["Content-Encoding"] = "gzip"
+        empty = status == 304 or request.method == "HEAD"
+        return httpx.Response(status, headers=headers, stream=_ChunkStream(b"" if empty else body), request=request)
+
+    async def scenario() -> None:
+        now = [1_750_000_000.0]
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler))
+        gateway = sidecar_module.TelegramProxySidecar(
+            BOT_TOKEN, OWNER_ID, 8765,
+            seams=sidecar_module.SidecarSeams(http_client=upstream_client, clock=lambda: now[0]),
+        )
+        gateway.set_public_url(PUBLIC_URL)
+        transport = httpx.ASGITransport(app=gateway)
+        async with httpx.AsyncClient(transport=transport, base_url=PUBLIC_ORIGIN) as browser:
+            refused = await browser.get("/static/app.js")
+            assert refused.status_code == 401 and refused.headers["cache-control"] == "no-store" and not seen
+            assert (await _authenticate(browser, auth_date=int(now[0]))).status_code == 204
+
+            first = await browser.get("/static/app.js")
+            assert first.status_code == 200 and first.content == b"export const v = 1;\n"
+            assert first.headers["cache-control"] == mark and first.headers["etag"] == '"v1"'
+            assert first.headers["cdn-cache-control"] == "no-store" and "pragma" not in first.headers
+            again = await browser.get("/static/app.js", headers={"If-None-Match": '"v1"'})
+            assert again.status_code == 304 and again.headers["cache-control"] == mark
+            files["/static/app.js"] = (b"export const v = 2;\n", '"v2"', mark)
+            changed = await browser.get("/static/app.js", headers={"If-None-Match": '"v1"'})
+            assert changed.status_code == 200 and changed.content == b"export const v = 2;\n"
+
+            no_store = [
+                await browser.get("/static/own.js"),  # a selected directory's file
+                await browser.head("/static/app.js"),  # HEAD describes the uncompressed variant
+                await browser.get("/static/gone.js"),  # a 404 that copies the mark
+                await browser.post("/static/app.js", headers={"Origin": PUBLIC_ORIGIN}),
+                await browser.get("/api/state"),
+            ]
+            for response in no_store:
+                assert response.headers["cache-control"] == "private, no-store", response.request.url
+                assert "cdn-cache-control" not in response.headers
+
+            # The core's gzip body is relayed byte for byte, once, and the phone's choice reaches the core.
+            state = no_store[-1]
+            assert state.headers["content-encoding"] == "gzip" and state.content == b'{"state": 1}'
+            assert seen[-1].headers["accept-encoding"] == browser.headers["accept-encoding"]
+            browser.headers.pop("accept-encoding")
+            await browser.get("/static/app.js")
+            assert seen[-1].headers["accept-encoding"] == "identity"
+        await upstream_client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_a_phone_revalidates_the_real_cores_gzipped_builtin_files_and_keeps_nothing_else(tmp_path, monkeypatch) -> None:
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    from ouroboros import server_process, server_web
+
+    # Two copies of one mark: a drift would silently turn every builtin file into no-store on the phone.
+    assert sidecar_module._BUILTIN_STATIC_CACHE == server_web.BUILTIN_STATIC_CACHE
+    monkeypatch.setattr(server_process, "_applied_restart_settings", {})
+    repo = Path(__file__).parents[1]
+    served = server_web.ServedUI(repo)
+    core = Starlette(routes=[Route("/", endpoint=served.index_page), *served.mounts()],
+                     middleware=server_web.TEXT_COMPRESSION)
+    core.state.drive_root = tmp_path / "data"
+    custom = tmp_path / "custom-ui"
+    custom.mkdir()
+    (custom / "index.html").write_text("<html><head></head><body>mine</body></html>", encoding="utf-8")
+    (custom / "app.js").write_bytes(b"export const mine = 1;\n" * 100)
+    css, mark = (repo / "web" / "ui.css").read_bytes(), "private, no-cache, must-revalidate"
+
+    async def scenario() -> None:
+        now = [1_750_000_000.0]
+        upstream_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=core))
+        gateway = sidecar_module.TelegramProxySidecar(
+            BOT_TOKEN, OWNER_ID, 8765,
+            seams=sidecar_module.SidecarSeams(http_client=upstream_client, clock=lambda: now[0]),
+        )
+        gateway.set_public_url(PUBLIC_URL)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway), base_url=PUBLIC_ORIGIN) as browser:
+            assert (await _authenticate(browser, auth_date=int(now[0]))).status_code == 204
+            first = await browser.get("/static/ui.css", headers={"Accept-Encoding": "gzip"})
+            assert first.status_code == 200 and first.headers["content-encoding"] == "gzip" and first.content == css
+            assert first.headers["etag"].startswith('W/"') and first.headers["cache-control"] == mark
+            assert first.headers["cdn-cache-control"] == "no-store"
+            again = await browser.get("/static/ui.css", headers={"Accept-Encoding": "gzip",
+                                                                  "If-None-Match": first.headers["etag"]})
+            assert again.status_code == 304 and again.headers["cache-control"] == mark
+            home = await browser.get("/")
+            served.apply(core, {"OUROBOROS_UI_DIR": str(custom)})
+            mine = await browser.get("/static/app.js", headers={"Accept-Encoding": "gzip"})
+            for response in (home, mine):
+                assert response.status_code == 200 and response.headers["cache-control"] == "private, no-store"
+                assert "cdn-cache-control" not in response.headers
+        await upstream_client.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_auth_rate_limit_is_bounded_and_counted() -> None:
     async def scenario() -> None:
         now = 1_750_000_000
