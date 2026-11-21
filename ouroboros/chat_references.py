@@ -1,18 +1,17 @@
 """Host-owned message addresses and Reply facts, shared by every owner ingress.
 
 References describe what the sender pointed at. They do not select work or grant
-authority, with one exception: the bundled owner Telegram bridge's accepted Reply
-to any message of a Project opens its turn in that Project (``telegram_reply_room``,
-decided once at acceptance); every other Reply stays its conversation's ordinary turn.
-Hash the persisted row before adding any history/view fields. A row the dialogue store
-cannot answer yet (its archive still importing, or unreadable) leaves the reference
-unresolved; it never blocks the message that carries it. Only that room decision, on a
-busy store, leaves the bridge's message unaccepted (it says so, and the next try decides
-afresh), never refused for good.
+authority: only a confirmed Project Reply from the bundled owner Telegram bridge
+opens its own Project turn. Unresolved ordinary quotes do not block acceptance;
+a transient store error during the Telegram decision permits a safe retry.
+Selected passages require an authored source and remain sender-reported citations.
 """
 from __future__ import annotations
 
-from ouroboros.chat_chain import format_address, resolve_row, row_address
+import copy
+
+from ouroboros.chat_chain import format_address, parse_address, resolve_row, row_address
+from ouroboros.chat_uploads import web_attachment_caption
 from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 
 TELEGRAM_SOURCE = "skill:telegram"  # the bundled owner bridge's authenticated ingress identity
@@ -20,8 +19,60 @@ TELEGRAM_SOURCE = "skill:telegram"  # the bundled owner bridge's authenticated i
 # and ``exact_reply`` (``LocalChatBridge.activate_update_transport``).
 ADDRESS, REPLY_ADDRESS, ROOT_ADDRESS = "host_address", "reply", "root"
 
+# A selected passage's source as acceptance captured it (words and files). It rides the delivery's ``reply_reference``
+# by value, so a work reads it when history cannot (``owner_words.reply_target``), and is never stored on the owner row.
+SOURCE_KEYS = ("text", "attachments")
 
-def projection_fields(row: dict) -> dict:
+
+def stored_reply(reply):
+    """A Reply reference as the owner row stores it and every client reads it: without the captured source."""
+    return {key: value for key, value in reply.items() if key not in SOURCE_KEYS} if isinstance(reply, dict) else reply
+
+
+def has_source(reply) -> bool:
+    """Whether a reference carries its selected passage's source (words or files), not only its preview."""
+    return isinstance(reply, dict) and bool(reply.get("text") or reply.get("attachments"))
+
+
+def delivery_reply(stored, held):
+    """The saved row's reference as delivery carries it: the source acceptance captured stays beside it while ``held``
+    names the same address and passage, never beside another's."""
+    if not (isinstance(stored, dict) and isinstance(held, dict) and stored.get("excerpt")
+            and held.get("address") == stored.get("address") and held.get("excerpt") == stored.get("excerpt")):
+        return stored
+    return {**stored, **{key: held[key] for key in SOURCE_KEYS if key in held}}
+
+
+def _card_display(root, row: dict) -> dict:
+    """A late card's displayed text may describe an act or combine its label and submitted fields."""
+    if row.get("direction") == "in" and (row.get("card_press") or row.get("late_answer")):
+        from ouroboros.answer_facts import card_input
+
+        return card_input(row, root)
+    return {}
+
+
+def _card_display_only(row: dict, card: dict) -> bool:
+    # A quiz comment occupies its own bubble. A living form's bubble mixes the title/labels and values.
+    return bool(card and (row.get("card_press") or card["source"] != "owner_mailbox"))
+
+
+def card_reply_display(root, row: dict) -> str:
+    """Host context for a whole-row Reply to a mixed or wordless card display, not the owner's speech."""
+    card = _card_display(root, row)
+    if not _card_display_only(row, card):
+        return ""
+    from ouroboros.answer_facts import press_record
+    from ouroboros.owner_words import OWNER_PRESS
+
+    if card["source"] == OWNER_PRESS:
+        return press_record(card["content"], card.get("source_task_id"), who="the owner")
+    if card["source"] == "owner_mailbox":
+        return f"The owner submitted values on a card of task {card['source_task_id']}:\n{card['content']}"
+    return card["content"]
+
+
+def projection_fields(row: dict, root=None) -> dict:
     """Additive fields for live frames and history, from the same stored row.
 
     An outgoing chat row saved under its own name (a relay's ``relay:<id>:<task>``) carries that name as
@@ -37,6 +88,9 @@ def projection_fields(row: dict) -> dict:
             and row.get("client_message_id"):
         fields["row_client_message_id"] = str(row["client_message_id"])
     fields["row_address"] = format_address(row_address(row))
+    fields["reply_author_label"] = _reply_author_label(row)
+    if _card_display_only(row, _card_display(root, row)):
+        fields["reply_excerpt_disabled"] = True
     return fields
 
 
@@ -62,22 +116,42 @@ def project_answer_text(row: dict) -> str:
         "project_started", "project_handoff", "project_completion_summary"} else ""
 
 
-def reference_from_row(row: dict) -> dict:
+REPLY_ROLES = ("user", "assistant", "system")
+
+
+def _reply_author_label(row: dict) -> str:
+    from ouroboros.dialogue_provenance import recorded_speaker_name, row_provenance
+
+    if reply_role(row) == "user":
+        return recorded_speaker_name(row) or ("author not recorded" if row_provenance(row) == "place" else "You")
+    return "Ouroboros" if reply_role(row) == "assistant" else "System"
+
+
+def reply_role(row: dict) -> str:
+    """Whose words a replied row holds, from the stored row alone: the one actor identity every reader of it
+    shares, whatever label each shows for that person. A lifecycle row carrying an authored answer is that answer
+    in Ouroboros's voice wherever Main shows it (project_answer.js::appendProjectRow). A row stored as ``role: system``
+    is the host's even when it entered by the owner's door (a call's opening: ``direction: in``), as history shows it."""
+    if project_answer_text(row):
+        return "assistant"
+    return "system" if row.get("role") == "system" else {"in": "user", "out": "assistant"}.get(
+        row.get("direction"), "system")
+
+
+def reference_from_row(row: dict, root=None) -> dict:
     kind = str(row.get("type") or "message")
-    # A lifecycle row carrying an authored answer is that answer in Ouroboros's
-    # voice wherever Main shows it (project_answer.js::appendProjectRow); the
-    # address still hashes the raw System row.
+    # The address still hashes the raw System row of an authored lifecycle answer.
     answer = project_answer_text(row)
     kind = ("question" if kind == "quiz" else "completion" if kind in
             {"project_completion_summary", "task_summary"} else
             "system" if row.get("direction") == "system" else "message")
-    role = "assistant" if answer else {"in": "user", "out": "assistant", "system": "system"}.get(
-        row.get("direction"), "system")
+    role = reply_role(row)
+    body = card_reply_display(root, row)  # the host's account of a card display, for its preview alone: the row is still its sender's
     from ouroboros.room_membership import reply_target_home
-    return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
-            "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
-                                             else {"assistant": "Ouroboros", "system": "System"}[role]),
-            "kind": kind, **_preview(answer or row.get("text") or row.get("caption")),
+    address = row_address(row)
+    return {"address": format_address(address), "row_sha256": address["row_sha256"], "chat_id": address["chat_id"],
+            "role": role, "author_label": _reply_author_label(row),
+            "kind": kind, **_preview(body or answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row)}
 
@@ -117,13 +191,118 @@ def resolve_reply(root, address: str, *, strict_transient: bool = False) -> dict
         except (ValueError, StoreError):
             row = None
         if row:
-            return reference_from_row(row)
+            return reference_from_row(row, root)
     return {"address": address, "unresolved": True}
 
 
-def ingress_reply(root, metadata: dict, *, strict_transient: bool = False) -> dict:
-    """Shared web/HTTP/skill seam. Raw input is resolved, never trusted as a preview."""
-    return resolve_reply(root, metadata.get("reply_to", ""), strict_transient=strict_transient)
+class ReplyExcerptUnavailable(ValueError):
+    """Fresh acceptance could not resolve the exact authored source of a selected passage."""
+
+
+class ReplyExcerptNotAuthored(ValueError):
+    """The resolved source has no eligible authored body or caption."""
+
+
+def reply_identity(metadata: dict) -> dict:
+    """The sender's part of a Reply. Never accept a client author, snippet, kind or routing fact."""
+    address = metadata.get("reply_to", "")
+    if not isinstance(address, str):
+        raise ValueError("reply_to must be an address string")
+    ref = {"address": address} if address else {}
+    if "reply_excerpt" in metadata:
+        excerpt = metadata["reply_excerpt"]
+        if not isinstance(excerpt, dict) or not address.startswith("row:"):
+            raise ValueError("reply_excerpt needs an addressed message")
+        text, start = excerpt.get("text"), excerpt.get("start_utf16")
+        if (not isinstance(text, str) or not text.strip() or type(start) is not int
+                or not 0 <= start <= 2**53 - 1 or not _valid_unicode(text)):
+            raise ValueError("reply_excerpt needs nonempty Unicode text and a nonnegative UTF-16 position")
+        ref["excerpt"] = {"text": text, "start_utf16": start}
+    return ref
+
+
+def _valid_unicode(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def same_reply(root, stored: dict, requested: dict) -> bool:
+    """A replay names the accepted source and passage, including every digest digit the sender supplied."""
+    if stored.get("excerpt") != requested.get("excerpt"):
+        return False
+    saved, wanted = stored.get("address"), requested.get("address")
+    if saved == wanted and not requested.get("row_sha256"):
+        return True
+    if not saved or not wanted or stored.get("unresolved"):
+        return False
+    try:
+        left, right = parse_address(saved), parse_address(wanted)
+    except ValueError:  # task addresses and unresolved free-form addresses only compare literally
+        return saved == wanted
+    if (left["chat_id"], left["ts"]) != (right["chat_id"], right["ts"]):
+        return False
+    # Older accepted references only stored the display prefix. Read their source when a retry
+    # supplies more digits than the acceptance recorded; never accept an unverified suffix.
+    digest = stored.get("row_sha256") or left["row_sha256"]
+    prefix = requested.get("row_sha256") or right["row_sha256"]
+    if len(prefix) > len(digest):
+        _, resolution = resolve_history_row(root, saved)
+        digest = resolution.get("address", {}).get("row_sha256", "")
+    return digest.startswith(prefix)
+
+
+def media_caption(row: dict) -> str:
+    """An explicit delivery caption, never the history row's generated fallback text."""
+    caption = row.get("caption")
+    return caption if row.get("type") in ("photo", "video", "document") and isinstance(caption, str) else ""
+
+
+def excerpt_source_text(row: dict) -> str:
+    """The authored source of a selected reply, not the generated preview for a whole-row reply."""
+    body = web_attachment_caption(row) if row.get("direction") == "in" else str(row.get("text") or "")
+    return project_answer_text(row) or media_caption(row) or body
+
+
+def excerpt_source_attachments(row: dict) -> list:
+    """Files beside a selected source. Delivered documents record their download facts on the row, not in uploads."""
+    files = copy.deepcopy(row["attachments"]) if isinstance(row.get("attachments"), list) else []
+    if row.get("direction") == "out" and row.get("type") == "document" and row.get("filename"):
+        files.append({"name": row["filename"], "mime": row.get("mime"), "size": row.get("size_bytes"),
+                      **({"download_url": row["download_url"]} if row.get("download_url") else {})})
+    return files
+
+
+def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_transient: bool = False) -> dict:
+    """Fresh selections require a real authored row. A duplicate compares with its original acceptance."""
+    ref = reply_identity(metadata)
+    if accepted is not None:
+        return ref  # rejoin_or_refuse compares it before using the saved resolution
+    address = ref.get("address", "")
+    if "excerpt" not in ref:
+        return resolve_reply(root, address, strict_transient=strict_transient)
+    try:
+        row, _ = resolve_row(root, address)
+    except (ValueError, StoreError, OSError) as exc:
+        raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.") from exc
+    if row is None:  # resolve_row checks the room, timestamp and every supplied digest digit
+        raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.")
+    authored = (row.get("direction") in {"in", "out"} and row.get("role") != "system"
+                and not any(row.get(key) for key in ("relay", "quiz", "host_fact", "text_placeholder", "is_progress")))
+    plain = (row.get("system_type") or row.get("type")) in {
+        None, "", "message", "text", "main_notice", "relay_reply", "proactive_message"}
+    body = plain and (web_attachment_caption(row) if row.get("direction") == "in" else row.get("text"))
+    if not project_answer_text(row) and not (authored and (body or media_caption(row).strip())
+                                             and not _card_display_only(row, _card_display(root, row))):
+        raise ReplyExcerptNotAuthored("Only a passage of an authored chat message can be quoted")
+    reference = reference_from_row(row, root)
+    reference.pop("chars", None)
+    source = excerpt_source_text(row)  # captured now, before the owner row is saved: delivery needs no later history read
+    files = excerpt_source_attachments(row)
+    return {**reference, **_preview(source), "excerpt": ref["excerpt"], "text": source,
+            **({"attachments": files} if files else {})}
 
 
 def origin_reply(root, task_id: str, metadata=None) -> dict:
@@ -131,7 +310,7 @@ def origin_reply(root, task_id: str, metadata=None) -> dict:
 
     Best-effort enrichment: a busy or unreadable store omits the reference, never the message."""
     row = _origin_row(root, task_id, metadata)
-    return reference_from_row(row) if row else {}
+    return reference_from_row(row, root) if row else {}
 
 
 def _origin_row(root, task_id: str, metadata=None):
@@ -418,7 +597,7 @@ def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool) -> No
     if is_progress:
         return
     row = _origin_row(root, task_id, meta if meta.get("origin_message_ref") else None)
-    reply = reference_from_row(row) if row else {}
+    reply = reference_from_row(row, root) if row else {}
     if reply:
         meta.setdefault("reply_to", reply)
     if (not reply or meta["reply_to"] is reply) and (exact := turn_reply_transport(root, task_id)):
@@ -549,4 +728,4 @@ def origin_projection(root, ref):
         row = resolve_owner_message_source(root, ref)
     except StoreError:
         return {}
-    return projection_fields(row) if row else {}
+    return projection_fields(row, root) if row else {}

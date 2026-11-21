@@ -63,7 +63,7 @@ export function createRowSwipe({
     const settling = new Map();  // row → the timer that ends its settle
 
     function eligible(target, row) {
-        if (!row || !feed.contains(row)) return false;
+        if (!row || row.dataset.selectText || !feed.contains(row)) return false;
         if (target.closest?.(FIELD_SELECTOR) || target.closest?.(SIDEWAYS_SELECTOR) || hasSelection()) return false;
         if (isBlocked() || chainKeepsGesture(target, { win, doc })) return false;
         return true;

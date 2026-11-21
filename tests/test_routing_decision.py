@@ -148,6 +148,54 @@ def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monke
     assert len(queue.events) == 1  # neither replay nor loser re-dispatched
 
 
+@pytest.mark.parametrize("recarry", [False, True])
+def test_refused_steer_click_anchors_its_ack_to_the_saved_selected_reply(tmp_path, monkeypatch, recarry):
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, resolve_row, row_address
+    from ouroboros.chat_references import ingress_reply, reference_from_row
+    from supervisor.steering import _handle_steer_task
+
+    chat_id = 7
+    source = {"direction": "out", "chat_id": chat_id, "text": "Follow the moon.",
+              "ts": "2026-10-06T12:00:00+00:00"}
+    dialogue_store.append(tmp_path, "chat", source)
+    selection = ingress_reply(tmp_path, {"reply_to": format_address(row_address(source)),
+                                         "reply_excerpt": {"text": "moon", "start_utf16": 11}})
+    saved = dialogue_store.append(tmp_path, "chat", {
+        "direction": "in", "chat_id": chat_id, "client_message_id": "cm-1", "type": "photo",
+        "text": "Map caption", "caption": "Map caption", "reply_to": selection,
+        "ts": "2026-10-06T12:01:00+00:00",
+    }).row
+    _seed_refusal(tmp_path)
+    acks = []
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, PENDING=[],
+                          bridge=SimpleNamespace(send_routing_ack=lambda chat, **ack: acks.append((chat, ack))))
+    def _steer(evt):
+        if recarry:
+            evt = dict(evt)
+            # An ordinary handoff adds local presentation to the SAME original row.
+            evt["quotes"] = [{**evt["quotes"][0], "owner_row": {
+                **evt["quotes"][0]["owner_row"],
+                "carried": {"from": "other-task", "went_to": "next-task", "at": "2026-10-06T12:02:00+00:00"},
+            }}]
+        return _handle_steer_task(evt, ctx)
+
+    _wire_queue(monkeypatch, _Queue(on_put=_steer))
+
+    status, body = handle_routing_decision(tmp_path, request_id="r1", decision_id="routing:cm-1:tok-1", option_index=0)
+    assert (status, body["reason"]) == (409, "target_unknown")
+    dispatch_token, _ = _derived_identity("cm-1", "tok-1", 0)
+    assert chat_annotation_receipt(tmp_path, "cm-1", dispatch_token)["reason"] == "target_unknown"
+    [(ack_room, ack)] = acks
+    assert ack_room == chat_id and ack["routing_notice_carrier"] == "routing_ack"
+    ref = ack["reply_to"]
+    row, found = resolve_row(tmp_path, ref)
+    assert found["status"] == "ok" and row == saved
+    assert ref == reference_from_row(saved) and ref["snippet"] == "Map caption"
+
+
 def _manual_picker(tmp_path, monkeypatch, **effort):
     """The real tool/annotation/WS producer, consumed later via the HTTP door."""
     from starlette.applications import Starlette

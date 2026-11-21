@@ -131,7 +131,7 @@ def test_web_project_context_requires_membership_when_numeric_chat_matches(tmp_p
     monkeypatch.setattr(server_owner_routing, "_route_project_chat_to_running_task", lambda *_a, **_kw: "")
     monkeypatch.setattr(routing, "_recent_root_results", lambda *_a: ([], {}))
     monkeypatch.setattr(owner_relay, "carry_room_context",
-                        lambda _drive, source, message, members, routed_to:
+                        lambda _drive, source, message, members, routed_to, *, reply=None:
                         relays.append((source, message, [row["task_id"] for row in members], routed_to)))
 
     _route(ctx, "m-members", chat_id=chat)

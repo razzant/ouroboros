@@ -1065,3 +1065,97 @@ def test_default_teardown_still_stops_services(tmp_path, monkeypatch):
     finalized = stop_task_services(registry._ctx)
     assert [item["lifecycle"] for item in finalized] == ["stopped"]
     assert pid_is_alive(payload["pid"]) is False
+
+
+def test_confirmed_stop_survives_log_capture_failure_without_leaking_or_repeating_stop(tmp_path, monkeypatch):
+    import gzip
+    from ouroboros.tools import services as services_mod
+    from ouroboros.tools.registry import ToolContext
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    key, secret = "task-log-fault:demo", "synthetic-service-secret-701"
+    cwd, log_path = drive / "task_drives" / "task-log-fault", drive / "services" / "task-log-fault" / "demo.log"
+    repo.mkdir()
+    cwd.mkdir(parents=True)
+    log_path.parent.mkdir(parents=True)
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="task-log-fault")
+    stops: list[tuple[str, ...]] = []
+
+    def fake_end_held(held, **_kwargs):
+        item = held[0]
+        stops.append(tuple(item.get("markers") or ()))
+        item["proc"].returncode = 0
+        return {item["key"]: {"birth": "b1", "known": [], "facts": {"exit_confirmed": True, "ended": [item["proc"].pid]}}}
+
+    def seed(pid: int, marker: str):
+        proc = SimpleNamespace(pid=pid, returncode=None)
+        proc.poll = lambda: proc.returncode
+        record = services_mod.ServiceRecord(
+            name="demo", service_id=key, task_id=ctx.task_id, cmd=["svc"], cwd=str(cwd),
+            cwd_root="task_drive", cwd_base=str(cwd), cwd_source="task_drive", log_path=log_path,
+            proc=proc, outputs=["report.txt"], before_outputs={"report.txt": (False, 0, "")},
+            secret_values=(secret,), scope_marker=marker,
+        )
+        monkeypatch.setitem(services_mod._SERVICES, key, record)
+        return record
+
+    monkeypatch.setattr("ouroboros.process_scope.end_held_processes", fake_end_held)
+    initial_bytes = f"selected={secret}\nREADY launch-1\n".encode("utf-8")
+    log_path.write_bytes(initial_bytes)
+    (cwd / "report.txt").write_text("ok-1", encoding="utf-8")
+    record_1 = seed(4101, "OURO_LAUNCH_SCOPE_1")
+    real_stat, real_read_text = pathlib.Path.stat, pathlib.Path.read_text
+
+    with monkeypatch.context() as fault:
+        fault.setattr(pathlib.Path, "stat", lambda self, *a, **k: (
+            (_ for _ in ()).throw(OSError(f"raw-exc-detail {secret}")) if self == log_path else real_stat(self, *a, **k)))
+        [stopped] = services_mod.stop_task_services(ctx)
+    dumped = json.dumps(stopped)
+    assert stops == [("OURO_LAUNCH_SCOPE_1",)]
+    assert stopped["lifecycle"] == "stopped" and stopped["process_cleanup"]["exit_confirmed"] is True
+    assert stopped["log_finalization"] == {"deleted_live_log": False, "full_log_ref": {}, "tail": "",
+                                           "errors": ["capture: OSError"], "retained_live_log_path": str(log_path)}
+    assert secret not in dumped and "raw-exc-detail" not in dumped
+    assert log_path.read_bytes() == initial_bytes
+    assert (drive / "task_results" / "artifacts" / ctx.task_id / "report.txt").read_text(encoding="utf-8") == "ok-1"
+
+    with monkeypatch.context() as read_fault:
+        read_fault.setattr(pathlib.Path, "read_text", lambda self, *a, **k: (
+            (_ for _ in ()).throw(PermissionError(f"raw-exc-detail {secret}")) if self == log_path else real_read_text(self, *a, **k)))
+        mid_fail = services_mod._finalize_service_log_for_drive(drive, record_1)
+    assert mid_fail == {"deleted_live_log": False, "full_log_ref": {}, "tail": "",
+                        "errors": ["capture: PermissionError"], "retained_live_log_path": str(log_path)}
+    assert log_path.read_bytes() == initial_bytes
+
+    with monkeypatch.context() as store_fault:
+        store_fault.setattr(services_mod, "write_blob", lambda *_a, **_k: (_ for _ in ()).throw(OSError(f"raw-exc-detail {secret}")))
+        store_fail = services_mod._finalize_service_log_for_drive(drive, record_1)
+    assert store_fail == {"deleted_live_log": False, "full_log_ref": {}, "tail": "selected=***\nREADY launch-1\n",
+                          "errors": ["capture: OSError"], "retained_live_log_path": str(log_path)}
+    assert log_path.read_bytes() == initial_bytes
+
+    absent = services_mod._finalize_service_log_for_drive(drive, record_1, log_path=log_path.with_name("absent.log"))
+    empty_path = log_path.with_name("empty.log")
+    empty_path.write_bytes(b"")
+    empty = services_mod._finalize_service_log_for_drive(drive, record_1, log_path=empty_path)
+    assert absent == {"deleted_live_log": True, "full_log_ref": {}, "tail": "", "errors": []}
+    assert empty["deleted_live_log"] is True and empty["full_log_ref"]["size"] == 0 and empty["full_log_ref"]["sha256"]
+
+    assert services_mod._service_status(ctx, "demo") == "⚠️ SERVICE_NOT_FOUND: demo"
+    assert services_mod._service_logs(ctx, "demo") == "⚠️ SERVICE_NOT_FOUND: demo"
+    assert services_mod._stop_service(ctx, "demo") == "⚠️ SERVICE_NOT_FOUND: demo"
+    assert services_mod.stop_task_services(ctx) == [] and stops == [("OURO_LAUNCH_SCOPE_1",)]
+
+    log_path.write_text(f"selected={secret}\nREADY launch-2\n", encoding="utf-8")
+    (cwd / "report.txt").write_text("ok-2", encoding="utf-8")
+    seed(4102, "OURO_LAUNCH_SCOPE_2")
+    assert json.loads(services_mod._service_status(ctx, "demo"))["state"] == "running"
+    live_logs = services_mod._service_logs(ctx, "demo")
+    assert "READY launch-2" in live_logs and secret not in live_logs and "selected=***" in live_logs
+
+    stopped_2 = json.loads(services_mod._stop_service(ctx, "demo"))
+    blob_2 = gzip.decompress(pathlib.Path(stopped_2["log_finalization"]["full_log_ref"]["path"]).read_bytes()).decode("utf-8")
+    assert stops == [("OURO_LAUNCH_SCOPE_1",), ("OURO_LAUNCH_SCOPE_2",)]
+    assert stopped_2["log_finalization"]["deleted_live_log"] is True and not log_path.exists()
+    assert not stopped_2["log_finalization"]["errors"] and "selected=***" in stopped_2["log_finalization"]["tail"]
+    assert secret not in json.dumps(stopped_2) and secret not in blob_2 and "READY launch-2" in blob_2

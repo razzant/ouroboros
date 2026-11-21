@@ -449,9 +449,13 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
     from dataclasses import replace
 
     from ouroboros import loop_forced_finalization as forced
+    from ouroboros.context_fit import ContextCore
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
     plan = replace(_forced_plan(mode, 128_000), initial_mode=mode)
+    source = ('prompts/SYSTEM.md', '1' * 64, 128, '2' * 64)
+    plan = replace(plan, core=ContextCore('', '', '', '', '', '', plan.user_content_json, False,
+                                         base_prompt_source=source))
     owner_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=mode, task_metadata={}, model_turn_state=None)
     captured = []
 
@@ -476,6 +480,7 @@ def test_the_forced_lookahead_and_send_share_one_measurement_allowance_and_ident
         forced._call_forced_model_once(ctx)  # a direct / drift send: its own fresh measurement of the same bytes
     assert len(captured) == 2, "both forced sends reached the physical executor"
     admitted, direct = captured
+    assert admitted.physical_context.base_prompt_source == direct.physical_context.base_prompt_source == source
     assert admitted.max_completion_tokens == direct.max_completion_tokens == request.max_completion_tokens
     assert admitted.candidate_clock_free_sha256 == request.candidate_clock_free_sha256 is not None
     if mode == "nano":

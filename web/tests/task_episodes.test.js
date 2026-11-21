@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { admittedSuccessor, createTaskEpisodes, episodeSpan, noteEpisodeFacts, renderEpisodes } from '../modules/task_episodes.js';
+import { renderLiveCardMeta } from '../modules/chat_activity.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 // The browser's text serializer, as utils.escapeHtmlText reads it back.
@@ -207,6 +208,50 @@ test('an unknown episode code is inside its disclosure, never in the summary, an
     } finally { restoreDom(prior); }
 });
 
+
+test('an earlier episode paints its facts again when its heading or disclosed content moved, never on a quiet sync', () => {
+    const { prior } = installDom();
+    try {
+        const first = card('t-1', 1000, 'Audit the projects');
+        const next = card('t-2', 5000, 'Continue: Audit the projects');
+        first.detailsEl = document.createElement('div');
+        next.episodeHistoryEl = document.createElement('div');
+        const records = new Map([[first.groupId, first], [next.groupId, next]]);
+        const painted = [];
+        const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null,
+            meta: (record) => painted.push({ id: record.groupId, words: record.episodeHeadingWords,
+                disclosed: record.detailsEl.parentNode === record.episodeDisclosure }) });
+        episodes.note(first, { wake_summary: 'Checked three of five.',
+            continued_by: { state: 'admitted', successor_task_id: next.groupId } });
+        assert.deepEqual(painted, [{ id: 't-1', words: ['Audit the projects', 'Checked three of five.'], disclosed: true }],
+            'its Details moved in, then its facts were painted with the heading\'s words known');
+        episodes.sync(next);
+        episodes.note(first, { wake_summary: 'Checked three of five.' });
+        assert.equal(painted.length, 1, 'the same heading and the same content paint nothing');
+        episodes.note(first, { wake_summary: 'Checked all five.' });
+        assert.equal(painted.length, 2, 'a heading that says something else paints again');
+        assert.deepEqual(painted[1].words, ['Audit the projects', 'Checked all five.']);
+    } finally { restoreDom(prior); }
+});
+
+test('Details leave out only the closing sentence the heading above them says in exactly those words', () => {
+    const { prior } = installDom();
+    try {
+        const sentence = 'Checked three of five.';
+        const painted = (episodeHeadingWords) => {
+            const facts = { dataset: { liveFacts: '' }, innerHTML: '', hidden: true };
+            renderLiveCardMeta({ groupId: 'e', items: [], finished: true, wakeSummary: sentence, initiator: 'consciousness',
+                metaEl: { isConnected: true, innerHTML: '' }, root: { children: [facts] }, episodeHeadingWords });
+            return facts.innerHTML;
+        };
+        assert.match(painted(undefined), /<dt>In its words<\/dt><dd><span data-i18n-authored>Checked three of five\.<\/span><\/dd>/,
+            'a card with no heading above it says its sentence, with the authored mark');
+        assert.match(painted(['Audit', 'Checked three of five']), /In its words/, 'a near miss is not the same words');
+        assert.match(painted([]), /In its words/);
+        assert.doesNotMatch(painted(['Audit', sentence]), /In its words/);
+        assert.doesNotMatch(painted([sentence]), /In its words/, 'the heading may carry the sentence as the name');
+    } finally { restoreDom(prior); }
+});
 
 test('the original Reviews reading door follows its host, never the old work controls', () => {
     const { prior } = installDom();

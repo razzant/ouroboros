@@ -365,7 +365,7 @@ def deliver_as_owner_message(
             "type": "chat", "role": "user", "content": str(row.get("text") or text),
             "ts": str(row.get("ts") or ""), "source": str(source or "web"), "chat_id": chat_id,
             "sender_session_id": "", "client_message_id": client_message_id,
-            **projection_fields(row),
+            **projection_fields(row, drive_root),
         }
         if row.get("ingress_accepted") is True:
             echo["ingress_accepted"] = True  # the row's own fact: live matches history replay

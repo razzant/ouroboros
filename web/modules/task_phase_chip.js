@@ -408,7 +408,7 @@ export function setLiveCardPhase(record, phase = 'working', text = '', className
 // expanded card says about its chip or amount, or its list of labelled facts.
 export function ownLiveDetail(record, key) {
     const own = node => Boolean(node?.dataset && key in node.dataset);
-    for (const node of record?.root?.children || []) {
+    for (const node of (record?.episodeDisclosure || record?.root)?.children || []) {
         if (own(node)) return node;
         if (node.classList?.contains('chat-live-details')) {
             const line = [...(node.children || [])].find(own);

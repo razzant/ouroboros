@@ -311,9 +311,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
-        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, task_metadata)
+        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, msg.get("task_metadata"))
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -363,12 +362,12 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
 
         from supervisor.message_bus import record_inbound_message
 
-        # The same writer mints ordinary ingress and validates preaccepted
-        # skill deliveries; the latter already have their one canonical row.
+        # The writer validates or mints the canonical row and may resolve Reply in task metadata.
         origin_message_ref = record_inbound_message(
             bridge, msg, chat_id=chat_id, user_id=user_id,
             client_message_id=client_message_id, text=log_text, ts=now_iso,
         )
+        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         if task_metadata or msg.get("accepted_source_ref"):
             task_metadata = {k: v for k, v in (task_metadata or {}).items() if k != "_host_operation"}
             if msg.get("accepted_source_ref"):

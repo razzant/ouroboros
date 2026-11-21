@@ -397,7 +397,7 @@ class HistorySource:
 
     def _entries(self, rows):
         from ouroboros.chat_references import projection_fields  # the row's address, from the stored row alone
-        return self._warmed([{**row.row, **projection_fields(row.row), "history_id": row.history_id,
+        return self._warmed([{**row.row, **projection_fields(row.row, self.root), "history_id": row.history_id,
                               "history_position": {"source": self.source, "offset": row.seq},
                               "_history_end": row.end} for row in rows])
 

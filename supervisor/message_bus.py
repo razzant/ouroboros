@@ -246,7 +246,7 @@ class LocalChatBridge:
         for key in (
             "sender_label", "sender_session_id", "client_message_id", "transport",
             "image_base64", "image_mime", "image_caption", "suppress_chat_log",
-            "task_constraint", "task_metadata", "accepted_source_ref", "accepted_source_row", "received_at",
+            "task_constraint", "task_metadata", "accepted_reply", "accepted_source_ref", "accepted_source_row", "received_at",
         ):
             value = msg.get(key)
             if value not in (None, "", 0):
@@ -352,6 +352,7 @@ class LocalChatBridge:
         suppress_chat_log: bool = False,
         task_constraint: Optional[Dict[str, Any]] = None,
         task_metadata: Optional[Dict[str, Any]] = None,
+        accepted_reply: Optional[Dict[str, Any]] = None,
         accepted_source_ref: Optional[Dict[str, Any]] = None,
         accepted_source_row: Optional[Dict[str, Any]] = None,
         received_at: str = "",
@@ -397,6 +398,7 @@ class LocalChatBridge:
             "suppress_chat_log": bool(suppress_chat_log),
             "task_constraint": dict(task_constraint or {}),
             "task_metadata": dict(task_metadata or {}),
+            **({"accepted_reply": accepted_reply} if accepted_reply else {}),
             "accepted_source_ref": dict(accepted_source_ref or {}),
             "accepted_source_row": dict(accepted_source_row or {}),
             "received_at": received_at,
@@ -1163,6 +1165,7 @@ class LocalChatBridge:
         image_caption: str = "",
         task_constraint: Optional[Dict[str, Any]] = None,
         task_metadata: Optional[Dict[str, Any]] = None,
+        accepted_reply: Optional[Dict[str, Any]] = None,
         chat_id: int = 1,
         project_id: str = "",
         dispatch=None,
@@ -1177,6 +1180,7 @@ class LocalChatBridge:
         self.enqueue_local_message(
             text,
             suppress_chat_log=suppress_chat_log,
+            accepted_reply=accepted_reply,
             task_constraint=task_constraint,
             task_metadata=task_metadata,
         )

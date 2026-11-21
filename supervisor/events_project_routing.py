@@ -74,13 +74,15 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any], address: Optional[Dict[
     whose room the host decided (``chat_references.decided_reply_address``).
     """
     from ouroboros.chat_references import decided_reply_address, reference_from_row
+    from ouroboros.owner_relay import owner_source_row
     from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
 
     client_message_id = str(evt.get("client_message_id") or "").strip()
     try:
-        row = next((quote["owner_row"] for quote in evt.get("quotes") or []
-                    if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
-                    and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
+        quote = next((quote for quote in evt.get("quotes") or []
+                      if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
+                      and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
+        row = quote["owner_row"] if quote is not None else None
         source = evt.get("source_ref")
         if row is None and owner_message_ref_is_valid(source) and (
                 not client_message_id or source["client_message_id"] == client_message_id):
@@ -89,9 +91,18 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any], address: Optional[Dict[
             from supervisor.message_ingress import accepted_chat_message
 
             row = accepted_chat_message(ctx.DRIVE_ROOT, int(evt.get("chat_id") or 0), client_message_id)
-        if row and address is not None:
+        if not row:
+            return {}
+        if address is not None:
             address.update(decided_reply_address(row))
-        return reference_from_row(row) if row else {}
+        root = row.get("_owner_source_root") or ctx.DRIVE_ROOT
+        reference = reference_from_row(owner_source_row(row), root)
+        source_address = quote["source"].get("address") if quote else None
+        if source_address and source_address != reference["address"]:  # a re-carried row includes local presentation fields
+            from ouroboros.chat_references import resolve_reply
+
+            return resolve_reply(root, source_address)
+        return reference
     except Exception:
         log.debug("Routing notice origin unavailable for %s", client_message_id, exc_info=True)
         return {}

@@ -1919,7 +1919,7 @@ in collapsible original-content sections, never duplicate cards.
 
 **Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
-History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed.
+History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed. `Model handover` shows which routes were involved, whether a successor reply was recorded, and what the successor did: an accepted answer choice or a successful tool call other than schema discovery. An incomplete handover establishes no act. After one reminder, the successor can explicitly select the complete answer or its offered hash. An accepted choice clears the handover warning alone; other failures stay visible. Restoring the same task ID can recover a proved choice; a new task ID must select for itself. Files, Continue and `Model handover` follow one settled stored detail: the census read serves the card, a reveal joins it, an incomplete read is topped up once, and a failed review read keeps its ordinary Retry. An exact row jump opens what it lands in; folded children stay unread, retranslation is local.
 
 History placement is separate from the task's outcome: ordinary
 `Saving task history` and `Task history saved` appear only in task details and
@@ -2009,7 +2009,8 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   echo, the bubble says "Not confirmed as saved" with "Send again", which
   resends the same frame and id (the host rejoins it if it was saved after all,
   never a second message), and "Discard", which forgets this tab's copy (never
-  an upload). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
+  an upload); a selected reply, which left the composer when sent, adds "Send as
+  new" (below). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
   words carry the state. Light retains its existing opacity. The frame is kept, with no count bound,
   until that id's saved echo or history row settles it (a row the running host
   has not yet dispatched keeps it until the host says which): a bubble the feed
@@ -2024,8 +2025,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   running host) says "Saved, not delivered." and keeps Send again: the host
   hands that row over once. A kept message whose saved row a host process before
   a restart took says "Saved; delivery not confirmed." with Send as new, which
-  only puts the words back in the composer as a new message: nothing is
-  replayed. Rows nobody kept stay plain history ("Input saved"). That plain
+  only puts the words back in the composer, after words already typed, as a
+  new message: nothing is replayed. While Send is busy or the composer holds
+  a staged reply or file it asks to finish or clear that draft first; a
+  selected reply returns with its quote, and only into an empty composer.
+  Rows nobody kept stay plain history ("Input saved"). That plain
   saved fact is one quiet tick before the message's time, its words its
   accessible text and a pointer's title: saved, never read or started, so no
   second tick, and a row the host never said is saved shows none; a doubt, an
@@ -2033,29 +2037,28 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
-Reply addresses a row for Ouroboros to interpret, never routes; only the owner's Telegram chat, one feed for
-every room, gives a Reply to any message of a Project its own turn there (owner 18.11, taken to merge; the owner's 20.11
-challenge to a broader design went to the council), and any other Reply there stays its chat's turn
-(`skills/telegram/SKILL.md`). A Main
-reply to a Project message also appears there at its time as the same Main message (owner 28.10, A), without
-telling, waking or resuming anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row
-menus; work cards in menus only, never hover-only. Reply stages the composer's first-line strip
-(`Replying to`, quoted author, one line, ×; Esc cancels). Send carries the address; the host builds the
-snippet. Questions use their own field.
+Reply quotes a row for Ouroboros to interpret. In the owner’s bundled Telegram chat, a confirmed Project Reply
+opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`).
+A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
+(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+menu, questions their own field. Select words in one message for **Reply to quote** beside them or
+in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
+Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes
+the words, reply and files before waiting. A send refused before the socket or its queue took it keeps the draft; once taken, it frees the
+field for the next message, a passage like any other, and a later draft stays. Its bubble keeps the unconfirmed row: Send again reuses
+the message ID, and a passage's Send as new puts its words and quote back into an empty composer.
 
-One quote component serves bubbles, strips and relays: above the text, a 2 px
-bar and tint in the quoted author's ink (the tint lies on the quote glass, so inside a
-dark voice it reads as a shade of graphite cooled or warmed by the quoted author, not as
-a second bubble; inside the dark Ouroboros voice a quote of Ouroboros lies on that voice's
-capsule step, its author in the voice's readable word), one line cut on a word; a photo leads
-with its thumbnail. Pressing a reply quote reveals the exact row, loading its
-bounded page in this room when present, otherwise its available home. Containing
-timelines open and scroll; the line is focused and highlighted below the header.
-A card, portal or retained copy cannot substitute. Refusal/failure preserves the view and newest-following intent; a toast explains why, offering Try again
-only if a retry can differ. New gestures/navigation cancel the read. Only the quoted stream is positioned:
-the other (narration beside owner speech or vice versa) stays unloaded down that chain until `Scroll to
-latest message`. Old sources read no newer messages. Ouroboros quotes its addressee only when not directly
-above; its own card does not count.
+Bubbles, strips and relays share quote glass with a 2 px bar and the quoted author’s tint over the
+bubble’s graphite in dark mode. Ouroboros quoting Ouroboros uses its capsule step and readable
+author ink. Whole-row replies show the host preview. Passages label the sender’s selection and name
+the source author, including for screen readers. Show all expands the text. Photos lead with a thumbnail. Pressing a quote loads the exact row’s
+bounded page here if present, otherwise in its home. Timelines open and scroll to the focused row
+below the header. A passage also highlights its saved range; if it changed, a notice explains why
+only the row is marked. Cards, portals and retained copies cannot substitute. A failed jump keeps
+the view and newest-following intent; its toast offers Try again only for retryable failures.
+New gestures or navigation cancel the read. Only the quoted stream loads: its sibling stays
+unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
+messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):
@@ -2664,7 +2667,7 @@ action changes model/account only. Closing the chat disposes view resources
 without claiming it stopped the task; continuation requires the Ouroboros
 process to keep running.
 
-A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
+A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words” (unless that episode's own heading already carries the phrase verbatim), and the answer remains the run's own note when it finishes silently.
 While running, the server supplies Own time, the focus's cause label or the
 schedule's name in that slot; no summary leaves the title in place, with no
 invented sentence. Model waits, controls and temporary model changes last
@@ -2767,6 +2770,8 @@ cards keep their edges rather than taking the shared fade.
   installation; when two windows arrange at once the last change wins. A
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
+- **Beautiful Context.** One neutral button stands after the cards and the board's save note and
+  opens its frame in place below itself; the frame follows the card palette.
 
 ### Storage
 

@@ -414,22 +414,33 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
         if frontier is None:
             return {}
         facts = membership_facts(root)
-        grouped: Dict[str, List[Entry]] = {}
         projected = _projection_rows(root, frontier)
         # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
         facts.rooms.warm({str(entry[1].get(key) or "") for entry in projected
                           for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
+        from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
+        from ouroboros.room_membership import capture_reply_targets, unknown_target_rooms
+
+        def group():
+            grouped: Dict[str, List[Entry]] = {}
+            considered: Dict[str, List[Entry]] = {}
+            missing = set()
+            for entry in projected:
+                for room in rooms_of_row(entry[1], facts):
+                    grouped.setdefault(room, []).append(entry)
+                    if quiet is not None and entry[1].get("quiet_finish") is True:
+                        considered.setdefault(room, []).append(entry)
+                if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
+                    missing.update(unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms))
+            return grouped, considered, missing
+
+        grouped, considered, missing = capture_reply_targets(facts.rooms, group)
+        if quiet is not None:
+            for room, rows in considered.items():
+                quiet.setdefault(room, []).extend(rows)
         if gaps is not None:
-            from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
-            from ouroboros.room_membership import unknown_target_rooms
-        for entry in projected:
-            for room in rooms_of_row(entry[1], facts):
-                grouped.setdefault(room, []).append(entry)
-                if quiet is not None and entry[1].get("quiet_finish") is True:
-                    quiet.setdefault(room, []).append(entry)
-            if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
-                for room in unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms):
-                    gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
+            for room in missing:
+                gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
         rooms: Dict[str, List[Entry]] = {}
         timed = rooms_read_by_time(root, (entry[1] for entry in projected))  # every room at once, sealed rows or not
         for room, entries in grouped.items():

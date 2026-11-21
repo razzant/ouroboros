@@ -760,11 +760,11 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         if (map) layers.batch(() => pageNavigation.clear());
         if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
         if (!openOnly) { layers.back('project-toggle'); return; }
-        if (!latest && !(taskId && quizId)) return;
+        if (!sourceReveal && !latest && !(taskId && quizId)) return;
         const inst = projectInstances.get(project.id);
         // A notification also supersedes an older reveal and its paint in the room already on screen.
-        if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); }
-        return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest });
+        if (latest && !sourceReveal && !(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); }
+        return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest, sourceReveal, navigation });
     }
     const origin = pageNavigation.capture();
     // The room is the registry's. A row that names its room is its caller's own answer (or the row pressed in the list)
@@ -820,18 +820,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         syncNavigationState();
         } });
         if (movedToChat === false || navigation !== projectNavigationGeneration) return;
-        if (sourceReveal) {
-            const reveal = {};
-            projectReveals.set(project.id, reveal);
-            cancelProjectPaint(project.id, inst);
-            try {
-                return await inst.revealSource(sourceReveal.address,
-                    () => navigation === projectNavigationGeneration, sourceReveal.page);
-            } finally {
-                if (projectReveals.get(project.id) === reveal) projectReveals.delete(project.id);
-            }
-        }
-        await landInProject(project, inst, { taskId, quizId, latest, forcePaint: !inst.hasPaintedHistory?.() });
+        return await landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint: !inst.hasPaintedHistory?.() });
     } finally {
         projectPanelOpeningSince = 0;
     }
@@ -839,7 +828,18 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
 
 // Once visible, the room returns where it was left; following the newest message, unread lands on what arrived last
 // (DESIGN "Unread"); left reading older history, it is put back there (chat.js `resume`); a notification lands latest.
-async function landInProject(project, inst, { taskId, quizId, latest, forcePaint = false }) {
+async function landInProject(project, inst, { taskId, quizId, latest, sourceReveal, navigation, forcePaint = false }) {
+    if (sourceReveal) {
+        const reveal = {};
+        projectReveals.set(project.id, reveal);
+        cancelProjectPaint(project.id, inst);
+        try {
+            return await inst.revealSource(sourceReveal.address,
+                () => navigation === projectNavigationGeneration, sourceReveal.page, { locate: sourceReveal.locate });
+        } finally {
+            if (projectReveals.get(project.id) === reveal) projectReveals.delete(project.id);
+        }
+    }
     if (taskId && quizId) return revealProjectQuestion(project, inst, taskId, quizId);
     void (latest ? inst?.showLatest?.({ arrive: projectUnread(project) }) : inst?.resume?.(projectUnread(project)));
     void inst?.revealQuestion?.();  // a plain landing cancels any pending question reveal
@@ -868,7 +868,7 @@ async function resolveProjectRoom(project, navigation) {
 }
 
 // Resolve and read the exact destination before switching; failed lookups retain room/composer state.
-async function revealQuotedSource(address, chatId, isCurrent) {
+async function revealQuotedSource(address, chatId, isCurrent, locate = null) {
     const navigation = projectNavigationGeneration;
     const origin = pageNavigation.capture();
     const current = () => navigation === projectNavigationGeneration && isCurrent();
@@ -890,11 +890,11 @@ async function revealQuotedSource(address, chatId, isCurrent) {
         const matches = address.startsWith('task:') ? chatId === 1 && page.anchor.task_id === address.slice(5)
             : page.anchor.row_address === address && page.anchor.chat_id === chatId;
         if (!matches) return { state: 'unknown' };
-        if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent } });
+        if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent, locate } });
     }
     if (await showPage('chat', { reveal: true, origin }) === false) return null;
     const showing = projectNavigationGeneration;
-    return mainChat.revealSource(address, () => showing === projectNavigationGeneration, page);
+    return mainChat.revealSource(address, () => showing === projectNavigationGeneration, page, { locate });
 }
 
 window.addEventListener('ouro:open-task', async ({ detail }) => {
