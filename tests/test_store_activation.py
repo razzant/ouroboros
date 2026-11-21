@@ -386,6 +386,71 @@ def test_restart_census_refuses_a_maintenance_exit_until_confirmed(tmp_path, mon
         assert outcome["status"] == "switched" and len(switches) == 1
 
 
+def _background_owners(monkeypatch, tmp_path):
+    """Fresh owners in place of the three background children (a stop latches its owner for the process) and a
+    cleanup whose other owners do nothing."""
+    import importlib
+
+    import server
+    from ouroboros.maintenance import MaintenanceChild
+    from ouroboros.startup_historical_audit import BACKGROUND_CHILDREN
+    from ouroboros.storage import StorageCounter
+    from ouroboros.storage_free import FreeSpace
+
+    owners = [MaintenanceChild(), StorageCounter(), FreeSpace()]
+    for (module, name), owner in zip(BACKGROUND_CHILDREN, owners):
+        monkeypatch.setattr(importlib.import_module(module), name, owner)
+    monkeypatch.setattr("ouroboros.local_model._manager", None)
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
+    monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
+    monkeypatch.setattr("supervisor.workers.last_worker_exit_census", lambda: {"unconfirmed": []})
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    monkeypatch.setattr(server, "_restart_requested", threading.Event())
+    return owners
+
+
+@pytest.mark.parametrize("row", [0, 1, 2], ids=["maintenance-child", "storage-count", "storage-free"])
+def test_the_restart_cleanup_stops_and_counts_each_background_child(tmp_path, monkeypatch, row):
+    """Each owner of ``BACKGROUND_CHILDREN`` is asked to stop and its live child holds the census (the store
+    switch then refuses); once that child and its owner thread are done the census is empty. A row dropped from
+    the list fails here: its child would leave the census while it still runs."""
+    import server
+
+    owners = _background_owners(monkeypatch, tmp_path)
+    owner, signals, release = owners[row], [], threading.Event()
+    child = SimpleNamespace(poll=lambda: None, kill=lambda: signals.append("kill"))
+    owner._process, owner._thread = child, threading.Thread(target=release.wait, daemon=True)
+    owner._thread.start()
+    try:
+        assert server._emergency_process_cleanup()["live_children"] == [child]
+        assert all(each._stopped.is_set() for each in owners) and signals == ["kill"]
+    finally:
+        release.set()
+        owner._thread.join(5)
+    owner._process = None  # its owner thread returned and dropped the finished child
+    assert server._emergency_process_cleanup()["live_children"] == []
+
+
+def test_a_background_child_that_cannot_be_read_stops_none_and_raises(tmp_path, monkeypatch):
+    """All three are read before the first stop: an owner whose module is gone raises before any owner is
+    stopped (the restart exit then refuses, never a switch on an empty census), and a readable list stops all."""
+    import server
+    from ouroboros import startup_historical_audit
+
+    owners = _background_owners(monkeypatch, tmp_path)
+    server._emergency_process_cleanup()
+    assert all(each._stopped.is_set() for each in owners)
+    owners = _background_owners(monkeypatch, tmp_path)
+    rows = (*startup_historical_audit.BACKGROUND_CHILDREN, ("ouroboros.no_such_background_owner", "child"))
+    monkeypatch.setattr(startup_historical_audit, "BACKGROUND_CHILDREN", rows)  # the unreadable one comes last
+    with pytest.raises(ModuleNotFoundError):
+        server._emergency_process_cleanup()
+    assert not any(each._stopped.is_set() for each in owners)
+
+
 def test_maintenance_census_covers_a_spawn_before_the_child_handle_is_published():
     from ouroboros.maintenance import MaintenanceChild
 

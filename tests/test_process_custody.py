@@ -1,5 +1,6 @@
-"""Process custody: supervised spawn chokepoint, ledger, reaper, lifeline."""
+"""Process custody: supervised spawn chokepoint, who stops each process kind, ledger, reaper, lifeline."""
 
+import ast
 import json
 import multiprocessing
 import os
@@ -137,6 +138,279 @@ def test_spawn_sites_are_custodied_or_allowlisted():
         "process_custody.spawn_supervised (or record_process write-through) "
         "or extend the allowlist with a justification comment."
     )
+
+
+# Who stops each kind of child process at each door (owner, 21.11, «4A»). A production start whose function
+# names no kind here, or a kind no start names any more, fails the gate below. An entry is "<routine>: <name>",
+# a stop that door's routine refers to (checked; that the stop works stays with its owner's tests), or
+# "<fate>: <why>" where no door routine stops it: survives (a recorded decision keeps it), lifeline (it ends
+# with its parent: a POSIX lifeline, the Windows Job), waited (its starter waits for it inside one bounded
+# call), exits (the process ends itself at this door), outside (no server generation starts it).
+_DOOR_ROUTINES = {
+    "teardown": "server.py::lifespan",  # the finally around its yield: Quit/close, the start of Restart and Fault
+    "cleanup": "server.py::_emergency_process_cleanup",  # Restart (planned, owner) and a direct install's Fault
+    "owner restart": "ouroboros/server_restart.py::_stop_owned_work",
+    "owned stop": "ouroboros/owned_shutdown.py::_memory_owners",  # what stop_owned_work asks in this process
+    "panic": "ouroboros/server_control.py::execute_panic_stop",
+    "worker exit": "supervisor/worker_process.py::request_worker_owned_stops",  # a worker's own owners
+    "launcher close": "launcher.py::main._on_closing",
+    "launcher reaper": "ouroboros/launcher_server_reaper.py::kill_runtime_orphans",
+    "quit engine": "ouroboros/launcher_server_reaper.py::QuitEngineStop._stop",
+    "launcher panic": "ouroboros/launcher_background.py::Background.request_panic",
+}
+_DOORS = {
+    "quit": {"teardown", "owned stop", "launcher close", "launcher reaper", "quit engine"},
+    "restart": {"teardown", "cleanup", "owner restart", "owned stop"},
+    "panic": {"panic", "worker exit", "launcher reaper", "launcher panic"},
+    "fault": {"teardown", "cleanup", "owned stop"},
+}
+_FATES = {"survives", "lifeline", "waited", "exits", "outside"}
+_LAUNCH_FUNCTIONS = {"ouroboros/process_custody.py::spawn_supervised",  # the shared launches: their callers start
+                     "ouroboros/startup_historical_audit.py::spawn_maintenance_job"}
+_PROCESS_KINDS = {
+    "ouroboros/claudexor_daemon.py::OwnedClaudexorDaemon._spawn": "engine",
+    "ouroboros/extension_companion.py::CompanionSupervisor.start": "companion",
+    "ouroboros/local_model.py::LocalModelManager.start_server": "local model",
+    "ouroboros/local_model.py::LocalModelManager._run_install": "local model",  # no ledger row: no next-start reap
+    "ouroboros/maintenance.py::MaintenanceChild._run": "maintenance child",
+    "ouroboros/storage.py::StorageCounter._run": "storage count",
+    "ouroboros/storage_free.py::FreeSpace._size": "free space sizing",
+    "ouroboros/startup_historical_audit.py::HistoricalAudit._run": "historical audit",
+    "ouroboros/server_control.py::restart_current_process": "restart successor",
+    "supervisor/worker_process.py::spawn_worker_process": "pool worker",
+    "supervisor/worker_pool_lifecycle.py::_record_worker_processes": "pool worker",
+    "supervisor/workers.py::get_event_q": "event bus",
+    "ouroboros/tools/services.py::_start_service": "task service",
+    "ouroboros/workspace_executor.py::start_service": "task service",
+    "ouroboros/workspace_executor.py::_handed_off_popen": "executor process",
+    "ouroboros/query_data_sql.py::run_sql": "task child",
+    "ouroboros/skill_publish_scanner.py::_run_capture": "task child",
+    "ouroboros/skill_publish_scanner.py::_run_detect": "task child",
+    "ouroboros/extension_process_runner.py::_child_process": "tracked command",
+    "ouroboros/marketplace/isolated_deps.py::_run": "tracked command",
+    "ouroboros/tools/shell_process.py::_tracked_subprocess_run": "tracked command",
+    "ouroboros/tools/skill_exec.py::_run_skill_subprocess": "tracked command",
+    "ouroboros/tools/skill_preflight.py::_run_check": "tracked command",
+    "ouroboros/work_domain.py::run_in_work": "tracked command",
+    "supervisor/git_ops.py::_attach_detached_head_locked": "tracked command",
+    "supervisor/git_ops.py::_run_git_process_bounded": "tracked command",
+    "supervisor/git_ops_reset.py::sync_runtime_dependencies": "tracked command",
+    "supervisor/update_merge.py::_run_update_smoke": "tracked command",
+    "ouroboros/delegate_named_evidence.py::private_review_paths": "waited helper",
+    "ouroboros/subagent_worktrees.py::_RawBlobWriter.write": "waited helper",
+    "ouroboros/tools/github.py::_capture_stdout": "waited helper",
+    "ouroboros/tools/vcs_read.py::_capture_read_git": "waited helper",
+    "ouroboros/workspace_patch_capture.py::_append_git_output": "waited helper",
+    "supervisor/update_carriers.py::_run_git": "waited helper",
+    "ouroboros/process_containment.py::ProcessContainer.spawn": "contained run",
+    "ouroboros/test_bytecode.py::run": "contained run",
+    "launcher.py::_hidden_popen": "server generation",
+    "ouroboros/launcher_bootstrap.py::spawn_bootstrap_command": "bootstrap command",
+    "ouroboros/launcher_bootstrap.py::exec_source_launcher": "bootstrap command",  # the source launcher successor
+    "ouroboros/platform_layer.py::open_path_external": "owner's program",
+    "ouroboros/body_switch.py::_windows_handoff": "outside the server",
+    "ouroboros/cli.py::_start_local_server": "outside the server",
+    "ouroboros/colab_bootstrap.py::_run_colab_git_network": "outside the server",
+    "ouroboros/launcher_windows_runtime.py::rehome_legacy_handoff": "outside the server",
+    "ouroboros/packaged_cli.py::_launch_desktop_app": "outside the server",
+}
+_STOPPERS = {
+    "engine": {
+        "quit": ("quit engine: OwnedClaudexorDaemon().stop_outcome",
+                 "survives: a close that keeps running, a crash, launcher EOF or a direct server's signal keep it"),
+        "restart": ("survives: Restart keeps the shared engine (owner 3A, 06.11)",
+                    "teardown: _stop_owned_daemon_for_new_pin", "cleanup: _stop_owned_daemon_for_new_pin"),
+        "panic": ("panic: daemon.panic_stop", "panic: get_owned_daemon().stop_outcome",
+                  "panic: stop_ledgered_processes"),
+        "fault": ("survives: the installation's engine outlives a fault; the launcher's crash path spares it",),
+    },
+    "companion": {
+        "quit": ("teardown: supervisor.stop_all", "launcher reaper: _pl.force_kill_pid"),
+        "restart": ("teardown: supervisor.stop_all", "cleanup: panic_kill_all"),
+        "panic": ("panic: panic_kill_all", "launcher reaper: _pl.force_kill_pid"),
+        "fault": ("teardown: supervisor.stop_all", "cleanup: panic_kill_all"),
+    },
+    "local model": {
+        "quit": ("teardown: get_manager().stop_server",),
+        "restart": ("teardown: get_manager().stop_server", "cleanup: model.panic_stop"),
+        "panic": ("panic: model.panic_stop", "panic: model.stop_server"),
+        "fault": ("teardown: get_manager().stop_server", "cleanup: model.panic_stop"),
+    },
+    "maintenance child": {
+        "quit": ("teardown: maintenance_child.stop",),
+        "restart": ("teardown: maintenance_child.stop", "cleanup: stop_background_children"),
+        "panic": ("panic: maintenance_child.stop",),
+        "fault": ("teardown: maintenance_child.stop", "cleanup: stop_background_children"),
+    },
+    "storage count": {
+        "quit": ("lifeline: the teardown does not ask it; the count child ends by its parent lifeline",),
+        "restart": ("cleanup: stop_background_children",),
+        "panic": ("panic: storage_count.stop",),
+        "fault": ("lifeline: under a launcher, as at Quit", "cleanup: stop_background_children"),
+    },
+    "free space sizing": {
+        "quit": ("lifeline: the teardown does not ask it; the sizing child ends by its parent lifeline",),
+        "restart": ("cleanup: stop_background_children",),
+        "panic": ("panic: storage_free.stop",),
+        "fault": ("lifeline: under a launcher, as at Quit", "cleanup: stop_background_children"),
+    },
+    "historical audit": {
+        "quit": ("lifeline: no product path starts it since 05.10; a started one ends by its parent lifeline",),
+        "restart": ("lifeline: as at Quit",),
+        "panic": ("panic: audit.stop",),
+        "fault": ("lifeline: as at Quit",),
+    },
+    "restart successor": {
+        "quit": ("survives: it is the next server generation (daemon scope), started by a direct restart or fault",),
+        "restart": ("survives: it is the handover itself",),
+        "panic": ("panic: stop_restart_successor",),
+        "fault": ("survives: a direct install's fault hands over to it",),
+    },
+    "pool worker": {
+        "quit": ("teardown: kill_workers",),
+        "restart": ("teardown: kill_workers", "cleanup: kill_workers", "cleanup: force_kill_pid",
+                    "owner restart: ctx.kill_workers"),
+        "panic": ("panic: kill_worker_tree",),
+        "fault": ("teardown: kill_workers", "cleanup: kill_workers", "cleanup: force_kill_pid"),
+    },
+    "event bus": {
+        "quit": ("teardown: _shutdown_supervisor_event_bus",),
+        "restart": ("teardown: _shutdown_supervisor_event_bus", "cleanup: force_kill_pid"),
+        "panic": ("panic: kill_worker_tree",),  # each multiprocessing child, this manager among them
+        "fault": ("teardown: _shutdown_supervisor_event_bus", "cleanup: force_kill_pid"),
+    },
+    "task service": {
+        "quit": ("teardown: stop_owned_work", "owned stop: kill_all_services"),
+        "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work"),
+        "panic": ("panic: kill_all_services", "worker exit: kill_all_services"),
+        "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
+    },
+    "executor process": {
+        "quit": ("teardown: stop_owned_work",),
+        "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work"),
+        "panic": ("panic: kill_all_foreground", "panic: kill_all_services", "worker exit: kill_all_foreground"),
+        "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
+    },
+    "task child": {
+        "quit": ("teardown: stop_owned_work", "teardown: kill_workers"),
+        "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work", "cleanup: kill_workers"),
+        "panic": ("panic: kill_worker_tree", "waited: its tool call waits for it with a deadline"),
+        "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
+    },
+    "tracked command": {
+        "quit": ("teardown: stop_owned_work", "owned stop: kill_all_tracked_subprocesses", "teardown: kill_workers"),
+        "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work", "cleanup: kill_workers"),
+        "panic": ("panic: kill_all_tracked_subprocesses", "worker exit: kill_all_tracked_subprocesses"),
+        "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
+    },
+    "waited helper": ("waited: its call waits for it and kills it on a timeout or a failure",),
+    "contained run": ("lifeline: a gate or test run's container; its guardian ends members whose owner is gone",),
+    "server generation": {
+        "quit": ("launcher close: stop_agent",),
+        "restart": ("exits: it exits 42 and the launcher starts the next generation",),
+        "panic": ("exits: it exits 99 from execute_panic_stop", "launcher panic: kill_process_tree"),
+        "fault": ("exits: it exits 1 and the launcher starts it again",),
+    },
+    "bootstrap command": {
+        "quit": ("launcher close: stop_bootstrap_commands",
+                 "survives: an interactive OS installer keeps its terminal after its setup window closes"),
+        "restart": ("outside: the launcher runs it before any server generation",),
+        "panic": ("launcher panic: stop_bootstrap_commands",),
+        "fault": ("outside: the launcher runs it before any server generation",),
+    },
+    "owner's program": ("survives: a path the launcher opened in the owner's own application is theirs",),
+    "outside the server": ("outside: a CLI's server or app start, a body or launcher handover, Colab's bootstrap",),
+}
+
+
+def _starts_a_process(func) -> bool:
+    """A custody launch, a tracked start or a raw birth (``Popen``, ``*.Process`` but ``psutil.Process``)."""
+    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+    return name in {"spawn_supervised", "record_process", "spawn_maintenance_job", "tracked_start",
+                    "contained_popen", "Popen"} or (name == "Process" and ast.unparse(func) != "psutil.Process")
+
+
+def _process_starts(root: pathlib.Path) -> set:
+    """``file::function`` of every start under the production trees, the shared launches excluded."""
+    starts = set()
+    for path in [*(root / "ouroboros").rglob("*.py"), *(root / "supervisor").rglob("*.py"),
+                 root / "server.py", root / "launcher.py"]:
+        if not path.exists():
+            continue
+        rel = path.relative_to(root).as_posix()
+
+        def visit(node, scope):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.Call) and _starts_a_process(child.func):
+                    starts.add(f"{rel}::{scope or '<module>'}")
+                named = isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                visit(child, f"{scope}.{child.name}".lstrip(".") if named else scope)
+
+        visit(ast.parse(path.read_text(encoding="utf-8")), "")
+    return starts - _LAUNCH_FUNCTIONS
+
+
+def _routine_names(root: pathlib.Path, ref: str):
+    """Every name, attribute chain and string ``file::qualname`` refers to (its finally around a ``yield``
+    for a lifespan); None when the routine is gone."""
+    file, _, qualname = ref.partition("::")
+    try:
+        node = ast.parse((root / file).read_text(encoding="utf-8"))
+        for part in qualname.split("."):
+            node = next(child for child in ast.iter_child_nodes(node) if getattr(child, "name", None) == part)
+    except (OSError, StopIteration):
+        return None
+    node = next((ast.Module(body=stmt.finalbody, type_ignores=[]) for stmt in ast.walk(node)
+                 if isinstance(stmt, ast.Try) and stmt.finalbody
+                 and any(isinstance(sub, ast.Yield) for part in stmt.body for sub in ast.walk(part))), node)
+    return ({ast.unparse(sub) for sub in ast.walk(node) if isinstance(sub, (ast.Name, ast.Attribute))}
+            | {sub.value for sub in ast.walk(node) if isinstance(sub, ast.Constant) and isinstance(sub.value, str)})
+
+
+def _stopper_problems(root: pathlib.Path, kinds: dict, stoppers: dict) -> list:
+    """Where the table disagrees with the tree at ``root``; empty when every start, row and entry holds."""
+    starts = _process_starts(root)
+    problems = [f"{start}: starts a process; name its kind in _PROCESS_KINDS" for start in sorted(starts - set(kinds))]
+    problems += [f"{start}: starts no process any more" for start in sorted(set(kinds) - starts)]
+    problems += [f"{kind}: no row in _STOPPERS" for kind in sorted(set(kinds.values()) - set(stoppers))]
+    problems += [f"{kind}: no start names this row" for kind in sorted(set(stoppers) - set(kinds.values()))]
+    names = {}
+    for kind, row in sorted(stoppers.items()):
+        cells = row if isinstance(row, dict) else dict.fromkeys(_DOORS, row)
+        for door in sorted(set(_DOORS) | set(cells)):
+            for entry in cells.get(door) or ("",):
+                head, _, rest = entry.partition(": ")
+                if head in _FATES and rest:
+                    continue
+                if door not in _DOORS or head not in _DOORS[door] or not rest:
+                    problems.append(f"{kind} at {door}: {entry!r} is no stop of this door's routines and no fate")
+                elif rest not in names.setdefault(head, _routine_names(root, _DOOR_ROUTINES[head]) or set()):
+                    problems.append(f"{kind} at {door}: {_DOOR_ROUTINES[head]} does not refer to {rest}")
+    return problems
+
+
+def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
+    """The real tree agrees with the table, and the gate reports each way a table and a tree part."""
+    assert _stopper_problems(REPO_ROOT, _PROCESS_KINDS, _STOPPERS) == []
+    (tmp_path / "ouroboros").mkdir()
+    (tmp_path / "ouroboros" / "tool.py").write_text(
+        "def start():\n    spawn_supervised(['x'])\n\n\ndef started_raw():\n    subprocess.Popen(['y'])\n",
+        encoding="utf-8")
+    (tmp_path / "server.py").write_text(
+        "async def lifespan(app):\n    thing.stop()\n    try:\n        yield\n    finally:\n        thing.halt()\n\n\n"
+        "def _emergency_process_cleanup():\n    thing.halt()\n", encoding="utf-8")
+    kinds = {"ouroboros/tool.py::start": "thing", "ouroboros/gone.py::run": "thing"}
+    stoppers = {"thing": {"quit": ("teardown: thing.halt",), "restart": ("teardown: thing.stop",),
+                          "panic": ("teardown: thing.halt",), "fault": ("magic: x",)},
+                "spare": ("survives: no start",)}
+    assert _stopper_problems(tmp_path, kinds, stoppers) == [
+        "ouroboros/tool.py::started_raw: starts a process; name its kind in _PROCESS_KINDS",
+        "ouroboros/gone.py::run: starts no process any more",
+        "spare: no start names this row",
+        "thing at fault: 'magic: x' is no stop of this door's routines and no fate",
+        "thing at panic: 'teardown: thing.halt' is no stop of this door's routines and no fate",
+        "thing at restart: server.py::lifespan does not refer to thing.stop",
+    ]
 
 
 @_POSIX_ONLY

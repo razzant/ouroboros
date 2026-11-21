@@ -1014,6 +1014,44 @@ def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
     assert "crash storm" not in call["result_reason"].lower()
 
 
+def test_emergency_cleanup_requests_the_local_model_and_makes_no_manager(monkeypatch):
+    """A teardown cut short (the restart watcher's bound, a fault's census before exec) may not have reached the
+    local model's stop: the cleanup requests its captured server as Panic does, with no lock or wait, and on a
+    server that never made a model manager it makes none."""
+    import subprocess
+    import sys
+
+    import server
+    from ouroboros import local_model, maintenance, storage, storage_free
+    from ouroboros.platform_layer import subprocess_new_group_kwargs
+
+    for module, name, fresh in ((maintenance, "child", maintenance.MaintenanceChild()),
+                                (storage, "count", storage.StorageCounter()),
+                                (storage_free, "free", storage_free.FreeSpace())):
+        monkeypatch.setattr(module, name, fresh)  # never the process singletons: a stop latches for the process
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
+    monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    monkeypatch.setattr(server, "_restart_requested", threading.Event())
+    monkeypatch.setattr(local_model, "_manager", None)
+    server._emergency_process_cleanup()
+    assert local_model._manager is None, "the cleanup provisions no model manager"
+    manager = local_model.LocalModelManager()
+    manager._proc = subprocess.Popen(  # in its own group, as the model's server is
+        [sys.executable, "-c", "import time; time.sleep(60)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **subprocess_new_group_kwargs())
+    monkeypatch.setattr(local_model, "_manager", manager)
+    try:
+        server._emergency_process_cleanup()
+        assert manager._proc.wait(timeout=10) is not None, "the captured model server is stopped"
+    finally:
+        if manager._proc.poll() is None:
+            manager._proc.kill()
+            manager._proc.wait(timeout=5)
+
+
 def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_path):
     from ouroboros import server_control
 
