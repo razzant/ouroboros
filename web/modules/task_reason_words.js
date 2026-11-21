@@ -78,9 +78,15 @@ export const TASK_CAUSE_PHRASES = {
     accounting_wait_expired: "Accounting access did not recover within this turn’s wait window",
     delivery_control_degraded: "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     authoring_handover_incomplete: "The replacement model stopped before resuming tool work.",
-    // A helper set to run as a coding session that finished without a succeeded run of it (subagent_bootstrap).
-    configured_actor_incomplete: "This subagent was set to run as a coding session, and no such run succeeded; its answer came without one.",
-    configured_actor_unknown: "This subagent was set to run as a coding session; whether that run succeeded is unknown.",
+    // A helper set to run as a coding session: keys picked by configuredActorCauseKey, not reason codes.
+    configured_actor_first_undetermined: "First coding attempt: outcome unknown.",
+    configured_actor_first_failed: "First coding attempt failed.",
+    configured_actor_first_cancelled: "First coding attempt cancelled.",
+    configured_actor_first_interrupted: "First coding attempt interrupted.",
+    configured_actor_first_succeeded: "First coding session finished.",
+    configured_actor_first_succeeded_source_unverified: "First coding session ended; brief coverage unverified.",
+    configured_actor_first_refused: "First coding attempt: start refused.",
+    configured_actor_not_started: "First coding attempt did not start.",
     delegated_custody_unreconciled: "Some delegated work was never reconciled.",
     // The one non-reason-code key: the task-result FIELD terminal_plan_review_open, a standing limitation.
     terminal_plan_review_open: "The plan review was still open when this answer was delivered",
@@ -129,6 +135,50 @@ export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'dele
 export function deliveredAnswerCause(record, reason = 'finalization_incomplete') {
     return reason === 'finalization_incomplete' && record?.reason_code === reason && record.terminal_origin === 'model_final'
         && record.finalization_recovery?.answer === 'delivered' ? 'finalization_incomplete_delivered' : '';
+}
+
+// Twin of tool_error_words.first_attempt_cause_key: the sentence key the stored actor_first_terminal PROVES about the
+// FIRST coding attempt, else ''. The typed witness is the single source — no producer status×reason matrix is
+// re-derived here (a duplicated list reads every new producer fact as unknown). Closed vocabularies match with
+// includes(), never a property lookup, so an inherited key ('constructor') is no state; strict types, never coerced.
+// Witnesses: an initial_execution.state out of FIRST_ATTEMPT_STATES with its own run id (a refused start:
+// 'failed_definite' without one; a settled success whose work-order coverage was never confirmed carries
+// 'succeeded_source_unverified' and proves only the ending), or a typed zero-run receipt — the decision-as-status spelling,
+// or a validated historical 'complete' receipt that still proves no physical start while the fact stays unknown.
+const FIRST_ATTEMPT_STATES = ['failed', 'cancelled', 'interrupted', 'succeeded', 'succeeded_source_unverified'];
+export function firstAttemptCauseKey(execution) {
+    const fact = execution?.actor_first_terminal;
+    if (!fact || typeof fact !== 'object' || !['incomplete', 'unknown'].includes(fact.status) || typeof fact.reason !== 'string') return '';
+    if (fact.zero_run === true) {
+        if (fact.zero_run_decision === fact.status && fact.reason === `configured_actor_zero_run_${fact.status}`) return 'configured_actor_not_started';
+        return fact.status === 'unknown' && fact.zero_run_decision === 'complete' && fact.reason === 'historical_zero_run_complete'
+            ? 'configured_actor_not_started' : '';
+    }
+    const initial = fact.initial_execution;
+    if (!initial || typeof initial !== 'object') return '';
+    const { state, run_id: runId } = initial;
+    if (FIRST_ATTEMPT_STATES.includes(state)) {
+        return typeof runId === 'string' && runId.trim() !== '' ? `configured_actor_first_${state}` : '';
+    }
+    const noRun = runId === undefined || runId === null || (typeof runId === 'string' && runId.trim() === '');
+    return state === 'failed_definite' && noRun ? 'configured_actor_first_refused' : '';
+}
+
+// Twin of tool_error_words.configured_actor_cause_key: the reason codes stay as recorded; the words come from the
+// proven first-attempt fact only when the fact's own status matches the code, else the conservative sentence.
+export function configuredActorCauseKey(reason, execution) {
+    if (typeof reason !== 'string') return '';
+    if (reason !== 'configured_actor_incomplete' && reason !== 'configured_actor_unknown') return reason;
+    const fact = execution?.actor_first_terminal;
+    const undetermined = 'configured_actor_first_undetermined';
+    if (!fact || typeof fact !== 'object' || fact.status !== reason.slice('configured_actor_'.length)) return undetermined;
+    return firstAttemptCauseKey(execution) || undetermined;
+}
+
+// Twin of tool_error_words.first_attempt_clause_key: the proven key to state BESIDE a different primary reason.
+export function firstAttemptClauseKey(reason, execution) {
+    return typeof reason !== 'string' || reason === 'configured_actor_incomplete' || reason === 'configured_actor_unknown'
+        ? '' : firstAttemptCauseKey(execution);
 }
 
 export function taskReasonPhrase(code) {

@@ -5,7 +5,7 @@ import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatC
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
 import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
-import { compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
+import { childLineCause, compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
@@ -117,11 +117,12 @@ export function buildTimelineItemHtml(item, record) {
     const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
     const displayHeadline = delegated ? delegatedHeadline(delegated)
         : expanded && item.fullHeadline ? item.fullHeadline : item.headline;
-    // P3: when expanded, prefer the genuinely-full fetched output, then the capped
-    // fullBody, then the preview body. A server-truncated line shows the fetched full
-    // text in a bounded-scroll box so a huge research output never grows the chat.
-    const displayBody = expanded ? (item.fullReadError || item.fetchedFull || item.fullBody || item.body) : item.body;
+    // The full read fills gaps; a later accepted frame owns any fact it states, including an empty debt list.
     const showingFetched = expanded && Boolean(item.fetchedFull);
+    const facts = showingFetched && item.fetchedCause && (item.childCause === item.fetchedCauseBasis
+        ? item.fetchedCause : { ...item.fetchedCause, ...item.childCause });
+    const fetched = facts ? [item.fetchedFull, childLineCause(facts).detail].filter(Boolean).join('\n\n') : item.fetchedFull;
+    const displayBody = expanded ? (item.fullReadError || fetched || item.fullBody || item.body) : item.body;
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
@@ -1385,7 +1386,7 @@ export function costMetaKeys(src) {
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
-    'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin',
+    'delegated_activity', 'outcome_axes', 'delegated_runs_unreconciled', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning', 'place_origin',
 ];
 export function cardMetaKeys(src) {
     return Object.fromEntries(CARD_META_KEYS.map((key) => [key, src?.[key]]));

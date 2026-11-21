@@ -541,6 +541,11 @@ def _finish_task_done_dispatch(
                 progress_meta["outcome_axes"] = task_done_event["outcome_axes"]
             if task_done_event.get("reason_code"):
                 progress_meta["reason_code"] = str(task_done_event["reason_code"])
+            # The row's CURRENT custody debt, an explicit empty list included: a stored stamp must not read as live debt.
+            for source in (effective_result, task_done_event):
+                if isinstance(source.get("delegated_runs_unreconciled"), list):
+                    progress_meta["delegated_runs_unreconciled"] = list(source["delegated_runs_unreconciled"])
+                    break
             if "review_projection" in task_done_event:
                 progress_meta["review_projection"] = task_done_event["review_projection"]
             if "model_execution" in task_done_event:
@@ -818,7 +823,8 @@ def _resolve_lifecycle_fault(
         "outcome_axes": normalize_outcome_axes(stored),
     }
     for key in ("review_projection", "review_status", "artifact_status", "artifact_bundle", "root_phase_checkpoint",
-                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin"):
+                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin",
+                "delegated_runs_unreconciled"):
         if key in stored:
             task_done_event[key] = stored[key]
     try:
@@ -1104,6 +1110,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             task_done_event[name] = dict(final_task_result[name])
     if final_task_result.get("terminal_origin"):
         task_done_event["terminal_origin"] = str(final_task_result["terminal_origin"])
+    if isinstance(final_task_result.get("delegated_runs_unreconciled"), list):  # the current debt, an explicit [] included
+        task_done_event["delegated_runs_unreconciled"] = list(final_task_result["delegated_runs_unreconciled"])
     review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None
     if not isinstance(review_status, dict):
         review_status = evt.get("review_status")
