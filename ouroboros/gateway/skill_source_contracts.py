@@ -304,6 +304,31 @@ class StarterConnection(TypedDict, total=False):
     options: List[Dict[str, Any]]
 
 
+class ConnectionIdentityRequest(TypedDict):
+    """``POST /api/onboarding/connection/identity``: the built-in skill whose card is open and the token typed there."""
+
+    skill: str
+    token: str
+
+
+class ConnectionIdentityResponse(TypedDict, total=False):
+    """Which account the token names (``ok`` with ``username``), or why not: ``cause`` ``refused`` (the service
+    rejected it) or ``unreachable``; ``error`` when the check itself did not run (400, 404, 500). Never the token."""
+
+    ok: Required[bool]
+    username: str
+    cause: str
+    error: str
+
+
+class CompletionConnection(TypedDict):
+    """One skill's entry in the completion's ``connections`` ({skill: CompletionConnection}): its card's token and
+    code fields by their declared names, and its options by key (the declared on or off value)."""
+
+    fields: Dict[str, str]
+    options: Dict[str, str]
+
+
 class StarterSkillItem(TypedDict, total=False):
     """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
     ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
@@ -342,5 +367,6 @@ __all__ = [
     "SkillSourceChangeResponse", "SkillSourceProbeRequest", "SkillSourceProbeResponse", "SkillSourceRow",
     "SkillSourceSuggestion", "SkillSourcesResponse", "SkillUninstallResponse", "SkillUpdateRequest",
     "SkillUpdateResponse",
+    "CompletionConnection", "ConnectionIdentityRequest", "ConnectionIdentityResponse",
     "StarterConnection", "StarterSkillItem", "StarterSkillsResponse",
 ]

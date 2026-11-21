@@ -751,6 +751,7 @@ D20 = "Presence"
 "ouroboros/skill_source_install.py" = "D14"
 "ouroboros/skill_sources.py" = "D14"
 "ouroboros/skill_starter.py" = "D14"
+"ouroboros/onboarding_connections.py" = "D14"  # a built-in skill's setup card: its check, its keys at Finish, its grant
 "ouroboros/skill_review_history.py" = "D14"
 "ouroboros/skill_review_runner.py" = "D14"
 "ouroboros/skill_review_status.py" = "D14"

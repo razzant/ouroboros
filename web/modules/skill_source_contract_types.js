@@ -242,6 +242,31 @@
  */
 
 /**
+ * `POST /api/onboarding/connection/identity`: the built-in skill whose card is open and the token typed there.
+ * @typedef {Object} ConnectionIdentityRequest
+ * @property {string} skill
+ * @property {string} token
+ */
+
+/**
+ * Which account the token names (`ok` with `username`), or why not: `cause` `refused` or `unreachable`; `error` when
+ * the check itself did not run. Never the token.
+ * @typedef {Object} ConnectionIdentityResponse
+ * @property {boolean} ok
+ * @property {string=} username
+ * @property {string=} cause
+ * @property {string=} error
+ */
+
+/**
+ * One skill's entry in the completion's `connections`: its card's token and code fields by their declared names and
+ * its options by key.
+ * @typedef {Object} CompletionConnection
+ * @property {Object} fields
+ * @property {Object} options
+ */
+
+/**
  * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` and
  * `pairing.code` name its secret fields, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`,
  * `pairing.hint`, `pairing.note` and `options` are the skill's own words.
