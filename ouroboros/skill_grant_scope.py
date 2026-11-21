@@ -19,9 +19,12 @@ that the owner granted to an earlier version of this installation does not keep 
 loading: that use is refused, saying why, until the bytes are accepted (``waiting_permissions``).
 A permission checked only at load waits for acceptance as before.
 
-A custom secret requested only because it now exists in Settings, which the grant decision never
-covered (it is not in the record's ``requested_keys``), is not passed and keeps nothing from running
-(``pending_keys``): the skill runs with its previous access and readiness names the key.
+A custom secret requested only because it now exists in Settings, which this installation's grant decision
+never covered (it is not in the record's ``requested_keys``), is not passed and keeps nothing from running
+(``pending_keys``): the skill runs with its previous access and readiness names the key. A key the decision
+covered and did not grant blocks, and so does every missing key without such a decision (a deleted record is a
+revocation); an acceptance of a skill that declares keys and has no record yet records an empty decision
+(``skill_acceptance.carry_if_accepted``), so a key saved later finds one.
 """
 
 from __future__ import annotations
@@ -98,10 +101,13 @@ def grant_view(drive_root: pathlib.Path, skill: Any, grants: Dict[str, Any], req
                                if perm in set(grants.get("granted_permissions") or [])]
         if earlier_keys or earlier_permissions:
             earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions}
+    # Pending needs a decision of this installation to compare with: no record (a deleted one revokes), or one of
+    # other bytes and another installation, leaves every missing key blocking, as before.
     always_requested = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS} | set(REQUESTABLE_WHEN_ABSENT)
     covered = set(grants.get("requested_keys") or [])
-    pending = [key for key in requested
-               if key not in granted and key not in always_requested and key not in covered]
+    decided_here = "requested_keys" in grants and (same_bytes or same_install)
+    pending = [key for key in requested if decided_here
+               and key not in granted and key not in always_requested and key not in covered]
     waiting = [perm for perm in (earlier_grant or {}).get("permissions", [])
                if perm in USE_TIME_PERMISSIONS and same_install]
     return {"granted_keys": granted, "granted_permissions": granted_permissions, "earlier_grant": earlier_grant,

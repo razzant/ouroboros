@@ -1458,6 +1458,29 @@ def test_a_key_saved_after_the_grant_is_not_passed_and_unloads_nothing(tmp_path,
     assert blocked.notes == [] and any(item.startswith("missing_grants") for item in blocked.blockers)
 
 
+def test_an_accepted_skill_waiting_for_its_first_key_gets_an_empty_decision(tmp_path, monkeypatch):
+    """B″ without an earlier grant: a skill that declares a key nobody has saved yet requests nothing, so no grant
+    is written. Its acceptance records an empty decision, so the key saved later is pending; without a decision
+    (never accepted, or the record deleted: a revocation) the same key blocks, as before."""
+    from ouroboros import config
+    from ouroboros.skill_acceptance import carry_if_accepted
+    from ouroboros.skill_loader import grant_status_for_skill, load_skill_grants
+
+    settings = {}
+    monkeypatch.setattr(config, "load_settings", lambda: dict(settings))
+    drive_root = tmp_path / "drive"
+    skill = _installed_extension(drive_root, name="mailer", env=("MAILER_TOKEN",), permissions=())
+    undecided = _installed_extension(drive_root, name="other", env=("MAILER_TOKEN",), permissions=())
+    assert carry_if_accepted(drive_root, skill) is False  # nothing to carry; the decision is recorded
+    assert load_skill_grants(drive_root, "mailer")["requested_keys"] == []
+    assert "requested_keys" not in load_skill_grants(drive_root, "other")
+    settings["MAILER_TOKEN"] = "saved later"
+    later = grant_status_for_skill(drive_root, skill)
+    assert later["pending_keys"] == ["MAILER_TOKEN"] and later["blocked"] is False and later["granted_keys"] == []
+    without = grant_status_for_skill(drive_root, undecided)
+    assert without["pending_keys"] == [] and without["blocked"] is True
+
+
 def test_grant_status_supports_extension_skills(tmp_path):
     """v5.2.2 dual-track grants: ``type: extension`` skills are now
     eligible for owner core-key grants alongside ``type: script``."""

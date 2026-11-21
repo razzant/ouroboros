@@ -2826,8 +2826,9 @@ def test_a_deferred_reconcile_writes_the_name_s_record_only_from_the_held_folder
 def test_a_grant_still_short_of_its_requests_keeps_the_switch_and_this_folder_s_pending_exit(
     tmp_path, monkeypatch, case: str,
 ) -> None:
-    """Saved Settings added a key the skill requests, so its companion was stopped and still awaits exit. The owner's
-    Grant with Enable grants only the other key: the grant answers 200, and its Enable keeps the Toggle's typed
+    """Saved Settings added a key the skill requests; while no grant decision of its installation covers it, it is
+    pending (owner 1A/B″, 21.11) and unloads nothing. Once the owner's decision covers it without granting it, the
+    companion is stopped and still awaits exit. The owner's Grant with Enable grants only the other key: the grant answers 200, and its Enable keeps the Toggle's typed
     refusal and words, before any write or reconcile. Whatever ended that Enable before an answer of its own (the
     ``grants`` precheck, another one, an unknown failure), the grant answers the saved switch as it reads, never the
     effective one: On or Off, no saved file at all is Off, a package a deployment requires is Off while saved Off,
@@ -2874,6 +2875,8 @@ def test_a_grant_still_short_of_its_requests_keeps_the_switch_and_this_folder_s_
     try:
         assert extension_loader.reconcile_extension(loaded.name, drive, lambda: {}, repo_path=str(repo))["live_loaded"]
         settings["ACME_TOKEN"] = "synthetic"  # a custom key saved in Settings joins the request, missing
+        assert extension_loader.reconcile_extension(loaded.name, drive, lambda: {}, repo_path=str(repo))["live_loaded"]
+        save_skill_grants(drive, loaded.name, keys[:1], content_hash=loaded.content_hash, requested_keys=keys)
         if case == "required_off":  # a deployment requires exactly these bytes: they read On over a saved Off
             required = types.SimpleNamespace(name=loaded.name, path=str(loaded.skill_dir),
                                              content_hash=loaded.content_hash, settings=())

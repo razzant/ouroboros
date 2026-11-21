@@ -116,15 +116,30 @@ def carry_grants_to_current(drive_root: pathlib.Path, skill: Any) -> bool:
 
 def carry_if_accepted(drive_root: pathlib.Path, skill: Any) -> bool:
     """At an acceptance event: carry this installation's grants when the current bytes are accepted
-    (``skill_loader.bytes_accepted``, the condition the automatic grant reads). Never raises."""
+    (``skill_loader.bytes_accepted``, the condition the automatic grant reads). A skill that declares keys and
+    has no grant record gets an empty decision for these bytes (granted nothing of what it requests now), so a
+    key saved later is pending, not a reason to stop it (``skill_grant_scope``). Never raises."""
     from ouroboros.skill_loader import bytes_accepted
 
     try:
         accepted = skill is not None and not skill.load_error and bytes_accepted(skill)
+        if accepted and skill.manifest.env_from_settings:
+            _record_empty_decision(pathlib.Path(drive_root), skill)
     except Exception:
         log.warning("Acceptance read failed for %s", getattr(skill, "name", "?"), exc_info=True)
         return False
     return accepted and carry_grants_to_current(pathlib.Path(drive_root), skill)
+
+
+def _record_empty_decision(drive_root: pathlib.Path, skill: Any) -> None:
+    """No grant record yet: record that these accepted bytes were granted nothing of their current request."""
+    from ouroboros.skill_grant_scope import install_identity
+    from ouroboros.skill_loader import load_skill_grants, requested_core_setting_keys, save_skill_grants
+
+    if "requested_keys" not in load_skill_grants(drive_root, skill.name):
+        save_skill_grants(drive_root, skill.name, [], content_hash=skill.content_hash,
+                          requested_keys=requested_core_setting_keys(list(skill.manifest.env_from_settings or [])),
+                          install_identity=install_identity(drive_root, skill))
 
 
 def accept_grants(drive_root: pathlib.Path, skill: Any) -> Any:
