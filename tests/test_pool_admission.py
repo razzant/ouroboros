@@ -718,6 +718,7 @@ _WORKERS, _PER_ROOT = "OUROBOROS_MAX_WORKERS", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_P
     (_PER_ROOT, 64, False, 64),  # the owner's own number stays
     (_PER_ROOT, "", False, None),
     (_PER_ROOT, "abc", False, 6),  # a typo is finite, never "no number"
+    (_PER_ROOT, 0, False, 6),
     (_PER_ROOT, 6, True, 6),  # a 6 the new Settings saved carries the marker and is the owner's
 ])
 def test_a_saved_worker_number_reads_as_migration_a_says_and_never_repeats(tmp_path, monkeypatch, key, saved, marked,
@@ -761,31 +762,34 @@ def test_an_earlier_release_document_reads_its_saved_six_as_no_number(tmp_path, 
 
 
 @pytest.mark.parametrize("provenance", [False, True])
-def test_legacy_worker_cap_projection_does_not_undo_migration(tmp_path, monkeypatch, provenance):
+@pytest.mark.parametrize("key, legacy", [(_WORKERS, 10), (_PER_ROOT, 6)])
+def test_legacy_worker_cap_projection_does_not_undo_migration(tmp_path, monkeypatch, provenance, key, legacy):
     from ouroboros import config
-    from ouroboros.runtime_limits import get_max_workers
+    from ouroboros.runtime_limits import get_max_active_subagents_per_root, get_max_workers
     from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV
-    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY, SUBAGENT_CAP_FORMAT_KEY
 
+    marker, getter = {_WORKERS: (OWNER_CAP_FORMAT_KEY, get_max_workers),
+                      _PER_ROOT: (SUBAGENT_CAP_FORMAT_KEY, get_max_active_subagents_per_root)}[key]
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"OUROBOROS_MAX_WORKERS": 10}), encoding="utf-8")
+    path.write_text(json.dumps({key: legacy}), encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
     inherited = {}
-    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, "OUROBOROS_MAX_WORKERS": 10}, environ=inherited)
-    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", inherited["OUROBOROS_MAX_WORKERS"])
+    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, key: legacy}, environ=inherited)
+    monkeypatch.setenv(key, inherited[key])
     monkeypatch.delenv(PROJECTED_SETTINGS_ENV, raising=False)
     if provenance:
         monkeypatch.setenv(PROJECTED_SETTINGS_ENV, inherited[PROJECTED_SETTINGS_ENV])
     loaded = config.load_settings()
-    assert loaded[OWNER_CAP_FORMAT_KEY] == 1 and loaded["OUROBOROS_MAX_WORKERS"] == ""
+    assert loaded[marker] == 1 and loaded[key] == ""
     config.apply_settings_to_env(loaded, environ=inherited)
-    assert "OUROBOROS_MAX_WORKERS" not in inherited
-    monkeypatch.delenv("OUROBOROS_MAX_WORKERS")
+    assert key not in inherited
+    monkeypatch.delenv(key)
     config.save_settings(loaded)
-    assert get_max_workers() is None
-    assert json.loads(path.read_text(encoding="utf-8"))["OUROBOROS_MAX_WORKERS"] == ""
-    config.save_settings({**loaded, "OUROBOROS_MAX_WORKERS": 10})
-    assert config.load_settings()["OUROBOROS_MAX_WORKERS"] == 10, "after migration, a chosen 10 stays chosen"
+    assert getter() is None
+    assert json.loads(path.read_text(encoding="utf-8"))[key] == ""
+    config.save_settings({**loaded, key: legacy})
+    assert config.load_settings()[key] == legacy, "after migration, a chosen legacy number stays chosen"
 
 
 def test_the_environment_configures_only_an_unauthored_worker_cap(tmp_path, monkeypatch):
