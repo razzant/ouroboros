@@ -430,8 +430,20 @@ def test_a_resume_cites_the_owners_message_after_a_panic_and_one_cite_covers_the
                               {"source": "owner_mailbox", "content": old, "msg_id": "m-old",
                                "ts": (started - timedelta(minutes=1)).isoformat()},
                               {"source": "owner_mailbox", "content": new, "msg_id": "m-new",
-                               "ts": (started + timedelta(minutes=1)).isoformat()}])
-    assert cited_owner_time(ctx, cited_owner_basis(ctx, new)[0]) == (started + timedelta(minutes=1)).isoformat()
+                               "ts": (started + timedelta(minutes=1)).isoformat(),
+                               "sent_at": (started + timedelta(seconds=50)).isoformat()}])  # sent after: counts
+    assert cited_owner_time(ctx, cited_owner_basis(ctx, new)[0]) == (started + timedelta(seconds=50)).isoformat()
+    # Telegram: a message the owner SENT before the Panic but the host accepted after it carries its send time
+    # (``sent_at``, the chat row's and the owner-words record's), and that time decides; an older copy sends none.
+    late = "Go on with the queue"
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": late, "chat_id": "7",
+                                  "client_message_id": "tg:7:5", "ts": (started + timedelta(minutes=2)).isoformat(),
+                                  "sent_at": (started - timedelta(seconds=30)).isoformat()})
+    assert cited_owner_time(ctx, cited_owner_basis(ctx, late)[0]) == (started - timedelta(seconds=30)).isoformat()
+    _receipt, outcomes, _events = _list(ctx, _resume_task, "sent-before", reason="all", task_ids=["saved"],
+                                        owner_words=late)
+    assert outcomes["saved"]["error"] == "panic_requires_owner_resume", "sent before the Panic: it does not count"
+    ctx.pending_events.clear()
     with invocation_scope({"tool_call_id": "invented"}):
         refused = json.loads(_resume_task(ctx, reason="all", task_ids=["sleeping"], owner_words="never said"))
     assert refused["error"] == "owner_words_unverified" and not ctx.pending_events

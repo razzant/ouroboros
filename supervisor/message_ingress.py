@@ -306,6 +306,8 @@ def _chat_record(
                 record[key] = stored_reply(meta[key]) if key == "reply_to" else dict(meta[key])  # no captured source
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
+        if meta.get("sent_at"):  # the carrier's own send time beside the host's acceptance ``ts``
+            record["sent_at"] = str(meta["sent_at"])
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
         if meta.get("card_press"):
@@ -506,7 +508,8 @@ def hand_over(root: Path, chat_id: int, message_id: str, name: Optional[str]) ->
     return dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process())
 
 
-def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, dispatch=None, **message) -> tuple[dict, bool]:
+def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, dispatch=None, sent_at: str = "",
+                         **message) -> tuple[dict, bool]:
     """Accept a named skill delivery once, then schedule/queue its exact source: ``(row, rejoined)``.
     The ingress lock serializes receipt-before-dispatch. A same-id retry rejoins without dispatch
     unless the row's dispatch is still owed (``pending``: the acceptor died before the handoff):
@@ -577,6 +580,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
                     transport=message.get("transport"), drive_root=root,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
+                                  **({"sent_at": sent_at} if sent_at else {}),
                                   **({"late_answer": late_answer} if late_answer else {}), **({"card_press": press} if press else {}),
                                   "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
                     dispatch=obligation(name, text, message))

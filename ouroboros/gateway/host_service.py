@@ -490,6 +490,14 @@ async def _api_allocate_internal(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "chat_id": chat_id})
 
 
+def _sent_at(value) -> str:
+    """An optional ``sent_at`` (ISO instant: when the owner's carrier says the message was sent, Telegram's
+    ``message.date``), kept on the accepted row; anything else is no time (an older skill sends none)."""
+    from ouroboros.work_stop import _instant
+
+    return str(value) if isinstance(value, str) and _instant(value) is not None else ""
+
+
 async def _api_chat_inject(request: Request) -> JSONResponse:
     """Inject one owner-channel message; correlate it when the caller names it.
 
@@ -663,7 +671,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
 
                 try:
                     _, rejoined = await run_sync_to_completion(
-                        accept_local_message, bridge, ctx.data_dir, text,
+                        accept_local_message, bridge, ctx.data_dir, text, sent_at=_sent_at(payload.get("sent_at")),
                         retain_inputs=pending_uploads.pop_all,
                         dispatch=functools.partial(dispatch_accepted_restart, bridge), **message,
                     )

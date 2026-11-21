@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import pathlib
 import threading
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import httpx
@@ -124,7 +125,9 @@ def _owner_ingress_fields(api, bot: str, chat_id: int, message: dict, update_id:
     reply = message.get("reply_to_message") if target is None else None
     address = target["address"] if target is not None else (
         _reply_reference(api, bot, chat_id, int(reply.get("message_id") or 0)) if isinstance(reply, dict) else "")
-    return {"client_message_id": client_id, **({"reply_to": address} if address else {})}
+    sent = int(message.get("date") or 0)  # Telegram's own send time: the host checks words written after a Panic by it
+    return {"client_message_id": client_id, **({"reply_to": address} if address else {}),
+            **({"sent_at": datetime.fromtimestamp(sent, timezone.utc).isoformat()} if sent > 0 else {})}
 
 
 def _reply_target(api, bot: str, chat_id: int, message: dict) -> dict:

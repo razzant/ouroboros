@@ -701,7 +701,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                      origin={"source_task_id": author or teller, "relayed_from_task_id": teller if author else None,
                                              "quiz_id": (answered or {}).get("quiz_id") or carried_answer.get("quiz_id"),
                                              "client_message_id": row.get("client_message_id"),
-                                             "chat_id": str(_row_chat_id(row)), "ts": row.get("ts"),
+                                             "chat_id": str(_row_chat_id(row)), "ts": row.get("ts"), "sent_at": row.get("sent_at"),
                                              "row_sha256": owner_row_identity(row)["row_sha256"],
                                              "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)

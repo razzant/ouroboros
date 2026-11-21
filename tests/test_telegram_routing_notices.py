@@ -586,3 +586,30 @@ def test_queued_technical_notice_uses_the_translation_under_its_original_receipt
         assert [sent["text"] for sent in phone.sent()] == [translated]
     finally:
         phone.plugin.telegram_i18n.configure(None)
+
+
+def test_an_owner_messages_telegram_send_time_rides_to_the_accepted_row(phone):
+    """The bridge sends Telegram's ``message.date`` as ``sent_at``; the host keeps a valid one on the accepted row
+    beside its own ``ts`` (owner words then read it: a message sent before a Panic counts by that time). An older
+    copy that sends none, or a value that is not an instant, keeps today's behaviour."""
+    from datetime import datetime, timezone
+
+    from ouroboros.gateway.host_service import _sent_at
+    from supervisor import message_bus
+
+    state = sys.modules[phone.plugin.__package__ + ".lib.telegram_state"]
+    message = {"message_id": 901, "date": 1795000000, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
+               "text": "go on"}
+    fields = state._owner_ingress_fields(phone.api, "", 42, message, 901)
+    assert fields["sent_at"] == datetime.fromtimestamp(1795000000, timezone.utc).isoformat()
+    receiver = SimpleNamespace(enqueue_local_message=lambda *_a, **_k: None)
+    row, _ = message_bus.accept_local_message(receiver, phone.data, "go on", chat_id=42, user_id=42,
+                                              source="skill:telegram", **fields)
+    assert row["sent_at"] == fields["sent_at"] and row["ts"] != row["sent_at"]
+    older = {**{key: value for key, value in message.items() if key != "date"}, "message_id": 902}
+    fields = state._owner_ingress_fields(phone.api, "", 42, older, 902)
+    assert "sent_at" not in fields
+    row, _ = message_bus.accept_local_message(receiver, phone.data, "go on again", chat_id=42, user_id=42,
+                                              source="skill:telegram", **fields)
+    assert "sent_at" not in row
+    assert _sent_at("yesterday") == "" and _sent_at(1795000000) == "" and _sent_at(fields.get("sent_at")) == ""
