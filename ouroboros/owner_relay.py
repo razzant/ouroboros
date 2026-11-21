@@ -480,7 +480,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                      origin={"source_task_id": author or teller, "relayed_from_task_id": teller if author else None,
                                              "quiz_id": (answered or {}).get("quiz_id") or carried_answer.get("quiz_id"),
                                              "client_message_id": row.get("client_message_id"),
-                                             "chat_id": row.get("chat_id"), "ts": row.get("ts"),
+                                             "chat_id": row.get("chat_id"), "ts": row.get("ts"), "sent_at": row.get("sent_at"),
                                              "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)
         line = carried_quote_line(quote, address=address, input_source=source)

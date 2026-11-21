@@ -596,7 +596,15 @@ def cited_owner_time(ctx: Any, basis: Mapping[str, Any] | None) -> str:
     ref, content = str(basis.get("msg_id") or ""), basis.get("content")
     for row in directive_owner_rows(ctx):
         if str(row.get("ref") or "") == ref and row.get("text") == content:
-            return str(row.get("ts") or "").removeprefix("received ")
+            origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+            twins = [item for item in _mapping(getattr(ctx, "_held_owner_messages", None)).values()
+                     if isinstance(item, Mapping) and _chat_ref(item) == ref]
+            twins += [item for item in getattr(ctx, "_owner_directives", None) or []
+                      if isinstance(item, Mapping) and ref and ref in (row_ref(item), str(item.get("msg_id") or ""))]
+            sent = (origin.get("sent_at") if ref == _door_ref(ctx) else "") or next(
+                (str(item["sent_at"]) for item in twins if item.get("sent_at")), "")
+            return str(sent or row.get("ts") or next((str(item["ts"]) for item in twins if item.get("ts")), "")
+                       ).removeprefix("received ")
     for item in getattr(ctx, "_owner_directives", None) or []:
         if isinstance(item, dict) and str(item.get("msg_id") or "") == ref and item.get("content") == content:
             return when(item)
