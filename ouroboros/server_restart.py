@@ -671,28 +671,24 @@ def _begin_task_teardown(restart_requested: bool) -> tuple[str, str]:
     return _shutdown_task_cleanup_args(restart_requested)
 
 
-def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
-    """Return ``(terminal_status, result_reason)`` for tasks torn down by a
-    graceful server shutdown.
-
-    A graceful shutdown — a requested restart (exit 42) or an external
-    stop/restart signal (SIGTERM/SIGINT) — is not a worker death, so a
-    still-running task is finalized as ``cancelled`` with an honest reason
-    instead of the stopped-worker text the pool writes for a death it recovers;
-    its callers pass ``stop_source="server_shutdown"``, the typed cause that
-    makes it a technical interruption the owner may Continue.
+def _shutdown_task_cleanup_args(restart_requested: bool, stop_source: str | None = None) -> tuple[str, str]:
+    """Return ``(terminal_status, result_reason)`` for tasks torn down by a graceful server shutdown: a requested
+    restart (exit 42), the application's Quit, the launcher's end or an external SIGTERM/SIGINT is not a worker
+    death, so a still-running task is finalized as ``cancelled`` with a reason naming that stop (``stop_source``,
+    default the live ingress ``server_process.server_stop_source``), not the stopped-worker text the pool writes
+    for a death it recovers. Its callers pass ``stop_source="server_shutdown"``, the typed cause that makes it a
+    technical interruption the owner may Continue; the text never changes that source.
     """
     if restart_requested:
-        reason = (
-            "Server restarted before this task finished; the task was "
-            "interrupted by the restart, not a worker crash."
-        )
-    else:
-        reason = (
-            "Server shut down (external stop/restart signal) before this task "
-            "finished; the task was interrupted, not a worker crash."
-        )
-    return "cancelled", reason
+        return "cancelled", ("Server restarted before this task finished; the task was "
+                             "interrupted by the restart, not a worker crash.")
+    if stop_source is None:
+        from ouroboros.server_process import server_stop_source
+        stop_source = server_stop_source()
+    words = {"launcher_quit": "the application was quit", "launcher_gone": "the application that started it ended"
+             }.get(stop_source, "external stop/restart signal")
+    return "cancelled", (f"Server shut down ({words}) before this task finished; "
+                         "the task was interrupted, not a worker crash.")
 
 
 def _shutdown_supervisor_event_bus() -> None:
