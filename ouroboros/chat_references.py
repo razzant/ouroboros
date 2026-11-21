@@ -64,12 +64,19 @@ def reference_from_row(row: dict) -> dict:
     role = "assistant" if answer else {"in": "user", "out": "assistant", "system": "system"}.get(
         row.get("direction"), "system")
     from ouroboros.room_membership import reply_target_home
+    carried_reply = row.get("reply_to")
+    room_decision = {}
+    if (row.get("source") == "skill:telegram" and row.get("direction") == "in"
+            and isinstance(carried_reply, dict) and "telegram_room_chat_id" in carried_reply):
+        room = carried_reply["telegram_room_chat_id"]
+        room_decision["telegram_room_chat_id"] = room if type(room) is int and room > 0 else None
     return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
             "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
                                              else {"assistant": "Ouroboros", "system": "System"}[role]),
             "kind": kind, **_preview(answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
-            "target_home": reply_target_home(row)}
+            "target_home": reply_target_home(row),
+            **room_decision}
 
 
 def resolve_reply(root, address: str) -> dict:
@@ -83,7 +90,8 @@ def resolve_reply(root, address: str) -> dict:
         task_id = address[5:]
         task = load_effective_task_result(root, task_id, materialize_artifacts=False) if task_id else None
         if task:
-            return {"address": address, "chat_id": int(task.get("chat_id") or 1), "role": "assistant",
+            chat_id = task.get("chat_id")
+            return {"address": address, "chat_id": int(1 if chat_id is None else chat_id), "role": "assistant",
                     "author_label": "Ouroboros", "kind": "work_card",
                     **_preview(task.get("title") or task.get("text")),
                     "ts": str(task.get("updated_at") or task.get("started_at") or ""), "task_id": task_id,
@@ -105,21 +113,91 @@ def ingress_reply(root, metadata: dict) -> dict:
     return resolve_reply(root, metadata.get("reply_to", ""))
 
 
-def origin_reply(root, task_id: str, metadata=None) -> dict:
+def telegram_reply_room(root, ref: dict, telegram_chat_id: int) -> int | None:
+    """Execution room for an accepted owner-bot Reply, not its transport address.
+
+    The host's saved row/work reference decides. Never reinterpret a missing,
+    retired or hidden target as Main.
+    """
+    from ouroboros.project_admission import reserved_project_for_chat
+    from ouroboros.projects_registry import RoomResolver
+    from ouroboros.room_membership import TARGET_ABSENT, TARGET_UNKNOWN, TARGET_WORK, reply_target
+
+    if ref.get("unresolved"):
+        return None
+    if "telegram_room_chat_id" in ref:
+        room = ref["telegram_room_chat_id"]
+        return room if type(room) is int and room > 0 else None
+    rooms = RoomResolver(root, strict=True)
+    home, task_id, chat_id = reply_target(rooms, ref)
+    if home in (TARGET_ABSENT, TARGET_UNKNOWN):
+        return None
+    if home == TARGET_WORK and task_id:
+        chat_id = rooms(task_id) or chat_id
+    if chat_id in (1, telegram_chat_id):
+        return 1
+    if chat_id > 0 and reserved_project_for_chat(root, chat_id).get("lifecycle") == "active":
+        return chat_id
+    return None
+
+
+def _live_origin_ref(task_id: str) -> dict | None:
+    from supervisor import queue
+    from supervisor.active_activity import get_direct_activity_registry
+
+    activity = get_direct_activity_registry().get(task_id)
+    if activity:
+        return activity.origin_message_ref
+    with queue._queue_lock:
+        task = (queue.RUNNING.get(task_id) or {}).get("task") or {}
+        return task.get("origin_message_ref")
+
+
+def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = None, live_first: bool = False) -> dict:
     """The answer's host reference to the owner message that began its turn.
 
-    Best-effort enrichment: a busy or unreadable store omits the reference, never the message."""
-    if not task_id or not root:
+    A known origin with no readable source leaves the native destination unresolved;
+    the local message still lands without its reference."""
+    if not root or not (task_id or metadata):
         return {}
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.project_dialogue import resolve_owner_message_source
+    ref = _live_origin_ref(task_id) if live_first and task_id else None
     try:
-        task = metadata or load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
-        ref = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
+        if not ref:
+            if live_first:
+                from ouroboros.task_results import load_task_result
+
+                task = metadata or load_task_result(root, task_id) or {}
+            else:
+                task = metadata or load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
+            ref = task.get("origin_message_ref") or (task.get("metadata") or {}).get("origin_message_ref")
+        if not ref and task_id and transport is not None:
+            ref = _live_origin_ref(task_id)
         row = resolve_owner_message_source(root, ref) if ref else None
     except StoreError:
+        row = None
+    if transport is not None and ref and not row:
+        transport["origin_unresolved"] = True
+    reply = reference_from_row(row) if row else {}
+    if transport is not None and row:
+        transport.update(owner_reply_transport(row, reply))
+    return reply
+
+
+def owner_reply_transport(row: dict, reply: dict) -> dict:
+    """Delivery fields proved by the accepted owner row, not by its execution room."""
+    transport = row.get("transport")
+    source = str(row.get("source") or "")
+    if not (source.startswith("skill:") and isinstance(transport, dict) and transport and reply.get("address")):
         return {}
-    return reference_from_row(row) if row else {}
+    return {**transport, "reply_address": reply["address"]} if source == "skill:telegram" else dict(transport)
+
+
+def telegram_origin_transport(root, task_id: str) -> dict:
+    transport: dict = {}
+    origin_reply(root, task_id, transport=transport, live_first=True)
+    return transport if transport.get("kind") == "telegram" or transport.get("origin_unresolved") else {}
 
 
 def resolve_progress_row(root, address):

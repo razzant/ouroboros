@@ -83,6 +83,7 @@ def _owner_facts(drive_root: Any, task_ids: set, now: float) -> Dict[str, Dict[s
                 "expected": reply_expected(task), "handed_off": bool(meta.get("reply_handed_off")), "attempt": attempt,
                 "logical_root": str(task.get("root_task_id") or task_id),
                 "root": str(task.get("budget_drive_root") or drive_root),
+                "origin_message_ref": task.get("origin_message_ref"),
                 "waits": [key[len(_SLOT_WAIT):] for key, row in rows if row.get("kind") == "in_slot_wait"
                           and key.startswith(_SLOT_WAIT)],
                 "park": park, "sleep": _sleep_runs(wait.get("sleep")) if park == "sleep" else None,
@@ -97,13 +98,15 @@ def _owner_facts(drive_root: Any, task_ids: set, now: float) -> Dict[str, Dict[s
                          if marker.get("reason") == "sleep" and isinstance(marker.get("sleep"), dict) else None)
                 facts.setdefault(task_id, {"expected": reply_expected(task), "handed_off": False, "waits": [],
                                            "logical_root": str(task.get("root_task_id") or task_id),
+                                           "origin_message_ref": task.get("origin_message_ref"),
                                            "park": "", "attempt": int(task.get("_attempt") or 1), "seats": set(),
                                            "sleep": sleep})
     for entry in get_direct_activity_registry().actors():
         if entry.activity_id not in task_ids:
             continue
         fact: Dict[str, Any] = {"expected": entry.reply_expected, "handed_off": entry.reply_handed_off,
-                                "local": True, "waits": [], "park": "", "sleep": None}
+                                "local": True, "waits": [], "park": "", "sleep": None,
+                                "origin_message_ref": entry.origin_message_ref}
         sleep = None
         try:
             context = getattr(getattr(entry.actor, "tools", None), "_ctx", None)
@@ -289,8 +292,10 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
         # A positive needs the task's own answer facts readable: unreadable is never "not answered yet".
         return None if result is True and _task_activity_facts(drive_root, task_id).get("unavailable") else result
 
+    from ouroboros.chat_references import origin_reply
+
     bridge = try_get_bridge()
-    chats: Dict[int, Dict[str, Any]] = {}
+    chats: Dict[tuple, Dict[str, Any]] = {}
     roots: List[str] = []
     for task_id, row in rows.items():
         if row.get("parent_task_id") or not (facts.get(task_id) or {}).get("expected"):
@@ -309,7 +314,14 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
         if chat is None:
             continue
         roots.append(task_id)
-        chats.setdefault(chat, {"chat_id": chat, "transport": bridge.chat_transport(chat) if bridge else {}})
+        transport: dict = {}
+        origin = (facts.get(task_id) or {}).get("origin_message_ref")
+        if origin:
+            origin_reply(drive_root, task_id, {"origin_message_ref": origin}, transport=transport)
+        transport = transport or (bridge.chat_transport(chat) if bridge else {})
+        key = (chat, str(transport.get("kind") or ""), str(transport.get("conversation_id") or ""),
+               str(transport.get("bot_id") or ""), transport.get("origin_unresolved") is True)
+        chats.setdefault(key, {"chat_id": chat, "transport": transport})
     return {"complete": availability["complete"], "chats": list(chats.values()), "roots": sorted(roots)}
 
 

@@ -431,6 +431,7 @@
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
+ * @property {(number|null)=} telegram_room_chat_id  // owner-bot room decision, separate from the physical Telegram chat
  * @property {boolean=} unresolved
  */
 

@@ -244,7 +244,9 @@ def _chat_record(
 
             record["message_accepted_at"] = utc_now_iso()
             try:
-                if effective_subagents_mode(task={"chat_id": chat_id}, drive_root=root) == "swarm":
+                reply = (message_meta or {}).get("reply_to")
+                room = reply.get("telegram_room_chat_id", chat_id) if source == "skill:telegram" and isinstance(reply, dict) else chat_id
+                if room is not None and effective_subagents_mode(task={"chat_id": room}, drive_root=root) == "swarm":
                     record["subagents_mode"] = "swarm"
             except Exception:
                 log.debug("Subagents label unavailable for the inbound row", exc_info=True)
@@ -282,7 +284,10 @@ def _chat_record(
             record["execution_transport"] = dict(meta["execution_transport"])
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
-            meta["reply_to"] = origin_reply(root, task_id)
+            origin_transport: dict = {}
+            meta["reply_to"] = origin_reply(root, task_id, transport=origin_transport)
+            if origin_transport and record_type in {"photo", "video", "document", "links", "quiz", "card"} and not transport:
+                record["transport"] = origin_transport
         for key in ("reply_to", "relay"):
             if isinstance(meta.get(key), dict) and meta[key]:
                 record[key] = dict(meta[key])
@@ -508,8 +513,20 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import ingress_reply, telegram_reply_room
     reply = ingress_reply(drive_root, message.get("task_metadata") or {})
+    transport = message.get("transport")
+    if (not reply and source == "skill:telegram" and isinstance(transport, dict)
+            and transport.get("reply_target_unlinked") is True):
+        reply = {"address": "", "unresolved": True, "telegram_room_chat_id": None}
+    if reply and source == "skill:telegram":
+        from ouroboros.store import StoreError
+
+        try:
+            room = telegram_reply_room(drive_root, reply, chat_id)
+        except (OSError, ValueError, StoreError):
+            room = None  # the accepted row keeps this unresolved decision for dispatch
+        reply["telegram_room_chat_id"] = room
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))

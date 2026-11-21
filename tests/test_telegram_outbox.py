@@ -93,6 +93,8 @@ class _Origin:
             self._handlers.discard(asyncio.current_task())
 
     def _answer(self, method: str, form: dict, action: str) -> tuple[int, bytes]:
+        if action == "missing_reply":
+            return 400, b'{"ok":false,"error_code":400,"description":"Bad Request: message to be replied not found"}'
         if action.startswith("429:"):
             wait = int(action.split(":", 1)[1])
             body = {"ok": False, "error_code": 429, "description": f"Too Many Requests: retry after {wait}",
@@ -217,6 +219,31 @@ def _run(scenario):
     asyncio.run(asyncio.wait_for(scenario(), timeout=60))
 
 
+@pytest.mark.parametrize("script, expected", [
+    (["missing_reply"], ["17", "19"]),
+    (["502"], ["17"]),
+    (["ok", "missing_reply"], ["17", "17"]),
+])
+def test_only_a_definitely_missing_child_card_before_delivery_can_change_anchor(tmp_path, script, expected):
+    async def scenario():
+        async with _Origin(script) as origin:
+            bridge = _Bridge(tmp_path / "state", origin.base)
+            await bridge.publish("chat.outbound", {
+                "text": _LONG if len(script) > 1 else "Reply to a child card.", "row_address": "row:answer",
+                "reply_to": {"chat_id": 42, "role": "user", "address": "row:owner"},
+                "transport": {"kind": "telegram", "bot_id": _BOT, "conversation_id": "42",
+                              "reply_address": "row:owner", "owner_message_id": 19,
+                              "reply_child_task_id": "child", "reply_child_message_id": 17},
+            })
+            assert [form["reply_to_message_id"] for form in origin.sent()] == expected
+            assert all(form["chat_id"] == "42" for form in origin.sent())
+            if expected[-1] == "19":
+                assert [form["text"] for form in origin.sent()] == ["Reply to a child card."] * 2
+                confirmed = bridge.module("telegram_state")._message_ref(bridge.api, _BOT, 42, origin.next_id)
+                assert confirmed["native_reply_id"] == 19
+    _run(scenario)
+
+
 def test_a_reply_that_never_left_waits_and_arrives_once_when_telegram_answers(tmp_path):
     async def scenario():
         bridge = _Bridge(tmp_path / "state", _closed_base())
@@ -285,15 +312,25 @@ def test_a_long_reply_resumes_at_its_first_unsent_part(tmp_path):
     async def scenario():
         async with _Origin(close_after=1) as first, _Origin() as second:
             bridge = _Bridge(tmp_path / "state", first.base)
-            await bridge.publish("chat.outbound", {"text": _LONG, "transport": {}})
+            address = "row:42@2026-11-17T12:00:00+00:00#0123456789ab"
+            from sys import modules
+
+            state = modules[bridge.plugin._mirror_options.__module__]
+            source = {"direction": "in", "row_address": address, "chat_id": 42}
+            state._remember_message(bridge.api, _BOT, 42, 10, source)
+            await bridge.publish("chat.outbound", {"text": _LONG, "transport": {},
+                                                    "reply_to": {"address": address, "chat_id": 42, "role": "user"}})
             [record] = bridge.records()
             assert [part["state"] for part in record["parts"]] == ["confirmed", "retry_wait"]
+            state._remember_message(bridge.api, _BOT, 42, 10, {"direction": "in"})
+            state._remember_message(bridge.api, _BOT, 42, 20, source)
             bridge.serve(second.base)
             await bridge.drain()
         chunks = bridge.telegram_api.message_chunks(_LONG, "HTML")
         assert len(chunks) == 3
         assert [form["text"] for form in first.sent()] == chunks[:1]  # the delivered part is never resent
         assert [form["text"] for form in second.sent()] == chunks[1:]
+        assert [form["reply_to_message_id"] for form in first.sent() + second.sent()] == ["10"] * 3
         await bridge.stop()
     _run(scenario)
 

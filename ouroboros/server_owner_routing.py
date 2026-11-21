@@ -608,6 +608,30 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
 
         if not isinstance(realtime_turn, LiveConversationTurn):
             raise ValueError("invalid call authority")
+    reply_ref = task_metadata.get("reply_reference")
+    telegram_reply = (incoming.get("source") == "skill:telegram" and task_metadata.get("_host_operation") is True
+                      and isinstance(reply_ref, dict)
+                      and (bool(reply_ref.get("address")) or "telegram_room_chat_id" in reply_ref))
+    if telegram_reply:
+        from ouroboros.chat_references import telegram_reply_room
+        from ouroboros.store import StoreError
+        from ouroboros.task_finalization import host_operation_reply_kwargs
+
+        try:
+            room = telegram_reply_room(ctx.DRIVE_ROOT, reply_ref, chat_id)
+            reserved_project = _reserved_project_for_chat(ctx, room) if room not in (None, 1) else {}
+            if room not in (None, 1) and reserved_project.get("lifecycle") != "active":
+                room = None
+        except (OSError, ValueError, StoreError):
+            room = None
+        if room is None:
+            notice = host_operation_reply_kwargs(incoming.get("origin_message_ref"), "failed", client_message_id)
+            notice.setdefault("progress_meta", {})["routing_notice_carrier"] = "system"
+            ctx.send_with_budget(chat_id, "The message or work card you replied to is unavailable. Nothing was routed.",
+                                 **notice,
+                                 role="system", system_type="command_reply")
+            return
+        telegram_ingress_chat, chat_id = chat_id, room
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     normalized_constraint = normalize_task_constraint(task_constraint)
@@ -667,10 +691,11 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # typed System row (host_initiated) plus that receipt.
         return
     try:
-        reserved_project = _reserved_project_for_chat(ctx, chat_id)
+        if not telegram_reply:
+            reserved_project = _reserved_project_for_chat(ctx, chat_id)
     except (OSError, ValueError) as exc:
         _record_routing_receipt(
-            bridge, ctx, chat_id=chat_id, client_message_id=client_message_id,
+            bridge, ctx, chat_id=telegram_ingress_chat if telegram_reply else chat_id, client_message_id=client_message_id,
             action="project_route", status="project_unavailable",
             reason="project_routing_fence_lookup_failed", detail=str(exc))
         return
@@ -683,7 +708,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         _record_routing_receipt(
             bridge,
             ctx,
-            chat_id=chat_id,
+            chat_id=telegram_ingress_chat if telegram_reply else chat_id,
             client_message_id=client_message_id,
             action="project_route",
             target=str(reserved_project.get("id") or ""),
@@ -739,7 +764,9 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     roots = addressable_roots(ctx)
     routed_to_task, unnamed_label = "", "Task"
     # A live call's admitted turn keeps the room it was opened in; it never re-routes.
-    if realtime_turn is None and ((project_id and not late) or thread_of):
+    if telegram_reply:
+        pass  # answer this exact Reply in a new turn, not through another reader's opening input
+    elif realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
             chat_id,

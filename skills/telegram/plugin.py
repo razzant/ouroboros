@@ -36,8 +36,8 @@ from .lib.telegram_state import (
     _get_silent_msg, _set_silent_msg, _clear_silent_msg, _subagent_cards_enabled,
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _load_runtime_state, _child_row_held_for_root, _child_final_report,
-    _mirror_options, _old_reference_unlinked, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
-    _quiet_progress,
+    _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
+    _quiet_progress, _same_telegram_binding,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_origin import origin_label
@@ -85,7 +85,7 @@ def _bridge_client(api, event=None, chat_id: int = 0,
     api_base_url, files_dir = server or _saved_server(api)
     client = TelegramClient(token, trust_env=_HONOR_ENV_PROXIES,
                             proxy=telegram_proxy(pathlib.Path(api.get_state_dir())),
-                            **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+                            **(_mirror_options(api, bot_id(token), event, chat_id) if token and event is not None else {}),
                             origin_label=origin_label(event, telegram_i18n.language()) if event is not None else "",
                             api_base_url=api_base_url, files_dir=files_dir, binding=binding, generation=generation)
     return client, generation
@@ -874,11 +874,27 @@ async def _handle_owner_message(
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
     chat_id = int(chat.get("id") or 0)
-    _owner_message_seen(api, client.bot_id, chat_id, int(message.get("message_id") or 0))
     # Owner binding + filtering is already enforced at the top of
     # the update loop (TOFU for all command modes), so chat_id is
     # guaranteed to equal the pinned owner chat here.
     text = str(message.get("text") or message.get("caption") or "").strip()
+    if text.lower().startswith("/panic"):
+        # The emergency door needs only the pinned sender, not conversation state.
+        # Telegram dates have one-second precision; admit the boundary second.
+        if int(message.get("date") or 0) < int(_POLL_GENERATION_STARTED):
+            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_earlier"])
+            return
+        try:
+            await asyncio.wait_for(_inject(api, {
+                "text": "/panic", "chat_id": chat_id,
+                "user_id": int(sender.get("id") or chat_id), "source": "telegram",
+            }), timeout=2)
+        except Exception:
+            api.log("warning", "Immediate Telegram Panic was not confirmed; it will not be retried.")
+            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
+        return
+
+    _owner_message_seen(api, client.bot_id, chat_id, int(message.get("message_id") or 0))
     caption = str(message.get("caption") or "").strip()
     # Handle /menu command locally — always allowed
     cleaned_text = text.lower().strip()
@@ -904,25 +920,6 @@ async def _handle_owner_message(
     if is_help_cmd:
         help_text = _LOCALIZED_TEXTS[lang]["help_text"]
         await client.send_message(chat_id, help_text)
-        return
-
-    if text.lower().startswith("/panic"):
-        # Compare Telegram's whole-second date with the host clock at import.
-        # This assumes aligned clocks: a host ahead rejects fresh commands until
-        # Telegram reaches that second; a host behind may admit retained ones.
-        # The boundary second is indistinguishable from fresh input; accept it.
-        if int(message.get("date") or 0) < int(_POLL_GENERATION_STARTED):
-            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_earlier"])
-            return
-        try:
-            sender_label = f"Telegram ({_extract_sender_label(sender, chat_id)})"
-            await asyncio.wait_for(_inject(api, {**_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
-                "text": "/panic", "chat_id": chat_id,
-                "sender_label": sender_label, "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label},
-                "user_id": int(sender.get("id") or chat_id), "source": "telegram"}), timeout=2)
-        except Exception:
-            api.log("warning", "Immediate Telegram Panic was not confirmed; it will not be retried.")
-            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
         return
 
     # Local commands are done. Look up the replied-to card once, before any payload forwarding;
@@ -980,6 +977,16 @@ async def _handle_owner_message(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
+    ingress = _owner_ingress_fields(api, client.bot_id, chat_id, message, update_id)
+    if (isinstance(reply_to, dict) and reply_to.get("message_id") and not ingress.get("reply_to")
+            and not _SLASH_COMMAND_RE.match(text)):
+        if quiz_ref and not safe_text:  # uncaptioned media on a known ordinary quiz keeps its chat path
+            ingress["transport"].pop("reply_target_unlinked", None)
+        else:
+            await client.call("sendMessage", data={"chat_id": str(chat_id), "text": _LOCALIZED_TEXTS[lang]["reply_not_linked"],
+                                                   "reply_to_message_id": message["message_id"],
+                                                   "allow_sending_without_reply": False})
+            return
     photos = message.get("photo") or []
     image_base64 = ""
     image_mime = ""
@@ -1007,15 +1014,14 @@ async def _handle_owner_message(
         parked = await telegram_inbound.park_inbound_file(api, client, inbound)
     try:
         await _inject(api, {
-            **_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
+            **ingress,
             "text": safe_text,
             "chat_id": chat_id,
             "user_id": int(sender.get("id") or chat_id or 1),
             "source": "telegram",
             "sender_label": sender_label,
             "transport": {
-                "kind": "telegram",
-                "conversation_id": str(chat_id),
+                **ingress["transport"],
                 "sender_label": sender_label,
             },
             "image_base64": image_base64,
@@ -1026,11 +1032,6 @@ async def _handle_owner_message(
     finally:
         if parked is not None:
             parked.cleanup()
-    if _old_reference_unlinked(api, client.bot_id, chat_id, message):
-        try:
-            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["reply_not_linked"])
-        except Exception:
-            api.log("warning", "Telegram note about an unlinked reply could not be delivered.")
 
 
 def _make_poller(api):
@@ -1164,9 +1165,9 @@ def _make_typing(cue: TypingCue):
 def _typing_cue(api) -> TypingCue:
     """The bridge's one typing refresher over the host's reply-preparation projection, paced per accepted token."""
     def targets(state: Dict[str, Any]) -> set:
-        settings = _load_settings(api)
-        rows = [row for row in state.get("chats") or [] if isinstance(row, dict)]
-        return {chat for row in rows if (chat := _target_chat(settings, {"transport": row.get("transport") or {}}))}
+        settings, bot = _load_settings(api), bot_id(binding_for(api).snapshot()[0])
+        return {chat for row in state.get("chats") or [] if isinstance(row, dict)
+                and (chat := _target_chat(settings, row)) and _same_telegram_binding(row.get("transport"), bot, chat)}
 
     return TypingCue(read_state=lambda: host_reply_preparation(_data_dir(api)), targets=targets,
                      client_factory=lambda: _telegram_client(api), warn=lambda text: api.log("warning", text),

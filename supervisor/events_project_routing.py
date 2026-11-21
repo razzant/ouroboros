@@ -63,34 +63,38 @@ def _owner_message_receipt(client_message_id: Any) -> str:
     return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
 
 
-def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
-    """The owner message a routing notice answers, as its exact host Reply reference.
+def _routing_notice_address(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
+    """A routing notice answers the exact owner input at its own delivery destination.
 
     The retained owner row the act quotes for this receipt, else the owner source it
-    carries by value, else the accepted row its receipt id names. ``{}`` when none
-    resolves (a synthetic act, an unreadable store): an explicit "no owner row", which
-    keeps a task-keyed System row from borrowing its target task's own origin.
+    carries by value, else the accepted row its receipt id names. An absent row
+    must never make a task-keyed System notice borrow the target task's origin.
     """
-    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chat_references import owner_reply_transport, reference_from_row
     from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
 
     client_message_id = str(evt.get("client_message_id") or "").strip()
+    source = evt.get("source_ref")
+    has_source = owner_message_ref_is_valid(source) and (
+        not client_message_id or source["client_message_id"] == client_message_id)
+    named_owner = _owner_message_receipt(client_message_id)
     try:
         row = next((quote["owner_row"] for quote in evt.get("quotes") or []
                     if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
                     and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
-        source = evt.get("source_ref")
-        if row is None and owner_message_ref_is_valid(source) and (
-                not client_message_id or source["client_message_id"] == client_message_id):
+        if row is None and has_source:
             row = resolve_owner_message_source(ctx.DRIVE_ROOT, source)
-        if row is None and _owner_message_receipt(client_message_id):
+        if row is None and named_owner:
             from supervisor.message_ingress import accepted_chat_message
 
             row = accepted_chat_message(ctx.DRIVE_ROOT, int(evt.get("chat_id") or 0), client_message_id)
-        return reference_from_row(row) if row else {}
+        if row:
+            reply = reference_from_row(row)
+            return {"reply_to": reply, "transport": owner_reply_transport(row, reply)}
     except Exception:
         log.debug("Routing notice origin unavailable for %s", client_message_id, exc_info=True)
-        return {}
+        has_source = has_source or named_owner  # a read error is not an authoritative miss
+    return {"reply_to": {}, "transport": {"origin_unresolved": True} if has_source else {}}
 
 
 def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,7 +109,7 @@ def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, 
         return {}
     if not _owner_message_receipt(evt.get("client_message_id")):
         return {"routing_notice_carrier": "system"}
-    return {"routing_notice_carrier": "routing_ack", "reply_to": _routing_notice_reply(ctx, evt)}
+    return {"routing_notice_carrier": "routing_ack", **_routing_notice_address(ctx, evt)}
 
 
 # Acts that pass the owner's words on to a running work: their receipt names that work and its room.
@@ -807,7 +811,7 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
             system_type="task_start_unconfirmed" if status == "unconfirmed" else "task_not_started",
             task_id=str(outcome.get("task_id") or evt.get("task_id") or ""),
             progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
-                           "reply_to": _routing_notice_reply(ctx, evt)},
+                           **_routing_notice_address(ctx, evt)},
         )
     except Exception:
         log.warning("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)

@@ -180,9 +180,9 @@ def test_a_refused_steer_of_an_owner_message_is_one_line_replying_to_that_messag
     [ack] = phone.acks()
     assert ack["reply_to"] == reference_from_row(row) and ack["routing_notice_carrier"] == "routing_ack"
     assert phone.rows() == []
-    # Control: an ordinary answer to the same latest message stays an unquoted neighbour.
+    # A separate ordinary answer to the same input keeps that exact anchor too.
     asyncio.run(phone.plugin._make_outbound(phone.api)({"text": "On it.", "reply_to": ack["reply_to"]}))
-    assert "reply_to_message_id" not in phone.sent()[-1]
+    assert phone.sent()[-1]["reply_to_message_id"] == 50
 
 
 @pytest.mark.parametrize("reason", _EVERY_REFUSAL)
@@ -386,6 +386,38 @@ def test_no_accepted_owner_row_means_no_reply_anchor(phone, monkeypatch):
     assert "reply_to" not in phone.acks()[0]
 
 
+def test_unreadable_owner_row_does_not_authorize_a_routing_notice_to_current_bot(phone, monkeypatch):
+    from ouroboros.store import StoreError
+    from supervisor.events_project_routing import _routing_notice_address
+
+    row = phone.owner(77)
+
+    def unavailable(*args, **kwargs):
+        raise StoreError("unavailable")
+
+    monkeypatch.setattr("supervisor.message_ingress.accepted_chat_message", unavailable)
+    _refuse("target_unknown", phone, monkeypatch)
+    _steer(phone, row["client_message_id"])
+    assert not phone.sent()
+    assert _routing_notice_address(phone.ctx, row)["transport"] == {"origin_unresolved": True}
+
+
+def test_routing_ack_keeps_the_accepted_transport_of_another_connector(phone, monkeypatch):
+    from ouroboros.event_bus import CHAT_OUTBOUND
+    from supervisor import message_bus as bus
+
+    source = {"kind": "other_connector", "conversation_id": "original"}
+    row = bus.log_chat("in", 42, 42, ASK, source="skill:other_connector",
+                       client_message_id="other:opening", transport=source)
+    phone.bridge.activate_update_transport({"chat_id": 42, "transport": {**source, "conversation_id": "new"}})
+    outbound = []
+    monkeypatch.setattr(bus, "publish_event", lambda topic, event: outbound.append(event) if topic == CHAT_OUTBOUND else None)
+    _refuse("target_unknown", phone, monkeypatch)
+    _steer(phone, row["client_message_id"])
+    [ack] = [event for event in outbound if event.get("annotation_type") == "routing_ack"]
+    assert ack["transport"] == source
+
+
 def test_a_landed_act_says_nothing_but_a_file_it_could_not_attach(phone, monkeypatch):
     from supervisor.events_project_routing import _emit_routing_receipt
 
@@ -497,7 +529,16 @@ def test_a_picker_gets_no_invented_reason_and_one_message_with_its_files(phone):
               "Reply with a number, or tap an option in the web chat.")
     [sent] = phone.sent()
     assert sent["text"] == f"{picker}\nNot attached to the task: оглавление.docx" and sent["reply_to_message_id"] == 50
-    asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "cause": "Not started: the attachments could not be staged",
+    from ouroboros.chat_references import resolve_history_row
+
+    state = sys.modules[phone.plugin.__package__ + ".lib.telegram_state"]
+    reply = state._owner_ingress_fields(phone.api, "", 42, {
+        "message_id": 51, "text": "2", "reply_to_message": {"message_id": 101},
+    }, 51)["reply_to"]
+    selected, _ = resolve_history_row(phone.data, reply)
+    assert selected["type"] == "routing_options" and "2. New task in Export" in selected["text"]
+    asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "row_address": reply,
+                                                       "cause": "Not started: the attachments could not be staged",
                                                        "target_label": "Export"}))
     assert phone.sent()[-1]["text"] == (f"Export · Not started: the attachments could not be staged\n{picker}"
                                         "\nNot attached to the task: оглавление.docx")

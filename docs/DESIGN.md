@@ -2053,6 +2053,11 @@ the other (narration beside owner speech or vice versa) stays unloaded down that
 latest message`. Old sources read no newer messages. Ouroboros quotes its addressee only when not directly
 above; its own card does not count.
 
+The owner Telegram bot has one shared feed: an explicit reply starts its turn in the
+addressed Main or Project room. Replies to the owner's own Telegram messages keep
+their assigned room. The answer attaches to the owner's message, or to the subagent's
+card when the owner replied to a notice about that subagent.
+
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):
 a card of Ouroboros's voice one quiet step back from a reply, on its own token in both

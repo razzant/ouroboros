@@ -90,7 +90,7 @@ _ID = re.compile(r"\d{12}-[0-9a-f]{8}")  # the only record id this journal write
 TOKEN_WAIT_SEC = 5.0
 _NOT_MODIFIED = "Telegram API editMessageText: message is not modified."
 _ACTIVE = frozenset({"pending", "sending", "retry_wait"})
-# Delivery manners, not content: Silent mode's sound and the reply anchor may differ between attempts.
+# Delivery manners are not part content; the native reply anchor is stored on the operation.
 _VOLATILE = frozenset({"disable_notification", "reply_to_message_id", "allow_sending_without_reply"})
 _SOURCE_KEYS = ("task_id", "subagent_task_id", "row_address", "quiz_id", "card_id", "system_type", "annotation_type")
 
@@ -255,6 +255,22 @@ class _Operation:
 
     async def _send(self, client, part: dict, method: str, data, files, timeout) -> Dict[str, Any]:
         record = self.record
+        # Later chunks and retries use the first dispatch's exact target, even if
+        # the derived message cache lost it or the subagent card was replaced.
+        if "native_reply_id" not in record:
+            if _delivered(record) and self.event.get("reply_to"):
+                await self.outbox._stop(self, "legacy_reply_anchor_unknown")
+            record["native_reply_id"] = getattr(client, "reply_to_message_id", 0)
+            record["reply_fallback_id"] = getattr(client, "reply_fallback_id", 0)
+        anchor = record["native_reply_id"]
+        if anchor and record.get("bot") and client.bot_id != record["bot"]:
+            await self._token_changed(part)
+        if anchor and record.get("chat_id") and record["chat_id"] != _chat(data):
+            await self.outbox._stop(self, "changed")
+        if hasattr(client, "reply_to_message_id"):
+            client.reply_to_message_id = anchor
+        if callback := getattr(client, "on_reply_changed", None):
+            callback(anchor)
         before = part["state"]
         part.update(state="sending", attempts=int(part.get("attempts") or 0) + 1)
         # The bot of its first delivered part owns the operation; until then, the one in force sends it.
@@ -283,6 +299,14 @@ class _Operation:
                 await self.outbox._defer(self, max(1, exc.retry_after), "HTTP 429")
             if not exc.unsent:
                 return await self._unknown(part, exc)
+            fallback = record.get("reply_fallback_id")
+            if (exc.status_code == 400 and exc.missing_reply and anchor and fallback and fallback != anchor
+                    and not _delivered(record) and method.startswith("send")):
+                # A definite refusal created no message. Persist the one changed
+                # anchor at the next write-ahead boundary, before another call.
+                part.update(state="pending", refused_reply_id=anchor)
+                record.update(native_reply_id=fallback, reply_fallback_id=0)
+                return await self._send(client, part, method, data, files, timeout)
             if str(exc) == _NOT_MODIFIED:
                 part.update(state="confirmed", not_modified=True, status=exc.status_code)
             else:

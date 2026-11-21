@@ -58,7 +58,7 @@ def send_card(bridge: Any, record: Dict[str, Any], chat_id: int, *, task_id: str
             pass
     stamp_project_thread(bus.DATA_DIR, frame)
     bridge.broadcast(frame)
-    transport = bridge.chat_transport(chat_id)
+    transport = (stored or {}).get("transport") or bridge.chat_transport(chat_id)
     publish_event(CHAT_CARD, {**identity, "chat_id": int(chat_id), "transport": transport,
                               "fallback_text": fallback, "interactive": bool(interactive),
                               "task_id": task_id, "ts": ts})
