@@ -213,11 +213,14 @@ def test_the_abandoned_attempt_no_longer_holds_the_pause_census_but_money_stays_
 
 
 def test_claudexor_sender_acknowledges_and_closes_after_its_receiver_left():
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
     from ouroboros.llm_claudexor import _ModelInvocation
 
     events = []
 
     class Gateway:
+        store_identity = "fixture-store"  # the owning store the sender's create proved
+
         def acknowledge_model_result(self, operation_id, sha):
             events.append(("ack", operation_id, sha))
             return {"response": {"state": "acknowledged"}}
@@ -227,6 +230,7 @@ def test_claudexor_sender_acknowledges_and_closes_after_its_receiver_left():
 
     invocation = _ModelInvocation.__new__(_ModelInvocation)
     invocation.gateway, invocation.io_lock = Gateway(), threading.Lock()
+    invocation.create_binding = model_rejoin_binding(invocation.gateway)  # the create's store proof, as `acknowledge` reads it
     invocation.operation_id, invocation.response_ref = "op-1", {"sha256": "abc"}
     invocation.retained, invocation.retention_error = {"manifest_ref": {"path": "x"}}, ""
     from ouroboros._usage_wait import close_unless_abandoned, late_transport_custody

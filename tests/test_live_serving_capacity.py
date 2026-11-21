@@ -87,8 +87,12 @@ def test_failed_preparation_cannot_flush_a_result_known_not_to_fit_serving_conne
         call.deferred_tool_outputs.append((ToolOutputs(tuple(result_rows), tuple(host.schemas)), []))
         await call.check_preparation()
         assert call.delivery_due.is_set()
-        with pytest.raises(RealtimeSetupError, match='context_capacity'):
+        with pytest.raises(RealtimeSetupError, match='context_capacity') as refused:
             await call.release_serving()  # the connection's delivery worker
+        detail = str(refused.value)
+        # The window WAS declared: the refusal names its own frame instead of claiming the size unavailable.
+        assert "limiting size was not available" not in detail
+        assert "total window here is 50,000 tokens" in detail and "continue by text" in detail
         assert call.deferred_tool_outputs, 'the completed effect retains delivery custody'
         record_property('capacity_fallback', json.dumps({
             'window': host.model.facts.conversation_window_tokens,
@@ -254,6 +258,61 @@ def test_serving_delivery_prices_its_body_even_after_an_authored_view_shrank(hos
     rows = [{'role':'tool','tool_call_id':'finished','content':'new '* (2000 if large else 10)}]
     host.messages.extend(rows)
     assert asyncio.run(host.delivery_fits(rows, tuple(host.schemas))) is not large
+
+
+def test_late_refusal_uses_one_measurement_of_the_binding_renewal_input_limit(host_world, monkeypatch):
+    from ouroboros import live_context_view
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.contracts.realtime import RealtimeSetupError
+    from skills.live_conversation.driver import _Call
+
+    host = host_world.host
+    host._renewal_facts = host.model.facts
+    host._renewal_window = WindowRecord("voice", input=WindowLimit(40000, "input", "refusal"), reserve=10000)
+    host._held_input = 40001
+    call = _Call(host)
+    call.delivered_catalog = tuple(host.schemas)
+    measure = live_context_view.serving_delivery_room
+    measurements = []
+
+    def price(snapshot, rows, schemas, **kwargs):
+        measurements.append(rows)
+        return measure(snapshot, rows, schemas, **kwargs)
+
+    monkeypatch.setattr(live_context_view, "serving_delivery_room", price)
+    rows = ({"role": "user", "content": "Hello."},)
+    with pytest.raises(RealtimeSetupError) as refused:
+        asyncio.run(call.guard_serving(rows))
+    assert measurements == [rows]
+    assert refused.value.code == "context_capacity"
+    assert "input limit here is 40,000 tokens" in str(refused.value)
+    assert "estimated input is" in str(refused.value) and "50,000" not in str(refused.value)
+
+    host._renewal_window = None
+    host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=None))
+    asyncio.run(call.guard_serving(rows))  # Without a declared window the old gate admits delivery.
+    assert measurements == [rows, rows]
+
+
+def test_guard_preserves_a_numberless_old_fit_gate(host_world):
+    from ouroboros.contracts.realtime import RealtimeSetupError
+    from skills.live_conversation.driver import _Call
+
+    call = _Call(host_world.host)
+    call.delivered_catalog = ()
+    checked = []
+
+    async def legacy(rows, schemas):
+        checked.append(rows)
+        return bool(rows)
+
+    host_world.host.delivery_fits = legacy
+    asyncio.run(call.guard_serving(("deliver",)))
+    with pytest.raises(RealtimeSetupError) as refused:
+        asyncio.run(call.guard_serving(()))
+    assert checked == [("deliver",), ()]
+    assert refused.value.code == "context_capacity" and "Continue by text" in str(refused.value)
+    assert "tokens" not in str(refused.value)
 
 
 def test_changed_view_gets_fresh_fit_before_old_socket_refuses_deferred_result(host_world, record_property):

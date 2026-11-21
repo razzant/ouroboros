@@ -692,7 +692,7 @@ def test_a_pause_after_prestart_storage_wait_parks_the_real_loop_and_its_resume_
     from ouroboros.work_stop import stop_presentation
     from supervisor import queue, worker_health, worker_process
     from tests.test_budget_pause_holds import _idle_worker
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     write_task_result(lane.root, "S", "requested", billing_group=BINDING, chat_id=7)
     usage_store.migrate_from_journal(lane.root)

@@ -213,6 +213,7 @@ def test_late_model_result_keeps_only_exact_attempt_effort_evidence(tmp_path, mo
     from types import SimpleNamespace
 
     from ouroboros import usage_accounting as ua
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
     from ouroboros.llm_attempt import effort_request_facts
     from ouroboros.llm_claudexor import recover_model_attempt
     from ouroboros.observability import persist_call
@@ -238,9 +239,11 @@ def test_late_model_result_keeps_only_exact_attempt_effort_evidence(tmp_path, mo
                        effort_resolution={**SHARED, "observed": "stale", "observedSource": "older_receipt"})
         row = ledger(tmp_path)[-1]
         attempt = reservation.attempt_id
+        store = SimpleNamespace(store_identity="fixture-model-store")
         persist_call(tmp_path, task_id="late", call_id=f"{attempt}_model_request",
                      call_type="llm_claudexor_request", payload=payload, keep_raw=True,
-                     manifest={"invocation_id": attempt, "operation_id": "exact-operation"})
+                     manifest={"invocation_id": attempt, "operation_id": "exact-operation",
+                               "model_store_binding": model_rejoin_binding(store)})
         raw = json.dumps(result)
         calls = []
 
@@ -257,7 +260,7 @@ def test_late_model_result_keeps_only_exact_attempt_effort_evidence(tmp_path, mo
 
         def factory():
             assert online, "retained terminal evidence needs no gateway"
-            return SimpleNamespace(get_model_operation=get_operation, get_model_result=get_result,
+            return SimpleNamespace(store_identity=store.store_identity, get_model_operation=get_operation, get_model_result=get_result,
                                    acknowledge_model_result=lambda *args: calls.append("ack"),
                                    close=lambda: calls.append("close"))
 

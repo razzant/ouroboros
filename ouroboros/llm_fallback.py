@@ -17,6 +17,8 @@ import copy
 import hashlib
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
@@ -34,6 +36,7 @@ from ouroboros.llm_attempt import (
     preserve_prior_dispatch,
     strongest_dispatch_capture,
     processing_refusal,
+    require_physical_dispatch_window,
     reasoning_strip_retry_allowed,
     single_physical_send_active,
 )
@@ -67,6 +70,49 @@ def _wire_surface(target: Dict[str, Any]) -> str:
     if target.get("provider") == "anthropic":
         return "messages"
     return OPENAI_API_SURFACES["responses"] if responses_route(target) else OPENAI_API_SURFACES["chat_completions"]
+
+
+class RepeatedParameterRefusal(UsageAccountingError):
+    """The wrap-up still asks the same endpoint for a parameter value it explicitly refused."""
+
+
+_FORCED_REFUSED_OPTIONS = ContextVar("forced_refused_options", default=())
+
+
+@contextmanager
+def forced_parameter_refusal(failure, round_idx):
+    bindings = (failure.get("refused_option_bindings", ()) if round_idx is not None and failure.get("round") == round_idx
+                and failure.get("failure_code") == "bad_request" else ())
+    token = _FORCED_REFUSED_OPTIONS.set(tuple(
+        pair for pair in (bindings or ())
+        if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(isinstance(value, str) for value in pair)
+    ))
+    try:
+        yield
+    finally:
+        _FORCED_REFUSED_OPTIONS.reset(token)
+
+
+def _openai_wire_options(candidate):
+    # SDK extras are merged into the JSON body, not sent as parameter names.
+    extras = candidate.get("extra_body")
+    body = {key: value for key, value in candidate.items() if key not in {"extra_body", "extra_headers", "extra_query"}}
+    if isinstance(extras, dict):
+        body.update(extras)
+    return {key: value for key, value in body.items() if key not in {"messages", "input"}}
+
+
+def _option_binding(target, options, name):
+    """Bind one named option to its effective direct route; store neither its value nor a key on its own."""
+    from ouroboros.request_wire_contract import canonical_sha256
+
+    client = [target.get(key) for key in ("provider", "connection", "usage_model", "base_url", "api_key", "default_headers")]
+    # Selectors describe a tool set or stream, not a standalone value. A new set or
+    # mode can change the selector's meaning; it cannot change an unrelated option like model.
+    depends_on = {"tool_choice": ("tools",), "parallel_tool_calls": ("tools", "tool_choice"),
+                  "stream_options": ("stream",)}.get(name, ())
+    context = {key: options[key] for key in depends_on if key in options}
+    return canonical_sha256([client, _wire_surface(target), options.get("model"), name, options[name], context])
 
 
 def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]:
@@ -447,10 +493,18 @@ class _RecoveryLadderMixin:
         replayed = self._has_replayed_reasoning_metadata(kwargs.get("messages") or [])
         transport_timeout = kwargs.get("timeout")
         prior_capture = None
+        refused_options = set()  # one ordinary call's bounded ladder, not a durable route capability
+        known_refusals = _FORCED_REFUSED_OPTIONS.get() if target.get("provider") == "openai" else ()
 
         def _send(candidate: Dict[str, Any]) -> Any:
             nonlocal prior_capture
             candidate = _finalized_physical_candidate(target, candidate, _wire_surface(target), fresh_clock=True)
+            options = _openai_wire_options(candidate) if known_refusals else {}
+            if any(name in options and _option_binding(target, options, name) == digest for name, digest in known_refusals):
+                require_physical_dispatch_window()
+                note_wire_send_failed()
+                self._pop_effort_clamp_disclosure()
+                raise RepeatedParameterRefusal("The provider already refused an unchanged request option.")
             request = _with_tariff(_attempt_request(target, candidate), target, candidate)
 
             def dispatch():
@@ -458,6 +512,16 @@ class _RecoveryLadderMixin:
                 try:
                     response = create_fn(**candidate, **({"timeout": timeout} if timeout is not None else {}))
                 except Exception as error:
+                    body = getattr(error, "body", None)
+                    native = body.get("error", body) if isinstance(body, dict) else None
+                    # A routed API may select a different upstream for new input. Bind only a direct
+                    # provider's own top-level option refusal, never a message field or a guessed cause.
+                    if (target.get("provider") == "openai" and getattr(error, "status_code", None) == 400
+                            and isinstance(native, dict) and native.get("code") in ("unsupported_parameter", "unsupported_value")
+                            and isinstance(param := native.get("param"), str)):
+                        sent = _openai_wire_options(candidate)
+                        if param in sent:
+                            refused_options.add((param, _option_binding(target, sent, param)))
                     refusal = processing_refusal(target, candidate, error)
                     if refusal is error:
                         raise
@@ -485,6 +549,10 @@ class _RecoveryLadderMixin:
                 preserve_prior_dispatch(exc, prior_capture)
                 raise
             except Exception as exc:
+                if refused_options:
+                    # A repair can fail differently. Keep what this call's earlier sends proved
+                    # beside the final failure, without changing its cause or custody.
+                    exc.refused_option_bindings = sorted(refused_options)
                 prior_capture = strongest_dispatch_capture(prior_capture, getattr(exc, "physical_attempt_capture", None))
                 note_wire_send_failed()
                 raise
@@ -528,6 +596,12 @@ class _RecoveryLadderMixin:
                     try:
                         current_response = _send(retry_kwargs)
                         current_failure = None
+                    except RepeatedParameterRefusal:
+                        # A changed first send was allowed. Keep that send's own result
+                        # instead of treating this unsent repair as the first candidate.
+                        if current_failure is not None:
+                            raise current_failure
+                        return current_response
                     except UsageAccountingError:
                         raise
                     except Exception as retry_exc:
@@ -562,6 +636,8 @@ class _RecoveryLadderMixin:
                 try:
                     resp = _send(retry_kwargs)
                     kwargs = retry_kwargs
+                except RepeatedParameterRefusal:
+                    raise exc
                 except UsageAccountingError:
                     raise
                 except Exception as retry_exc:

@@ -35,7 +35,7 @@ def test_refused_fit_is_durable_before_error_and_fitting_candidate_stays_quiet(h
     host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=raw + 9999))
     async def refused(session):
         pytest.fail('overflowing candidate reached the provider')
-    with pytest.raises(RealtimeSetupError, match='context_capacity'):
+    with pytest.raises(RealtimeSetupError, match='context_capacity') as refused_fit:
         asyncio.run(host.session(refused, LiveOptions()))
     host.wire.flush()  # the journal's writer creates the file
     events = host_events(host) if host.wire_path.exists() else []
@@ -47,6 +47,8 @@ def test_refused_fit_is_durable_before_error_and_fitting_candidate_stays_quiet(h
     measured = event['fit']['measurement']
     assert measured['rendered_mode'] == 'nano'
     assert measured['capacity_total_tokens'] == raw + 9999
+    assert f"total window here is {raw + 9999:,} tokens" in str(refused_fit.value)
+    assert "Calls (beta) settings" in str(refused_fit.value) and "input limit" not in str(refused_fit.value)
     assert measured['response_reserve_tokens'] == 10000
     assert measured['estimated_input_tokens'] == measured['raw_input_tokens']
     free = measured['capacity_total_tokens'] - measured['raw_input_tokens'] - 10000
@@ -69,6 +71,44 @@ def test_refused_fit_is_durable_before_error_and_fitting_candidate_stays_quiet(h
     asyncio.run(host.session(allowed, LiveOptions()))
     assert [event for event in host_events(host) if event['type'] == 'call.fit_refused'] == refusals
     assert host_events(host)[-1]['type'] == 'call.prepared'
+
+
+@pytest.mark.parametrize("sealed_candidate", [False, True], ids=["ladder", "final_check"])
+def test_connection_refusal_keeps_an_observed_input_cap_not_its_total_equivalent(host_world, monkeypatch, sealed_candidate):
+    from ouroboros import realtime_setup
+    from ouroboros.context_window import record_observation
+    from ouroboros.contracts.realtime import RealtimeSetupError
+
+    host = host_world.host
+    scope = host.turn.observation_fingerprint()
+    cap = 1_234
+
+    def observe_cap():
+        record_observation(host.ctx.drive_root, scope, refused=cap, kind="input", basis="provider_stated")
+
+    if sealed_candidate:
+        publish = realtime_setup._publish_room_reader
+
+        def publish_with_smaller_limit(*args, **kwargs):
+            observe_cap()  # the immutable wire is remeasured after publishing its room reader
+            return publish(*args, **kwargs)
+
+        monkeypatch.setattr(realtime_setup, '_publish_room_reader', publish_with_smaller_limit)
+    else:
+        observe_cap()
+
+    async def consume(_session):
+        pytest.fail('the refused input must not reach the provider')
+
+    with pytest.raises(RealtimeSetupError, match='context_capacity') as raised:
+        asyncio.run(host.session(consume, LiveOptions()))
+    event_type = 'call.prepared' if sealed_candidate else 'call.fit_refused'
+    event, = [row for row in host_events(host) if row['type'] == event_type]
+    measurement = event['fit']['measurement']
+    assert measurement['window']['kind'] == 'input' and measurement['window']['tokens'] == cap
+    assert "input limit here is 1,234 tokens" in str(raised.value)
+    assert f"limit here is {measurement['capacity_total_tokens']:,}" not in str(raised.value)
+    assert "continue by text" in str(raised.value) and not any(s.opened for s in host_world.sessions)
 
 
 def test_fresh_default_max_connects_with_real_gemini_envelope_and_allowance(tmp_path, monkeypatch, provider_catalog_offline):

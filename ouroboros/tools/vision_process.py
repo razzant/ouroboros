@@ -85,7 +85,7 @@ _RECEIPT = _object({
 })
 _RESULT = _object({
     **_RECEIPT["properties"],
-    "kind": {"enum": ["success", "model", "not_dispatched", "send_refused", "interrupted", "error"]},
+    "kind": {"enum": ["success", "model", "content_refused", "not_dispatched", "send_refused", "interrupted", "error"]},
     "text": _STRING, "usage": _DICT, "ledger_attempt_ids": {"type": "array", "items": _STRING},
     "error": _STRING, "problem": _DICT, "operation_id": _STRING,
     "model_role": _STRING, "route": _DICT, "unknown": {"type": "boolean"},
@@ -100,7 +100,7 @@ def _read_receipt(value: Any, receipt_id: str, *, terminal: bool = False) -> dic
     capture, custody = value["capture"], value["custody"]
     if custody and capture and custody["invocation_id"] != capture["attempt_id"]:
         raise ValueError("VLM child operation and physical attempt disagree")
-    if terminal and value["kind"] in {"model", "not_dispatched"}:
+    if terminal and value["kind"] in {"model", "not_dispatched", "content_refused"}:
         problem = value["problem"]
         if not isinstance(problem.get("code"), str) or not problem["code"]:
             raise ValueError("VLM typed model error has no problem code")
@@ -109,6 +109,12 @@ def _read_receipt(value: Any, receipt_id: str, *, terminal: bool = False) -> dic
         status = problem.get("context", {}).get("httpStatus", 0)
         if type(status) is not int:
             raise ValueError("VLM typed HTTP status must be an integer")
+        from ouroboros.llm_claudexor import ClaudexorContentRefused, ClaudexorRefusalError
+
+        if value["kind"] == "content_refused" and (value["unknown"] or not capture or capture["state"] != "settled"
+                or problem.get("code") not in {ClaudexorContentRefused.terminal_code, ClaudexorRefusalError.terminal_code}
+                or problem.get("retryable") is not False):
+            raise ValueError("A content refusal requires a settled provider response")
         if value["kind"] == "not_dispatched" and (value["unknown"] or capture is None or capture["state"] != "released"):
             raise ValueError("VLM non-dispatch requires its released physical attempt receipt")
         if custody and custody["operation_id"] and custody["operation_id"] != value["operation_id"]:
@@ -141,7 +147,7 @@ def child_main(payload_path: str) -> None:
     """Entrypoint imported by the tracked child, never a second wait owner."""
     from ouroboros.llm import LLMClient
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
-    from ouroboros.llm_claudexor import ClaudexorModelError, ClaudexorModelNotDispatched
+    from ouroboros.llm_claudexor import ClaudexorRefusalError, ClaudexorModelError, ClaudexorModelNotDispatched
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.usage_accounting import UsageScope, usage_scope
 
@@ -210,7 +216,8 @@ def child_main(payload_path: str) -> None:
                 cause = getattr(exc, "previous_error", None)
                 cause = cause if isinstance(cause, ClaudexorModelError) else exc
                 envelope.update(kind="interrupted" if isinstance(exc, ModelWaitInterrupted) else
-                                "not_dispatched" if isinstance(exc, ClaudexorModelNotDispatched) else "model",
+                                "not_dispatched" if isinstance(exc, ClaudexorModelNotDispatched) else
+                                "content_refused" if isinstance(exc, ClaudexorRefusalError) else "model",
                                 problem=getattr(cause, "problem", {}), operation_id=getattr(cause, "operation_id", ""),
                                 model_role=exc.model_role, route=getattr(cause, "route", {}),
                                 unknown=getattr(cause, "code", "") == "model_outcome_unknown",
@@ -252,7 +259,7 @@ def _unknown(receipt_id: str, receipt_path: Path, role: str, reason: str):
 
 
 def _decode_terminal(value: dict, receipt_id: str) -> tuple[str, dict]:
-    from ouroboros.llm_claudexor import ClaudexorModelError, ClaudexorModelNotDispatched
+    from ouroboros.llm_claudexor import ClaudexorContentRefused, ClaudexorRefusalError, ClaudexorModelError, ClaudexorModelNotDispatched
     from ouroboros.model_wait import ModelWaitInterrupted
 
     data = _read_receipt(value, receipt_id, terminal=True)
@@ -270,6 +277,9 @@ def _decode_terminal(value: dict, receipt_id: str) -> tuple[str, dict]:
     else:
         problem = data["problem"]
         cls = ClaudexorModelNotDispatched if data["kind"] == "not_dispatched" else ClaudexorModelError
+        if data["kind"] == "content_refused":
+            policy = problem["code"] == ClaudexorContentRefused.terminal_code
+            cls = ClaudexorContentRefused if policy else ClaudexorRefusalError
         error = cls(problem, model_role=data["model_role"], operation_id=data["operation_id"],
                     route=data["route"], unknown=data["unknown"])
         if data["kind"] == "interrupted":

@@ -270,8 +270,9 @@ def test_local_send_narrows_its_timeout_to_the_window_left_after_preparation(env
                                          "model": "local-model", "choices": completion("local")["choices"],
                                          "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}})
 
+    monkeypatch.setenv("LOCAL_MODEL_PORT", "8799")  # the fixture names the endpoint this SDK client reaches
     monkeypatch.setattr(import_module("ouroboros.local_model"), "get_manager",
-                        lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
+                        lambda: SimpleNamespace(serving_context_evidence=lambda **_bound: {}))
     spend_preparation(monkeypatch, env, 3)
     client = LLMClient(api_key="unused")
     with OpenAI(base_url="http://127.0.0.1:8799/v1", api_key="local", max_retries=0,

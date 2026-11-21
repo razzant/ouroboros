@@ -412,7 +412,7 @@ def _cold_registry(tmp_path, monkeypatch, left):
     from ouroboros.model_wait import TaskModelWait
     from ouroboros.owner_wait import checkpoint_owner_wait, set_owner_wait
     from ouroboros.task_results import write_task_result
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     ctx = registry._ctx

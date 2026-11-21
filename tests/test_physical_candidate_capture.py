@@ -239,7 +239,9 @@ def test_local_candidate_is_measured_as_prepared_without_a_compactor(data_root, 
         local_model,
         "get_manager",
 
-        lambda: SimpleNamespace(serving_context_evidence=lambda: {"context_window": 8192, "confirmed": True}, measure_prepared_input=lambda payload: {"supported": False}),
+        lambda: SimpleNamespace(
+            serving_context_evidence=lambda **kwargs: {"context_window": 8192, "confirmed": True},
+            measure_prepared_input=lambda payload, **kwargs: {"supported": False}),
     )
     tools = [{
         "type": "function",
@@ -294,7 +296,7 @@ def test_local_transport_timeout_is_separate_from_physical_candidate(
         transport_timeouts.append(request.extensions["timeout"])
         return httpx.Response(200, json=_Response(text="local").model_dump())
 
-    def measure(payload):
+    def measure(payload, **kwargs):
         measured.append(copy.deepcopy(payload))
         return {
             "supported": measurement_supported, "input_is_exact": measurement_supported,
@@ -304,7 +306,7 @@ def test_local_transport_timeout_is_separate_from_physical_candidate(
         }
 
     monkeypatch.setattr(import_module("ouroboros.local_model"), "get_manager", lambda: SimpleNamespace(
-        serving_context_evidence=lambda: {"context_window": 8192, "confirmed": True, "process_id": 123},
+        serving_context_evidence=lambda **kwargs: {"context_window": 8192, "confirmed": True, "process_id": 123},
         measure_prepared_input=measure,
     ))
     messages = [{"role": "user", "content": "hello", "_context_capsule": {"generation": 2}}]
@@ -360,7 +362,9 @@ def test_local_read_timeout_after_dispatch_is_not_retried(data_root, monkeypatch
         local_model,
         "get_manager",
 
-        lambda: SimpleNamespace(serving_context_evidence=lambda: {"context_window": 8192, "confirmed": True}, measure_prepared_input=lambda payload: {"supported": False}),
+        lambda: SimpleNamespace(
+            serving_context_evidence=lambda **kwargs: {"context_window": 8192, "confirmed": True},
+            measure_prepared_input=lambda payload, **kwargs: {"supported": False}),
     )
     with ua.usage_scope(_scope(data_root, "task-local-timeout")), ua.bind_physical_attempt_context(
         _physical_context("route-local-timeout")

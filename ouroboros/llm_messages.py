@@ -559,6 +559,13 @@ class _MessageShapingMixin:
         for original in cls._order_complete_tool_episodes(messages):
             msg = copy.deepcopy(original)
             role = str(msg.get("role") or "").strip().lower()
+            if role == "assistant" and isinstance(msg.get("content"), list):
+                # A stateless recipient reads the words in order; native replay keeps its own opaque receipt.
+                msg["content"] = [
+                    {"type": "text", "text": part["refusal"]} if isinstance(part, dict)
+                    and part.get("type") == "refusal" and isinstance(part.get("refusal"), str) else part
+                    for part in msg["content"]
+                ]
 
             if awaiting_tool_results and role not in {"tool", "system"}:
                 awaiting_tool_results = False

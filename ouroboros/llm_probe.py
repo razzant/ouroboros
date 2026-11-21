@@ -480,7 +480,7 @@ __all__ = [
 ]
 
 
-def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
+def upstream_transport_reachable(llm: Any, model: str, *, timeout: float, use_local: bool = False,
                                  model_role: str = "main", account_override: Optional[str] = None,
                                  observed_after: Optional[float] = None, expected_route: Optional[dict] = None) -> dict:
     """Non-generating observation of the selected upstream, never a paid probe."""
@@ -489,8 +489,28 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
     from ouroboros.deadline_utils import parse_deadline_ts
     from ouroboros.utils import utc_now_iso
     from ouroboros.provider_models import parse_claudexor_model, provider_for_model
-    from ouroboros.transport_custody import is_loopback_base_url
+    from ouroboros.transport_custody import endpoint_fingerprint, is_loopback_base_url
     try:
+        if timeout <= 0:
+            return {}
+        if use_local:
+            from ouroboros.local_model import get_manager, local_dispatch_port
+            from ouroboros.model_concurrency import measurement_slot
+
+            started, port = time.monotonic(), local_dispatch_port()
+            # A count on this server waits on the inference lock a generation holds, so an observation whose
+            # answer is only evidence declines the server's one slot instead of opening a connection behind it.
+            with measurement_slot(wait=False) as admitted:
+                if not admitted:
+                    return {}
+                measured = get_manager().measure_prepared_input(
+                    {"model": "local-model", "messages": [{"role": "user", "content": "."}], "tool_choice": "none"},
+                    timeout=timeout, expected_port=port)
+            # Even an opaque formatter answers with the validated process, input and serving window.
+            if measured.get("endpoint_sha256") and local_dispatch_port() == port and time.monotonic() - started <= timeout:
+                return {"kind": "local_server_http", "process_id": measured["process_id"],
+                        "port": port, "observed_at": utc_now_iso(), "endpoint_sha256": measured["endpoint_sha256"]}
+            return {}
         if provider_for_model(model) == "claudexor":
             from ouroboros.llm_claudexor import catalog_admits_model, model_catalog
             from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
@@ -523,7 +543,7 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
             return {}
         target = llm._resolve_remote_target(model)
         url = str(target.get("base_url") or "")
-        if not url or is_loopback_base_url(url):
+        if not url or is_loopback_base_url(url):  # an external listener on this host proves no upstream, nor the old generation's end
             return {}
         import httpx
         # Metadata carries no cognitive in-flight lease. Reuse the ordinary
@@ -535,8 +555,10 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         # An upstream HTTP refusal still proves connectivity. A gateway/server
         # outage does not. This says nothing about the old generation's outcome.
         if 200 <= response.status_code < 500:
-            return {"kind": "upstream_http", "status_code": response.status_code,
-                    "observed_at": utc_now_iso()}
+            if llm._resolve_remote_target(model).get("base_url") != url:
+                return {}  # The observation belongs to the endpoint that answered HEAD.
+            return {"kind": "upstream_http", "status_code": response.status_code, "observed_at": utc_now_iso(),
+                    "endpoint_sha256": endpoint_fingerprint(url)}
     except Exception:
         logging.getLogger(__name__).debug("upstream transport still unavailable", exc_info=True)
     return {}

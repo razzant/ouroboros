@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import ipaddress
 import logging
 import socket
@@ -11,6 +12,16 @@ from typing import Any
 from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
+
+
+def endpoint_fingerprint(url):
+    return hashlib.sha256(str(url or "").encode()).hexdigest()
+
+
+def require_observed_endpoint(expected, url):
+    if expected and endpoint_fingerprint(url) != expected:
+        raise ObservedEndpointChanged("The observed model endpoint changed before dispatch.")
+
 
 # Two separate scopes carry a Main send's physical attempts. ``single_physical_send`` is the caller's strict one-send
 # claim: ``claim(reservation)`` writes ahead at the dispatch boundary and the lanes run no repair of their own.
@@ -65,6 +76,20 @@ class ProviderNotDispatched(RuntimeError):
     A local control-plane HTTP failure cannot mint this fact: an accepted
     remote operation may already have sent its provider request.
     """
+
+
+class ObservedEndpointChanged(ProviderNotDispatched):
+    """The selected sender no longer targets the observed endpoint; no request was sent."""
+
+
+def managed_local_endpoint_fingerprint(binding: dict) -> str:
+    """The manager's live listener and process birth, distinct from an external loopback URL."""
+    from ouroboros.request_wire_contract import canonical_sha256
+
+    birth = binding.get("fingerprint") or {}
+    if not (birth.get("start_time") or birth.get("creation_time")):
+        return ""
+    return canonical_sha256(["managed_local", binding["host"], binding["port"], binding["pid"], birth])
 
 
 def is_loopback_base_url(base_url: Any) -> bool:
@@ -284,58 +309,6 @@ def _requests_protocol_death(exc: BaseException) -> Any:
     return found
 
 
-def is_retryable_transport_death(exc: BaseException) -> bool:
-    """True when a DISPATCHED request died with a typed transport death that a
-    bounded paid repeat (a NEW physical attempt) may follow.
-
-    The class is deliberately narrow: httpx ``ReadError`` / ``WriteError`` /
-    ``RemoteProtocolError`` reached through the explicit ``__cause__`` chain the
-    OpenAI SDK sets (``raise APIConnectionError(request=request) from err``), or
-    the requests/urllib3 Anthropic-native shape — a ``ConnectionError`` or a
-    body-read ``ChunkedEncodingError`` carrying
-    ``urllib3.exceptions.ProtocolError`` / ``http.client.RemoteDisconnected``.
-    NOT a timeout of any kind (a ``ReadTimeout`` is "we gave up", the provider
-    may still be working), NOT a provider status/body error, NOT a pre-dispatch
-    failure (that custody is ``released`` and owned by the free wait episode),
-    and — the classifier's locality gate — NOT a local provider or a loopback
-    route, whose dead server is not a network fault worth paying for again. A
-    missing capture proves nothing and fails closed.
-
-    Running turns, Presence included, use shared configured-route recovery
-    (``loop_transport.new_generation_after_unknown``). This predicate serves
-    ``loop_llm_call``'s explicit low-level repeat API and retained old records,
-    a compatibility surface, not production Presence policy. Each opted-in
-    repeat has its own attempt and unknown cost; ``TRANSPORT_DEATHS_KEY`` binds
-    the count/failure to its round. Budget/deadline still bind, and an open
-    record permits only a typed-death repeat or free pre-dispatch redial.
-    """
-    if is_pre_dispatch_transport_failure(exc):
-        return False  # the free released class: the two predicates are never both true
-    capture = _capture_on_chain(exc)
-    if (
-        capture is None
-        or str(getattr(capture, "state", "") or "") not in ("dispatched", "unresolved", "settled")
-        or not outcome_unknown_on_chain(exc)
-        or str(getattr(capture, "provider", "") or "") == "local"
-        or bool(getattr(capture, "route_is_loopback", False))
-    ):
-        return False
-    try:
-        import httpx
-
-        death_types: tuple = (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)
-    except Exception:  # pragma: no cover - httpx ships with the runtime
-        death_types = ()
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while isinstance(current, BaseException) and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, death_types) or _requests_protocol_death(current) is not None:
-            return True
-        current = current.__cause__
-    return False
-
-
 def release_pre_dispatch_attempt(reservation: Any, exc: BaseException, *, expected_revision: int | None = None) -> bool:
     """Release a marked attempt only after a typed pre-dispatch transport fact."""
     if not is_pre_dispatch_transport_failure(exc):
@@ -403,7 +376,7 @@ def attempt_custody_event_fields(error: BaseException) -> dict:
         fields["model_output_received"] = True
     if getattr(error, "explicit_timeout", False) is True:
         fields["explicit_timeout"] = True
-    # The same walk the death predicate uses: the explicit ``__cause__`` chain,
+    # Read the explicit ``__cause__`` chain,
     # plus — at every link including the error itself, because the requests lane
     # raises its ConnectionError bare — the typed death requests keeps in
     # ``args``/``reason`` rather than on ``__cause__``.

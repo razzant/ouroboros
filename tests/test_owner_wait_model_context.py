@@ -18,7 +18,7 @@ from ouroboros.task_results import write_task_result
 from ouroboros.tools.registry import ToolRegistry
 from supervisor import queue, task_model_wait, workers
 from tests._context_shared import _make_health_env
-from tests.test_context_fit_v664 import _plan
+from tests._context_fit_plan import fit_plan as _plan
 from tests.test_llm_claudexor import MODEL
 from tests.test_loop_transport_wait import _loop_kwargs
 

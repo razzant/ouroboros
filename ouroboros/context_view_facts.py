@@ -274,8 +274,11 @@ def _failure_request_text(usage, walked):
     if walked:
         model = (usage.get("_last_llm_failure") or {}).get("model")
         return f"{stated}{f' on {model}' if model else ''}; its window is not known here." if input_tokens or total else ""
-    estimate = int(usage.get("_context_prompt_estimate") or 0)
+    restored = bool((usage.get("_last_llm_failure") or {}).get("restored_attempt"))  # its request is no package this round measured
+    estimate = 0 if restored else int(usage.get("_context_prompt_estimate") or 0)
     request = stated if input_tokens or total else f"request input estimated {estimate:,} tokens" if estimate else "request size unknown"
+    if restored:
+        return f"{request}; its window is not known here."
     window = usage.get("_context_window") or window_projection(WindowRecord("", reserve=int(
         usage.get("_context_response_reserve_tokens") or 0)))
     return f"{request}; assumed {window['text']}."

@@ -1081,7 +1081,7 @@ def _safety_model_call(
                         model=light_model, use_local=use_local,
                         max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
                         timeout=get_safety_call_timeout_sec(),
-                        model_role=model_role, model_account_override=account, processing_preference=processing,
+                        model_role=model_role, model_account_override=account, processing_preference=processing, accepts_typed_refusals=True,
                         wait_for_resources=(not mode_has_unrestricted_agency(_runtime_mode(ctx))
                                             if wait_for_resources is None else wait_for_resources),
                         response_format=({"type": "json_object"}
@@ -1285,6 +1285,9 @@ def _run_llm_check(
                 _mark_storm(error, binding, own=True, fail_open=fail_open)
                 return _unanswered(ctx, tool_name, error, fail_open=fail_open)
 
+    from ouroboros._usage_response import refusal_content_text
+    if refusal_content_text(msg.get("content")) is not None:  # the engine's advertised typed refusal: no verdict, held unparsed
+        return _hold(ctx, tool_name, "its checker did not issue a verdict: it refused the request")  # and never repaired
     result = _parse_safety_response(msg.get("content") or "")
     if result is None:
         raw_content = str(msg.get("content") or "")
@@ -1543,8 +1546,12 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     if (speech or is_mcp) and release and not judged and not same_step and (quiz := _owner_yes(ctx, subject)):
         return released(quiz)
 
+    from ouroboros.llm_claudexor import ClaudexorRefusalError
     try:
         assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
+    except ClaudexorRefusalError as refusal:
+        # The checker request ended without a verdict. Preserve any earlier flag and the ordinary hold policy.
+        assessment = _hold(ctx, tool_name, f"its checker did not issue a verdict: {refusal.notice}")
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
         from ouroboros.model_wait import propagate_model_control

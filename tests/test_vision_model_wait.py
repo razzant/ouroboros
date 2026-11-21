@@ -33,6 +33,7 @@ def _install_child_fixture(mode, events_path):
             handle.write(json.dumps({"kind": kind, **fields}) + "\n")
 
     class Gateway:
+        store_identity = "fixture-store"  # the model store the real child's binding is proved against
         operation = ""
         polls = 0
         lost = False

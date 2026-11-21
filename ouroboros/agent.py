@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ouroboros.task_carrier import conversation_origin, inline_execution
+from ouroboros.task_carrier import conversation_origin
 
 from ouroboros.config import runtime_setting
 
@@ -50,12 +50,12 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, terminal_result_fields
+from ouroboros.task_finalization import EMPTY_REFUSAL_NOTICE, TERMINAL_ORIGIN_HOST_NOTICE, set_terminal_host_notice, terminal_result_fields
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import attach_task_contract
-from ouroboros.outcomes import infra_failed_axes
+from ouroboros.outcomes import _refusal_final_answer, infra_failed_axes
 from ouroboros import body_candidate, mcp_task_session, route_choice, subagent_bootstrap, subagent_runtime
 from ouroboros.subagents import (
     SubagentDispatch,
@@ -1128,7 +1128,13 @@ class OuroborosAgent:
         drive_logs = self.env.drive_path("logs")
         heartbeat_stop = self._start_task_heartbeat_loop(str(task.get("id") or ""))
         try:
-            ctx, messages, cap_info = self._prepare_task_context(task, authority_refusal)
+            try:
+                ctx, messages, cap_info = self._prepare_task_context(task, authority_refusal)
+            except MinimumViewUnfit as unfit:
+                terminal = _start_context_capacity_terminal(task, getattr(self, "_realtime_turn", None), unfit, drive_logs)
+                if terminal is None:  # the ordinary inline call's carrier owns this refusal
+                    raise
+                return finished(*terminal, self.tools._ctx)
             budget_remaining = cap_info.get("budget_remaining")
 
             usage: Dict[str, Any] = {}
@@ -1261,7 +1267,7 @@ class OuroborosAgent:
                     except Exception:
                         log.debug("Failed to persist review continuation after task exception", exc_info=True)
 
-            replaced, _, text = _resolve_intentional_empty(ctx, usage, text)
+            replaced, _, text = _resolve_intentional_empty(ctx, usage, text, llm_trace)
             if replaced:
                 usage["terminal_origin"] = TERMINAL_ORIGIN_HOST_NOTICE
                 usage.pop("presence_completion_outcome", None)
@@ -1275,14 +1281,6 @@ class OuroborosAgent:
             events = finished(text, usage, llm_trace, ctx)
             _retire_working_checkpoint(self.tools._ctx, task)  # retire only after durable persistence readback
             return events
-
-        except MinimumViewUnfit as unfit:
-            if inline_execution(task):
-                raise  # a direct turn or a call reports its own refusal (``worker_chat_lane``)
-            # A pooled start's known incompatibility is its outcome, never a worker crash. No model ran this
-            # attempt, so nothing to synthesize; what earlier attempts saved or started keeps its own owners.
-            task["_skip_post_task_synthesis"] = True
-            return finished(*_context_capacity_terminal(unfit), self.tools._ctx)
 
         except BudgetPauseRequested as exc:
             # The durable pause row already exists (the loop raised only after
@@ -1544,18 +1542,20 @@ class OuroborosAgent:
         return stop
 
 
-def _resolve_intentional_empty(ctx: Any, usage: Dict[str, Any], text: Any) -> tuple[bool, bool, Any]:
+def _resolve_intentional_empty(ctx: Any, usage: Dict[str, Any], text: Any, trace: Any = None) -> tuple[bool, bool, Any]:
     """Resolve empty finals before outcome derivation; ``(replaced, intentional, text)``.
 
-    The loop's accepting exit stamps ``usage["wake_silent"]`` (loop_delivery): the wake's
-    words, even empty, are internal, and the pipeline decides what its outcome publishes.
+    The loop's accepting exit stamps ``usage["wake_silent"]`` (loop_delivery): the wake's words, even empty, are
+    internal. A completed refusal's own bytes the trace binds by hash stay its final, the host's notice beside them.
     """
     ok_status = str(usage.get("execution_status") or usage.get("result_status") or "") not in {"failed", "infra_failed"}
     presence = (getattr(ctx, "_presence_completion_accepted", False)
                 and (getattr(ctx, "_presence_completion", None) or {}).get("outcome") in {"silent", "tool_delivered"}
                 and ok_status)
     intentional_empty = presence or usage.get("wake_silent") is True
-    if not isinstance(text, str) or (not text.strip() and not intentional_empty):
+    if isinstance(text, str) and not text.strip() and not intentional_empty and _refusal_final_answer(text, trace or {}) is not None:
+        set_terminal_host_notice(usage, str(usage.get("terminal_host_notice") or ""), EMPTY_REFUSAL_NOTICE)
+    elif not isinstance(text, str) or (not text.strip() and not intentional_empty):
         if ctx is not None:
             ctx._presence_completion_accepted = False
         usage.pop("wake_silent", None)
@@ -1583,7 +1583,7 @@ def make_agent(
 from ouroboros.agent_dispatch import (  # noqa: E402, F401 -- intentional public re-exports
     _record_executor_resolution,
     _blocked_executor_terminal,
-    _context_capacity_terminal,
+    _start_context_capacity_terminal,
     _persist_early_origin_stub,
     _budget_exhausted_message,
     _budget_resume_policy,

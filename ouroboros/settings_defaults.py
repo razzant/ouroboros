@@ -150,7 +150,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
     # The owner's limit on physical calls in flight per model route (``model_concurrency``): excess sends wait in
     # line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends the wait). "": not chosen, so an
-    # API route has no limit of the host's and a local model keeps three (``settings_scales.MODEL_CAP_KEY``); a
+    # API route has no limit of the host's and the built-in server admits one (``settings_scales.MODEL_CAP_KEY``); a
     # whole number limits both; <=0 limits neither.
     "OUROBOROS_MODEL_MAX_CONCURRENCY": "",
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"

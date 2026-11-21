@@ -738,9 +738,9 @@ def prospective_wrapup_attempt_request(
     reasoning_effort: str, tools: Optional[list[Dict[str, Any]]] = None,
     allow_server_web_search: bool = False, prompt_tokens: int = 0,
     model_role: str = "main", model_account_override: Optional[str] = None,
-    model_turn_state: Any = None,
-    cache_affinity: str = "",
-    processing_preference: Optional[str] = None,
+    model_turn_state: Any = None, use_local: bool = False,
+    cache_affinity: Optional[str] = None,
+    processing_preference: Optional[str] = None, prepared_parameters: Optional[dict] = None,
 ) -> Any:
     """Build the conservative request facts from the prospective wire payload.
 
@@ -749,17 +749,25 @@ def prospective_wrapup_attempt_request(
     value the send will carry, or the two payloads differ by that field alone.
     Under a bound Main clock (``send_clock``) the copy carries a line of its own
     sample, so its price is advice: the send seals a fresh line and is admitted
-    again at its own price (``loop_forced_finalization._forced_admission_predicate``)."""
+    again at its own price (``forced_admission_predicate``)."""
     from ouroboros.llm import _attempt_request, _finalized_physical_candidate
     from ouroboros.llm_fallback import _wire_surface
     from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
-    from ouroboros.request_wire_recovery import request_wire_call_scope
+    from ouroboros.request_wire_recovery import request_wire_call_scope, resolve_temperature_hint
     from ouroboros.pricing import infer_provider_from_model
     from ouroboros.send_clock import stamp_clock_note
     from ouroboros.usage_accounting import AttemptRequest, _merge_scope
     from ouroboros.model_slots import resolve_processing_preference
 
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
+    prepared = prepared_parameters or {}
+    max_tokens = prepared.get("max_tokens", MAIN_LOOP_MAX_TOKENS)
+    tool_choice = prepared.get("tool_choice", "auto")
+    temperature = prepared.get("temperature")
+    if use_local:
+        target, candidate = llm._prepared_local_candidate(
+            messages, tools, max_tokens, tool_choice, processing_preference, reasoning_effort)
+        return _merge_scope(_attempt_request(target, candidate, source="llm.local"))[0]
 
     resolved = None
     if callable(getattr(llm, "_resolve_remote_target", None)):
@@ -773,31 +781,36 @@ def prospective_wrapup_attempt_request(
         return _merge_scope(AttemptRequest(
             model=model, provider=infer_provider_from_model(model),
             prompt_tokens_estimate=prompt_tokens,
-            max_completion_tokens=MAIN_LOOP_MAX_TOKENS,
+            max_completion_tokens=max_tokens,
             processing_preference=processing_preference,
             force_unknown_reservation=bool(processing_preference),
         ))[0]
 
     target = {**resolved, "processing_preference": processing_preference}
+    temperature = resolve_temperature_hint(target, temperature, prepared.get("default_temperature"))
+    if target.get("provider") == "gigachat":
+        candidate = llm._prepared_gigachat_candidate(target, messages, tools, reasoning_effort, max_tokens,
+                                                     tool_choice, temperature)
+        return _merge_scope(_attempt_request(target, candidate, source="llm.gigachat"))[0]
     if target.get("provider") == "claudexor":
-        from ouroboros.llm_claudexor import _request, prepare_processing_target
+        from ouroboros.llm_claudexor import _request, cache_key_for_model, prepare_processing_target
 
         target = prepare_processing_target(target)
         candidate = stamp_clock_note(_request(target, messages, tools, {"reasoning_effort": reasoning_effort,
             "model_role": model_role, "model_account_override": model_account_override,
             "model_turn_state": model_turn_state,
             "processing_preference": processing_preference,
-            "cache_affinity": cache_affinity, "prospective": True}))
+            "cache_affinity": cache_key_for_model(model) if cache_affinity is None else cache_affinity,
+            **prepared, "prospective": True}))
         return _merge_scope(replace(_attempt_request(target, candidate),
-            force_unknown_reservation=True, max_completion_tokens=MAIN_LOOP_MAX_TOKENS))[0]
+            route_is_loopback=False, force_unknown_reservation=True, max_completion_tokens=max_tokens))[0]
     with request_wire_call_scope():
         # The send's own options, from their one owner: a key the send carries and
         # this copy does not is a different payload, and the admitted answer is refused.
-        candidate = llm._build_remote_candidate(
-            target, messages, reasoning_effort, MAIN_LOOP_MAX_TOKENS, "auto", None, tools,
-            skip_capability_fetch=True,
-            **main_loop_wire_options(model, allow_server_web_search=allow_server_web_search),
-        )
+        options = main_loop_wire_options(model, allow_server_web_search=allow_server_web_search)
+        options.update({key: prepared[key] for key in options if key in prepared})
+        candidate = llm._build_remote_candidate(target, messages, reasoning_effort, max_tokens, tool_choice,
+            temperature, tools, skip_capability_fetch=True, response_format=prepared.get("response_format"), **options)
         llm._normalize_payload_cache_ttl(target, candidate)
         anthropic = target.get("provider") == "anthropic"
         candidate = _finalized_physical_candidate(
@@ -808,6 +821,22 @@ def prospective_wrapup_attempt_request(
     return _merge_scope(_attempt_request(target, candidate))[0]
 
 
+def forced_route_options(ctx: Any) -> dict:
+    """The acting route's selectors for the budget probe and the admitted wrap-up."""
+    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
+    from ouroboros.model_wait import current_model_wait
+
+    owner = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    waiter = current_model_wait()
+    actor = {"model_role": acting_model_role(owner, model_role=getattr(ctx, "model_role", "")),
+             "task_metadata": getattr(owner, "task_metadata", {})}
+    role, account = task_model_binding(actor, context_fit_plan=getattr(owner, "context_fit_plan", None),
+                                       overrides=waiter.overrides if waiter else None)
+    return dict(model_role=role, model_account_override=account, use_local=ctx.active_use_local,
+                model_turn_state=getattr(owner, "model_turn_state", None),
+                processing_preference=task_processing_preference(actor, model_role=role))
+
+
 def prepared_wrapup_candidate(
     ctx: Any, messages: list[Dict[str, Any]], *, allow_server_web_search: bool,
 ) -> Tuple[Any, list[Dict[str, Any]]]:
@@ -815,19 +844,12 @@ def prepared_wrapup_candidate(
 
     The forced send this candidate admits continues the loop's active transport
     turn, so the candidate is built from that same owner slot."""
-    from ouroboros.llm_claudexor import cache_key_for_model
     from ouroboros.loop_llm_call import _prepare_main_messages
-    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
-    from ouroboros.model_wait import current_model_wait
     from ouroboros.send_clock import MainSendClock, main_clock_policy
     from ouroboros.transcript_prefix import append_reasoning_retirement_fact, retire_main_reasoning
 
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
-    waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": acting_model_role(owner_ctx, model_role=getattr(ctx, "model_role", "")),
-        "task_metadata": getattr(owner_ctx, "task_metadata", {})},
-        context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
-        overrides=waiter.overrides if waiter else None)
+    route = forced_route_options(ctx)
 
     retire_main_reasoning(ctx, messages)
     append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), messages)
@@ -840,8 +862,8 @@ def prepared_wrapup_candidate(
         use_local=ctx.active_use_local,
         task_attempt=ctx.accumulated_usage.get("_task_attempt"),
         deadline_ts=ctx.deadline_ts,
-        model_role=role,
-        model_account_override=account,
+        model_role=route["model_role"],
+        model_account_override=route["model_account_override"],
     )
     from ouroboros.loop_forced_finalization import _forced_physical_context
     from ouroboros.usage_accounting import bind_physical_attempt_context
@@ -860,17 +882,81 @@ def prepared_wrapup_candidate(
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=allow_server_web_search,
             prompt_tokens=int(ctx.accumulated_usage.get("_context_prompt_estimate") or 0),
-            model_role=role,
-            model_account_override=account,
-            model_turn_state=getattr(owner_ctx, "model_turn_state", None),
-            # The admitted candidate must be the payload the send will produce: the
-            # main loop declares the same install-scoped cache affinity, so this
-            # prepared copy binds the same key as that dispatch does.
-            cache_affinity="" if getattr(ctx, "active_use_local", False) else cache_key_for_model(ctx.active_model),
-            processing_preference=task_processing_preference(
-                {"task_metadata": getattr(owner_ctx, "task_metadata", {})}, model_role=role),
+            **route,
         )
     return request, send_messages
+
+
+def forced_admission_predicate(expected, admission, *, repair=False):
+    """Check the send at its own price against the original balances. Only a priced copy binds exact bytes."""
+    from ouroboros.loop_forced_finalization import ForcedCandidateUnaffordable, ForcedRepairDrift
+
+    def identity(request):
+        return (getattr(request, "model", None), getattr(request, "provider", None),
+                getattr(request, "candidate_clock_free_sha256", None) or getattr(request, "candidate_raw_sha256", None))
+
+    def admit(actual):
+        if expected is not None and identity(actual) != identity(expected):
+            if repair:
+                raise ForcedRepairDrift("the repaired forced request changed after pricing")
+            return False
+        if admission is not None and wrapup_reservation_fits(request=actual, **admission) is False:
+            raise ForcedCandidateUnaffordable("the fresh forced request exceeds its admitted balances")
+        return True
+
+    admit.budget_only = expected is None
+    return admit
+
+
+def reprepare_forced_candidate(ctx, values, *, priced, admission):
+    """Rebind an authorized retry; keep its balance check and, if still present, its byte binding."""
+    from ouroboros import loop
+    from ouroboros.loop_forced_finalization import _forced_physical_context, ForcedCandidateUnaffordable
+    from ouroboros.loop_model_call import _fit_route_tool_ceiling
+    from ouroboros.loop_routes import reprepare_source, reprepare_wire
+    from ouroboros.model_wait import PreparedModelCall, current_model_wait
+    from ouroboros.usage_accounting import bind_physical_attempt_context, current_physical_attempt_predicate
+
+    owner = getattr(ctx.tools, "_ctx", None)
+    observed = reprepare_source(ctx, values)
+    model, local, role = values["model"], values.get("use_local", False), values["model_role"]
+    effort = values.get("reasoning_effort", ctx.active_effort)
+    if (plan := getattr(owner, "context_fit_plan", None)) is not None:
+        loop._rebind_context_fit_plan(plan, ctx.tools, ctx.messages, model=model, use_local=local,
+            start_mode=getattr(owner, "active_context_mode", None), tool_schemas=ctx.tool_schemas,
+            model_role=role, model_route=observed or {}, credential_profile_id=values.get("model_account_override"),
+            reasoning_effort=effort)
+    ctx.active_model, ctx.active_use_local, ctx.active_effort = model, local, effort
+    if owner is not None:
+        owner.active_model, owner.active_use_local, owner.active_effort = model, local, effort
+        waiter = current_model_wait()
+        if waiter is not None and waiter.overrides.get(role):
+            from ouroboros.route_choice import explicit
+
+            owner.route_choice = explicit("wait_card")
+        if _fit_route_tool_ceiling(ctx):
+            values["tools"] = ctx.tool_schemas
+    reprepare_wire(ctx, values, deadline_ts=ctx.deadline_ts)
+    physical = _forced_physical_context(ctx, values["messages"])
+    guard = current_physical_attempt_predicate()
+    if priced or admission is not None:
+        with bind_physical_attempt_context(physical):
+            expected = prospective_wrapup_attempt_request(
+                llm=ctx.llm, messages=values["messages"], model=model, tools=values.get("tools"),
+                reasoning_effort=effort, use_local=local,
+                allow_server_web_search=values["allow_server_web_search"],
+                model_role=role, processing_preference=values.get("processing_preference"), prepared_parameters=values)
+        if admission is not None:
+            if admission.get("use_local") and not local:
+                from ouroboros.loop_budget import _wrapup_global_remaining
+                admission = {**admission, "global_remaining_usd": _wrapup_global_remaining()}
+            admission = {**admission, "use_local": local}
+            if wrapup_reservation_fits(request=expected, **admission) is False:
+                raise ForcedCandidateUnaffordable("the re-prepared forced request exceeds its admitted balances")
+        # An unpriced drift repair passes ``expected=None``: no byte anchor is reinstalled,
+        # the balances alone re-admit the request this reprepare produced.
+        guard = forced_admission_predicate(expected if priced else None, admission, repair=True)
+    return PreparedModelCall(values, physical, guard)
 
 
 def wrapup_reservation_fits(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import pathlib
 import threading
 from concurrent.futures import Future, TimeoutError
@@ -33,6 +34,18 @@ def endpoint_generation(endpoint):
     if not path or not stamp or descriptor_stamp(path) != stamp:
         return None
     return path, stamp, hashlib.sha256(endpoint.token.encode()).hexdigest()
+
+
+def model_rejoin_binding(gateway) -> str:
+    """Persist only an opaque proof of the store (legacy: the exact descriptor generation)."""
+    store = getattr(gateway, "store_identity", "")
+    if isinstance(store, str) and store:
+        identity = ("store", store)
+    elif generation := endpoint_generation(getattr(gateway, "_endpoint", None)):
+        identity = ("descriptor", generation)
+    else:
+        return ""
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode("ascii")).hexdigest()
 
 
 def _select(key):

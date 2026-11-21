@@ -746,7 +746,7 @@ def _run_retrieving_review(
 
         emit_review_execution_error(usage_ctx, assignment, exc, usage=custody, prompt_ref=prompt_ref)  # #1578
         from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
+        propagate_model_error(exc, single_request=True)
         if isinstance(exc, BudgetExceeded):
             raise
         log.error("Deep self-review failed: %s", exc, exc_info=True)
@@ -901,6 +901,6 @@ def run_deep_self_review(
         raise
     except Exception as e:
         from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(e)
+        propagate_model_error(e, single_request=True)
         log.error("Deep self-review failed: %s", e, exc_info=True)
         return _failed(f"❌ Deep self-review failed: {type(e).__name__}: {e}", reason_code="deep_self_review_error")

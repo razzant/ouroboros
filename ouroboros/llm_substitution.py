@@ -186,7 +186,16 @@ def same_route_refusal(accumulated_usage: dict) -> bool:
     """Did this round already get a refusal that a repeat of it cannot cure?"""
     return (str(accumulated_usage.get("_last_llm_error_kind") or "") == "model_substituted"
             or str(accumulated_usage.get("_last_llm_provider_code") or "") == "invalid_continuation"
-            or capability_refused(accumulated_usage))
+            or capability_refused(accumulated_usage) or restored_repair_refused(accumulated_usage))
+
+
+def restored_repair_refused(accumulated_usage: dict) -> bool:
+    """A restored round's Standard repair of a proven advisory-tier refusal was itself refused before any request
+    (the source no longer advertises Standard): the only other tier a salvage call could use is the refused one."""
+    from ouroboros.llm_claudexor import RESTORED_PROCESSING_KEY
+
+    failure = accumulated_usage.get("_acting_route_failure") or accumulated_usage.get("_last_llm_failure") or {}
+    return bool(accumulated_usage.get(RESTORED_PROCESSING_KEY) and failure.get("provider_code") == "unsupported_parameter")
 
 
 def capability_refused(accumulated_usage: dict) -> bool:
@@ -242,7 +251,9 @@ def _redo_allowed(payload: dict, *, identical: bool = False) -> str:
 
     if (payload.get("account") or {}).get("mode") == "pin":
         return "pinned_account"
-    if current_physical_attempt_predicate() is not None and not identical:
+    guard = current_physical_attempt_predicate()
+    # A budget-only guard prices every actual attempt; unlike a byte binding it permits a changed request.
+    if not identical and guard is not None and getattr(guard, "budget_only", False) is not True:
         return "admitted_candidate"
     from ouroboros.model_wait import dispatch_deadline_remaining_sec
 
@@ -333,6 +344,27 @@ class SubstitutionBudget:
         if reason:
             raise _refusal(self, invocation, fact, result, reason, self.used - 1)
         return True
+
+    def allowance(self, payload: dict) -> int:
+        """The redos this call could still spend if another model answered ``payload``'s send, judged before that send by
+        ``admit``'s own rule (none under a pin, a bound candidate or a spent window) and recorded with it (``restored``)."""
+        return 0 if _redo_allowed(payload) else max(0, self.redos - self.used)
+
+    def restored(self, error: Exception, payload: dict) -> None:
+        """A restored attempt's answer from another model, met by its round's own call (``llm_claudexor._meet_restored_end``):
+        its call had ``redos_left`` when that attempt was admitted (``allowance``, recorded before dispatch), so this budget
+        starts with no more than that left, nor more than today's setting, and ``admit``'s rule decides on this request: the
+        round is asked again, or ``error`` (the typed refusal with the reason) is raised. A record naming none never reaches here."""
+        context = error.problem.setdefault("context", {})
+        self.used = max(0, self.redos - int(context["redos_left"]))
+        reason = _redo_allowed(payload) or ("" if self.used < self.redos else "redos_exhausted")
+        self.used += 1
+        self.discarded.append({"requested": str(context.get("requested_model") or ""), "observed": str(
+            context.get("observed_model") or ""), "account": str((error.route or {}).get("credentialProfileId") or ""),
+            "disposition": reason or "redo", "result_custody": {"state": "retained", "operation_id": error.operation_id}})
+        if reason:
+            context.update(reason=reason, redos=self.used - 1)
+            raise error
 
 
 def _refusal(budget: "SubstitutionBudget", invocation: Any, fact: dict,

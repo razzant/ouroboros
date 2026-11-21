@@ -724,6 +724,17 @@ def wait_member_fence(source: Any) -> Dict[str, Any]:
             publish("ended")
 
 
+def fence_open_now(source: Any) -> bool:
+    """Whether ``source`` is affirmatively unfenced, by one strict read that never waits: for a reply read once its
+    call's deadline or grace ended the wait, which has no safe boundary left to wait at (``wait_member_fence``). A closed
+    or unreadable fence is not open, and a busy store proves nothing open, so none of them lets that reply be current."""
+    try:
+        with acquisition_budget(0):
+            return not member_fence(source)
+    except StoreBusy:
+        return False
+
+
 @contextmanager
 def review_episode(root_task_id: str, operation: Any = None):
     """Bind ONE physical review attempt's Pause exception to this context (owner 2026-10-08).

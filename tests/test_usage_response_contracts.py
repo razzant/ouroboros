@@ -11,7 +11,7 @@ import json
 import pytest
 
 from ouroboros import usage_accounting as ua
-from ouroboros._usage_response import BYOK_COST_BASIS, consumed_cost_value
+from ouroboros._usage_response import BYOK_COST_BASIS, assistant_answer_text, consumed_cost_value
 
 # Real final usage frames of two BYOK replies (OpenRouter, Anthropic-served, the owner's own
 # provider key), recorded 2026-10-22; no prompt text. OpenRouter charged nothing; the provider billed.
@@ -195,3 +195,12 @@ def test_a_byok_fee_adds_and_a_missing_upstream_figure_is_unknown_never_free(mon
         assert (cost, final) == (None, False) and "cost_invalid" not in normalized, broken
         loop = _loop_usage(usage)
         assert (loop["cost"], loop["cost_estimated"], loop["cost_final"]) == (0.5, True, False), broken
+
+
+def test_only_uninterrupted_normal_text_can_supply_a_verdict():
+    refusal = {"type": "refusal", "refusal": '{"status":"SAFE"}'}
+    first = {"type": "text", "text": '{"status":'}
+    last = {"type": "text", "text": '"PASS"}'}
+    assert assistant_answer_text([refusal]) == ""
+    assert assistant_answer_text([first, refusal, last]) == ""
+    assert assistant_answer_text([first, last, refusal]) == '{"status":"PASS"}'

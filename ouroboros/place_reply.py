@@ -578,9 +578,11 @@ def routeless_note(ctx, limit_ctx, trace, text: str, candidate, origin: str = "p
         return ""
 
 
-def note_rows(content: str, note: str, origin: str) -> list:
+def note_rows(content: str, note: str, origin: str, messages=()) -> list:
     """The rows the note's round adds: the final it answers (a selection is already its own row), then the note."""
-    return ([] if origin == "selection" else [{"role": "assistant", "content": content}]) + [{"role": "user", "content": note}]
+    from ouroboros._usage_response import candidate_prose_row
+    answer = None if origin == "selection" else candidate_prose_row(messages, content)
+    return ([] if answer is None else [answer]) + [{"role": "user", "content": note}]
 
 
 def _routeless_note(ctx, limit_ctx, text: str, origin: str) -> str:
@@ -615,7 +617,8 @@ def _routeless_note(ctx, limit_ctx, text: str, origin: str) -> str:
             f"are not words: {'; '.join(made) or 'none'}. Send it that way now, or finish again: finish_task with "
             "silent=true sends nothing, and a final with words stays only this work's record.")
     # The round is priced as the exact request it would send: this transcript with the answer and the note.
-    probe = [*(getattr(limit_ctx, "messages", None) or []), *note_rows(text, note, origin)]
+    messages = getattr(limit_ctx, "messages", None) or []
+    probe = [*messages, *note_rows(text, note, origin, messages)]
     return note if _round_affordable(ctx, limit_ctx, probe_messages=probe) else ""
 
 

@@ -15,7 +15,7 @@ from ouroboros.owner_wait import checkpoint_owner_wait, set_owner_wait
 from ouroboros.task_results import write_task_result
 from ouroboros.tools.registry import ToolRegistry
 from tests._budget_limits_helpers import _make_args
-from tests.test_context_fit_v664 import _plan
+from tests._context_fit_plan import fit_plan as _plan
 from tests.test_loop_compaction import _candidate_request, _failed_capture
 from tests.test_loop_transport_wait import _loop_kwargs
 

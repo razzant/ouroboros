@@ -22,7 +22,7 @@ from starlette.responses import JSONResponse
 from ouroboros.config import load_settings
 from ouroboros.llm_pricing import openrouter_catalog_price
 from ouroboros.net_transport import ExtraCaBundleError, extra_ca_bundle, verify_kwargs
-from ouroboros.gateway._helpers import json_error, json_exception
+from ouroboros.gateway._helpers import json_error, json_exception, run_sync_to_completion
 from ouroboros.observability import redact_projection
 from ouroboros.provider_connections import (
     connection_configured, connection_display, connection_routes, connection_rows, direct_provider_defaults, find_row,
@@ -770,7 +770,10 @@ async def api_local_model_test(request: Request) -> JSONResponse:
         mgr = get_manager()
         if not mgr.is_running:
             return json_error("Local model server is not running", 400)
-        result = mgr.test_tool_calling()
+        # The probe waits for the server's one slot and then runs a real generation. That synchronous wait must
+        # not hold the event loop the control endpoints answer on, and a client that goes away leaves the owned
+        # attempt to settle rather than abandoning its custody (gateway._helpers.run_sync_to_completion).
+        result = await run_sync_to_completion(mgr.test_tool_calling)
         return JSONResponse(result)
     except Exception as e:
         return json_exception(e)

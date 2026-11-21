@@ -14,7 +14,8 @@ from ouroboros.tools.registry import ToolRegistry
 from tests.test_loop_transport_wait import _loop_kwargs, _read_network_wait_events
 
 
-def test_managed_unknown_waits_for_upstream_then_adds_new_input(tmp_path, monkeypatch):
+@pytest.mark.parametrize("use_local", [True, False])
+def test_managed_unknown_waits_for_upstream_then_adds_new_input(tmp_path, monkeypatch, use_local):
     sends, probes, sleeps, notes = [], [], [], []
     previous = {"physical_attempt_id": "old-paid-attempt", "outcome": "unknown", "model": "test-model"}
     def send(_llm, messages, *args, **kwargs):
@@ -27,14 +28,18 @@ def test_managed_unknown_waits_for_upstream_then_adds_new_input(tmp_path, monkey
         return {"role": "assistant", "content": "continued answer"}, 0.0
     def reachable(*args, **kwargs):
         probes.append(kwargs)
+        assert kwargs["use_local"] is use_local
         assert len(sends) == 1
-        return {"kind": "upstream_http", "status_code": 200} if len(probes) == 3 else {}
+        if len(probes) != 3:
+            return {}
+        return ({"kind": "local_server_http", "endpoint_sha256": "fixture"} if use_local else {"kind": "upstream_http"})
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", send)
     monkeypatch.setattr(transport, "upstream_transport_reachable", reachable)
     monkeypatch.setattr(transport, "interruptible_wait_sleep", lambda seconds, wake: sleeps.append(seconds) or False)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_model_override, registry._ctx.task_use_local_override = "test-model", use_local
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, notes))
     assert result == "continued answer" and len(sends) == 2 and len(probes) == 3
     assert len(sleeps) == 3  # No cognition or compaction was sent between observations.
@@ -42,7 +47,7 @@ def test_managed_unknown_waits_for_upstream_then_adds_new_input(tmp_path, monkey
     assert any("NEW physical model attempt" in str(row.get("content")) and "old-paid-attempt" in str(row.get("content")) for row in sends[1])
     assert usage["transport_recovery"]["previous_attempt"] == previous
     assert usage["transport_recovery"]["old_outcome"] == "unknown"
-    assert any("another charge is possible" in text for text in notes)
+    assert any("another charge is possible" in text for text in notes) is (not use_local)
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     recovered = [row for row in events if row.get("detail") == "new_attempt_after_unknown_outcome"]
     assert recovered[0]["outcome_custody"] == previous
@@ -193,11 +198,13 @@ def test_deadline_closes_unknown_wait_without_a_probe_or_send(tmp_path, monkeypa
         messages=[], accumulated_usage={}, drive_logs=tmp_path, task_id="t", model="m", emit_progress=lambda *a, **k: None)
 
 
-@pytest.mark.parametrize("status,ready", [(200, True), (401, True), (405, True), (503, False)])
+@pytest.mark.parametrize("status,ready", [(200, True), (302, True), (401, True), (405, True), (503, False)])
 def test_upstream_probe_is_non_generating_and_uses_resolved_route(monkeypatch, status, ready):
+    """The one HEAD asks the route the client resolved, carries no body or credential, and only an upstream
+    status below 500 observes. A loopback listener is never asked at all (see test_transport_custody)."""
     from ouroboros.llm import LLMClient
 
-    seen = []
+    url, seen = "https://exact-provider.invalid/api", []
     original = httpx.Client
     def client(**kwargs):
         assert kwargs["trust_env"] is False
@@ -208,18 +215,134 @@ def test_upstream_probe_is_non_generating_and_uses_resolved_route(monkeypatch, s
     monkeypatch.setattr(httpx, "Client", client)
     llm = LLMClient()
     monkeypatch.setattr(llm, "_resolve_remote_target",
-                        lambda model: {"base_url": "https://exact-provider.invalid/api"})
+                        lambda model: {"base_url": url})
     observed = transport.upstream_transport_reachable(llm, "vendor/model", timeout=3)
     assert bool(observed) is ready
     assert len(seen) == 1 and seen[0].method == "HEAD"
-    assert str(seen[0].url) == "https://exact-provider.invalid/api"
+    assert str(seen[0].url) == url
+    if observed:
+        assert observed["kind"] == "upstream_http"
     assert not seen[0].content and "authorization" not in seen[0].headers
 
 
-def test_loopback_response_cannot_prove_upstream_recovery(monkeypatch):
-    monkeypatch.setattr(httpx, "Client", lambda **kw: pytest.fail("loopback is not upstream"))
-    llm = SimpleNamespace(_resolve_remote_target=lambda model: {"base_url": "http://127.0.0.1:1234/v1"})
+@pytest.mark.parametrize("old_url", ["http://127.0.0.1:9011/v1", "https://first.invalid/api"], ids=["loopback", "external"])
+def test_an_old_listener_cannot_speak_for_the_new_endpoint(monkeypatch, old_url):
+    """A loopback listener is never asked, so it grants nothing; an external answer belongs only to the endpoint
+    that gave it, and the route changing during the HEAD withdraws the grant."""
+    from ouroboros.llm import LLMClient
+
+    llm, asked = LLMClient(), []
+    selected = {"base_url": old_url}
+    monkeypatch.setattr(llm, "_resolve_remote_target", lambda _: selected.copy())
+    def respond(request):
+        asked.append(str(request.url))
+        selected["base_url"] = "https://second.invalid/api"
+        return httpx.Response(200)
+    original = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(**kw, transport=httpx.MockTransport(respond)))
     assert not transport.upstream_transport_reachable(llm, "vendor/model", timeout=3)
+    assert asked == ([] if old_url.startswith("http://127.") else [old_url])
+
+
+def test_same_connection_name_with_a_new_url_needs_its_own_observation(monkeypatch, tmp_path):
+    from ouroboros.llm import LLMClient
+
+    llm, urls = LLMClient(), []
+    target = {"base_url": "https://first.invalid/api"}
+    monkeypatch.setattr(llm, "_resolve_remote_target", lambda _model: dict(target))
+    def change_endpoint(request):
+        urls.append((request.method, str(request.url)))
+        target["base_url"] = "https://second.invalid/api"
+        return httpx.Response(200)
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: client(**kw, transport=httpx.MockTransport(change_endpoint)))
+    episode = transport.TransportWaitEpisode(wait_cause="provider_outcome_unknown")
+    tools = SimpleNamespace(_ctx=SimpleNamespace(task_id="task", task_metadata={}))
+    messages, usage = [], {}
+    assert not transport.continue_unknown_transport(episode, llm=llm, tools=tools, messages=messages,
+        accumulated_usage=usage, drive_logs=tmp_path, task_id="task", model="vendor/model", emit_progress=lambda *_a, **_kw: None)
+    assert urls == [("HEAD", "https://first.invalid/api")]
+    assert not episode.continuation_granted and messages == [] and "transport_recovery" not in usage
+
+
+def test_send_rechecks_the_endpoint_after_a_successful_observation(monkeypatch, tmp_path):
+    from ouroboros.llm import LLMClient
+    from ouroboros.transport_custody import ObservedEndpointChanged
+
+    monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})
+    first, second = "https://first.invalid/v1", "https://second.invalid/v1"
+    model, task = "openai::m", "task"
+    llm, heads, sends = LLMClient(), [], []
+    target = {"provider": "openai", "usage_model": model, "resolved_model": "m", "base_url": first}
+    monkeypatch.setattr(llm, "_resolve_remote_target", lambda _: dict(target))
+
+    def observe(request):
+        heads.append((request.method, str(request.url)))
+        return httpx.Response(200)
+
+    def send(actual, *_args, **_kwargs):
+        sends.append(actual["base_url"])
+        return {"role": "assistant", "content": "answer"}, {"provider": "openai", "resolved_model": "m", "cost": 0.0}
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: client(**kw, transport=httpx.MockTransport(observe)))
+    monkeypatch.setattr(llm, "_chat_remote", send)
+    episode = transport.TransportWaitEpisode(wait_cause="provider_outcome_unknown")
+    ctx = SimpleNamespace(task_id=task, task_metadata={})
+    previous = {"physical_attempt_id": "original", "outcome": "unknown"}
+    messages, usage = [], {"_pending_transport_outcome": previous}
+
+    def grant():
+        return transport.continue_unknown_transport(episode, llm=llm, tools=SimpleNamespace(_ctx=ctx),
+            messages=messages, accumulated_usage=usage, drive_logs=tmp_path, task_id=task,
+            model=model, emit_progress=lambda *_a, **_kw: None)
+
+    def generation():
+        return loop_mod.call_llm_with_retry(llm, messages, model, [], "low", 1, tmp_path / "logs",
+                                            task, 1, None, usage, initial_messages=messages)
+
+    assert grant() and heads == [("HEAD", first)]
+    target["base_url"] = second
+    with pytest.raises(ObservedEndpointChanged):
+        generation()
+    transport.revoke_endpoint_grant(usage, episode)
+    assert not sends and usage["_pending_transport_outcome"] == previous
+    assert grant() and heads == [("HEAD", first), ("HEAD", second)]
+    assert generation()[0]["content"] == "answer" and sends == [second]
+
+
+def test_reachable_server_does_not_replace_an_operation_that_can_be_rejoined(tmp_path, monkeypatch):
+    usage = {"_pending_transport_outcome": {"physical_attempt_id": "previous"}}
+    ctx = SimpleNamespace(task_id="t", task_metadata={})
+    episode = transport.TransportWaitEpisode(wait_cause="provider_outcome_unknown")
+    def reachable(*_args, **_kwargs):
+        usage["_pending_transport_outcome"]["same_operation_recoverable"] = True
+        return {"kind": "local_server_http", "process_id": 123, "endpoint_sha256": "fixture"}
+    monkeypatch.setattr(transport, "upstream_transport_reachable", reachable)
+    messages = []
+    assert not transport.continue_unknown_transport(episode, llm=None, tools=SimpleNamespace(_ctx=ctx),
+        messages=messages, accumulated_usage=usage, drive_logs=tmp_path, task_id="t", model="m", use_local=True,
+        emit_progress=lambda *a, **k: pytest.fail("granted another attempt"))
+    assert not messages and not episode.continuation_granted
+    assert usage["_pending_transport_outcome"]["same_operation_recoverable"]
+
+
+def test_wait_observes_the_chosen_role_again_if_locality_changes_mid_probe(tmp_path, monkeypatch):
+    choice = {"model": "fixture", "use_local": True}
+    waiter = SimpleNamespace(overrides={"main": choice}, control_reason=lambda: "")
+    monkeypatch.setattr("ouroboros.model_wait.current_model_wait", lambda: waiter)
+    def reachable(llm, selected, **kwargs):
+        assert selected == "fixture" and kwargs["use_local"]
+        choice["use_local"] = False
+        return {"kind": "local_server_http", "process_id": 123, "endpoint_sha256": "fixture"}
+    monkeypatch.setattr(transport, "upstream_transport_reachable", reachable)
+    ctx = SimpleNamespace(task_id="t", task_metadata={})
+    episode = transport.TransportWaitEpisode(wait_cause="provider_outcome_unknown")
+    assert not transport.continue_unknown_transport(episode, llm=None, tools=SimpleNamespace(_ctx=ctx),
+        messages=[], accumulated_usage={}, drive_logs=tmp_path, task_id="t", model="original",
+        emit_progress=lambda *a, **k: pytest.fail("selected route changed"))
+    assert not episode.continuation_granted
 
 
 @pytest.mark.parametrize("fact", ["absent", "local", "upstream"])
@@ -240,6 +363,7 @@ def test_subscription_requires_fresh_typed_upstream_observation(monkeypatch, fac
 def test_claudexor_control_loss_keeps_same_operation_past_read_window(tmp_path, monkeypatch, route_kind):
     from ouroboros import llm_claudexor
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
     inv = llm_claudexor._ModelInvocation({"usage_model": "claudexor::codex=test"}, {}, {"timeout": 1})
     inv.operation_id, inv.invocation_id, inv.task_id, inv.root = "same-op", "same-attempt", "t", tmp_path
     inv.create_attempted = True
@@ -249,6 +373,7 @@ def test_claudexor_control_loss_keeps_same_operation_past_read_window(tmp_path, 
     monkeypatch.setattr(llm_claudexor, "current_model_wait", lambda: waiter)
     monkeypatch.setattr(llm_claudexor, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda t: now.__setitem__(0, now[0]+t)))
     class Gateway:
+        store_identity = "fixture-store"  # the owning store the original handle proved at create
         def get_model_operation(self, operation, **kwargs):
             reads.append(operation)
             if len(reads) <= 3: raise ClaudexorUnavailable("daemon_unreachable", "offline")
@@ -260,6 +385,7 @@ def test_claudexor_control_loss_keeps_same_operation_past_read_window(tmp_path, 
         def create_model_operation(self, *a, **kw): pytest.fail("second model operation")
         def close(self): pass
     gateway = inv.gateway = Gateway()
+    inv.create_binding = model_rejoin_binding(gateway)  # the same store's proof; rejoin by the SAME handle
     monkeypatch.setattr(llm_claudexor, "read_owned_gateway", lambda: gateway)
     monkeypatch.setattr(inv, "retain", lambda raw: None)
     answer = inv.receive()

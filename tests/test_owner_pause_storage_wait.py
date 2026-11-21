@@ -141,3 +141,29 @@ def test_supervisor_reader_still_returns_contention_without_owning_a_wait(bounda
             owner_pause.member_fence(ctx)
     assert raised.value.reason == "contention"
     assert owner_pause.member_fence(ctx) == {}
+
+
+@pytest.mark.parametrize("state", ["open", "released", "closed", "unreadable", "contended"])
+def test_a_reply_read_past_its_bound_needs_one_open_read_that_never_waits(boundary, monkeypatch, state):
+    """``fence_open_now`` serves a reply read once its call's deadline or grace ended the wait, with no safe boundary
+    left to wait at: only a fence read at once and found open lets it be current. A closed or unreadable fence, and a
+    busy store, never do, and nothing sleeps for any of them."""
+    from ouroboros import store_hot_facts
+
+    root, ctx, _limit = boundary
+    _sleep(monkeypatch, lambda _: pytest.fail("a bound already passed waits for no fence"))
+    if state in {"released", "closed"}:
+        owner_pause.install_fence(root, "same", request_id="owner-pause")
+    if state == "released":
+        owner_pause.release_fence(root, "same", reason="resume")
+    if state == "unreadable":
+        def lost(*_args, **_kwargs):
+            raise store.StoreLost("missing")
+        monkeypatch.setattr(store_hot_facts, "controls", lost)  # the one addressed control read
+    if state == "contended":
+        with database_reader(root, exclusive=True):
+            started = time.monotonic()
+            assert owner_pause.fence_open_now(ctx) is False
+            assert time.monotonic() - started < 2.0  # the one read gave up at once
+        return
+    assert owner_pause.fence_open_now(ctx) is (state in {"open", "released"})

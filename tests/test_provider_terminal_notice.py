@@ -123,7 +123,10 @@ def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_s
     assert invoked == [task_id] and len(created) == 1  # replay never regenerates
     stored = load_task_result(data, task_id)
     notice = stored["terminal_provider_notice"]
-    assert stored["result"] == RAW and "no terminal provider outcome" in notice
+    assert stored["result"] == RAW
+    # The checkpointed repeat's own hint: the human sentence and the structured error kind it records.
+    assert "An earlier request has no confirmed provider outcome" in notice
+    assert "permits no further retry or paid fallback. The checkpoint records provider_outcome_unknown." in notice
     marker = stored["metadata"]["presence_unknown_outcome"]
     assert marker["source"] == "provider_outcome_unknown_no_resend"
     assert marker["error_kind"] == "provider_outcome_unknown"
@@ -300,18 +303,18 @@ def test_mismatch_round_never_calls_the_one_argument_tool_context_emitter(tmp_pa
 
 def test_body_error_diagnostic_is_masked_before_terminal_publication(tmp_path, monkeypatch):
     from ouroboros.utils import sanitize_tool_result_for_log
-    from tests.test_transport_death_retry import _ScriptedLLM, _death, _primary_call
+    from tests._transport_death_fixtures import _ScriptedLLM, _primary_call
 
     secret = "synthetic_notice_canary_" + "x" * 32
     body = "Request failed for api_key=" + secret
     assert secret not in sanitize_tool_result_for_log(body)
-    usage = {}
-    llm = _ScriptedLLM(_death, ({"content": "", "tool_calls": []}, {
+    usage = {"execution_id": "saved", loop_llm_call.TRANSPORT_DEATHS_KEY: {"round_id": "saved:round:1", "count": 1}}
+    llm = _ScriptedLLM(({"content": "", "tool_calls": []}, {
         "cost": 0.0, "provider_error": {"kind": "provider_error", "code": "401", "message": body},
     }))
     monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda *_a, **_k: True)
     message, _ = _primary_call(llm, tmp_path / "logs", usage)
-    assert message is None and llm.calls == 2
+    assert message is None and llm.calls == 1
     _, registry, ctx, trace = _forced_test_context(tmp_path, usage=usage)
     loop._replace_delivery_candidate(registry, ctx, trace, RAW, control="replace")
     text, usage, trace = loop._handle_provider_unavailable(ctx, error_kind=usage["_last_llm_error_kind"])

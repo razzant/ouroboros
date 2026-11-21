@@ -28,6 +28,7 @@ import ouroboros.maintenance as child_process
 from ouroboros import evidence_packer as packer, evidence_packs as packs, obligations
 from ouroboros import observability as obs, server_maintenance as maintenance, store, usage_accounting as usage
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_status import find_child_tasks
 from ouroboros.usage_ledger import is_abandoned_settlement
@@ -54,6 +55,7 @@ def env(tmp_path, monkeypatch):
 
     class Gateway:  # the engine says the call is over; its owner may Continue while the probe is out
         continue_during_probe = False
+        store_identity = "fixture-model-store"
 
         def get_model_operation(self, operation_id, **_kw):
             calls.append(operation_id)
@@ -175,7 +177,8 @@ def _settle_in(env):
     ended = _attempt(env, "kid-ended", provider="claudexor")
     obs.persist_call(root, task_id="kid-ended", call_id=f"{ended.attempt_id}_model_request",
                      call_type="llm_claudexor_request", payload={}, keep_raw=True,
-                     manifest={"invocation_id": ended.attempt_id, "operation_id": "operation"})
+                     manifest={"invocation_id": ended.attempt_id, "operation_id": "operation",
+                               "model_store_binding": model_rejoin_binding(env.gateway)})
     truth = {tid: [packs.blob_bytes(root, ref) for ref in refs] for tid, refs in env.refs.items()}
 
     # Pass 1. The owner Continues while the ended call's probe is out: the post-I/O fence refuses to

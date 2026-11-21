@@ -226,6 +226,44 @@ def test_every_wire_option_of_the_send_reaches_the_priced_copy():
     assert set(options) == {"stream", "cache_affinity", "allow_server_web_search", "bypass_response_cache"}
 
 
+@pytest.mark.parametrize("local", [True, False], ids=["builtin", "gigachat"])
+def test_priced_forced_request_matches_the_native_sender(monkeypatch, tmp_path, local):
+    from ouroboros import local_model, loop_forced_finalization as forced
+
+    model = "claudexor::codex=named-but-local" if local else "gigachat::GigaChat-Pro"
+    monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})
+    client = LLMClient(api_key="unused")
+    if local:
+        monkeypatch.setattr(client, "_resolve_remote_target", lambda *_: pytest.fail("local send resolved a remote target"))
+        monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
+        monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(timeout=None))
+    else:
+        monkeypatch.setattr(client, "_resolve_remote_target", lambda _: {
+            "provider": "gigachat", "resolved_model": "GigaChat-Pro", "usage_model": model})
+        monkeypatch.setattr(client, "_get_gigachat_client", lambda *_a, **_kw: object())
+    captured = []
+
+    def execute(request, _send, before_dispatch):
+        before_dispatch(SimpleNamespace(attempt_id="native", drive_root=tmp_path))
+        captured.append(request)
+        if local:
+            return _completion("The native sender answered.")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="The native sender answered."))])
+
+    _patch_execute_candidate(monkeypatch, llm_module, execute)
+    ctx = _ctx(llm=client, active_model=model, active_use_local=local, messages=copy.deepcopy(_MESSAGES),
+               tool_schemas=_TOOLS, drive_logs=tmp_path / "logs", drive_root=tmp_path,
+               tools=SimpleNamespace(_ctx=SimpleNamespace(task_metadata={})))
+    ctx.drive_logs.mkdir()
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(drive_root=tmp_path, task_id="task1", root_task_id="task1")):
+        price, prepared = task_pacing.prepared_wrapup_candidate(ctx, copy.deepcopy(ctx.messages), allow_server_web_search=False)
+        assert forced._call_forced_model_once(ctx, initial_messages=prepared, admitted_request=price) == "The native sender answered."
+    sent, = captured
+    assert price.provider == sent.provider == ("local" if local else "gigachat")
+    assert price.model == sent.model and price.max_completion_tokens == sent.max_completion_tokens
+    assert price.candidate_clock_free_sha256 == sent.candidate_clock_free_sha256 is not None
+
+
 @pytest.mark.parametrize("api_surface", ["responses", "chat_completions"])
 @pytest.mark.parametrize("learned", [False, True])
 def test_wrapup_parity_after_learned_responses_effort_repair(monkeypatch, tmp_path, api_surface, learned):
@@ -347,6 +385,30 @@ def test_the_budget_rail_delivers_the_models_wrapup_as_a_best_effort_answer(monk
     assert OUTCOME_PHASE_HEADLINE[phase] == "Done with warnings"   # not "Failed": the answer was delivered
 
 
+def test_last_fit_wrapup_keeps_late_owner_words_without_buying_a_second_send(monkeypatch, tmp_path):
+    from ouroboros import loop
+
+    sent = []
+
+    def execute(request, send, before_dispatch):
+        before_dispatch(SimpleNamespace(attempt_id=f"attempt-{len(sent)}", drive_root=tmp_path))
+        sent.append(request)
+        return _completion("Answer before the late directive.")
+
+    def drain(ctx, _trace):
+        if len(sent) == 1 and ctx.messages[-1].get("content") != "Also report the backup window.":
+            ctx.messages.append({"role": "user", "content": "Also report the backup window."})
+            return True
+        return False
+
+    monkeypatch.setattr(loop, "_drain_forced_owner_directives", drain)
+    ctx, (text, usage, trace) = _last_fit_rail(monkeypatch, tmp_path, execute)
+    assert len(sent) == 1 and ctx.messages[-1]["content"] == "Also report the backup window."
+    assert "not answered" in text and "Answer before" not in text
+    assert usage["reason_code"] == "budget_exhausted"
+    assert trace["forced_finalization"]["source"] == "late_owner_directive_requires_resume"
+
+
 @pytest.mark.parametrize("carrier,tier", [
     ({"source": "owner", "tier": "fast"}, "fast"),
     ({"source": "room", "tier": "economy"}, "economy"),
@@ -383,18 +445,21 @@ def test_a_tiered_works_admitted_forced_send_is_the_priced_candidate(monkeypatch
 
 
 def test_a_drifted_admitted_candidate_is_sent_once_more_instead_of_losing_the_answer(monkeypatch, tmp_path):
-    """The predicate refuses before dispatch; the refusal must not cost the owner the final answer."""
+    """The predicate refuses before dispatch; the refusal must not cost the owner the final answer.
+    The ONE repair resend carries the ORIGINAL admission: the transport proved the first request
+    unsent, so its balances — not the byte anchor that just failed — still admit the fresh one."""
     import ouroboros.loop as loop_module
 
-    calls, events = [], []
+    calls, admissions, events = [], [], []
     real_once = loop_module._call_forced_model_once
 
     def once(ctx, *, initial_messages=None, admitted_request=None, admission=None):
         calls.append(admitted_request is not None)
+        admissions.append(admission)
         if admitted_request is not None:
             raise usage_accounting.PhysicalAttemptPreconditionFailed(
                 "physical candidate precondition rejected dispatch", attempt_id="refused-1")
-        return real_once(ctx)
+        return real_once(ctx, admission=admission)
 
     monkeypatch.setattr(loop_module, "_call_forced_model_once", once)
     monkeypatch.setattr(loop_module, "_emit_checkpoint_event",
@@ -403,6 +468,8 @@ def test_a_drifted_admitted_candidate_is_sent_once_more_instead_of_losing_the_an
         monkeypatch, tmp_path, lambda request, send, before_dispatch: _completion("Recovered wrap-up."))
 
     assert calls == [True, False], "one admitted send, then exactly one ordinary send"
+    assert admissions[0] is not None, "the admitted send carried its balances"
+    assert admissions[1] == admissions[0], "the repair resend keeps the ORIGINAL admitted balances"
     assert result[0].startswith("Recovered wrap-up") and result[1]["_best_effort_extracted"] is True
     drift = [event for event in events if event.get("checkpoint_kind") == "forced_candidate_drift"]
     assert len(drift) == 1 and drift[0]["refused_attempt_id"] == "refused-1"

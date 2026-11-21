@@ -243,9 +243,12 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
     from tests.test_model_wait_controls import _loop_tools
     from tests.test_quota_rotation_fallback import RESET
 
-    ctx, _gateway, owner, _events, _decide, _observations = main_call
+    ctx, _gateway, owner, events, _decide, _observations = main_call
     tools = _loop_tools(ctx, owner)
     tools._ctx.primary_route = {"model": ctx.active_model, "use_local": False, "role": "main"}
+    tools._ctx.route_choice = {"kind": "following", "role": "main"}
+    tools._ctx.route_wait_on_primary = True
+    tools._ctx.task_id, tools._ctx.event_queue = ctx.task_id, events
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::one,openai::two")
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
@@ -306,6 +309,13 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
             "The previous attempt ended without a usable answer; the host is preparing another request after the owner's answer."]}
     assert message["content"] == "after the owner wait" and model == "openai::one" and asked == ["quota"]
     assert seen == [("openai::one", True), ("openai::two", True), ("openai::one", False)]
+    from ouroboros.owner_wait import continuation_state
+
+    saved = continuation_state(tools._ctx, ctx.messages, {}, usage, 4, [], set())
+    assert saved["route"]["route_choice"] == {"kind": "explicit", "source": "fallback"}
+    assert tools._ctx.route_wait_on_primary is False
+    [lead] = [event["lead"] for event in list(events.queue) if event.get("type") == "work_lead"]
+    assert (lead["model"], lead["basis"], lead["role"]) == ("openai::one", "fallback", "fallback:0")
     # The walk's end reports its last attempt before the wait and rules out nothing; the resend's answer adopts a route.
     assert [(text, incident is not None) for text, incident in notes] == [
         (f"⚡ Fallback: trying openai::one after a rejected request on {ctx.active_model}.", True),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import httpx
 
@@ -260,139 +262,12 @@ def _sdk_wrapped(cause: BaseException, capture=None):
         return exc
 
 
-@pytest.mark.parametrize("cause_cls", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError])
-def test_typed_transport_death_on_dispatched_remote_route_is_retryable(cause_cls):
-    from ouroboros.transport_custody import is_retryable_transport_death
-
-    exc = _sdk_wrapped(cause_cls("socket died after dispatch"), _unresolved_capture())
-    assert is_retryable_transport_death(exc) is True
-
-
-@pytest.mark.parametrize("cause_cls", [
-    httpx.ReadTimeout, httpx.ConnectError, httpx.PoolTimeout,
-])
-def test_timeouts_and_pre_dispatch_failures_are_not_transport_deaths(cause_cls):
-    """A timeout is "we gave up" (the provider may still be working); a connect
-    failure is the free released class — neither earns a paid repeat."""
-    from ouroboros.transport_custody import is_retryable_transport_death
-
-    exc = _sdk_wrapped(cause_cls("not a death"), _unresolved_capture())
-    assert is_retryable_transport_death(exc) is False
-
-
-def test_httpx_proxy_error_is_pre_dispatch_never_a_death():
-    """A tunnel/CONNECT failure is the free released class even when it rides a
-    dispatched-looking capture: the pre-dispatch predicate is evaluated first,
-    so the two predicates can never both be true."""
-    from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
+def test_httpx_proxy_error_is_pre_dispatch():
+    """A failed CONNECT tunnel supplies typed evidence that nothing reached the provider."""
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
     exc = _sdk_wrapped(httpx.ProxyError("CONNECT tunnel failed"), _unresolved_capture())
     assert is_pre_dispatch_transport_failure(exc) is True
-    assert is_retryable_transport_death(exc) is False
-
-
-def test_provider_status_error_is_not_a_transport_death():
-    from ouroboros.transport_custody import is_retryable_transport_death
-
-    exc = RuntimeError("HTTP 503 upstream unavailable")
-    exc.status_code = 503
-    exc.physical_attempt_capture = _unresolved_capture(provider_status_code=503)
-    assert is_retryable_transport_death(exc) is False
-
-
-def test_implicit_context_chain_never_proves_a_transport_death():
-    """Only an explicit ``raise ... from`` carries transport provenance."""
-    from ouroboros.transport_custody import is_retryable_transport_death
-
-    try:
-        raise httpx.ReadError("earlier leg died")
-    except httpx.ReadError:
-        try:
-            raise RuntimeError("later wrapper without a cause")
-        except RuntimeError as exc:
-            exc.physical_attempt_capture = _unresolved_capture()
-            assert exc.__context__ is not None
-            assert is_retryable_transport_death(exc) is False
-
-
-@pytest.mark.parametrize("capture", [
-    _unresolved_capture(provider="local"),
-    ua.PhysicalAttemptCapture(
-        attempt_id="pa-rel", model="m", provider="openrouter", state="released",
-        candidate_measurement_kind="opaque",
-    ),
-    None,
-])
-def test_local_loopback_released_or_captureless_death_is_not_retryable(capture):
-    """The classifier's locality gate: a dead local/loopback server is not a
-    network fault worth paying for again; released custody is the free
-    pre-dispatch class, never a paid repeat; a missing capture fails closed."""
-    from ouroboros.transport_custody import is_retryable_transport_death
-
-    exc = _sdk_wrapped(httpx.ReadError("socket died"), capture)
-    assert is_retryable_transport_death(exc) is False
-
-
-def test_requests_protocol_error_with_remote_disconnected_is_a_transport_death():
-    """The Anthropic-native requests/urllib3 shape of a mid-request socket death."""
-    import http.client
-
-    import requests
-    import urllib3
-    from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
-
-    disconnected = http.client.RemoteDisconnected("Remote end closed connection without response")
-    exc = requests.exceptions.ConnectionError(
-        urllib3.exceptions.ProtocolError("Connection aborted.", disconnected)
-    )
-    exc.physical_attempt_capture = _unresolved_capture(provider="anthropic")
-    assert is_retryable_transport_death(exc) is True
-    assert is_pre_dispatch_transport_failure(exc) is False  # the two predicates are exclusive
-    # The same fact through an explicit wrapper (the recovery ladder re-raises with a cause).
-    assert is_retryable_transport_death(_sdk_wrapped(exc, _unresolved_capture(provider="anthropic"))) is True
-    # urllib3 may hand the same fact over as MaxRetryError(reason=ProtocolError).
-    retried = requests.exceptions.ConnectionError(urllib3.exceptions.MaxRetryError(
-        None, "/messages", reason=urllib3.exceptions.ProtocolError("Connection aborted.", disconnected),
-    ))
-    retried.physical_attempt_capture = _unresolved_capture(provider="anthropic")
-    assert is_retryable_transport_death(retried) is True
-
-
-def test_requests_chunked_body_disconnect_is_a_transport_death():
-    """The lane's OTHER wrapper. The Anthropic-native POST is non-streaming, so
-    the body is read inside ``requests.post``: a socket that dies mid-BODY
-    surfaces as ``ChunkedEncodingError(ProtocolError(RemoteDisconnected))``,
-    which does NOT subclass ``ConnectionError``. It is the same post-dispatch
-    death and earns the same bounded repeat; without a typed transport cause the
-    wrapper proves nothing and keeps the base no-resend terminal."""
-    import http.client
-
-    import requests
-    import urllib3
-    from ouroboros.transport_custody import (
-        attempt_custody_event_fields,
-        is_pre_dispatch_transport_failure,
-        is_retryable_transport_death,
-    )
-
-    assert not issubclass(
-        requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError,
-    )  # why this class has to be named explicitly
-    disconnected = http.client.RemoteDisconnected("Remote end closed connection without response")
-    exc = requests.exceptions.ChunkedEncodingError(
-        urllib3.exceptions.ProtocolError("Connection broken: IncompleteRead(0 bytes read)", disconnected)
-    )
-    exc.physical_attempt_capture = _unresolved_capture(provider="anthropic")
-    assert is_retryable_transport_death(exc) is True
-    assert is_pre_dispatch_transport_failure(exc) is False  # the two predicates stay exclusive
-    assert attempt_custody_event_fields(exc)["transport_cause_type"] == "RemoteDisconnected"
-    # The same fact through an explicit wrapper (the recovery ladder re-raises with a cause).
-    assert is_retryable_transport_death(_sdk_wrapped(exc, _unresolved_capture(provider="anthropic"))) is True
-    # A body failure with no typed transport cause is not a death.
-    untyped = requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead(0 bytes read)")
-    untyped.physical_attempt_capture = _unresolved_capture(provider="anthropic")
-    assert is_retryable_transport_death(untyped) is False
-    assert "transport_cause_type" not in attempt_custody_event_fields(untyped)
 
 
 def test_requests_lane_event_fields_name_the_innermost_typed_cause(data_root):
@@ -431,46 +306,26 @@ def test_requests_lane_event_fields_name_the_innermost_typed_cause(data_root):
     assert rows[-1]["reason"].startswith("ConnectionError [cause: RemoteDisconnected]:")
 
 
-def test_requests_read_timeout_and_connect_shapes_are_not_transport_deaths():
+def test_requests_chunked_body_disconnect_keeps_its_typed_cause():
+    import http.client
     import requests
     import urllib3
-    from ouroboros.transport_custody import is_retryable_transport_death
+    from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure
 
-    capture = _unresolved_capture(provider="anthropic")
-    timeout = requests.exceptions.ReadTimeout("read timed out")
-    timeout.physical_attempt_capture = capture
-    assert is_retryable_transport_death(timeout) is False
-    connect_timeout = requests.exceptions.ConnectTimeout("connect timed out")
-    connect_timeout.physical_attempt_capture = capture
-    assert is_retryable_transport_death(connect_timeout) is False
-    read_timeout_wrapped = requests.exceptions.ConnectionError(
-        urllib3.exceptions.MaxRetryError(
-            None, "/messages", reason=urllib3.exceptions.ReadTimeoutError(None, "/messages", "read timed out"),
-        )
-    )
-    read_timeout_wrapped.physical_attempt_capture = capture
-    assert is_retryable_transport_death(read_timeout_wrapped) is False
-    refused = requests.exceptions.ConnectionError(
-        urllib3.exceptions.MaxRetryError(
-            None, "/messages", reason=urllib3.exceptions.NewConnectionError(None, "connection refused"),
-        )
-    )
-    refused.physical_attempt_capture = capture
-    assert is_retryable_transport_death(refused) is False
+    broken = urllib3.exceptions.ProtocolError("Connection broken", http.client.RemoteDisconnected("closed"))
+    error = requests.exceptions.ChunkedEncodingError(broken)
+    assert not is_pre_dispatch_transport_failure(error)
+    assert attempt_custody_event_fields(error)["transport_cause_type"] == "RemoteDisconnected"
+    untyped = requests.exceptions.ChunkedEncodingError("Connection broken")
+    assert "transport_cause_type" not in attempt_custody_event_fields(untyped)
 
 
-def test_requests_proxy_tunnel_death_is_neither_pre_dispatch_nor_a_death():
-    """The tunnel to the proxy died (RemoteDisconnected nested in a urllib3
-    ProxyError): not the base pre-dispatch class (no connect-time evidence —
-    a proxy that ANSWERS is not an outage to wait out), and never a paid
-    repeat either — the round keeps the base unknown no-resend terminal. With
-    connect-time evidence the base pre-dispatch contract still holds, and a
-    proxy failure is still not a death."""
+def test_requests_proxy_error_needs_connect_evidence_to_prove_pre_dispatch():
     import http.client
 
     import requests
     import urllib3
-    from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
     tunnel_died = requests.exceptions.ProxyError(urllib3.exceptions.MaxRetryError(
         None, "/messages", reason=urllib3.exceptions.ProxyError(
@@ -479,7 +334,6 @@ def test_requests_proxy_tunnel_death_is_neither_pre_dispatch_nor_a_death():
     ))
     tunnel_died.physical_attempt_capture = _unresolved_capture(provider="anthropic")
     assert is_pre_dispatch_transport_failure(tunnel_died) is False
-    assert is_retryable_transport_death(tunnel_died) is False
     refused = requests.exceptions.ProxyError(urllib3.exceptions.MaxRetryError(
         None, "/messages", reason=urllib3.exceptions.ProxyError(
             "Cannot connect to proxy.", urllib3.exceptions.NewConnectionError(None, "connection refused"),
@@ -487,11 +341,9 @@ def test_requests_proxy_tunnel_death_is_neither_pre_dispatch_nor_a_death():
     ))
     refused.physical_attempt_capture = _unresolved_capture(provider="anthropic")
     assert is_pre_dispatch_transport_failure(refused) is True
-    assert is_retryable_transport_death(refused) is False
     bare = requests.exceptions.ProxyError("proxy refused the CONNECT")
     bare.physical_attempt_capture = _unresolved_capture(provider="anthropic")
     assert is_pre_dispatch_transport_failure(bare) is False
-    assert is_retryable_transport_death(bare) is False
 
 
 def _capture(state, status=None):
@@ -546,3 +398,74 @@ def test_report_attempt_end_ignores_the_pre_dispatch_capture_and_an_unbound_trac
         report_attempt_end(_capture("reserved", 400), error := _failure())  # a failed release is a reported end
         report_attempt_end(_capture("settled"), None)
     assert heard == [("reserved", error), ("settled", None)]
+
+
+def test_a_loopback_listener_never_proves_upstream_recovery_but_an_external_endpoint_does(monkeypatch):
+    """A HEAD answer from a listener on this host says nothing of the old generation's end or of any upstream, so it
+    cannot admit a new send after an unknown outcome; the same answer from an external endpoint still observes."""
+    from ouroboros import llm_probe
+    from ouroboros.llm import LLMClient
+
+    seen, original = [], httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: original(
+        **kw, transport=httpx.MockTransport(lambda request: seen.append(str(request.url)) or httpx.Response(200))))
+    llm = LLMClient()
+    for url, observed in (("http://127.0.0.1:1234/v1", False), ("http://localhost:11434/v1", False),
+                          ("https://exact-provider.invalid/api", True)):
+        monkeypatch.setattr(llm, "_resolve_remote_target", lambda _model, url=url: {"base_url": url})
+        seen.clear()
+        reached = llm_probe.upstream_transport_reachable(llm, "vendor/model", timeout=3)
+        assert bool(reached) is observed and (seen == [url]) is observed  # a loopback URL is not even asked
+        if observed:
+            assert reached["kind"] == "upstream_http"
+
+
+@pytest.mark.parametrize(("control", "status_sec"), [("deadline", 1.0), ("deadline", 5.0), ("finalize_requested", 5.0),
+                                                     ("owner_pause", 5.0)],
+                         ids=["inside_grace", "grace_arrives", "stop_arrives", "pause_arrives"])
+def test_a_control_during_the_status_read_starts_no_result_read_and_cancels_nothing(monkeypatch, control, status_sec):
+    """The status GET begins inside the grace and answers terminal-ready after it: no result GET follows, no
+    cancel is posted for the already terminal operation, no create or retry is sent, and the interruption keeps
+    the exact operation identity for the existing read-only recovery. Inside the grace the result is read once."""
+    from ouroboros import llm_claudexor
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
+
+    now, calls = [0.0], []  # a controlled clock: the control (the grace at 4 s, or a Stop or Pause) is live from 4 s on
+    invocation = llm_claudexor._ModelInvocation({"usage_model": "claudexor::codex=m"}, {}, {
+        "timeout": 1, "model_poll_control": lambda: control if now[0] >= 4.0 else None})
+    invocation.operation_id, invocation.invocation_id, invocation.create_attempted = "accepted-op", "attempt", True
+    monkeypatch.setattr(llm_claudexor, "current_model_wait", lambda: SimpleNamespace(control_reason=lambda: None))
+
+    class Gateway:
+        store_identity = "fixture-store"
+
+        def get_model_operation(self, operation, **_kwargs):
+            calls.append("status")
+            now[0] += status_sec  # this read began at 0 s, inside the grace
+            return {"id": operation, "state": "succeeded", "dispatch": {"state": "response_received"},
+                    "response": {"state": "ready", "ref": {"sha256": "exact"}}}
+
+        def get_model_result(self, operation, **_kwargs):
+            calls.append("result")
+            return b'{"outcome":"completed"}'
+
+        def cancel_model_operation(self, *_args, **_kwargs):
+            pytest.fail("a cancel was posted for an operation already terminal")
+
+        def create_model_operation(self, *_args, **_kwargs):
+            pytest.fail("a second POST over an accepted operation")
+
+        def close(self):
+            pass
+
+    gateway = invocation.gateway = Gateway()
+    invocation.create_binding = model_rejoin_binding(gateway)
+    if status_sec < 4.0:
+        assert invocation._wait_for_result() == b'{"outcome":"completed"}'
+        assert calls == ["status", "result"]
+        return
+    with pytest.raises(llm_claudexor.ClaudexorModelError) as ended:
+        invocation._wait_for_result()
+    assert ended.value.control_reason == control and ended.value.operation_id == "accepted-op"
+    assert ended.value.problem["context"] == {"control_reason": control, "cancellation": "not_requested"}
+    assert calls == ["status"]

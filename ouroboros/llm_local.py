@@ -16,7 +16,8 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.deadline_utils import physical_dispatch_timeout
-from ouroboros.model_concurrency import limit_physical_send
+from ouroboros.model_concurrency import limit_physical_send, measurement_slot
+from ouroboros._usage_response import observe_finish_reason
 
 from ouroboros.context_budget import LocalContextTooLargeError  # the typed overflow lives with the overflow vocabulary
 from ouroboros.llm_messages import DISPLAY_KEY
@@ -28,19 +29,23 @@ from ouroboros.llm_attempt import (
     is_size_refusal,
 )
 from ouroboros.usage_accounting import UsageAccountingError
-from ouroboros.transport_custody import outcome_unknown_on_chain
+from ouroboros.transport_custody import ObservedEndpointChanged, outcome_unknown_on_chain
 
 # The moved warnings keep the logger identity they were emitted under.
 log = logging.getLogger("ouroboros.llm")
 
 
-def local_context_limits(max_tokens: int) -> Tuple[int, int]:
-    """Confirmed serving window (0 if unknown) and output cap for caller preflight."""
+def local_context_limits(max_tokens: int, evidence: Optional[Dict[str, Any]] = None) -> Tuple[int, int]:
+    """Confirmed serving window (0 if unknown) and output cap for caller preflight.
+
+    ``evidence`` lets a caller supply facts already bound to the endpoint it sends to;
+    omitted, the manager's own serving evidence is read."""
     ctx_len = 0
     local_max = min(max_tokens, 2048)
     try:
-        from ouroboros.local_model import get_manager
-        evidence = get_manager().serving_context_evidence() or {}
+        if evidence is None:
+            from ouroboros.local_model import get_manager
+            evidence = get_manager().serving_context_evidence() or {}
         if evidence.get("confirmed") is True:
             ctx_len = max(0, int(evidence.get("context_window") or 0))
         if ctx_len > 0:
@@ -48,6 +53,15 @@ def local_context_limits(max_tokens: int) -> Tuple[int, int]:
     except Exception:
         pass
     return ctx_len, local_max
+
+
+def _endpoint_port(base_url: Optional[str]) -> Optional[int]:
+    """The port an OpenAI-compatible base URL names, or None when it spells none."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(str(base_url or "")).port
+    except Exception:
+        return None
 
 
 def _split_leading_reasoning(text: str) -> Tuple[str, str]:
@@ -154,8 +168,13 @@ class _LocalLaneMixin:
         self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
         max_tokens: int, tool_choice: str, timeout: Optional[float] = None,
         processing_preference: Optional[str] = None,
+        base_url: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Prepare the complete local payload for sizing and actual dispatch."""
+        """Prepare the complete local payload for sizing and actual dispatch.
+
+        ``base_url`` names the endpoint the SDK will actually reach. When given, the
+        candidate's serving facts are bound to that endpoint: a count from a manager
+        listening elsewhere stays uncertain rather than describing another server."""
         messages = self._normalize_system_message_placement(messages)
         clean_messages = self._strip_openrouter_roundtrip_metadata(
             self._copy_messages_with_cache_policy(
@@ -165,14 +184,26 @@ class _LocalLaneMixin:
         # Our llama.cpp lane is launched without a vision handler: keep base64 out
         # of the text prompt and name the lane, never the model.
         clean_messages = self._replace_image_blocks_with_placeholder(clean_messages, "local llama.cpp")
-        _ctx_len, local_max = local_context_limits(max_tokens)
+        from ouroboros.local_model import get_manager
+        manager = get_manager()
+        expected_port = _endpoint_port(base_url)
+        if base_url:
+            evidence = manager.serving_context_evidence(bind_endpoint=True) or {}
+            if expected_port is None or evidence.get("port") != expected_port:
+                evidence = {}
+        else:
+            evidence = manager.serving_context_evidence() or {}
+        _ctx_len, local_max = local_context_limits(max_tokens, evidence)
         for msg in clean_messages:
             content = msg.get("content")
             if content is None and msg.get("role") == "assistant":
                 msg["content"] = ""
             if isinstance(content, list):
-                msg["content"] = "\n\n".join(
-                    b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
+                # Assistant parts are ordered fragments of one reply, not separate paragraphs.
+                separator = "" if msg.get("role") == "assistant" else "\n\n"
+                msg["content"] = separator.join(
+                    b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
+                    and isinstance(b.get("text"), str)
                 )
         clean_tools = None
         if tools:
@@ -185,30 +216,44 @@ class _LocalLaneMixin:
             kwargs["timeout"] = float(timeout)
 
         from ouroboros.model_slots import resolve_processing_preference
-        from ouroboros.local_model import get_manager
-        evidence = get_manager().serving_context_evidence() or {}
         preference = resolve_processing_preference(override=processing_preference)
         target = {"provider": "local", "resolved_model": "local-model", "usage_model": "local-model",
                   "processing_preference": preference, "context_window_tokens": evidence.get("context_window"),
                   "context_window_confirmed": evidence.get("confirmed") is True,
                   "window_instance_id": str(evidence.get("process_id") or "")}
+        if base_url:
+            target["base_url"] = str(base_url)
         return target, kwargs
 
-    def _finalize_local_candidate(self, target: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _finalize_local_candidate(self, target: Dict[str, Any], payload: Dict[str, Any],
+                                  *, measure: bool = True) -> Dict[str, Any]:
         """Measure on the serving instance, then bind the output allowance before send.
 
         This explicit stage may perform bounded, non-generating loopback I/O. The payload
         builder and shared context arithmetic remain pure. An instance that cannot count
         the candidate leaves the estimate in force; an exact shortfall is the typed refusal
         with this candidate's own facts (``llm_attempt.bound_reply_allowance``).
+
+        A caller decides ``measure`` from ``model_concurrency.measurement_slot``, which admits this count
+        before its connection opens: ``False`` is the once-only form's busy slot, where the count is advice
+        and the provider-clean candidate keeps its estimate with no connection at all.
         """
         from ouroboros.local_model import get_manager
 
-        measure = getattr(get_manager(), "measure_prepared_input", None)
         # Bind the provider-clean physical payload before measuring. Host-only
         # metadata must not affect the measured input or candidate hash.
         candidate = _finalized_physical_candidate(target, payload, "chat.completions")
-        evidence = measure(candidate) if callable(measure) else None
+        if not measure:
+            return candidate
+        measure_input = getattr(get_manager(), "measure_prepared_input", None)
+        endpoint_port = _endpoint_port(target.get("base_url")) if target.get("base_url") else None
+        if target.get("base_url") and endpoint_port is None:
+            return candidate
+        # A send's own count is bound by the live child's pid and port; only a durable endpoint observation
+        # needs the service binding's digest, which an owner's own process may not have.
+        evidence = (measure_input(candidate, expected_port=endpoint_port, require_endpoint_digest=False)
+                    if callable(measure_input) and endpoint_port is not None
+                    else measure_input(candidate) if callable(measure_input) else None)
         if not (isinstance(evidence, dict) and evidence.get("supported")):
             return candidate
         target["local_input_measurement"] = evidence
@@ -216,28 +261,51 @@ class _LocalLaneMixin:
         # input and output cap are sealed together.
         return _finalized_physical_candidate(target, payload, "chat.completions")
 
+    def _prepared_local_candidate(self, messages, tools, max_tokens, tool_choice, processing_preference, reasoning_effort,
+                                  *, queued=False, base_url=None):
+        """The measured, sealed request shared by the built-in sender and its budget lookahead.
+
+        ``queued`` is the sender's own preparation: its count is a request to the built-in server that waits on
+        the inference lock like a generation, so it takes the server's slot first and opens no connection before it
+        (``model_concurrency.measurement_slot``). The lookahead tries that slot once instead: while a generation
+        holds it no connection opens and the candidate keeps its estimate, so a price that is advice never stands
+        in line behind the work it prices."""
+        from ouroboros.send_clock import stamp_clock_note
+
+        if base_url is None and not queued:
+            # The lookahead owns no SDK client: snapshot the built-in route URL from one port read, so the
+            # target, its count and the queue admission below name the endpoint the lane dispatches to.
+            from ouroboros.local_model import local_dispatch_port
+            from ouroboros.model_concurrency import built_in_route
+
+            base_url = built_in_route(local_dispatch_port())["base_url"]
+
+        target, payload = self._build_local_candidate(messages, tools, max_tokens, tool_choice,
+                                                      processing_preference=processing_preference,
+                                                      base_url=base_url)
+        target["requested_reasoning_effort"] = reasoning_effort
+        # The clock line is sealed after the wait, and a count the server's one slot declined opens no connection.
+        with measurement_slot(target, wait=queued) as admitted:
+            return target, self._finalize_local_candidate(target, stamp_clock_note(payload), measure=admitted)
+
     def _chat_local(
         self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
         max_tokens: int, tool_choice: str, timeout: Optional[float] = None,
         processing_preference: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        observed_endpoint_sha256: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send exactly the previously prepared complete local candidate."""
         client = self._get_local_client()
-        local_target, candidate = self._build_local_candidate(
-            messages, tools, max_tokens, tool_choice, timeout, processing_preference)
-        # The shared finalizer removes SDK transport options from the measured
-        # and sealed payload. Keep the builder's positive caller override (else
-        # the client's own phases) for the actual send, which narrows it to the
-        # caller's bounds left after preparation and the slot wait (#572),
-        # including chat_async's local thread.
-        transport_timeout = candidate.get("timeout", getattr(client, "timeout", None))
-        local_target["requested_reasoning_effort"] = reasoning_effort
-        from ouroboros.send_clock import stamp_clock_note
-
-        # ONE clock line per call, sampled before finalization: the serving
-        # instance measures exactly the bytes that are then sealed and sent.
-        candidate = self._finalize_local_candidate(local_target, stamp_clock_note(candidate))
+        # The queue, the measurement and the generation must name the endpoint this SDK actually
+        # reaches: the client is snapshotted once, so its base_url is the address every later
+        # env read must not silently replace.
+        client_base_url = getattr(client, "base_url", None)
+        local_target, candidate = self._prepared_local_candidate(
+            messages, tools, max_tokens, tool_choice, processing_preference, reasoning_effort,
+            queued=True, base_url=str(client_base_url) if client_base_url else None)
+        # The SDK timeout is transport-only and is narrowed again after the slot wait.
+        transport_timeout = float(timeout) if timeout and timeout > 0 else getattr(client, "timeout", None)
         clean_tools = candidate.get("tools")
         # ONE physical attempt per call. Re-sending here spent the caller's
         # physical-attempt budget without the caller authorising it, so a
@@ -262,10 +330,20 @@ class _LocalLaneMixin:
 
             def send():
                 timeout = physical_dispatch_timeout(transport_timeout)
+                if observed_endpoint_sha256:
+                    from ouroboros.local_model import get_manager, local_dispatch_port
+
+                    # The slot wait happens after accounting preparation. Check the SDK destination
+                    # and the manager's live process here, before sending any generation bytes.
+                    serving = get_manager().serving_context_evidence(bind_endpoint=True)
+                    port = local_dispatch_port()
+                    if (serving.get("endpoint_sha256") != observed_endpoint_sha256 or serving.get("port") != port
+                            or str(client.base_url).rstrip("/") != f"http://127.0.0.1:{port}/v1"):
+                        raise ObservedEndpointChanged("The observed local model endpoint changed before dispatch.")
                 return client.chat.completions.create(**candidate, **({"timeout": timeout} if timeout is not None else {}))
 
             resp = _execute_candidate(request, limit_physical_send(local_target, send), check_instance)
-        except UsageAccountingError:
+        except (UsageAccountingError, ObservedEndpointChanged):
             raise
         except Exception as exc:
             err = str(exc)
@@ -309,6 +387,7 @@ class _LocalLaneMixin:
         finish_reason = first_choice.get("finish_reason")
         if isinstance(finish_reason, str) and finish_reason.strip():
             usage["response_finish_reason"] = finish_reason.strip()[:64]
+        observe_finish_reason(usage, first_choice, completion=resp)
         from ouroboros.llm_attempt import attach_processing_receipt
 
         attach_processing_receipt(local_target, usage)

@@ -597,7 +597,7 @@ def _select_optional_pr_core(
         body = str(response.get("content") or "").strip()
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(exc)
+        propagate_model_error(exc, single_request=True)
         ctx.emit_progress_fn("PR body formatter unavailable; using deterministic fallback.")
         return fallback
     if not body:

@@ -9,6 +9,7 @@ transcript again; transport loss continues through that same fitted history.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from pathlib import Path
@@ -180,7 +181,6 @@ async def run(host: LiveHost, *, state_dir=None):
     await _Call(host).run()
 
 
-NO_ROOM = "This room's context and working reserve do not fit this engine's window."
 ROOM_POINTER = ("[Host fact; not owner words] New room context is in the fitted history. "
                 "You may answer, act or stay silent.")
 
@@ -609,8 +609,17 @@ class _Call:
 
     async def guard_serving(self, rows):
         check = getattr(self.host, 'delivery_fits', None)
-        if check is None or not await check(rows, self.serving_catalog()):
-            raise RealtimeSetupError('context_capacity', NO_ROOM)
+        if check is not None:
+            # Old hosts and custom fit gates accept only rows and schemas.
+            try:
+                option = inspect.signature(check).parameters.get('explain')
+            except (TypeError, ValueError):
+                option = None
+            kwargs = {'explain': True} if option and option.kind in (option.KEYWORD_ONLY, option.POSITIONAL_OR_KEYWORD) else {}
+            if await check(rows, self.serving_catalog(), **kwargs):
+                return
+        raise RealtimeSetupError('context_capacity',
+            "The current voice connection could not accept this delivery. Continue by text or start a new call.")
 
     async def delivery(self):
         """This connection's one sender of what waited for it. It dies with the connection, so nothing it was measuring
@@ -642,7 +651,9 @@ class _Call:
             if output is None:  # no native lane: only a fit can hold this unit, and none is coming once one was refused
                 if self.fit_on_its_way() or self.host.state.get("refit"):
                     return
-                raise RealtimeSetupError('context_capacity', NO_ROOM)
+                raise RealtimeSetupError('context_capacity',
+                    "This voice connection cannot receive the completed tool result, and a fresh fit was refused. "
+                    "Continue by text or start a new call.")
             rows = output.messages
             if offers is not None:  # withheld for a fit; an admitted output needs no measure and left no offers
                 try:

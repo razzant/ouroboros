@@ -15,9 +15,7 @@ with no finish key of its own.
 
 from __future__ import annotations
 
-import copy
 import json
-import queue
 
 import httpx
 import pytest
@@ -28,7 +26,6 @@ import ouroboros.loop_transport as loop_transport
 from ouroboros import loop_output_exhaustion as recovery, usage_accounting as ua
 from ouroboros.loop import _output_exhausted_notice, run_llm_loop
 from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, refusal_words
-from ouroboros.tools.registry import ToolRegistry
 from ouroboros._usage_response import output_exhaustion_facts, reported_reasoning_tokens, response_finish_reason
 from ouroboros.loop_llm_call import (
     _COOLDOWN_ERROR_KINDS,
@@ -39,10 +36,18 @@ from ouroboros.loop_llm_call import (
     provider_no_call_source,
     transient_retry_max,
 )
+from ouroboros.llm_claudexor import ClaudexorContentRefused
+from ouroboros.outcomes import _refusal_final_answer, derive_loop_outcome, selected_final_answer
+from tests._model_replies import MIXED_REFUSAL_PARTS, MIXED_REFUSAL_TEXT, finish
+from tests._scripted_model_loop import (
+    OK_RESPONSE,
+    ScriptedLLM as _ScriptedLLM,
+    loop_kwargs as _loop_kwargs,
+    walk_loop as _walk_loop,
+)
 from tests._shared import saved_settings
 
 MESSAGES = [{"role": "user", "content": "work"}]
-OK_RESPONSE = ({"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
 # The six recorded incident replies: completion tokens, all of them reasoning.
 INCIDENT_COMPLETIONS = (216, 188, 160, 132, 105, 77)
 
@@ -63,29 +68,6 @@ def _receipt(sent: int, provider: str = "openrouter") -> ua.PhysicalAttemptCaptu
     return ua.PhysicalAttemptCapture(attempt_id=f"pa-{sent}", model="test-model", provider=provider,
                                      state="settled", candidate_measurement_kind="opaque",
                                      max_completion_tokens=sent)
-
-
-class _ScriptedLLM:
-    """chat() returns the scripted replies in order (then OK), adopting a receipt when given one."""
-
-    def __init__(self, *script, receipts=()):
-        self.script, self.receipts, self.requests = list(script), list(receipts), []
-
-    @property
-    def calls(self):
-        return len(self.requests)
-
-    def default_model(self):
-        return "test-model"
-
-    def chat(self, **kwargs):
-        self.requests.append(copy.deepcopy(kwargs))
-        if self.receipts:
-            ua.adopt_physical_attempt_capture(self.receipts.pop(0))
-        step = self.script.pop(0) if self.script else OK_RESPONSE
-        if callable(step):
-            raise step()
-        return copy.deepcopy(step)
 
 
 @pytest.fixture(autouse=True)
@@ -443,12 +425,6 @@ def _quiet_chain(**kwargs):  # the configured routes answer nothing
     return None, kwargs["active_model"], kwargs["active_use_local"], kwargs["context_fit_plan"], kwargs["active_context_mode"]
 
 
-def _loop_kwargs(tmp_path, llm, notes):
-    return dict(messages=[{"role": "user", "content": "go"}], tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
-                llm=llm, drive_logs=tmp_path, emit_progress=lambda text, **_meta: notes.append(text),
-                incoming_messages=queue.Queue(), task_id="t-exhaust-loop", drive_root=tmp_path)
-
-
 def _host_facts(messages):
     return [row for row in messages if row.get("role") == "user" and str(row.get("content") or "").startswith(HOST_FACT)]
 
@@ -545,28 +521,6 @@ def test_an_owner_terminal_names_output_exhaustion_not_a_provider_failure():
     assert "classified the failure as a provider failure." in unknown
 
 
-def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachable=None, notes=None):
-    """The real loop with the real configured-route walk (a route switch keeps the captured core)."""
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", fallbacks)
-    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
-    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda _sec, _wake: False)
-    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: reachable or {})
-    from dataclasses import replace
-    from tests.test_context_fit_v664 import _plan
-
-    def rebind(plan_, tools, _messages, *, model, use_local, **kwargs):
-        rebound = replace(plan_, model=model, route_fp=f"route-{model}")
-        tools._ctx.context_fit_plan = rebound
-        return rebound, "max"
-
-    monkeypatch.setattr(loop_mod, "_rebind_context_fit_plan", rebind)
-    llm = _ScriptedLLM(*script)
-    kwargs = _loop_kwargs(tmp_path, llm, [] if notes is None else notes)
-    kwargs["tools"]._ctx.context_fit_plan = _plan(preferred="max", window=1_000_000, known=True)
-    return (llm, *run_llm_loop(**kwargs))
-
-
 def test_a_configured_candidate_that_exhausts_reaches_the_next_round_not_a_redial(tmp_path, no_sleep, monkeypatch):
     """The real configured-route walk: the primary fails before dispatch, the fallback candidate
     answers but spends its reply allowance. That candidate's kind survives the walk (it is no
@@ -615,7 +569,6 @@ def test_a_refusal_whose_configured_routes_all_cool_gets_its_own_row_once(tmp_pa
     """The real walk with its one configured route cooling asks nobody: the refusal's own feed row, once, with no
     "Fallback" claim. When that route is asked, the walk's own rows name the refusal as before and none is added."""
     from ouroboros import fallback_cooldown
-    from tests.test_completion_selection import finish
 
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: cooling)
     refusal = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
@@ -682,7 +635,28 @@ def test_other_finishes_leave_text_the_plain_final(tmp_path, loop_env, no_sleep,
     llm = _ScriptedLLM(_finished(source, finish))
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
     assert (result, llm.calls) == (CUT_TEXT, 1)
+    [event] = _events(tmp_path, "llm_round")
+    assert ("finish_reason" in event) == (source != "none")
+    assert event.get("finish_reason") == finish
     assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
+
+
+@pytest.mark.parametrize("finish,expected", [("content_filter", {"finish_reason": "content_filter"}),
+                                            ("private diagnostic text", {"finish_reason_origin": "discarded"})])
+def test_accepted_tool_calls_keep_only_a_finish_label_in_the_round(tmp_path, no_sleep, finish, expected):
+    from unittest.mock import Mock
+    from ouroboros.llm import LLMClient
+
+    calls = [{"id": "c", "type": "function", "function": {"name": "inspect", "arguments": "{}"}}]
+    message = {"role": "assistant", "content": "", "tool_calls": calls}
+    body = {"choices": [{"message": message, "finish_reason": finish}], "usage": {"cost": 0.0}}
+    client, llm = LLMClient(api_key="k"), Mock()
+    llm.chat.side_effect = lambda **_: client._normalize_remote_response(body, {"provider": "openrouter"},
+                                                                        skip_cost_fetch=True)
+    accepted, _ = _call(llm, tmp_path, {})
+    assert accepted["tool_calls"] == calls and llm.chat.call_count == 1
+    [row] = _events(tmp_path, "llm_round")
+    assert {key: row[key] for key in ("finish_reason", "finish_reason_origin") if key in row} == expected
 
 
 # ------------------------------------------------------------------ provider-stated usability (Responses terminals)
@@ -867,3 +841,167 @@ def test_forced_finals_read_intermediate_and_unusable_terminals_as_incomplete():
                                               "response_status": "completed"})
     assert not forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "max_output_tokens",
                                               "response_status": "incomplete"}, completion_request=True)
+
+
+@pytest.mark.parametrize(("parts", "visible"), [
+    (MIXED_REFUSAL_PARTS, MIXED_REFUSAL_TEXT),
+    ([{"type": "refusal", "refusal": ""}], ""),
+    ([{"type": "refusal", "refusal": " \n"}], " \n"),
+    ([{"type": "text", "text": "  "}, {"type": "refusal", "refusal": ""}], "  "),
+])
+def test_completed_refusal_is_a_literal_reply_even_with_configured_alternates(tmp_path, monkeypatch, parts, visible):
+    msg = {"role": "assistant", "content": parts}
+    llm, text, usage, trace = _walk_loop(tmp_path, monkeypatch, (msg, {"provider": "claudexor"}))
+    assert text == visible and llm.calls == 1
+    assert usage.get("execution_status") != "failed"
+    assert usage["terminal_origin"] == "model_final"
+    assert derive_loop_outcome(text, usage, trace)["reason_code"] != "empty_final_text"
+    assert selected_final_answer(text, trace) == "" and _refusal_final_answer(text, trace) == ""  # hash-bound
+
+
+@pytest.mark.parametrize("calls", ["none", "unrun", "refused_finish", "own_finish"])
+def test_a_forced_blank_refusal_beside_an_unrun_call_keeps_the_incomplete_rail(tmp_path, monkeypatch, calls):
+    """A blank completed refusal with no call answers; beside any offered call the rail never runs, or a finish_task
+    whose request is refused, it stays incomplete (no answer is recorded, nothing executes); the reply's one
+    adopted finish_task still selects as before."""
+    tool_calls = {"none": [], "own_finish": finish("Two salads.")["tool_calls"],
+                  "refused_finish": finish("Two salads.", action=[])["tool_calls"],  # offered, its request refused
+                  "unrun": [{"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}]}[calls]
+    reply = ({"role": "assistant", "content": [{"type": "refusal", "refusal": ""}], "tool_calls": tool_calls}, {})
+    llm, text, usage, trace = _walk_loop(tmp_path, monkeypatch, BODY_ERROR, reply, fallbacks="")
+    assert llm.calls == 2 and not trace.get("tool_calls")
+    if calls == "own_finish":
+        assert text == "Two salads." and trace["forced_completion_request"]["status"] == "selected"
+    else:
+        answered = calls == "none"
+        if calls == "refused_finish":
+            assert trace["forced_completion_request"]["status"] == "refused"
+        assert (_refusal_final_answer(text, trace) is not None) is answered
+        assert (usage.get("terminal_origin") == "model_final") is answered
+
+
+@pytest.mark.parametrize("words", ["", " \n"])
+def test_a_forced_refusal_keeps_its_exact_blank_words_bound_without_another_send(tmp_path, monkeypatch, words):
+    reply = ({"role": "assistant", "content": [{"type": "refusal", "refusal": words}]}, {})
+    llm, text, usage, trace = _walk_loop(tmp_path, monkeypatch, BODY_ERROR, reply, fallbacks="")
+    assert llm.calls == 2 and text == words and usage["terminal_origin"] == "model_final"
+    assert _refusal_final_answer(text, trace) == "" and selected_final_answer(text, trace) == ""
+
+
+# Two ordinary runs around a refusal: the first holds a whole marker, the refusal's own words end with another.
+SPLIT_MARKER = [{"type": "text", "text": "Menu:\nFINAL ANSWER: two salads\n"},
+                {"type": "refusal", "refusal": "FINAL ANSWER: not this"}, {"type": "text", "text": "\nEnjoy."}]
+GLUED_MARKER = [{"type": "text", "text": "FINAL ANS"}, {"type": "refusal", "refusal": ""},
+                {"type": "text", "text": "WER: picnic"}]
+
+
+@pytest.mark.parametrize("forced", [False, True])
+@pytest.mark.parametrize(("parts", "answer"), [(SPLIT_MARKER, "two salads"), (GLUED_MARKER, "")])
+def test_a_final_answer_comes_only_from_one_ordinary_run_on_either_exit(tmp_path, monkeypatch, forced, parts, answer):
+    """The visible words glue the runs (and the refusal's words) together; the selection never reads them so."""
+    reply = ({"role": "assistant", "content": parts}, {})
+    script = (BODY_ERROR, reply) if forced else (reply,)
+    llm, text, _usage, trace = _walk_loop(tmp_path, monkeypatch, *script, fallbacks="")
+    assert llm.calls == len(script) and selected_final_answer(text, trace) == answer
+
+
+@pytest.mark.parametrize(("parts", "visible"), [
+    (MIXED_REFUSAL_PARTS, MIXED_REFUSAL_TEXT),
+    (GLUED_MARKER, "FINAL ANSWER: picnic"),
+    (SPLIT_MARKER, "Menu:\nFINAL ANSWER: two salads\nFINAL ANSWER: not this\nEnjoy."),
+])
+def test_later_provider_failure_keeps_multipart_tool_history_only_as_salvage(tmp_path, monkeypatch, parts, visible):
+    def read_round(content, call_id):
+        call = {"id": call_id, "type": "function", "function": {"name": "chat_history", "arguments": "{}"}}
+        return {"role": "assistant", "content": content, "tool_calls": [call]}, {"response_finish_reason": "tool_calls"}
+
+    script = (read_round("Earlier narration.", "old-read"), read_round(parts, "new-read"), BODY_ERROR, FORCED_ERROR)
+    llm, text, usage, trace = _walk_loop(tmp_path, monkeypatch, *script, fallbacks="")
+    assert llm.calls == len(script)  # existing provider-failure grace call, no new one
+    assert [row["tool_call_id"] for row in trace["tool_calls"]] == ["old-read", "new-read"]
+    assert any(row.get("tool_call_id") == "new-read" for row in llm.requests[2]["messages"])
+    assert text == visible and usage["terminal_origin"] == "host_salvage"
+    assert usage["reason_code"] == "provider_unavailable" and usage["execution_status"] == "infra_failed"
+    assert selected_final_answer(text, trace) == ""  # no glued/refusal marker; the old ordinary marker preceded a tool
+    assert "forced_completion_request" not in trace and "task_completion" not in trace
+
+
+@pytest.mark.parametrize("parts", [
+    [{"type": "text", "text": '{"action": "finish", '}, {"type": "refusal", "refusal": ""},
+     {"type": "text", "text": '"answer": "picnic"}'}],  # a control body glued across a refusal
+    [{"type": "text", "text": "Menu."}, {"type": "refusal", "refusal": '{"action": "finish", "answer": "picnic"}'}],
+])
+def test_a_forced_refusal_turns_neither_glued_nor_refused_words_into_a_request(tmp_path, monkeypatch, parts):
+    reply = ({"role": "assistant", "content": parts}, {})
+    llm, text, _usage, trace = _walk_loop(tmp_path, monkeypatch, BODY_ERROR, reply, fallbacks="")
+    assert llm.calls == 2 and "forced_completion_request" not in trace and text != "picnic"
+    assert selected_final_answer(text, trace) == ""
+
+
+@pytest.mark.parametrize("words", ["", " \n"])
+def test_handle_task_stores_blank_refusal_words_exact_with_the_hosts_notice_beside(tmp_path, monkeypatch, words):
+    from ouroboros import loop
+    from ouroboros.agent import _resolve_intentional_empty
+    from ouroboros.task_finalization import EMPTY_REFUSAL_NOTICE
+    from ouroboros.task_results import load_task_result
+    from tests._agent_entry_helpers import body_agent
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    agent = body_agent(tmp_path, monkeypatch, [{"role": "user", "content": "The picnic menu, please."}])
+    models = []
+
+    def generate(_llm, _messages, model, *_args, **_kwargs):  # the generation seam: one received refusal
+        models.append(model)
+        return {"role": "assistant", "content": [{"type": "refusal", "refusal": words}]}, 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", generate)
+    events = agent.handle_task({"id": "blank-refusal", "type": "task", "chat_id": 1, "_is_direct_chat": True,
+                                "text": "The picnic menu, please.", "_skip_post_task_synthesis": True})
+    stored = load_task_result(tmp_path, "blank-refusal")
+    assert len(models) == 1  # no resend and no other model
+    assert stored["result"] == words and stored["terminal_origin"] == "model_final"
+    assert stored["terminal_host_notice"] == EMPTY_REFUSAL_NOTICE  # the host's words beside, never inside, the answer
+    assert stored["loop_outcome"]["final_answer"] == "" and stored["loop_outcome"]["reason_code"] != "empty_final_text"
+    finals = [event for event in events if event.get("type") == "send_message"]
+    assert finals and all(EMPTY_REFUSAL_NOTICE not in e["text"] and "empty response" not in e["text"] for e in finals)
+    # A trace that binds other bytes legalizes no ordinary empty answer.
+    usage = {}
+    other = {"delivery_candidate": {"refusal_final_answer": "", "content_sha256": "0" * 64}}
+    assert _resolve_intentional_empty(None, usage, words, other)[0] is True and "terminal_host_notice" not in usage
+
+
+def test_a_forced_mixed_refusal_records_its_words_never_its_unrun_calls(tmp_path, monkeypatch):
+    calls = [{"id": "c1", "type": "function", "function": {"name": "shell", "arguments": '{"cmd": "ls"}'}}]
+    reply = ({"role": "assistant", "content": MIXED_REFUSAL_PARTS, "tool_calls": calls,
+              "nativeContinuation": {"route": {"source": "codex"}}}, {})
+    seen = {}
+    llm, text, _usage, trace = _walk_loop(tmp_path, monkeypatch, BODY_ERROR, reply, fallbacks="", seen=seen)
+    assert llm.calls == 2 and selected_final_answer(text, trace) == ""  # the refusal's words select nothing
+    transcript = seen["tools"]._ctx.messages
+    rows = [row for row in transcript if row.get("content") == MIXED_REFUSAL_PARTS]
+    assert rows and all(row["role"] == "assistant" and "tool_calls" not in row and "nativeContinuation" not in row
+                        for row in rows)  # its words in order; no call reads as made
+    assert not trace.get("tool_calls") and all(row.get("role") != "tool" for row in transcript)
+
+
+def test_a_forced_refusals_own_finish_call_keeps_its_path_and_reads_as_unrun(tmp_path, monkeypatch):
+    reply = ({"role": "assistant", "content": MIXED_REFUSAL_PARTS, "tool_calls": finish("Two salads.")["tool_calls"]}, {})
+    seen = {}
+    llm, text, _usage, trace = _walk_loop(tmp_path, monkeypatch, BODY_ERROR, reply, fallbacks="", seen=seen)
+    assert llm.calls == 2 and text == "Two salads."  # the reply's own control action selects, as before
+    assert trace["forced_completion_request"]["status"] == "selected"
+    rows = [row for row in seen["tools"]._ctx.messages if row.get("content") == MIXED_REFUSAL_PARTS]
+    assert rows and all("tool_calls" not in row for row in rows) and not trace.get("tool_calls")
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_forced_call_returns_the_refusal_without_another_send(tmp_path, monkeypatch, failed):
+    error = ClaudexorContentRefused({"code": "provider_content_refused", "message": ClaudexorContentRefused.notice})
+    reply = (lambda: error) if failed else ({"role": "assistant", "content": MIXED_REFUSAL_PARTS}, {})
+    llm, text, usage, trace = _walk_loop(tmp_path, monkeypatch, BODY_ERROR, reply, fallbacks="")
+    assert llm.calls == 2  # initial ordinary failure, then this one forced call
+    assert all(request["accepts_typed_refusals"] for request in llm.requests)
+    assert text == (error.notice if failed else MIXED_REFUSAL_TEXT)
+    assert selected_final_answer(text, trace) == ""
+    if failed:
+        assert usage["reason_code"] == "provider_content_refused"

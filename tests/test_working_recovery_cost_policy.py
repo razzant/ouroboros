@@ -12,7 +12,7 @@ import pytest
 from ouroboros import loop, task_pacing, usage_accounting as accounting, working_checkpoint as wc
 from ouroboros.contracts.task_contract import build_task_contract
 from ouroboros.task_results import write_task_result
-from tests.test_context_fit_v664 import _plan
+from tests._context_fit_plan import fit_plan as _plan
 from tests.test_working_checkpoint import _registry
 from tests._store_shared import delete_result, unreadable_result
 

@@ -936,7 +936,8 @@ def _maybe_inject_finalization_nudges(
         # (live progress AND the durable trail), name the hold's typed cause
         # for the delivery owner's observation, re-loop.
         if content and content.strip():
-            messages.append({"role": "assistant", "content": content})
+            from ouroboros._usage_response import append_candidate_prose
+            append_candidate_prose(messages, content)
         _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{reminder}")
         if progress:
             emit_progress(note)
@@ -971,11 +972,12 @@ def _maybe_inject_finalization_nudges(
     # P2 one-shot final-answer-marker nudge: real work + prose, no FINAL ANSWER
     # marker — the agent marks its OWN answer, prose is never mined (P5). Own
     # latch after verify/red; the protocol gate alone suffices (v6.56.0).
+    control = getattr(getattr(tools._ctx, "_delivery_candidate", None), "refusal_control_text", None)
     if (
         not getattr(tools._ctx, "_final_marker_nudged", False)
         and _answer_protocol_active(tools._ctx)  # v6.60.0: marker nudge is protocol-gated
         and content and content.strip()
-        and not extract_final_answer(content or "")
+        and not extract_final_answer(content if control is None else control)
         and (work_calls or turn_has_reviewable_effects(llm_trace))
     ):
         tools._ctx._final_marker_nudged = True

@@ -285,7 +285,7 @@ def _extract_verdict_via_light_model(
                 deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec())):
             # Unsent once its own window ended while it prepared: its result before admission, not a task control.
             return None, {"model": named, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
-        propagate_model_error(exc)
+        propagate_model_error(exc, single_request=True)
         log.warning("Review session verdict extraction failed: %s", exc)
         return None, {}
     content = message.get("content") if isinstance(message, dict) else ""

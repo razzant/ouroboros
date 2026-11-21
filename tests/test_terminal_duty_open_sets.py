@@ -7,7 +7,7 @@ import pytest
 from ouroboros import usage_accounting as usage, usage_store
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from tests.test_usage_abandoned_reconciliation import (
-    env as env, _attempt, _terminal, _final, _remote_request, _remote_receipt,
+    env as env, FIXTURE_STORE, _attempt, _terminal, _final, _remote_request, _remote_receipt,
 )
 from ouroboros.terminal_cost_reconciliation import reconcile_abandoned_usage
 
@@ -52,7 +52,7 @@ def test_operation_gone_ends_the_search_but_keeps_the_late_receipt_right(env, mo
         raise ClaudexorUnavailable(code, "gone", status_code=404)
 
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway",
-                        lambda: SimpleNamespace(get_model_operation=gone, close=lambda: None))
+                        lambda: SimpleNamespace(store_identity=FIXTURE_STORE, get_model_operation=gone, close=lambda: None))
     reconcile_abandoned_usage(env.root)
     first = _final(env, reservation)
     assert first["recovery"]["outcome"] == "operation_gone"
@@ -67,6 +67,60 @@ def test_operation_gone_ends_the_search_but_keeps_the_late_receipt_right(env, mo
     usage.settle_attempt(reservation, cost_usd=0.4, cost_final=True)
     row = _final(env, reservation)
     assert row["settle_reason"] == "late_receipt" and row["cost_usd"] == 0.4
+
+
+def _unbound_request(env, reservation, operation_id):
+    """A request recorded before model requests named their store (a body installed over work in flight)."""
+    from ouroboros.observability import persist_call
+
+    persist_call(env.root, task_id="child", call_id=f"{reservation.attempt_id}_model_request",
+                 call_type="llm_claudexor_request", payload={}, keep_raw=True,
+                 manifest={"invocation_id": reservation.attempt_id, "operation_id": operation_id})
+
+
+def test_a_request_that_recorded_no_store_closes_at_unknown_price_without_probing_one(env, monkeypatch):
+    _terminal(env)
+    reservation = _attempt(env, provider="claudexor")
+    _unbound_request(env, reservation, "legacy")
+    monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway",
+                        lambda: pytest.fail("a store nothing verifies is never probed"))
+    reconcile_abandoned_usage(env.root)
+    row = _final(env, reservation)
+    assert row["state"] == "settled" and row["cost_usd"] is None and row["cost_final"] is False  # unknown, not zero
+    assert row["recovery"]["outcome"] == "terminal" and row["recovery"]["basis"] == {"code": "model_control_store_unbound"}
+    reads = _reads(monkeypatch)
+    reconcile_abandoned_usage(env.root)  # no pass repeats an end nothing can change
+    assert reads == [] and _final(env, reservation) == row
+    usage.settle_attempt(reservation, cost_usd=0.4, cost_final=True)  # the ONE late receipt stays an explicit writer's right
+    late = _final(env, reservation)
+    assert late["settle_reason"] == "late_receipt" and late["cost_usd"] == 0.4
+
+
+def test_a_retained_receipt_settles_a_request_that_recorded_no_store(env, monkeypatch):
+    _terminal(env)
+    reservation = _attempt(env, provider="claudexor")
+    _unbound_request(env, reservation, "legacy")
+    _remote_receipt(env, reservation, "legacy")
+    monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", lambda: pytest.fail("the receipt is retained"))
+    reconcile_abandoned_usage(env.root)
+    row = _final(env, reservation)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.4 and "recovery" not in row
+
+
+def test_a_bound_request_whose_store_moved_stays_retryable_until_it_is_verified(env, monkeypatch):
+    _terminal(env)
+    reservation = _attempt(env, provider="claudexor")
+    _remote_request(env, reservation, "moved")
+    gateway = SimpleNamespace(store_identity="another-store", close=lambda: None,
+                              get_model_operation=lambda *a, **kw: pytest.fail("a foreign store is never read"))
+    monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", lambda: gateway)
+    for _ in range(2):
+        reconcile_abandoned_usage(env.root)
+    assert _final(env, reservation)["state"] == "dispatched" and "recovery" not in _final(env, reservation)
+    gateway.store_identity = FIXTURE_STORE  # the original store answers again
+    gateway.get_model_operation = lambda *a, **kw: {"state": "cancelled", "dispatch": {"state": "unknown"}}
+    reconcile_abandoned_usage(env.root)
+    assert _final(env, reservation)["recovery"]["outcome"] == "terminal"
 
 
 def _record(env, reservation, fact):
@@ -181,7 +235,7 @@ def test_ended_custody_adds_no_decode_or_payload_read(env, monkeypatch, history)
     _record(env, ended, {"outcome": "terminal"})
     _clone(env, ended.attempt_id, [({}, lambda extra: None)] * history)
     _remote_request(env, live := _attempt(env, provider="claudexor"), "running")
-    gateway = SimpleNamespace(get_model_operation=lambda *a, **kw: {"state": "running"}, close=lambda: None)
+    gateway = SimpleNamespace(store_identity=FIXTURE_STORE, get_model_operation=lambda *a, **kw: {"state": "running"}, close=lambda: None)
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", lambda: gateway)
     decoded, decode, reads = [], usage_store._decode, _reads(monkeypatch)
     monkeypatch.setattr(usage_store, "_decode", lambda record: decoded.append(record["attempt_id"]) or decode(record))
@@ -204,7 +258,7 @@ def test_ended_custody_selection_is_recomputed_from_rows_after_a_restart(env, mo
         return {"state": "cancelled", "dispatch": {"state": "unknown"}} if operation_id == "ended" else {"state": "running"}
 
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway",
-                        lambda: SimpleNamespace(get_model_operation=operation, close=lambda: None))
+                        lambda: SimpleNamespace(store_identity=FIXTURE_STORE, get_model_operation=operation, close=lambda: None))
     reconcile_abandoned_usage(env.root)
     row = _final(env, ended)
     assert is_abandoned_settlement(row) and row["recovery"]["outcome"] == "terminal"
@@ -252,7 +306,7 @@ def test_ownership_taken_during_a_blocked_probe_refuses_the_settlement(env, monk
             "state": "cancelled", "dispatch": {"state": "unknown"}}
 
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway",
-                        lambda: SimpleNamespace(get_model_operation=blocked, close=lambda: None))
+                        lambda: SimpleNamespace(store_identity=FIXTURE_STORE, get_model_operation=blocked, close=lambda: None))
     worker = threading.Thread(target=reconcile_abandoned_usage, args=(env.root,))
     worker.start()
     try:
@@ -285,7 +339,7 @@ def test_retry_after_is_a_provider_fact_and_unresolved_without_it_is_retried(env
         error.retry_after = "120"
         raise error
 
-    gateway = SimpleNamespace(get_model_operation=limited, close=lambda: None)
+    gateway = SimpleNamespace(store_identity=FIXTURE_STORE, get_model_operation=limited, close=lambda: None)
     monkeypatch.setattr("ouroboros.claudexor_daemon.read_owned_gateway", lambda: gateway)
     reconcile_abandoned_usage(env.root)
     row = _final(env, reservation)

@@ -27,6 +27,9 @@ export const CHECKPOINT_LABELS = {
     services_kept: 'Background services kept',
     service_finalization_error: 'Background service cleanup unconfirmed',
     forced_candidate_drift: 'Forced candidate drifted',
+    // loop_forced_finalization's unaffordable rail: the fresh forced request no longer fits the
+    // balances it was admitted on; it was refused before a byte left and nothing was paid.
+    forced_candidate_unaffordable: 'Forced candidate no longer fits its admitted budget',
 };
 
 const WAIT_LABELS = {

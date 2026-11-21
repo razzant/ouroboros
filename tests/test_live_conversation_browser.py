@@ -375,6 +375,32 @@ def test_call_lifecycle_ends_capture_playback_and_socket(subscription_ui, monkey
     assert not subscription_ui["errors"]
 
 
+def test_context_capacity_shows_the_call_detail_and_allows_text(subscription_ui, monkeypatch):
+    from playwright.sync_api import expect
+    from ouroboros.context_budget import context_capacity_detail
+
+    page, posts = open_call_ui(subscription_ui, monkeypatch, width=1280, scheme="light")
+    start_call(page)
+    assert_live(page)
+    detail = context_capacity_detail(live_call=True, limit_kind="input", limit_tokens=92_000, input_tokens=96_000)
+    page.evaluate("frame => __callFixture.sockets[0].emit(frame)", {
+        "type": "state", "state": "closed", "reason": "context_capacity", "engine": "openai", "detail": detail,
+    })
+    assert_ended(page)
+    state = page.locator("#page-chat .call-state")
+    expect(state).to_be_visible()
+    expect(state).to_have_text(detail)
+    expect(state).to_contain_text("input limit here is 92,000 tokens")
+    expect(state).to_contain_text("Choose a voice model with a larger window in Calls (beta) settings")
+    expect(state).to_contain_text("or continue by text")
+    browser.capture(page, "live-context-capacity")
+    page.locator("#page-chat .call-close").click()
+    page.locator("#page-chat #chat-input").fill("Continue here.")
+    expect(page.locator("#page-chat .chat-send-inline")).to_have_text("Send")
+    assert len(posts) == 1
+    assert not subscription_ui["errors"].unexpected(), subscription_ui["errors"].report()
+
+
 def test_background_document_keeps_call_until_pagehide(visible_call_ui, monkeypatch):
     page, _ = open_call_ui(visible_call_ui, monkeypatch, width=1280, scheme="light")
     start_call(page)

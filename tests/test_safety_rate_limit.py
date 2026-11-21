@@ -184,6 +184,72 @@ def test_subscription_safety_uses_safety_pin_and_existing_text_verdict_parser(su
         assert "response_format" not in payload and "responseFormat" not in payload["options"]
 
 
+@pytest.mark.parametrize("repair", [False, True])
+def test_checker_request_refusal_is_a_hold_without_another_send(subscription_transport, monkeypatch, repair):
+    from ouroboros import safety
+    from tests._shared import saved_settings
+
+    root, gateway, _ = subscription_transport
+    saved_settings(monkeypatch, root, OUROBOROS_MODEL_SAFETY=MODEL,
+                   OUROBOROS_MODEL_FALLBACKS="claudexor::codex=alternate-checker", USE_LOCAL_FALLBACK="false")
+    monkeypatch.setattr(safety, "get_safety_model", lambda: MODEL)
+    monkeypatch.setattr(safety, "_resolve_safety_routing", lambda: (False, False, None))
+    monkeypatch.setattr(safety, "get_runtime_mode", lambda: "advanced")
+    assert len(safety._safety_routes(MODEL, False)) == 2
+    first = result(cash=0, knowledge="exact")
+    first["message"] = {"role": "assistant", "content": "Not a verdict."}
+    declined = result(outcome="failed", cash=0, knowledge="exact", problem={
+        "code": "provider_content_refused", "message": "Picnic fixture detail", "retryable": False})
+    declined["message"] = None
+    gateway.results = ([first] if repair else []) + [declined]
+    gateway.dispatch = ["response_received"] * len(gateway.results)
+    ctx = _DriveCtx(root)
+    allowed, message = safety.check_safety("fixture_tool", {"label": "menu"}, ctx=ctx)
+    assert not allowed and message.startswith("⚠️ SAFETY_UNAVAILABLE:") and "did not issue a verdict" in message
+    assert len(gateway.creates) == len(gateway.acks) == len(gateway.results)
+    assert all(upload["model"] == "exact-model" for upload, _ in gateway.uploads)
+    assert len(_read_events(ctx, "safety_hold")) == 1 and not _read_events(ctx, "safety_verdict")
+    assert "Picnic fixture detail" not in message
+
+
+@pytest.mark.parametrize("advertised", [True, False], ids=["typed-refusal-advertised", "legacy-plain-text"])
+def test_an_advertised_typed_checker_refusal_holds_before_parse_or_repair(subscription_transport, monkeypatch, advertised):
+    """The checker negotiates the engine's advertised typed refusal shape: a typed refusal reply keeps the existing
+    conservative hold before any verdict parse, paid repair or route walk, its words never shown. Without the
+    advertisement nothing new is asked and an unparseable ordinary reply keeps its one repair (paired control)."""
+    import ouroboros.safety as safety
+
+    root, gateway, _ = subscription_transport
+    monkeypatch.setattr(safety, "get_safety_model", lambda: MODEL)
+    monkeypatch.setattr(safety, "_resolve_safety_routing", lambda: (False, False, None))
+    gateway.operation_catalog = [{"method": "POST", "path": "/v2/model-operations", "parameters": [
+        {"name": "typedRefusals", "location": "query", "enum": ["true"]}]}] if advertised else []
+    first, repaired = result(cash=0, knowledge="exact"), result(cash=0, knowledge="exact")
+    first["message"] = {"role": "assistant", "content": (
+        [{"type": "refusal", "refusal": "Fixture decline."}] if advertised else "Not a verdict.")}
+    repaired["message"] = {"role": "assistant", "content": '{"status":"SAFE","reason":"Scoped file read"}'}
+    gateway.results, gateway.dispatch = [first, repaired], ["response_received"] * 2
+    ctx = _DriveCtx(root)
+    ok, message = safety._run_llm_check("fixture_tool", {"path": "README.md"}, [], ctx)
+    assert gateway.capture_requests[0] == ({"typed_refusals": True} if advertised else {})
+    if advertised:
+        assert not ok and "did not issue a verdict" in message and "Fixture decline" not in message
+        assert len(gateway.creates) == 1 and not _read_events(ctx, "safety_parse_retry")
+        assert len(_read_events(ctx, "safety_hold")) == 1
+    else:
+        assert ok and len(gateway.creates) == 2 and len(_read_events(ctx, "safety_parse_retry")) == 1
+
+
+def test_the_verdict_parser_reads_no_verdict_from_typed_refusal_parts():
+    """The repair and the optional flag recheck read their replies through this parser: typed refusal parts are no
+    verdict (None, so the repair holds and a recheck leaves the first verdict standing); verdict text parses as before."""
+    from ouroboros.safety_records import parse_safety_response
+
+    assert parse_safety_response([{"type": "refusal", "refusal": "Fixture decline."}]) is None
+    assert parse_safety_response([{"type": "text", "text": "Lead in. "}, {"type": "refusal", "refusal": ""}]) is None
+    assert parse_safety_response('{"status":"SAFE","reason":"Scoped file read"}')["status"] == "SAFE"
+
+
 def test_subscription_safety_transient_429_keeps_one_retry_and_unavailable_outcome(subscription_transport, monkeypatch, _no_backoff):
     import ouroboros.safety as safety
 

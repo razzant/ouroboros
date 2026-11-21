@@ -477,18 +477,21 @@ def test_operation_identity_mismatch_is_not_an_accepted_response(gateway_factory
 
 
 @pytest.mark.parametrize(("capture_effort", "capture_failure"), [(False, False), (True, True)])
-def test_evidence_opt_ins_preserve_create_body(gateway_factory, capture_failure, capture_effort):
+@pytest.mark.parametrize("typed_refusals", [False, True])
+def test_evidence_opt_ins_preserve_create_body(gateway_factory, capture_failure, capture_effort, typed_refusals):
     wire = ModelWire()
     gateway = gateway_factory(wire)
     ref = gateway.upload_model_request(_request(), idempotency_key="evidence")
     gateway.create_model_operation(ref, idempotency_key="evidence",
-        capture_failure_evidence=capture_failure, capture_effort_evidence=capture_effort)
+        capture_failure_evidence=capture_failure, capture_effort_evidence=capture_effort, typed_refusals=typed_refusals)
     request = wire.calls[-1]
     expected = {}
     if capture_failure:
         expected["captureFailureEvidence"] = "true"
     if capture_effort:
         expected["captureEffortEvidence"] = "true"
+    if typed_refusals:
+        expected["typedRefusals"] = "true"
     assert dict(request.url.params) == expected
     assert json.loads(request.content) == {"request": ref}
     assert request.headers["Idempotency-Key"] == "evidence"
@@ -496,7 +499,7 @@ def test_evidence_opt_ins_preserve_create_body(gateway_factory, capture_failure,
     assert wire.generation_count == 1
 
 
-@pytest.mark.parametrize("parameter_name", ["captureFailureEvidence", "captureEffortEvidence"])
+@pytest.mark.parametrize("parameter_name", ["captureFailureEvidence", "captureEffortEvidence", "typedRefusals"])
 def test_query_negotiation_uses_exact_wire_descriptor(parameter_name):
     def supported(operations):
         return cx.operation_query_supported(operations, method="POST", path="/v2/model-operations",
@@ -509,7 +512,7 @@ def test_query_negotiation_uses_exact_wire_descriptor(parameter_name):
     assert not supported([])
     for change in ({"method": "GET"}, {"path": "/v2/model-operations/:id"}, {"parameters": []}):
         assert not supported([{**operation, **change}])
-    for change in ({"name": "other"}, {"location": "header"}, {"enum": ["false"]}, {"enum": "true"}):
+    for change in ({"name": "other"}, {"location": "header"}, {"enum": ["false"]}, {"enum": "true"}, {"enum": [True]}):
         assert not supported([{**operation, "parameters": [{**parameter, **change}]}])
     accounts = {"method": "GET", "path": "/v2/model-sources", "parameters": [
         {"name": "view", "location": "query", "enum": ["accounts"]}]}

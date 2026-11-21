@@ -13,6 +13,7 @@ from tests._delivery_candidate_shared import (
     write_child as _write_child,
     write_confirmed_disposition_fixture as _write_confirmed_disposition,
 )
+from tests._model_replies import finish
 
 
 def _forced_test_context(tmp_path, *, usage=None, incoming=None):
@@ -1161,7 +1162,8 @@ def test_a_forced_replacement_never_keeps_an_earlier_answers_result_review_curre
     assert outcome["outcome_axes"]["objective"]["status"] != "pass"
 
 
-def test_second_forced_owner_arrival_returns_exact_resume_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("typed", [False, True])
+def test_second_forced_owner_arrival_returns_exact_resume_fallback(tmp_path, monkeypatch, typed):
     import hashlib
 
     incoming = queue.Queue()
@@ -1172,7 +1174,9 @@ def test_second_forced_owner_arrival_returns_exact_resume_fallback(tmp_path, mon
         nonlocal calls
         calls += 1
         incoming.put(f"owner directive {calls}")
-        return {"role": "assistant", "content": f"stale draft {calls}"}, 0.0
+        draft = f"stale draft {calls}"
+        content = [{"type": "refusal", "refusal": draft}] if typed else draft
+        return {"role": "assistant", "content": content}, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", forced_model)
     text, _usage, returned_trace = loop._forced_final_answer(
@@ -1185,6 +1189,9 @@ def test_second_forced_owner_arrival_returns_exact_resume_fallback(tmp_path, mon
     assert calls == 2
     assert "Resume the task" in text
     assert "stale draft" not in text
+    if typed:
+        assert [row["content"] for row in ctx.messages if row.get("role") == "assistant"] == [
+            [{"type": "refusal", "refusal": f"stale draft {i}"}] for i in (1, 2)]
     assert len(registry._ctx._owner_directives) == 2
     assert registry._ctx._delivery_candidate.full_text == text
     assert returned_trace["delivery_candidate"]["content_sha256"] == hashlib.sha256(
@@ -1193,6 +1200,33 @@ def test_second_forced_owner_arrival_returns_exact_resume_fallback(tmp_path, mon
     assert returned_trace["forced_finalization"]["source"] == (
         "late_owner_directive_requires_resume"
     )
+
+
+@pytest.mark.parametrize("stop", [True, False], ids=["stop_now_drained", "no_stop"])
+def test_a_refused_parameter_wrap_up_honors_the_stop_its_own_drain_read(tmp_path, monkeypatch, stop):
+    """The wrap-up still asks its endpoint for a value that endpoint refused, so nothing is sent, and this exit's drain is
+    the only reader of the owner's mail it holds. A direct turn's Stop now it reads ends the turn on the Stop's own terminal,
+    with no post-task synthesis after it; without one the rail keeps its no-resend fallback."""
+    from ouroboros import owner_mailbox
+    from ouroboros.llm_fallback import RepeatedParameterRefusal
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+
+    loop, registry, ctx, _trace = _forced_test_context(tmp_path)
+
+    def refused(*_args, **_kwargs):  # the Stop lands after the rail's first drain, while its request is refused unsent
+        if stop:
+            assert owner_mailbox.write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, "parent1", msg_id="stop",
+                                                     kind=owner_mailbox.KIND_FINALIZE_NOW)
+        raise RepeatedParameterRefusal("the endpoint refused this value before")
+
+    monkeypatch.setattr(loop, "_call_forced_model_once", refused)
+    _text, usage, trace = loop._forced_final_answer(ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit")
+    if stop:
+        assert trace["forced_finalization"]["source"] == "owner_stopped_direct_turn"
+        assert usage["reason_code"] == "owner_requested_finalization" and registry._ctx._skip_post_task_synthesis is True
+    else:
+        assert trace["forced_finalization"]["source"] == "bad_request_no_resend" and usage["reason_code"] == "round_limit"
+        assert not getattr(registry._ctx, "_skip_post_task_synthesis", False)
 
 
 def test_forced_owner_refresh_does_not_resend_unknown_provider_outcome(tmp_path, monkeypatch):
@@ -1221,6 +1255,151 @@ def test_forced_owner_refresh_does_not_resend_unknown_provider_outcome(tmp_path,
     assert returned_trace["forced_finalization"]["source"] == (
         "provider_outcome_unknown_no_resend"
     )
+
+
+def test_a_forced_send_abandoned_to_a_warm_pause_is_never_bought_twice(tmp_path, monkeypatch):
+    """The receiver left an accepted wrap-up for the owner's Pause and the Pause returned warm: the terminal states the
+    unknown outcome, and no second wrap-up is sent over the accepted one."""
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    loop, _registry, ctx, _trace = _forced_test_context(tmp_path)
+    calls = 0
+
+    def abandoned(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        error = ModelWaitInterrupted("owner_pause", role="main")
+        error.receiver_abandoned = True  # the sender settles that operation late
+        raise error
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", abandoned)
+    monkeypatch.setattr(loop, "_handle_model_wait_control", lambda *_a, **_k: None)  # the warm Resume returned
+    _text, usage, returned_trace = loop._forced_final_answer(
+        ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit")
+    assert calls == 1
+    assert returned_trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
+    assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
+
+
+def test_a_forced_descriptor_under_grace_is_read_never_sent_again(tmp_path, monkeypatch):
+    """The accepted operation a round only reads is no reason to buy a call: an ordinary one ends on its unknown
+    outcome; a wrap-up already sent goes on to its own read, which ends it by the recorded facts."""
+    loop, registry, ctx, _trace = _forced_test_context(tmp_path)
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: pytest.fail("a wrap-up was sent over an accepted one"))
+    grace = {"finalize_now": "finalization_grace"}
+    sent = {"forced_reason_code": "round_limit", "physical_attempt_id": "forced-attempt", "operation_id": ""}
+    assert loop._maybe_early_finalize(ctx, registry, grace, reading_operation=sent) is None
+    _text, _usage, returned_trace = loop._maybe_early_finalize(ctx, registry, grace, reading_operation={"operation_id": "op"})
+    assert returned_trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
+
+
+_SENT_WRAP_UP = {"forced_reason_code": "round_limit", "physical_attempt_id": "forced-attempt", "operation_id": "op",
+                 "model_role": "main", "owner_source_sha256": "bound-source"}
+
+
+@pytest.mark.parametrize(("offset", "expected"), [(30.0, None), (0.0, "deadline"), (-1.0, "deadline")],
+                         ids=["inside", "exact", "after"])
+def test_an_accepted_wrap_up_read_ends_at_its_grace_on_the_forced_rail(tmp_path, monkeypatch, offset, expected):
+    """The grace the round's mail carried bounds the exact read (its deadline included: the clock equal to it ends the
+    read), even under a far calendar deadline whose own check must not widen it again. Before the grace the read goes
+    on. Once it has passed, the read's interruption reaches the loop's own control owner, which ends this read that
+    received nothing on the forced rail: the wrap-up's own reason, the control beside it, the attempt still owed its
+    read, and nothing sent."""
+    from ouroboros import llm_claudexor, loop_transport
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    class Polled(Exception):
+        pass
+
+    loop, registry, ctx, _trace = _forced_test_context(tmp_path)
+    registry._ctx.task_metadata["deadline_at"] = "2999-01-01T00:00:00+00:00"
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: pytest.fail("the read sent again"))
+    frozen = time.time()
+    monkeypatch.setattr(loop_transport, "time", SimpleNamespace(time=lambda: frozen, monotonic=time.monotonic,
+                                                                sleep=time.sleep))
+    ctx.accumulated_usage["_pending_transport_outcome"] = dict(_SENT_WRAP_UP)  # what ready_operation bound
+    grace = {"finalize_now": "finalization_grace", "finalize_deadline_ts": frozen + offset}
+    assert loop._maybe_early_finalize(ctx, registry, grace, reading_operation=_SENT_WRAP_UP) is None
+    assert ctx.deadline_ts == grace["finalize_deadline_ts"]
+    polled = []
+
+    def recover(_root, _task_id, _pending, _turn_state, *, poll_control):
+        polled.append(poll_control())
+        if expected is None:
+            raise Polled
+        return None  # no body downloaded: the wait ends on that very poll
+
+    monkeypatch.setattr(llm_claudexor, "recover_chat_reply", recover)
+    if expected is None:
+        with pytest.raises(Polled):
+            loop._read_accepted_round(ctx, dict(_SENT_WRAP_UP), loop_transport.read_ready_operation)
+        assert polled == [None]
+        return
+    with pytest.raises(ModelWaitInterrupted) as ended:
+        loop._read_accepted_round(ctx, dict(_SENT_WRAP_UP), loop_transport.read_ready_operation)
+    assert ended.value.control_reason == "deadline" and ended.value.read_operation["forced_reason_code"] == "round_limit"
+    text, usage, trace = loop._handle_model_wait_control(ctx, ended.value)  # the loop's own consumer of it
+    assert polled == ["deadline"] and "No usable answer was recovered" in text
+    assert usage["reason_code"] == trace["forced_finalization"]["reason_code"] == "round_limit"
+    assert trace["forced_finalization"]["control_reason"] == "deadline"
+    assert usage["_pending_transport_outcome"]["physical_attempt_id"] == "forced-attempt"
+
+
+def test_a_grace_never_widens_the_round_deadline_nor_does_the_calendar(tmp_path):
+    from ouroboros.loop_round_limits import local_deadline_remaining
+
+    loop, registry, ctx, _trace = _forced_test_context(tmp_path)
+    ctx.deadline_ts = earlier = time.time() + 5.0
+    for controls in ({"finalize_now": "finalization_grace", "finalize_deadline_ts": earlier + 60.0},
+                     {"finalize_now": "finalization_grace"}):
+        assert loop._maybe_early_finalize(ctx, registry, controls, reading_operation=dict(_SENT_WRAP_UP)) is None
+        assert ctx.deadline_ts == earlier
+    registry._ctx.task_metadata["deadline_at"] = "2999-01-01T00:00:00+00:00"
+    assert local_deadline_remaining(registry._ctx, ctx) > 0 and ctx.deadline_ts == earlier
+
+
+@pytest.mark.parametrize("case", ["stored-immediate-stop", "direct-stop-now", "received-refusal"])
+def test_the_control_owner_rules_a_wrap_up_read_its_deadline_ended(tmp_path, monkeypatch, case):
+    """The read's own poll sees the deadline before the task's other controls, so a Stop stored between the status
+    read and the result read at the bound reaches the loop's control owner as a deadline: the owner still finds that
+    Stop and ends as it, never on the forced parser. A direct turn's Stop now ends the same way. A refusal the read
+    received keeps that refusal's own terminal (the loop's next step), never a retry or another route."""
+    from ouroboros import cancel_intents, llm_claudexor, loop_transport, owner_mailbox
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+
+    loop, _registry, ctx, _trace = _forced_test_context(tmp_path)
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: pytest.fail("the read sent again"))
+    refused = llm_claudexor.ClaudexorContentRefused(llm_claudexor.ClaudexorContentRefused.terminal_problem(),
+                                                    model_role="main", operation_id="op")
+
+    def recover(*_args, poll_control):
+        if case == "direct-stop-now":
+            assert owner_mailbox.write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, "parent1",
+                                                     msg_id="stop", kind=owner_mailbox.KIND_FINALIZE_NOW)
+            assert poll_control() == "finalize_requested"
+            return None
+        assert poll_control() is None  # the status read began inside the bound
+        if case == "stored-immediate-stop":
+            cancel_intents.request_cancel(tmp_path, "parent1", requested_stop_policy=cancel_intents.STOP_POLICY_IMMEDIATE)
+        ctx.deadline_ts = time.time() - 1  # ...and the bound passed before any result read
+        if case == "received-refusal":
+            raise refused
+        return None
+
+    monkeypatch.setattr(llm_claudexor, "recover_chat_reply", recover)
+    with pytest.raises(ModelWaitInterrupted) as ended:
+        loop._read_accepted_round(ctx, dict(_SENT_WRAP_UP), loop_transport.read_ready_operation)
+    assert ended.value.control_reason == ("finalize_requested" if case == "direct-stop-now" else "deadline")
+    controlled = loop._handle_model_wait_control(ctx, ended.value)
+    if case == "received-refusal":
+        assert controlled is None and ended.value.received_refusal is refused
+        _notice, usage, _trace = loop._refusal_terminal(ctx, ended.value.received_refusal, ctx.llm_trace)
+        assert usage["reason_code"] == "provider_content_refused"
+        return
+    _text, usage, trace = controlled
+    assert usage["reason_code"] == "owner_requested_finalization"
+    assert trace["forced_finalization"]["source"] == "owner_stopped_direct_turn"
 
 
 def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_replacement(tmp_path, monkeypatch):
@@ -2161,3 +2340,24 @@ def test_a_forced_answer_shows_the_answer_one_shot_facts_returned_before_replaci
 
     assert text.startswith("Done, see above.") and shown == [report]
     assert registry._ctx._delivery_candidate.full_text == text
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_forced_completion_reads_real_call_beside_literal_control_json(tmp_path, monkeypatch, native):
+    loop, registry, ctx, _ = _forced_test_context(tmp_path)
+    ctx.tool_schemas = [registry.get_schema_by_name("finish_task")]
+    literal = '{"action":"stop","answer":"Fixture draft.","rationale":"Fixture reason."}'
+    reply = finish("Chosen.") if native else {"role": "assistant"}
+    reply["content"] = [{"type": "refusal", "refusal": literal}]
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_args, **_kwargs: (reply, 0.0))
+    text, _, trace = loop._forced_final_answer(ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit")
+    assert text == ("Chosen." if native else literal)
+    # Its words stay in order; a structured call is data for the one request this rail reads, never a history row.
+    assert ctx.messages[-1] == {key: value for key, value in reply.items() if key != "tool_calls"}
+    assert not any(row.get("tool_calls") for row in ctx.messages)
+    assert "task_completion" not in trace
+    if native:
+        assert trace["forced_completion_request"]["status"] == "selected"
+        assert trace["forced_completion_request"]["form"] == "native"
+    else:
+        assert "forced_completion_request" not in trace

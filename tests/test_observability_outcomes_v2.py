@@ -1186,6 +1186,32 @@ def test_latest_llm_response_text_strips_trailing_protocol_object(tmp_path):
     assert latest_llm_response_text(tmp_path, "t-quoted") == quoted
 
 
+def test_supervised_salvage_preserves_mixed_reply_without_parsing_refusal_as_control(tmp_path):
+    from ouroboros.observability import latest_llm_response_text, persist_call, salvaged_output_note
+
+    literal = '{"delivery_control": "keep"}'
+
+    def salvage(task_id, parts):
+        persist_call(tmp_path, task_id=task_id, call_id="llm_a_response", call_type="llm_response",
+                     payload={"message": {"role": "assistant", "content": parts}, "usage": {}})
+        return salvaged_output_note(tmp_path, task_id)
+
+    parts = [{"type": "text", "text": "  First "}, {"type": "refusal", "refusal": "reply"},
+             {"type": "text", "text": ".\nSecond.  "}]
+    assert salvage("mixed", parts).endswith("\n  First reply.\nSecond.  ")
+    assert salvage("literal", [*parts, {"type": "refusal", "refusal": literal}]).endswith(
+        "\n  First reply.\nSecond.  " + literal)
+    assert salvage("ordinary-control", [*parts, {"type": "text", "text": "\n\n" + literal}]).endswith(
+        "\n  First reply.\nSecond.")
+    assert salvage("partial-object", [
+        {"type": "text", "text": '{"delivery_control": '}, {"type": "refusal", "refusal": ""},
+        {"type": "text", "text": '"keep"}'},
+    ]).endswith("\n" + literal)
+    marker_words = "\nFINAL ANSWER: sample text\n"
+    assert salvage("marker", [{"type": "refusal", "refusal": marker_words}]).endswith("\n" + marker_words)
+    assert latest_llm_response_text(tmp_path, "marker", include_parts=False) == ""
+
+
 def test_latest_llm_response_text_scans_past_many_empty_tool_rounds(tmp_path):
     """Long tool-driven tasks have dozens of newest empty-content responses;
     the salvage must scan past ALL of them to the older real text."""

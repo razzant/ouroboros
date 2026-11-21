@@ -14,7 +14,7 @@ from ouroboros import loop, loop_output_exhaustion as recovery
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME, _record_owner_directive
 from ouroboros.context_budget import bound_host_row
 from ouroboros.llm import LLMClient
-from tests.test_context_fit_v664 import _plan
+from tests._context_fit_plan import fit_plan as _plan
 from tests.test_context_source_view import BODY, _tool, _observation
 from tests.test_output_exhaustion import _loop_kwargs, _events, _incident_reply, _ScriptedLLM, no_sleep as no_sleep
 from tests.test_transport_b_stream_deadlines import isolated as isolated, chunk, sse
@@ -285,6 +285,46 @@ def test_only_new_owner_input_resets_episode(tmp_path, monkeypatch, stage):
     assert ctx.accumulated_usage[recovery.KEY]["owner_revision"] == 2
 
 
+@pytest.mark.parametrize("end", ["this-claim", "another-attempt", "none", "an-unnamed-claim"])
+def test_a_read_known_end_of_the_claimed_informed_attempt_is_met_by_that_step(tmp_path, monkeypatch, end):
+    """A restore read the informed step's own claimed attempt and found it ended, here a quota refusal: that claim is no
+    interruption. The step's own call meets the end (``met`` stands for the round call that raises it) and the step
+    records it as the live step records its attempt's refusal: the claim closed, the refusal its outcome, the configured
+    walk next. Another attempt's end, or none, proves nothing about this claim: it stays an unconfirmed send, interrupted."""
+    from ouroboros.llm_claudexor import RESTORED_END_KEY
+    from tests._main_fit_fixtures import _ctx
+
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None  # no sizing measurement in this claim-authority test
+    monkeypatch.setattr(recovery, "_save", lambda *_: None)
+    usage = ctx.accumulated_usage
+    record = usage[recovery.KEY] = {"stage": "informed", "owner_revision": 0, "tried": [], "pending": "informed",
+                                    "attempt_id": "attempt-1"}
+    if end == "an-unnamed-claim":
+        del record["attempt_id"]  # a claim saved before its send named an attempt: no end can prove it over
+    if end not in ("none", "an-unnamed-claim"):
+        usage[RESTORED_END_KEY] = {"physical_attempt_id": "attempt-1" if end == "this-claim" else "attempt-2",
+                                   "round_id": "exec:round:1", "custody": "settled", "model": "same-model",
+                                   "model_role": "main", "operation_id": "op-0"}
+    calls = []
+
+    def met(call_ctx):  # the live owner records the typed refusal the restored end raised
+        calls.append(True)
+        call_ctx.accumulated_usage.update(_last_llm_error_kind="quota_exhausted", _last_llm_failure={
+            "failure_code": "quota_exhausted", "physical_attempt_id": "attempt-1", "recovered_operation_id": "op-0"})
+        return None, 0.0, "max"
+
+    msg, _cost, _mode = recovery.call(ctx, met)
+    assert msg is None
+    if end == "this-claim":
+        assert calls == [True] and "pending" not in record and record["stage"] == "fallback"
+        assert record["last_failure_kind"] == "quota_exhausted" and usage["_last_llm_error_kind"] == "quota_exhausted"
+        assert recovery.ready_for_fallback(usage) and recovery.next_step(usage) == "", "the walk, then the existing rails"
+    else:
+        assert not calls and (record["stage"], record["interrupted"]) == ("exhausted", True)
+        assert usage["_last_llm_error_kind"] == "output_recovery_interrupted"
+
+
 def persistent_loop(tmp_path, monkeypatch, client, *, target="t-output-recovery", handoff=None, sources=False):
     from tests.test_working_checkpoint import _registry
     from ouroboros.task_results import write_task_result
@@ -349,6 +389,66 @@ def test_real_checkpoint_recovery_never_reopens_spent_step(tmp_path, monkeypatch
         assert text == "done" and len(sent) == 3
         if lost_at == "fallback_informed":
             assert [s["model"] for s in sent] == ["primary-fixture", "fallback-fixture", "fallback-fixture"]
+
+
+@pytest.mark.parametrize("ending", ["lost", "lost_with_address", "incorporated"], ids=[
+    "worker_lost_before_incorporation", "worker_lost_with_a_native_operation_address", "incorporated"])
+def test_an_answered_smaller_send_keeps_its_saved_claim_until_the_loop_incorporates_the_reply(
+        tmp_path, monkeypatch, isolated, endpoint, ending):
+    """The smaller send that answered writes no newer state: when its reply returns, the checkpoint is still the
+    claim's own save, and an operation address written at that claim (its sequence, round and attempt) still names
+    it. Work lost before the loop incorporates the reply is never generated again: with that address the restored
+    read gives the same answer; without one the claim ends unconfirmed. The ordinary continuation incorporates
+    the reply as the final and ends the episode."""
+    from ouroboros import working_checkpoint as wc
+    from tests._worker_loss_fixtures import WorkerLost
+    client, sent = endpoint(["empty", "empty", "answer"])
+    kw, _ = persistent_loop(tmp_path, monkeypatch, client, sources=True)
+
+    def saved():
+        state = wc.read_working(tmp_path, kw["task_id"], 1)[1]
+        record = state.get("usage", {}).get(recovery.KEY) or {}
+        return state, ((state.get("working") or {}).get("seq"), record.get("pending"))
+
+    save, send_smaller, claims, address = wc.save_model_call, recovery._send_smaller, [], {}
+    def record_claims(**kwargs):
+        save(**kwargs)
+        claims.append(saved()[1])
+    def answered(ctx, cost):
+        result = send_smaller(ctx, cost)
+        assert result[0] is not None and len(sent) == 3
+        state, kept = saved()
+        assert claims[-1][1] == "smaller_request" and kept == claims[-1]  # no later save replaced the claim
+        address.update(seq=kept[0], round=state["round_idx"],
+                       physical_attempt_id=state["usage"][recovery.KEY]["attempt_id"])
+        assert wc.native_attempt_at(state, dict(address)) == address  # the claim's own address still binds it
+        if ending != "incorporated":
+            raise WorkerLost()
+        return result
+    with monkeypatch.context() as watched:
+        watched.setattr(wc, "save_model_call", record_claims)
+        watched.setattr(recovery, "_send_smaller", answered)
+        if ending == "incorporated":
+            text, usage, trace = loop.run_llm_loop(**kw)
+        else:
+            with pytest.raises(WorkerLost):
+                loop.run_llm_loop(**kw)
+    if ending == "lost_with_address":
+        # The address reaches the loop at its reader seam, as in the restored-read cases below: the read of that
+        # exact attempt returns the reply the lost worker had received.
+        operations = [{**address, "operation_id": "op-fixture", "model_role": "main"}]
+        monkeypatch.setattr(loop, "ready_operation", lambda *_a, **_k: operations.pop(0) if operations else None)
+        monkeypatch.setattr(loop, "read_ready_operation",
+                            lambda _ctx, _pending: ({"role": "assistant", "content": "done"}, 0.0))
+    if ending != "incorporated":
+        text, usage, trace = _resume(tmp_path, monkeypatch, client, kw)
+    assert len(sent) == 3  # the answered send is never sent again
+    if ending == "lost":
+        assert trace["output_recovery"]["interrupted"]
+        assert usage["reason_code"] == recovery.REASON and "unconfirmed" in text
+    else:
+        assert text == "done" and recovery.KEY not in usage
+        assert "output_recovery" not in trace and "forced_finalization" not in trace
 
 
 @pytest.mark.parametrize("tail", ["answer", "empty"])
@@ -1321,3 +1421,165 @@ def test_new_owner_words_and_a_usable_tool_round_each_reopen_the_turn(tmp_path, 
     assert "Use the newer counts." in json.dumps(sent[1]["messages"])
     assert [len(_cut_notices(s["messages"])) for s in sent] == [0, 1, 2, 2, 3]
     assert [(row["tool"], bool(row.get("is_error"))) for row in trace["tool_calls"]] == [("list_available_tools", False)]
+
+
+# ------------------------------------------------- restored read vs the output ladder (R6)
+
+def _read_ctx(tmp_path):
+    from tests._main_fit_fixtures import _ctx
+    ctx = _ctx(tmp_path)
+    ctx.accumulated_usage[recovery.KEY] = {"stage": "informed", "pending": "informed", "attempt_id": "pa-1",
+                                            "owner_revision": 0, "tried": []}
+    return ctx
+
+
+def test_reconcile_read_closes_only_the_exact_matching_claim(tmp_path):
+    ctx = _read_ctx(tmp_path)
+    ctx.tools._ctx._presence_delivered = [{"source_event_id": "chat:a:1", "message": {"message_id": "1"}},
+                                          {"source_event_id": "chat:a:2", "message": {"message_id": "2"}}]
+    msg = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]}
+    assert recovery.reconcile_read(ctx, {"physical_attempt_id": "pa-1"}, msg) is msg
+    assert recovery.KEY not in ctx.accumulated_usage  # the answered claimed send ended the episode
+    # The read itself is not a send: it grants no arrival coverage (``covered_send`` owns that).
+    assert getattr(ctx.tools._ctx, "_presence_covered", 0) == 0
+
+
+def test_reconcile_read_mismatch_keeps_the_claim_and_drops_the_reply(tmp_path):
+    ctx = _read_ctx(tmp_path)
+    record = ctx.accumulated_usage[recovery.KEY]
+    msg = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]}
+    assert recovery.reconcile_read(ctx, {"physical_attempt_id": "pa-2"}, msg) is None
+    assert record["pending"] == "informed" and record["stage"] == "exhausted" and record["interrupted"]
+    assert ctx.accumulated_usage["_last_llm_error_kind"] == "output_recovery_interrupted"
+
+
+def test_reconcile_read_without_a_claim_passes_the_reply_through(tmp_path):
+    from tests._main_fit_fixtures import _ctx
+    ctx = _ctx(tmp_path)
+    msg = {"role": "assistant", "content": "hi"}
+    assert recovery.reconcile_read(ctx, {"physical_attempt_id": "pa-9"}, msg) is msg
+    assert "_last_llm_error_kind" not in ctx.accumulated_usage
+
+
+def test_keep_unseen_reply_places_a_stale_reply_before_the_drained_words_without_its_tools(tmp_path):
+    from ouroboros.loop_messages import owner_source_sha256
+    from tests._main_fit_fixtures import _ctx
+
+    ctx = _ctx(tmp_path)  # system, user: the saved transcript the restored send carried
+    saw = owner_source_sha256(ctx.tools._ctx)
+    ctx.messages.append({"role": "user", "content": "New words."})  # the round's drain, after that transcript
+    ctx.tools._ctx._owner_directives = [{"source": "owner_mailbox", "content": "New words."}]  # the corpus moved
+    msg = {"role": "assistant", "content": "Old reply.", "tool_calls": [{"id": "c1"}]}
+    assert recovery.keep_unseen_reply(ctx, {"owner_source_sha256": saw}, msg, 2) is True
+    assert ctx.messages[2:] == [{"role": "assistant", "content": "Old reply."}, {"role": "user", "content": "New words."}]
+    # The corpus the send carried, a legacy send that bound none, and no operation at all: delivered as before.
+    for operation in ({"owner_source_sha256": owner_source_sha256(ctx.tools._ctx)}, {"owner_source_sha256": None},
+                      {"owner_source_sha256": ""}, {}, None):
+        assert recovery.keep_unseen_reply(ctx, operation, msg, 2) is False
+    assert len(ctx.messages) == 4
+
+
+def _smaller_ctx(tmp_path):
+    ctx = _read_ctx(tmp_path)
+    ctx.accumulated_usage[recovery.KEY] = {
+        "stage": "smaller", "owner_revision": 0, "tried": [],
+        "comparison": {"provider": "p", "model": "m", "max_completion_tokens": 100,
+                       "candidate_measurement_kind": "canonical_json_v1",
+                       "candidate_raw_sha256": "x", "candidate_context_size_bytes": 10}}
+    ctx.tools._ctx._presence_delivered = [
+        {"source_event_id": "chat:a:1", "message": {"message_id": "1", "source_order": 1}},
+        {"source_event_id": "chat:a:2", "message": {"message_id": "2", "source_order": 2}}]
+    return ctx
+
+
+@pytest.mark.parametrize("answered", [True, False], ids=["answered_send", "unanswered_send"])
+def test_send_smaller_covers_only_what_its_own_answer_read(tmp_path, monkeypatch, answered):
+    """The restored ladder's smaller send is a real send of the round: like ``_call_round_model`` it is wrapped
+    in ``covered_send``, so only its usable reply advances the arrival coverage (``reply_anchor``)."""
+    ctx = _smaller_ctx(tmp_path)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda _ctx, automatic_pass_used: None)
+    monkeypatch.setattr(recovery, "_invoke", lambda ctx, send, step, key=recovery.KEY: send())
+    monkeypatch.setattr(loop, "_dispatch_round_model",
+                        lambda *_a, **_kw: ({"role": "assistant", "content": "ok"}, 0.0) if answered else (None, 0.0))
+    msg, _cost, _mode = recovery._send_smaller(ctx, 0.0)
+    assert (msg is not None) is answered
+    assert getattr(ctx.tools._ctx, "_presence_covered", 0) == (2 if answered else 0)
+
+
+@pytest.mark.parametrize("match", [True, False], ids=["exact_attempt", "mismatched_attempt"])
+def test_restored_read_of_the_informed_send_runs_its_tool_once_then_finishes_normally(
+        tmp_path, monkeypatch, isolated, endpoint, match):
+    """Loss after the second (informed) send's acceptance. The restored read of that exact attempt closes its
+    pending claim before the reply's harmless tool runs, and the ordinary third send finishes the work; a read
+    of a different physical attempt keeps the claim, runs no tool and ends on the interrupted rail."""
+    from ouroboros import working_checkpoint as wc
+    from tests._worker_loss_fixtures import WorkerLost
+    def die(_request):
+        raise WorkerLost()
+    tool = {"role": "assistant", "content": "",
+            "tool_calls": [{"id": "one-tool", "type": "function",
+                            "function": {"name": "list_available_tools", "arguments": "{}"}}]}
+    client, sent = endpoint(["empty", die, "answer"])
+    kw, _ = persistent_loop(tmp_path, monkeypatch, client)
+    with pytest.raises(WorkerLost):
+        loop.run_llm_loop(**kw)
+    before = len(sent)
+    _, state = wc.read_working(tmp_path, kw["task_id"], 1)
+    record = state["usage"][recovery.KEY]
+    assert record["pending"] == "informed" and record["attempt_id"]
+    physical = record["attempt_id"] if match else record["attempt_id"] + "-other"
+    operations = [{"physical_attempt_id": physical, "operation_id": "op-fixture", "model_role": "main"}]
+    reads = [dict(tool)]
+    monkeypatch.setattr(loop, "ready_operation", lambda *_a, **_k: operations.pop(0) if operations else None)
+    monkeypatch.setattr(loop, "read_ready_operation", lambda _ctx, _pending: (reads.pop(0), 0.0))
+    text, usage, trace = _resume(tmp_path, monkeypatch, client, kw)
+    if match:
+        assert text == "done" and len(sent) == before + 1  # only the ordinary third send; the read resent nothing
+        assert [(row["tool"], bool(row.get("is_error"))) for row in trace["tool_calls"]] == [("list_available_tools", False)]
+        assert recovery.KEY not in usage and not (trace.get("output_recovery") or {}).get("interrupted")
+    else:
+        assert len(sent) == before and not trace.get("tool_calls")  # no resend, no tool from the mismatched read
+        assert usage["reason_code"] == recovery.REASON and trace["output_recovery"]["interrupted"]
+
+
+@pytest.mark.parametrize("match", [True, False], ids=["exact_attempt", "mismatched_attempt"])
+def test_a_deadline_at_the_restored_read_takes_only_its_exact_claimed_reply(
+        tmp_path, monkeypatch, isolated, endpoint, match):
+    """Loss after the informed send's acceptance, then the deadline passes as the restored read returns its reply
+    (the reader raises with that reply, as ``read_ready_operation`` does). That exit applies the ordinary exit's
+    comparison: the exact claimed attempt's final words are the deadline answer and close the claim; a read of a
+    different physical attempt keeps the claim and takes none of its words. Neither sends anything or runs a tool."""
+    from ouroboros import working_checkpoint as wc
+    from ouroboros.loop_messages import owner_source_sha256
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from tests._worker_loss_fixtures import WorkerLost
+    def die(_request):
+        raise WorkerLost()
+    menu = "Picnic menu: lemonade, cheese sandwiches and one apple pie."
+    client, sent = endpoint(["empty", die, "answer"])
+    kw, _ = persistent_loop(tmp_path, monkeypatch, client)
+    with pytest.raises(WorkerLost):
+        loop.run_llm_loop(**kw)
+    before = len(sent)
+    claimed = wc.read_working(tmp_path, kw["task_id"], 1)[1]["usage"][recovery.KEY]["attempt_id"]
+    operations = [{"physical_attempt_id": claimed if match else claimed + "-other", "operation_id": "op-fixture",
+                   "model_role": "main"}]
+    def deadline_as_the_read_returns(ctx, pending):
+        error = ModelWaitInterrupted("deadline", role=pending["model_role"])
+        error.operation_id, error.recovered_attempt_id = pending["operation_id"], pending["physical_attempt_id"]
+        error.ledger_attempt_ids = [pending["physical_attempt_id"]]
+        error.received_main_reply = ({"role": "assistant", "content": menu}, {"response_status": "completed"},
+                                     owner_source_sha256(ctx.tools._ctx))
+        raise error
+    monkeypatch.setattr(loop, "ready_operation", lambda *_a, **_k: operations.pop(0) if operations else None)
+    monkeypatch.setattr(loop, "read_ready_operation", deadline_as_the_read_returns)
+    monkeypatch.setattr(loop, "handle_tool_calls", lambda *_a, **_k: pytest.fail("a deadline never dispatches tools"))
+    text, usage, trace = _resume(tmp_path, monkeypatch, client, kw)
+    assert len(sent) == before and not trace.get("tool_calls") and usage["reason_code"] == "deadline_local"
+    if match:
+        assert text == menu and usage["terminal_origin"] == "model_final" and recovery.KEY not in usage
+        assert trace["forced_finalization"]["source"] == "model_wait_received_reply"
+    else:
+        assert menu not in text and trace["forced_finalization"]["source"] == "model_wait_control"
+        record = usage[recovery.KEY]
+        assert record["pending"] == "informed" and record["stage"] == "exhausted" and record["interrupted"]

@@ -87,7 +87,7 @@ def _real_actor(lane, monkeypatch, fanout):
     """The carrier's real actor; the provider answers once and the context builder may emit."""
     from ouroboros import agent as agent_module, agent_task_pipeline
     from ouroboros.agent import OuroborosAgent
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
 
     repo = lane.root.parent / "repo"
     repo.mkdir(exist_ok=True)

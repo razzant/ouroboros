@@ -41,7 +41,7 @@ the host speaking about the turn: it passes ``incident=None`` and keeps the
 default voice, so an ``emit_progress`` callable handed to ``run_llm_loop`` must
 accept the emitter's keyword facts (``incident``, ``narration``, ``reasoning``).
 
-Terminal/fallback text and salvage readers share this owner (extracted from byte-capped ``loop.py``).
+Provider terminal notices and their source facts share this owner.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ import pathlib
 import queue
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ouroboros.config import (
     NETWORK_WAIT_BACKOFF_START_SEC,
@@ -60,11 +60,12 @@ from ouroboros.config import (
     get_task_idle_timeout_sec,
 )
 from ouroboros.deadline_utils import parse_deadline_ts
-from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
+from ouroboros.loop_llm_call import TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
 from ouroboros.llm_claudexor import daemon_not_delivered
 from ouroboros.llm_probe import upstream_transport_reachable
 from ouroboros.model_concurrency import capacity_refusal
 from ouroboros.owner_mailbox import OwnerMailboxPeek
+from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -178,6 +179,365 @@ def new_generation_after_unknown(ctx: Any, accumulated_usage: Optional[Dict[str,
                 and not pending.get("same_operation_recoverable"))
 
 
+FORCED_ATTEMPT_KEY = "_forced_finalization_attempt"
+
+
+class ReadyRoundAttempts:
+    """Bind a native create or a forced send to its round's own landed ready checkpoint before dispatch."""
+
+    def __init__(self, call, tracker, ids, request_ref):
+        self.call, self.tracker = call, tracker
+        self.reply_source = None
+        self.ids = {**ids, "request_ref": request_ref.get("manifest_ref")}
+        self.alternative = getattr(call, "defer_resource_wait", None) is not None
+        self.saved_plan = object() if self.alternative else getattr(call, "context_fit_plan", None)
+
+    def __call__(self, reservation):
+        from ouroboros.llm_attempt import PhysicalAttemptPreparationFailed, PhysicalDispatchInterrupted
+        from ouroboros.loop_messages import owner_source_sha256
+        from ouroboros.model_wait import ModelWaitInterrupted
+        from ouroboros.working_checkpoint import checkpoint_path, save_model_call
+        from ouroboros.utils import atomic_write_json
+
+        if self.tracker is not None:
+            self.tracker(reservation)
+        owner, native = self.call.tools._ctx, reservation.provider == "claudexor"
+        reason = getattr(self.call, "forced_reason_code", "")
+        if native or reason:
+            self.reply_source = (reservation.attempt_id, owner_source_sha256(owner))
+        if reason:
+            # Save the disposition with the physical identity in ONE ready write; there may be no prior ready
+            # boundary (e.g. a soft landing before round one), and the reply never owns an ordinary tool turn.
+            self.call.accumulated_usage[FORCED_ATTEMPT_KEY] = {
+                **self.ids, "physical_attempt_id": reservation.attempt_id, "provider": reservation.provider,
+                "model": reservation.model, "forced_reason_code": reason, "owner_source_sha256": self.reply_source[1],
+                "owner_directive_count": len(getattr(owner, "_owner_directives", None) or ())}  # old readers
+            save_model_call()
+            return
+        seq = getattr(owner, "_working_checkpoint_seq", None)
+        if native and (getattr(owner, "_working_checkpoint_owed", False) or seq and self.saved_plan is not self.call.context_fit_plan):
+            # A create binds this round's own landed ready state, never an absent or earlier one: an owed write or a changed view lands first under the hold.
+            try:
+                save_model_call(model_call=self.call if self.alternative else None)
+            except ModelWaitInterrupted as held:
+                raise PhysicalDispatchInterrupted(held.control_reason) from held
+            self.saved_plan, seq = self.call.context_fit_plan, getattr(owner, "_working_checkpoint_seq", None)
+        if native and getattr(owner, "_working_checkpoint_owed", False):  # still owed: no writer is bound outside a loop's model-call scope
+            raise PhysicalAttemptPreparationFailed("A native create cannot name a ready state that is still owed.", attempt_id=reservation.attempt_id)
+        if not seq:
+            return  # no write was ever attempted: an unsupported continuation sends as before, naming no sequence
+        path = checkpoint_path(reservation.drive_root, self.call.task_id, getattr(owner, "task_attempt", None) or 1).with_suffix(".operation.json")
+        if native:
+            atomic_write_json(path, {**self.ids, "seq": seq, "physical_attempt_id": reservation.attempt_id,
+                                     "model": reservation.model, "owner_source_sha256": self.reply_source[1]})
+            owner._ready_native_receipt = True
+        elif getattr(owner, "_ready_native_receipt", False):
+            path.unlink(missing_ok=True)
+            owner._ready_native_receipt = False
+
+    def attempt_ended(self, capture, error):
+        if self.tracker is not None:
+            self.tracker.attempt_ended(capture, error)
+
+
+def _record_released_operation(usage, physical_id):
+    usage["ledger_attempt_ids"] = list(dict.fromkeys([*usage.get("ledger_attempt_ids", []), physical_id]))
+    if (usage.get("_pending_transport_outcome") or {}).get("physical_attempt_id") == physical_id:
+        usage.pop("_pending_transport_outcome")
+        if usage.get("_last_llm_error_kind") == "provider_outcome_unknown":
+            usage.pop("_last_llm_error_kind")
+            if usage.get("execution_status") == "infra_failed":
+                usage.pop("execution_status")
+    record = usage.get(TIMEOUT_REPEAT_KEY) or {}
+    repeat = record.get("repeat") or {}
+    if record.get("state") in {"dispatched", "spent"} and repeat.get("physical_attempt_id") == physical_id:
+        record.update(state="spent", repeat={**repeat, "attempt_custody_state": "released",
+                      "failure_code": "model_operation_not_started", "error": "The recorded repeat ended before dispatch."})
+        usage["_last_llm_attempt_custody"] = "released"
+
+
+def ready_operation(state, usage, root, task_id, attempt_id=""):
+    """Bind a restored round to a read, never a dispatch. A forced boundary without a reader still ends. A named
+    ``attempt_id`` binds only that physical attempt: another one is refused before it touches ``usage``."""
+    if state.get("task_id") != task_id:
+        return None
+    forced = (state.get("usage") or {}).get(FORCED_ATTEMPT_KEY)
+    if isinstance(forced, dict) and forced.get("forced_reason_code") and forced.get("physical_attempt_id"):
+        adopted = (usage.get("_last_llm_call_meta") or {}).get("physical_attempt_id") == forced["physical_attempt_id"]
+        if not adopted and forced.get("provider") == "claudexor":
+            if pending := _ready_native_operation(state, usage, root, task_id, forced=forced, expected=attempt_id):
+                return pending
+        return {**forced, "operation_id": ""}  # no matching reader, proven unsent, or already incorporated
+    return _ready_native_operation(state, usage, root, task_id, expected=attempt_id)
+
+
+def _ready_native_operation(state, usage, root, task_id, *, forced=None, expected=""):
+    from ouroboros import usage_store
+    from ouroboros.llm_claudexor import processing_recovery_candidate
+    from ouroboros.loop_messages import _recovered_owner_source_sha256
+    from ouroboros.loop_output_exhaustion import kept_arrivals
+    from ouroboros.observability import call_manifest_path
+    from ouroboros.utils import read_json_dict
+    from ouroboros.working_checkpoint import native_attempt_at
+
+    boundary = (state.get("working") or {}).get("boundary")
+    pending = usage.get("_pending_transport_outcome") or {}
+    repeat = usage.get(TIMEOUT_REPEAT_KEY) or {}
+    failure = usage.get("_last_llm_failure") or {}
+    legacy_unknown = False
+    if native := forced or native_attempt_at(state):
+        attempt = native
+    elif boundary == "ready" and repeat.get("state") == "dispatched":
+        # The one-repeat owner wrote a newer ready sequence after the pre-dispatch tracker.
+        attempt = repeat.get("repeat") or {}
+    elif (pending.get("paused_receipt_read") or pending.get("same_operation_recoverable") and pending.get("llm_call_id")) and (
+            state.get("resume_point") or boundary in {"ready", "resumed"}):
+        attempt = pending  # This very read was checkpointed again, including by an exact pause.
+    elif boundary != "ready":
+        return None
+    else:
+        # Older ready states kept the pending physical ID and the round on its matching failure.
+        legacy_unknown = pending.get("same_operation_recoverable") is not True
+        if (not pending.get("physical_attempt_id") or pending["physical_attempt_id"] != failure.get("physical_attempt_id")
+                or failure.get("round") is None or failure["round"] != state.get("round_idx")
+                or pending.get("model") and failure.get("model") not in (None, pending["model"])
+                or legacy_unknown and pending.get("outcome") != "unknown"):
+            return None
+        call_id = failure.get("llm_call_id") or pending.get("llm_call_id")
+        request_ref = pending.get("request_ref")
+        if call_id and isinstance(request_ref, dict) and request_ref.get("call_id") not in (None, f"{call_id}_request"):
+            return None
+        logical = (read_json_dict(call_manifest_path(root, task_id, f"{call_id}_request")) or {}) if call_id else {}
+        ids = {"llm_call_id": call_id, "round": failure["round"],
+               **{key: logical[key] for key in ("execution_id", "round_id") if key in logical}}
+        if logical and (logical.get("task_id") != task_id or logical.get("llm_call_id", call_id) != call_id
+                        or logical.get("round", failure["round"]) != failure["round"]):
+            return None
+        if any(pending.get(key) not in (None, value) for key, value in ids.items()):
+            return None
+        attempt = {**pending, **ids}
+    physical_id = attempt.get("physical_attempt_id")
+    role = state.get("context_model_role") or attempt.get("model_role")
+    execution_id = usage.get("execution_id")
+    round_id = f"{execution_id}:round:{state.get('round_idx')}" if execution_id else attempt.get("round_id")
+    if (not physical_id or expected and physical_id != expected or attempt.get("round") != state.get("round_idx")
+            or execution_id and attempt.get("execution_id") not in (None, execution_id)
+            or round_id and attempt.get("round_id") not in (None, round_id)
+            or role and attempt.get("model_role") and attempt["model_role"] != role):
+        return None
+    with usage_store.read(root) as store:
+        row = store.attempt(physical_id)
+    observed_round = ((row or {}).get("physical_context") or {}).get("round_id")
+    if row and (row["task_id"] != task_id or row["provider"] != "claudexor"
+                or attempt.get("model") and attempt["model"] != row["model"]
+                or round_id and observed_round and observed_round != round_id):
+        return None
+    if row and row["state"] == "reserved":
+        return None  # mark_dispatched precedes create
+    request = read_json_dict(call_manifest_path(root, task_id, f"{physical_id}_model_request")) or {}
+    if legacy_unknown and not row and request.get("invocation_id") != physical_id:
+        return None  # A legacy transport error alone does not identify a native chat.
+    receipt = (retained := read_json_dict(call_manifest_path(root, task_id, f"{physical_id}_model_response")) or {}) or request
+    role = role or request.get("model_role")
+    model = (row or {}).get("model") or attempt.get("model") or request.get("model")
+    operation = request.get("operation_id") or receipt.get("operation_id")
+    for source in (request, receipt):
+        if (source.get("invocation_id") != physical_id or source.get("task_id") != task_id
+                or source.get("request_kind", "chat") != "chat" or source.get("model_role", role) != role
+                or source.get("model", model) != model):
+            operation = None
+    saved_ids = [source["operation_id"] for source in (attempt, pending, failure)
+                 if source.get("physical_attempt_id") == physical_id and source.get("operation_id")]
+    if any(saved_id != operation for saved_id in saved_ids) or receipt.get("operation_id") not in (None, "", operation):
+        operation = None
+    if row and row["state"] == "released" and not (operation and (processing_recovery_candidate(row) or retained.get("dispatch_state") == "not_started")):
+        _record_released_operation(usage, physical_id)  # no retained reason to read: the owed round is admitted again
+        return None
+    if not operation and repeat.get("state") in {"dispatched", "spent"}:
+        return None  # The timeout owner already recorded the dispatch and owns its no-resend terminal.
+    # The address authorizes a read. Losing it cannot undo a dispatch or establish a zero charge.
+    bound = {**attempt, "operation_id": saved_ids[0] if saved_ids else operation or "", "model_role": role, "model": model,
+             "owner_source_sha256": _recovered_owner_source_sha256(state, attempt, row),
+             "outcome": "unknown", "same_operation_recoverable": True}
+    bound.update(kept_arrivals(pending, bound))  # a Pause kept the drains' facts with this read (``read_ready_operation``)
+    usage["_pending_transport_outcome"] = bound
+    usage["_last_llm_error_kind"] = "provider_outcome_unknown"
+    if usage.get("execution_status") == "infra_failed":
+        usage.pop("execution_status")  # Lost contact on the previous worker. This worker still owes the read.
+    usage["ledger_attempt_ids"] = list(dict.fromkeys([*usage.get("ledger_attempt_ids", []), physical_id]))
+    return bound if bound["operation_id"] == (operation or "") else {**bound, "operation_id": ""}  # the record itself: what a drain binds stays
+
+
+def read_ready_operation(ctx, pending):
+    """Consume the identified attempt in this round, without passing through any sender."""
+    from ouroboros._usage_response import assistant_answer_text, refusal_content_text, usage_reply_usability
+    from ouroboros.budget_pause import enter_owner_pause
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.llm import add_usage
+    from ouroboros.llm_claudexor import ClaudexorModelError, ClaudexorRefusalError, recover_chat_reply, restored_end
+    from ouroboros.llm_observability import persist_main_response
+    from ouroboros.loop_llm_call import (_account_received_error, _classify_empty_response, _remember_llm_call,
+                                         _replace_response_meta, _take_response_facts, classify_llm_exception)
+    from ouroboros.loop_output_exhaustion import OWNER_PAUSE_CONTROLS, paused_read, poll_read_control, record_empty_cut, response_facts
+    from ouroboros.model_wait import ModelWaitInterrupted, accepted_operation_scope, current_model_wait
+    from ouroboros.owner_pause import wait_member_fence
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    usage, owner = ctx.accumulated_usage, ctx.tools._ctx
+    mailbox = OwnerMailboxPeek()
+    if pending.get("execution_id"):
+        usage.setdefault("execution_id", pending["execution_id"])
+    carry = not pending.get("forced_reason_code") and TIMEOUT_REPEAT_KEY not in usage  # this round's own call may follow
+
+    def poll_control():
+        return poll_read_control(ctx, owner, mailbox)
+
+    def interrupt(reason, cause=None, *, reply=None):
+        if reason in OWNER_PAUSE_CONTROLS:  # the poll met the owner's Pause: this read stays owed, its operation running
+            paused_read(usage, pending)
+        interrupted = ModelWaitInterrupted(reason, role=pending["model_role"], cause=cause)
+        interrupted.operation_id = pending["operation_id"]
+        interrupted.recovered_attempt_id = pending["physical_attempt_id"]
+        interrupted.read_operation = pending  # the exact read it ended: its control owner rules, a wrap-up's rail ends it
+        interrupted.ledger_attempt_ids = [pending["physical_attempt_id"]]
+        if reply is not None:
+            interrupted.received_main_reply = (*reply, pending.get("owner_source_sha256"))
+        if isinstance(cause, ClaudexorRefusalError):
+            interrupted.received_refusal = cause
+        raise interrupted from cause
+
+    ending_controls = {"cancelled", "finalize_requested", "execution_deadline", "absolute_ceiling", "deadline"}
+
+    def ending_control():
+        with accepted_operation_scope():
+            waiter = current_model_wait()
+            reason = poll_control() or (waiter.control_reason() if waiter else None)
+        return reason if reason in ending_controls else None
+
+    def check_control(cause=None, *, reply=None):
+        if reason := pending_control or ending_control():
+            interrupt(reason, cause, reply=reply)
+
+    def terminal_failure(kind, message, *, cause=None, route=None, provider_code="", status_code=0):
+        usage.update(_last_llm_error_kind=kind, _last_llm_error=message, _last_llm_attempt_custody="settled",
+                     _last_llm_provider_code=provider_code, _last_llm_status_code=status_code, execution_status="infra_failed")
+        usage["_last_llm_failure"] = {**{key: pending.get(key) for key in (
+            "operation_id", "physical_attempt_id", "model", "model_role", "llm_call_id")}, "round": ctx.round_idx,
+            "error": message, "failure_code": kind, "attempt_custody_state": "settled", "observed_route": dict(route or {}),
+            "recovered_operation_id": pending["operation_id"], "provider_code": provider_code, "status_code": status_code,
+            **getattr(cause, "received_status", {})}
+        usage.pop("_pending_transport_outcome", None)
+        usage.pop(TRANSPORT_DEATHS_KEY, None)
+        check_control(cause)
+        return None, None
+
+    def received_end(error, classification, kind=""):  # a received failure or unusable reply ended known: its round's call meets it
+        stamp_owner_provider_message(usage, error, classification)
+        known = terminal_failure(kind or classification.kind, error.display_message, cause=error, route=error.route, provider_code=classification.provider_code or error.code, status_code=classification.status_code)
+        if carry:  # (a control met first ended the read above)
+            restored_end(usage, pending, ctx.round_idx, error)
+        return known
+
+    try:
+        result = (recover_chat_reply(ctx.status_drive_root, ctx.task_id, pending, getattr(owner, "model_turn_state", None),
+                                     poll_control=poll_control)
+                  if pending["operation_id"] else None)
+    except BudgetExceeded:
+        # The exact budget Resume still owes this read, even if its balance now allows a new call.
+        usage["_pending_transport_outcome"] = {**pending, "paused_receipt_read": True}
+        raise
+    except (ClaudexorModelError, ProviderNotDispatched) as error:
+        if getattr(error, "control_reason", None):
+            interrupt(error.control_reason, error)
+        result = error
+    except (ClaudexorUnavailable, OSError, ValueError, KeyError, TypeError):
+        log.info("Recorded chat operation %s could not be read", pending["operation_id"], exc_info=True)
+        result = None
+
+    # Park after durable settlement and before adding the receipt to this round's usage.
+    # An exact Resume will read it from retained storage and count it once.
+    pending_control = ending_control()
+    if not pending_control:
+        with accepted_operation_scope():
+            try:
+                if wait_member_fence(owner):
+                    paused_read(usage, pending)
+                    enter_owner_pause(ctx)
+            except ModelWaitInterrupted as error:
+                if error.control_reason not in ending_controls:
+                    raise
+                pending_control = error.control_reason
+
+    if isinstance(result, ProviderNotDispatched):
+        _record_released_operation(usage, pending["physical_attempt_id"])
+        check_control(result)
+        if carry and isinstance(result, ClaudexorModelError):  # the engine's own typed refusal: its round's call meets it
+            restored_end(usage, pending, ctx.round_idx, result)
+        raise result
+    if isinstance(result, ClaudexorModelError):
+        error = result
+        _account_received_error(usage, error, pending["physical_attempt_id"])
+        if isinstance(error, ClaudexorRefusalError):
+            terminal_failure(error.code, error.display_message, cause=error, route=error.route, provider_code=error.code)
+            raise error
+        classification = classify_llm_exception(error)
+        if classification.kind != "provider_outcome_unknown":
+            return received_end(error, classification)
+        usage.update(_last_llm_error=error.display_message, _last_llm_provider_code=str(error.problem.get("code") or ""))  # why it stays unknown
+        result = None
+
+    if result is None:
+        check_control()
+        usage["execution_status"] = "infra_failed"
+        return None, None
+    msg, reported, _physical_ref = result
+    _take_response_facts(reported, msg, usage)
+    _replace_response_meta(response_facts(owner), reported, msg)
+    if first := pending["physical_attempt_id"] not in usage.get("_counted_error_attempts", ()):  # a withdrawn control's or an
+        add_usage(usage, reported)  # exact Resume's re-read applies it again, never counting or recording it twice
+        usage.setdefault("_counted_error_attempts", []).append(pending["physical_attempt_id"])
+        call_ids = {**{key: pending[key] for key in
+            ("llm_call_id", "execution_id", "round_id", "attempt", "model_role") if key in pending}, "round": ctx.round_idx,
+            "physical_attempt_id": pending["physical_attempt_id"], "operation_id": pending["operation_id"],
+            "operation_outcome": reported["claudexor"]["outcome"]}
+        model = reported["resolved_model"]
+        response_ref = persist_main_response(ctx.drive_logs.parent, ctx.task_id, call_ids, msg, reported, usage,
+                                             model=model, display_model=model, provider="claudexor")
+        _remember_llm_call(usage, call_ids=call_ids, model=model, display_model=model, provider="claudexor", use_local=False,
+            request_ref={"manifest_ref": pending.get("request_ref")}, response_ref=response_ref, reported_model=reported["resolved_model"],
+            requested_profile=reported["claudexor"]["requested_profile"], observed_route=reported["claudexor"]["route"])
+    content = msg.get("content")
+    if usage_reply_usability(reported, msg) == "unusable" or not (
+            msg.get("tool_calls") or assistant_answer_text(content).strip() or refusal_content_text(content) is not None):
+        if (not pending.get("forced_reason_code") and TIMEOUT_REPEAT_KEY not in usage
+                and reported.get("response_status") == "incomplete"
+                and _classify_empty_response(reported, msg) == ("llm_empty_response", False, True)):
+            record_empty_cut(usage, reported, custody="settled")  # no sent cap on a Claudexor reply
+            usage.pop("_pending_transport_outcome", None)
+            check_control()
+            return None, reported["cost"]
+        rejected = ClaudexorModelError({"code": "response_rejected", "message": "The recorded operation returned no usable model reply."}, model_role=pending["model_role"], operation_id=pending["operation_id"], route=reported["claudexor"]["route"])
+        rejected.usage = {"claudexor": reported["claudexor"]}  # its receipt's state and outcome, counted once above: a rejected end
+        return received_end(rejected, classify_llm_exception(rejected), "response_rejected")  # the read's row keeps its own code
+    if pending.get("llm_call_id") and not pending.get("forced_reason_code"):
+        usage["_last_llm_call_meta"]["usable_solve_response"] = True
+    for stale in ("execution_status", "result_status", "reason_code", TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY, "_pending_transport_outcome"):
+        usage.pop(stale, None)
+    usage["rounds"] = usage.get("rounds", 0) + int(first)
+    check_control(reply=(msg, reported))
+    return msg, reported["cost"]
+
+
+def revoke_endpoint_grant(usage, episode, *, keep_latest_failure=False):
+    usage.pop("_observed_transport_endpoint", None)
+    usage.setdefault("_pending_transport_outcome", usage["transport_recovery"]["previous_attempt"])
+    if not keep_latest_failure:
+        usage["_last_llm_error_kind"] = "provider_outcome_unknown"
+    if episode is not None:
+        episode.continuation_granted = False
+    return None, None
+
+
 def append_unknown_recovery_input(messages: list, accumulated_usage: dict, previous: Dict[str, Any], *,
                                   lead: str, continuation: str, connectivity: Any = None) -> bool:
     """The facts-only input a NEW generation after an unknown outcome carries, once per unknown attempt.
@@ -202,7 +562,7 @@ def append_unknown_recovery_input(messages: list, accumulated_usage: dict, previ
 
 def continue_unknown_transport(episode: TransportWaitEpisode, *, llm: Any, tools: Any,
                                messages: list, accumulated_usage: dict, drive_logs: Any,
-                               task_id: str, model: str, emit_progress: Callable) -> bool:
+                               task_id: str, model: str, emit_progress: Callable, use_local: bool = False) -> bool:
     """Grant one NEW attempt only after upstream recovery, retaining old custody."""
     from ouroboros.deadline_utils import dispatch_window_remaining_sec
     from ouroboros.llm import LLMClient
@@ -214,39 +574,62 @@ def continue_unknown_transport(episode: TransportWaitEpisode, *, llm: Any, tools
     timeout = float(LLMClient._no_proxy_timeout().connect)
     if remaining is not None:
         timeout = min(timeout, remaining)
-    from ouroboros.model_slots import task_model_binding
+    from ouroboros.model_slots import route_binding, task_model_binding
     from ouroboros.model_wait import current_model_wait
     ctx, waiter = tools._ctx, current_model_wait()
     if transport_repeat_stop_requested(ctx) or (waiter is not None and waiter.control_reason()):
         return False
-    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
-        "task_metadata": getattr(ctx, "task_metadata", {})},
-        context_fit_plan=getattr(ctx, "context_fit_plan", None), overrides=waiter.overrides if waiter else None)
-    observed = upstream_transport_reachable(llm, model, timeout=timeout, model_role=role,
+
+    def selected_binding():
+        overrides = waiter.overrides if waiter else None
+        role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
+            "task_metadata": getattr(ctx, "task_metadata", {})},
+            context_fit_plan=getattr(ctx, "context_fit_plan", None), overrides=overrides)
+        selected, local, role_account = route_binding(model, use_local, role, overrides=overrides)
+        return selected, local, role, role_account if account is None else account
+
+    binding = selected_binding()
+    selected, local, role, account = binding
+
+    def eligible():
+        return (episode.wait_cause == "provider_outcome_unknown" and not episode.continuation_granted
+                and new_generation_after_unknown(ctx, accumulated_usage)
+                and not episode.outcome_custody.get("same_operation_recoverable"))
+
+    if not eligible():
+        return False
+    observed = upstream_transport_reachable(llm, selected, timeout=timeout, use_local=local, model_role=role,
         account_override=account, observed_after=episode.started_at,
         expected_route=(episode.outcome_custody.get("route")
-                        if episode.outcome_custody.get("model", model) == model
+                        if episode.outcome_custody.get("model", selected) == selected
                         and episode.outcome_custody.get("model_role", role) in ("", role) else None))
+    if local and (observed.get("kind") != "local_server_http" or not observed.get("endpoint_sha256")):
+        observed = {}
     remaining = dispatch_window_remaining_sec(deadline_ts=task_deadline_epoch(tools), reserve_sec=get_finalization_grace_sec())
     if not observed:  # the row that says why this round went on to its configured routes or kept waiting
         emit_network_wait_event(drive_logs, task_id=task_id, phase="continued", elapsed_sec=episode.waited_sec,
-                                redials=episode.redials, model=model, detail="upstream_not_observed")
-    if (not observed or remaining == 0.0 or transport_repeat_stop_requested(ctx)
-            or (waiter is not None and waiter.control_reason())):
+                                redials=episode.redials, model=selected, detail="upstream_not_observed")
+    if (not observed or not eligible() or remaining == 0.0 or transport_repeat_stop_requested(ctx)
+            or (waiter is not None and waiter.control_reason()) or selected_binding() != binding):
         return False
     # The latest outstanding unknown is the attempt this generation follows: since the episode opened on the
     # primary's lost answer, a configured route may have lost its own.
     previous = dict(accumulated_usage.get("_pending_transport_outcome") or episode.outcome_custody)
     append_unknown_recovery_input(messages, accumulated_usage, previous, connectivity=observed,
                                   lead="Upstream connectivity is available again.", continuation="new_physical_attempt")
+    if observed.get("endpoint_sha256"):
+        accumulated_usage["_observed_transport_endpoint"] = observed["endpoint_sha256"]
+    else:
+        accumulated_usage.pop("_observed_transport_endpoint", None)
     accumulated_usage.pop(TRANSPORT_DEATHS_KEY, None)
     accumulated_usage.pop("_pending_transport_outcome", None)
     episode.continuation_granted = True
     emit_network_wait_event(drive_logs, task_id=task_id, phase="recovered",
-        elapsed_sec=episode.waited_sec, redials=episode.redials, model=model,
+        elapsed_sec=episode.waited_sec, redials=episode.redials, model=selected,
         detail="new_attempt_after_unknown_outcome", outcome_custody=previous)
+    cost_note = "" if local else " Any unreported cost remains unknown; another charge is possible."
     emit_progress("🌐 Connection restored — continuing from saved work in a new attempt. "
-                  "The prior result and unreported cost remain unknown; another charge is possible.", incident=None)
+                  "The prior result is still unknown." + cost_note, incident=None)
     return True
 
 
@@ -296,18 +679,16 @@ def fallback_chain_allowed(
     One lost answer is evidence about an attempt, not its route: an acting primary's
     eligible unknown outcome with no wait open takes its own continuation first (the
     episode's entry step, then ``continue_unknown_transport``; owner decision 2026-11-11).
-    A missed observation walks from the open episode. The new attempt is an ordinary one:
-    its outcome takes that kind's recovery (lost again or undelivered walks at once; a cut
-    reply keeps its ladder), as does another acting route's unknown outcome. A declared
+    A missed observation walks from the open episode; the new attempt's outcome takes that kind's recovery
+    (lost again or undelivered walks at once, a cut keeps its ladder), as does another acting route's unknown one. A declared
     wait on the primary (``switch_model(primary="wait")``) keeps its refusals and
     outages on the primary's own wait instead of paid alternatives; after its content filter's
     stop nothing is there to wait for, so this run ends as interrupted (owner, 12.11). A context overflow
     reaches the configured routes only after the primary's own recovery ladder
     (``loop_model_call._recover_context_overflow``) left the round unanswered: the
     candidates inherit the compacted view (owner decision 7A, rung f). A send that found
-    no slot in the install's own queue (``model_concurrency``) never opens them: the model
-    did not fail, and a move would write the work's whole start on another route (owner, 13.11). Nor does the
-    acting route's own Claudexor daemon left unanswered once its same-route repeats are spent (``engine_unanswered``;
+    no slot in the install's own queue (``model_concurrency``) never opens them: the model did not fail, and a move
+    would write the work's whole start on another route (owner, 13.11). Nor does the acting route's own Claudexor daemon left unanswered once its same-route repeats are spent (``engine_unanswered``;
     owner wait-first, 13.11): the round's episode waits; a candidate's daemon failure mid-walk stops no walk.
     """
     usage = accumulated_usage or {}
@@ -329,6 +710,8 @@ def fallback_chain_allowed(
     if last_error_kind == "llm_output_exhausted":
         from ouroboros.loop_output_exhaustion import ready_for_fallback
         return ready_for_fallback(usage) and not getattr(ctx, "route_wait_on_primary", False)
+    if (usage.get("_last_llm_failure") or {}).get("rejected_receipt"):
+        return False  # an accepted receipt judged unusable, live or restored, ended known: no candidate sends over it
     return last_error_kind not in ("deadline_exhausted", "output_recovery_interrupted")
 
 
@@ -342,7 +725,7 @@ def reconcile_transport_wait(
     task_id: str,
     model: str,
     emit_progress: Callable[..., None],
-    by_configured_route: bool = False,
+    by_configured_route: bool = False, use_local: bool = False,
 ) -> Optional[TransportWaitEpisode]:
     """Reconcile the episode latch with one dispatch outcome.
 
@@ -383,9 +766,17 @@ def reconcile_transport_wait(
     refusal tries nothing and keeps it): a silent own daemon sets it; any other transport
     failure, a dispatched unknown or a received refusal clears it.
     """
+    lost_note = ("🌐 Provider connection was lost after dispatch. The outcome is unknown. "
+                 "Waiting for connectivity before a new attempt on the built-in server." if use_local else
+                 "🌐 Provider connection was lost after dispatch. The outcome and any unreported cost remain unknown. "
+                 "Waiting for connectivity, then continuing from saved work with a new attempt; another charge is possible.")
     pending = dict((getattr(ctx, "_accumulated_usage", {}) or {}).get("_pending_transport_outcome") or {})
     unknown_again = error_kind == "provider_outcome_unknown" and new_generation_after_unknown(ctx)
     refused = not msg_present and primary_refusal_wait(ctx, error_kind)
+
+    def event(phase, elapsed_sec, detail="", **custody):  # one durable row of the current episode, at its redial count
+        emit_network_wait_event(drive_logs, task_id=task_id, phase=phase, elapsed_sec=elapsed_sec, redials=episode.redials, model=model, detail=detail, **custody)
+
     if refused and episode is not None:
         # Catalog readiness is not generation recovery. Keep the existing episode's
         # pacing, elapsed bound and prior unknown custody; only a real answer ends it.
@@ -420,13 +811,9 @@ def reconcile_transport_wait(
             if error_kind == "provider_outcome_unknown":
                 episode.started_at = time.time()
                 episode.outcome_custody = pending
-            emit_network_wait_event(
-                drive_logs, task_id=task_id, phase="continued",
-                elapsed_sec=time.monotonic() - episode.started_monotonic, redials=episode.redials, model=model,
-                detail=("continuation_outcome_unknown" if error_kind == "provider_outcome_unknown"
-                        else "continuation_transport_unavailable"),
-                outcome_custody=episode.outcome_custody,
-            )
+            event("continued", time.monotonic() - episode.started_monotonic,
+                  "continuation_outcome_unknown" if error_kind == "provider_outcome_unknown"
+                  else "continuation_transport_unavailable", outcome_custody=episode.outcome_custody)
             if error_kind == "transport_unavailable":  # the grant note said "continuing"; the owner must hear otherwise
                 emit_progress("🌐 The new attempt could not reach the provider — waiting and redialing "
                               "automatically (that attempt was $0).", incident=None)
@@ -441,14 +828,10 @@ def reconcile_transport_wait(
         episode.started_at = time.time()
         if pending:
             episode.outcome_custody = pending
-        emit_network_wait_event(
-            drive_logs, task_id=task_id, phase="continued",
-            elapsed_sec=time.monotonic() - episode.started_monotonic, redials=episode.redials, model=model,
-            detail="redial_outcome_unknown", outcome_custody=episode.outcome_custody,
-        )
+        event("continued", time.monotonic() - episode.started_monotonic, "redial_outcome_unknown",
+              outcome_custody=episode.outcome_custody)
         emit_progress(  # the "$0 redials" framing of the entry note no longer holds
-            "🌐 Provider connection was lost after dispatch. The outcome and any unreported cost remain unknown. "
-            "Waiting for connectivity, then continuing from saved work with a new attempt; another charge is possible.",
+            lost_note,
             incident=None,
         )
         return episode
@@ -466,18 +849,14 @@ def reconcile_transport_wait(
             wait_bound_sec=float(get_task_idle_timeout_sec()) if interactive else None,
             engine_unanswered=engine_unanswered(getattr(ctx, "_accumulated_usage", None)),
         )
-        emit_network_wait_event(
-            drive_logs, task_id=task_id, phase="entered",
-            elapsed_sec=0.0, redials=0, model=model, detail=error_kind if refused else "",
-        )
+        event("entered", 0.0, error_kind if refused else "")
         episode.last_note_monotonic = time.monotonic()
         # Interactive notes keep their existing wording; direct-turn Stop is
         # separately handled through its typed mailbox control.
         emit_progress(
             ("🌐 The primary provider temporarily refused the request. Waiting as chosen, then continuing "
              "on the same primary with paced requests; prior attempt costs remain recorded." if refused else
-             "🌐 Provider connection was lost after dispatch. The outcome and any unreported cost remain unknown. "
-             "Waiting for connectivity, then continuing from saved work with a new attempt; another charge is possible."
+             lost_note
              if unknown else "🌐 No local model slot was free, so this request was not sent — waiting under Requests "
              "at once per model and trying again automatically ($0)." if capacity_refusal(getattr(ctx, "_accumulated_usage", None)) else
              "🌐 The local Claudexor engine is not answering, so this request was not sent ($0 for it). The work keeps "
@@ -489,14 +868,10 @@ def reconcile_transport_wait(
         return episode
     elapsed = time.monotonic() - episode.started_monotonic
     if msg_present and by_configured_route:  # the waited route proved nothing
-        emit_network_wait_event(drive_logs, task_id=task_id, phase="ended", elapsed_sec=elapsed,
-                                redials=episode.redials, model=model, detail="configured_route_answered")
+        event("ended", elapsed, "configured_route_answered")
         return None
     if msg_present:
-        emit_network_wait_event(
-            drive_logs, task_id=task_id, phase="recovered", elapsed_sec=elapsed,
-            redials=episode.redials, model=model,
-        )
+        event("recovered", elapsed)
         emit_progress(
             (f"🌐 Primary provider answered after {elapsed / 60.0:.1f} min — resuming."
              if episode.wait_cause in PRIMARY_REFUSAL_KINDS else
@@ -512,11 +887,7 @@ def reconcile_transport_wait(
     ):
         # The redial got past the connect phase and failed differently: the
         # transport is provably passable, so ordinary failure policy resumes.
-        emit_network_wait_event(
-            drive_logs, task_id=task_id, phase="ended", elapsed_sec=elapsed,
-            redials=episode.redials, model=model,
-            detail=f"error_kind_changed:{error_kind}",
-        )
+        event("ended", elapsed, f"error_kind_changed:{error_kind}")
         if episode.interactive:  # a managed task keeps its durable row and ordinary progress
             emit_progress(
                 f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — the redial "
@@ -581,40 +952,6 @@ def transport_repeat_stop_requested(ctx: Any, *, mailbox_peek: Any = None) -> bo
     except Exception:
         log.debug("finalize-control peek failed during transport repeat", exc_info=True)
         return False
-
-
-def wait_transport_repeat(ctx: Any) -> bool:
-    """Stop a granted transport repeat only before its new physical dispatch."""
-    from ouroboros.loop_llm_call import _emit_retry_deadline_exhausted, _sleep_within_deadline, _uncount_transport_death
-
-    # Granted, counted and deadline-checked in _record_llm_call_error; only
-    # the recorded backoff (by death ordinal) is left before the loop sends
-    # a NEW physical attempt. Not a spent wall either — the unknown
-    # no-resend terminal outranks the wall.
-    backoff = (ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY) or {}).get("backoff_sec")
-    if backoff is None:
-        return True
-    interrupted = False
-
-    def wake_check() -> bool:
-        nonlocal interrupted
-        interrupted = bool(ctx.stop_retry_check())
-        return interrupted
-
-    options = {"wake_check": wake_check} if ctx.stop_retry_check is not None else {}
-    if _sleep_within_deadline(backoff, ctx.deadline_ts, **options):
-        return False
-    _uncount_transport_death(ctx.accumulated_usage)  # only this never-sent grant; prior custody stays
-    if interrupted:
-        append_jsonl(ctx.drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "llm_not_dispatched", "task_id": ctx.task_id,
-            "round": ctx.round_idx, "model": ctx.model, "reason_code": "finalize_control_pending",
-        })
-    else:
-        _emit_retry_deadline_exhausted(ctx.drive_logs, task_id=ctx.task_id, execution_id=ctx.execution_id,
-            round_id=ctx.round_id, round_idx=ctx.round_idx, attempt=ctx.attempt,
-            model=ctx.model, error_kind="provider_outcome_unknown")
-    return True
 
 
 def _owner_signal_pending(
@@ -787,11 +1124,7 @@ def finalize_now_transport_terminal(
     cause and prior attempt costs. Close the durable episode first; the caller's
     ``_handle_provider_unavailable`` keeps terminal composition in loop.py.
     """
-    emit_network_wait_event(
-        drive_logs, task_id=task_id, phase="ended",
-        elapsed_sec=time.monotonic() - episode.started_monotonic,
-        redials=episode.redials, model=model, detail="finalize_now",
-    )
+    end_episode_budget(episode, drive_logs, task_id, model, detail="finalize_now")
     return handle_provider_unavailable(
         error_kind=episode.wait_cause,
         wait_cause=episode.wait_cause,
@@ -828,24 +1161,6 @@ def task_deadline_epoch(tools: Any) -> Optional[float]:
     return deadline.timestamp() if deadline is not None else None
 
 
-def last_assistant_text(messages: List[Dict[str, Any]]) -> str:
-    """Last real assistant text already produced this task — salvaged into the
-    terminal answer when provider-death prevents a fresh final response, so
-    useful work is never silently discarded (workspace files persist on disk
-    regardless). A reply's display projection stands for its history bytes: reasoning is never salvaged, and a reply
-    of reasoning alone yields to earlier visible text (or to none: the host's notice)."""
-    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
-    from ouroboros.llm_messages import DISPLAY_KEY
-
-    for m in reversed(messages or []):
-        if isinstance(m, dict) and m.get("role") == "assistant" and not m.get(HOST_CONTEXT_KIND_KEY):
-            display = m.get(DISPLAY_KEY)
-            content = display.get("text") if isinstance(display, dict) else m.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
-    return ""
-
-
 # Unknown outcome alone establishes neither a receipt nor a numeric bound.
 UNKNOWN_ATTEMPT_COST_NOTE = (
     " This does not establish the attempt's cost; any recorded estimate or "
@@ -866,15 +1181,6 @@ def _unknown_wait_note(unknown: bool, waited_sec: float, interactive: bool) -> s
         return ""
     subject = "This turn" if interactive else "The task"
     return f" {subject} spent {waited_sec / 60.0:.1f} min in the provider wait; that wait did not confirm the attempt's outcome."
-
-
-def _unknown_terminal_recovery_hint(usage: Dict[str, Any]) -> str:
-    # Wording only, confined to unknown terminals. Stop/Wrap up keep their
-    # existing byte-for-byte control sentence and recovery hint.
-    return provider_recovery_hint(usage).replace(
-        "the dead ones stay unresolved at their upper bound",
-        "the dead ones stay unresolved; any recorded bound is retained",
-    )
 
 
 def provider_terminal_fallback_text(accumulated_usage: Dict[str, Any], *, round_idx: Any = None, **facts: Any) -> str:
@@ -946,7 +1252,7 @@ def _provider_terminal_text(
                 "⚠️ The dispatched attempt has no confirmed provider outcome."
                 f"{_unknown_wait_note(True, waited_sec, interactive)}"
                 " Inspect the preserved facts before starting another run."
-                f"{_unknown_terminal_recovery_hint(accumulated_usage)}{UNKNOWN_ATTEMPT_COST_NOTE}"
+                f"{provider_recovery_hint(accumulated_usage)}{UNKNOWN_ATTEMPT_COST_NOTE}"
                 + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
             )
         # A released attempt proves only that the request never reached the provider: a broken
@@ -974,14 +1280,14 @@ def _provider_terminal_text(
     if is_deadline_exhausted:
         text = "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
         if unknown:
-            text += _unknown_terminal_recovery_hint(accumulated_usage) + UNKNOWN_ATTEMPT_COST_NOTE
+            text += provider_recovery_hint(accumulated_usage) + UNKNOWN_ATTEMPT_COST_NOTE
         return text + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
     released = accumulated_usage.get("_last_llm_attempt_custody") == "released" and not unknown
     return (
         ("⚠️ The model request did not start generation." if released else "⚠️ The model provider returned no usable response.")
         + f"{_unknown_wait_note(unknown, waited_sec, interactive)}"
         f"{provider_failure_hint(accumulated_usage)}"
-        f"{_unknown_terminal_recovery_hint(accumulated_usage) if unknown else provider_recovery_hint(accumulated_usage)}"
+        f"{provider_recovery_hint(accumulated_usage)}"
         f"{UNKNOWN_ATTEMPT_COST_NOTE if unknown else ''} "
         "Any files written so far are preserved in the workspace."
         + request_window_fact(accumulated_usage, round_idx=round_idx)
@@ -1199,35 +1505,12 @@ def provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
     deaths = accumulated_usage.get(TRANSPORT_DEATHS_KEY)
     repeats = int(deaths.get("count") or 0) if isinstance(deaths, dict) else 0
     if repeats:
-        # Paid repeats already spent on the last dispatched round's typed transport
-        # deaths (the record is round-keyed and cleared only by a usable response):
-        # name them, and the class the repeat failed with, so the terminal never
-        # reads as "sent once" and never promises a retry the fence forbids. That
-        # class lives on the record, stamped by the repeat's own failure once that
-        # failure is classified as an exception: the sticky kind may by now belong to
-        # a later free redial of the round, or to a refusal, and would misname the
-        # paid attempt. A record without the stamp falls back to the sticky kind, and
-        # on those paths the sticky kind IS the repeat's own outcome: a repeat that
-        # returned an empty response left the host and stamps no exception class, so
-        # the sticky kind is that response's own class (provider_incomplete_response,
-        # rate_limit, provider_body_error, ...); a repeat refused before it was sent
-        # by the admission gate or the sleep gate (each writes its own durable row) is
-        # un-counted and keeps the unknown class. A budget refusal does not un-count:
-        # the budget rail cannot prove the repeat never left the host, so the record
-        # keeps the attempt booked and the budget terminal, not this hint's provider
-        # terminal, ends the round.
-        failed_as = str(deaths.get("error_kind") or kind)
-        last = (
-            " the dispatched request has no terminal provider outcome;"
-            if failed_as == "provider_outcome_unknown" else f" the repeat failed as {failed_as};"
-        )
-        return (
-            f" {repeats} earlier physical attempt(s) of the last dispatched round died "
-            "with a typed transport death and were repeated as new attempts (the dead "
-            f"ones stay unresolved at their upper bound);{last} no further retry or paid "
-            "fallback was sent while the earlier request has no terminal outcome, since "
-            "either could duplicate live work."
-        )
+        # The oldest checkpoint counted permission before a repeat could be dispatched.
+        # Only later checkpoints recorded the failure on that permission itself.
+        recorded = deaths.get("error_kind")
+        detail = f" The checkpoint records {recorded}." if recorded else ""
+        return (" An earlier request has no confirmed provider outcome. The saved round "
+                f"permits no further retry or paid fallback.{detail}")
     if kind == "provider_outcome_unknown" or accumulated_usage.get("_pending_transport_outcome"):
         if accumulated_usage.get("transport_recovery"):
             return (" An earlier dispatched attempt still has no confirmed provider outcome. "

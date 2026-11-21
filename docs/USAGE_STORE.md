@@ -427,9 +427,9 @@ error settles money without proving
 that the response completed. The existing `stream_incomplete` fact keeps running
 turns' shared unknown-response recovery (Presence included), revoked-control
 no-resend and diagnostic response outcomes independent of monetary capture state.
-The low-level opt-in transport-death repeat API and old records remain a
-compatibility surface, not production Presence policy. Timeout, local-route, Stop and deadline exclusions
-remain in their existing consumers. Diagnostic events carry `stream_incomplete`
+An old checkpoint can retain a prior transport-death count. It preserves the
+old restriction; it cannot grant another send. The live timeout allowance of a
+configured API child remains separate, with its existing Stop and deadline checks. Diagnostic events carry `stream_incomplete`
 beside monetary custody state; typed terminal local rejection keeps its existing
 provider-error policy. Async first-generation binding runs in a joined worker;
 failed binding can recover from the stream receipt using the explicit attempt

@@ -6,10 +6,10 @@ import pytest
 
 from ouroboros import capability_evidence as ce, usage_accounting as ua
 from ouroboros.response_limits import record_response_ack, resolve_response_limit
-from tests import test_llm_claudexor as claudexor_fixtures, test_processing_transport as transport_fixtures
+from tests import test_llm_claudexor as claudexor_fixtures
+from tests._processing_transport_fixture import physical_transport as physical_transport  # registers the `transport` fixture
 from tests.test_llm_claudexor import MODEL
 
-transport = transport_fixtures.transport
 native_setup = claudexor_fixtures.setup
 
 
@@ -270,8 +270,11 @@ def test_a_maximum_applied_while_stopped_holds_after_the_model_starts(transport,
                                                          "route_fp": stopped["response_limit"]["route_fp"]})
     assert acked.status_code == 200, acked.text
     assert downloads == []  # Preview/ack may resolve metadata, never download a model.
+    monkeypatch.delenv("LOGITS_ALL", raising=False)
     path = manager.download_model(source, filename)
     manager.start_server(path, port=8766, n_ctx=32768, source=source, filename=filename)
+    assert local_model.subprocess.Popen.call_args.kwargs["env"]["LOGITS_ALL"] == "false"
+    assert local_model.subprocess.Popen.call_args.args[0][-2:] == ["--n_ctx", "32768"]
     assert manager._model_path == served
     assert local_model.subprocess.Popen.call_args.args[0][3:7] == ["--model", served, "--port", "8766"]
     manager._status = "ready"  # Health is external to the identity path.
@@ -295,7 +298,9 @@ def test_a_maximum_applied_while_stopped_holds_after_the_model_starts(transport,
         assert other_preview["response_limit"]["route_fp"] != stopped["response_limit"]["route_fp"]
         served = served.rsplit("/", 2)[0] + "/" + other
         path = manager.download_model(source, other)
+        monkeypatch.setenv("LOGITS_ALL", "true")
         manager.start_server(path, port=8766, n_ctx=32768, source=source, filename=other)
+        assert local_model.subprocess.Popen.call_args.kwargs["env"]["LOGITS_ALL"] == "true"
         manager._status = "ready"
         client.chat([{"role": "user", "content": "restarted"}], "local-label", use_local=True, max_tokens=65536)
         assert sent[-1]["max_tokens"] == ua.last_physical_attempt_capture().max_completion_tokens == 8192

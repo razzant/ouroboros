@@ -185,6 +185,8 @@ def _check_budget_limits(
             presence_arm = (getattr(tools_ctx, "_presence_forced_declaration", None),
                             getattr(tools_ctx, "_presence_forced_pending", None))
             priced_prompt = _loop()._prepare_forced_prompt(ctx, forced_prompt, trace)
+            if getattr(ctx, "forced_stop_read", False):  # the Stop its drain read outranks the price, a pause and ordinary work
+                return _loop()._handle_direct_turn_hard_stop(ctx)
             from ouroboros.loop_forced_finalization import _deliver_forced_late_results
 
             _deliver_forced_late_results(ctx, trace)  # priced with the candidate, never added after
@@ -282,7 +284,7 @@ def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balance
         probe = task_pacing.prospective_wrapup_attempt_request(
             llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
-            allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
+            allow_server_web_search=server_web, prompt_tokens=prompt_estimate, **task_pacing.forced_route_options(ctx),
         )
     wrapup_args = dict(request=probe, **balances)
     fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
@@ -403,6 +405,8 @@ def _soft_land_exhausted_ceiling(
     priced_prompt = _loop()._prepare_forced_prompt(
         limit_ctx, f"[BUDGET LIMIT] {soft_land_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}", trace,
     )
+    if getattr(limit_ctx, "forced_stop_read", False):  # the Stop its drain read outranks the wrap-up and its price
+        return _loop()._handle_direct_turn_hard_stop(limit_ctx)
     from ouroboros.loop_forced_finalization import _deliver_forced_late_results
 
     _deliver_forced_late_results(limit_ctx, trace)  # priced with the candidate, never added after

@@ -427,10 +427,11 @@ OWNER_NUMBERS: dict[str, int] = {OWNER_CAP_KEY: OWNER_CAP_LEGACY, SUBAGENT_CAP_K
 # for both, zero or less none for either, as before; anything else is a typo that reads finite. A document without
 # the format marker was written while every shipped default was saved: its 3 reads once as blank; 5, say, stays.
 MODEL_CAP_KEY = "OUROBOROS_MODEL_MAX_CONCURRENCY"
-MODEL_CAP_LOCAL = 3  # also the value every install saved before the owner's choice became optional
+MODEL_CAP_LOCAL = 1  # the built-in server holds one inference lock
+MODEL_CAP_LEGACY = 3  # shipped before the owner's choice became optional; also the finite malformed-value fallback
 MODEL_CAP_FORMAT_KEY = "_model_cap_format"  # disk format, never an environment setting or owner knob
 # An optional number whose earlier shipped value every document carries: (key, that value, the marker that ends it).
-_UNCHOSEN_SAVED = ((OWNER_CAP_KEY, OWNER_CAP_LEGACY, OWNER_CAP_FORMAT_KEY), (MODEL_CAP_KEY, MODEL_CAP_LOCAL, MODEL_CAP_FORMAT_KEY),
+_UNCHOSEN_SAVED = ((OWNER_CAP_KEY, OWNER_CAP_LEGACY, OWNER_CAP_FORMAT_KEY), (MODEL_CAP_KEY, MODEL_CAP_LEGACY, MODEL_CAP_FORMAT_KEY),
                    (SUBAGENT_CAP_KEY, SUBAGENT_CAP_LEGACY, SUBAGENT_CAP_FORMAT_KEY))
 
 
@@ -449,7 +450,7 @@ def unchosen_saved_document(raw: Any) -> Any:
 
 def model_cap_value(raw: Any) -> Optional[int]:
     """One read of the model limit: ``None`` = not chosen, else a whole number (zero or less: no limit). An
-    unlimited alias reads blank; a typo takes the finite ``MODEL_CAP_LOCAL``, reported once per process and value."""
+    unlimited alias reads blank; a typo takes the finite ``MODEL_CAP_LEGACY``, reported once per process and value."""
     if raw is None or isinstance(raw, str) and (not raw.strip() or raw.strip().lower() in UNLIMITED_ALIASES):
         return None
     try:
@@ -460,8 +461,8 @@ def model_cap_value(raw: Any) -> Optional[int]:
         if (MODEL_CAP_KEY, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
             _WARNED_OPTIONAL_BOUNDS.add((MODEL_CAP_KEY, repr(raw)))
             logging.getLogger(__name__).warning(
-                "%s=%r is not a whole number or blank; using the finite fallback %s", MODEL_CAP_KEY, raw, MODEL_CAP_LOCAL)
-        return MODEL_CAP_LOCAL
+                "%s=%r is not a whole number or blank; using the finite fallback %s", MODEL_CAP_KEY, raw, MODEL_CAP_LEGACY)
+        return MODEL_CAP_LEGACY
 
 
 OPTIONAL_VALUE_KEYS = frozenset({*OPTIONAL_BOUND_LEGACY, *OWNER_NUMBERS, MODEL_CAP_KEY})  # spelled by the next function

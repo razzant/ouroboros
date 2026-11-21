@@ -507,6 +507,39 @@ _CITATION = """() => {
 }"""
 
 
+@pytest.mark.parametrize("case,cause,primary,acting,words", [
+    ("key", "api_key", GLM, ASTRA, "Check the API key"),
+    ("billing", "api_billing", GLM, ASTRA, "Check API billing"),
+    # A fallback is already acting, so nothing is waited for; the coarse legacy code proved neither sign-in nor quota and shows as itself.
+    ("legacy", "auth_error", GLM, ASTRA, "auth_error"),
+    ("subscription", "auth", ASTRA, OPUS, "Sign-in required"),
+], ids=["key", "billing", "legacy", "subscription"])
+def test_fallback_card_reports_the_failed_routes_access(direct_server_with_data, tmp_path, case, cause, primary, acting, words):  # noqa: F811 - pytest fixture
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import expect, sync_playwright
+
+    shots = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path)))
+    shots.mkdir(parents=True, exist_ok=True)
+    stand = Stand()
+    stand.leads["t-fallback"].update(model=acting, primary=_lead(primary, "owner"), cause=cause)
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, "chromium", viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+        try:
+            _serve(page, stand)
+            _open(page, direct_server_with_data["url"], "phone390", None)
+            _show(page, "t-fallback")
+            page.tap(_fact("t-fallback"))
+            speech = page.locator(".ui-popup.model-sheet .card-model-pop-words")
+            expect(speech).to_have_text(re.compile(f" · {re.escape(words)}$"))
+            view = page.evaluate(_POPOVER)
+            assert view["inside"] and [act[0] for act in view["acts"]] == ["return", "wait", "keep"], view
+            assert page.evaluate("() => document.querySelector('#chat-messages').scrollWidth <= document.querySelector('#chat-messages').clientWidth")
+            page.screenshot(path=str(shots / f"fallback-access-{case}-phone390.png"), animations="disabled")
+            assert not stand.writes
+        finally:
+            browser.close()
+
+
 def _citation_walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None, phone: bool, telegram: bool) -> None:
     """Owner, 11.11.2026: the model and the exact cited words are visible on the card, also away from its primary."""
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError

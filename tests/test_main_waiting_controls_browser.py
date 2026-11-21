@@ -12,11 +12,13 @@ via OUROBOROS_BROWSER_EVIDENCE_OUT; reached/not-reached stages name the proof li
 from contextlib import contextmanager
 import json
 import shutil
+import threading
 import uuid
 
 import pytest
 
 from devtools.benchmarks.common.server_runner import _api
+from tests._model_choice_browser import _close_project, _open_project, _work_of
 from tests.system_e2e.harness import (
     ArtifactOracle, KeylessIsolatedServer, ModelGate, ScriptedStubModel,
     body_text, keyless_settings, wait_durable_result, wait_until, write_settings_file,
@@ -118,6 +120,7 @@ def _census(page, facts, label):
 def _manual_card(page, oracle, facts, task_id):
     waiting = facts["initial_wait"] = _wait(oracle, task_id)
     assert waiting["reason"] == "auth" and waiting["requires_owner_action"] is True
+    assert waiting["access_reason"] == "api_key"
     assert waiting["auto_continue"] is False and waiting["availability_observation"] == "unavailable"
     state = _census(page, facts, "manual_census")
     projected = next(row for row in state["main_attention"] if row["task_id"] == task_id)
@@ -125,6 +128,7 @@ def _manual_card(page, oracle, facts, task_id):
     _controls_project_closed(page)
     control = _controls_owner_action(page, task_id).locator(f'.model-wait-row[data-wait-id="{waiting["wait_id"]}"]')
     control.get_by_role("button", name="Change model or account", exact=True).wait_for()
+    assert control.locator("[data-wait-reason]").inner_text() == "Check the API key"
     return waiting, control
 
 
@@ -133,6 +137,7 @@ def test_main_change_model_applies_wait_role_and_reads_resumed_result(wait_clone
 
     marker, resumed = "MAIN1660_CHANGE_MODEL", []
     answer = "The same Project task completed on the replacement model selected in Main."
+    replacement_called, release_replacement = threading.Event(), threading.Event()
     with _ControlsAuthRefusalStub(marker, resumed) as stub:
         stub._explicit_model_ids = ["mock-model", "replacement-model"]
         complete = _completion_step(answer, answer_form="answer")
@@ -141,11 +146,14 @@ def test_main_change_model_applies_wait_role_and_reads_resumed_result(wait_clone
             # A real handover requires a substantive step on the replacement.
             # Then select completion, acknowledging the host's source if offered.
             if len(resumed) == 1:
+                replacement_called.set()
+                assert release_replacement.wait(60), "the replacement response gate was not released"
                 return {"tool": "list_files", "arguments": {"root": "system_repo", "path": "."}}
             return complete(body)
         stub.script[1:] = [finish] * 4
         with _session(wait_clone, tmp_path, stub, "main-change-model", [
             "manual wait visible", "replacement selected", "revision-bound switch accepted",
+            "Project card says new model before its first reply",
             "same author resumed on replacement", "Main result read", "cold census retired wait",
         ]) as (page, server, oracle, facts, evidence):
             task_id = _start(server, facts, marker)
@@ -178,6 +186,21 @@ def test_main_change_model_applies_wait_role_and_reads_resumed_result(wait_clone
             assert confirmation["wait"]["task_attempt"] == waiting["task_attempt"]
             assert waiting["role"] == "main"
             facts["reached"].append("revision-bound switch accepted")
+            try:
+                assert replacement_called.wait(10), "the replacement never reached the fixture provider"
+                prefix = _open_project(page, facts["project"])
+                card = page.locator(f'#{prefix}-messages .chat-live-card[data-task-id="{task_id}"]')
+                expect(card.locator(".card-model-id")).to_contain_text("replacement-model", timeout=20_000)
+                expect(card.locator(".card-model-why .card-model-words")).to_contain_text("you chose it")
+                expect(card.locator(".card-model-fact.model-fallback")).to_have_count(0)
+                lead = facts["applied_lead"] = _work_of(_api(server.base_url, "GET", "/api/state"), task_id)["lead"]
+                assert lead["basis"] == "owner" and lead["cause"] == "wait_card" and "pending" not in lead, lead
+                assert len(resumed) == 1
+                _controls_capture(page, evidence, "project-model-after-applied-switch")
+                _close_project(page)
+                facts["reached"].append("Project card says new model before its first reply")
+            finally:
+                release_replacement.set()
             final = facts["final"] = wait_durable_result(oracle, task_id, timeout=90)
             resolved = final["model_waits"][waiting["wait_id"]]
             assert final["status"] == "completed" and resolved["resolution"] == "model_switched", final

@@ -28,9 +28,9 @@ from ouroboros.model_slots import (
 )
 from ouroboros.model_slots import MODEL_PROCESSING_PREFERENCES_KEY as ROLES
 from ouroboros.model_slots import PROCESSING_PREFERENCE_KEY as GLOBAL
+from tests._processing_transport_fixture import physical_transport as physical_transport  # registers the `transport` fixture
 from tests.test_llm_claudexor import MODEL, ledger, result, setup  # noqa: F401 -- the Claudexor engine double
 from tests.test_processing_claudexor import receipt, refusal
-from tests.test_processing_transport import transport  # noqa: F401 -- the API provider double
 from tests.test_usage_accounting import data_root  # noqa: F401 -- a usage ledger root
 
 ULTRAFAST = {"source": "owner", "tier": "ultrafast"}

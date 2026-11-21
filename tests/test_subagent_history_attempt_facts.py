@@ -57,7 +57,7 @@ def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=
                 raise error
             return {"content": "Useful response"}, {"prompt_tokens": 1, "completion_tokens": 1,
                 "cost": 0.0, "provider": provider, "resolved_model": served or model,
-                "claudexor": {"route": route, "outcome": "succeeded"}, **({"ledger_attempt_ids": [ledger]} if ledger else {})}
+                "claudexor": {"route": route, "outcome": "completed"}, **({"ledger_attempt_ids": [ledger]} if ledger else {})}
 
     message, _ = call_llm_with_retry(Provider(), [{"role": "user", "content": "work"}], model,
         None, "high", 0, tmp_path / "logs", "history-actor", 1, None, usage, model_account_override=pin)

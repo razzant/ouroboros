@@ -19,6 +19,7 @@ import queue
 import time
 
 from typing import Any, Dict, List, Optional, Tuple
+from ouroboros._usage_response import assistant_answer_text, refusal_content_text
 from ouroboros.llm import LLMClient
 from ouroboros.observability import timed_phase
 from ouroboros.context_timing import timed_section
@@ -94,6 +95,8 @@ def _emit_checkpoint_event(
 def _extract_plain_text_from_content(content: Any) -> str:
     """Extract text from strings or multipart content for transcript sealing."""
     if isinstance(content, list):
+        if (visible := refusal_content_text(content)) is not None:
+            return visible
         return "".join(block.get("text", "") for block in content if isinstance(block, dict))
     return content if isinstance(content, str) else "" if content is None else str(content)
 
@@ -321,8 +324,33 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
 def owner_source_sha256(ctx: Any) -> str:
     """Address the retained exact owner corpus, independently of its meaning."""
     rows = getattr(ctx, "_owner_directives", [])
-    return hashlib.sha256(json.dumps(rows if isinstance(rows, list) else [], ensure_ascii=False, sort_keys=True,
+    return _owner_directives_sha256(rows if isinstance(rows, list) else [])
+
+
+def _owner_directives_sha256(rows: list) -> str:
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+
+def _recovered_owner_source_sha256(state: dict, attempt: dict, ledger_row: dict | None) -> str | None:
+    """Resolve the already-bound send's source from saved facts, before draining its current mail."""
+    saved_usage = state.get("usage") or {}
+    prior = saved_usage.get("_pending_transport_outcome") or {}
+    same_read = prior.get("physical_attempt_id") == attempt["physical_attempt_id"]
+    if "owner_source_sha256" in attempt or same_read:
+        source = attempt.get("owner_source_sha256", prior.get("owner_source_sha256"))
+        if isinstance(source, str) and len(source) == 64 and all(c in "0123456789abcdef" for c in source):
+            return source
+        return None
+    # Old forced sends recorded the count and owner rows in the same pre-send ready write.
+    # A later ready (after mail at terminal) or a parked receipt is no longer that input.
+    rows = state.get("owner_directives")
+    sending_attempt = (ledger_row or {}).get("local_answer_task_attempt")
+    if (attempt.get("forced_reason_code") and (state.get("working") or {}).get("boundary") == "ready"
+            and not saved_usage.get("terminal_origin") and sending_attempt in (None, state.get("task_attempt"))
+            and isinstance(rows, list) and len(rows) == attempt.get("owner_directive_count")):
+        return _owner_directives_sha256(rows)
+    return None
 
 
 def owner_input_revision(ctx: Any) -> int:
@@ -587,13 +615,13 @@ def prepare_acceptance_observation(ctx: Any, trace: dict, incoming: Any, message
     messages.append({"role": "user", "content": note, "acceptance_observation": True})
 
 
-def _latch_final_answer_marker(llm_trace: Dict[str, Any], content: str | None) -> None:
+def _latch_final_answer_marker(llm_trace: Dict[str, Any], content: Any) -> None:
     """Anytime capture of an explicit FINAL ANSWER marker; marker-only, never mined prose. The
     tool-call count stamp keeps the stale-answer invariant: later grounding invalidates this
     fallback unless the model emits a newer marker."""
     from ouroboros.outcomes import FINAL_ANSWER_MARKER, extract_final_answer
 
-    text = content or ""
+    text = assistant_answer_text(content)
     answer = extract_final_answer(text)
     if not answer:
         if any(line.strip().startswith(FINAL_ANSWER_MARKER) for line in text.splitlines()):
@@ -616,10 +644,34 @@ def _visible_round_text(content: Any) -> str:
     visible text' (narration falls back to readable reasoning)."""
     if isinstance(content, str):
         return content.strip()
+    if (visible := refusal_content_text(content)) is not None:
+        return visible.strip()
     if isinstance(content, list):  # reasoning/thinking blocks are display reasoning, not visible answer text
         return "".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
                        and str(b.get("type") or "") not in ("thinking", "reasoning", "redacted_thinking")
                        and b.get("thought") is not True).strip()
+    return ""
+
+
+def last_assistant_text(messages: List[Dict[str, Any]]) -> str | list[dict]:
+    """Choose visible assistant history, never reasoning or host rows. Keep the original parts of a
+    refusal-bearing tool round beside its result; flattening them here would also join the control text.
+    For other rows, the reply's display projection stands for its history bytes."""
+    from ouroboros.llm_messages import DISPLAY_KEY
+
+    next_row: Any = None
+    for row in reversed(messages or []):
+        if isinstance(row, dict) and row.get("role") == "assistant" and not row.get(HOST_CONTEXT_KIND_KEY):
+            content, display = row.get("content"), row.get(DISPLAY_KEY)
+            if (isinstance(next_row, dict) and next_row.get("role") == "tool"
+                    and (call_id := next_row.get("tool_call_id")) and any(
+                        isinstance(call, dict) and call.get("id") == call_id for call in row.get("tool_calls") or ())
+                    and (visible := refusal_content_text(content)) and visible.strip()):
+                return content
+            content = display.get("text") if isinstance(display, dict) else content
+            if isinstance(content, str) and content.strip():
+                return content
+        next_row = row
     return ""
 
 

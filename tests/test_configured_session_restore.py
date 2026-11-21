@@ -20,7 +20,7 @@ class InputReached(BaseException):
 
 def _restored_registry(tmp_path, monkeypatch, carrier):
     from ouroboros import owner_wait
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
     from tests.test_working_checkpoint import _registry, _saved_working_state
 
     task_id = "nanny"

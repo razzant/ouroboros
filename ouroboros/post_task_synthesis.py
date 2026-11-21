@@ -361,9 +361,10 @@ def propagate_paid_interruption(error: BaseException) -> None:
     exception chain — the consolidator's own classifier, never a broadened global
     one — are the others (TZ-2 C3). A stage adapter that only logged them let the
     coordinator run the next paid stage and write ``completed``. Anything else
-    returns, so the caller isolates the failure to its own stage.
+    returns, so the caller isolates the failure to its own stage: a received refusal
+    too, which ended its stage's one request and asks nothing of the stages after it.
     """
-    propagate_model_error(error)
+    propagate_model_error(error, single_request=True)
     from ouroboros.transport_custody import outcome_unknown_on_chain
     from ouroboros.usage_accounting import BudgetExceeded
 

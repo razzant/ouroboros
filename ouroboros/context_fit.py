@@ -34,7 +34,7 @@ from ouroboros.section_floor import (HostSection, render_governance, rendered_te
                                      _governance_blocks as _section_governance, _system_blocks)
 from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
-from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
+from ouroboros.context_window import WindowLimit, WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
 from ouroboros.context_timing import adopt, another_pass, apart, counted, timed, timed_section
@@ -853,7 +853,7 @@ class MinimumViewUnfit(ValueError):
 
     def __init__(self, message: str, *, fixed_tokens: int, memory_tokens: int,
                  reserve_tokens: int, window_tokens: int, ratio: float, work_room_tokens: int = 0,
-                 required_book_tokens: int = 0):
+                 required_book_tokens: int = 0, limiting: Optional[WindowLimit] = None):
         # Retain the fitter's exact rounding: fixed + memory is calibrated once.
         self.raw_input_tokens = fixed_tokens + memory_tokens
         self.measurement_density = ratio
@@ -861,7 +861,8 @@ class MinimumViewUnfit(ValueError):
         self.estimated_input_tokens = math.ceil(self.raw_input_tokens * ratio)
         self.memory_view_tokens = self.estimated_input_tokens - self.fixed_input_tokens
         self.response_reserve_tokens = reserve_tokens
-        self.window_tokens = window_tokens
+        self.window_tokens = window_tokens  # fit arithmetic, not necessarily a physical limit
+        self.limiting = limiting  # from the actual frame, before any handbook-specific reply reserve
         self.deficit_tokens = max(0, self.estimated_input_tokens + reserve_tokens - window_tokens)
         self.work_room_tokens = work_room_tokens
         self.work_room_deficit_tokens = max(0, self.fixed_input_tokens + reserve_tokens + work_room_tokens - window_tokens)
@@ -1052,9 +1053,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
-        return sent, fixed, reserve, window, boundary, allowances
+        return sent, fixed, reserve, window, boundary, allowances, record
 
-    sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+    sent, fixed, reserve, window, boundary, allowances, record = timed(f"fit.frame_{mode}", frame, mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
@@ -1087,7 +1088,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                                    window, boundary, reserve, start_room=False))
     if (room_fact and floor.max_room_lost(room_fact)) or running_max_needs_maps:
         mode = "low"
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+        sent, fixed, reserve, window, boundary, allowances, record = timed(f"fit.frame_{mode}", frame, mode)
 
     def render(forms=None, *, level=None):  # this frame's memory with its floor receipt
         if not snapshot:
@@ -1121,10 +1122,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             break
         if mode == "low" and kept is not None and admitted:
             low_view = render() if shown is floor.NO_VIEW else shown
-            low = (sent, fixed, reserve, window, boundary, allowances, receipts, low_view,
+            low = (sent, fixed, reserve, window, boundary, allowances, record, receipts, low_view,
                    spare(low_view, section_views(sections[mode], receipts)))
         mode = "low" if mode == "max" else "nano"
-        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
+        sent, fixed, reserve, window, boundary, allowances, record = timed(f"fit.frame_{mode}", frame, mode)
     if held_heads and mode == "nano" and overflows(shown):
         emergency_level = shown.level
 
@@ -1138,14 +1139,14 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                 shown = render(level=emergency_level)
     if low is not None and (stays or held_heads and spare(shown, section_views(sections[mode], receipts)) <= low[-1]):
         mode = "low"  # decided above, or with held heads: Nano's full price leaves no more room than Low's
-        sent, fixed, reserve, window, boundary, allowances, receipts, shown, _ = low
+        sent, fixed, reserve, window, boundary, allowances, record, receipts, shown, _ = low
     if kept is None and current_messages is None and overflows(shown):  # a cold restore still reconciles its saved tools
         core_alone = overflows()
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
                                reserve_tokens=reserve, window_tokens=window, ratio=ratio,
-                               work_room_tokens=work() if core_alone else 0)
+                               work_room_tokens=work() if core_alone else 0, limiting=record.limiting if record else None)
     story, room, facts = shown.story, shown.room, shown.facts  # the one view this start delivers: drawn here
     book = whole_core.required_book_tokens(mode)
     ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
@@ -1163,7 +1164,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         if math.ceil((fixed + book + memory) * ratio) + max(reserve, reply) > window:
             raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
                                    fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
-                                   window_tokens=window, ratio=ratio, required_book_tokens=book)
+                                   window_tokens=window, ratio=ratio, required_book_tokens=book, limiting=record.limiting if record else None)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     contents = {}

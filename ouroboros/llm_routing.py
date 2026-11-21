@@ -16,7 +16,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.request_wire_recovery import request_wire_scoped
@@ -312,6 +311,7 @@ class _ProviderRoutingMixin:
         model_account_override: str | None = None,
         model_turn_state: Any = None,
         stream: bool = False,
+        accepts_typed_refusals: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup.
 
@@ -330,6 +330,7 @@ class _ProviderRoutingMixin:
                 model_operation_observer=model_operation_observer,
                 model_account_override=model_account_override,
                 model_turn_state=model_turn_state,
+                accepts_typed_refusals=accepts_typed_refusals,
             )
         if target.get("provider") == "anthropic":
             return self._chat_anthropic(
@@ -579,7 +580,9 @@ class _ProviderRoutingMixin:
         return probe_provider_readiness(self, model, settings=settings, timeout=timeout)
 
     def _get_local_client(self):
-        port = int(os.environ.get("LOCAL_MODEL_PORT", "8766"))
+        from ouroboros.local_model import local_dispatch_port
+
+        port = local_dispatch_port()
         if self._local_client is None or self._local_port != port:
             from openai import OpenAI
             self._local_client = OpenAI(

@@ -28,7 +28,7 @@ from supervisor import queue, workers
 from supervisor.events_budget import budget_hold_fact, install_exact_budget_pause
 from supervisor.owner_pause_control import request_owner_pause
 from tests._budget_pause_exact_helpers import _loop_ctx
-from tests.test_context_fit_v664 import _plan
+from tests._context_fit_plan import fit_plan as _plan
 from tests.test_loop_transport_wait import _loop_kwargs
 from tests.test_project_hold_recovery import worker
 from tests.test_restart_saved_work import _ack

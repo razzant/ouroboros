@@ -12,7 +12,7 @@ from ouroboros import loop, loop_llm_call, loop_transport, owner_mailbox
 from ouroboros.llm import LLMClient
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.transport_custody import (
-    attempt_custody_event_fields, is_retryable_transport_death, outcome_unknown_on_chain,
+    attempt_custody_event_fields, outcome_unknown_on_chain,
 )
 from tests._usage_store_testing import ledger_rows
 from tests import test_openrouter_transport_evidence as evidence_fixtures
@@ -113,7 +113,7 @@ def test_presence_repeat_deadline_still_excludes_priced_stream(isolated, monkeyp
     monkeypatch.setattr(loop_llm_call, "_prepare_main_messages", lambda messages, **kw: messages)
     message, _ = loop_llm_call.call_llm_with_retry(
         consumer, [{"role": "user", "content": "hello"}], "vendor/fixture", [], "low", 3,
-        isolated, "money-task", 1, None, usage, "presence", transport_death_retries=2,
+        isolated, "money-task", 1, None, usage, "presence",
         deadline_ts=time.time() + 32, transport_reserve_sec=30)
     assert message is None and consumer.calls == 1
     assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
@@ -155,15 +155,15 @@ def test_search_unknown_response_guard_is_independent_of_received_price(isolated
     assert _provider_outcome_is_unknown(failure)
 
 
-@pytest.mark.parametrize("provider,loopback,error_type,retryable", [
-    ("openrouter", False, httpx.ReadError, True),
-    ("local", False, httpx.ReadError, False),
-    ("openai-compatible", True, httpx.ReadError, False),
-    ("openrouter", False, httpx.ReadTimeout, False),
-    ("openrouter", False, httpx.WriteTimeout, False),
-    ("openrouter", False, httpx.ConnectTimeout, False),
+@pytest.mark.parametrize("provider,loopback,error_type", [
+    ("openrouter", False, httpx.ReadError),
+    ("local", False, httpx.ReadError),
+    ("openai-compatible", True, httpx.ReadError),
+    ("openrouter", False, httpx.ReadTimeout),
+    ("openrouter", False, httpx.WriteTimeout),
+    ("openrouter", False, httpx.ConnectTimeout),
 ])
-def test_priced_incomplete_chain_keeps_locality_and_timeout_exclusions(provider, loopback, error_type, retryable):
+def test_a_settled_price_cannot_close_an_incomplete_response(provider, loopback, error_type):
     from ouroboros.usage_accounting import PhysicalAttemptCapture
 
     inner = error_type("socket failed")
@@ -174,11 +174,9 @@ def test_priced_incomplete_chain_keeps_locality_and_timeout_exclusions(provider,
     outer = RuntimeError("wrapped")
     outer.__cause__ = inner
     assert outcome_unknown_on_chain(outer)
-    assert is_retryable_transport_death(outer) is retryable
     assert attempt_custody_event_fields(outer)["stream_incomplete"] is True
     del inner.stream_incomplete
     assert not outcome_unknown_on_chain(outer)
-    assert not is_retryable_transport_death(outer)
 
 
 @pytest.mark.parametrize("cost", [None, 0.0, 1.25])

@@ -5,6 +5,8 @@ import json
 import pytest
 
 from ouroboros import llm_claudexor as transport
+from ouroboros.gateways.claudexor import ClaudexorUnavailable
+from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
 from ouroboros.observability import call_manifest_path, persist_call, read_call_payload
 
 
@@ -15,6 +17,8 @@ RESULT = {"outcome": "completed", "message": {"content": "Ответ 🐍"},
 
 
 class Gateway:
+    store_identity = "fixture-model-store"
+
     def __init__(self, *, state="succeeded", dispatch="response_received", ready=True):
         self.raw = json.dumps(RESULT, ensure_ascii=False).encode()
         self.ref = {"resourceId": "result-one", "sha256": "sha256:" + hashlib.sha256(self.raw).hexdigest(),
@@ -43,7 +47,8 @@ class Gateway:
 def request(root, **manifest):
     persist_call(root, task_id=ROW["task_id"], call_id="attempt-one_model_request",
                  call_type="llm_claudexor_request", payload={"messages": []}, keep_raw=True,
-                 manifest={"invocation_id": "attempt-one", **manifest})
+                 manifest={"invocation_id": "attempt-one", "model_store_binding": model_rejoin_binding(Gateway),
+                           **manifest})
 
 
 def response(root, **manifest):
@@ -64,6 +69,12 @@ def test_retained_terminal_usage_requires_no_network(tmp_path):
 
 def test_early_cancel_defers_until_existing_operation_ends(tmp_path):
     request(tmp_path, operation_id="op-one")
+    replacement = Gateway()
+    replacement.store_identity = "empty-fixture-store"
+    with pytest.raises(ClaudexorUnavailable) as held:
+        transport.recover_model_attempt(tmp_path, ROW, gateway_factory=lambda: replacement)
+    assert held.value.code == "model_control_store_unverified" and held.value.status_code == 0
+    assert not (replacement.reads or replacement.results or replacement.acks)
     gateway = Gateway(state="running", dispatch="started")
     assert transport.recover_model_attempt(tmp_path, ROW, gateway_factory=lambda: gateway) is None
     assert not call_manifest_path(tmp_path, ROW["task_id"], "attempt-one_model_response").exists()
@@ -74,6 +85,23 @@ def test_early_cancel_defers_until_existing_operation_ends(tmp_path):
     assert payload["result_json_utf8"].encode() == gateway.raw
     assert manifest["dispatch_state"] == "response_received"
     assert gateway.results == ["op-one"] and len(gateway.acks) == 1 and not gateway.closed
+
+
+def test_older_unbound_attempt_needs_a_retained_receipt(tmp_path):
+    request(tmp_path, operation_id="op-one")
+    path = call_manifest_path(tmp_path, ROW["task_id"], "attempt-one_model_request")
+    before_binding = json.loads(path.read_text(encoding="utf-8"))
+    before_binding.pop("model_store_binding")
+    path.write_text(json.dumps(before_binding), encoding="utf-8")
+
+    def no_attach():
+        pytest.fail("the old request cannot establish a store")
+
+    with pytest.raises(ClaudexorUnavailable) as held:
+        transport.recover_model_attempt(tmp_path, ROW, gateway_factory=no_attach)
+    assert held.value.code == "model_control_store_unverified"
+    response(tmp_path, operation_state="succeeded", dispatch_state="response_received")
+    assert transport.recover_model_attempt(tmp_path, ROW, gateway_factory=no_attach)[0] == "settled"
 
 
 def test_missing_operation_identity_never_creates_work(tmp_path):
@@ -89,6 +117,19 @@ def test_legacy_response_rechecks_exact_dispatch_before_release(tmp_path):
     gateway = Gateway(state="failed", dispatch="not_started")
     assert transport.recover_model_attempt(tmp_path, ROW, gateway_factory=lambda: gateway)[0] == "released"
     assert gateway.reads == ["op-one"] and not gateway.results
+
+
+@pytest.mark.parametrize("request_kind", ["chat", "image"])
+@pytest.mark.parametrize("ready", [False, True])
+def test_not_started_conflicting_detail_remains_unknown_on_reread(tmp_path, request_kind, ready):
+    request(tmp_path, operation_id="op-one", request_kind=request_kind)
+    gateway = Gateway(state="failed", dispatch="not_started", ready=ready)
+    gateway.detail["problem"] = {"code": "provider_content_refused"}
+    expected = ("abandoned", {}, None, False)
+    assert transport.recover_model_attempt(tmp_path, ROW, gateway_factory=lambda: gateway) == expected
+    assert transport.recover_model_attempt(tmp_path, ROW, gateway_factory=lambda: pytest.fail("duplicate lookup")) == expected
+    assert gateway.reads == ["op-one"] and len(gateway.results) == int(ready)
+    assert len(gateway.acks) == int(ready and request_kind == "chat")
 
 
 @pytest.mark.parametrize(("ready", "proven"), [(False, False), (True, True)])

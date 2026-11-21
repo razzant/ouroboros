@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -17,13 +17,13 @@ from typing import Any
 
 from ouroboros import _usage_wait, config, context_fit
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY
-from ouroboros._usage_response import model_operation_usage as _usage
+from ouroboros._usage_response import model_operation_usage as _usage, observe_finish_reason
 from ouroboros.anthropic_native_custody import scrub_native_custody
 from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_engine_version, read_owned_gateway
 from ouroboros.deadline_utils import llm_transport_timeout_sec
 from ouroboros.gateways.claudexor import (ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported,
                                           operation_query_supported, _READ_TIMEOUT_SEC)
-from ouroboros.gateways.claudexor_metadata import current_engine, model_gateway
+from ouroboros.gateways.claudexor_metadata import current_engine, model_gateway, model_rejoin_binding
 from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _candidate_before_dispatch, effort_request_facts
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
@@ -38,12 +38,20 @@ from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
-    PhysicalAttemptPreparationFailed, current_physical_attempt_context, current_usage_scope,
-    execute_physical_attempt, execute_physical_attempt_async, last_physical_attempt_capture)
+    PhysicalAttemptCapture, PhysicalAttemptPreparationFailed, adopt_physical_attempt_capture, current_physical_attempt_context,
+    current_usage_scope, execute_physical_attempt, execute_physical_attempt_async, last_physical_attempt_capture)
 from ouroboros.utils import append_jsonl, read_json_dict, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
 _PROCESSING_PREFERENCES: dict = {}  # each source's processingPreferences per exact engine build and source id
+_ADVISORY_TIERS = ("fast", "economy", "ultrafast")
+RESTORED_PROCESSING_KEY = "_restored_native_processing"
+RESTORED_END_KEY = "_restored_native_end"  # a restored attempt's known end, for its round's own next call (``restored_round``)
+_MODEL_STORE_UNVERIFIED = {"code": "model_control_store_unverified",
+                          "message": "The original model operation's store could not be verified."}
+# A request that recorded no store can never be verified by a later reader: its search has an end, a mismatch may pass.
+_MODEL_STORE_UNBOUND = {"code": "model_control_store_unbound", "message":
+    "The request recorded no store for its operation, so its result can be neither verified nor read; its cost stays unknown."}
 
 
 def model_sources(*, processing_view: bool = False) -> dict:
@@ -120,6 +128,12 @@ class ClaudexorModelError(RuntimeError):
         self.route = copy.deepcopy(route or {})
 
     @property
+    def received_status(self) -> dict:
+        receipt = (getattr(self, "usage", None) or {}).get("claudexor") or {}
+        return ({"operation_state": receipt["operation_state"], "operation_outcome": receipt["outcome"]}
+                if receipt.get("operation_state") and receipt.get("outcome") else {})
+
+    @property
     def display_message(self) -> str:
         """Show typed provider details without changing exception classification text."""
         if self.code == "model_capability_refused":
@@ -136,6 +150,60 @@ class ClaudexorModelError(RuntimeError):
         ]
         # Details lead so a shortened Logs preview still names the refusal.
         return sanitize_tool_result_for_log("; ".join([", ".join(details), str(self)]) if details else str(self))
+
+
+class ClaudexorRefusalError(ClaudexorModelError):
+    """A received refusal cannot yield another send or a verdict for a string-only caller."""
+
+    notice = "The provider returned refusal content that this caller cannot accept."
+    terminal_code = "unexpected_refusal_content"  # the problem code, the loop's reason_code and the class are one fact
+
+    @classmethod
+    def terminal_problem(cls, **extra) -> dict:
+        """The public problem this refusal settles as: its code, no retry and the notice, never the provider's words."""
+        return {"code": cls.terminal_code, "retryable": False, "message": cls.notice, **extra}
+
+
+class ClaudexorContentRefused(ClaudexorRefusalError):
+    """The settled Codex operation explicitly declined this request."""
+
+    notice = "Codex declined this request under its content policy."
+    terminal_code = "provider_content_refused"
+
+    @classmethod
+    def public_problem(cls, result, detail, source):
+        """Project a verified, received refusal. The original response stays in the private CAS.
+
+        Both producer shapes are settled and non-retryable: ``terminal_code``, or the legacy ``provider_failed``
+        carrying the policy's exact ``vendorCode``. Neither discovery nor the caller's body opt-in classifies them."""
+        dispatch = detail.get("dispatch") or {}
+        if (source != "codex" or detail.get("state") != "failed" or result.get("outcome") != "failed"
+                or dispatch.get("state") != "response_received"):
+            return None
+        if any(route is not None and (not isinstance(route, dict) or route.get("source", source) != source)
+               for route in (result.get("route"), dispatch.get("route"))):
+            return None
+        problem = result.get("problem") or {}
+        if not isinstance(problem, dict) or problem.get("retryable") is not False:
+            return None
+        context = problem.get("context")
+        vendor_code = context.get("vendorCode") if isinstance(context, dict) else None
+        legacy = problem.get("code") == "provider_failed" and vendor_code == "cyber_policy"
+        if problem.get("code") == cls.terminal_code or legacy:
+            return cls.terminal_problem(**({"context": {"vendorCode": vendor_code}} if vendor_code == "cyber_policy" else {}))
+        return None
+
+
+def _explicit_content_refusal(result: object) -> bool:
+    problem = result.get("problem") if isinstance(result, dict) else None
+    return isinstance(problem, dict) and problem.get("code") == ClaudexorContentRefused.terminal_code
+
+
+def _operation_receipt_fields(detail: dict) -> dict:
+    dispatch = detail.get("dispatch") or {}
+    return {"operation_state": detail.get("state"), "dispatch_state": dispatch.get("state"),
+            "dispatch_route": dispatch.get("route"),
+            **({"operation_problem_code": ClaudexorContentRefused.terminal_code} if _explicit_content_refusal(detail) else {})}
 
 
 class ClaudexorModelNotDispatched(ClaudexorModelError, ProviderNotDispatched):
@@ -169,11 +237,15 @@ def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:
             and isinstance(capture, PhysicalAttemptCapture) and capture.state == "released")
 
 
-def propagate_model_error(error: Exception) -> None:
+def propagate_model_error(error: Exception, *, single_request: bool = False) -> None:
     """Preserve control/resource waits and unknown custody across helper fallbacks.
 
     A confirmed ordinary provider refusal still belongs to the helper's existing
-    retry or disclosed-unavailable path, just as it does for direct API calls.
+    retry or disclosed-unavailable path, just as it does for direct API calls. A
+    received typed refusal ends its one request: it is raised, so no fallback of the
+    helper sends that request again, on another route either. ``single_request``: this
+    caller sends nothing more for the request, so the refusal takes its own ordinary
+    unavailable outcome instead (a caption, an extraction, one post-task stage).
     """
     from ouroboros.model_wait import ModelWaitInterrupted, model_wait_reason
     from ouroboros.transport_custody import outcome_unknown_on_chain
@@ -181,7 +253,8 @@ def propagate_model_error(error: Exception) -> None:
     if isinstance(error, ModelWaitInterrupted):
         raise error
     if isinstance(error, ClaudexorModelError):
-        if (error.code in {"model_outcome_unknown", "model_operation_interrupted"}
+        if (isinstance(error, ClaudexorRefusalError) and not single_request
+                or error.code in {"model_outcome_unknown", "model_operation_interrupted"}
                 or model_wait_reason(error)
                 or outcome_unknown_on_chain(error)):
             raise error
@@ -332,6 +405,15 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     if named_effort:
         options["reasoningEffort"] = named_effort
     processing = parameters.get("_processing_submission", target.get("processing_preference"))
+    if (repair := target.get(RESTORED_PROCESSING_KEY)) and not options.get("serviceTier") and (
+            target["usage_model"], parameters.get("model_role"), processing, account.get("profileId", "")) == (
+            repair["model"], repair["model_role"], repair["preference"], repair["pin"]):
+        if "standard" not in target.get("processing_preferences", []):
+            raise ClaudexorModelNotDispatched({"code": "unsupported_parameter", "retryable": False,
+                "message": "The model source did not advertise Standard processing; no request was sent.",
+                "context": {"parameter": "processingPreference"}},
+                model_role=parameters.get("model_role", ""))
+        processing = "standard"  # the current intent stays on target, just as on the warm repair
     if processing and processing in target.get("processing_preferences", []):
         options["processingPreference"] = processing
     opted_in, turn_state = _requested_turn_state(parameters.get("model_turn_state"))
@@ -369,16 +451,25 @@ class _ModelInvocation:
         self.request_manifest_ref: dict = {}
         self.interrupt_reason = ""
         self.create_attempted = False
+        self.create_binding = ""
         self.capture_failure_evidence = False
         self.capture_effort_evidence = False
+        self.typed_refusals = False
+        self.redos_left = None  # served-model redos its call had left when it was admitted (``SubstitutionBudget.restored``)
+        self.auth_reissue_left = None  # its call's one no-start ``auth_changed`` reissue, unused (1) or spent (0), as recorded
+        self.auth_reissue_of = parameters.get("_auth_reissue_of") or ""  # the released attempt whose allowance this send spends
+        self.accepts_typed_refusals = parameters.get("accepts_typed_refusals") is True
         self.defer_close = False
         self.io_active = False
         self.io_lock = threading.Lock()
         self.outage_episode = None
 
-    def check_control(self, *, starting=False):
+    def check_control(self, *, starting=False, cancel=True):
         """The caller supplies deadline/cancel policy; this seam transports it. Once a create may have been
-        accepted, a helper's send window no longer applies: only the caller's own deadlines and controls end it."""
+        accepted, a helper's send window no longer applies: only the caller's own deadlines and controls end it.
+        ``cancel=False``: the operation is already terminal, so a control ends the wait without a pointless cancel."""
+        if self.gateway is None and self.retained:
+            return  # The cold reader classifies its retained terminal result before applying current controls.
         with accepted_operation_scope() if self.create_attempted else contextlib.nullcontext():
             reason = self.interrupt_reason or (self.poll_control() if self.poll_control else None)
             if not reason:
@@ -401,8 +492,8 @@ class _ModelInvocation:
                 reason = str(exc)  # prior create_attempted remains unknown, never unsent
         if not reason:
             return
-        cancellation = "not_requested"
-        if self.operation_id:
+        cancellation = "not_requested"  # an owner Pause cancels no sent work: it parks the read (``OWNER_PAUSE_CONTROLS``)
+        if cancel and reason not in ("owner_pause", "owner_pause_authority_unreadable") and self.operation_id and self._bound_gateway_current():
             try:
                 self.gateway.cancel_model_operation(self.operation_id, reason_code="host_cancelled")
                 cancellation = "requested"  # a POST never proves terminality
@@ -454,14 +545,23 @@ class _ModelInvocation:
             self.capture_failure_evidence = model_failure_evidence_supported(operations)
             self.capture_effort_evidence = operation_query_supported(operations, method="POST",
                 path="/v2/model-operations", name="captureEffortEvidence", value="true")
+            self.typed_refusals = self.accepts_typed_refusals and operation_query_supported(operations, method="POST",
+                path="/v2/model-operations", name="typedRefusals", value="true")
+            self.create_binding = model_rejoin_binding(self.gateway)
             self.request_ref = timed("daemon.upload", self.gateway.upload_model_request, canonical_bytes, sha256=sha256,
                                      size_bytes=size_bytes, idempotency_key=self.invocation_id)
             self.request_manifest_ref = persist_call(self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
                          call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
                          manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
-                                   "model_role": self.role,
+                                   "model_role": self.role, "model": self.target["usage_model"],
+                                   "model_store_binding": self.create_binding,
+                                   "typed_refusals": self.typed_refusals, "substitution_redos_left": self.redos_left,
+                                   "auth_reissue_left": self.auth_reissue_left,
                                    "capture_failure_evidence": self.capture_failure_evidence,
                                    "capture_effort_evidence": self.capture_effort_evidence})["manifest_ref"]
+            if self.auth_reissue_of:  # spent on the released attempt's own record before this reissue's create: never twice
+                update_call_manifest_metadata(self.root, task_id=self.task_id, call_id=f"{self.auth_reissue_of}_model_request",
+                                              metadata={"auth_reissue_left": 0})
             host_step("daemon_upload")
         except ClaudexorUnavailable as error:
             raise ClaudexorModelNotDispatched({"code": error.code, "message": str(error)}, model_role=self.role) from None
@@ -516,12 +616,44 @@ class _ModelInvocation:
         return cls(problem or {"code": "model_operation_failed", "message": "The engine returned no model result."}, model_role=self.role,
                    operation_id=self.operation_id, route=route, unknown=unknown, same_operation_recoverable=rejoinable)
 
+    def _bound_gateway_current(self) -> bool:
+        # An unbound original handle can finish in-process, but is never replaceable.
+        return self.gateway is not None and (not self.create_binding
+                or self.create_binding == model_rejoin_binding(self.gateway))
+
+    def _check_create_binding(self) -> None:
+        if not self._bound_gateway_current() or (self.create_attempted and not self.create_binding):
+            self.check_control()  # a concurrent Stop wins without marking a create as attempted
+            raise self.error(_MODEL_STORE_UNVERIFIED, unknown=self.create_attempted,
+                             rejoinable=self.create_attempted) from None
+
+    def _rejoin_gateway(self, gateway):
+        if self.create_binding and self.create_binding == model_rejoin_binding(gateway):
+            return gateway
+        if gateway is not self.gateway:
+            gateway.close()
+        raise self.error(_MODEL_STORE_UNVERIFIED, unknown=True, rejoinable=True) from None
+
+    def _unconfirmed_refusal(self):
+        # No dispatch release, policy verdict or account penalty without a consistent result.
+        return self.error({"code": "malformed_response", "message": "The refusal has no consistent response receipt."},
+                          unknown=True, rejoinable=True)
+
     def receive(self) -> dict:
         from ouroboros.model_concurrency import model_call_slot
         with model_call_slot(self.target.get("usage_model", ""), route=self.target, check=self.check_control):
-            return self._receive()
+            raw = self._wait_for_result()
+            if raw is None:
+                if _explicit_content_refusal(self.detail):
+                    raise self._unconfirmed_refusal()
+                raise self.error(self.detail.get("problem"), self.detail,
+                                 unknown=(self.detail.get("dispatch") or {}).get("state") != "not_started")
+            self.retain(raw)
+            self.observe_operation(phase="response_received")
+            return self._terminal_result(json.loads(raw.decode("utf-8")))
 
-    def _receive(self) -> dict:
+    def _wait_for_result(self, *, read_body=True) -> bytes | None:
+        """Follow the original operation through live states and control outages. Once bound, only GET it."""
         outage_started = None
         detail: dict = {}
         while True:
@@ -529,9 +661,11 @@ class _ModelInvocation:
             try:
                 if not self.operation_id:
                     self.observe_operation()
+                    self._check_create_binding()
                     self.check_control(starting=True)
                     detail = timed("daemon.create", self.gateway.create_model_operation, self.request_ref,
                         idempotency_key=self.invocation_id,
+                        **({"typed_refusals": True} if self.typed_refusals else {}),
                         **({"capture_failure_evidence": True} if self.capture_failure_evidence else {}),
                         **({"capture_effort_evidence": True} if self.capture_effort_evidence else {}))
                     self.operation_id = detail["id"]
@@ -539,45 +673,30 @@ class _ModelInvocation:
                     self.detail = detail
                     self.observe_operation(accepted=True)
                 else:
+                    if self.gateway is None:
+                        if not self.create_binding:
+                            raise self.error(_MODEL_STORE_UNBOUND, unknown=True, rejoinable=True)
+                        self.gateway = self._rejoin_gateway(read_owned_gateway())
+                    if not self._bound_gateway_current():
+                        raise ClaudexorUnavailable(**_MODEL_STORE_UNVERIFIED)
                     detail = self.gateway.get_model_operation(self.operation_id, timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC))
+                    if detail.get("id") != self.operation_id:
+                        raise self.error({"code": "malformed_response", "message": "The operation ID changed during a read."},
+                                         unknown=True)
                 self.detail = detail
                 self.observe_operation()
                 if self.outage_episode is not None:
                     self._control_outage(recovered=True)
                 if detail.get("state") not in {"queued", "running"}:
                     response = detail.get("response") or {}
-                    if response.get("state") != "ready":
-                        raise self.error(detail.get("problem"), detail,
-                                         unknown=(detail.get("dispatch") or {}).get("state") != "not_started")
-                    self.response_ref = response["ref"]
-                    raw = self.gateway.get_model_result(self.operation_id, expected_ref=self.response_ref,
-                                                        timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC), raw_bytes=True)
-                    self.retain(raw)
-                    self.observe_operation(phase="response_received")
-                    result = json.loads(raw.decode("utf-8"))
-                    if (detail.get("dispatch") or {}).get("state") == "not_started":
-                        error = self.error(result.get("problem"), detail)
-                        error.route = copy.deepcopy(result.get("route") or error.route)
-                        raise error
-                    if result.get("outcome") == "unknown" or (detail.get("dispatch") or {}).get("state") == "unknown":
-                        raise self.error(result.get("problem"), detail, unknown=True)
-                    if (detail.get("dispatch") or {}).get("state") != "response_received" or result.get("outcome") not in {"completed", "incomplete", "failed"}:
-                        raise self.error({"code": "malformed_response", "message": "The engine did not prove a terminal provider response."}, detail, unknown=True)
-                    problem = result.get("problem") or {}
-                    context = problem.get("context") or {}
-                    options = self.payload.get("options") or {}
-                    if (result.get("outcome") == "failed" and problem.get("code") == "processing_unavailable"
-                            and context.get("generationStarted") is False
-                            and context.get("processingFallback") == "standard"
-                            and context.get("processingRefusal") in {"capacity", "unsupported"}
-                            and self.target.get("processing_preference") in {"fast", "economy", "ultrafast"}
-                            and options.get("processingPreference") in {"fast", "economy", "ultrafast"}
-                            and not options.get("serviceTier")):
-                        # response_received describes the refusal envelope. The
-                        # engine separately proves generation never started.
-                        raise ClaudexorModelNotDispatched(problem, model_role=self.role,
-                            operation_id=self.operation_id, route=result.get("route") or {})
-                    return result
+                    if read_body and response.get("state") == "ready":
+                        self.response_ref = response["ref"]
+                        self.check_control(cancel=False)  # a control met during the status read starts no result read
+                        if not self._bound_gateway_current():
+                            raise ClaudexorUnavailable(**_MODEL_STORE_UNVERIFIED)
+                        return self.gateway.get_model_result(self.operation_id, expected_ref=self.response_ref,
+                                                             timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC), raw_bytes=True)
+                    return None
                 outage_started = None
             except ClaudexorUnavailable as error:
                 if not self.operation_id and error.code == "model_request_invalid":
@@ -602,6 +721,76 @@ class _ModelInvocation:
                 if time.monotonic() - outage_started >= self.timeout:
                     raise self.error({"code": "model_control_unreachable", "message": "Control connection lost; the same model operation may still finish."}, detail, unknown=True, rejoinable=True) from None
             time.sleep(min(config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, self.timeout))
+
+    def _terminal_result(self, result: dict) -> dict:
+        detail = self.detail
+        dispatch = (detail.get("dispatch") or {}).get("state")
+        if not isinstance(result, dict):
+            raise self.error({"code": "malformed_response", "message": "The engine returned no result object."}, detail, unknown=True)
+        explicit_refusal = _explicit_content_refusal(result) or _explicit_content_refusal(detail)
+        response_received = dispatch == "response_received" and result.get("outcome") in ("completed", "incomplete", "failed")
+        if explicit_refusal and not response_received:
+            raise self._unconfirmed_refusal()  # The body was retained before classification.
+        if dispatch == "not_started":
+            error = self.error(result.get("problem"), detail)
+            error.route = copy.deepcopy(result.get("route") or error.route)
+            raise error
+        if result.get("outcome") == "unknown" or dispatch == "unknown":
+            raise self.error(result.get("problem"), detail, unknown=True)
+        if not response_received:
+            raise self.error({"code": "malformed_response", "message": "The engine did not prove a terminal provider response."}, detail, unknown=True)
+        if (not explicit_refusal and result["outcome"] == "failed"
+                and self.target.get("processing_preference") in _ADVISORY_TIERS
+                and (problem := _processing_refusal_proof(result.get("problem")))
+                and _sent_advisory_tier(self.payload)):
+            # The response is the refusal envelope, not a generated answer.
+            raise ClaudexorModelNotDispatched(problem, model_role=self.role,
+                                            operation_id=self.operation_id, route=result.get("route"))
+        return result
+
+    def _received_reply_error(self, result: dict) -> ClaudexorModelError | None:
+        """Decide delivery after settlement and before any substitution or use of the message."""
+        state, outcome = self.detail.get("state"), result["outcome"]
+        identity = dict(model_role=self.role, operation_id=self.operation_id, route=result.get("route") or {})
+        if public := ClaudexorContentRefused.public_problem(result, self.detail, self.payload.get("source")):
+            return ClaudexorContentRefused(public, **identity)
+        message = result.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if _explicit_content_refusal(result) or _explicit_content_refusal(self.detail):
+            return ClaudexorRefusalError(ClaudexorRefusalError.terminal_problem(), **identity)
+        if (outcome in ("completed", "incomplete") and isinstance(content, list)
+                and any(isinstance(p, dict) and p.get("type") == "refusal" for p in content)):
+            accepted = state == "succeeded" and outcome == "completed" and self.typed_refusals and all(
+                isinstance(p, dict) and p.get("type") in ("text", "refusal")
+                and isinstance(p.get(p["type"]), str) for p in content)
+            if not accepted:
+                return ClaudexorRefusalError(ClaudexorRefusalError.terminal_problem(), **identity)
+        problem = result.get("problem") or {}
+        if state == "cancelled":
+            return ClaudexorModelError({"code": "model_operation_cancelled",
+                "message": "The engine cancelled this model operation."}, **identity)
+        if outcome == "failed":
+            return ClaudexorModelError(problem, **identity)
+        if not isinstance(message, dict):
+            error = ClaudexorModelError(problem or {"code": "response_rejected",
+                "message": "The terminal provider response contained no usable model message."}, **identity)
+            error.stream_rejected = error.stream_incomplete = True
+            return error
+        # The engine records a received output cut as interrupted, even though its partial text is
+        # available to the loop's length recovery. It cannot authorize an unfinished tool call.
+        completed = state == "succeeded" and outcome == "completed"
+        output_cut = (state == "interrupted" and outcome == "incomplete" and isinstance(content, str)
+                      and not message.get("tool_calls") and problem.get("code") == "provider_incomplete"
+                      and (problem.get("context") or {}).get("reason") == "max_output_tokens")
+        if (self.operation_id or self.detail) and not (completed or output_cut):
+            return ClaudexorModelError({"code": "response_rejected",
+                "message": "The recorded operation has no deliverable model message."}, **identity)  # rejected by its code (``__init__``)
+        return None
+
+    def redo_substitution(self, result: dict, budget: SubstitutionBudget) -> bool:
+        if substitution_fact(result) is None or self._received_reply_error(result) is not None:
+            return False
+        return budget.admit(self, result)
 
     def _control_outage(self, *, recovered: bool = False) -> bool:
         """Running turns keep the same accepted operation through control loss."""
@@ -631,8 +820,8 @@ class _ModelInvocation:
         except ClaudexorUnavailable:
             replacement = None
         if replacement is not None:
-            previous, self.gateway = self.gateway, replacement
-            if previous is not None:
+            previous, self.gateway = self.gateway, self._rejoin_gateway(replacement)
+            if previous is not None and previous is not self.gateway:
                 previous.close()
         # Unlike an owner-mail peek, check_control's exception must propagate.
         deadline = time.monotonic() + backoff
@@ -650,8 +839,7 @@ class _ModelInvocation:
                 call_type="llm_claudexor_response", payload={"result_json_utf8": raw.decode("utf-8")}, keep_raw=True,
                 manifest={"operation_id": self.operation_id, "invocation_id": self.invocation_id,
                           "response_ref": self.response_ref, "model_role": self.role,
-                          "operation_state": self.detail.get("state"),
-                          "dispatch_state": (self.detail.get("dispatch") or {}).get("state")},
+                          **_operation_receipt_fields(self.detail)},
             )
         except Exception as error:
             # The caller keeps the useful result and the engine keeps its bytes.
@@ -664,6 +852,10 @@ class _ModelInvocation:
         if not self.retained:
             custody["reason"] = f"result_retention_failed:{self.retention_error}"
             return custody
+        if self.gateway is None:  # Cold read from the retained manifest; its reader already handled the engine ACK.
+            return {**custody, "state": "retained"}
+        if not self._bound_gateway_current():
+            return {**custody, "reason": _MODEL_STORE_UNVERIFIED["code"]}
         try:
             receipt = self.gateway.acknowledge_model_result(self.operation_id, self.response_ref["sha256"])
             custody["state"] = (receipt.get("response") or {}).get("state", "pending")
@@ -691,7 +883,14 @@ class _ModelInvocation:
             }
         return usage, cost, final
 
-    def finish(self, result: dict) -> tuple[dict, dict]:
+    def finish(self, result: dict, *, recovered: bool = False) -> tuple[dict, dict]:
+        reply_error = self._received_reply_error(result)
+        if recovered and reply_error is None and (mismatch := substitution_fact(result)):
+            reply_error = ClaudexorModelError({  # with the redos its admission recorded left, if any: its round decides them
+                "code": "model_substituted", "message": "Another model answered the recorded operation.",
+                "context": {"requested_model": mismatch["requested"], "observed_model": mismatch["observed"],
+                            **({"redos_left": self.redos_left} if type(self.redos_left) is int else {})}},
+                model_role=self.role, operation_id=self.operation_id, route=result.get("route"))
         usage, cost, final = self.extract_usage(result)
         # After the host's Standard retry of a refused tier (``_unstarted_repair``) the engine's receipt answers that
         # Standard request; this logical call still asked the work's tier, which its receipt keeps beside what was
@@ -709,7 +908,9 @@ class _ModelInvocation:
                                 "requested_profile": str((self.payload.get("account") or {}).get("profileId") or ""),
                                 **_dispatch_facts(self.payload, self.detail, result),
                                 "route": copy.deepcopy(route), "cost_evidence": copy.deepcopy(result.get("cost")),
-                                "outcome": result.get("outcome"), "problem": copy.deepcopy(result.get("problem")),
+                                "operation_state": self.detail.get("state"), "dispatch_state": (self.detail.get("dispatch") or {}).get("state"),
+                                "outcome": result.get("outcome"), "problem": copy.deepcopy(
+                                    reply_error.problem if reply_error is not None else result.get("problem")),
                                 "requested_options": copy.deepcopy(self.payload.get("options") or {}),
                                 "applied_options": copy.deepcopy(result.get("appliedOptions")),
                                 "applied_options_source": "provider_response",
@@ -717,40 +918,43 @@ class _ModelInvocation:
                                 "result_custody": {"state": "pending", "operation_id": self.operation_id,
                                                    "response_ref": self.response_ref,
                                                    "retained_manifest_ref": self.retained.get("manifest_ref")}})
-        try:
-            self.check_control()
-            usage["claudexor"]["result_custody"] = self.acknowledge()
-            self.check_control()
-        except ClaudexorModelError as error:
-            # Control changes authority to continue, never ownership of the
-            # already received result or its settled usage.
-            error.usage = usage
-            error.model_result = copy.deepcopy(result)
-            error.route = copy.deepcopy(route)
-            raise
-        if result.get("outcome") == "failed" or self.detail.get("state") == "cancelled":
-            problem = ({"code": "model_operation_cancelled", "message": "The engine cancelled this model operation."}
-                       if self.detail.get("state") == "cancelled" else result.get("problem") or {})
-            error = ClaudexorModelError(problem, model_role=self.role,
-                                       operation_id=self.operation_id, route=route)
-            error.physical_attempt_capture = self.capture
-            error.usage = usage
-            raise error
-        message = result.get("message")
-        if not isinstance(message, dict):
-            error = ClaudexorModelError(result.get("problem") or {
-                "code": "response_rejected", "message": "The terminal provider response contained no usable model message."},
-                model_role=self.role, operation_id=self.operation_id, route=route)
-            error.stream_rejected = error.stream_incomplete = True
-            error.physical_attempt_capture = self.capture
-            error.usage = usage
-            raise error
-        if result.get("outcome") == "incomplete":
+        if reply_error is None and result.get("outcome") == "incomplete":  # recorded before a control can take the receiver:
+            usage["response_status"] = "incomplete"  # what it carries away says this reply was cut, never whole
             usage["response_finish_reason"] = (
                 "length" if ((result.get("problem") or {}).get("context") or {}).get("reason") == "max_output_tokens"
                 else "incomplete"
             )
-        return copy.deepcopy(message), usage
+            observe_finish_reason(usage, usage, "response_finish_reason", computed=True)
+        refusal = isinstance(reply_error, ClaudexorRefusalError)
+        if reply_error is not None:
+            usage["response_status"] = result["outcome"]
+            reply_error.physical_attempt_capture = self.capture
+            reply_error.ledger_attempt_ids = [self.invocation_id] if self.invocation_id else []
+            reply_error.usage = usage
+        if refusal:
+            # A received refusal is its request's terminal: custody is taken before any control is read, and a
+            # control read after it keeps its own exit with the refusal beside it (``received_refusal``) for this
+            # request's owner alone: a caption keeps it, the loop ends only its own request on it.
+            usage["claudexor"]["result_custody"] = self.acknowledge()
+        try:
+            self.check_control()
+            if not refusal:
+                usage["claudexor"]["result_custody"] = self.acknowledge()
+                self.check_control()
+        except ClaudexorModelError as error:
+            # Control changes authority to continue, never ownership of the
+            # already received result or its settled usage.
+            error.usage = usage
+            if reply_error is None:
+                error.model_result = copy.deepcopy(result)
+            error.route = copy.deepcopy(route)
+            if refusal:
+                error.received_refusal = reply_error
+            raise
+        if reply_error is not None:
+            raise reply_error
+        return copy.deepcopy(result["message"]), usage
+
     async def offload(self, function, *args):
         """A cancelled caller leaves the current I/O thread owning its gateway."""
         with self.io_lock:
@@ -863,17 +1067,30 @@ def _unstarted_retry_preparation(target: dict, payload: dict, parameters: dict, 
     return waiter.reprepare(parameters.get("model_role", ""), values)
 
 
-def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched) -> dict | None:
-    """Read the already proved generation refusal; never convert an unknown run."""
-    context = error.problem.get("context") or {}
-    capture = getattr(error, "physical_attempt_capture", None)
+def _processing_refusal_proof(problem):
+    if isinstance(problem, dict) and problem.get("code") == "processing_unavailable":
+        context = problem.get("context")
+        if (isinstance(context, dict) and context.get("generationStarted") is False
+                and context.get("processingFallback") == "standard"
+                and context.get("processingRefusal") in ("capacity", "unsupported")):
+            return problem
+    return None
+
+
+def _sent_advisory_tier(payload):
     options = payload.get("options") or {}
-    if (error.code != "processing_unavailable" or getattr(capture, "state", None) != "released"
-            or context.get("generationStarted") is not False
-            or context.get("processingFallback") != "standard"
-            or context.get("processingRefusal") not in {"capacity", "unsupported"}
-            or options.get("processingPreference") not in {"fast", "economy", "ultrafast"}
-            or options.get("serviceTier")):
+    return options.get("processingPreference") in _ADVISORY_TIERS and not options.get("serviceTier")
+
+
+def processing_recovery_candidate(row):
+    """Cheap filter; only the exact request and terminal body can prove the refusal."""
+    return (row.get("processing_preference") in _ADVISORY_TIERS
+            and row.get("submitted_processing_mode") in _ADVISORY_TIERS)
+
+
+def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched) -> dict | None:
+    if (getattr(getattr(error, "physical_attempt_capture", None), "state", None) != "released"
+            or not _processing_refusal_proof(error.problem) or not _sent_advisory_tier(payload)):
         return None
     updated = copy.deepcopy(payload)
     updated["options"]["processingPreference"] = "standard"
@@ -893,8 +1110,9 @@ def _unstarted_repair(target: dict, payload: dict, parameters: dict, invocation:
         cause, repair = "processing", (updated, {**parameters, "_processing_submission": "standard"})
     elif "native" not in repaired and (updated := _reset_native(payload, error, invocation)) is not None:
         cause, repair = "native", (updated, parameters)
-    elif "auth" not in repaired and error.code == "auth_changed" and getattr(capture, "state", None) == "released":
-        cause, repair = "auth", (payload, parameters)
+    elif ("auth" not in repaired and not parameters.get("_auth_reissue_of") and error.code == "auth_changed"
+          and getattr(capture, "state", None) == "released"):
+        cause, repair = "auth", (payload, {**parameters, "_auth_reissue_of": invocation.invocation_id})
     else:
         return None
     repaired.add(cause)
@@ -905,15 +1123,138 @@ def _unstarted_repair(target: dict, payload: dict, parameters: dict, invocation:
     return (*repair, prepared)
 
 
+class RestoredEnd(Exception):
+    """A restored read ended known: its round's own next call meets that end before it sends (``restored_end``)."""
+
+
+@dataclass(frozen=True)
+class RestoredCapture(PhysicalAttemptCapture):
+    """The capture of an attempt read back from its record. It is opaque: no record proves its request's bytes or token size
+    (the engine's words never state a count), and nothing the round measures now describes it (``restored``)."""
+
+    restored = True
+
+
+def restored_end(usage: dict, attempt: dict, round_idx: int, error: ClaudexorModelError) -> None:
+    """End a restored read on its known ``error`` (``RestoredEnd``): the round's own next call meets it (``restored_round``), so
+    the wait, retry, route, size and terminal owners decide it as the live one. A refused advisory tier is the exception: its
+    Standard repair is kept as ``RESTORED_PROCESSING_KEY``. The record stays in the saved usage until a call meets it, so a
+    checkpoint written between the read and that call (or an exact Pause there) carries it and no restart sends over it.
+    No transport repair rides it: a restored ``auth_changed``/``invalid_continuation`` is a typed end like any other, because
+    nothing durable proves the one repair its cause permits unused and bound to this operation (a repair's own send carries
+    no marker, and every cold entry starts a fresh ``repaired`` set); only the live refusal's one-shot repair stands."""
+    released, round_id = isinstance(error, ClaudexorModelNotDispatched), f"{usage.get('execution_id')}:round:{round_idx}"
+    if repair := getattr(error, "processing_recovery", None):
+        usage[RESTORED_PROCESSING_KEY] = {**repair, "round_id": round_id}
+        return
+    receipt = (getattr(error, "usage", None) or {}).get("claudexor") or {}
+    usage[RESTORED_END_KEY] = {  # ``rejected``: a whole response judged unusable stays that, never a same-model repeat
+        **{key: attempt.get(key) for key in ("operation_id", "physical_attempt_id", "model", "model_role")},
+        "rejected": bool(getattr(error, "stream_rejected", False)),
+        "auth_reissue_left": getattr(error, "auth_reissue_left", None),  # its own record's; absent (older): unproven
+        "round_id": round_id, "problem": error.problem, "custody": "released" if released else "settled", "route": error.route,
+        "receipt": {key: receipt[key] for key in ("operation_state", "outcome", "requested_profile") if key in receipt},
+        "origin": {key: attempt[key] for key in ("llm_call_id", "execution_id", "round_id", "round", "attempt", "request_ref",
+                   "attempt_budget", "max_retries") if attempt.get(key) is not None}}  # with the burst it was admitted in
+    for key in ("_last_llm_error_kind", "execution_status"):
+        usage.pop(key, None)  # the round's own call meets the end and rewrites the rest of the failure row at its head
+    raise RestoredEnd
+
+
+def restored_round(usage: dict, round_id: str) -> dict:
+    """What this round's restored read leaves its own call: the kept Standard repair of a proven tier refusal and the known end
+    (the saved usage's own record, spent where it is met). Another round's record applies nothing and is dropped."""
+    repair, end = usage.get(RESTORED_PROCESSING_KEY) or {}, usage.get(RESTORED_END_KEY) or {}
+    if end.get("round_id") != round_id:
+        usage.pop(RESTORED_END_KEY, None)
+    return {**(repair if repair.get("round_id") == round_id else {}), **({"end": end} if end.get("round_id") == round_id else {})}
+
+
+def _meet_restored_end(target: dict, parameters: dict) -> ClaudexorModelError | None:
+    """Raise, in place of this call's first send, the end its round's restored attempt left, as the live call raised it: every
+    owner above sees the exact type, code, status (a whole response judged unusable too) and the receipt's own state and outcome.
+    Nothing is sent, no account marked and no money counted again (the read counted it once); another model or role never meets
+    it. A call that does not meet it still spends it: the end is the evidence of that one restart, never a standing fact a later
+    call of the round could replay. Another model's answer whose admission recorded redos left (``redos_left``) is returned
+    instead: this call decides that redo by the live policy (``SubstitutionBudget.restored``) and raises it when refused."""
+    spent = (target.get(RESTORED_PROCESSING_KEY) or {}).pop("end", None)
+    end = dict(spent or {})
+    if spent:
+        spent.clear()  # met or not, the saved usage's record is spent only here: an exception before this call keeps it
+    if end and (end["model"], end["model_role"]) == (target["usage_model"], parameters.get("model_role")):
+        error = (ClaudexorModelNotDispatched if end["custody"] == "released" else ClaudexorModelError)(
+            end["problem"], model_role=end["model_role"], operation_id=end["operation_id"], route=end["route"])
+        if end.get("rejected"):
+            error.stream_rejected = error.stream_incomplete = True
+        if end.get("receipt"):
+            error.usage = {"claudexor": dict(end["receipt"])}  # state, outcome, profile: no counters, so nothing counts twice
+        capture = error.physical_attempt_capture = RestoredCapture(  # the last capture is the restored attempt's own,
+            end["physical_attempt_id"], end["model"], "claudexor", end["custody"], "opaque")  # never an earlier round's
+        error.ledger_attempt_ids = [end["physical_attempt_id"]]
+        error.restored_origin = dict(end.get("origin") or {})  # the call and request its own record names (``restored_view``)
+        adopt_physical_attempt_capture(capture)
+        left = (error.problem.get("context") or {}).get("redos_left") if error.code == "model_substituted" else None
+        if type(left) is int and left > 0:
+            return error
+        if error.code == "auth_changed" and end["custody"] == "released" and end.get("auth_reissue_left") == 1:
+            parameters["_auth_reissue_of"] = end["physical_attempt_id"]  # its own record proves the one reissue unused:
+            return None  # this call's first send is that reissue, a new operation on the same route, recorded spent
+        raise error
+    return None
+
+
+def restored_burst(usage: dict, round_id: str, model: str, role: str, budget: int, max_retries: int) -> tuple[int, int, int]:
+    """``(start, budget, max_retries)`` of the call that meets this round's restored end (``call_llm_with_retry``): the burst its
+    own attempt (``origin``) was admitted in, recorded before dispatch, within today's and never beyond it, and that attempt's
+    place there, so a temporary failure repeats only what its live burst had left and a raised setting renews none. A record that
+    names no place or burst proves no unused attempt: the last place. With no end of this round, model and role: unchanged."""
+    end = usage.get(RESTORED_END_KEY) or {}
+    if end.get("round_id") != round_id or (end.get("model"), end.get("model_role")) != (model, role):
+        return 0, budget, max_retries
+    ordinal, admitted, retries = ((end.get("origin") or {}).get(key) for key in ("attempt", "attempt_budget", "max_retries"))
+    if not (type(ordinal) is int and ordinal > 0 and type(admitted) is int and admitted > 0 and type(retries) is int and retries >= 0):
+        return budget - 1, budget, max_retries
+    budget, max_retries = min(budget, admitted), min(max_retries, retries)
+    return min(ordinal, budget) - 1, budget, max_retries
+
+
+def restored_view(error: Exception, identity: dict, fit: dict, request_ref: Any) -> tuple:
+    """``(identity, fit, request_ref, facts)`` an error event of ``error`` shows, ``facts`` what its failure row adds. A restored
+    attempt's end names the call and request its own record names (``restored_fields`` lists them); a field the record names none
+    of keeps the evaluating call's own value, the call that also stays as ``current_*``, never an invented origin; none of this
+    unsent call's fit facts (its estimate is not that request's size). Its row is a restored attempt's, and a settled one keeps
+    its own operation (``recovered_operation_id``): the no-call rail buys no request over that read (``provider_no_call_source``).
+    An accepted operation's receipt judged unusable (``stream_rejected``), live or restored, adds ``rejected_receipt``: its own
+    known end, which no configured route, wrap-up or grace sends over. Any other error shows what it was given and adds nothing."""
+    origin = getattr(error, "restored_origin", None)
+    rejected = {"rejected_receipt": True} if isinstance(error, ClaudexorModelError) and getattr(error, "stream_rejected", False) else {}
+    if origin is None:
+        return identity, fit, request_ref, rejected if getattr(error, "operation_id", "") else {}
+    named = {key: origin[key] for key in ("execution_id", "round_id", "llm_call_id", "round", "attempt") if origin.get(key) is not None}
+    return ({**identity, **named, "current_llm_call_id": identity["llm_call_id"], "current_attempt": identity["attempt"],
+             "restored_fields": sorted(named)}, {}, origin.get("request_ref"),
+            {"restored_attempt": True, **({} if isinstance(error, ClaudexorModelNotDispatched) else
+                                          {"recovered_operation_id": str(getattr(error, "operation_id", "") or "")}),
+             **rejected})
+
+
 def chat_claudexor(target: dict, messages: list, tools: list | None, **parameters: Any) -> tuple[dict, dict]:
     """One generation, one released no-start repair per cause, quota re-asks on Auto."""
+    redo = _meet_restored_end(target, parameters)  # a known end raises; another model's answer with redos left returns
     target = prepare_processing_target(target)
     payload = _request(target, messages, tools, parameters)
     retry_preparation, repaired = None, set()
     substitution, rotation, capability = SubstitutionBudget(ClaudexorModelError), AccountRotation(), CapabilityRetry()
+    if redo is not None:  # the live policy decides it on this request; raised when refused, else the round is asked again
+        substitution.restored(redo, payload)
+        parameters = {**parameters, "_no_account_preference": True}
+        payload = _request(target, payload["messages"], payload["tools"], parameters)
     all_operations_not_started = True
     for _preparation in range(5 + substitution.redos + rotation.CEILING):
         invocation = _ModelInvocation(target, payload, parameters)
+        # Recorded with its request by admission's own rule (``restored``); a correlated retry is its call's last send.
+        invocation.redos_left = 0 if capability.original is not None else substitution.allowance(payload)
+        invocation.auth_reissue_left = 0 if "auth" in repaired or invocation.auth_reissue_of else 1
         try:
             with prepared_call_scope(retry_preparation or {}) as prepared:
                 if prepared:
@@ -925,7 +1266,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                 invocation.capture = last_physical_attempt_capture()
                 if capability.original is not None:
                     substitution.redos = substitution.used  # the correlated operation is the last send
-                if substitution.admit(invocation, result):
+                if invocation.redo_substitution(result, substitution):
                     # Every later request in this round leaves account selection to the engine.
                     retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
                     payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
@@ -950,6 +1291,8 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
+            if isinstance(error, ClaudexorRefusalError) or getattr(error, "received_refusal", None) is not None:
+                raise
             updated = capability.refused(invocation, error)
             if updated is not None:
                 retry_preparation, payload = None, updated
@@ -975,15 +1318,21 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
 
 
 def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
-    """Read retained receipts offline; without terminal facts (custody's ``TERMINAL_STATES``, ``interrupted`` too), read the
-    exact operation. Missing/live/unknown custody defers, unknown dispatch abandons at unknown price; never create or cancel."""
+    """Reconcile billing from the recorded operation, without submitting work."""
+    receipt = _read_model_receipt(drive_root, row, gateway_factory=gateway_factory)
+    return receipt[0] if receipt else None
+
+
+def _read_model_receipt(drive_root, row, *, gateway_factory=None, invocation=None):
+    """Use retained terminal facts first. Billing probes once; a restored chat waits on its bound operation."""
     from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.observability import call_manifest_path, read_call_payload
+    from ouroboros.usage_ledger import is_abandoned_settlement
     task_id, attempt_id = str(row.get("task_id") or ""), str(row.get("attempt_id") or "")
     call_id = f"{attempt_id}_model_response"
-    manifest, payload = {}, {}
+    manifest, payload, ref = {}, {}, {}
     try:
-        manifest, payload, _ = read_call_payload(drive_root, task_id=task_id, call_id=call_id)
+        manifest, payload, ref = read_call_payload(drive_root, task_id=task_id, call_id=call_id)
     except FileNotFoundError:
         pass
     if manifest and manifest.get("invocation_id") != attempt_id:
@@ -992,53 +1341,169 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
     if request and (request.get("invocation_id") != attempt_id or request.get("task_id") != task_id):
         return None
     operation_id = manifest.get("operation_id") or request.get("operation_id")
-    if not operation_id or (request.get("operation_id") and request["operation_id"] != operation_id):
+    if (not operation_id or (invocation is not None and invocation.operation_id != operation_id)
+            or (request.get("operation_id") and request["operation_id"] != operation_id)):
         return None
     operation_state, dispatch_state = manifest.get("operation_state"), manifest.get("dispatch_state")
     image = request.get("request_kind") == "image"
     raw = payload.get("result_json_utf8") if isinstance(payload, dict) else None
+    detail_refused = (manifest.get("operation_problem_code") == ClaudexorContentRefused.terminal_code
+                      or isinstance(payload, dict) and _explicit_content_refusal(payload.get("operation")))
+    if operation_state in TERMINAL_STATES and dispatch_state == "not_started" and detail_refused:
+        return ("abandoned", {}, None, False), None
     gateway = None
     try:
         if (operation_state not in TERMINAL_STATES or not dispatch_state
                 or (raw is None and (image or dispatch_state == "response_received"))):
-            gateway = (gateway_factory or read_owned_gateway)()
-            detail = gateway.get_model_operation(operation_id, timeout_sec=_READ_TIMEOUT_SEC)
+            if row.get("state") == "released":  # an old release buys no network read
+                return ("released", {}, None, False), None
+            binding = request.get("model_store_binding")
+            if invocation is None:
+                if not image and not binding:
+                    raise ClaudexorUnavailable(**_MODEL_STORE_UNBOUND)
+                gateway = (gateway_factory or read_owned_gateway)()
+                if not image and binding != model_rejoin_binding(gateway):
+                    raise ClaudexorUnavailable(**_MODEL_STORE_UNVERIFIED)
+                detail = gateway.get_model_operation(operation_id, timeout_sec=_READ_TIMEOUT_SEC)
+            else:
+                received = invocation._wait_for_result(read_body=raw is None)
+                gateway, detail = invocation.gateway, invocation.detail
+                if received is not None:
+                    raw = received.decode("utf-8")
             operation_state = detail.get("state")
             dispatch_state = (detail.get("dispatch") or {}).get("state")
             if operation_state not in TERMINAL_STATES:
                 return None
             response = detail.get("response") or {}
+            detail_refused = _explicit_content_refusal(detail)
             response_ref = response.get("ref") or manifest.get("response_ref") or {}
-            if raw is None and response.get("state") == "ready":
+            if invocation is None and raw is None and response.get("state") == "ready":
+                if not image and binding != model_rejoin_binding(gateway):
+                    raise ClaudexorUnavailable(**_MODEL_STORE_UNVERIFIED)
                 raw = gateway.get_model_result(operation_id, expected_ref=response_ref,
                                                timeout_sec=_READ_TIMEOUT_SEC, raw_bytes=True).decode("utf-8")
             payload = {"result_json_utf8": raw} if raw is not None else {"operation": detail}
-            persist_call(drive_root, task_id=task_id, call_id=call_id,
-                         call_type="llm_claudexor_response", payload=payload, keep_raw=True,
-                         manifest={"operation_id": operation_id, "invocation_id": attempt_id,
-                                   "response_ref": response_ref, "operation_state": operation_state,
-                                   "dispatch_state": dispatch_state,
-                                   "request_kind": request.get("request_kind", "chat")})
+            manifest = {"operation_id": operation_id, "invocation_id": attempt_id,
+                        "response_ref": response_ref, **_operation_receipt_fields(detail),
+                        "request_kind": request.get("request_kind", "chat")}
+            ref = persist_call(drive_root, task_id=task_id, call_id=call_id, call_type="llm_claudexor_response",
+                               payload=payload, keep_raw=True, manifest=manifest)
             # Image ACK belongs to its artifact consumer AFTER ledger reconciliation.
             # Terminal maintenance retains the receipt but cannot claim artifact custody.
-            if not image and raw is not None and response.get("state") == "ready":
+            if (not image and raw is not None and response.get("state") == "ready"
+                    and binding == model_rejoin_binding(gateway)):
                 try:
                     gateway.acknowledge_model_result(operation_id, response_ref["sha256"])
                 except Exception:
                     log.debug("Recovered model response retained without ACK", exc_info=True)
         if dispatch_state == "not_started":
-            return "released", {}, None, False
+            body = json.loads(raw) if raw is not None and not image else payload.get("operation") if isinstance(payload, dict) else None
+            if detail_refused or _explicit_content_refusal(body):
+                return ("abandoned", {}, None, False), None
+            typed = isinstance(body, dict) and isinstance(body.get("problem"), dict)  # the engine's own refusal rides its release
+            return ("released", {}, None, False), ((manifest, body, ref) if typed else None)
         if raw is None or (not image and dispatch_state != "response_received"):
-            return "abandoned", {}, None, False
+            return ("abandoned", {}, None, False), None
         result = json.loads(raw)
         outcomes = {"completed", "failed", "unknown"} if image else {"completed", "incomplete", "failed"}
         if not isinstance(result, dict) or result.get("outcome") not in outcomes:
-            return "abandoned", {}, None, False
+            return ("abandoned", {}, None, False), None
+        receipt = manifest, result, ref
+        if (not image and not detail_refused and result["outcome"] == "failed"
+                and processing_recovery_candidate(row)
+                and manifest.get("model_role", request.get("model_role")) == request.get("model_role")
+                and (row.get("state") != "settled" or is_abandoned_settlement(row))
+                and _processing_refusal_proof(result.get("problem"))):
+            sent = invocation.payload if invocation is not None else read_call_payload(
+                drive_root, task_id=task_id, call_id=f"{attempt_id}_model_request")[1]
+            if _sent_advisory_tier(sent):
+                return ("released", {}, None, False), receipt
         usage, cost, final = _usage(result, row.get("effort"), request_kind=request.get("request_kind", "chat"))
-        return "settled", usage, cost, final
+        return ("settled", usage, cost, final), receipt
     finally:
-        if gateway is not None and gateway_factory is None:
+        if invocation is not None:
+            invocation.close()
+        elif gateway is not None and gateway_factory is None:
             gateway.close()
+
+
+def recover_chat_reply(root, task_id, pending, turn_state, *, poll_control=None):
+    """Read the ready checkpoint's original chat attempt. This path owns no new send allowance."""
+    from ouroboros import usage_accounting, usage_store
+    from ouroboros.observability import call_manifest_path, read_call_payload
+    from ouroboros.transport_custody import release_pre_dispatch_attempt
+    from ouroboros.usage_ledger import is_abandoned_settlement
+
+    attempt, operation = pending["physical_attempt_id"], pending["operation_id"]
+    with usage_store.read(root) as txn:
+        row = txn.attempt(attempt)
+    if (not row or row["task_id"] != task_id or row["provider"] != "claudexor"
+            or row["state"] not in {"dispatched", "unresolved", "settled", "released"}
+            or (pending.get("model") and row["model"] != pending["model"])):
+        return None
+    unsent = ProviderNotDispatched("The recorded chat operation ended before dispatch.")
+    retained = read_json_dict(call_manifest_path(root, task_id, f"{attempt}_model_response")) or {}
+    if row["state"] == "released" and not (processing_recovery_candidate(row) or retained.get("dispatch_state") == "not_started"):
+        raise unsent  # no retained receipt proves a reason, and an old release buys no network read
+    if not operation:
+        return None
+    request, payload, _ = read_call_payload(root, task_id=task_id, call_id=f"{attempt}_model_request")
+    if (request.get("invocation_id") != attempt or request.get("operation_id") not in (None, "", operation)
+            or request.get("model_role") != pending.get("model_role")
+            or request.get("request_kind", "chat") != "chat"):
+        return None
+    target = {"usage_model": row["model"], "source": payload["source"], "resolved_model": payload["model"],
+              "processing_preference": row.get("processing_preference")}
+    invocation = _ModelInvocation(target, payload, {"model_role": request.get("model_role"),
+        "max_tokens": row.get("max_completion_tokens"), "model_poll_control": poll_control})
+    invocation.root, invocation.task_id = root, task_id
+    invocation.invocation_id, invocation.operation_id, invocation.create_attempted = attempt, operation, True
+    invocation.create_binding = request.get("model_store_binding") or ""
+    receipt = _read_model_receipt(root, row, invocation=invocation)
+    if receipt is None:
+        return None
+    (disposition, counters, cost, final), response = receipt
+    if disposition not in {"settled", "released"}:
+        return None
+    if row["state"] in {"dispatched", "unresolved"} or is_abandoned_settlement(row):
+        reservation = usage_accounting.AttemptReservation(attempt, root, row["model"], row["provider"],
+            row.get("reservation_upper_bound_usd"), row.get("processing_preference") or "",
+            row.get("submitted_processing_mode") or "", row.get("processing_basis"))
+        if disposition == "settled":
+            usage_accounting.settle_attempt(reservation, counters, cost_usd=cost, cost_final=final, expected_revision=row["revision"])
+        else:
+            release_pre_dispatch_attempt(reservation, unsent, expected_revision=row["revision"])
+        with usage_store.read(root) as txn:
+            row = txn.attempt(attempt)  # Another writer may have won the revision check.
+    if not row or row["state"] != disposition or is_abandoned_settlement(row):
+        return None
+    if disposition == "released":
+        if response is not None:  # the engine's typed refusal of this unsent operation, as its live call raised it
+            manifest, result, _ = response
+            if manifest.get("model_role", invocation.role) == invocation.role:
+                error = ClaudexorModelNotDispatched(result["problem"], model_role=invocation.role,
+                    operation_id=operation, route=result.get("route"))
+                error.auth_reissue_left = request.get("auth_reissue_left")  # this attempt's own record; absent: None
+                if manifest.get("dispatch_state") != "not_started":  # a refused advisory tier, proved: Standard repairs it
+                    error.processing_recovery = {"model": row["model"], "model_role": invocation.role,
+                        "preference": row["processing_preference"], "pin": (payload.get("account") or {}).get("profileId", "")}
+                raise error
+        raise unsent
+    manifest, result, ref = response
+    if manifest.get("model_role", request.get("model_role")) != request.get("model_role"):
+        return None
+    invocation.detail = {"state": manifest["operation_state"],
+                         "problem": {"code": manifest.get("operation_problem_code")},
+                         "dispatch": {"state": manifest["dispatch_state"], "route": manifest.get("dispatch_route")},
+                         "response": {"state": "ready", "ref": manifest["response_ref"]}}
+    invocation.typed_refusals = request.get("typed_refusals") is True
+    invocation.redos_left = request.get("substitution_redos_left")  # absent from an older record: no unused redo proved
+    invocation.retained = ref
+    invocation.response_ref = manifest["response_ref"]
+    reply, usage = invocation.finish(result, recovered=True)
+    usage["ledger_attempt_ids"] = [attempt]
+    adopt_turn_state(turn_state, payload, result)
+    return reply, usage, ref
 
 
 async def chat_claudexor_async(target: dict, messages: list, tools: list | None, **parameters: Any) -> tuple[dict, dict]:
@@ -1051,6 +1516,8 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
     all_operations_not_started = True
     for _preparation in range(5 + substitution.redos + rotation.CEILING):
         invocation = _ModelInvocation(target, payload, parameters)
+        invocation.redos_left = 0 if capability.original is not None else substitution.allowance(payload)
+        invocation.auth_reissue_left = 0 if "auth" in repaired or invocation.auth_reissue_of else 1
         try:
             with prepared_call_scope(retry_preparation or {}) as prepared:
                 if prepared:
@@ -1070,7 +1537,7 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                 invocation.capture = last_physical_attempt_capture()
                 if capability.original is not None:
                     substitution.redos = substitution.used
-                if await invocation.offload(substitution.admit, invocation, result):
+                if await invocation.offload(invocation.redo_substitution, result, substitution):
                     # Every later request in this round leaves account selection to the engine.
                     retry_preparation, parameters = None, {**parameters, "_no_account_preference": True}
                     payload = _request(target, payload["messages"], payload["tools"], {**(prepared or parameters), "_no_account_preference": True})
@@ -1095,6 +1562,8 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
             payload, parameters, retry_preparation = repair
         except ClaudexorModelError as error:
             all_operations_not_started = False
+            if isinstance(error, ClaudexorRefusalError) or getattr(error, "received_refusal", None) is not None:
+                raise
             updated = await invocation.offload(capability.refused, invocation, error)
             if updated is not None:
                 retry_preparation, payload = None, updated

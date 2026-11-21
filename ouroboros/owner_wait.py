@@ -1128,8 +1128,11 @@ def park_for_left_review(tools: Any, limit_ctx: Any, content: Any, emit_progress
         return False  # its notice was read: that wave is over
     from ouroboros.loop_messages import _emit_round_progress
 
-    if str(content or "").strip():
-        limit_ctx.messages.append({"role": "assistant", "content": str(content)})
+    from ouroboros._usage_response import append_candidate_prose, refusal_display
+    words = refusal_display(content)
+    text = words if words is not None else str(content or "")  # a refusal's exact words, never its parts' repr
+    if text.strip():
+        append_candidate_prose(limit_ctx.messages, text)
         _emit_round_progress(content, {"content": content}, emit_progress, limit_ctx.llm_trace)
     if restored:
         from ouroboros.review_pause import left_review_custody_note

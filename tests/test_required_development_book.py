@@ -56,10 +56,10 @@ def fixed_density(monkeypatch):
                         lambda *_a, **_kw: (RATIO, "fresh_route_usage"))
 
 
-def _route(window, known=True, source="metadata"):
+def _route(window, known=True, source="metadata", *, window_kind="total"):
     from ouroboros.capability_evidence import utc_now_iso  # a serving statement is dated, as its read is
     evidence = SimpleNamespace(route_fp="route", status="confirmed" if known else "unprobeable",
-                               stale=False, window_tokens=window, source=source, ts=utc_now_iso())
+                               stale=False, window_tokens=window, window_kind=window_kind, source=source, ts=utc_now_iso())
     return lambda *_a, **_kw: ({"provider": "fixture", "model": "fixture"}, evidence)
 
 
@@ -407,6 +407,28 @@ def test_a_physical_nonfit_is_named_and_enters_no_rescue(tmp_path, fixed_density
     unfit = raised.value
     assert unfit.required_book_tokens > 0 and unfit.window_tokens == window and unfit.deficit_tokens > 0
     assert unfit.deficit_tokens < unfit.required_book_tokens  # without it, this request fits
+
+
+def test_handbook_refusal_keeps_the_input_cap_when_its_reply_outgrows_the_frame_reserve(tmp_path, fixed_density):
+    from ouroboros.agent_dispatch import _context_capacity_terminal
+
+    def plan(required):
+        return fit.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path),
+            _core(tmp_path, required=required, book_tokens=400_000), {"id": "t", "type": "task"},
+            preferred_mode="nano", tool_schemas=SCHEMAS, route_resolver=_route(272_000, window_kind="input"))
+
+    assert plan(False).initial_mode == "nano"
+    with pytest.raises(fit.MinimumViewUnfit, match="directly required handbook") as raised:
+        plan(True)
+    unfit = raised.value
+    assert (unfit.limiting.kind, unfit.limiting.tokens) == ("input", 272_000)
+    assert unfit.window_tokens == 280_192 and unfit.response_reserve_tokens > 8_192
+    incorrect_input_limit = unfit.window_tokens - unfit.response_reserve_tokens
+    text, usage, _trace = _context_capacity_terminal(unfit)
+    assert "input limit here is 272,000 tokens" in text
+    assert f"{incorrect_input_limit:,}" not in text and "280,192" not in text
+    assert "without it the start fits" in text and "a Continue keeps it" in text
+    assert usage["reason_code"] == "context_capacity"
 
 
 def test_the_assignment_rescue_stays_for_what_a_view_without_the_book_needs(tmp_path, fixed_density):
@@ -905,7 +927,7 @@ def test_a_nonfit_start_ends_its_task_named_and_the_same_worker_runs_the_next(tm
     assert stored["outcome_axes"]["execution"]["reason_code"] == "context_capacity"
     text = next(row["text"] for row in events if row.get("type") == "send_message" and row.get("task_id") == "needs-book")
     assert "directly requires the whole development handbook" in text and "without it the start fits" in text
-    assert "the model's limit here is 150,000" in text
+    assert "The model's total window here is 150,000 tokens." in text
     assert "window=" not in text, "a person reads the limit in words, never the refusal's key=value record"
     # The measured parts name the handbook on its own and add up to the input: the core part excludes it.
     measured = text.split("Measured, in tokens: ", 1)[1]
@@ -988,16 +1010,34 @@ def test_the_terminal_preserves_saved_work_started_custody_and_unknown_money(tmp
     assert stored["reason_code"] == "context_capacity" and stored["delegated_runs_unreconciled"] == ["run-a1"]
 
 
-@pytest.mark.parametrize("fields", [{"_is_direct_chat": True}, {"_presence_turn": True, "_is_direct_chat": True}])
-def test_a_direct_turn_keeps_its_own_typed_owner(tmp_path, monkeypatch, fields):
+def _unfit_start(monkeypatch):
     from ouroboros import agent as agent_module
 
-    repo, drive, _ran = _agent_world(tmp_path, monkeypatch, 150_000)
-    monkeypatch.setattr(agent_module, "emit_task_results", lambda *_a, **_kw: pytest.fail("no pooled terminal here"))
     monkeypatch.setattr(agent_module.OuroborosAgent, "_prepare_task_context", lambda *_a, **_kw: (_ for _ in ()).throw(
         fit.MinimumViewUnfit("cannot", fixed_tokens=1, memory_tokens=1, reserve_tokens=1, window_tokens=1, ratio=1.0)))
+    return agent_module
+
+
+def test_a_direct_turn_keeps_its_own_typed_owner(tmp_path, monkeypatch):
+    """An owner's inline turn names its refusal through its carrier (``worker_chat_lane``), never a second terminal."""
+    repo, drive, _ran = _agent_world(tmp_path, monkeypatch, 150_000)
+    agent_module = _unfit_start(monkeypatch)
+    monkeypatch.setattr(agent_module, "emit_task_results", lambda *_a, **_kw: pytest.fail("no pooled terminal here"))
     with pytest.raises(fit.MinimumViewUnfit):
-        _real_agent(repo, drive)._handle_task_scoped(_queued("direct", **fields))
+        _real_agent(repo, drive)._handle_task_scoped(_queued("direct", _is_direct_chat=True))
+
+
+def test_a_presence_turn_owns_its_capacity_terminal_even_on_a_legacy_thread(tmp_path, monkeypatch):
+    """A Presence turn's ordinary result is its own (``_start_context_capacity_terminal``): the start ends once on the
+    typed capacity terminal, with no model round and no synthesis, instead of reaching the carrier as a fault."""
+    repo, drive, ran = _agent_world(tmp_path, monkeypatch, 150_000)
+    agent_module, emitted = _unfit_start(monkeypatch), []
+    monkeypatch.setattr(agent_module, "emit_task_results", lambda *args, **_kw: emitted.append(args))
+    task = _queued("presence", _presence_turn=True, _is_direct_chat=True)
+    _real_agent(repo, drive)._handle_task_scoped(task)
+    (args,) = emitted
+    assert ran == [] and args[4]["id"] == "presence" and args[4]["_skip_post_task_synthesis"] is True
+    assert args[6]["reason_code"] == "context_capacity" and "for this conversation" in args[5]
 
 
 def test_only_a_known_incompatibility_takes_this_terminal(tmp_path, monkeypatch):

@@ -380,7 +380,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         '_replace_delivery_candidate', '_resolve_forced_delivery_control_body', '_retire_main_reasoning',
         '_server_web_allowed_by_task', '_service_finalization_evidence',
         'call_llm_with_retry',
-        '_rebind_context_fit_plan',  # fit the forced candidate's acting route before pricing or sending
+        '_handle_provider_unavailable', '_refusal_terminal',
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_record_owner_directive",
@@ -400,7 +400,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "last_physical_attempt_capture", "seal_task_transcript",
     })),
     "ouroboros/loop_routes.py": ("ouroboros/loop.py", "_loop", frozenset({
-        "_apply_runtime_overrides", "_rebind_context_fit_plan",
+        "_apply_runtime_overrides", "_rebind_context_fit_plan", "_server_web_allowed_by_task",
     })),
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",
@@ -459,6 +459,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_finalize_loop_candidate",  # a pending routeless note's retained final finishes before a rail (#2570)
         "_forced_fallback_result", "_forced_final_answer",
         "_handle_forced_finalization", "_last_assistant_text", "_owner_marked_content",
+        "_answer_protocol_active", "_live_delivery_candidate",
         "_measure_main_context_view", "_measure_round_main_fit",
         "_provider_unavailable_result", "_record_owner_directive",
         "_soft_land_exhausted_ceiling", "_task_deadline_epoch",

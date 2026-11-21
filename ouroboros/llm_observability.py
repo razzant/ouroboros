@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterator, Optional, Tuple
 from ouroboros.context_timing import STEPS as _STEPS, carry_spans, host_step, measured_sections, section_spans, timed
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
-from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
+from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.physical_attempt_context import attempt_fact
 
 
@@ -138,6 +138,35 @@ def persist_observed_call(root: Any, *, payload: Any, writer: Any = None, **iden
     except Exception:
         logging.getLogger(__name__).warning("Failed to persist LLM observability payload", exc_info=True)
         return {}
+
+
+def persist_main_response(root, task_id, call_ids, message, usage, total, *, model, display_model, provider, write=None):
+    """Record the logical reply. A restored physical attempt can reuse the warm caller's exact source."""
+    from ouroboros.observability import call_manifest_path, read_call_payload
+
+    attempt = call_ids.get("physical_attempt_id")
+    call_id = f"{call_ids.get('llm_call_id') or attempt}_response"
+    if attempt:
+        try:
+            if call_manifest_path(root, task_id, call_id).is_file():
+                record, payload, ref = read_call_payload(root, task_id=task_id, call_id=call_id)
+                prior = payload.get("usage") if isinstance(payload, dict) else None
+                ids = prior.get("ledger_attempt_ids") if isinstance(prior, dict) else None
+                native = prior.get("claudexor") if isinstance(prior, dict) else None
+                if (record.get("call_type") == "llm_response" and ref.get("redacted_projection_ref")
+                        and isinstance(ids, list) and ids[-1:] == [attempt]
+                        and isinstance(native, dict) and native.get("operation_id") == call_ids["operation_id"]):
+                    total.setdefault("first_answer_at", record.get("first_answer_at") or utc_now_iso())
+                    return ref
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        # The original worker may publish later. Bind a fresh manifest to the same logical call
+        # without overwriting any source (including an older or unreadable one).
+        call_id = f"{new_call_id('llm_recovered')}_response"
+    return (write or persist_observed_call)(root, task_id=task_id, call_id=call_id, call_type="llm_response",
+        payload={"message": message, "usage": usage},
+        manifest={"first_answer_at": total.setdefault("first_answer_at", utc_now_iso()), **call_ids,
+                  "model": model, "resolved_model": display_model, "provider": provider})
 
 
 def _root(drive_root: Any) -> pathlib.Path:

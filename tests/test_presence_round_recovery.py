@@ -215,6 +215,7 @@ def test_deadline_closing_after_lost_response_sends_no_fallback(data_root, monke
 def test_control_loss_rejoins_the_accepted_operation_without_another_post(data_root, monkeypatch, http_status):
     from ouroboros import llm_claudexor
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
 
     invocation = llm_claudexor._ModelInvocation({"usage_model": PRIMARY}, {}, {"timeout": 1})
     invocation.operation_id, invocation.invocation_id = "accepted-operation", "physical-attempt"
@@ -227,6 +228,8 @@ def test_control_loss_rejoins_the_accepted_operation_without_another_post(data_r
         monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
 
     class Gateway:
+        store_identity = "fixture-store"  # the owning store the original handle proved at create
+
         def get_model_operation(self, operation, **_kwargs):
             reads.append(operation)
             if len(reads) <= 3:
@@ -246,6 +249,7 @@ def test_control_loss_rejoins_the_accepted_operation_without_another_post(data_r
             pass
 
     gateway = invocation.gateway = Gateway()
+    invocation.create_binding = model_rejoin_binding(gateway)  # the same store's proof; rejoin by the SAME handle
     monkeypatch.setattr(llm_claudexor, "read_owned_gateway", lambda: gateway)
     monkeypatch.setattr(invocation, "retain", lambda _raw: None)
     assert invocation.receive()["message"]["content"] == "same accepted answer"

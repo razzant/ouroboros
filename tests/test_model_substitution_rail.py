@@ -145,6 +145,32 @@ def test_no_redo_changes_the_bytes_of_an_admitted_candidate(setup):
     assert len(gateway.creates) == 1
 
 
+@pytest.mark.parametrize("second_fits", [True, False])
+def test_a_budget_only_wrapup_prices_the_ordinary_model_mismatch_redo(setup, monkeypatch, second_fits):
+    from ouroboros import task_pacing
+    from ouroboros.loop_forced_finalization import ForcedCandidateUnaffordable
+
+    root, gateway, client = setup
+    gateway.results, gateway.dispatch = [substituted(), result()], ["response_received"] * 2
+    checked = []
+
+    def fits(*, request, **balances):
+        checked.append(request)
+        assert balances == {"root_cap_usd": 1.0, "deciding_usd": 0.9}
+        return len(checked) == 1 or second_fits
+
+    monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", fits)
+    guard = task_pacing.forced_admission_predicate(None, {"root_cap_usd": 1.0, "deciding_usd": 0.9})
+    with ua.bind_physical_attempt_context(None, guard):
+        if second_fits:
+            assert call(client)[1]["claudexor"]["route"]["model"] == "exact-model"
+        else:
+            with pytest.raises(ForcedCandidateUnaffordable):
+                call(client)
+    assert len(checked) == 2 and len(gateway.creates) == (2 if second_fits else 1)
+    assert sorted(row["state"] for row in ledger_rows(root)) == sorted(["settled", "settled" if second_fits else "released"])
+
+
 def test_a_redo_never_spends_a_send_its_caller_still_needs(setup):
     root, gateway, client = setup
     gateway.results = [substituted()]
@@ -372,18 +398,8 @@ def test_an_unknown_outcome_is_never_treated_as_a_substitution(setup):
 
 
 def test_no_outer_paid_repeat_can_nest_another_redo_budget_on_this_transport(setup):
-    """The rail's budget cannot be multiplied by the transport-death repeat.
-
-    A reviewer read the two bounded budgets as a product. They never meet: a
-    dispatched Claudexor operation whose outcome is unknown surfaces without any
-    HTTP cause (the engine still owns it; control loss rejoins it), so the typed
-    transport-death walk finds no death and no outer repeat starts a second call
-    whose redos begin again. The daemon's loopback address is not the guard: each
-    attempt states that the model runs remotely, so a not-started receipt is a
-    free outage, never a stopped local server (12.10 incident).
-    """
-    import httpx
-    from ouroboros.transport_custody import is_retryable_transport_death
+    """An unknown dispatch leaves the accepted operation in the engine's custody."""
+    from ouroboros.loop_llm_call import classify_llm_exception
 
     _root, gateway, client = setup
     gateway.results = [substituted()]
@@ -392,12 +408,8 @@ def test_no_outer_paid_repeat_can_nest_another_redo_budget_on_this_transport(set
         call(client)
     error = raised.value
     assert error.__cause__ is None and error.physical_attempt_capture.route_is_loopback is False
-    assert is_retryable_transport_death(error) is False
-    # Counter-direction: the walk still finds a real dispatched death.
-    died = transport.ClaudexorModelError({"code": "model_operation_failed", "message": "died"})
-    died.__cause__ = httpx.ReadError("connection reset")
-    died.physical_attempt_capture = SimpleNamespace(state="dispatched", provider="claudexor", route_is_loopback=False)
-    assert is_retryable_transport_death(died) is True
+    assert not classify_llm_exception(error).retry_same_request
+    assert len(gateway.creates) == 1
 
 
 def test_a_discarded_generation_never_becomes_the_live_turn(setup, monkeypatch):
@@ -419,7 +431,10 @@ def test_a_discarded_generation_never_becomes_the_live_turn(setup, monkeypatch):
 def test_an_incomplete_answer_from_another_model_is_refused_too(setup, monkeypatch):
     root, gateway, client = setup
     monkeypatch.setattr(transport.config, "get_model_substitution_redos", lambda: 0)
-    gateway.results = [substituted(outcome="incomplete")]
+    cut = substituted(outcome="incomplete")
+    cut.update(message={"role": "assistant", "content": "Partial text"},
+               problem={"code": "provider_incomplete", "context": {"reason": "max_output_tokens"}})
+    gateway.results = [cut]
     gateway.dispatch = ["response_received"]
     with pytest.raises(transport.ClaudexorModelError) as raised:
         call(client)

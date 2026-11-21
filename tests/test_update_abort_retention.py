@@ -696,7 +696,7 @@ def test_a_child_never_outlives_a_parent_whose_saved_source_became_unreadable(tm
 def test_abort_handoff_reaches_the_real_loop_without_replaying_unknown_effects(tmp_path, monkeypatch):
     from ouroboros import delegate_custody, loop
     from ouroboros.external_runs import observe_task_runs
-    from tests.test_context_fit_v664 import _plan
+    from tests._context_fit_plan import fit_plan as _plan
     from tests.test_loop_transport_wait import _loop_kwargs
     from tests.test_working_checkpoint import _registry
 

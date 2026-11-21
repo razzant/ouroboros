@@ -2528,10 +2528,9 @@ list; a pending line appears only when the published fact carries one.
 
 **A work on a fallback is amber until that is resolved**: its fact reads
 `fallback from Settings · claude-opus-5.5 · since 02:14`, then what it left (`left gpt-6-astra`), wrapping rather
-than cut, and its popover says when it left and why — in the wait card's own words where it has them for that
-condition (`Sign-in required`, `Waiting for quota`, `Key unavailable`), else the server's code as it is, never a
-sentence of the page's own — and offers the three exits: **Return** (back to the model it
-left, at the next step), **Wait** (wait for that model, no paid calls until it answers) and **Keep** (the
+than cut. The popover names when it left and why, in the wait card's words for the failed route or in its own
+failure code, never a guess based on the acting fallback. Its exits are **Return** (back to the model it left,
+at the next step), **Wait** (wait for that model, no paid calls until it answers) and **Keep** (the
 fallback becomes the work's own choice). Amber ends when the server's fact says so, never on a timer here;
 nothing about it is written to the Main chat; the amber line carries no money figure (one money line per card;
 per-route spend is in Details).
@@ -2619,9 +2618,9 @@ cannot be observed, an account not proven, the cases of the owner-action System
 message under Quiz card), never while it goes on by itself. Completed steps remain intact; a held worker slot and its
 effect on the queue are stated only when the host reports that fact.
 
-The quota row offers automatic continuation, initially enabled, and shows a
-known reset time or an explicit unknown; an authentication row instead offers
-the existing Accounts sign-in flow. Both can open Settings, retry explicitly, or
+The confirmed-quota row offers automatic continuation, initially enabled, and
+shows a known reset time or an explicit unknown; an authentication row instead
+offers the Accounts sign-in flow. Both can open Settings, retry explicitly, or
 choose a replacement model/account in the shared model-role editor. The
 replacement affects the named waiting role until its task or review operation
 ends; an unchecked "Also save this role in Settings" checkbox separately
@@ -2634,16 +2633,19 @@ A work on a model of its own (its room's, or one the owner gave it) waits on no
 role of Settings: its row is named `This work's model` and offers no "Also save
 this role in Settings".
 
-A pool confirmed to contain both accounts requiring sign-in and accounts waiting
-for quota says "Waiting for access" and names both causes. It keeps automatic
-continuation and opens Accounts without selecting a profile or initiating login.
-A dated pool refusal without a confirmed cause says "Waiting for an account",
-retains the engine's reset forecast and keeps automatic continuation without
-claiming quota exhaustion or guaranteed availability. It never offers sign-in.
-Only confirmed quota pauses the execution clock; authentication and unconfirmed
-availability waits consume it. Calendar deadlines remain fixed. Configured
-fallback routes are tried before a wait card is shown. Work continuing on a
-fallback is not a wait: nothing claims the primary recovered, the mind or the
+A pool confirmed with sign-in and quota accounts says "Waiting for access",
+names both causes and shows the quota reset or unknown; continuation stays
+worded for access and Accounts opens with no profile chosen or login. A dated
+pool refusal with no confirmed cause says "Waiting for an account", keeps the
+engine's reset forecast and automatic continuation, claims neither quota
+exhaustion nor availability and never offers sign-in. Only confirmed quota
+evidence (`quota`, mixed `auth_quota`, a bill) pauses the clock; a reset shows
+for the first two, and authentication, a key and unconfirmed waits consume it.
+Calendar deadlines remain fixed. Configured
+fallback routes are tried before an automatic wait. For a confirmed API key or bill problem both cards say
+“Check the API key” or “Check API billing”, not subscription sign-in. Unconfirmed access says “Waiting for
+provider access”; explicit primary Wait is still allowed. Retry, Switch and Stop keep their doors. Work continuing
+on a fallback is not a wait: nothing claims the primary recovered; the mind or the
 owner returns it (the owner from the card's amber model fact: Return, Wait or
 Keep), and only the primary's own accepted reply
 counts as a return.

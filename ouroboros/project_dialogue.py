@@ -788,6 +788,13 @@ TASK_CAUSE_PHRASES = {
     # #869: the provider-death rail's terminal words; the amount of retained text is
     # said by the notice, this clause only names why the task ended.
     "provider_unavailable": "The task could not get a usable model answer, so it could not finish",
+    # The no-resend terminals (loop_llm_call.provider_no_call_source, loop_round_limits._refusal_terminal
+    # over llm_claudexor.terminal_code): a typed resource refusal no route or owner wait recovered, and
+    # received refusals that yield no other send and no verdict. Each names only its limit; nothing here
+    # promises a retry or a Continue.
+    "resource_refusal_no_resend": "A temporary model-resource refusal was never recovered by another route or an owner wait, so the task ended without a resend",
+    "provider_content_refused": "The model provider declined this request under its content policy, so the task could not finish",
+    "unexpected_refusal_content": "The model provider returned refusal content this task could not accept, so it could not finish",
     "accounting_wait_expired": "Accounting access did not recover within this turn’s wait window",
     "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     "authoring_handover_incomplete": "The saved result records an incomplete model handover.",
@@ -1045,15 +1052,6 @@ def resolve_legacy_continuation_narrative(
     return None
 
 
-def _append_terminal_task_projection(
-    drive_root: Any, task_id: str, task: Dict[str, Any], result: Dict[str, Any],
-    task_done_event: Dict[str, Any],
-) -> bool:
-    from ouroboros.terminal_projection import append_terminal_projection
-
-    return append_terminal_projection(drive_root, task_id, task, task_done_event, result=result)
-
-
 def historical_terminal_projection(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Small immutable lifecycle observation, never revived review/cost truth."""
     from ouroboros.task_status import SETTLED_STATUSES
@@ -1078,9 +1076,9 @@ def append_terminal_task_projection(
 ) -> bool:
     """Fail-soft terminal projection; lifecycle cleanup must always continue."""
     try:
-        return _append_terminal_task_projection(
-            drive_root, task_id, task, result, task_done_event,
-        )
+        from ouroboros.terminal_projection import append_terminal_projection
+
+        return append_terminal_projection(drive_root, task_id, task, task_done_event, result=result)
     except Exception:
         log.warning("Failed to append canonical terminal projection for %s", task_id, exc_info=True)
         return False

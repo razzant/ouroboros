@@ -32,8 +32,12 @@ def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
     equals), so a quoted SAFE cannot outrank a direct flag. Only when no candidate
     carries a verdict is the whole reply read as ``{"answer": "<verdict JSON>"}``
     with no other key: that string is decoded once, never searched. Otherwise
-    None: the caller fails closed.
+    None: the caller fails closed. An advertised typed refusal (``refusal_content_text``) is no verdict text: None.
     """
+    from ouroboros._usage_response import refusal_content_text
+
+    if refusal_content_text(text) is not None:
+        return None
     clean = text.replace("```json", "").replace("```", "").strip()
     candidates = [clean]
     depth = 0

@@ -8,18 +8,10 @@ import pytest
 
 import ouroboros.loop as loop
 from ouroboros.loop_delivery import selected_completion_text
-from ouroboros.outcomes import derive_loop_outcome
+from ouroboros.outcomes import derive_loop_outcome, selected_final_answer
 from ouroboros.tools.registry import ToolRegistry
-
-
-def finish(answer=None, *, action='finish', **kw):
-    arguments = {'action': action, **kw}
-    if answer is not None:
-        arguments['answer'] = answer
-    return {'role': 'assistant', 'content': None, 'tool_calls': [{
-        'id': 'complete', 'type': 'function',
-        'function': {'name': 'finish_task', 'arguments': json.dumps(arguments)},
-    }]}
+from tests._model_replies import MIXED_REFUSAL_PARTS, MIXED_REFUSAL_TEXT, finish
+from tests._scripted_model_loop import walk_loop
 
 
 def hold_first_delivery(monkeypatch):
@@ -557,3 +549,52 @@ def test_refused_completion_keeps_the_retained_answer_unselected(tmp_path, refus
     assert not getattr(registry._ctx, '_completion_selected', None)
     assert registry._ctx._delivery_candidate.full_text == 'Retained work'
     assert registry._ctx._delivery_candidate.acceptance_binding['authoritative'] is False
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_completed_refusal_waits_for_result_review_and_author_selection(tmp_path, monkeypatch, keep):
+    reviewed = []
+
+    def review(_ctx, content, _trace, hold):
+        reviewed.append(content)
+        if len(reviewed) == 1:
+            hold("Fixture review requests another look.")
+            return True
+        return False
+
+    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
+    reply = {"role": "assistant", "content": MIXED_REFUSAL_PARTS}
+    choice = finish(answer_sha256=hashlib.sha256(MIXED_REFUSAL_TEXT.encode()).hexdigest()) if keep else finish("Reviewed.")
+    llm, text, _, trace = walk_loop(tmp_path, monkeypatch, (reply, {}), (choice, {}))
+    assert llm.calls == 2
+    history = llm.requests[1]["messages"]
+    assert [row["content"] for row in history if row.get("role") == "assistant"] == [MIXED_REFUSAL_PARTS]
+    assert text == (MIXED_REFUSAL_TEXT if keep else "Reviewed.")
+    assert reviewed == [MIXED_REFUSAL_TEXT, text]
+    assert selected_final_answer(text, trace) == ""
+
+
+def test_mixed_completed_executes_only_its_structured_call_and_preserves_history(tmp_path, monkeypatch):
+    call_record = {"type": "function", "id": "demo", "function": {"name": "fixture_read", "arguments": "{}"}}
+    reply = {"role": "assistant", "content": MIXED_REFUSAL_PARTS, "tool_calls": [call_record]}
+    seen = []
+
+    def handle(calls, tools, logs, task_id, executor, messages, trace, progress, **kwargs):
+        seen.extend(calls)
+        assert messages[-1] == reply
+        messages.append({"role": "tool", "tool_call_id": "demo", "content": "Ready."})
+        trace["tool_calls"].append({"tool": "fixture_read", "is_error": False})
+
+    real_handle = loop.handle_tool_calls
+
+    def dispatch(calls, *args, **kwargs):
+        if calls == [call_record]:
+            return handle(calls, *args, **kwargs)
+        return real_handle(calls, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "handle_tool_calls", dispatch)
+    notes = []
+    llm, text, _, trace = walk_loop(tmp_path, monkeypatch, (reply, {}), (finish("Done."), {}), notes=notes)
+    assert seen == [call_record] and llm.calls == 2 and text == "Done."
+    assert all(request["accepts_typed_refusals"] for request in llm.requests)
+    assert MIXED_REFUSAL_TEXT in notes and "best_valid_final_answer" not in trace

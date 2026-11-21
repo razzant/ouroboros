@@ -1,10 +1,7 @@
 """One rolling working checkpoint per task attempt (#1563, consolidated #1543).
 
-Every same-ID continuation already serializes the loop's cognition through ONE
-serializer (``owner_wait.continuation_state``), but only when the task parks.
-This module writes that same state DURING ordinary work, so a worker crash, an
-automatic retry or an application stop costs at most the work since the last
-boundary instead of the whole line of thought:
+During ordinary work the loop saves the same ``owner_wait.continuation_state``
+used to park a task, at these recovery boundaries:
 
 - ``ready`` — incorporated owner/peer mail and context changes, before the
   model call (skipped only when its signature, the round number included,
@@ -19,11 +16,8 @@ boundary instead of the whole line of thought:
   written before the grant is consumed (``save_resumed``): the pause retired
   this file, and consumption ends the pause's own recovery ownership.
 
-The file (``task_results/artifacts/<task>/source_handles/working/working_checkpoint-a<attempt>.json``,
-never a deliverable: every artifact/evidence scanner skips ``source_handles``)
-has exactly one writer, its attempt's loop, and is replaced atomically (temp +
-``os.replace``: a process crash leaves the old or the new state, never a torn
-one; no fsync, so no power-loss promise). It stores each repeated element once:
+The attempt's loop atomically replaces ``source_handles/working/working_checkpoint-a<attempt>.json``
+(temp + ``os.replace``, no fsync). Artifact/evidence scanners skip ``source_handles``. It stores each repeated element once:
 every dict element of a list reached through dicts (messages, tool schemas, trace
 tool calls, owner directives, call refs, the copies inside the context
 observations) on which custody projection and redaction are no-ops is a blob of
@@ -32,8 +26,7 @@ the observability CAS (the same part a request view stores,
 ``observability/calls/<task>/working-a<attempt>.json`` (``call_type``
 ``working_parts``: the packer keeps and retires them with the task); this union
 of every part the attempt named is written before the checkpoint that names it.
-Crashing between a part write and its manifest leaves an orphan of one element,
-the same class of orphan as a whole observability blob.
+Crashing before the manifest leaves an orphan part, like an orphan observability blob.
 Each part holds its ``_json_bytes`` and is named by ``{"$shared": <sha256>}``; the file
 is the wrapper ``{"format": "working_shared_v1", "state": <skeleton>}``, which
 an older body refuses as an identity mismatch, keeping its original-prompt path
@@ -41,14 +34,11 @@ an older body refuses as an identity mismatch, keeping its original-prompt path
 a state carrying a token-shaped dict is written whole. ``read_working`` expands
 the state (a part nothing holds is typed ``SharedValueMissing``); the frozen
 recovery source and any pause completed from it are always the expanded whole.
-It is deleted only once the
-attempt's result, owed final or exact pause is durable, or once the attempt
-that continues it loaded the frozen copy (never at the freeze itself, whose
-locator is not durable yet); storage stays one state per live attempt.
-Only a real recovery FREEZES its exact bytes into the existing immutable
-continuation-source store, so a retry or a restart restores a verified
-source, never the mutable file. A live park (owner wait, exact pause, sleep)
-keeps its own newer source: recovery never prefers this file over it.
+Before native dispatch a sibling ``.operation.json`` binds one physical attempt to this round's own landed ready
+sequence: a write begun and not landed is owed (``_working_checkpoint_owed``) and is written first, under the typed
+hold, so the address never names an absent or an earlier sequence. Recovery freezes the matching address with the
+state. Both files retire after a durable result, owed final, exact pause, or a consumer loading that immutable source.
+A live park (owner wait, exact pause, sleep) keeps its own newer source.
 The recovery locator carries clock facts to assignment and agent startup,
 independently of fresh idle timestamps; legacy sources without an origin keep
 fresh-start timing without old exclusions.
@@ -155,7 +145,7 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
         budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
         context_model_role=str(state.get("context_model_role") or ""),
-        context_start=state.get("context_start")), RESUMED)
+        context_start=state.get("context_start"), native_attempt=native_attempt_at(state)), RESUMED)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -195,15 +185,12 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
     attempt = int(getattr(ctx, "task_attempt", None) or 1)
     call_id = f"working-a{attempt}"
     listed = getattr(ctx, "_working_parts_listed", None)
-    created_at = None
     if listed is None:
         listed = ctx._working_parts_listed = {}
         path = call_manifest_path(root, task_id, call_id)
-        if path.is_file():
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-            created_at = manifest.get("created_at")
-            listed.update({ref["sha256"]: ref for ref in manifest.get("shared_parts") or [] if isinstance(ref, dict)})
-        ctx._working_parts_created_at = created_at
+        manifest = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        listed.update({ref["sha256"]: ref for ref in manifest.get("shared_parts") or [] if isinstance(ref, dict)})
+        ctx._working_parts_created_at = manifest.get("created_at")
     new = {digest: raw for digest, raw in parts.items() if digest not in listed}
     if not new:
         return 0
@@ -239,7 +226,7 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
 
     signature = _signature(limit_ctx)
     started = time.perf_counter()
-    usage = limit_ctx.accumulated_usage
+    usage, ctx._working_checkpoint_owed = limit_ctx.accumulated_usage, True  # owed until this write lands
     seq = int(getattr(ctx, "_working_checkpoint_seq", 0) or 0) + 1
     state = continuation_state(
         ctx, limit_ctx.messages, limit_ctx.llm_trace if isinstance(limit_ctx.llm_trace, dict) else {},
@@ -262,6 +249,8 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
                         "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}
+    if boundary == RESUMED and limit_ctx.native_attempt:
+        state["working"]["native_attempt"] = {**limit_ctx.native_attempt, "seq": seq}
     degraded: List[str] = []
 
     def opaque(value: Any) -> Dict[str, str]:
@@ -282,7 +271,7 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
     write_bytes_atomic(checkpoint_path(_root(ctx), ctx.task_id, int(getattr(ctx, "task_attempt", None) or 1),
                                        create=True), data)
     written = time.perf_counter()
-    ctx._working_checkpoint_seq, ctx._working_checkpoint_signature = seq, signature
+    ctx._working_checkpoint_seq, ctx._working_checkpoint_signature, ctx._working_checkpoint_owed = seq, signature, False
     stats = usage.setdefault("working_checkpoint", {"saves": 0, "max_bytes": 0, "encode_ms": 0.0, "write_ms": 0.0,
                                                     "parts_written": 0})
     stats.update(saves=stats["saves"] + 1, last_bytes=len(data), max_bytes=max(stats["max_bytes"], len(data)),
@@ -428,23 +417,37 @@ def expand_working(root: Any, wrapper: Dict[str, Any], task_id: Optional[str] = 
 
 
 def read_working(root: Any, task_id: str, attempt: int) -> tuple:
-    """``(bytes, state)`` of one attempt's working checkpoint; ``(b"", {})`` when it has none.
-
-    The bytes are the whole state (a shared-form file is expanded and re-encoded): what a
-    recovery freezes is always self-contained.
-    """
+    """Self-contained (bytes, state) of one attempt, or (b"", {}) if absent."""
+    from ouroboros.utils import read_json_dict
+    path = checkpoint_path(root, task_id, attempt)
     try:
-        data = checkpoint_path(root, task_id, attempt).read_bytes()
+        data = path.read_bytes()
     except FileNotFoundError:
         return b"", {}
     state = json.loads(data.decode("utf-8"))
-    if isinstance(state, dict) and state.get("format") == WORKING_SHARED_FORMAT:
+    shared = isinstance(state, dict) and state.get("format") == WORKING_SHARED_FORMAT
+    if shared:
         state = expand_working(root, state, str(task_id))
-        data = json.dumps(state, ensure_ascii=False).encode("utf-8")
     if (not isinstance(state, dict) or state.get("task_id") != str(task_id)
             or int(state.get("task_attempt") or 0) != int(attempt) or not isinstance(state.get("working"), dict)):
         raise ValueError("working checkpoint identity mismatch")
+    working = state["working"]
+    if working.get("boundary") in {"ready", RESUMED}:
+        if native := native_attempt_at(state, read_json_dict(path.with_suffix(".operation.json"))):
+            working["native_attempt"] = native
+    if shared or working.get("native_attempt"):
+        data = json.dumps(state, ensure_ascii=False).encode("utf-8")
     return data, state
+
+
+def native_attempt_at(state: dict, descriptor: Optional[dict] = None) -> Optional[dict]:
+    """The native send named by this exact ready boundary, including pre-freeze handoffs."""
+    working = state.get("working") or {}
+    native = descriptor or working.get("native_attempt") or (state.get("_working_handoff") or {}).get("native_attempt")
+    if (working.get("boundary") in {"ready", RESUMED} and isinstance(native, dict) and native.get("physical_attempt_id")
+            and working.get("seq") and native.get("seq") == working["seq"] and native.get("round") == state.get("round_idx")):
+        return native
+    return None
 
 
 def live_park(root: Any, task_id: str, attempt: Optional[int] = None, *, verify_source: bool = False) -> str:
@@ -859,7 +862,9 @@ def consume_recovery(ctx: Any, handoff: Dict[str, Any]) -> None:
     source_task = str(handoff.get("source_task_id") or ctx.task_id)
     try:
         if str(handoff.get("source_kind") or SOURCE_WORKING) == SOURCE_WORKING:
-            checkpoint_path(_root(ctx), source_task, int(handoff.get("from_attempt") or 0)).unlink(missing_ok=True)
+            path = checkpoint_path(_root(ctx), source_task, int(handoff.get("from_attempt") or 0))
+            path.unlink(missing_ok=True)
+            path.with_suffix(".operation.json").unlink(missing_ok=True)
             return
         wait = (load_task_result(_root(ctx), source_task, strict=True) or {}).get("owner_wait") or {}
         if wait.get("wait_id") == handoff.get("wait_id") and wait.get("state") == "waiting":

@@ -35,7 +35,8 @@ _CODE = re.compile(r"[a-z][a-z0-9_.:-]{0,63}")
 # other kinds (imported aggregates), rows under a review's custody, abandoned settlements
 # outside the engine (only the explicit OpenRouter command fetches their receipts) and
 # abandoned settlements whose ended engine custody is recorded: once the engine said the
-# call is over, its price is not searched automatically. Their late-receipt right is unchanged.
+# call is over, or its request names no store to verify, its price is not searched
+# automatically. Their late-receipt right is unchanged.
 _RECOVERABLE = ("COALESCE(kind, 'attempt') = 'attempt' AND COALESCE(review_skill, '') = '' "
                 "AND COALESCE(review_slot_id, '') = '' AND (state IN ('reserved', 'dispatched', 'unresolved') "
                 "OR (COALESCE(provider, '') = 'claudexor' "
@@ -514,14 +515,17 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                     _unresolved(observations, row, (basis.get("code") if isinstance(basis, dict) else str(basis))
                                 or "provider_retry_after")
                     continue
-                if exc.code == "recovery_operation_gone":
+                # No later pass can find this price: the engine no longer has the operation, or its request recorded
+                # no store, so none can be verified and none is probed. The row closes at unknown price, once.
+                ended = {"recovery_operation_gone": "operation_gone", "model_control_store_unbound": "terminal"}.get(exc.code)
+                if ended:
                     if task_has_live_ownership(task_id, ownership=reads):
                         continue
                     state = usage.terminalize_abandoned_attempt(
                         reservation, reason="owner_task_terminal", expected_revision=row["revision"])
                     if state == "settled":
-                        _recovery_fact(root, row, "operation_gone", {"operation_get_status": exc.status_code,
-                                                                   "code": str(exc)},
+                        _recovery_fact(root, row, ended, {"operation_get_status": exc.status_code, "code": str(exc)}
+                                       if ended == "operation_gone" else {"code": exc.code},
                                        revision=row["revision"] + (0 if abandoned else 1))
                     if state in {"settled", "released"}:
                         unproven.discard(attempt_id)

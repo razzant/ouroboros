@@ -19,13 +19,9 @@ from ouroboros import usage_accounting as ua
 from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 from ouroboros.llm import LLMClient
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
-from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
+from ouroboros.transport_custody import is_pre_dispatch_transport_failure
+from tests._llm_claudexor_fixtures import MODEL, REF, ROUTE, result
 from tests._usage_store_testing import ledger_rows
-
-
-MODEL = "claudexor::codex=exact-model"
-ROUTE = {"source": "codex", "credentialProfileId": "account-a", "accountFingerprint": "fingerprint-a", "model": "exact-model"}
-REF = {"resourceId": "res-one", "sha256": "sha256:" + "a" * 64, "sizeBytes": 99}
 
 
 @pytest.mark.parametrize("unknown", [False, True])
@@ -110,20 +106,6 @@ def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code
     assert classify_llm_exception(typed).kind == "context_overflow"
 
 
-def result(*, outcome="completed", cash=None, knowledge="unknown", route=None, problem=None):
-    route = dict(ROUTE if route is None else route)
-    return {"outcome": outcome, "message": {"role": "assistant", "content": "Ответ 🐍", "tool_calls": [
-        {"id": "a", "type": "function", "function": {"name": "read", "arguments": '{ "path": "a" }'}},
-        {"id": "b", "type": "function", "function": {"name": "read", "arguments": '{"path":"b"}'}},
-    ], "nativeContinuation": {"route": route, "format": "codex.responses.v1", "payload": [
-        {"type": "reasoning", "encrypted_content": "opaque+==\r\n", "_context_capsule": "not host metadata"},
-    ]}}, "route": route, "usage": {"input_tokens": 20, "output_tokens": 7, "cached_input_tokens": 12,
-                                    "cache_write_tokens": None, "reasoning_tokens": 3},
-        "cost": {"knowledge": knowledge, "cashUsd": cash, "estimatedUsd": None, "valuationUsd": 12.5,
-                 "valuationKnowledge": "exact", "billing": "unknown", "source": "provider", "provenance": ["fixture"]},
-        "appliedOptions": {"reasoningEffort": "high"}, "problem": problem}
-
-
 class Gateway:
     def __init__(self, results=None, dispatch=None):
         self.results = results or [result()]
@@ -132,6 +114,7 @@ class Gateway:
         self.uploaded_bytes = []
         self.accepted_operations = {}
         self.creates = []
+        self.create_requests = []
         self.reads = []
         self.acks = []
         self.cancels = []
@@ -144,6 +127,7 @@ class Gateway:
         self.operation_catalog = []
         self.catalog_reads = 0
         self.capture_requests = []
+        self.store_identity = "store-one"
 
     def operations(self, **_kwargs):
         self.catalog_reads += 1
@@ -161,6 +145,7 @@ class Gateway:
         assert ref == REF
         self.capture_requests.append(deepcopy(options))
         self.creates.append(idempotency_key)
+        self.create_requests.append((idempotency_key, deepcopy(ref), deepcopy(options)))
         if idempotency_key not in self.accepted_operations:
             self.accepted_operations[idempotency_key] = len(self.accepted_operations)
         index = self.accepted_operations[idempotency_key]
@@ -177,8 +162,11 @@ class Gateway:
 
     def detail(self, index):
         value = self.results[index]
-        succeeded = value["outcome"] == "completed" and value["message"] is not None
-        return {"id": f"op-{index}", "state": "running" if self.pending else "succeeded" if succeeded else "failed",
+        # These are the engine lifecycle states, not a judgement about the returned text.
+        terminal = {"completed": "succeeded", "incomplete": "interrupted", "unknown": "interrupted"}.get(value["outcome"], "failed")
+        if (value["problem"] or {}).get("code") == "response_rejected" and value["message"] is None:
+            terminal = "failed"
+        return {"id": f"op-{index}", "state": "running" if self.pending else terminal,
                 "dispatch": {"state": "started" if self.pending else self.dispatch[index], "route": value["route"]},
                 "response": {"state": "absent"} if self.pending else {"state": "ready", "ref": REF},
                 "problem": value["problem"]}
@@ -227,6 +215,25 @@ def setup(tmp_path, monkeypatch):
 
 def ledger(root):
     return ledger_rows(root)
+
+
+def test_engine_output_limit_is_a_computed_finish_on_the_accepted_round(setup):
+    from ouroboros.loop_llm_call import call_llm_with_retry, forced_response_is_incomplete
+
+    root, gateway, client = setup
+    reply = result(outcome="incomplete", problem={"code": "provider_incomplete", "context": {"reason": "max_output_tokens"}})
+    reply["message"] = {"role": "assistant", "content": "Hello."}
+    gateway.results = [reply]
+    policy = {}
+    tools = [{"type": "function", "function": {"name": "label_sample", "parameters": {"type": "object"}}}]
+    msg, _ = call_llm_with_retry(client, [{"role": "user", "content": "Hello."}], MODEL, tools, "high", 1,
+                                 root, "task-one", 1, None, {}, response_meta_out=policy)
+    assert msg["content"] == "Hello." and len(gateway.creates) == 1
+    assert policy["finish_reason"] == "length" and forced_response_is_incomplete(policy)
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    row, = [event for event in events if event["type"] == "llm_round"]
+    assert (row["finish_reason"], row["finish_reason_origin"]) == ("length", "computed")
+    assert row["claudexor"]["operation_state"] == "interrupted" and policy["response_status"] == "incomplete"
 
 
 def test_the_fixture_owns_its_data_root_for_every_reader(setup):
@@ -344,9 +351,73 @@ def test_lost_create_reply_rejoins_without_second_physical_attempt(setup):
     gateway.lose_create = True
     answer, usage = client.chat([{"role": "user", "content": "hi"}], MODEL)
     assert answer["content"] == "Ответ 🐍"
-    assert len(gateway.creates) == 2 and gateway.creates[0] == gateway.creates[1]
+    [(_, key)] = gateway.uploads
+    assert len(gateway.uploaded_bytes) == 1 and gateway.create_requests == [(key, REF, {})] * 2
     assert len(gateway.accepted_operations) == 1 and len(usage["ledger_attempt_ids"]) == 1
     assert [row["state"] for row in ledger(root)] == ["settled"]
+
+
+@pytest.mark.parametrize(("original_store", "new_store", "same_generation", "rejoin"), [
+    ("store-one", "store-one", False, True),
+    ("store-one", "store-two", False, False),
+    ("store-one", "", False, False),
+    ("", "", True, True),
+    ("", "", False, False),
+], ids=["same-store", "different-store", "unverified-store", "legacy-same-generation", "legacy-new-generation"])
+@pytest.mark.parametrize("accepted", [False, True], ids=["lost-create", "lost-read"])
+def test_warm_create_rejoins_only_a_bound_store(setup, monkeypatch, tmp_path, original_store, new_store,
+                                               same_generation, rejoin, accepted):
+    from ouroboros.gateways.claudexor import DaemonEndpoint
+    from ouroboros.gateways.claudexor_metadata import descriptor_stamp
+
+    def endpoint(name):
+        path = tmp_path / name
+        path.write_text("descriptor")
+        return DaemonEndpoint("127.0.0.1", 1, "test-token", str(path), descriptor_stamp(path))
+
+    root, gateway, client = setup
+    replacement = Gateway()
+    gateway.store_identity, replacement.store_identity = original_store, new_store
+    gateway._endpoint = endpoint("original")
+    replacement._endpoint = gateway._endpoint if same_generation else endpoint("replacement")
+    gateway.lose_create = not accepted
+    gateway.pending = gateway.read_error = accepted
+    if rejoin:
+        replacement.accepted_operations = gateway.accepted_operations
+    monkeypatch.setattr(transport, "read_owned_gateway", lambda: replacement)
+    monkeypatch.setattr(transport, "current_model_wait", lambda: SimpleNamespace(
+        tool_context=SimpleNamespace(task_id="task-one", is_direct_chat=False), control_reason=lambda: None))
+    monkeypatch.setattr(transport.config, "NETWORK_WAIT_BACKOFF_START_SEC", 0.001)
+    monkeypatch.setattr(transport.config, "NETWORK_WAIT_BACKOFF_MAX_SEC", 0.001)
+
+    if rejoin:
+        answer, usage = client.chat([], MODEL)
+        assert answer == result()["message"] and len(usage["ledger_attempt_ids"]) == 1
+        assert replacement.create_requests == ([] if accepted else gateway.create_requests)
+        assert replacement.reads == (["op-0"] if accepted else [])
+        assert len(replacement.acks) == 1
+    else:
+        with pytest.raises(transport.ClaudexorModelError) as raised:
+            client.chat([], MODEL)
+        error = raised.value
+        assert error.code == "model_outcome_unknown" and error.same_operation_recoverable
+        assert not error.retryable and error.physical_attempt_capture.state == "unresolved"
+        assert not replacement.create_requests and not replacement.accepted_operations
+        assert not replacement.reads and not replacement.acks and not replacement.cancels
+    assert len(gateway.create_requests) == len(gateway.accepted_operations) == len(gateway.uploaded_bytes) == 1
+    assert not replacement.uploaded_bytes
+    assert gateway.closed == replacement.closed == 1
+    assert [row["state"] for row in ledger(root)] == ["settled" if rejoin else "unresolved"]
+
+
+def test_stop_after_lost_create_does_not_guess_the_operation_id(setup):
+    root, gateway, client = setup
+    gateway.lose_create = True
+    with pytest.raises(transport.ClaudexorModelError) as raised:
+        client.chat([], MODEL, model_poll_control=lambda: "owner_cancelled" if gateway.creates else None)
+    assert raised.value.control_reason == "owner_cancelled" and not raised.value.operation_id
+    assert len(gateway.creates) == len(gateway.accepted_operations) == 1 and not gateway.cancels
+    assert [row["state"] for row in ledger(root)] == ["unresolved"]
 
 
 @pytest.mark.parametrize("fault", ["stall_then_ready", "deadline", "forbidden"])
@@ -465,7 +536,7 @@ def test_control_connect_failure_after_acceptance_stays_unknown(setup):
         client.chat([{"role": "user", "content": "hi"}], MODEL, timeout=0.01)
     error = raised.value
     assert error.code == "model_outcome_unknown" and error.operation_id == "op-0"
-    assert not is_pre_dispatch_transport_failure(error) and not is_retryable_transport_death(error)
+    assert not is_pre_dispatch_transport_failure(error)
     assert ledger(root)[-1]["state"] == "unresolved" and len(gateway.accepted_operations) == 1
     assert not gateway.acks
 
@@ -1064,6 +1135,8 @@ def test_operation_observer_has_recovery_identity_without_provider_content(setup
 
 
 def test_acceptance_updates_only_receipt_and_preserves_physical_seal(setup, monkeypatch):
+    from ouroboros.gateways.claudexor_metadata import model_rejoin_binding
+
     root, gateway, client = setup
     initial, physical, payload_passes = {}, {}, []
     persist = transport.persist_call
@@ -1086,6 +1159,7 @@ def test_acceptance_updates_only_receipt_and_preserves_physical_seal(setup, monk
     path = root / "observability" / "calls" / "task-one" / f'{initial["call_id"]}.json'
     accepted = json.loads(path.read_text())
     assert len(payload_passes) == 1
+    assert initial["model_store_binding"] == model_rejoin_binding(gateway) != gateway.store_identity
     assert accepted == {**initial, "operation_id": "op-0"}
     assert all(path.read_bytes() == raw for path, raw in physical.items())
     assert len(gateway.accepted_operations) == 1
@@ -1425,7 +1499,7 @@ def test_a_failed_operation_route_names_the_model_it_requested(setup, monkeypatc
     answer, _ = call_llm_with_retry(client, [{"role": "user", "content": "hello"}], MODEL, None, "high", 3,
                                     root / "logs", "task-one", 1, None, usage)
     assert answer is None and usage["_model_route"] == {**ROUTE, "model": served or "exact-model"}
-    events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [event["observed_route"] for event in events if event.get("type") == "llm_api_error"] == [route]
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: root)
     auto = replace(_plan(), model=MODEL, provider="claudexor", route_fp="auto", window_witness_bound=False)
@@ -1440,6 +1514,27 @@ def test_caller_control_before_create_proves_no_dispatch(setup):
     assert not gateway.uploads and not gateway.creates
     assert raised.value.physical_attempt_capture.state == "released"
     assert [row["state"] for row in ledger(root)] == ["released"]
+
+
+@pytest.mark.parametrize("stop", [False, True], ids=["store-moved", "store-moved-and-stop"])
+def test_control_after_observer_wins_over_unverified_create_binding(setup, stop):
+    root, gateway, client = setup
+    control = None
+
+    def observe(value):
+        nonlocal control
+        if value["model_activity"]["phase"] == "preparing":
+            gateway.store_identity = "different-store"
+            if stop:
+                control = "owner_cancelled"
+
+    with pytest.raises(transport.ClaudexorModelNotDispatched) as caught:
+        client.chat([], MODEL, model_operation_observer=observe, model_poll_control=lambda: control)
+    assert caught.value.code == ("model_operation_interrupted" if stop else "model_control_store_unverified")
+    assert getattr(caught.value, "control_reason", None) == control
+    assert len(gateway.uploads) == 1 and not gateway.creates and not gateway.cancels
+    [attempt] = ledger(root)
+    assert attempt["state"] == "released" and attempt.get("cost_usd") is None  # released: no billed claim, not a zero
 
 
 @pytest.mark.parametrize("phase", ["upload", "ack"])

@@ -31,7 +31,7 @@ from supervisor.events_budget import budget_hold_fact, install_exact_budget_paus
 from supervisor.owner_pause_control import request_owner_pause
 from tests._budget_pause_exact_helpers import _loop_ctx
 from tests._execution_clock_seams import agent_start
-from tests.test_context_fit_v664 import _plan
+from tests._context_fit_plan import fit_plan as _plan
 from tests.test_loop_transport_wait import _loop_kwargs
 from tests.test_resume_handover import MARK, ProcessLost, _account_route, _dispatch_one, _has_mark, _stop_boot
 from tests.test_swarm_host_admission import host  # noqa: F401

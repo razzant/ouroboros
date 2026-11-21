@@ -27,7 +27,7 @@
  * @property {string=} role  // a fallback's chain row (`fallback:<n>`, n from 0): tells apart two rows of one model
  * @property {WorkPrimaryRoute=} primary  // only when the acting route is not the primary
  * @property {string=} since  // an ISO instant in UTC
- * @property {string=} cause  // a short code or phrase: `switch_model`, a failure's code, `configured fallback`
+ * @property {string=} cause  // departure code: a chosen switch, the failed call's access/failure code, or `configured fallback`
  * @property {import('./client_contract_types.js').ChatModelRoute=} pending  // the route the next step uses, when it differs
  */
 /**

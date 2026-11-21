@@ -1,6 +1,7 @@
 """Acting role, exact account and active turn survive prospective and forced sends."""
 
 import json
+import queue
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -12,12 +13,12 @@ from ouroboros.loop_model_call import _RoundModelCallContext, _adopt_fallback_ro
 from ouroboros.llm import LLMClient
 from ouroboros.llm_claudexor import ModelTurnState
 from ouroboros.loop_llm_call import call_llm_with_retry
-from ouroboros.loop_round_limits import _RoundLimitContext
-from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, task_model_binding
+from ouroboros.model_slots import task_model_binding
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
 from ouroboros.send_clock import CLOCK_NOTE_PREFIX
+from tests._forced_model_binding_fixtures import acting as acting
 from tests.test_llm_claudexor import MODEL, ROUTE, result, setup as setup
 
 
@@ -26,41 +27,6 @@ def _unclocked(messages):
     assert str(messages[-1].get("content") or "").startswith(CLOCK_NOTE_PREFIX), messages[-1]
     assert not any(str(row.get("content") or "").startswith(CLOCK_NOTE_PREFIX) for row in messages[:-1])
     return messages[:-1]
-
-
-@pytest.fixture
-def acting(setup, monkeypatch):
-    root, gateway, client = setup
-    from ouroboros.task_results import write_task_result
-    write_task_result(root, "task-one", "running", root_task_id="task-one", _attempt=1)
-    gateway.results *= 4
-    gateway.dispatch *= 4
-    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "main-only", "fallback": ["fallback-only"]}))
-    # Auto is the mode that asks the route's catalog (Inline sends without asking),
-    # so these sends show which account binding that read used.
-    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
-    catalogs = []
-
-    def catalog(source, profile=None, *, requested_model=None):
-        catalogs.append((source, profile, requested_model))
-        return {"source": source, "credentialProfileId": profile, "models": [
-            {"id": requested_model, "inputModalities": ["text"] if profile == "main-only" else ["text", "image"]}]}
-
-    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
-    messages = [{"role": "system", "content": "Own SYSTEM"}, {"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
-    tools = ToolRegistry(repo_dir=root.parent, drive_root=root)
-    tools._ctx.task_metadata = {"configured_subagent": {"selected_subagent_id": "visual-actor",
-        "route": {"kind": "api_model", "target_id": MODEL, "credential_profile_id": "actor-only"}}}
-    tools._ctx.active_model = MODEL
-    logs = root / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    ctx = _RoundLimitContext(messages=deepcopy(messages), llm=client, active_model=MODEL,
-        active_effort="high", max_retries=1, drive_logs=logs, task_id="task-one", round_idx=2,
-        event_queue=None, accumulated_usage={}, task_type="task", active_use_local=False,
-        max_rounds=2, drive_root=root, tools=tools, tool_schemas=[])
-    return SimpleNamespace(root=root, gateway=gateway, client=client, messages=messages,
-                           tools=tools, ctx=ctx, catalogs=catalogs)
 
 
 def test_forced_call_keeps_configured_actor_account_and_image(acting):
@@ -90,6 +56,385 @@ def test_subscription_prepared_candidate_admits_the_actual_forced_send(acting):
     text = forced._call_forced_model_once(acting.ctx, initial_messages=prepared, admitted_request=request)
     assert text == "Ответ 🐍", acting.ctx.accumulated_usage
     assert len(acting.gateway.creates) == 1
+
+
+@pytest.mark.parametrize("ending", ["answer", "unrun-tool", "no-address", "new-owner-words", "new-addressing",
+                                  "legacy-ready", "legacy-new-addressing", "legacy-resumed", "legacy-deadline",
+                                  "deadline-new-addressing", "late-stop", "late-presence-stop",
+                                  "late-stop-new-owner-words", "late-stop-with-owner-words",
+                                  "grace-answer", "grace-finish-only", "deadline-pooled-stop",
+                                  "grace-open-fence", "grace-open-fence-finish-only", "grace-pause",
+                                  "grace-pause-finish-only", "grace-pause-unreadable", "grace-pause-busy"])
+def test_forced_dispatch_checkpoint_only_recovers_its_existing_reply(acting, monkeypatch, ending):
+    """A restored wrap-up is read, never sent again, and its reply returns only through forced delivery. A deadline
+    or an expired supervisor grace that meets the read after its receipt keeps that receipt on the forced rail: the
+    forced reason stays the terminal's, the control is recorded beside it, and a finish_task-only reply still answers.
+    That read never reached its own Pause check, so the owner's persisted Pause, or a fence that cannot be read at
+    once (unreadable, or its store busy: never waited for past the bound), withholds the reply, its words and its
+    finish request alike, from the terminal; the receipt stays counted once on its one row, with no POST, no tool and
+    no Pause entered. A fence released again is the matching open one, and answers as without any.
+    A pooled worker's Stop stored between the restored read's status read and any result read, as the deadline
+    passes, is still that Stop: the loop's control owner ends the work as it, with no result read, POST or cancel."""
+    from ouroboros import loop, loop_transport, owner_mailbox, owner_pause, store, working_checkpoint
+    from ouroboros.loop_messages import owner_source_sha256
+    from ouroboros.observability import update_call_manifest_metadata
+    from tests._model_replies import finish
+    from tests._working_checkpoint import checkpoint_registry
+    from tests._usage_store_testing import ledger_rows
+
+    ctx, root, gateway = acting.ctx, acting.root, acting.gateway
+    ctx.status_drive_root = root
+    ctx.messages = [{"role": "user", "content": "Summarize the verified fixture."}]
+    ctx.llm_trace = {"reasoning_notes": [], "tool_calls": []}
+    ctx.tools._ctx.task_id, ctx.tools._ctx.task_attempt = ctx.task_id, 1
+    owner_row = _carry_wrap_up_owner_words(ctx)
+    baseline = owner_source_sha256(ctx.tools._ctx)
+    answer = "The fixture was verified."
+    reply = {"role": "assistant", "content": answer}
+    if ending.endswith("finish-only"):  # the wrap-up offered finish_task and answered with that call alone
+        ctx.tool_schemas = [ctx.tools.get_schema_by_name("finish_task")]
+        reply = finish(answer)
+    if ending == "unrun-tool":
+        reply["tool_calls"] = [{"id": "read-fixture", "type": "function", "function": {
+            "name": "chat_history", "arguments": "{}"}}]
+    gateway.results[0] = {**result(cash=0.17, knowledge="exact"), "message": reply}
+    task = {"id": ctx.task_id}
+    original_create = gateway.create_model_operation
+
+    if ending.startswith("legacy-"):
+        save = working_checkpoint.save_model_call
+
+        def save_count_only():
+            record = ctx.accumulated_usage[loop_transport.FORCED_ATTEMPT_KEY]
+            digest = record.pop("owner_source_sha256")
+            try:
+                save()
+            finally:
+                record["owner_source_sha256"] = digest
+
+        monkeypatch.setattr(working_checkpoint, "save_model_call", save_count_only)
+
+    def capture(ref, *, idempotency_key, **kwargs):
+        _, saved = working_checkpoint.read_working(root, ctx.task_id, 1)
+        descriptor = saved["usage"][loop_transport.FORCED_ATTEMPT_KEY]
+        if ending.startswith("legacy-"):
+            assert "owner_source_sha256" not in descriptor and descriptor["owner_directive_count"] == 1
+        else:
+            assert descriptor["owner_source_sha256"] == baseline
+        # The adapter has not submitted create yet, but dispatch custody already has an address.
+        pending = loop_transport.ready_operation(saved, deepcopy(saved["usage"]), root, ctx.task_id)
+        assert (pending["forced_reason_code"], pending["physical_attempt_id"], pending["operation_id"]) == (
+            "round_limit", idempotency_key, "")
+        if ending == "legacy-resumed":
+            # A continuation's newer snapshot can hold the same rows and count without being the send's input.
+            working_checkpoint.save_resumed(ctx.tools, saved, ctx.messages, ctx.llm_trace, deepcopy(saved["usage"]), set())
+        assert working_checkpoint.attach_recovery(root, task, source_task_id=ctx.task_id, from_attempt=1, cause="worker_crash")
+        return original_create(ref, idempotency_key=idempotency_key, **kwargs)
+
+    monkeypatch.setattr(gateway, "create_model_operation", capture)
+    forced._forced_final_answer(ctx, prompt="Best effort only", fallback_text="No answer.", reason_code="round_limit")
+    [row] = ledger_rows(root)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.17
+    if ending == "no-address":
+        for kind in ("request", "response"):
+            update_call_manifest_metadata(root, task_id=ctx.task_id, call_id=f"{row['attempt_id']}_model_{kind}",
+                                          metadata={"operation_id": None})
+    if ending.endswith("new-owner-words"):
+        assert owner_mailbox.write_owner_message(root, "Also verify the second fixture.", ctx.task_id, msg_id="late")
+    if ending.endswith("new-addressing"):
+        assert owner_mailbox.write_owner_message(root, owner_row["text"], ctx.task_id, msg_id="addressed",
+                                                 client_message_id=owner_row["client_message_id"])
+
+    fresh = checkpoint_registry(root, monkeypatch, ctx.task_id, 2)
+    fresh._ctx.task_metadata = deepcopy(ctx.tools._ctx.task_metadata)
+    fresh._ctx.working_recovery = task["_working_recovery"]
+    if "deadline" in ending:
+        read = llm_claudexor._read_model_receipt
+
+        def expire_after_read(*args, **kwargs):
+            receipt = read(*args, **kwargs)
+            fresh._ctx.task_metadata["deadline_at"] = "2000-01-01T00:00:00+00:00"
+            return receipt
+
+        monkeypatch.setattr(llm_claudexor, "_read_model_receipt", expire_after_read)
+    if ending.startswith("grace-"):
+        # The supervisor's grace opened before this round and has already ended: the read it bounds stops at its
+        # first control check, after the retained receipt, under a far calendar deadline that alone would not stop it.
+        fresh._ctx.task_metadata["deadline_at"] = "2999-01-01T00:00:00+00:00"
+        monkeypatch.setattr(task_pacing, "effective_finalization_reserve_sec", lambda _ctx: 0.0)
+        assert owner_mailbox.write_owner_message(root, "deadline", ctx.task_id, msg_id="grace",
+                                                 kind=owner_mailbox.KIND_FINALIZE_NOW)
+    fence_reads = []
+    if ending.startswith(("grace-open-fence", "grace-pause")):
+        # The owner's Pause is durable once the reply is retained, and the grace has ended: the read stops at that
+        # control before its own fence check. A fence released again is the same row and read with the fence open.
+        if ending in {"grace-pause-unreadable", "grace-pause-busy"}:
+            real_read = owner_pause.read_fence
+
+            def authority_lost(*args, **kwargs):  # only the one read that never waits fails; every other read is real
+                if store.bounded_wait(60.0) != 0.0:
+                    return real_read(*args, **kwargs)
+                fence_reads.append(0.0)
+                raise (store.StoreBusy("busy", reason="contention") if ending.endswith("busy")
+                       else ValueError("owner_pause_authority_unreadable"))
+
+            monkeypatch.setattr(owner_pause, "read_fence", authority_lost)
+        else:
+            owner_pause.install_fence(root, ctx.task_id, request_id="owner-pause")
+            if ending.startswith("grace-open-fence"):
+                owner_pause.release_fence(root, ctx.task_id, reason="owner_resume_consumed")
+    if ending.startswith("late-"):
+        # Stop now lands once the final receipt read has returned: only the forced exit's own read can meet it,
+        # as the live exit does (a direct turn's control in its drain, a Presence turn's open intent).
+        from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+        ready_read, stopped = loop.read_ready_operation, []
+
+        def stop_after_the_read(limit, pending):
+            reply = ready_read(limit, pending)
+            if ending == "late-stop-with-owner-words":  # both reach the forced exit's one drain together
+                assert owner_mailbox.write_owner_message(root, "Also verify the second fixture.", ctx.task_id, msg_id="late")
+            stopped.append(ending == "late-presence-stop" or owner_mailbox.write_owner_message(
+                root, REASON_OWNER_STOPPED_DIRECT_TURN, ctx.task_id, msg_id="stop", kind=owner_mailbox.KIND_FINALIZE_NOW))
+            return reply
+
+        monkeypatch.setattr(loop, "read_ready_operation", stop_after_the_read)
+        if ending == "late-presence-stop":
+            monkeypatch.setattr("supervisor.owner_stop.presence_stop_now", lambda _ctx: bool(stopped))
+    monkeypatch.setattr(ctx.llm, "chat", lambda *_a, **_k: pytest.fail("Recovery must not open a sender"))
+    monkeypatch.setattr(loop, "handle_tool_calls", lambda *_a, **_k: pytest.fail("A forced reply cannot run tools"))
+    if ending == "deadline-pooled-stop":
+        from ouroboros import cancel_intents
+        from ouroboros.model_wait import ModelWaitInterrupted
+        from ouroboros.observability import call_manifest_path
+
+        # No body retained this time: the restored read asks the engine for the same operation.
+        call_manifest_path(root, ctx.task_id, f"{row['attempt_id']}_model_response").unlink()
+        monkeypatch.setattr(llm_claudexor, "read_owned_gateway", lambda: gateway)
+        status, cancels = gateway.get_model_operation, len(gateway.cancels)
+
+        def stop_after_the_status_read(*args, **kwargs):
+            detail = status(*args, **kwargs)  # terminal, its result ready
+            cancel_intents.request_cancel(root, ctx.task_id, requested_stop_policy=cancel_intents.STOP_POLICY_IMMEDIATE)
+            fresh._ctx.task_metadata["deadline_at"] = "2000-01-01T00:00:00+00:00"
+            return detail
+
+        monkeypatch.setattr(gateway, "get_model_operation", stop_after_the_status_read)
+        monkeypatch.setattr(gateway, "get_model_result", lambda *_a, **_k: pytest.fail("a result read after the bound"))
+        with task_model_wait_scope(task={"id": ctx.task_id, "_attempt": 2}, drive_root=root, event_queue=None,
+                                   worker_slot_held=True) as owner, pytest.raises(ModelWaitInterrupted) as stopped:
+            owner.tool_context = fresh._ctx
+            loop.run_llm_loop([], fresh, ctx.llm, ctx.drive_logs, lambda *_a, **_k: None,
+                              queue.Queue(), task_id=ctx.task_id, drive_root=root)
+        assert stopped.value.control_reason == "cancelled"  # the pooled Stop's own exit, never the forced parser
+        assert gateway.creates == [row["attempt_id"]] and len(gateway.cancels) == cancels
+        return
+    text, usage, trace = loop.run_llm_loop([], fresh, ctx.llm, ctx.drive_logs, lambda *_a, **_k: None,
+                                         queue.Queue(), task_id=ctx.task_id, drive_root=root)
+    assert gateway.creates == [row["attempt_id"]] and ledger_rows(root) == [row]
+    assert trace["tool_calls"] == []
+    late_stop = ending.startswith("late-")  # the owner's Stop ends the rail under its own reason
+    # A deadline or grace that ended the read never replaces the wrap-up's own reason; it stays its own fact.
+    assert usage["reason_code"] == ("owner_requested_finalization" if late_stop else "round_limit")
+    if "deadline" in ending or ending.startswith("grace-"):
+        assert trace["forced_finalization"]["control_reason"] == "deadline"
+    if late_stop:  # no post-task model work follows it, and the receipt already read stays counted
+        assert fresh._ctx._skip_post_task_synthesis is True and usage["cost"] == 0.17
+    if ending.endswith("new-addressing"):
+        [addressed] = fresh._ctx._owner_directives
+        assert addressed["content"] == owner_row["text"] and "carried" not in addressed
+        assert owner_source_sha256(fresh._ctx) != baseline
+    held = ending.startswith("grace-pause")  # the owner's Pause, or authority that cannot be read, holds the reply
+    if ending in {"answer", "legacy-ready", "legacy-deadline", "late-stop", "late-presence-stop"} or (
+            ending.startswith("grace-") and not held):
+        assert text == answer and usage["cost"] == 0.17
+        assert owner_source_sha256(fresh._ctx) == baseline
+        assert not usage["_last_llm_call_meta"].get("usable_solve_response")
+        if ending == "legacy-deadline" or ending.startswith("grace-"):  # the forced parser, not deadline prose
+            assert trace["forced_finalization"]["source"] == "model"
+            if ending.endswith("finish-only"):
+                assert trace["forced_completion_request"]["status"] == "selected"
+        elif late_stop:  # its own verified answer stays on the row; the rail never delivers it as its final
+            assert trace["forced_finalization"]["source"] == "owner_stop_retained_candidate"
+        elif ending == "answer":  # the matching non-failure: no Stop, so the rail delivers its own recovered final
+            assert trace["forced_finalization"]["source"] == "model"
+            assert not getattr(fresh._ctx, "_skip_post_task_synthesis", False)
+    elif late_stop:  # nor does Stop keep a reply the current owner input does not own, read before it or with it
+        assert answer not in text and trace["forced_finalization"]["source"] == "owner_stopped_direct_turn"
+    elif ending == "unrun-tool":
+        assert trace["forced_finalization"]["source"] == "forced_model_incomplete"
+    elif ending == "legacy-resumed":
+        assert answer not in text and "owner input could not be verified" in text
+        assert trace["forced_finalization"]["source"] == "recovered_owner_source_unverified"
+        assert usage["terminal_origin"] == "host_notice"
+    else:
+        assert answer not in text
+        assert ("No usable answer" if ending == "no-address" or held else "not answered") in text
+        if ending == "deadline-new-addressing":  # a deadline after the read does not let the old reply answer new input
+            assert trace["forced_finalization"]["source"] == "late_owner_directive_requires_resume"
+        if held:  # the receipt stays counted once; no part of it became current, and no Pause was entered for it
+            assert usage["cost"] == 0.17 and "forced_completion_request" not in trace
+            assert getattr(fresh._ctx, "_completion_selected", None) is None
+            if ending in {"grace-pause", "grace-pause-finish-only"}:
+                assert owner_pause.read_fence(root, ctx.task_id)["state"] == "requested"
+            else:  # lost authority: the one read made at once, never repeated nor waited for
+                assert fence_reads == [0.0]
+
+
+def _carry_wrap_up_owner_words(ctx):
+    from ouroboros.owner_relay import inject_relay
+
+    row = {"ts": "2026-11-04T10:00:00+00:00", "direction": "in", "chat_id": 1,
+           "text": "Use the short summary.", "client_message_id": "owner-summary"}
+    inject_relay(ctx.tools._ctx, {"kind": "relay_entry", "msg_id": "relay:summary",
+                "text": "Context from the coordinating task.", "relay": {"relay_id": "summary"},
+                "owner_rows": [row], "source_task_id": "coordinator"}, ctx.messages)
+    [carried] = ctx.tools._ctx._owner_directives
+    assert carried["carried"] is True and carried["content"] == row["text"]
+    return row
+
+
+def test_live_one_turn_wrap_up_not_current_after_the_same_words_become_addressed(acting, monkeypatch):
+    from ouroboros.owner_mailbox import write_owner_message
+
+    ctx, gateway = acting.ctx, acting.gateway
+    ctx.tools._ctx.task_id, ctx.tools._ctx.task_attempt = ctx.task_id, 1
+    row = _carry_wrap_up_owner_words(ctx)
+    create = gateway.create_model_operation
+
+    def address_words(*args, **kwargs):
+        assert write_owner_message(acting.root, row["text"], ctx.task_id, msg_id="addressed",
+                                   client_message_id=row["client_message_id"])
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, "create_model_operation", address_words)
+    text, usage, trace = forced._forced_final_answer(ctx, prompt="Give the summary.", fallback_text="No answer.",
+                                                    reason_code="round_limit", single_semantic_turn=True)
+    [addressed] = ctx.tools._ctx._owner_directives
+    assert addressed["content"] == row["text"] and "carried" not in addressed
+    assert len(gateway.creates) == 1 and usage["terminal_origin"] == "host_notice"
+    assert trace["forced_finalization"]["source"] == "late_owner_directive_requires_resume"
+    assert "Resume the task for a current answer." in text
+
+
+@pytest.mark.parametrize("arrival", ["stop", "none", "stop_and_new_words", "stop_and_addressed_words"],
+                         ids=["stop_now_while_the_call_is_out", "no_stop", "stop_now_with_new_owner_words",
+                              "stop_now_with_addressed_owner_words"])
+def test_live_forced_final_reads_the_direct_stop_its_own_drain_delivered(acting, monkeypatch, arrival):
+    """The live twin of the restored ``late-stop`` endings: custody's Stop now control lands while the forced call is
+    out, so only the rail's own drain after the reply reads it. Alone, the Stop keeps the answer on the row; with
+    owner input that reply never read (new words, or carried words now addressed to this work) the Stop's own
+    terminal ends the turn and the reply is never installed as an answer. Without the control the rail delivers the
+    same reply as its own final."""
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+
+    ctx, gateway = acting.ctx, acting.gateway
+    ctx.status_drive_root = acting.root
+    ctx.messages = [{"role": "user", "content": "Count the picnic baskets."}]
+    ctx.llm_trace = {"reasoning_notes": [], "tool_calls": []}
+    ctx.tools._ctx.task_id, ctx.tools._ctx.task_attempt = ctx.task_id, 1
+    carried = _carry_wrap_up_owner_words(ctx) if arrival == "stop_and_addressed_words" else None
+    answer = "Three baskets are packed."
+    gateway.results[0] = {**result(), "message": {"role": "assistant", "content": answer}}
+    create = gateway.create_model_operation
+
+    def mail_arrives(*args, **kwargs):  # after the rail's first drain, before its reply is in hand
+        if arrival == "stop_and_new_words":
+            assert write_owner_message(acting.root, "Count the blankets too.", ctx.task_id, msg_id="late")
+        elif carried:
+            assert write_owner_message(acting.root, carried["text"], ctx.task_id, msg_id="addressed",
+                                       client_message_id=carried["client_message_id"])
+        if arrival != "none":
+            assert write_owner_message(acting.root, REASON_OWNER_STOPPED_DIRECT_TURN, ctx.task_id, msg_id="stop",
+                                       kind=KIND_FINALIZE_NOW)
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, "create_model_operation", mail_arrives)
+    text, usage, trace = forced._forced_final_answer(ctx, prompt="Give the count.", fallback_text="No answer.",
+                                                    reason_code="round_limit")
+    stopped, unread = arrival != "none", arrival.startswith("stop_and_")
+    assert len(gateway.creates) == 1 and ctx.tools._ctx._delivery_candidate.full_text == text
+    assert usage["reason_code"] == ("owner_requested_finalization" if stopped else "round_limit")
+    assert bool(getattr(ctx.tools._ctx, "_skip_post_task_synthesis", False)) is stopped
+    if unread:  # both facts reached the exit: the Stop is honored, and the reply that read neither is kept nowhere
+        assert answer not in text and trace["forced_finalization"]["source"] == "owner_stopped_direct_turn"
+    else:
+        assert text == answer
+        assert trace["forced_finalization"]["source"] == ("owner_stop_retained_candidate" if stopped else "model")
+
+
+@pytest.mark.parametrize("arrival", ["carried", "carried-with-stop", "none"])
+def test_a_live_forced_reply_never_answers_a_carried_row_its_send_never_saw(acting, monkeypatch, arrival):
+    """The live twin of the restored forced read: a row of my human's carried to this work lands while the one wrap-up's
+    call is out, so only the rail's own drain after the reply shows it. It moves no owner hash, yet the reply never read
+    it: the rail ends on the late-directive terminal and the reply is not adopted. With a direct turn's Stop now in that
+    same drain the Stop's own terminal ends the turn and the reply is kept nowhere. Without the row the reply is final."""
+    from ouroboros import owner_mailbox
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from tests._forced_model_binding_fixtures import carried_quote as _carried_quote
+    from tests._forced_model_binding_fixtures import carry_to_work as _carry_to_work
+
+    ctx, root, gateway = acting.ctx, acting.root, acting.gateway
+    ctx.status_drive_root = root
+    ctx.messages = [{"role": "user", "content": "Summarize the verified fixture."}]
+    ctx.llm_trace = {"reasoning_notes": [], "tool_calls": []}
+    ctx.tools._ctx.task_id, ctx.tools._ctx.task_attempt = ctx.task_id, 1
+    answer = "The fixture was verified."
+    gateway.results[0] = {**result(cash=0.17, knowledge="exact"), "message": {"role": "assistant", "content": answer}}
+    quote, create = _carried_quote(root), gateway.create_model_operation
+
+    def row_lands_while_the_call_is_out(*args, **kwargs):  # after the rail's first drain, before its reply is in hand
+        if arrival != "none":
+            _carry_to_work(root, ctx.task_id, quote)
+        if arrival == "carried-with-stop":
+            assert owner_mailbox.write_owner_message(root, REASON_OWNER_STOPPED_DIRECT_TURN, ctx.task_id, msg_id="stop",
+                                                     kind=owner_mailbox.KIND_FINALIZE_NOW)
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, "create_model_operation", row_lands_while_the_call_is_out)
+    text, usage, trace = forced._forced_final_answer(ctx, prompt="Best effort only", fallback_text="No answer.",
+                                                    reason_code="round_limit", single_semantic_turn=True)
+    assert len(gateway.creates) == len(gateway.uploads) == 1, "one wrap-up, never a second"
+    if arrival == "none":
+        assert text == answer and trace["forced_finalization"]["source"] == "model"
+    elif arrival == "carried":
+        assert answer not in text and trace["forced_finalization"]["source"] == "late_owner_directive_requires_resume"
+    else:
+        assert answer not in text and trace["forced_finalization"]["source"] == "owner_stopped_direct_turn"
+        assert usage["reason_code"] == "owner_requested_finalization" and ctx.tools._ctx._skip_post_task_synthesis is True
+
+
+def test_a_withdrawn_wrap_up_never_delivers_a_forced_reply_its_provider_cut(acting, monkeypatch):
+    """The forced rail's own request settles on an output cut and meets a Wrap up there that is withdrawn before the rail
+    drains it. The cut was recorded on that receipt before the control took the receiver, so the rail ends on its
+    incomplete terminal, the words kept as written, never as a complete final; nothing is sent again."""
+    from tests._usage_store_testing import ledger_rows
+
+    ctx, root, gateway = acting.ctx, acting.root, acting.gateway
+    ctx.status_drive_root = root
+    ctx.messages = [{"role": "user", "content": "Summarize the verified fixture."}]
+    ctx.llm_trace = {"reasoning_notes": [], "tool_calls": []}
+    ctx.tools._ctx.task_id, ctx.tools._ctx.task_attempt = ctx.task_id, 1
+    gateway.results[0] = {**result(outcome="incomplete", cash=0.17, knowledge="exact", problem={
+        "code": "provider_incomplete", "context": {"reason": "max_output_tokens"}}),
+        "message": {"role": "assistant", "content": "The fixture was ver"}}
+    pressed = []
+
+    def wrap_up_then_withdrawn():  # the forced wait's own control reader: Wrap up once the receipt is in, then gone
+        if gateway.acks and not pressed:
+            pressed.append(True)
+            return "finalize_requested"
+        return None
+
+    with task_model_wait_scope(task={"id": ctx.task_id, "_attempt": 1}, drive_root=root, event_queue=None,
+                               worker_slot_held=True, owner_control=wrap_up_then_withdrawn) as owner:
+        owner.tool_context = ctx.tools._ctx
+        _text, usage, trace = forced._forced_final_answer(ctx, prompt="Best effort only", fallback_text="No answer.",
+                                                         reason_code="round_limit")
+    [sent] = [row for row in ledger_rows(root) if row["state"] != "released"]
+    assert pressed == [True] and len(gateway.creates) == len(gateway.uploads) == 1 and sent["cost_usd"] == 0.17
+    assert usage["cost"] == pytest.approx(0.17) and trace["forced_finalization"]["control_reason"] == "finalize_requested"
+    assert trace["forced_finalization"]["source"] == "forced_model_incomplete", "a cut reply is never a complete final"
 
 
 def test_subscription_prospective_and_send_share_the_install_cache_key(acting, monkeypatch):

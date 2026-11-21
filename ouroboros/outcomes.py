@@ -87,10 +87,8 @@ EXECUTION_FAILED = "failed"
 EXECUTION_INFRA_FAILED = "infra_failed"
 EXECUTION_CANCELLED = "cancelled"
 EXECUTION_INTERRUPTED = "interrupted"
-# Forced finalization (deadline/budget/round limit) with a real extracted
-# answer is an honest positive shelf, not a failure. The gate is DETERMINISTIC
-# runtime facts only: a force-finalization reason code plus a non-empty,
-# non-error final text — never prose classification (P5-safe, no whitewash).
+# Forced finalization with a real extracted answer is an honest positive shelf, not a
+# failure; its deterministic (never prose) gate is stated at the branch in derive_loop_outcome.
 EXECUTION_BEST_EFFORT = "best_effort"
 
 OBJECTIVE_BEST_EFFORT = "best_effort"
@@ -705,8 +703,24 @@ def _objective_axis(review: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _refusal_final_answer(text: str, trace: dict) -> Optional[str]:
+    candidate = trace.get("delivery_candidate")
+    matched = (isinstance(candidate, dict) and "refusal_final_answer" in candidate and isinstance(text, str)
+               and candidate.get("content_sha256") == sha256(text.encode("utf-8")).hexdigest())
+    return candidate["refusal_final_answer"] if matched else None
+
+
 def selected_final_answer(text: str, trace: Dict[str, Any]) -> str:
     """The exact answer protocol selection shared by retention and final consumers."""
+    if "refusal_reply_final_answer" in trace:
+        return trace["refusal_reply_final_answer"]
+    if (marker := _refusal_final_answer(text, trace)) is not None:
+        return marker
+    return authored_final_answer(text, trace)
+
+
+def authored_final_answer(text: str, trace: dict) -> str:
+    """Apply the marker and its ordinary fallback only to authored protocol text."""
     if any(line.strip().startswith(FINAL_ANSWER_MARKER) for line in str(text or "").splitlines()):
         return extract_final_answer(text)  # an explicit empty selection withdraws the old answer
     return (
@@ -998,11 +1012,8 @@ def _apply_actor_first_terminal_projection(
 
 
 def _loop_usage_snapshot(usage: Dict[str, Any], resource_limit: Dict[str, Any]) -> Dict[str, Any]:
-    """The loop-outcome's flat usage snapshot (module-size law extraction).
-    ABI-3: the loop's own accounted cost rides the honest name — this
-    sub-dict reaches the public task-result payload through ``loop_outcome``
-    (stored legacy rows still resolve deprecated-wins at the projection
-    boundary)."""
+    """The loop-outcome's flat usage snapshot; it reaches the public payload through
+    ``loop_outcome``, and its ABI-3 cost-name rule is stated once in ``public_task_result``."""
     return {
         "accounted_upper_bound_usd": (
             round(float(usage["cost"]), 6)
@@ -1021,6 +1032,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     usage_reason = str(usage.get("reason_code") or "").strip()
     resource_limit = dict(usage.get("resource_limit") or {}) if isinstance(usage.get("resource_limit"), dict) else {}
     text = str(final_text or "")
+    completed_refusal = _refusal_final_answer(text, llm_trace) is not None
     failure: Dict[str, Any] | None = None
     execution_status = EXECUTION_OK
     reason_code = REASON_FINAL_MESSAGE
@@ -1081,7 +1093,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         usage_status == RESULT_FAILED
         and usage_reason in BEST_EFFORT_REASON_CODES
         and bool(usage.get("_best_effort_extracted"))
-        and (text.strip() or usage.get("wake_silent") is True)
+        and (text.strip() or completed_refusal or usage.get("wake_silent") is True)
     ):
         # Forced finalization (deadline grace / budget / round limit) that
         # actually EXTRACTED a model answer: honest best-effort, not failure.
@@ -1095,9 +1107,12 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         reason_code = usage_reason
         failure = None
     elif usage_status == RESULT_FAILED:
+        from ouroboros.llm_claudexor import ClaudexorContentRefused, ClaudexorRefusalError
+
         execution_status = EXECUTION_FAILED
         reason_code = usage_reason or REASON_EMPTY_FINAL_TEXT
-        failure = {"kind": "agent", "reason_code": reason_code}
+        refused = {ClaudexorContentRefused.terminal_code, ClaudexorRefusalError.terminal_code}
+        failure = {"kind": "provider" if reason_code in refused else "agent", "reason_code": reason_code}
     elif (
         (usage_status == EXECUTION_DEGRADED and usage_reason == REASON_AUTHORING_HANDOVER_INCOMPLETE)
         or bool(llm_trace.get("authoring_handover_incomplete"))
@@ -1105,13 +1120,13 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_DEGRADED
         reason_code = usage_reason or REASON_AUTHORING_HANDOVER_INCOMPLETE
         failure = {"kind": "authoring_handover", "reason_code": reason_code}
-    elif not text.strip() and usage.get("presence_completion_outcome") not in {"silent", "tool_delivered"} \
+    elif not text.strip() and not completed_refusal and usage.get("presence_completion_outcome") not in {"silent", "tool_delivered"} \
             and not usage.get("wake_silent"):
         # A typed wake-silent finish is intentional, unlike an ordinary empty final.
         execution_status = EXECUTION_FAILED
         reason_code = REASON_EMPTY_FINAL_TEXT
         failure = {"kind": "agent", "reason_code": reason_code}
-    elif (_infra := next(
+    elif not completed_refusal and (_infra := next(
         (row for row in _INFRA_TEXT_PREFIXES if text.lstrip().startswith(row[0])), None,
     )) is not None:
         execution_status = EXECUTION_INFRA_FAILED

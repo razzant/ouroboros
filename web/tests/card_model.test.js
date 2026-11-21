@@ -186,7 +186,7 @@ test('an accepted cited primary awaiting its first call is named as pending, not
     c.paint({ lead: lead(OPUS, 'fallback', { role: 'fallback:0', primary, pending: route(GLM), cause: 'auth_error' }), since: '02:14' });
     assert.equal(c.said('why'), '');
     assert.equal(c.popup().querySelector('.card-model-pop-words').textContent,
-        'fallback from Settings · claude-opus-5.5 · since 02:14 · → glm-5.3 at the next step · Sign-in required · you asked for it');
+        'fallback from Settings · claude-opus-5.5 · since 02:14 · → glm-5.3 at the next step · auth_error · you asked for it');
     assert.equal(c.popup().querySelector('.card-model-cited').textContent, cited.text);
     closeCardModel();
 });
@@ -521,8 +521,14 @@ test('every refusal the endpoint names has words of its own; an unknown one keep
 
 test('a cause is said in the wait card\'s words where it has them, as its code where it has none, and not twice', () => {
     assert.equal(causeWords('subscription_window_exhausted'), 'Waiting for quota');
-    assert.equal(causeWords('quota_exhausted'), 'Waiting for quota');
-    assert.equal(causeWords('auth_error'), 'Sign-in required');
+    assert.equal(causeWords('auth_required'), 'Sign-in required');
+    assert.equal(causeWords('auth'), 'Sign-in required');
+    // The coarse legacy classifications proved neither sign-in nor quota, and a fallback is already acting: no "Waiting";
+    // the popover names their own exact code (DESIGN "A work's model on its card").
+    assert.equal(causeWords('quota_exhausted'), 'quota_exhausted');
+    assert.equal(causeWords('auth_error'), 'auth_error');
+    assert.equal(causeWords('api_key'), 'Check the API key');
+    assert.equal(causeWords('api_billing'), 'Check API billing');
     assert.equal(causeWords('connection_unavailable'), 'Key unavailable');
     assert.equal(causeWords('provider_transient'), 'provider_transient', 'a code this page has no words for is shown as it is');
     assert.equal(causeWords('configured fallback'), '', 'the amber line already says "fallback from Settings"');
@@ -532,15 +538,15 @@ test('a cause is said in the wait card\'s words where it has them, as its code w
 
 test('a fallback\'s popover offers Return, Wait and Keep, each its own act', async () => {
     const c = card();
-    const fell = lead(OPUS, 'fallback', { role: 'fallback:0', primary: lead(GLM, 'owner'), since: '2026-11-11T02:14:00Z', cause: 'auth_error' });
-    for (const [action, toast] of [['return', APPLIED_WORDS.next_step], ['wait', 'Waits for glm-5.3: no paid calls until it answers.'],
+    const fell = lead(OPUS, 'fallback', { role: 'fallback:0', primary: lead(ASTRA, 'owner'), since: '2026-11-11T02:14:00Z', cause: 'auth' });
+    for (const [action, toast] of [['return', APPLIED_WORDS.next_step], ['wait', 'Waits for gpt-6-astra: no paid calls until it answers.'],
         ['keep', 'Stays on claude-opus-5.5: your choice from now on.']]) {
         c.paint({ lead: fell, since: '02:14' });
         c.fact().click();
         await flush();
-        assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Left glm-5.3 at 02:14 · Sign-in required');
-        assert.deepEqual(c.acts(), [['return', 'Return to glm-5.3', 'at the next step'],
-            ['wait', 'Wait for glm-5.3', 'no paid calls until it answers'], ['keep', 'Keep on claude-opus-5.5', 'your choice from now on']]);
+        assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Left gpt-6-astra at 02:14 · Sign-in required');
+        assert.deepEqual(c.acts(), [['return', 'Return to gpt-6-astra', 'at the next step'],
+            ['wait', 'Wait for gpt-6-astra', 'no paid calls until it answers'], ['keep', 'Keep on claude-opus-5.5', 'your choice from now on']]);
         await c.pressAct(action);
         await flush();
         assert.deepEqual(c.calls.at(-1), ['t1', { action }]);

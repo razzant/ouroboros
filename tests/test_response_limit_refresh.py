@@ -7,9 +7,7 @@ import pytest
 
 from ouroboros import capability_evidence as ce, usage_accounting as ua, utils
 from ouroboros.response_limits import record_response_ack, resolve_response_limit
-from tests import test_processing_transport as transport_fixtures
-
-transport = transport_fixtures.transport
+from tests._processing_transport_fixture import physical_transport as physical_transport  # registers the `transport` fixture
 
 
 @pytest.mark.parametrize("provider,outage", [
