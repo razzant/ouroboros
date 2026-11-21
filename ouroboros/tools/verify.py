@@ -43,7 +43,7 @@ from ouroboros.tools.process_facts import (
     active_resolved_runtime, check_output_views, masked_process_or_withheld, process_environment_tool, publish_process_facts,
     receipt_line_safe, redact_process_data, record_runtime_selection, selected_process_environment,
 )
-from ouroboros.tools.shell_process import CommandStopped, command_start_refusal, command_timeout_for_call, turn_stop_reader
+from ouroboros.tools.shell_process import CommandStopped, _oom_note, command_start_refusal, command_timeout_for_call, start_refused_result, turn_stop_reader
 from ouroboros.utils import utc_now_iso
 
 # The typed process facts a run-kind receipt DISCLOSES (D6/R4). `duration_ms` —
@@ -56,9 +56,9 @@ from ouroboros.utils import utc_now_iso
 # (Stream-A resolver seam); its absence means the recorded argv is exactly what
 # executed. The channel publishes MORE than this (the kill facts belong to the
 # call's result_meta, not to the receipt's stored shape), so the receipt keeps
-# exactly the three keys it has always carried, copied from the one publication
-# instead of derived a second time.
-_RECEIPT_PROCESS_KEYS = ("duration_ms", "signal", "resolved_runtime", "runtime_provenance")
+# these five keys — `duration_ms`, `signal`, `resolved_runtime`, `runtime_provenance`,
+# `memory_oom` (the memory leaf's OOM facts) — copied from the one publication, on timeout/Stop as on completion.
+_RECEIPT_PROCESS_KEYS = ("duration_ms", "signal", "resolved_runtime", "runtime_provenance", "memory_oom")
 # The `no_visible_machine_contract` receipt carries the agent's OWN stated proxy and
 # residual risk — decision-shaping cognitive evidence a reviewer reads, so it goes
 # through the same disclosed bound as every other durable receipt field.
@@ -84,14 +84,14 @@ def _interrupted_check(ended: BaseException, timeout: Any, *, started_ts: float,
     are published once, as for a completed run."""
     stopped = isinstance(ended, CommandStopped)
     why = (f"check ended by Stop now; its exit was {'observed' if ended.exit_observed else 'NOT observed'}"
-           if stopped else f"check timed out after {timeout}s")
+           if stopped else f"check timed out after {timeout}s") + _oom_note(ended)
     streams = ((ended.output, ended.stderr) if stopped else
                [b.decode("utf-8", errors="replace") if isinstance(b, (bytes, bytearray)) else b
                 for b in (getattr(ended, "stdout", None), getattr(ended, "stderr", None))])
     out, err = (str(s or "") for s in streams)
     output = None if not stopped and streams == [None, None] else out + (("\n" + err) if err else "")
     facts = publish_process_facts(started_ts=started_ts, resolved_runtime=resolved_runtime,
-                                  timed_out=not stopped, killed_by_host=not stopped or ended.exit_observed)
+                                  timed_out=not stopped, killed_by_host=not stopped or ended.exit_observed, memory_oom=getattr(ended, "memory_oom", None))  # kernel OOM count beside the host kill
     return why, output, facts
 
 
@@ -816,14 +816,14 @@ def _verify_and_record(
                 res = executor_execute(
                     ctx, exec_argv, pathlib.Path(work_dir), timeout,
                     env_overlay=interpreter_path_overlay(node_resolution),
-                    stop=turn_stop_reader(ctx),
+                    stop=turn_stop_reader(ctx), memory=True,
                     **({"target_env": selected_env} if selected_env else {}),
                 )
             else:
                 res = _tracked_subprocess_run(
                     exec_argv, cwd=str(work_dir),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
-                    stop=turn_stop_reader(ctx),
+                    stop=turn_stop_reader(ctx), memory=True,
                     **({"env": run_env} if run_env is not None else {}),
                 )
         except (subprocess.TimeoutExpired, CommandStopped) as ended:
@@ -844,6 +844,8 @@ def _verify_and_record(
                 f"verify_and_record [{kind}] FAIL: {why}. "
                 f"root={binding.root}, cwd={binding.target_path}. Receipt recorded."
             ) + f"\n\n{shown}", receipt, compared=False, detail=receipt["summary"])
+        except Exception as refused:  # refused before any argv ran: no verdict, no receipt; anything else propagates
+            return start_refused_result(ctx, refused, tool="verify_and_record", where=f"root={binding.root}, cwd={binding.target_path}", started_ts=_check_started_ts)
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
@@ -852,7 +854,7 @@ def _verify_and_record(
         # ``exit=`` the result text renders for the agent.
         _facts = publish_process_facts(
             returncode=rc, started_ts=_check_started_ts,
-            resolved_runtime=_resolved_runtime,
+            resolved_runtime=_resolved_runtime, memory_oom=getattr(res, "memory_oom", None),
         )
         if match_mode == "bytes_equal":
             # v6.60.0: after the check, the VERDICT is the byte-parity of the two

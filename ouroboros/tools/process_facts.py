@@ -547,6 +547,7 @@ PROCESS_FACT_KEYS = (
     "killed_by_host",
     "pre_exec_failure",
     "ws_relay_failures",
+    "memory_oom",
 )
 
 
@@ -569,7 +570,7 @@ def active_resolved_runtime(ctx) -> str:
 def publish_process_facts(
     *, returncode=None, started_ts: float, resolved_runtime: str = "",
     timed_out: bool = False, killed_by_host: bool = False,
-    pre_exec_failure: str = "", ws_relay_failures=None,
+    pre_exec_failure: str = "", ws_relay_failures=None, memory_oom=None,
 ) -> Dict[str, object]:
     """Publish this thread's typed process facts for the in-flight process tool.
 
@@ -615,6 +616,13 @@ def publish_process_facts(
         }
         if failures:
             facts["ws_relay_failures"] = failures
+    # The kernel's own OOM counts for this command's memory leaf (``command_memory.outcome``): fixed
+    # keys, integer counts and booleans, None where unread. Separate observations, never a verdict.
+    if isinstance(memory_oom, dict):
+        observed = {key: memory_oom[key] for key in ("victim_in_leaf", "leaf_local_oom", "commands_local_oom", "unknown")
+                    if key in memory_oom and (memory_oom[key] is None or type(memory_oom[key]) in (bool, int))}
+        if observed:
+            facts["memory_oom"] = observed
     if provenance := getattr(_process_facts_tls, "runtime_provenance", None):
         facts["runtime_provenance"] = provenance
     facts = redact_process_data(facts)
@@ -637,8 +645,24 @@ def consume_last_process_facts() -> "Dict[str, object] | None":
     return facts if isinstance(facts, dict) else None
 
 
+def _memory_reason(fact: dict) -> str:
+    """A human reading of the kernel's OOM counts for the command's memory group. The group's kill and the
+    command's own exit status are separate observations: the kill may have taken any process of the group
+    (a descendant, or all of them), so it is never attributed to the process whose status is reported."""
+    seen = []
+    if fact.get("victim_in_leaf"):
+        seen.append("the kernel recorded an out-of-memory kill in its memory group (any process of the group)")
+    elif fact.get("victim_in_leaf") is False:
+        seen.append("no kill in its memory group was recorded")
+    if fact.get("commands_local_oom"):
+        seen.append(f"{fact['commands_local_oom']} out-of-memory event(s) hit the commands group")
+    if fact.get("unknown"):
+        seen.append("the kernel's memory events could not all be read")
+    return "memory: " + "; ".join(seen or ["no out-of-memory event recorded"])
+
+
 def describe_returncode(returncode: int, *, cwd=None, binding=None,
-                        lived_ms: "int | None" = None, resolved_runtime: str = "") -> str:
+                        lived_ms: "int | None" = None, resolved_runtime: str = "", memory_oom=None) -> str:
     """Render a return code with signal details when applicable.
 
     On a SIGNAL death the caller may disclose the child's lifetime (a
@@ -654,6 +678,8 @@ def describe_returncode(returncode: int, *, cwd=None, binding=None,
             suffix.append(f"lived={lived_ms}ms")
         if resolved_runtime:
             suffix.append(f"runtime={resolved_runtime}")
+    if isinstance(memory_oom, dict) and (signal_name == "SIGKILL" or memory_oom.get("victim_in_leaf")):
+        suffix.append(_memory_reason(memory_oom))  # after the leader's own signal; a group kill may end a plain exit too
     if cwd is not None:
         suffix.append(f"cwd={pathlib.Path(cwd).resolve(strict=False)}")
     rendered_suffix = f" ({', '.join(suffix)})" if suffix else ""

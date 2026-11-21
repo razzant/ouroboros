@@ -164,6 +164,7 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         **({"latest_duration_ms": latest.get("duration_ms")} if latest.get("duration_ms") is not None else {}),
         **({"latest_signal": str(latest.get("signal") or "")} if latest.get("signal") else {}),
         **({"latest_resolved_runtime": _accept_cap(str(latest.get("resolved_runtime") or ""), 300)} if latest.get("resolved_runtime") else {}),
+        **({"latest_memory_oom": latest.get("memory_oom")} if isinstance(latest.get("memory_oom"), dict) else {}),
         "latest_expected_match": str(latest.get("expected_match") or ""),
         "latest_summary": _accept_cap(str(latest.get("summary") or ""), 2000),
         # C: aggregate the after-only artifact-lifecycle flag across ALL receipts (a deleted
