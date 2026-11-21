@@ -669,7 +669,7 @@ def _reconcile_delegated_runs_on_kill(q: Any, task_id: str) -> List[str]:
     return list(_audit_delegated_runs_on_kill(q, task_id).get("unreconciled") or [])
 
 
-def _stop_open_tree_runs(q: Any, task_id: str) -> None:
+def _stop_open_tree_runs(q: Any, task_id: str, intent: Optional[Dict[str, Any]]) -> None:
     """The cascade's verdict over its tree's open delegated runs, before its postcondition.
 
     A member killed by the sweep cancels its own runs behind the owner's verdict, but a member that
@@ -684,7 +684,9 @@ def _stop_open_tree_runs(q: Any, task_id: str) -> None:
         from ouroboros.delegate_custody_reconcile import stop_tree_runs
         from ouroboros.delegate_terminal import refresh_terminal_reconciliation
 
-        outcomes = stop_tree_runs(root, task_id)
+        action = (intent or {}).get("followup_stop") or {}
+        outcomes = stop_tree_runs(root, task_id, owner_stop=action if action.get("source") in
+                                 {"http_cascade", "http_single", "owner", "owner_stop"} else None)
         for owner in sorted({str(row.get("task_id") or "") for row in outcomes} - {""}):
             refresh_terminal_reconciliation(root, owner, trigger="kill_path_clear")
     except Exception:

@@ -369,8 +369,74 @@ def test_pause_of_a_queued_retry_fences_its_logical_root_and_one_resume_releases
     assert [t["id"] for t in _assign(host, monkeypatch)] == [retry["id"]]
 
 
+@pytest.mark.parametrize(("rail", "error"), [
+    ("deadline", "deadline_passed"), ("lifetime", "lifetime_exhausted"),
+    ("paid", "budget_still_exhausted"), ("global_read", "monetary_authority_unavailable"),
+    ("root_cap", "root_hard_cap_exhausted"), ("group_zero", "root_hard_cap_exhausted"),
+    ("tree_read", "root_accounting_unavailable"),
+    ("update", "update_in_progress"), ("source_read", "selection_authority_changed"),
+])
+def test_queued_retry_checks_ordinary_resume_authority_before_accepting_a_start(host, monkeypatch, clock,  # noqa: F811
+                                                                               reaper, rail, error):
+    from ouroboros import delegate_custody as custody
+    from ouroboros.task_store import patch_document
+    from tests._owner_pause_ended_helpers import _pending, _resume
+
+    _hung_first_attempt(host, monkeypatch, clock)
+    _pending(host.root, "held", "lost", tree="held")  # The original worker sent the request before the pause.
+    historical_timeout_retry(clock)
+    [retry] = _successors(host)
+    tid = retry["id"]
+    assert request_owner_pause(tid, request_id="retry-with-lost-start")["ok"]
+    choice, = _resume("mind", selected=tid)["acceptable_unknown"]
+    row = next(item for item in host.pending if item["id"] == tid)
+
+    def unreadable(*args, **kwargs):
+        raise OSError("accounting unavailable")
+
+    with monkeypatch.context() as fault:
+        if rail == "deadline":
+            fault.setitem(row["metadata"], "deadline_at", "1970-01-01T00:00:00Z")
+        elif rail == "lifetime":
+            fault.setitem(row, "execution_timeout_sec", 60)
+            fault.setitem(row, "_execution_handoff_sec", 60)
+        elif rail == "paid":
+            fault.setitem(row["metadata"], "lead", {"source": "owner", "model": "openai/gpt-5.2", "use_local": False})
+            fault.setattr("supervisor.state.budget_remaining", lambda *_a, **_kw: 0)
+        elif rail == "global_read":
+            fault.setattr("supervisor.state.budget_remaining", unreadable)
+        elif rail == "root_cap":
+            fault.setattr("ouroboros.usage_accounting.usage_projection", lambda *_a, **_kw: {
+                "settled_usd": 5.0, "accounted_usd": 5.0, "limit_usd": 5.0})
+        elif rail == "group_zero":
+            prior = load_task_result(host.root, "held", strict=True)
+            patch_document(host.root, "held", lambda r: {**r, "billing_group": {
+                "billing_group_id": "held", "billing_group_limit_usd": 0}})
+        elif rail == "source_read":
+            fault.setitem(row["_working_recovery"]["source_ref"], "sha256", "0" * 64)
+        elif rail == "tree_read":
+            fault.setattr("ouroboros.usage_admission.task_money_snapshot", unreadable)
+        else:
+            fault.setattr(workers, "_repo_writer_gate_reason", "managed_update")
+        refusal = _resume("mind", [choice], selected=tid)
+        assert refusal["error"] == error and not refusal.get("acceptable_unknown")
+        assert not custody.invocation_record(host.root, "lost").get("resume_decisions")
+        assert not read_fence(host.root, "held").get("resume_grant") and "held" in queue.BUDGET_ROOT_FENCES
+    if rail == "group_zero":
+        patch_document(host.root, "held", lambda r: {**r, "billing_group": prior.get("billing_group") or {}})
+    if rail == "paid":
+        # At the same reached global limit, local work still returns. A zero task timeout adds no bound.
+        monkeypatch.setattr("supervisor.state.budget_remaining", lambda *_a, **_kw: 0)
+        row["metadata"]["lead"] = {"source": "owner", "model": "local-model", "use_local": True}
+        row["execution_timeout_sec"] = 0
+    assert _resume("mind", [choice], selected=tid)["ok"]
+    decision, = read_fence(host.root, "held")["resume_grant"]["accepted_start_risks"]
+    assert decision["resuming_task_id"] == tid and decision["choice_id"] == choice
+
+
+@pytest.mark.parametrize("late_start", ["none", "after_grant", "after_new_owner_pause"])
 def test_pause_of_a_running_retry_stops_its_new_effects_and_one_resume_reopens_the_tree(  # noqa: F811
-        host, monkeypatch, clock, reaper):  # noqa: F811
+        host, monkeypatch, clock, reaper, late_start):  # noqa: F811
     from concurrent.futures import ThreadPoolExecutor
     from ouroboros.owner_pause import review_episode, submit_tool
     from ouroboros.tools.registry import ToolContext, ToolRegistry
@@ -386,6 +452,16 @@ def test_pause_of_a_running_retry_stops_its_new_effects_and_one_resume_reopens_t
     with ThreadPoolExecutor(max_workers=1) as executor, review_episode("held") as armed:
         # The real handoff arms this episode; calling its marker alone is not a launch.
         assert submit_tool(ctx, "review probe", executor.submit, lambda: "started").result(timeout=2) == "started"
+    if late_start != "none":
+        from ouroboros import delegate_custody as custody, external_runs
+        from ouroboros.gateways import claudexor
+        from tests._delegated_transport_shared import Engine, _sweep
+        from tests._owner_pause_ended_helpers import REQUEST, _pending, _resume
+
+        engine = Engine(host.root)
+        monkeypatch.setattr(custody, "_CUSTODY", {})
+        monkeypatch.setattr(claudexor, "ClaudexorGateway", lambda *_a, **_kw: engine.gateway())
+        _pending(host.root, running["id"], "lost", tree="held")
     assert request_owner_pause(running["id"], request_id="running-retry")["root_task_id"] == "held"
     assert member_fence(ctx).get("state") == "requested"
     registry = ToolRegistry(repo_dir=workers.REPO_DIR, drive_root=host.root)
@@ -414,9 +490,37 @@ def test_pause_of_a_running_retry_stops_its_new_effects_and_one_resume_reopens_t
         sort_pending=queue.sort_pending, persist_queue_snapshot=queue.persist_queue_snapshot, bridge=None),
         running["id"], budget_pause.exact_pause_marker(raised.value.pause)["checkpoint"])
     assert budget_pause.budget_pause_row(host.root, running["id"])["root_task_id"] == "held"
-    granted = queue.resume_budget_paused_task(running["id"])
+    if late_start != "none":
+        choice, = _resume("owner", selected=running["id"])["acceptable_unknown"]
+        granted = _resume("owner", [choice], selected=running["id"])
+    else:
+        granted = queue.resume_budget_paused_task(running["id"])
     assert granted["ok"] and granted["exact_continuation"] and granted["root_task_id"] == "held"
     assert "held" not in queue.BUDGET_ROOT_FENCES, "the root actor's Resume lifts the logical latch"
+    if late_start != "none":
+        grant = budget_pause.budget_pause_row(host.root, running["id"])["grant"]
+        old = grant["owner_pause_fence_id"]
+        if late_start == "after_new_owner_pause":
+            assert request_owner_pause(running["id"], request_id="new-owner-pause")["ok"]
+        job = engine.accept("lost", REQUEST)
+        sibling = engine.commands[engine.accept("sibling", REQUEST)]["run"]
+        assert custody.record_started(host.root, custody.RunCustody(run_id=sibling, task_id="another-member",
+                                      root_task_id="held", route_id="some-route", ledger_root=str(host.root)))
+        _sweep(host.root, engine, live={running["id"], "another-member"})
+        fence = read_fence(host.root, "held")
+        assert fence["active_delegated_start"]["invocation_id"] == "lost"
+        assert fence["fence_id"] != old and bool(fence.get("observe_only")) == (late_start == "after_grant")
+        owner_pause.reopen_for_resume(host.root, "held", running["id"], fence_id=old, grant_id=grant["grant_id"])
+        assert member_fence(ctx)["fence_id"] == fence["fence_id"]
+        with pytest.raises(OwnerPauseRefused):
+            owner_pause.run_operation(ctx, lambda: pytest.fail("the old grant admitted a new effect"))
+        for member in (running["id"], "another-member"):
+            observed = external_runs.observe_task_runs(host.root, member, reason="pause", pause_tree="held",
+                                                        stop_policy=external_runs.STOP_POLICY_TASK_OWNED)
+            assert observed["custody_read"] == "ok" and len(observed["runs"]) == 1
+        assert engine.cancels == ([] if late_start == "after_grant" else [engine.commands[job]["run"], sibling])
+        assert not engine.creates
+        return
     [again] = _assign(host, monkeypatch)
     assert again["id"] == running["id"] and again["_budget_pause_resume"]["root_fence_id"] == ""
     seen = _loop_once(host, monkeypatch, again, plan=fresh)

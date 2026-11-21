@@ -151,6 +151,75 @@ def test_a_quiet_run_is_watched_without_a_detail_read(tmp_path, runtime):
     assert fact["answered"] is True and fact["run_state"] == "running" and fact["waiting_on_user"] is False
 
 
+def test_first_compact_status_holds_the_next_dispatch(tmp_path, runtime, monkeypatch):
+    from copy import copy
+
+    from ouroboros import delegate_custody as custody, owner_pause
+    from ouroboros.task_results import write_task_result
+    from tests._budget_pause_exact_helpers import _loop_ctx
+    from tests._delegated_transport_shared import Engine as Transport, _bind_without_state, _rows
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _fence, _pending
+
+    monkeypatch.setattr(custody, "_CUSTODY", {})
+    # The serving store the recovered run was admitted in (the real gateway learns it at
+    # handshake); the compact summary's position link alone never proves the store.
+    monkeypatch.setattr(Engine, "store_identity", "store-a")
+    write_task_result(tmp_path, "root-1", "running", root_task_id="root-1")
+    assert _decide(tmp_path, _pending(tmp_path, "root-1", "lost"))
+    ctx, _ = _loop_ctx(tmp_path, "root-1")
+    transport = Transport(tmp_path)
+    job = transport.accept("lost", REQUEST)
+    rid = transport.commands[job]["run"]
+    with transport.gateway() as gateway:
+        entry = _bind_without_state(tmp_path, gateway, transport, rid)
+    instance, _ = runtime
+    Engine.wakes.append(ClaudexorUnavailable("daemon_unreachable", "read timed out",
+                         observation_timeout=True, observation_reason="observation_read_timeout"))
+    instance._watch([entry], hold=False)
+    assert instance.observation(rid)["answered"] is False and not Engine.detail_reads
+    assert not owner_pause.fence_closed(_fence(tmp_path))
+    for observer in (entry, copy(entry)):  # Both readers loaded the row before either observed activity.
+        Engine.wakes.append(_wake("timeout", [_summary("running")]))
+        instance._watch([observer], hold=False)
+        fact = instance.observation(rid)
+        assert fact["answered"] and fact["run_state"] == "running" and not Engine.detail_reads
+        with pytest.raises(owner_pause.OwnerPauseRefused):
+            owner_pause.run_operation(ctx, lambda: pytest.fail("dispatch crossed the new fence"))
+    assert len(_rows(tmp_path, custody.START_STATE_OBSERVED, "lost")) == 1
+    assert _fence(tmp_path)["observe_only"] and not transport.creates and not transport.cancels
+
+
+def test_the_compact_summary_of_another_store_never_consumes_the_recovered_start_state(tmp_path, runtime,
+                                                                                             monkeypatch):
+    """The summary's position link names the run but proves no store: a substituted store's row
+    keeps ``unknown``; the genuine store's summary establishes it."""
+    from ouroboros import delegate_custody as custody, owner_pause
+    from ouroboros.task_results import write_task_result
+    from tests._delegated_transport_shared import Engine as Transport, _bind_without_state, _rows
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _fence, _pending
+
+    monkeypatch.setattr(custody, "_CUSTODY", {})
+    write_task_result(tmp_path, "root-1", "running", root_task_id="root-1")
+    assert _decide(tmp_path, _pending(tmp_path, "root-1", "lost"))
+    transport = Transport(tmp_path)
+    job = transport.accept("lost", REQUEST)
+    rid = transport.commands[job]["run"]
+    with transport.gateway() as gateway:
+        entry = _bind_without_state(tmp_path, gateway, transport, rid)
+    instance, _ = runtime
+    monkeypatch.setattr(Engine, "store_identity", "store-b")  # the daemon serves another store now
+    Engine.wakes.append(_wake("timeout", [_summary("running")]))
+    instance._watch([entry], hold=False)
+    assert not instance.observation(rid), "an unrecognized summary is no execution fact"
+    assert current.run(tmp_path, rid).resume_start_state == "unknown"
+    assert not _rows(tmp_path, custody.START_STATE_OBSERVED) and not owner_pause.fence_closed(_fence(tmp_path))
+    monkeypatch.setattr(Engine, "store_identity", "store-a")  # the genuine store answers again
+    Engine.wakes.append(_wake("timeout", [_summary("running")]))
+    instance._watch([entry], hold=False)
+    assert current.run(tmp_path, rid).resume_start_state == "running"
+    assert len(_rows(tmp_path, custody.START_STATE_OBSERVED, "lost")) == 1
+
+
 def test_attention_fetches_the_question_before_the_token_is_acknowledged(tmp_path, runtime):
     instance, step = runtime
     entry = started(tmp_path)

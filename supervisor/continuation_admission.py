@@ -147,9 +147,8 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
     passed through unchanged: only the owner's Continue and its held selection
     name ``CONTINUE_PURPOSE``; Pause and Resume keep the default census.
     """
-    from ouroboros.control_actor import accepted_unknown, control_actor
-    from ouroboros.local_custody_repair import accept_unknown_custody, repair_ended_local_custody
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.control_actor import accepted_unknown
+    from ouroboros.local_custody_repair import repair_ended_local_custody
 
     root = pathlib.Path(drive_root or q.DRIVE_ROOT)
     events = pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl"
@@ -164,19 +163,31 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
             q.append_jsonl(events, {"type": "local_custody_retired", "root_task_id": predecessor, "retired": repaired})
     except Exception:
         log.warning("Ended local custody of %s was not repaired; it stays held", predecessor, exc_info=True)
-    decision = accepted_unknown()  # the caller's named decision for this call, on this tree only
-    if decision and members:
-        by = {"actor": "owner", "text": decision["text"], "at": utc_now_iso(), **control_actor()}
-        try:
-            outcome = accept_unknown_custody(root, members, decision["ids"], root_task_id=predecessor, by=by)
-            if outcome["accepted"] or outcome["refused"]:  # a later census of the same call finds nothing new
-                q.append_jsonl(events, {"type": "local_custody_unknown_accepted", "root_task_id": predecessor,
-                                        "by": by, **outcome})
-        except Exception:
-            log.warning("The named decision on %s was not recorded; its calls stay held", predecessor,
-                        exc_info=True)
+    # A Resume applies the decision at its grant edge, after checking the selected member.
+    from ouroboros.delegate_resume import deciding_resume
+    decision = accepted_unknown() if purpose == CONTINUE_PURPOSE or not deciding_resume() else {}
+    local_ids = [key for key in decision.get("ids", ()) if not key.startswith("delegate_start:")]
+    if local_ids and members:
+        accept_local_choice(q, root, predecessor, members, local_ids, decision)
     return conflicting_writers(q, predecessor, drive_root=drive_root, owner_pause_fence_id=owner_pause_fence_id,
                                purpose=purpose, gaps=gaps)
+
+
+def accept_local_choice(q, root, tree, members, ids, decision):
+    from ouroboros.control_actor import control_actor
+    from ouroboros.local_custody_repair import accept_unknown_custody
+    from ouroboros.utils import utc_now_iso
+
+    by = {"actor": "owner", "text": decision.get("text", ""), "at": utc_now_iso(), **control_actor()}
+    try:
+        outcome = accept_unknown_custody(root, members, ids, root_task_id=tree, by=by)
+    except Exception:
+        log.warning("The named decision on %s was not recorded", tree, exc_info=True)
+        return []
+    if outcome["accepted"] or outcome["refused"]:
+        q.append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl", {
+            "type": "local_custody_unknown_accepted", "root_task_id": tree, "by": by, **outcome})
+    return outcome["accepted"]
 
 
 # Integrity bound only: a recorded chain is a handful of Continues; a corrupted one

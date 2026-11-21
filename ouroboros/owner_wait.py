@@ -300,6 +300,19 @@ def store_continuation_source(ctx: Any, state: dict, source_id: str) -> dict:
 REASON_OWNER_PAUSE_WARM = "owner_pause"
 
 
+def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = False) -> dict:
+    """Capture the phase once, whether the pause keeps its stack or releases it."""
+    from ouroboros.budget_pause import pending_tool_call_ids
+
+    pending = pending_tool_call_ids(limit_ctx.messages)
+    selected = delivery_candidate or getattr(limit_ctx, "resume_candidate", False)
+    return {"round_idx": int(limit_ctx.round_idx),
+            "phase": "partial_tool_batch_unknown" if pending else "candidate" if selected else "boundary",
+            "unanswered_tool_call_ids": pending, "unanswered_policy": "not_re_executed_execution_unknown",
+            "abandoned_model_attempts": list(getattr(ctx, "_abandoned_model_attempts", None) or []),
+            "budget_tail": getattr(limit_ctx, "budget_tail", "tool")}
+
+
 def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
                           round_idx: int, tool_schemas: list, seen: set,
                           *, review_binding: str = "", pause: dict | None = None) -> dict:
@@ -650,7 +663,8 @@ def _owner_pause_wake(ctx: Any, checkpoint: dict) -> str:
     return f"control:{control}" if control else ""
 
 
-def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: list) -> str:
+def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: list,
+                         delivery_candidate: bool = False) -> str:
     """Park the SAME author stack warm under the owner's Pause (full variant, 2026-10-08).
 
     The member whose launched reviewers the Pause lets finish keeps its worker:
@@ -683,6 +697,7 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
         external = {"runs": [], "custody_read": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     pause = {"fence_id": str(fence.get("fence_id") or ""), "generation": int(fence.get("generation") or 0),
              "root_task_id": str(fence.get("root_task_id") or ""), "detached_reviews": list(detached),
+             "resume_point": pause_resume_point(limit_ctx, ctx, delivery_candidate=delivery_candidate),
              "external_runs": external, **episode_fields({}, external, starts=True), "parked_at": utc_now_iso()}
     from ouroboros import model_sleep
 

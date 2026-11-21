@@ -9,6 +9,7 @@ survives lifting that fence, and the explicit selection that releases one row
 
 from __future__ import annotations
 
+import json
 import logging
 import copy
 from contextlib import contextmanager
@@ -673,15 +674,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
 
 
 def _handle_budget_resume_child(evt: Dict[str, Any], ctx: Any) -> None:
-    """Owner Q9: a resumed root's model SELECTS one budget-paused child to continue.
-
-    The requester must be the live parent/root of the target (its tree, not any
-    tree): a root selects any stored descendant, an intermediate parent only its
-    direct children. The grant itself goes through the ONE resume seam, so every typed
-    refusal (money, cancel intent, deadline, lifetime, root still paused) is the
-    same the owner would receive. The outcome is recorded as an event the
-    requesting task can read back; nothing is auto-fanned-out.
-    """
+    """A root selects a descendant, an intermediate parent its direct child. Resume checks its current grant."""
+    from ouroboros.owner_mailbox import write_task_message
+    from supervisor.queue_timeouts import _task_drive_for_task
     from supervisor.queue import _queue_lock
     from supervisor.queue_transitions import resume_budget_paused_task
 
@@ -690,6 +685,7 @@ def _handle_budget_resume_child(evt: Dict[str, Any], ctx: Any) -> None:
     with _queue_lock:
         target = next((row for row in ctx.PENDING if str(row.get("id") or "") == task_id), None)
         target = target or (getattr(ctx, "RUNNING", {}).get(task_id) or {}).get("task")
+        parent = (getattr(ctx, "RUNNING", {}).get(requester) or {}).get("task") or {}
         lineage_ok = bool(
             target is not None and requester
             and requester in (str(target.get("parent_task_id") or ""), str(target.get("root_task_id") or ""))
@@ -699,8 +695,10 @@ def _handle_budget_resume_child(evt: Dict[str, Any], ctx: Any) -> None:
     else:
         # A MODEL-issued selection: the grant additionally requires the live
         # owner-derived Resume grant of the target's own root (never lineage alone).
-        from ouroboros.control_actor import mind_control
-        with mind_control(requester, str(evt.get("reason") or "")):
+        from ouroboros.control_actor import accepting_unknown, mind_control
+        reason = str(evt.get("reason") or "")
+        named = evt.get("accept_unknown")
+        with mind_control(requester, reason), accepting_unknown(named if isinstance(named, list) else (), reason):
             outcome = resume_budget_paused_task(task_id, selected_by=requester)
     event = {
         "ts": evt.get("ts", utc_now_iso()),
@@ -712,6 +710,11 @@ def _handle_budget_resume_child(evt: Dict[str, Any], ctx: Any) -> None:
     }
     _address_ctx(ctx, event)
     append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", event)
+    if outcome.get("acceptable_unknown"):
+        drive = _task_drive_for_task(parent, requester, canonical=ctx.DRIVE_ROOT)
+        if not write_task_message(drive, json.dumps(event, ensure_ascii=False), requester,
+                                  source_task_id="", provenance="system"):
+            log.warning("Could not deliver the Resume choice for %s to requester %s", task_id, requester)
     try:
         ctx.bridge.push_log(event)
     except Exception:
@@ -1111,7 +1114,9 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
     after re-locating the exact row, so a newer hold/Stop/Pause or root grant
     invalidates this observation rather than inheriting its permission.
     """
-    from supervisor.queue_transitions import pending_member_replay_safe
+    from contextlib import nullcontext
+    from ouroboros.control_actor import accepting_unknown
+    from supervisor.queue_transitions import pending_member_replay_safe, queued_admitted_dispatch
     from supervisor.continuation_admission import CONTINUE_PURPOSE, action_writers
 
     try:
@@ -1122,7 +1127,12 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
             authority = _held_selection_authority(q, task)
         candidate = authority["task"]
         predecessor = str(((candidate.get("metadata") or {}).get("continuation") or {}).get("predecessor_task_id") or "")
-        blockers = action_writers(q, predecessor, purpose=CONTINUE_PURPOSE) if predecessor else []
+        own_saved_pause = (authority["owner_fence"] and authority["root_actor"]
+                           and queued_admitted_dispatch(candidate) and "_working_recovery" in candidate)
+        # Only the earlier writer-held selection answers for the predecessor.
+        # A paused, already-dispatched episode's choices belong to its own census.
+        with accepting_unknown(()) if own_saved_pause else nullcontext():
+            blockers = action_writers(q, predecessor, purpose=CONTINUE_PURPOSE) if predecessor else []
         if native_continuation_repair(candidate):
             from ouroboros.owner_wait import restore_owner_wait_allowed
 
@@ -1189,6 +1199,9 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
 
         if selected_by == "reconciliation" or writer_wait(task) or not only_running_writers(writers):
             return writers_unsettled_refusal(writers)
+    from ouroboros.delegate_resume import names_start
+    if names_start():
+        return {"ok": False, "error": "selection_authority_changed"}
     # Use the identity already revalidated with this selection's snapshot.
     # A reciprocal retry is the root actor even though its physical id differs.
     actor = current["root_actor"]

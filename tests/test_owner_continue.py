@@ -1510,3 +1510,25 @@ def test_continue_retypes_the_previous_releases_later_quiz_answers(tmp_path, mon
     assert [(row["msg_id"], row["source"]) for row in meta["owner_corpus"] if row.get("quiz_id")] == [
         (press["msg_id"], "owner_press"), (words["msg_id"], "owner_quiz_answer")]
     assert meta["continuation"]["owner_sources"]["later"] == [{**press, "source": "owner_press"}, words]
+
+
+def test_continue_and_snapshot_gc_still_see_the_original_pending_writer(tmp_path, monkeypatch):
+    from tests._owner_pause_ended_helpers import _decide, _pending, _resume
+    from ouroboros import delegate_custody as custody
+    from tests._delegated_transport_shared import _rows
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import admit_continuation, release_settled_continuations
+
+    _install_queue(tmp_path, monkeypatch)
+    write_task_result(tmp_path, "pred-1", "running", root_task_id="pred-1")
+    start = _pending(tmp_path, "pred-1", "lost", tree="pred-1", snapshot_id="retained-copy")
+    assert _decide(tmp_path, start)
+    _interrupted(tmp_path)
+    successor = admit_continuation("pred-1", action_nonce=NONCE)
+    assert successor["ok"] and successor["held"]
+    assert any(b.get("invocation_id") == "lost" for b in successor["blockers"])
+    refused = _resume("owner", [start["choice_id"]], selected=successor["successor_task_id"])
+    assert refused["error"] == "predecessor_writers_unsettled" and not refused.get("acceptable_unknown")
+    assert release_settled_continuations("pred-1") == []
+    assert len(_rows(tmp_path, custody.START_RISK_ACCEPTED)) == 1
+    assert "retained-copy" in custody.open_snapshot_ids(tmp_path)

@@ -332,8 +332,8 @@ export function taskSourceDownloadUrl(taskId, ref) {
 }
 
 /**
- * Owner Resume. A refusal may list `acceptable_unknown`: held calls whose outcome is unknown; naming
- * them in `body` goes on without their results (recorded on the task, never run again).
+ * Owner Resume can name a refusal's exact `acceptable_unknown` IDs with a reason. A delegated
+ * start stays open for lookup and its original request cannot be sent again.
  * @param {string} taskId
  * @param {import('./client_contract_types.js').TaskResumeRequest|null} [body]
  */

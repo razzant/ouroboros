@@ -76,7 +76,7 @@ from ouroboros.post_task_checkpoint import (
 )
 from ouroboros.skill_publish_result import apply_skill_publish_receipt_veto
 from ouroboros.task_finalization import (
-    TERMINAL_ORIGIN_HOST_NOTICE,
+    OWED_REGISTERED, TERMINAL_ORIGIN_HOST_NOTICE,
     build_sealed_final_package,
     set_terminal_host_notice,
     model_execution_projection,
@@ -841,11 +841,9 @@ def emit_task_results(
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing.
 
-    Order (owner 1A(1), "answer first"): the final frame is built and stamped,
-    owed in the durable outbox, and put on the live bus — THEN cost reconstruction,
-    evidence capture and the result store run; ``task_done`` stays buffered after
-    the store. Pre-store carriers state the pre-store observation; post-store
-    carriers use the stored status (W10).
+    A registered root answer goes live before cost and result storage (owner 1A(1)).
+    A selected answer without that debt commits its result before sending.
+    The buffered task_done reports the stored status.
     """
     from ouroboros.subagent_bootstrap import actor_first_terminal_projection
     actor_fact, usage, llm_trace = actor_first_terminal_projection(ctx, task, usage, llm_trace, task.get("budget_drive_root") or getattr(env, "drive_root", None))
@@ -881,6 +879,8 @@ def emit_task_results(
         if stop_origin := owner_stop_origin(custody_root, str(task.get("id") or "")):
             usage["cancel_origin"] = stop_origin
     # Pre-store carriers state the status observed now, as the outbox stamp does (a later race may differ).
+    from ouroboros.delegate_resume import answer_publication
+    publication = answer_publication(ctx)
     terminal_status = _durable_terminal_status(env, task, execution_status, usage=usage, reason_code=reason_code)
     outcome_axes = lifecycle_named(outcome_axes, terminal_status)
     failed_or_forced = (
@@ -929,6 +929,10 @@ def emit_task_results(
         send_event.pop("chat_id", None)
         send_event.update(address=PROJECT_ROOM_ADDRESS, **{key: task[key] for key in ("parent_task_id", "root_task_id")
                                                            if task.get(key)})
+    buffered = pending_events
+    if publication:
+        prior_events = len(buffered)
+        pending_events = list(buffered)
     if _presence:
         pending_events.append(build_presence_result_event(
             task, text, ctx, terminal_origin=str(usage.get("terminal_origin") or ""),
@@ -957,34 +961,39 @@ def emit_task_results(
             send_event, task, terminal_status=terminal_status,
             post_task_open=not task.get("_skip_post_task_synthesis") and not _root_post_task_already_completed(env, task),
         )
-        register_final_answer_owed(task, send_event, env_drive_root=env.drive_root)
+        if register_final_answer_owed(task, send_event, env_drive_root=env.drive_root,
+                                      **({"publication": publication} if publication else {})) == OWED_REGISTERED:
+            if publication:  # an already owed or delivered answer needs no new rename
+                ctx._selected_answer_context = None
+            publication = None
     # Answer first (owner 1A(1)): the owner's answer is on the live bus before
     # the heavy tail below (cost ledger, evidence capture, the result store).
-    _live_delivered = _root_outbox and not quiet and _deliver_answer_first(
-        env, task, event_queue, pending_events, register=not _ordinary,
-        undrained=bool(_presence and _ordinary and task.get("_presence_turn")))
-    # A failed live put keeps its owed/buffered answer and skips optional annotation.
-    # Children and silent runs retain their existing buffered/no-chat lifecycle.
-    if _live_delivered or not _root_outbox or quiet:
-        with timed_phase("custody_annotation", timing=usage.get("_finalization_timing") or {}):
-            record_terminal_reconciliation(custody_root, str(task.get("id") or ""), custody_audit,
-                                           addressed=True, emit_evidence=True)
+    def send_answer():
+        return _root_outbox and not quiet and _deliver_answer_first(
+            env, task, event_queue, pending_events, register=not _ordinary,
+            undrained=bool(_presence and _ordinary and task.get("_presence_turn")))
+
+    # Without outbox debt the local result is the first handoff we can order before the blocking live put.
+    _live_delivered = not publication and send_answer()
     duration_sec = round(time.time() - start_time, 3)
+    def record_completion():
+        if _live_delivered or not _root_outbox or quiet:
+            with timed_phase("custody_annotation", timing=usage.get("_finalization_timing") or {}):
+                record_terminal_reconciliation(custody_root, str(task.get("id") or ""), custody_audit,
+                                               addressed=True, emit_evidence=True)
+        try:
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "task_eval", "ok": execution_status not in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED},
+                "task_id": task.get("id"), "task_type": task.get("type"), "outcome_axes": outcome_axes,
+                "reason_code": reason_code, "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
+                "review_trigger": str(loop_outcome.get("review_trigger") or ""), "duration_sec": duration_sec,
+                **tool_metrics, "response_len": len(text),
+            })
+        except Exception:
+            log.warning("Failed to log task eval event", exc_info=True)
+    if not publication:
+        record_completion()
     task_cost_fields = _task_cost_fields(env, task)
-    try:
-        append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "task_eval", "ok": execution_status not in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED},
-            "task_id": task.get("id"), "task_type": task.get("type"),
-            "outcome_axes": outcome_axes,
-            "reason_code": reason_code,
-            "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
-            "review_trigger": str(loop_outcome.get("review_trigger") or ""),
-            "duration_sec": duration_sec,
-            **tool_metrics,
-            "response_len": len(text),
-        })
-    except Exception:
-        log.warning("Failed to log task eval event", exc_info=True)
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
@@ -1001,11 +1010,16 @@ def emit_task_results(
 
     review_evidence = _collect_review_evidence_bundle(env, ctx, task, receipt_root, verification_receipts)
 
-    # The durable result write happens AFTER the answer left (owner 1A(1)); the
-    # outbox row registered above is the crash insurance for this window.
     with timed_phase("result_store", timing=usage.get("_finalization_timing") or {}):
         _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence,
-                           loop_outcome=loop_outcome, cost_fields=task_cost_fields)
+                           loop_outcome=loop_outcome, cost_fields=task_cost_fields,
+                           **({"publication": publication} if publication else {}))
+    if pending_events is not buffered:
+        buffered.extend(pending_events[prior_events:])
+        pending_events = buffered
+    if publication:
+        _live_delivered = send_answer()
+        record_completion()
     if _live_delivered:
         # The live copy's timing snapshot was frozen at its enqueue; the store span
         # completed after it and is journaled as its own correlated row.
@@ -1204,7 +1218,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                        usage: Dict[str, Any], llm_trace: Dict[str, Any],
                        review_evidence: Dict[str, Any] | None = None,
                        loop_outcome: Dict[str, Any] | None = None,
-                       cost_fields: Dict[str, Any] | None = None) -> None:
+                       cost_fields: Dict[str, Any] | None = None, publication=None) -> None:
     """Store task result for parent task retrieval.
 
     ``loop_outcome``, when supplied by ``emit_task_results``, is the SINGLE already-
@@ -1329,6 +1343,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             str(task.get("id") or ""),
             status,
             _terminal_observed=True,
+            **({"_publication": publication} if publication else {}),
             reason_code=reason_code,
             outcome_axes=outcome_axes,
             # Compatibility mirror consumed by the gateway and task_done event.
@@ -1396,6 +1411,8 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             ts=utc_now_iso(),
         )
     except Exception as e:
+        if publication:
+            raise  # a buffered result alone cannot commit a selected answer past the tree fence
         log.warning("Failed to store task result: %s", e)
         return
     try:

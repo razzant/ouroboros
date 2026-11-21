@@ -704,13 +704,11 @@ def _override_delegation_constraint(ctx: ToolContext, constraint_id: str, reason
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"⚠️ override_delegation_constraint: failed to record override for {cid}.")))
 
 
-def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
+def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "", accept_unknown=None) -> str:
     """Owner Q9: select ONE paused root descendant or intermediate parent's direct child.
 
-    The request rides the existing worker->supervisor control channel; the
-    supervisor validates lineage and grants through the ONE resume seam, and
-    records the typed outcome as a ``budget_resume_child_outcome`` event. This
-    tool therefore reports a REQUEST, never a completed resume.
+    The supervisor checks lineage and records the grant or refusal in
+    ``budget_resume_child_outcome``. This tool reports the request.
     """
     try:
         tid = validate_task_id(task_id)
@@ -731,6 +729,7 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
         "task_id": tid,
         "requested_by": requester,
         "reason": reason_text,
+        **({"accept_unknown": accept_unknown} if isinstance(accept_unknown, list) and accept_unknown else {}),
         "ts": utc_now_iso(),
     })
     _record_child_decision_beacon(
@@ -738,14 +737,10 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     )
     note = " (live)" if emitted == "live" else " (deferred to round end)"
     return (
-        f"Resume requested for {tid}{note}. This is a REQUEST: the supervisor validates money, "
-        "Stop/cancel intent, deadline, finite lifetime and the child's checkpoint through the same "
-        "seam the owner's Resume uses, then records a budget_resume_child_outcome event. A grant "
-        "removes the child's current_stop: its SAME task id then waits in the queue for a worker "
-        "(status stays scheduled, execution_observation.dispatch=queued) and reads running once a "
-        "worker takes it. A refusal (budget_still_exhausted, cancel_intent_active, deadline_passed, "
-        "lifetime_exhausted, root_still_paused, pause_record_missing, ...) leaves its current_stop in "
-        "place. Check with peek_task or get_task_result."
+        f"Resume requested for {tid}{note}. The supervisor checks this REQUEST against the child's checkpoint, "
+        "Stop, deadline, lifetime and budget. A grant removes the child's current_stop and queues the same task ID. "
+        "A refusal keeps the hold. Read the child's status with peek_task or get_task_result. If the refusal offers "
+        "a choice, your task mailbox receives its acceptable_unknown IDs. Name the IDs you accept and give a reason."
     )
 
 
@@ -823,10 +818,10 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "", stop_action_i
         elif settled_status(status_drive_root, tid):
             # A settled root whose helpers or delegated runs still work is still
             # owned: the owner's Stop cascades over that tree, and so does this one.
-            from ouroboros.delegate_custody_reconcile import tree_open_runs
+            from ouroboros.delegate_custody_current import cascade_work_open
 
             live_helpers = (task_subtree_has_live_queue_rows(status_drive_root, tid)
-                            or bool(tree_open_runs(status_drive_root, tid)))
+                            or cascade_work_open(status_drive_root, tid))
             live_ownership = live_ownership or live_helpers
     except Exception:
         live_ownership = True
@@ -940,6 +935,9 @@ def get_tools() -> list[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "reason": {"type": "string", "default": "", "description": "Why this child is still needed (recorded)."},
+                "accept_unknown": {"type": "array", "items": {"type": "string"},
+                                   "description": "Copy acceptable_unknown IDs from the refusal in your task mailbox. Give a reason. "
+                                                  "The start may still run and spend money. Its request becomes lookup-only."},
             }, "required": ["task_id"]},
         }, _resume_child_task),
         ToolEntry("cancel_task", {

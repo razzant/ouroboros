@@ -61,6 +61,9 @@ def observe_run(root, entry, detail: dict) -> bool:
         return False
     if seq < fresh.observation_seq:
         return False
+    from ouroboros.delegate_resume import observe_bound_state
+    if observe_bound_state(root, fresh, state) is False:
+        return False
     if state in c.TERMINAL_STATES:
         if fresh.terminal_state and fresh.terminal_state != state:
             return False
@@ -103,6 +106,8 @@ def _collection_failure(entry, step, exc, failures) -> bool:
 
 def record_terminal_money(root, entry, detail: dict, *, failures=None) -> dict:
     """The old exact session accounting, without project retirement or output ACK."""
+    if c.names_another_run(detail, entry.run_id):
+        raise ValueError("terminal money belongs to another run")
     if entry.settled:
         return {"settled": True, "ledger_recorded": entry.ledger_recorded, "retried": False}
     from ouroboros.delegate_accepted import deferred_money
@@ -716,6 +721,17 @@ class BodyRuntime:
     def _absorb_detail(self, entry, gateway, detail):
         with self.lock:
             self.observation_gaps.pop(entry.run_id, None)
+        if getattr(entry, "resume_start_state", None) is not None:
+            if c.names_another_run(detail, entry.run_id):
+                raise ValueError("execution observation belongs to another run")
+            from ouroboros.delegate_resume import recovered_cancel_detail
+            # A successful exact read first binds an admission-left-unbound row to the store that
+            # answered it (``bind_daemon_store``); a recovered start's facts are then kept only
+            # from an answer proved to be its run in its own store (``recovered_cancel_detail``).
+            # An unrecognized answer keeps ``unknown`` for a genuine later one and settles nothing.
+            c.bind_daemon_store(self.root, gateway, entry)
+            if not recovered_cancel_detail(gateway, entry, detail):
+                raise ValueError("execution observation does not prove its run in its store")
         hold_to_grant(self.root, gateway, entry, detail)  # the rights floor, before the facts it read are kept
         # A late valid source fact remains evidence; it grants no wait.
         observe_run(self.root, entry, detail)
@@ -789,6 +805,16 @@ class BodyRuntime:
                     with self.lock:
                         self.seen[entry.run_id] = observation.ACKNOWLEDGED_PROBLEM
                 continue
+            if getattr(entry, "resume_start_state", None) == "unknown":
+                from ouroboros.delegate_resume import observe_bound_state, recovered_cancel_store
+                # wait-many binds each summary by its position in the ordered target list: the
+                # position names the run but proves no store (a substituted store's row binds by
+                # position just as well), so the existing store/gateway link must hold too. An
+                # unrecognized summary keeps ``unknown`` for a genuine later answer and is no
+                # reason to skip this run's ordinary handling below.
+                if (row.run_id != entry.run_id or not recovered_cancel_store(gateway, entry)
+                        or observe_bound_state(self.root, entry, row.status) is False):
+                    continue
             if not wake.needs_attention(index):
                 if row.pending is False and entry.pending_interaction_ids:
                     # Answered since this observer last read the run: one addressed read clears
@@ -858,6 +884,11 @@ class BodyRuntime:
                                 failures=failures, recapture=recapture, generation=self.runtime_id, background=True)
 
     def _owing(self, stamp, entry) -> _Held:
+        from ouroboros.delegate_resume import ACTIVE, recovered_writer_changed
+
+        if getattr(entry, "resume_start_state", None) in ACTIVE:
+            # This row just changed (possibly in a worker), or the body restarted.
+            recovered_writer_changed(self.root, entry.root_task_id or entry.task_id)
         return _Held(stamp, entry, not entry.review_owned and not entry.terminal_source
                      and (not entry.settled or bool(entry.terminal_state)),
                      collection_due(entry, generation=self.runtime_id), self.runtime_id)

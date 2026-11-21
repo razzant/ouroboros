@@ -194,7 +194,7 @@ _REPLACE_RETRY_MAX_DELAY_SEC = 0.1
 
 def replace_atomic(
     src: pathlib.Path | str, dst: pathlib.Path | str, *,
-    precondition: Callable[[], bool] | None = None,
+    precondition: Callable[[], bool] | None = None, publication=None,
 ) -> bool:
     """``os.replace`` with a bounded retry on Windows sharing violations.
 
@@ -214,7 +214,10 @@ def replace_atomic(
         if precondition is not None and not precondition():
             return False
         try:
-            os.replace(src, dst)
+            if publication is None:
+                os.replace(src, dst)
+            else:
+                publication(os.replace, src, dst)  # a refused rename sleeps outside the tree's handoff
             return True
         except PermissionError:
             if attempt == _REPLACE_RETRY_ATTEMPTS - 1:
@@ -241,7 +244,7 @@ def read_text_across_replace(path: pathlib.Path | str, *, encoding: str = "utf-8
             delay = min(delay * 2, _REPLACE_RETRY_MAX_DELAY_SEC)
 
 
-def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None]) -> None:
+def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None], *, publication=None) -> None:
     """Run ``write_temp`` against a sibling file, then atomically replace ``path``.
 
     A crash (SIGKILL / power loss) between the temp create and the replace leaves the
@@ -276,7 +279,7 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
         if existing_mode is not None:
             with contextlib.suppress(OSError):
                 os.chmod(tmp, existing_mode)
-        replace_atomic(tmp, path)
+        replace_atomic(tmp, path, **({"publication": publication} if publication else {}))
     except Exception:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -479,6 +482,7 @@ def update_json_locked(
     strict_existing_dict: bool = False,
     reject_existing_empty_dict: bool = False,
     after_write: Any = None,
+    publication: Any = None,
 ) -> Dict[str, Any]:
     """Locked read-modify-write of a durable JSON dict file.
 
@@ -514,7 +518,12 @@ def update_json_locked(
         updated = mutator(current)
         if updated is None:
             return current
-        atomic_write_json(path, updated)
+        if publication is None:
+            atomic_write_json(path, updated)
+        else:
+            # The full payload and the writer lock are ready before ordering the one public rename.
+            data = machine_json(updated).encode("utf-8")
+            _atomic_overwrite(path, lambda tmp: tmp.write_bytes(data), publication=publication)
         if after_write is not None:
             after_write(updated)  # still under the writer lock; a crash leaves extra debt
         return updated

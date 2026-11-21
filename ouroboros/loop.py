@@ -103,7 +103,8 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
     ctx = tools._ctx
     if resume_candidate:
         content = ctx._delivery_candidate.full_text
-    if resume_candidate and _owner_generation_changed(ctx):
+    if resume_candidate and (ctx._delivery_candidate.finalization_control == "owner_revision_required"
+                             or _owner_generation_changed(ctx)):
         _release_for_owner_followup(ctx, limit_ctx.llm_trace)
         ctx._delivery_candidate.finalization_control = "owner_revision_required"
         if ctx._delivery_candidate.control_episode_seen:
@@ -430,6 +431,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._result_review_request_asked = []
     ctx._owner_reply_revision = None  # no live reply of an earlier turn answers this turn's owner rows
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
+    ctx._selected_answer_context = None
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
     ctx.model_turn_state, ctx._authoring_handover, ctx._pending_handover_reason = ModelTurnState(), None, None
     ctx.route_wait_on_primary, ctx.active_role_override, ctx._route_facts_pending = False, None, ""
@@ -584,12 +586,13 @@ def run_llm_loop(
             tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
             (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
             cost_ceiling, budget_remaining_usd)
-        pending_candidate = resume_delivery_candidate(tools, saved_working, tool_schemas)
+        pending_candidate = resume_delivery_candidate(tools, saved_working or saved_pause, tool_schemas)
+        candidate_tail = ((continuation.get("resume_point") or continuation.get("working") or {}).get("budget_tail")
+                          if pending_candidate else None)
         while True:
-            if free_redial or pending_tool_budget:
-                free_redial = False  # Tool tails and transport waits retain their logical round.
-            else:
-                round_idx += 1
+            if not (free_redial or pending_tool_budget or pending_candidate):
+                round_idx += 1  # Only a new round counts; a transport wait or retained tail does not.
+            free_redial = False
 
             ctx = tools._ctx
             (active_model, active_use_local, active_effort, context_fit_plan,
@@ -604,12 +607,13 @@ def run_llm_loop(
                 drive_root=drive_root, llm_trace=llm_trace, emit_progress=emit_progress,
                 incoming_messages=incoming_messages, owner_msg_seen=_owner_msg_seen, tool_schemas=tool_schemas)
             _finalize_limit_ctx(limit_ctx, tools, llm_trace)
-            limit_ctx.budget_tail = "tool" if pending_tool_budget else "no_tool"
-            if _presence_conversation_lost(ctx):
+            limit_ctx.resume_candidate = pending_candidate
+            limit_ctx.budget_tail = ((candidate_tail if pending_candidate else None)
+                                     or ("tool" if pending_tool_budget else "no_tool"))
+            if lost := _presence_conversation_lost(ctx):
                 # A Presence author stopped while it had yielded its conversation (#1536).
-                text, accumulated_usage, forced_trace = _presence_lost_terminal(limit_ctx, _presence_conversation_lost(ctx))
-                _merge_finalization_trace(llm_trace, forced_trace)
-                return text, accumulated_usage, llm_trace
+                text, accumulated_usage, forced_trace = _presence_lost_terminal(limit_ctx, lost)
+                return text, accumulated_usage, _merge_finalization_trace(llm_trace, forced_trace)
             if MAX_ROUNDS is not None and round_idx > MAX_ROUNDS:
                 # Live hold: a paid [ROUND_LIMIT] dial would be a resend (no wake receipt) — no-call unknown terminal.
                 if _delegate_hold_close(tools, drive_logs=drive_logs, task_id=task_id,
@@ -618,14 +622,15 @@ def run_llm_loop(
                     text, accumulated_usage, forced_trace = _handle_provider_unavailable(limit_ctx, error_kind="provider_outcome_unknown")
                 else:
                     text, accumulated_usage, forced_trace = _handle_round_limit(limit_ctx)
-                _merge_finalization_trace(llm_trace, forced_trace)
-                return text, accumulated_usage, llm_trace
+                return text, accumulated_usage, _merge_finalization_trace(llm_trace, forced_trace)
 
             # Tuple, not a sum: an APPENDED short owner message must also read as new input (final-pair fable F1).
             _pre_drain_sig = transcript_growth_signature(messages)
             _controls = _drain_incoming_messages(
                 messages, incoming_messages, drive_root, task_id, event_queue,
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
+            if pending_candidate and _controls.get("owner_carried_addressed"):
+                ctx._delivery_candidate.finalization_control = "owner_revision_required"
             active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,
@@ -640,19 +645,21 @@ def run_llm_loop(
                 limit_ctx, tools, _controls, transport_episode=transport_wait, cost_ceiling=cost_ceiling)
             if _early_final is not None:
                 text, accumulated_usage, forced_trace = _early_final
-                _merge_finalization_trace(llm_trace, forced_trace)
-                return text, accumulated_usage, llm_trace
+                return text, accumulated_usage, _merge_finalization_trace(llm_trace, forced_trace)
             cost_ceiling = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)  # a warm Resume may lift it (#2566)
 
-            if pending_tool_budget:
-                pending_tool_budget = False
-                budget_result = _finish_tool_round_budget(
-                    limit_ctx, budget_remaining_usd, cost_ceiling, active_model, active_use_local, active_effort)
-                if budget_result is not None:
-                    return budget_result
-                final_result = _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, after_tools=True)
+            if pending_candidate or pending_tool_budget:
+                if not pending_candidate:
+                    budget_result = _finish_tool_round_budget(
+                        limit_ctx, budget_remaining_usd, cost_ceiling, active_model, active_use_local, active_effort)
+                    if budget_result is not None:
+                        return budget_result
+                final_result = _finalize_loop_candidate(None, limit_ctx, tools, emit_progress,
+                                                        after_tools=not pending_candidate, resume_candidate=pending_candidate)
                 if final_result is not None:
                     return final_result
+                pending_no_tool_budget = pending_no_tool_budget or pending_candidate
+                pending_candidate = pending_tool_budget = False
                 continue
 
             if pending_no_tool_budget:
@@ -661,12 +668,6 @@ def run_llm_loop(
                 if budget_result is not None:
                     return budget_result
 
-            if pending_candidate:
-                pending_candidate, pending_no_tool_budget = False, True
-                final_result = _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, resume_candidate=True)
-                if final_result is not None:
-                    return final_result
-                continue
             model_call = None  # this round's call, once it starts: a yield before it keeps the loop's own state
             try:
                 from ouroboros.loop_llm_call import timeout_repeat_blocked
@@ -729,8 +730,7 @@ def run_llm_loop(
                 controlled = _handle_model_wait_control(limit_ctx, error, transport_episode=transport_wait)
                 if controlled is not None:
                     text, accumulated_usage, forced_trace = controlled
-                    _merge_finalization_trace(llm_trace, forced_trace)
-                    return text, accumulated_usage, llm_trace
+                    return text, accumulated_usage, _merge_finalization_trace(llm_trace, forced_trace)
                 if model_call is not None:  # the redial starts from what the yielded call applied (wait card, view, low)
                     active_model, active_use_local = model_call.active_model, model_call.active_use_local
                     context_fit_plan, active_context_mode = model_call.context_fit_plan, model_call.active_context_mode
@@ -766,8 +766,7 @@ def run_llm_loop(
                     wait_cause=transport_wait.wait_cause if transport_wait is not None else "",
                     waited_sec=transport_wait.waited_sec if transport_wait is not None else 0.0,
                     interactive=transport_wait.interactive if transport_wait is not None else False)
-                _merge_finalization_trace(llm_trace, forced_trace)
-                return text, accumulated_usage, llm_trace
+                return text, accumulated_usage, _merge_finalization_trace(llm_trace, forced_trace)
 
             _record_transcript_prefix(tools._ctx, messages, round_idx, accumulated_usage, event_queue, task_id, drive_logs, tool_schemas)
             from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY

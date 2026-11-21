@@ -430,7 +430,7 @@ OWED_REGISTERED, OWED_UNREGISTERED, OWED_SKIPPED = "registered", "unregistered",
 
 
 def register_final_answer_owed(
-    task: Dict[str, Any], send_event: Dict[str, Any], *, env_drive_root: Any,
+    task: Dict[str, Any], send_event: Dict[str, Any], *, env_drive_root: Any, publication=None,
 ) -> str:
     """GR2-5 (§8-A2, ONE outbox for EVERY root): owe the final answer durably.
 
@@ -458,6 +458,7 @@ def register_final_answer_owed(
     disclosed write failure: the send still happens, without crash insurance)
     or ``skipped`` (no chat id / no canonical root: nothing to owe).
     """
+    from ouroboros.delegate_resume import AnswerHeld
     if not send_event.get("chat_id") and send_event.get("address") != PROJECT_ROOM_ADDRESS:
         return OWED_SKIPPED
     try:
@@ -473,7 +474,10 @@ def register_final_answer_owed(
         if not str(send_event.get("delivery_id") or "").strip():
             digest = hashlib.sha256(str(send_event.get("text") or "").encode("utf-8")).hexdigest()[:16]
             send_event["delivery_id"] = f"final:{tid}:{digest}"
-        registered = register_pending_delivery(pathlib.Path(outbox_root), dict(send_event))
+        registered = register_pending_delivery(pathlib.Path(outbox_root), dict(send_event),
+                                              **({"publication": publication} if publication else {}))
+    except AnswerHeld:
+        raise
     except Exception:
         log.debug("final-answer owed registration failed for %s", task.get("id"), exc_info=True)
         return OWED_UNREGISTERED

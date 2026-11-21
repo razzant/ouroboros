@@ -931,8 +931,7 @@ class ScheduleActionRequest(TypedDict):
 
 
 class TaskResumeRequest(TypedDict, total=False):
-    """The optional body of ``POST /api/tasks/{task_id}/resume``: the held calls whose outcome is
-    unknown (a refusal's ``acceptable_unknown``) the owner goes on past, and why. Recorded, never re-run."""
+    """Resume this saved task with the opaque IDs offered in acceptable_unknown and a reason; never reconstruct an ID."""
 
     accept_unknown: List[str]
     reason: str
@@ -964,6 +963,7 @@ class TaskResumeResponse(TypedDict, total=False):
     # once ``blockers`` (that census) settle, unless a newer Pause, Stop or Panic replaces the wait.
     held: bool
     blockers: List[Dict[str, Any]]
+    accepted_start_risks: List[Dict[str, Any]]
     # The still-closed Pause's census settled without these unreadable rows nothing ties to the task:
     # {"rows": [{"task_id", "reason"}] (at most 20), "count"}; ``message`` words them.
     membership_gaps: Dict[str, Any]

@@ -90,17 +90,20 @@ def read_custody(drive_root: Any, *, strict: bool = True, every_drive: bool = Fa
     return LaunchCustody(readable, rows, copies, unknown, blind, previous, records)
 
 
-def unsettled_rows(drive_root: Any, owners: Any) -> List[tuple]:
+def unsettled_rows(drive_root: Any, owners: Any, *, gaps: Optional[List[str]] = None) -> List[tuple]:
     """What ``owners``' launches and older rows may still run: ``(row, "live" | "unknown")``. Read only, never a stop.
     Raises when the drive's ledger cannot be read, or when nothing else answers and a launch may exist that no row
-    attributes: unavailable is never "none"."""
+    attributes. A reader filtering by member needs both the named launches and any unattributed gap."""
     custody = read_custody(drive_root, every_drive=True)
     if not custody.readable:
         raise OSError("process_custody_unreadable")
     found = unsettled_selection(drive_root, [row for row in custody.rows if str(row.get("owner_task") or "") in owners],
                                 custody)
-    if custody.blind and not found:
-        raise OSError(f"process_custody_unknown: {custody.blind}")
+    if custody.blind:
+        if gaps is not None:
+            gaps.append(custody.blind)
+        elif not found:
+            raise OSError(f"process_custody_unknown: {custody.blind}")
     return found
 
 
