@@ -1059,6 +1059,24 @@ def _own_marks(rows: list[dict]) -> list:
     return [row for row in rows if row.get("tag") != SKILL_TAG]
 
 
+def _on_segment(point, start, end, slack=2, margin=10) -> bool:
+    """Whether a point lies on the segment start-end (within ``slack`` points of it) and more than ``margin``
+    points from either end."""
+    (px, py), (ax, ay), (bx, by) = point, start, end
+    length = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+    along = ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / length
+    off = abs((px - ax) * (by - ay) - (py - ay) * (bx - ax)) / length
+    return off <= slack and margin < along < length - margin
+
+
+def _pairs(rows: list[dict]) -> list[tuple[int, int]]:
+    """Key rows in time order as (down key code, up key code) pairs; an up before its down, or a second down before
+    the up, breaks the pairing and shows as a mismatch."""
+    ordered = sorted((r for r in rows if r["event"] in ("key_down", "key_up")), key=lambda r: r["t"])
+    return [(a["key_code"] if a["event"] == "key_down" else -1, b["key_code"] if b["event"] == "key_up" else -1)
+            for a, b in zip(ordered[::2], ordered[1::2])]
+
+
 def _near(point, target, slack=1) -> bool:
     return point is not None and all(abs(a - b) <= slack for a, b in zip(point, target))
 
@@ -1112,10 +1130,8 @@ def test_a_drag_goes_down_at_its_start_travels_and_comes_up_at_its_end(host, lau
     assert kinds[0] == MOUSE["left_down"] and kinds[-1] == MOUSE["left_up"] and kinds.count(MOUSE["left_dragged"]) >= 1, kinds
     assert set(kinds[1:-1]) == {MOUSE["left_dragged"]}, kinds
     assert _near(rows[0]["at"], start) and _near(rows[-1]["at"], end) and after["buttons_down"] == 0, (rows, after)
-    # The pointer travelled: some dragged point lies well inside the way, not only at its ends.
-    inside = [r["at"] for r in rows[1:-1] if all(abs(r["at"][i] - a) > 10 and abs(r["at"][i] - b) > 10
-                                                 for i, (a, b) in enumerate(zip(start, end)))]
-    assert inside, rows
+    # The pointer travelled along the way: some dragged point lies on the segment, well away from both ends.
+    assert any(_on_segment(r["at"], start, end) for r in rows[1:-1]), rows
 
 
 @desktop_only
@@ -1167,7 +1183,8 @@ def test_mixed_text_arrives_whole_as_unicode_events_without_the_clipboard(host, 
     ups = _between(front.rows(), before["t"], after["t"], "key_up")
     assert (sent.get("ok"), sent.get("method"), sent.get("chars_sent")) == (True, "unicode_events", sent.get("chars_total")), sent
     assert len(downs) == len(ups) == sent["chars_total"] == 16 and not _own_marks(ups), {"downs": downs, "ups": ups}
-    assert [r["key_code"] for r in downs] == [r["key_code"] for r in ups], "each key down has its own key up"
+    pairs = _pairs(downs + ups)
+    assert len(pairs) == 16 and all(d == u != -1 for d, u in pairs), pairs  # down then its own up, in time order
     assert after["text"] == text, {"arrived": after["text"], "sent": text, "receipt": sent}
     assert after["pasteboard_change_count"] == before["pasteboard_change_count"] and not _own_marks(downs), downs
     assert after["keys_down"] == [], after
@@ -1217,8 +1234,10 @@ def test_a_named_arrow_carries_its_class_flags(host, launch):
     before = front.mark("before")
     sent = call("key", keys="shift+left", app=f"pid:{front.pid}", raise_policy="never")
     row = front.wait_for("key_down", after=before["t"], key_code=123)
+    up = front.wait_for("key_up", after=before["t"], key_code=123)
     assert sent.get("ok") is True and sent.get("method") == "cg_events", sent
-    assert row["raw_flags"] & 0xA20000 == 0xA20000 and row["modifiers"] == ["shift"] and row["tag"] == SKILL_TAG, row
+    for event in (row, up):  # the class bits ride on the release as on the press
+        assert event["raw_flags"] & 0xA20000 == 0xA20000 and event["modifiers"] == ["shift"] and event["tag"] == SKILL_TAG, event
     assert front.mark("after")["keys_down"] == []
 
 
@@ -1281,10 +1300,11 @@ def test_a_system_key_arrives_as_a_system_defined_event(host, launch):
 
 
 @desktop_only
-def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_path):
-    """600 characters (Latin, Cyrillic, emoji, line breaks) through type_text: the text view holds them all. How long
-    the program took is recorded (wall time of the call, first key event to last in the fixture, the budget the skill
-    gave the program), so that budget is set from this measurement on the runner, not from a guess."""
+def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_path, record_property):
+    """600 characters (Latin, Cyrillic, emoji, line breaks) through type_text: the text view holds all 600, and the
+    fixture's own log says how long they took. The skill's budget allows 10 ms per character beyond a fixed part, so
+    more than 10 ms per character fails here: green means the budget holds on this runner, red that it must be
+    raised (from this measurement, which goes to the job summary and the artifact, not from a guess)."""
     call, _schema = host
     _input_ready(call)
     front = launch("front")
@@ -1304,6 +1324,10 @@ def test_a_long_text_arrives_whole_and_its_time_is_recorded(host, launch, tmp_pa
                                              "chars_sent": sent.get("chars_sent"), "wall_ms": wall_ms, "budget_ms": budget,
                                              "fixture_s": (keys[-1]["t"] - keys[0]["t"]) if keys else None,
                                              "ok": sent.get("ok"), "error": sent.get("error")})
-    log.warning("long text: %s characters, %s ms wall, budget %s ms", len(text), wall_ms, budget)
-    assert sent.get("ok") is True and sent.get("chars_sent") == sent.get("chars_total"), sent
+    per_char = round((keys[-1]["t"] - keys[0]["t"]) * 1000 / len(text), 2) if keys else None
+    record_property("ms_per_char", per_char)  # the job summary prints it beside the case
+    record_property("wall_ms", wall_ms)
+    log.warning("long text: %s characters, %s ms wall, %s ms per character, budget %s ms", len(text), wall_ms, per_char, budget)
+    assert sent.get("ok") is True and sent.get("chars_sent") == sent.get("chars_total") == 600, sent
     assert after["text"] == text, {"arrived": len(after["text"]), "sent": len(text)}
+    assert per_char is not None and per_char <= 10, {"ms_per_char": per_char, "budget_ms": budget}
