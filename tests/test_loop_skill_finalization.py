@@ -88,3 +88,27 @@ def test_skill_finalization_message_allows_ready_self_authored_skill(tmp_path):
     trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "skills/external/alpha/SKILL.md"}}]}
 
     assert _skill_finalization_message(drive_root, trace) == ""
+
+
+def test_skill_finalization_message_reads_what_runs_the_files_not_only_readiness(tmp_path):
+    """Readiness alone calls a reviewed, enabled script ready whose declared entry file is gone; the one
+    status the Installed Skills section shows (``skill_catalogue.skill_status``) does not, nor does this nudge."""
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    skill_dir = _write_self_authored_skill(drive_root)
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\ntype: script\nversion: 0.1.0\nruntime: python3\n"
+                                        "scripts:\n  - name: run.py\n---\nbody\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    save_review_state(drive_root, "alpha", SkillReviewState(
+        status="pass", content_hash=find_skill(drive_root, "alpha").content_hash))
+    save_enabled(drive_root, "alpha", True)
+    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "skills/external/alpha/SKILL.md"}}]}
+
+    message = _skill_finalization_message(drive_root, trace)
+    assert "SKILL_NOT_FINALIZED" in message and "entry_unavailable" in message
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    save_review_state(drive_root, "alpha", SkillReviewState(
+        status="pass", content_hash=find_skill(drive_root, "alpha").content_hash))
+    assert _skill_finalization_message(drive_root, trace) == ""
