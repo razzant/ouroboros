@@ -209,11 +209,58 @@ def test_wizard_saved_server_rows_bind_their_secret_controls_once(subscription_u
 
 
 def test_wizard_fields_have_explicit_names_help_and_shared_family(subscription_ui):
+    expect = pytest.importorskip("playwright.sync_api").expect
     page = _open_wizard(subscription_ui)
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('[data-collapse="local-model"] > summary').click()
     page.locator('[data-collapse="more-providers"] > summary').click()
-    # A hidden input holds a choice strip's word and is no control: the strip's own group carries the name.
+    # A choice strip's value travels in a hidden input that no reader reaches (it has no `labels`); the strip's
+    # button group, tied to that input by its help (`<id>-note`), is what the owner reads and presses, so that group
+    # must be shown, named, hold its named choices with the carried one pressed, and point to its help. A hidden
+    # input that belongs to no strip is reported, never skipped. The OpenAI key's API strip stands only under a key
+    # (settings_provider_cards.js `createFlatKeyChoices`), so a key is typed for the check and cleared after it.
+    key = page.locator("#openai-key")
+    strip_shown = "() => !document.querySelector('[data-flat-key-choice=\"OPENAI_API_SURFACE\"]').hidden"
+    assert not page.evaluate(strip_shown)
+    key.fill("sk-test-wizard-names")
+    assert page.evaluate(strip_shown)
+    carriers = page.locator(".wizard-content input[type=hidden]")
+    assert carriers.count() > 0
+    for carrier in carriers.all():
+        strip = carrier.evaluate("""el => {
+            const holder = el.closest('[data-connection-choice]');
+            if (!holder) return {stray: el.outerHTML};
+            const group = holder.querySelector(`[role=group][aria-describedby="${CSS.escape(el.id + '-note')}"]`);
+            const help = el.id && document.getElementById(el.id + '-note');
+            const choices = group ? [...group.querySelectorAll('button[aria-pressed]')] : [];
+            const box = group?.getBoundingClientRect();
+            return {
+                id: el.id, name: group?.getAttribute('aria-label')?.trim() || '',
+                shown: Boolean(group?.checkVisibility?.() ?? true) && box?.width > 0 && box?.height > 0,
+                labels: choices.map((button) => button.textContent.trim()),
+                pressed: choices.filter((button) => button.getAttribute('aria-pressed') === 'true')
+                    .map((button) => button.dataset.connectionChoiceValue),
+                value: el.value, help: help?.textContent.trim() || '',
+            };
+        }""")
+        assert 'stray' not in strip, f"a hidden input outside a choice strip: {strip.get('stray')}"
+        assert strip['name'] and strip['shown'], strip
+        assert len(strip['labels']) >= 2 and all(strip['labels']), strip
+        assert strip['pressed'] == [strip['value']], strip
+        assert strip['help'], strip
+        # The same group as a reader meets it: found through the accessibility tree (role lookups skip aria-hidden
+        # and visibility:hidden nodes), visible, not faded out, with each named choice reachable and one pressed.
+        holder = page.locator(f'[data-connection-choice]:has([id="{strip["id"]}"])')
+        group = holder.get_by_role("group", name=strip['name'], exact=True)
+        expect(group).to_have_count(1)
+        expect(group).to_be_visible()
+        assert group.evaluate("el => { for (let n = el; n; n = n.parentElement) "
+                              "if (Number(getComputedStyle(n).opacity) === 0) return false; return true; }"), strip
+        for label in strip['labels']:
+            expect(group.get_by_role("button", name=label, exact=True)).to_be_visible()
+        expect(group.get_by_role("button", pressed=True)).to_have_count(1)
+    key.fill("")
+    assert not page.evaluate(strip_shown)
     for field in page.locator(".wizard-content input:not([type=hidden]), .wizard-content select").all():
         assert field.evaluate("el => el.labels.length > 0 || Boolean(el.getAttribute('aria-label'))")
         assert field.evaluate("el => el.classList.contains('ui-control')")

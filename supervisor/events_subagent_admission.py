@@ -12,7 +12,7 @@ import logging
 import pathlib
 import subprocess
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
 from ouroboros.delegate_readonly_inputs import native_selection_block
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -90,16 +90,21 @@ def _depth_reservation_admits(
     return _active_subagent_count(root_task_id, pending, running) < hard_ceiling
 
 
-def _subagent_cap_blocks(root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: int) -> bool:
-    """Queue behind awake pending + acting children unless depth reserves a place; the hard bound counts every child."""
+def _subagent_cap_blocks(
+    root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: Optional[int]
+) -> bool:
+    """The hard bound counts every child, with or without the owner's number; with a number, queue behind awake
+    pending + acting children unless depth reserves a place. No number: nothing queues behind it."""
     from supervisor.pool_admission import acting_children, cold_sleeping
 
+    if _active_subagent_count(root_task_id, pending, running) >= MAX_ACTIVE_SUBAGENTS_HARD_CAP:
+        return True
+    if max_active is None:
+        return False
     awake = [task for task in pending if not cold_sleeping(task)]
-    return (
-        _active_subagent_count(root_task_id, pending, running) >= MAX_ACTIVE_SUBAGENTS_HARD_CAP
-        or (_active_subagent_count(root_task_id, awake, {}) + acting_children(root_task_id, running.values()) >= max_active
-            and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active))
-    )
+    occupied = _active_subagent_count(root_task_id, awake, {}) + acting_children(root_task_id, running.values())
+    return occupied >= max_active and not _depth_reservation_admits(
+        root_task_id, parent_id, pending, running, max_active)
 
 
 def _subagent_rejection_meta(
@@ -132,9 +137,9 @@ def _subagent_scheduled_meta(
     task_group_id: str,
     requested_model_lane: str,
     active_subagent_count: int,
-    max_active_subagents: int,
+    max_active_subagents: Optional[int],
 ) -> Dict[str, Any]:
-    return {
+    progress_meta = {
         "subagent_event": "scheduled",
         "accepted": True,
         "active_subagent_count": active_subagent_count,
@@ -148,6 +153,9 @@ def _subagent_scheduled_meta(
         # running card (written by the worker after dispatch) carries both.
         "model_lane": requested_model_lane,
     }
+    if max_active_subagents is None:
+        del progress_meta["max_active_subagents"]  # no number of the owner's: the feed names none
+    return progress_meta
 
 
 def _send_subagent_rejection(

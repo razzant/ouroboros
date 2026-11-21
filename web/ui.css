@@ -1384,6 +1384,8 @@ select.ui-source-backing {
     padding: 0;
     border: 0;
     clip-path: inset(50%);
+    /* The menu button stands in for it: no pointer, no tab stop, nothing to see (opacity says so to layout gates). */
+    opacity: 0;
     pointer-events: none;
 }
 .ui-source-options { width: var(--ui-popup-anchor-width); padding: var(--space-1); }

@@ -210,7 +210,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     subagent_role: NotRequired[str]
     accepted: NotRequired[bool]
     active_subagent_count: NotRequired[int]
-    max_active_subagents: NotRequired[int]
+    max_active_subagents: NotRequired[int]  # the owner's number per root; absent: no number
     queued_behind_active_cap: NotRequired[bool]
     required_capabilities: NotRequired[list[str]]
     write_surface: NotRequired[str]

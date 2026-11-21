@@ -291,7 +291,9 @@ def _file_response(target: pathlib.Path, *, filename: str | None = None, media_t
         return json_error(str(exc), status=403)
     if os.name == "nt" or not store.is_sqlite_file(target):  # Windows locks belong to their handle
         return FileResponse(str(target), filename=filename, media_type=media_type)
-    headers = {"Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}"} if filename else None
+    # Marked as a stored file in every case, so the text filter never re-encodes the database bytes.
+    disposition = f"attachment; filename*=utf-8''{quote(filename)}" if filename else "inline"
+    headers = {"Content-Disposition": disposition}
     return StreamingResponse(store.iter_file_bytes(target), media_type=media_type or "application/octet-stream",
                              headers=headers)
 
