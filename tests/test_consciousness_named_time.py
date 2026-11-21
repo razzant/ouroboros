@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import consciousness as clock_module
-from ouroboros.consciousness import INTERVAL_STATE_KEY, LAST_WAKE_STATE_KEY, BackgroundConsciousness
+from ouroboros.consciousness import INTERVAL_STATE_KEY, LAST_WAKE_STATE_KEY, NEXT_WAKE_STATE_KEY, BackgroundConsciousness
 from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
 from tests.test_consciousness import CEILING, DEFAULT, FLOOR, T0, _iso, _launched
 from tests.test_consciousness import clock as clock  # the alarm over an in-memory state: the fixture these tests share
@@ -117,13 +117,16 @@ def test_after_a_failed_wake_a_named_time_still_fires_once_then_the_backoff_resu
     assert WAKE_TARGET_STATE_KEY not in clock.store and clock.clock.next_wake_at == target + 60 + DEFAULT * 4
 
 
-def test_a_newer_named_time_written_during_a_settlement_survives_its_compare_and_delete(clock, monkeypatch):
+@pytest.mark.parametrize("ahead", [7200, 1200])  # beyond the interval (3300 s) after the wake's end, and nearer
+def test_a_newer_named_time_written_during_a_settlement_survives_and_sets_the_next_wake(clock, monkeypatch, ahead):
+    """The settlement decides on the state its own write holds: a Main turn's ``at`` landing between the alarm's read
+    and that write is kept (stored during this wake, not consumed by it) and is the one that sets the next wake."""
     from supervisor import state
 
     start = T0 + FLOOR + 1
     target = start + 60 + 1000
     _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60, at=target)
-    newer = _named(target + 7200, standing=target)
+    newer = _named(target + 60 + ahead, standing=target)
     settle_write = state.update_state
 
     def racing(mutator, **kwargs):
@@ -134,6 +137,7 @@ def test_a_newer_named_time_written_during_a_settlement_survives_its_compare_and
     monkeypatch.setattr(state, "update_state", racing)
     _wake(clock, monkeypatch, "wake0002", start=target, end=target + 60)
     assert clock.store[WAKE_TARGET_STATE_KEY] == newer
+    assert clock.clock.next_wake_at == clock.store[NEXT_WAKE_STATE_KEY] == target + 60 + min(ahead, DEFAULT)
 
 
 def test_a_restart_keeps_the_named_time_and_the_appointment_that_stood_when_it_was_stored(clock, monkeypatch):

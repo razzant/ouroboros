@@ -8,11 +8,11 @@ stood then. ``seconds``, the rhythm, leaves it standing; a later ``at`` replaces
 (``consciousness.BackgroundConsciousness._next_delay``) lets it shorten a delay only while it lies strictly ahead,
 never below MIN nor above MAX after a wake's end, so a time beyond MAX is reached through intermediate wakes. The
 settlement of a wake appointed after it was stored consumes it once that wake ends at or after it, success or
-failure (``consumed_by``), by compare-and-delete inside the settlement's own state write, so a newer ``at`` written
-meanwhile stays. The wake that stood appointed when it was stored, pending or running, never consumes it: each named
-time is consumed by one wake that started with it stored, and a passed one never adds a wake. With consciousness on,
-a time at or before the pending appointment is refused: that wake keeps its time (owner 12.10, #1603), and
-``schedule_followup(run_at=…)`` serves work at that moment.
+failure (``consumed_by``), decided inside the settlement's own state write on the record it holds, so a newer ``at``
+written meanwhile stays and sets the next wake. The wake that stood appointed when it was stored, pending or running,
+never consumes it: each named time is consumed by one wake that started with it stored, and a passed one never adds
+a wake. With consciousness on, a time at or before the pending appointment is refused: that wake keeps its time
+(owner 12.10, #1603), and ``schedule_followup(run_at=…)`` serves work at that moment.
 
 My human's last reported zone (``OWNER_ZONE_STATE_KEY``) is overwritten at owner ingress (``note_owner_zone``) from
 their own message whose client reported a valid IANA zone; any other message leaves the dated fact as it is.

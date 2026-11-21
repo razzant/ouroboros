@@ -26,8 +26,8 @@ wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup(second
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
 wake succeeds. A time the mind named (``set_next_wakeup(at)``, ``consciousness_clock``) makes it
 sooner while it lies strictly ahead, never below min nor above max after that finish; the settlement
-of a wake appointed after it was stored consumes it once that wake ends at or after it
-(``_next_delay``). The persisted own actor id and cause fence completion; a carrier handoff
+of a wake appointed after it was stored consumes it once that wake ends at or after it, deciding on the
+state its own write holds (``_next_delay``). The persisted own actor id and cause fence completion; a carrier handoff
 does not finish the logical wake, and repeated terminal callbacks do not advance it twice.
 A wake a pending Restart refuses before its start stays a refusal, like every closed door:
 no failure, no row, no owner and no observation (``handle_wake_direct``). A pooled terminal
@@ -321,22 +321,25 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: %s not persisted", key, exc_info=True)
 
-    def _interval(self, state: Optional[Dict[str, Any]] = None) -> int:
-        """The model's chosen interval (``set_next_wakeup(seconds)``) or the default, clamped."""
+    def _interval(self, state: Optional[Dict[str, Any]] = None, bounds: Optional[Tuple[int, int]] = None) -> int:
+        """The model's chosen interval (``set_next_wakeup(seconds)``) or the default, clamped into ``bounds`` (MIN,
+        MAX; read from the settings when not given)."""
+        floor, ceiling = bounds or (self.floor, self.ceiling)
         try:
             chosen = int((self._read_state() if state is None else state).get(INTERVAL_STATE_KEY) or WAKE_DEFAULT_SEC)
         except (TypeError, ValueError):
             chosen = WAKE_DEFAULT_SEC
-        return max(self.floor, min(self.ceiling, chosen))
+        return max(floor, min(ceiling, chosen))
 
-    def _next_delay(self, now: float, state: Dict[str, Any]) -> float:
+    def _next_delay(self, now: float, state: Dict[str, Any], bounds: Optional[Tuple[int, int]] = None) -> float:
         """The one next-delay rule of a settlement and a refused admission: the rhythm (the chosen interval times
         the failure backoff, up to MAX), or sooner while a named time (``set_next_wakeup(at)``) lies strictly
         ahead of ``now``, never below MIN nor above MAX after it. A passed named time changes nothing here."""
-        delay = min(self.ceiling, self._interval(state) * self._backoff)
+        floor, ceiling = bounds or (self.floor, self.ceiling)
+        delay = min(ceiling, self._interval(state, (floor, ceiling)) * self._backoff)
         target = target_ts(state.get(WAKE_TARGET_STATE_KEY))
         if target is not None and target > now:
-            delay = min(delay, max(self.floor, min(self.ceiling, target - now)))
+            delay = min(delay, max(floor, min(ceiling, target - now)))
         return delay
 
     def _archive_legacy_inbox(self) -> None:
@@ -652,20 +655,22 @@ class BackgroundConsciousness:
             else:
                 self._backoff, self._last_wake_outcome = min(self._backoff * 2, 1024), "failed"
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"
-            persisted = self._read_state()
-            named = persisted.get(WAKE_TARGET_STATE_KEY)
-            # Before the appointment moves: only a wake appointed after the time was stored consumes it.
-            consumed = consumed_by(named, appointment_at=self._appointment_at, now=now)
-            self._next_wake_at = self._appointment_at = now + self._next_delay(now, persisted)
+            # Only a wake appointed after the named time was stored consumes it: judged by this wake's appointment.
+            prior, bounds = self._appointment_at, (self.floor, self.ceiling)
+            # Held when the settlement cannot be written; a written one decides on the state it holds.
+            self._next_wake_at = self._appointment_at = now + self._next_delay(now, self._read_state(), bounds)
             settled = {OWN_WAKE_STATE_KEY: self._own_wake, LAST_WAKE_STATE_KEY: now,
-                       NEXT_WAKE_STATE_KEY: self._next_wake_at, APPOINTMENT_STATE_KEY: self._appointment_at,
                        OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
                        CONTINUITY_STATE_KEY: dict(self._continuity)}
 
             def settle(st: Dict[str, Any]) -> None:
-                st.update(settled)
-                if consumed and st.get(WAKE_TARGET_STATE_KEY) == named:  # compare-and-delete: a newer at stays
+                # Under the state lock: a named time stored since the read above is the one judged and the one
+                # that sets the next appointment.
+                if consumed_by(st.get(WAKE_TARGET_STATE_KEY), appointment_at=prior, now=now):
                     st.pop(WAKE_TARGET_STATE_KEY, None)
+                self._next_wake_at = self._appointment_at = now + self._next_delay(now, st, bounds)
+                st.update(settled, **{NEXT_WAKE_STATE_KEY: self._next_wake_at,
+                                      APPOINTMENT_STATE_KEY: self._appointment_at})
 
             from supervisor import state
             try:  # the notes past it (``None``: an unreadable row) persist with the settlement itself
