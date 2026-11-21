@@ -190,7 +190,11 @@ def start_notice_rows(tool_ctx: Any, omissions: List[Dict[str, Any]]) -> List[Di
     capability gets one row, in key order. A surface the work cannot reach (``resource_blocked``) is not read."""
     blocked = _blocked_surfaces(omissions)
     reach = {"mcp": "mcp" not in blocked, "skills": "extensions" not in blocked}
-    broken, _working = read_facts(_root(tool_ctx), **reach)
+    try:
+        broken, _working = read_facts(_root(tool_ctx), **reach)
+    except Exception:  # an unreadable work context keeps the registry's notice as it was
+        log.debug("capability breakage notice unavailable", exc_info=True)
+        return [dict(row) for row in omissions]
     if tool_ctx is not None:
         try:
             setattr(tool_ctx, _TOLD, {"facts": dict(broken), **reach})

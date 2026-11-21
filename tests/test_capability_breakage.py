@@ -89,6 +89,8 @@ def test_mcp_configuration_facts_join_the_notice(monkeypatch, tmp_path):
         "MCP is off in Settings → Tools; its 1 configured servers are not offered")}]
     blocked = [{"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"}]
     assert breakage.start_notice_rows(_work(tmp_path), blocked) == blocked  # a surface out of reach is not read
+    odd = SimpleNamespace(task_metadata=None, budget_drive_root=object())  # an unusable work context
+    assert breakage.start_notice_rows(odd, blocked) == blocked
 
 
 def test_a_skill_not_live_or_missing_a_permission_is_dated_and_a_live_one_is_not(monkeypatch, tmp_path):
