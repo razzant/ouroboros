@@ -19,7 +19,7 @@ from ouroboros.runtime_mode_policy import mode_allows_protected_write
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
 from tests._store_shared import seed_result
-from tests._workspace_git import capture_manifest_fields, publish_capture
+from tests._workspace_git import capture_manifest_fields, git_repository, publish_capture
 
 
 def _git(repo, *args, check=True, text=True):
@@ -27,10 +27,7 @@ def _git(repo, *args, check=True, text=True):
 
 
 def _init_repo(path: pathlib.Path, files: dict) -> str:
-    path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "-q")
-    _git(path, "config", "user.email", "t@t")
-    _git(path, "config", "user.name", "t")
+    git_repository(path, unborn=True, identity=True)
     for rel, content in files.items():
         fp = path / rel
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -258,8 +255,7 @@ def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     base = tmp_path / "repo"
-    base.mkdir()
-    subprocess.run(["git", "init"], cwd=base, check=True, capture_output=True)
+    git_repository(base, unborn=True)
     (base / "large.py").write_text("\n".join(f"line {i}" for i in range(300)), encoding="utf-8")
     subprocess.run(["git", "add", "large.py"], cwd=base, check=True, capture_output=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
@@ -1102,8 +1098,7 @@ def test_external_workspace_unborn_first_commit_keeps_artifact(tmp_path, monkeyp
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     proj = tmp_path / "empty-gitproj"
-    proj.mkdir()
-    _git(proj, "init", "-q")
+    git_repository(proj, unborn=True)
     ctx = SimpleNamespace(REPO_DIR=repo)
     c, wr, wm, detail = _resolve_subagent_constraint(
         ctx,
