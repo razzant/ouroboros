@@ -371,7 +371,7 @@ def server_description(model_facing: str) -> str:
         try:
             if isinstance(json.loads(tail), dict):
                 return head
-        except ValueError:
+        except (ValueError, RecursionError):  # server text, so a nesting the decoder cannot walk is not ours to raise
             pass
     return rest
 

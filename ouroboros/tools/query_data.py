@@ -552,8 +552,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                                  f"send op=\"json\" without {'it' if len(jsonl_only) == 1 else 'them'}")
             if op != legal:
                 rows = ("" if legal == "json" or type(tail) is not int else
-                        "; its rows from the start were read (tail=0)" if tail == 0 else
-                        f"; its last {tail} rows were read (tail={tail})")
+                        "; tail=0 reads its rows from the start" if tail == 0 else
+                        f"; tail={tail} limits the read to its last {tail} rows")
                 notes.append(f"op={op!r} read as op={legal!r}: kind={kind} is read only by op={legal}{rows}")
                 op = legal
         if format not in {"json", "text"}:

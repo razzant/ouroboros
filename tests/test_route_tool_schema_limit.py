@@ -231,6 +231,9 @@ def test_the_notice_names_an_mcp_tool_by_its_server_text_and_says_when_nothing_c
     assert server("Inventory\n\nServer metadata: returns build information.") == (
         "Inventory Server metadata: returns build information.")
     assert server("Inventory\n\nServer description: builds.", {"version": "2"}) == "Inventory Server description: builds."
+    # Server text nested deeper than the decoder walks is read as text, never raised out of the catalog.
+    deep = "Lists builds.\n\nServer metadata: " + '{"a":' * 100_000 + "1" + "}" * 100_000
+    assert server(deep).startswith("Lists builds.")
     schemas = [_schema("read_file"), framed, bare]
     left = ("mcp_slack__history", "mcp_slack__post")
     notice = route_tool_limit_notice(OPENAI_MAIN, 1, 3, left, selectors=META_TOOL_NAMES, schemas=schemas)

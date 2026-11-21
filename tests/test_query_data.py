@@ -766,10 +766,13 @@ def test_the_one_operation_a_kind_takes_is_read_for_the_other_and_named(ctx):
     lines = call(ctx, op="json", kind="verification_receipts", tail=1)  # the tail is kept, not dropped
     assert lines["status"] == "ok" and lines["data"] == plain["data"] and lines["source"]["op"] == "jsonl"
     assert lines["notes"] == ["op='json' read as op='jsonl': kind=verification_receipts is read only by op=jsonl; "
-                              "its last 1 rows were read (tail=1)"]
+                              "tail=1 limits the read to its last 1 rows"]
     default = call(ctx, op="json", kind="verification_receipts")  # the default tail is named in the note
     assert default["data"] == [{"pass": True}, {"pass": False}] and default["notes"][0].endswith(
-        "; its last 100 rows were read (tail=100)")
+        "; tail=100 limits the read to its last 100 rows")
+    # The note describes the request, so it stays true when nothing could be read (a refused bound, a missing file).
+    bounded = call(ctx, op="json", kind="verification_receipts", max_rows=0)
+    assert bounded["status"] != "ok" and all("were read" not in note for note in bounded.get("notes", []))
     document = call(ctx, op="jsonl", kind="queue_snapshot")
     assert document["data"] == {"a": 1} and document["source"]["op"] == "json"
     assert document["notes"] == ["op='jsonl' read as op='json': kind=queue_snapshot is read only by op=json"]
