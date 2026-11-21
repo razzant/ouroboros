@@ -5,7 +5,7 @@ holds the failures (``outcome_axes.execution.unresolved_tool_errors`` first, els
 ``cosmetic_tool_errors``; ``outcomes`` keeps at most 20 of each), so the clause names the first LOUD one — not a
 failed read (``read_only``, owner 06.11 A) and not a details-only leftover (``details_only``, owner 09.11 A: a
 command that ran and failed, a call refused before running; both stay in the details) — in plain words: a noun for
-the step and what happened to it, never a tool name, its result text or a path (DESIGN "Owner-facing words"; owner decision 16.09 Q5=A). Browser twin:
+the step and what happened to it, never a tool name, its result text or a path (DESIGN principle 7 "Words serve the next step"; owner decision 16.09 Q5=A). Browser twin:
 ``web/modules/task_reason_words.js`` (``residualToolErrorsPhrase``); the cases of
 ``web/tests/fixtures/outcome_phase_parity.json`` pin both.
 
