@@ -542,11 +542,15 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
         jsonl_only = [_arg(name, value) for name, value, used in (("filter", filter, filter is not None),
                                                                   ("tail", tail, tail != 100)) if used]
         # A kind exactly one of json/jsonl reads names that operation: the other one is read as it, disclosed
-        # in ``notes`` (DEVELOPMENT 02 "Naming a documented default"); jsonl's filter or tail on a JSON kind asks
-        # for rows that kind does not have, so it stays the refusal below.
+        # in ``notes`` (DEVELOPMENT 02 "Naming a documented default"). jsonl's filter or tail on a JSON kind asks
+        # for rows that kind does not have: refused here, before the filter's own checks, so the repair is one call.
         if op in {"json", "jsonl"} and isinstance(kind, str) and (kind in _FILES or kind == "task_result"):
             legal = "jsonl" if _lines_kind(kind) else "json"
-            if op != legal and not (legal == "json" and jsonl_only):
+            if op != legal and legal == "json" and jsonl_only:
+                raise ValueError(f"kind={kind} requires op=json; {', '.join(jsonl_only)} "
+                                 f"{'applies' if len(jsonl_only) == 1 else 'apply'} only to op=jsonl: "
+                                 f"send op=\"json\" without {'it' if len(jsonl_only) == 1 else 'them'}")
+            if op != legal:
                 notes.append(f"op={op!r} read as op={legal!r}: kind={kind} is read only by op={legal}")
                 op = legal
         if format not in {"json", "text"}:
@@ -665,10 +669,6 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 raise ValueError(f"{_arg('kind', kind)}: op={op} needs one of task_result, {', '.join(_FILES)}")
             if state_file not in _STATES:
                 raise ValueError(f"{_arg('state_file', state_file)}: use one of {', '.join(_STATES)}")
-            if (op == "jsonl") != _lines_kind(kind):  # only jsonl's filter or tail on a JSON kind reaches here
-                raise ValueError(f"kind={kind} requires op=json; {', '.join(jsonl_only)} "
-                                 f"{'applies' if len(jsonl_only) == 1 else 'apply'} only to op=jsonl: "
-                                 f"send op=\"json\" without {'it' if len(jsonl_only) == 1 else 'them'}")
             identities = ids if ids is not None else ([ctx.task_id] if kind == "verification_receipts" else [""])
             if not isinstance(identities, list) or not 1 <= len(identities) <= 32:
                 raise ValueError("ids must be an array of 1..32 identities")

@@ -163,8 +163,15 @@ def usable_selectors(registry: Any, resident: Iterable[Dict[str, Any]] | None = 
 
 
 def tool_purpose(schema: Mapping[str, Any]) -> str:
-    """A tool's purpose as its own author wrote it: the first sentence of its description."""
-    text = " ".join(str((schema.get("function") or {}).get("description") or "").split())
+    """A tool's purpose as its own author wrote it: the first sentence of its description; for an MCP tool,
+    of the server's description inside the host frame (``mcp_schema.server_description``), '' without one."""
+    from ouroboros.mcp_schema import server_description
+
+    function = schema.get("function") or {}
+    text = str(function.get("description") or "")
+    if tool_namespace(str(function.get("name") or "")).startswith("mcp_"):
+        text = server_description(text)
+    text = " ".join(text.split())
     head, stop, _rest = text.partition(". ")
     return head + "." if stop else text
 
@@ -176,7 +183,8 @@ def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequen
     Each left-out name comes with its purpose (``tool_purpose``) read from ``schemas``, the list the
     fit was made from, in the fit's own order, so one cut always reads the same; an MCP server's text
     is quoted as data. It names only the ``selectors`` this actor can use in the fitted request
-    (``usable_selectors``).
+    (``usable_selectors``); with none, it says their schemas cannot be loaded here, and names the
+    resident MCP gateway for left-out MCP tools.
     """
     purposes = {str(schema["function"]["name"]): tool_purpose(schema) for schema in schemas}
     rows = []
@@ -191,10 +199,16 @@ def route_tool_limit_notice(model: str, limit: int, total: int, left_out: Sequen
         ("enable_tools", "enable_tools loads one if it fits (possibly displacing another), or shows an MCP "
                          "schema for a resident text gateway without taking a slot"),
     ) if name in selectors]
+    if ways:
+        tail = "They stay callable: " + ", and ".join(ways) + "."
+    else:
+        gateway = MCP_GATEWAY_TOOL_NAME in {schema["function"]["name"] for schema in schemas} - set(left_out)
+        mcp = gateway and any(tool_namespace(name).startswith("mcp_") for name in left_out)
+        tail = ("No schema loader is available to this task, so their schemas cannot be loaded here"
+                + (f"; the MCP ones stay callable through {MCP_GATEWAY_TOOL_NAME}" if mcp else "") + ".")
     return ("[SYSTEM NOTICE]\n"
             f"The route {model} accepts at most {limit} tool schemas in one request; this task had "
-            f"{total} loaded. Not loaded for now:\n" + "\n".join(rows) + "\nThey stay callable"
-            + (": " + ", and ".join(ways) if ways else "") + ".")
+            f"{total} loaded. Not loaded for now:\n" + "\n".join(rows) + "\n" + tail)
 
 
 def compact_tool_catalog(

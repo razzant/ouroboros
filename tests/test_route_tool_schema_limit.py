@@ -159,7 +159,13 @@ def test_a_route_that_cannot_carry_every_schema_sends_memory_and_work_and_names_
     administration, rescue and one-off media wait behind every other schema; each left-out tool is named
     with its own purpose. A tail tool this task already called keeps its place, and one whole skill
     loaded on purpose still fits."""
-    memory = {"journal_read", "journal_write", "workpad_read", "workpad_write", "compact_context"}
+    memory = {"journal_read", "journal_write", "workpad_read", "workpad_write", "memory_map",
+              "memory_update_registry", "compact_context"}
+    from ouroboros.tools.registry import ToolRegistry
+
+    registered = set(ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)._entries)
+    assert ROUTE_TAIL_TOOL_NAMES <= registered and ROUTE_TAIL_TOOL_NAMES.isdisjoint(CORE_TOOL_NAMES)
+    assert {"maintain_harness", "free_storage"}.isdisjoint(CORE_TOOL_NAMES | ROUTE_TAIL_TOOL_NAMES)
     for skill_tools in (25, 4):  # macOS/Linux and Windows default-on computer-use skills
         catalog = _installed_catalog(tmp_path, skill_tools)
         kept, left_out = fit_tool_schemas_to_limit(catalog, 128)
@@ -172,7 +178,7 @@ def test_a_route_that_cannot_carry_every_schema_sends_memory_and_work_and_names_
         assert called in _names(kept_called)
         skill = [name for name in _names(catalog) if name.startswith("ext_")]
         loaded, _ = fit_tool_schemas_to_limit(catalog, 128, first=skill)
-        assert set(skill) <= set(_names(loaded))
+        assert set(skill) <= set(_names(loaded)) and memory <= set(_names(loaded))  # memory stays beside a skill
         notice = route_tool_limit_notice(OPENAI_MAIN, 128, len(catalog), left_out, selectors=META_TOOL_NAMES,
                                          schemas=catalog)
         by_name = {schema["function"]["name"]: schema for schema in catalog}
@@ -189,6 +195,32 @@ def test_a_route_that_cannot_carry_every_schema_sends_memory_and_work_and_names_
         ctx = _round_ctx(json.loads(before), model=model, use_local=use_local)
         assert loop_model_call._fit_route_tool_ceiling(ctx) is False
         assert json.dumps(ctx.tool_schemas, sort_keys=False) == before and len(ctx.messages) == 1
+
+
+def test_the_notice_names_an_mcp_tool_by_its_server_text_and_says_when_nothing_can_load_it():
+    """An MCP schema carries the host frame; its purpose is the server's own first sentence, quoted as data.
+    Without a selector the notice does not promise a load: it says so, and names a resident gateway."""
+    from ouroboros.mcp_schema import _model_facing_description
+
+    tool = SimpleNamespace(server_id="slack", description="Channel history. Reads one channel.",
+                           metadata={"annotations": {"readOnlyHint": True}})
+    framed = {"type": "function", "function": {"name": "mcp_slack__history", "parameters": {"type": "object"},
+                                               "description": _model_facing_description(tool)}}
+    bare = {"type": "function", "function": {"name": "mcp_slack__post", "parameters": {"type": "object"},
+                                             "description": _model_facing_description(SimpleNamespace(
+                                                 server_id="slack", description="", metadata={}))}}
+    assert tool_purpose(framed) == "Channel history." and tool_purpose(bare) == ""
+    schemas = [_schema("read_file"), framed, bare]
+    left = ("mcp_slack__history", "mcp_slack__post")
+    notice = route_tool_limit_notice(OPENAI_MAIN, 1, 3, left, selectors=META_TOOL_NAMES, schemas=schemas)
+    assert "\n- mcp_slack__history: 'Channel history.'\n- mcp_slack__post\n" in notice
+    assert "External MCP tool" not in notice and "They stay callable: list_available_tools" in notice
+    blind = route_tool_limit_notice(OPENAI_MAIN, 1, 3, left, selectors=(), schemas=schemas)
+    assert "They stay callable" not in blind and blind.endswith(
+        "No schema loader is available to this task, so their schemas cannot be loaded here.")
+    gated = route_tool_limit_notice(OPENAI_MAIN, 2, 4, left, selectors=(),
+                                    schemas=[*schemas, _schema(MCP_GATEWAY_TOOL_NAME)])
+    assert gated.endswith(f"; the MCP ones stay callable through {MCP_GATEWAY_TOOL_NAME}.")
 
 
 def test_main_leaves_fitting_catalogs_and_other_routes_untouched():

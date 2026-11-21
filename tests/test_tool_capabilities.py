@@ -220,6 +220,7 @@ def test_extract_video_frames_visible_where_media_siblings_are_visible():
 
     for tool_set in (LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES):
         assert {"ocr_pdf", "youtube_transcript", "extract_video_frames"} <= tool_set
+    assert {"ocr_pdf", "extract_pdf_text"} <= CORE_TOOL_NAMES  # the document readers stay always sent
     # On a route that cannot carry every schema the two one-off media helpers wait together in its tail.
     assert {"youtube_transcript", "extract_video_frames"} <= ROUTE_TAIL_TOOL_NAMES - CORE_TOOL_NAMES
 

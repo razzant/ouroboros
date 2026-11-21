@@ -353,6 +353,16 @@ def annotation_marks(annotations: Any) -> str:
     return " ".join(marks)
 
 
+SERVER_DESCRIPTION_LABEL = "Server description: "
+
+
+def server_description(model_facing: str) -> str:
+    """The server's own description inside the host frame ``_model_facing_description`` builds ('' when it gave
+    none): the frame's paragraphs before it carry no label, so the first label is the frame's own."""
+    _frame, label, rest = str(model_facing or "").partition("\n\n" + SERVER_DESCRIPTION_LABEL)
+    return rest.split("\n\nServer metadata: ", 1)[0] if label else ""
+
+
 def _model_facing_description(tool: Any) -> str:
     """One frame for the whole loaded contract, not one per field: description, hints, metadata."""
     metadata = dict(tool.metadata or {})
@@ -364,7 +374,7 @@ def _model_facing_description(tool: Any) -> str:
     if marks := annotation_marks(annotations):
         parts.append(f"Server hints (advice, not permissions): {marks}")
     if tool.description:
-        parts.append(f"Server description: {tool.description}")
+        parts.append(SERVER_DESCRIPTION_LABEL + str(tool.description))
     if metadata:
         parts.append("Server metadata: " + json.dumps(metadata, ensure_ascii=False))
     return "\n\n".join(parts)

@@ -33,7 +33,9 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
 # this rule only orders the default, and enable_tools still loads any permitted schema.
 # The set's size stays where it is, so one explicitly loaded skill (25 tools) still fits.
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
+    # Installation upkeep (maintain_harness, free_storage) is neither this mind's memory nor the work in front of
+    # it: on such a route it takes the remaining room in its own order.
+    "inspect_harness", "inspect_subagent",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -74,8 +76,10 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
-    # The project's progress memory and working page, and the fold of this actor's own transcript.
-    "journal_read", "journal_write", "workpad_read", "workpad_write", "compact_context",
+    # The project's progress memory and working page, the hand-written source registry of memory
+    # (memory/registry.md), and the fold of this actor's own transcript.
+    "journal_read", "journal_write", "workpad_read", "workpad_write", "memory_map", "memory_update_registry",
+    "compact_context",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
     "ocr_pdf", "extract_pdf_text",

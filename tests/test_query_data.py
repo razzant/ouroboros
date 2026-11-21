@@ -759,19 +759,24 @@ def test_another_operations_parameter_is_named_with_its_owner(ctx, kwargs, messa
 def test_the_one_operation_a_kind_takes_is_read_for_the_other_and_named(ctx):
     """A kind exactly one of json/jsonl reads names its operation: the other one takes it, disclosed;
     jsonl's own filter or tail on a JSON kind still asks for rows it lacks and is refused with the call."""
-    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", b'{"pass":true}\n')
+    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", b'{"pass":true}\n{"pass":false}\n')
     write(ctx, "state/queue_snapshot.json", b'{"a":1}')
-    plain = call(ctx, op="jsonl", kind="verification_receipts")
-    assert plain["data"] == [{"pass": True}] and "notes" not in plain
-    lines = call(ctx, op="json", kind="verification_receipts", tail=1)
+    plain = call(ctx, op="jsonl", kind="verification_receipts", tail=1)
+    assert plain["data"] == [{"pass": False}] and "notes" not in plain
+    lines = call(ctx, op="json", kind="verification_receipts", tail=1)  # the tail is kept, not dropped
     assert lines["status"] == "ok" and lines["data"] == plain["data"] and lines["source"]["op"] == "jsonl"
     assert lines["notes"] == ["op='json' read as op='jsonl': kind=verification_receipts is read only by op=jsonl"]
     document = call(ctx, op="jsonl", kind="queue_snapshot")
     assert document["data"] == {"a": 1} and document["source"]["op"] == "json"
     assert document["notes"] == ["op='jsonl' read as op='json': kind=queue_snapshot is read only by op=json"]
-    assert "notes" not in call(ctx, op="json", kind="queue_snapshot")
+    canonical = call(ctx, op="json", kind="queue_snapshot")
+    assert (canonical["status"], canonical["data"]) == ("ok", {"a": 1}) and "notes" not in canonical
     refused(call(ctx, op="jsonl", kind="queue_snapshot", filter={"field": "a", "op": "eq", "value": 1}),
             'filter={"field": "a", "op": "eq", "value": 1} applies only to op=jsonl: send op="json" without it')
+    # A filter the kind cannot take is refused for the kind first, so the advice is one call, not two refusals.
+    message = refused(call(ctx, op="jsonl", kind="queue_snapshot", filter={"field": "", "op": "eq", "value": 1}),
+                      'kind=queue_snapshot requires op=json; filter=')
+    assert "select/filter fields" not in message and "filter requires" not in message
 
 
 def test_a_default_valued_parameter_of_another_operation_takes_the_omitted_path(ctx):
