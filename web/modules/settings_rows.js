@@ -433,7 +433,7 @@ export const ROWS = [
     { id: 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', keys: ['OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT'], page: 'agents', fold: true,
         name: 'At once, for one task',
         meta: 'A number caps the subagents one task runs at once. No limit: Ouroboros decides; this computer\u2019s memory still limits.',
-        more: 'The number counts acting subagents: one that waits or sleeps yields its place. One task never has more than 500.',
+        more: 'The number counts acting subagents: one that waits or sleeps yields its place. One task never has more than 500 waiting and running at once.',
         control: { kind: 'number', min: 1, max: 500, noLimit: true, empty: 'no limit' },
         aliases: ['Active subagents per root', 'Active at once per task'],
         writer: 'generic', codec: 'ownerCap', confirm: '', hiddenWhen: '' },
