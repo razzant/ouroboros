@@ -335,6 +335,8 @@ D20 = "Presence"
 "ouroboros/depth_evidence.py" = "D07"
 "ouroboros/dialogue_evidence.py" = "D06"
 "ouroboros/dialogue_provenance.py" = "D15"
+"ouroboros/dialogue_words.py" = "D15"  # the one tokenization rule and word predicate over dialogue fields
+"ouroboros/dialogue_recall.py" = "D15"  # chat_history(words=…): the words reader over the conversation
 "ouroboros/effort_evidence.py" = "D07"
 "ouroboros/event_bus.py" = "D14"
 "ouroboros/event_token_totals.py" = "D16"

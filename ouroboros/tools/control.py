@@ -23,6 +23,7 @@ from ouroboros.config import (
 )
 from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
 from ouroboros.memory_texts import edit_properties
+from ouroboros.dialogue_recall import WORDS_DESCRIPTION
 from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
 from ouroboros.contracts.task_contract import (
     build_task_contract,  # noqa: F401
@@ -424,7 +425,7 @@ def get_tools() -> List[ToolEntry]:
         }, _request_deep_self_review),
         ToolEntry("chat_history", {
             "name": "chat_history",
-            "description": "Retrieve live and recent archived chat messages. Supports exact provenance/date filters, substring search, and pagination.",
+            "description": "Retrieve live and recent archived chat messages. Supports exact provenance/date filters, substring search or words, and pagination.",
             "parameters": {"type": "object", "properties": {
                 "count": {"type": "integer", "default": 100, "description": "Number of messages (from latest)"},
                 "offset": {"type": "integer", "default": 0, "description": "Skip N from end (pagination)"},
@@ -437,6 +438,10 @@ def get_tools() -> List[ToolEntry]:
                 "date_from": {"type": "string", "default": "", "description": "Inclusive ISO-8601 lower timestamp bound"},
                 "date_to": {"type": "string", "default": "", "description": "Inclusive ISO-8601 upper timestamp bound"},
                 "snapshot": {"type": "string", "default": "", "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"},
+                "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
+                "room_id": {"type": "string", "description": "With words: one room, its chat id as text (1 is Main); default every room."},
+                "voice": {"type": "string", "enum": ["owner"], "description": "With words: only my human's own words; on a card, the comment, not the question or options."},
+                "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first, so an original said before its restatements can come first."},
             }, "required": [], "additionalProperties": False},
         }, _chat_history),
         ToolEntry("update_scratchpad", {

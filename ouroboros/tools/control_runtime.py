@@ -333,9 +333,18 @@ def _request_deep_self_review(ctx: ToolContext, reason: str, reviewer: str = "")
 @completed_local_read
 def _chat_history(
     ctx: ToolContext, count: int = 100, offset: int = 0, search: str = "",
-    snapshot: str = "", **filters: str,
+    snapshot: str = "", words: list | None = None, room_id: str = "", voice: str = "", order: str = "",
+    **filters: str,
 ) -> str:
+    from ouroboros import dialogue_recall
     from ouroboros.memory import Memory
+    from ouroboros.tools.arg_feedback import argument_refusal
+
+    try:  # words, room_id, voice and order: the words reader (``dialogue_recall``); without them, the legacy one
+        query, room = dialogue_recall.check_arguments(words, search=search, room_id=room_id, voice=voice, order=order,
+                                                      filters=filters)
+    except ValueError as exc:
+        return argument_refusal(ctx, "TOOL_ARG_ERROR (chat_history)", [str(exc)], effect="Nothing was read.")
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(
         getattr(ctx, "task_metadata", {}), dict
     ) else {}
@@ -348,6 +357,9 @@ def _chat_history(
     # Full project awareness (v6.32.0): the one mind's active recall spans every
     # thread (main + projects). The project-task working FOCUS is applied to the
     # passive default context only, never to this deliberate recall tool.
+    if query is not None:
+        return dialogue_recall.words_history(mem, query, room=room, voice=voice, order=order, count=count,
+                                             offset=offset, snapshot=snapshot, filters=filters)
     return mem.chat_history(
         count=count, offset=offset, search=search, snapshot=snapshot, **filters,
     )
