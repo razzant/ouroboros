@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Callable, Collection, Iterable, List, Literal, Mapping, Tuple
+from typing import Any, Callable, Collection, Iterable, List, Literal, Tuple
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
 
