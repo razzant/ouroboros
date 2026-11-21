@@ -389,11 +389,15 @@ def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
 
 
 def _callable_tools(tools: Any) -> Optional[frozenset]:
-    """The tools this actor may call now; None when unreadable, and then the notice withholds no path."""
+    """The built-in tools this actor may call now (``callable_rows``: a name a consciousness level withholds stays
+    shown, В31=B, yet its call is refused); None when unreadable, and then the notice withholds no path."""
+    from ouroboros.tool_policy import BUILTIN_NAMESPACE
+
     try:
-        return frozenset(tools.available_tools())
+        rows = tools.callable_rows(BUILTIN_NAMESPACE)
     except Exception:
         return None
+    return None if rows is None else frozenset(row["name"] for row in rows)
 
 
 RED_CHECK_NOTICE = "red_check_notice"  # the hold cause of the red check stated alone; beside the other facts the hold is theirs

@@ -396,7 +396,10 @@ def preflight_delegate_visibility(
 
     reason = "delegate_tools_invisible"
     try:
-        available = set(tools.available_tools())
+        from ouroboros.tool_policy import BUILTIN_NAMESPACE
+
+        # Callable, not merely shown: a contract can withhold a verb whose schema stays visible (В31=B).
+        available = {row["name"] for row in tools.callable_rows(BUILTIN_NAMESPACE)}
         if all(verb in available for verb in _DELEGATE_VERBS):
             return dispatch, False
     except Exception:
