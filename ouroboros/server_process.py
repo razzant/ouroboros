@@ -831,7 +831,8 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
 
     held, cut = held_saved_work_ids(pending, ended_at), interrupted_roots(root, ended_at)
     cancelled = cut["cancelled"] if cut else None  # journal twins of the turn's facts; None: unknown
-    facts = {"cancelling": cut["cancelling"], "not_continuable": cut["refused"]} if cut else {}
+    facts = ({"cancelling": cut["cancelling"], "not_continuable": cut["refused"], "unknown": cut["unknown"]}
+             if cut else {})
     gate_open = bool(gate())
     text = recovery_turn_text(_fault_cause_words(cause), ended_at, held, cut, root)
     meta = admit(int(chat_id), text, None) if gate_open else None

@@ -34,9 +34,10 @@ def _of_this_stop(event_at: str, since: str) -> bool:
 
 
 def interrupted_roots(root: pathlib.Path, since: str) -> Optional[Dict[str, List[Any]]]:
-    """``{"cancelled": [ids open to Continue], "refused": [(id, refusal)], "cancelling": [ids]}`` for the roots
-    the stop that began at ``since`` cut without a saved point; ``None`` when the rows or the intents cannot be
-    read. Children are their roots' business."""
+    """``{"cancelled": [ids open to Continue], "refused": [(id, refusal)], "cancelling": [ids], "unknown": [ids]}``
+    for the roots the stop that began at ``since`` cut without a saved point; ``None`` when the rows or the
+    intents cannot be read at all. An open intent whose own row cannot be read is that id's unknown, never a
+    reason to drop the lists already read. Children are their roots' business."""
     from ouroboros.cancel_intents import read_active_intents
     from ouroboros.owner_continue import continuation_eligibility
     from ouroboros.task_results import list_task_results, load_task_result
@@ -49,7 +50,7 @@ def interrupted_roots(root: pathlib.Path, since: str) -> Optional[Dict[str, List
     except Exception:
         log.warning("Cancelled rows or cancel intents are unreadable; the recovery turn says so", exc_info=True)
         return None
-    facts: Dict[str, List[Any]] = {"cancelled": [], "refused": [], "cancelling": []}
+    facts: Dict[str, List[Any]] = {"cancelled": [], "refused": [], "cancelling": [], "unknown": []}
     settled = set()
     for row in rows:
         origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
@@ -61,17 +62,19 @@ def interrupted_roots(root: pathlib.Path, since: str) -> Optional[Dict[str, List
         verdict = continuation_eligibility(row, task_id)
         refusal = "already_continued" if isinstance(row.get("continued_by"), dict) else verdict["refusal"]
         facts["refused" if refusal else "cancelled"].append((task_id, refusal) if refusal else task_id)
-    try:
-        for task_id, intent in intents.items():
-            if (task_id in settled or not shutdown_cancel(intent)
-                    or not _of_this_stop(str(intent.get("requested_at") or ""), since)):
-                continue
+    for task_id, intent in intents.items():
+        if (task_id in settled or not shutdown_cancel(intent)
+                or not _of_this_stop(str(intent.get("requested_at") or ""), since)):
+            continue
+        try:
             row = load_task_result(root, task_id, strict=True) or {}
-            if str(row.get("root_task_id") or task_id) == task_id:
-                facts["cancelling"].append(task_id)
-    except Exception:
-        log.warning("A cancelling row is unreadable; the recovery turn says so", exc_info=True)
-        return None
+        except Exception:
+            log.warning("The row of cancelling %s is unreadable; the recovery turn names it unknown", task_id,
+                        exc_info=True)
+            facts["unknown"].append(task_id)
+            continue
+        if str(row.get("root_task_id") or task_id) == task_id:
+            facts["cancelling"].append(task_id)
     return {key: sorted(value) for key, value in facts.items()}
 
 
@@ -88,8 +91,10 @@ def recovery_turn_text(cause_words: str, ended_at: str, held: List[str], interru
         cut = ("Interrupted roots with no saved point, cancelled by the stop and open to Continue: "
                f"{', '.join(interrupted['cancelled']) or 'none'}.",
                f"Cancelled by the stop but not open to Continue: {refused}." if refused else "",
-               "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): "
-               f"{', '.join(interrupted['cancelling']) or 'none'}.")
+               "Being cancelled now by this start's restore (Continue is decided per root once its cancel "
+               f"settles): {', '.join(interrupted['cancelling']) or 'none'}.",
+               "Being cancelled now, but their rows could not be read (root and Continue unknown): "
+               f"{', '.join(interrupted['unknown'])}." if interrupted.get("unknown") else "")
     return "\n".join(filter(None, (
         f"[recovery after a server fault] The previous server generation ended at {ended_at or 'an unknown time'}: "
         f"{cause_words}. This generation restarted itself with the same code.",

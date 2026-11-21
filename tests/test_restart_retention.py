@@ -465,7 +465,8 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     assert "its event-bus process exited" in text and "restarted itself with the same code" in text
     assert "Tasks held with their saved state (Resume continues each from that state): held-1." in text
     assert "cancelled by the stop and open to Continue: root-cut, root-fenced." in text
-    assert "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): none." in text
+    assert "Being cancelled now by this start's restore (Continue is decided per root once its cancel " \
+        "settles): none." in text
     assert "root-stopped" not in text and "child-cut" not in text and "plain-queued" not in text
     assert "root-owner-restart" not in text and "root-done" not in text
     assert "held-by-an-earlier-quit" not in text, "a hold older than this fault's entry is not this fault's work"
@@ -534,21 +535,36 @@ def test_a_fault_boot_names_the_roots_this_starts_restore_is_cancelling(tmp_path
     queue.restore_pending_from_snapshot(terminalized=fenced)
     assert fenced == ["root-live"] and active_intent(tmp_path, "root-live")["source"] == "snapshot_restore"
 
+    # One cancelling root whose own row cannot be read is that root's unknown; the lists already read stay.
+    from ouroboros import task_results
+
+    real_load = task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda root, task_id, *a, **k: (
+        (_ for _ in ()).throw(OSError("row unreadable")) if task_id == "root-live" else real_load(root, task_id, *a, **k)))
     worker_chat_lane.auto_resume_after_restart()
-    text = turns[0][1]
-    assert "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): " \
+    monkeypatch.setattr(task_results, "load_task_result", real_load)
+    first = turns[0][1]
+    assert "their rows could not be read (root and Continue unknown): root-live." in first
+    assert "Cancelled by the stop but not open to Continue: root-done-before (already_continued)." in first
+    assert "unknown, the cancelled rows" not in first
+    write_task_result(tmp_path, "turn-1", "completed", chat_id=7, result="told the owner")
+
+    worker_chat_lane.auto_resume_after_restart()
+    text = turns[1][1]
+    assert "Being cancelled now by this start's restore (Continue is decided per root once its cancel settles): " \
         "root-live." in text
     assert "open to Continue: none." in text and "root-earlier-start" not in text
     assert "Cancelled by the stop but not open to Continue: root-done-before (already_continued)." in text
-    [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
-    assert row["cancelling"] == ["root-live"] and row["cancelled"] == []
+    rows = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
+    assert rows[0]["unknown"] == ["root-live"] and rows[0]["cancelling"] == []
+    assert rows[1]["cancelling"] == ["root-live"] and rows[1]["cancelled"] == [] and rows[1]["unknown"] == []
 
     assert sweep_cancel_intents(now=time.time() + 3600)["root-live"] == "cancelled"
-    write_task_result(tmp_path, "turn-1", "completed", chat_id=7, result="told the owner")
+    write_task_result(tmp_path, "turn-2", "completed", chat_id=7, result="told the owner")
     worker_chat_lane.auto_resume_after_restart()
-    assert "cancelled by the stop and open to Continue: root-live." in turns[1][1]
-    assert "Being cancelled now by this start's restore (Continue opens for each once its cancel settles): " \
-        "none." in turns[1][1]
+    assert "cancelled by the stop and open to Continue: root-live." in turns[2][1]
+    assert "Being cancelled now by this start's restore (Continue is decided per root once its cancel settles): " \
+        "none." in turns[2][1]
 
 
 def test_a_fault_boot_of_another_generation_gets_its_own_turn_and_lists_a_held_earlier_one(tmp_path, monkeypatch):
