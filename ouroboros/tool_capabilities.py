@@ -588,9 +588,12 @@ COMPLETION_RECEIPT_TOOLS = frozenset({
 })
 
 
+SCHEMA_DISCOVERY_TOOLS = frozenset({"enable_tools", "list_available_tools"})
+
+
 def completion_observation_calls(calls: object) -> list:
     """Results a finish must observe. Exempt: successful schema bookkeeping, and a receipt
     write that answered exactly ``OK`` (a warning or a partial write is read first)."""
     return [call for call in substantive_tool_calls(calls) if call.get("is_error") or not (
-        call.get("tool") in {"enable_tools", "list_available_tools"}
+        call.get("tool") in SCHEMA_DISCOVERY_TOOLS
         or (call.get("tool") in COMPLETION_RECEIPT_TOOLS and call.get("tool_result_code") == "OK"))]

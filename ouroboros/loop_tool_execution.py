@@ -1179,7 +1179,10 @@ def handle_tool_calls(
     results = execute_tool_calls(tool_calls, tools, drive_logs, task_id, stateful_executor, llm_trace)
     errors = process_tool_results(results, messages, llm_trace, emit_progress, tools=tools,
                                   fit_candidate=fit_candidate, tool_schemas=tool_schemas, project_results=project_results)
-    if substantive_tool_calls(llm_trace.get("tool_calls", [])[initial_count:]):
+    from ouroboros.loop_nudges import observe_handover_work
+    batch = llm_trace.get("tool_calls", [])[initial_count:]
+    observe_handover_work(tools._ctx, llm_trace, batch)
+    if substantive_tool_calls(batch):
         tools._ctx._skill_finalization_injected = False
     return errors
 

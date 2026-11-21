@@ -709,10 +709,14 @@ def test_owner_model_act_during_a_tools_helper_wait_keeps_the_loop_running(host,
                                worker_slot_held=True) as waiter:
         waiter.tool_context = ctx
         ctx.model_wait_context = waiter
-        text, _, _ = loop.run_llm_loop([{"role": "user", "content": "Read the note"}], tools,
+        text, usage, trace = loop.run_llm_loop([{"role": "user", "content": "Read the note"}], tools,
             SimpleNamespace(default_model=lambda: A), host[0], lambda *_a, **_k: None,
             queue.Queue(), task_id="work", drive_root=host[0], event_queue=ctx.event_queue)
-    assert text == "done" and calls == [A, B] and len(ticks) == 2
+    # The helper still finishes its own wait. Only the successor sees the handover reminder.
+    assert len(ticks) == 2 and calls == [A, B, B] and text == "done"
+    [handover] = trace["route_handovers"]
+    assert (handover["from_model"], handover["to_model"], handover["selection"]) == (A, B, "answer")
+    assert handover["recovery_prompted"] and usage.get("reason_code") != "authoring_handover_incomplete"
 
 
 def test_forced_finalization_wait_does_not_spin_or_consume_a_primary_act(host, monkeypatch):
