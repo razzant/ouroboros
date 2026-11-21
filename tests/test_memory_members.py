@@ -305,3 +305,33 @@ def test_the_schema_carries_members_and_words_and_its_lead_names_them():
     assert properties["members"] == {"type": "boolean", "description": "true: what stands under room_id or node_id."}
     assert properties["words"]["type"] == "array" and properties["words"]["items"] == {"type": "string"}
     assert "members=true with room_id or node_id lists what stands under it by recorded relation" in schema["description"]
+
+
+def test_words_drop_non_matching_listed_lines_over_the_whole_list_before_paging(tmp_path, monkeypatch):
+    """The shared predicate (``dialogue_words``) keeps the matching lines of the listed set; the filter runs over every
+    immediate entry first, so a smaller page never changes which entries match, and no context level joins."""
+    ctx, _rows, page, note = install(tmp_path)
+    for n in range(10):
+        write(ctx, kind="note", text=f"Flaky runner number {n} failed again. More.")
+    whole = members(ctx, room_id="1")
+    assert len(listed(whole)) == 14  # page, 11 notes, two untold runs
+    text = members(ctx, room_id="1", words=["flak"])
+    assert "words ['flak']: 11 of 14 listed lines match (applied before paging)" in text.split("\n")[0]
+    assert [line.split(" ")[1] for line in listed(text)] == ["note"] * 11 and "context, level" not in text
+    both = members(ctx, room_id="1", words=["build red", "flaky test"])
+    assert [line.split(" ", 3)[2] for line in listed(both)] == [page, note]
+    assert listed(members(ctx, room_id="1", words=["нет такого"])) == [""]
+    monkeypatch.setattr(chronicle, "tool_result_limit", lambda _name: 700)
+    seen, start = "", 0
+    while True:
+        window = members(ctx, room_id="1", words=["flak"], start=start).split("\n", 2)
+        assert window[0] == text.split("\n")[0]
+        seen += window[2]
+        found = re.search(r"next_start=(\d+) \(listed order\); memory_read\(members=true, room_id='1', "
+                          r"words=\['flak'\], start=(\d+)\)", window[1])
+        if found is None:
+            break
+        start = int(found.group(1))
+    assert seen == "\n".join(text.split("\n")[2:])
+    for bad in (["   "], [], "flaky", [3]):
+        assert "TOOL_ARG_ERROR" in members(ctx, room_id="1", words=bad), bad

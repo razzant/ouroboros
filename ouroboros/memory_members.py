@@ -76,9 +76,10 @@ def check_call(*, room_id: Any, node_id: Any, words: Any, members: bool, others:
     if room and str(room_id).strip() != LEGACY_ROOM_ID and not str(room_id).strip().lstrip("-").isdigit():
         raise ValueError(f"room_id {str(room_id).strip()!r} is not a room address: members reads one room by its chat id "
                          "as text (or 'legacy')")
-    if words is not None and (not isinstance(words, list) or not words or not all(isinstance(w, str) and w.strip()
-                                                                                   for w in words)):
-        raise ValueError("words is a non-empty list of non-empty strings, each one alternative")
+    if words is not None:  # the shared predicate's own rules (``dialogue_words.parse``) name a bad item
+        from ouroboros.dialogue_words import parse
+
+        parse(words)
 
 
 def read_members(root: Path, *, room_id: Any = None, node_id: Any = None, start: int = 0, limit: int,
