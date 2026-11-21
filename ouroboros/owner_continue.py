@@ -184,6 +184,16 @@ def execution_carry(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"execution_timeout_sec": total, "execution_consumed_sec": float(sec) if known else None}
 
 
+def _recorded_task_type(result: Dict[str, Any]) -> str:
+    """The kind of work the record's task contract names (``build_task_contract``: the running write and the final
+    store carry it), else the admission metadata's copy; ``""`` when neither names one."""
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    for contract in (result.get("task_contract"), metadata.get("task_contract")):
+        if isinstance(contract, dict) and contract.get("task_type"):
+            return str(contract["task_type"])
+    return ""
+
+
 def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     """``{"eligible": bool, "cause": str, "refusal": str}`` from typed facts only.
 
@@ -238,6 +248,10 @@ def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, 
         return {"eligible": False, "cause": cause, "refusal": "execution_budget_unknown"}
     if cause == AUTHOR_STOP_CAUSE and deadline and seconds_until(deadline) is None:
         return {"eligible": False, "cause": cause, "refusal": "deadline_unknown"}
+    # Where Continue would be offered: a deep self-review saves no midpoint, so a successor would be an ordinary task
+    # (a finished or owner-stopped one keeps its own refusal above).
+    if _recorded_task_type(result) == "deep_self_review":
+        return {"eligible": False, "cause": "deep_self_review", "refusal": "deep_review_restart_required"}
     return {"eligible": True, "cause": cause, "refusal": ""}
 
 

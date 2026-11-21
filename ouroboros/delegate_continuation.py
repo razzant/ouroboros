@@ -154,7 +154,8 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
     the offer is read at every settled member the walk reaches, not only at the
     run's own root; child tasks never carry an offer. An author's stop is offered Continue, but that offer adds
     no hold here: its line keeps a finished root's ordinary retention (every other check below still applies),
-    and its successor's work order says so. An admitted claim is followed below, like any other.
+    and its successor's work order says so. An admitted claim is followed below, like any other. A row-only offer
+    adds no lifetime hold; retention, Keep, custody and successor holds remain.
     ``every_offer`` is the stricter reading a managed document's release needs (``delegate_documents``): any
     offer holds, an author's stop included, and so does one whose eligibility a later fact may still decide
     (``_UNDECIDED_OFFERS``); the registration reading above never passes it.
