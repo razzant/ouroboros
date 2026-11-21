@@ -1079,6 +1079,7 @@ D20 = "Presence"
 "supervisor/schedule_time.py" = "D08"
 "supervisor/state.py" = "D08"
 "supervisor/state_initialization.py" = "D08"
+"supervisor/first_meeting.py" = "D08"  # setup's Start opens one host-started root, at most once a state
 "supervisor/steering.py" = "D09"
 "supervisor/subagent_task_truth.py" = "D08"
 "supervisor/task_admission.py" = "D08"

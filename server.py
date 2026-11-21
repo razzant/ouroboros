@@ -741,6 +741,8 @@ def _run_supervisor(settings: dict) -> None:
         startup_upgrade_notices(settings)
 
         run_startup_phase(_loop_liveness, "startup:resume", auto_resume_after_restart)
+        from supervisor.first_meeting import admit_first_meeting  # setup's Start opens one root, at most once a state
+        run_startup_phase(_loop_liveness, "startup:first_meeting", lambda: admit_first_meeting(DATA_DIR))
 
         _consciousness = BackgroundConsciousness(  # wakes speak in the bound chat, or Main while it is known empty
             drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=lambda: owner_chat_of(load_state()),

@@ -253,6 +253,23 @@ def test_a_fresh_install_left_on_is_born_on_and_one_left_off_is_born_off(minted,
     assert _boot_control() == (False, None)
 
 
+def test_a_state_minted_after_setup_owes_the_first_meeting_and_one_minted_before_does_not(minted, tmp_path):
+    """My human's press of Start (the completion fact) is what a first state is born owing: one first meeting
+    (``supervisor.first_meeting``), whatever the switch said. A root minted before any setup owes none, and a setup
+    finished over a state that already exists adds none."""
+    from supervisor import state
+    from supervisor.first_meeting import FIRST_MEETING_KEY
+
+    _complete(minted, consciousness=False)
+    read = state.init_state()
+    assert read.values[FIRST_MEETING_KEY] == {"state": "owed", "pressed_at": minted.saved()[ONBOARDING_COMPLETED_KEY]}
+    _forget_state(tmp_path)
+    minted.settings_path.unlink(missing_ok=True)
+    assert FIRST_MEETING_KEY not in state.init_state().values  # no setup recorded when it was minted
+    _complete(minted, consciousness=True)
+    assert FIRST_MEETING_KEY not in state.init_state().values  # setup over an existing state: nothing owed
+
+
 def test_an_owner_reset_then_setup_left_on_is_born_on(minted, tmp_path):
     from ouroboros.consciousness import OWNER_STOP, _persist_stop
     from supervisor.state_initialization import mark_pending
