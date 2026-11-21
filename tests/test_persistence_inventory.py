@@ -1014,7 +1014,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
 # ``DAMAGED_MARK``); the existing evidence-pack row names it.
 # 479 -> 480: the capture reader also names the existing task artifact workspace.patch.
-EXPECTED_SCAN_PATHS = 480
+# Service finalization observes the private log directory and its files, ``private_service_logs`` and
+# ``private_service_logs/*``. Settlement copies each legacy log to ``private_service_logs/*/*`` and verifies the
+# exact file before releasing the old drive (``launch_custody._keep_legacy_log``); use the existing private-log row.
+EXPECTED_SCAN_PATHS = 483
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1025,6 +1028,8 @@ SENTINELS = frozenset({
     "state/state.json",
     "state/queue_snapshot.json",
     "state/process_ledger.jsonl",
+    "private_service_logs",
+    "private_service_logs/*",
     "state/consciousness_observations.jsonl",
     "state/skills/*/review_history.jsonl",
     "logs/events.jsonl",

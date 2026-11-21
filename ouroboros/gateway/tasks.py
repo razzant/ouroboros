@@ -38,8 +38,9 @@ from ouroboros.gateway.task_hurry import api_task_hurry  # noqa: F401
 from ouroboros.gateway.task_pause import api_task_pause, owner_tree_control_routes  # noqa: F401 -- same split as hurry
 from ouroboros.gateway.task_decision import api_decision_answer  # noqa: F401
 from ouroboros.gateway.task_archive import (
-    chat_media_identity, directory_archives, plain_segments, serve_directory_archive, serve_task_file,
-    task_artifact_location, recorded_identity, serve_task_source, serve_wrap_up_document,
+    VERIFICATION_LEDGER_NAME, chat_media_identity, directory_archives, plain_segments, serve_directory_archive,
+    serve_task_file, task_artifact_location, recorded_identity, serve_projected_verification_ledger,
+    serve_task_source, serve_wrap_up_document,
 )
 from ouroboros.confined_files import root_spellings
 from ouroboros.task_custody import task_artifact_stores
@@ -972,7 +973,7 @@ def api_task_artifact(request: Request):
                 if media else json_error("artifact not found", 404, task_id=task_id, artifact=name))
     registered = artifact_store.registered_task_artifact(drive_root, task_id, name) if relpath in (None, name) else None
     # A registered immutable top-level file needs one identity check, not a result projection.
-    fast = bool(not source and registered and registered.get("immutable")
+    fast = bool(not source and name != VERIFICATION_LEDGER_NAME and registered and registered.get("immutable")
                 and (at := task_artifact_location(stores, registered.get("path"), spellings)) and at[2] == name)
     result = {} if fast else (load_effective_task_result(drive_root, task_id) or {})
     if not result and not registered:
@@ -995,6 +996,8 @@ def api_task_artifact(request: Request):
             return json_error("artifact path is outside task artifact directory", 500)
         return json_error("artifact not found", 404, task_id=task_id, artifact=name)
     (index, _path, relative), _order, artifact = min(matches, key=lambda item: (item[0][0], item[1]))
+    if relative == VERIFICATION_LEDGER_NAME and artifact.get("kind") == "verification_ledger":
+        return serve_projected_verification_ledger(request, task_id)
     return serve_task_file(drive_root, stores[index], relative, name, recorded_identity(artifact), task_id=task_id,
                            mutable=not artifact.get("immutable"), head_only=request.method == "HEAD")
 

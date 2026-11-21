@@ -219,6 +219,38 @@ test('an open Timeline grows in place, keeps MAX rows, and closed lets its rows 
     assert.equal(rows().length, 30);
 });
 
+// A launch's own row (the host's `card_row_id`, service_finalization) is ONE row of its task, as on its card: the bound
+// is telemetry's, a retried file result (`card_row_revision` 2) revises the row where its stop stands, and an earlier
+// revision told late, at its own later time, is nothing new (docs/architecture/11-frozen-contracts-v1.md).
+test('a task timeline keeps each launch\'s newest service row past the telemetry bound', async (t) => {
+    const STOPPED = 'Background service stopped: paper (aaaaaaaaaa) · requested stop · log saved · output 1 absent';
+    const SECOND = 'Background service stopped: paper (bbbbbbbbbb) · at task end · log saved';
+    const UPDATED = 'Background service outputs updated: paper (aaaaaaaaaa) · ended · log saved · output 1 saved: preview.txt';
+    const service = (second, text, extra = {}) => ({ type: 'task_checkpoint', task_id: 't', ts: at(second),
+        checkpoint_kind: 'services_stopped', role: 'system', system_type: 'task_checkpoint',
+        card_row_id: 'service:launch-aaaaaaaaaa', card_row_revision: 1, detail: text, content: text, text, ...extra });
+    const logs = mountLogs(t);
+    await settle();
+    logs.emit(service(1, STOPPED));
+    logs.emit(service(2, SECOND, { card_row_id: 'service:launch-bbbbbbbbbb' }));
+    for (let second = 3; second < 41; second += 1) logs.emit({ type: 'task_heartbeat', phase: 'running', task_id: 't', ts: at(second) });
+    const card = logs.card('t');
+    logs.toggle(card, true);
+    const rows = () => card.querySelector('.log-task-timeline').querySelectorAll('.log-task-event');
+    const names = () => rows().map((row) => row.querySelector('.log-name').textContent);
+    assert.equal(rows().length, 32, 'thirty telemetry rows and each launch\'s own row');
+    assert.deepEqual(names().slice(0, 3), [STOPPED, SECOND, 'Still working'], 'the launches outlast the telemetry after them');
+    const [launch] = rows();
+    logs.emit(service(41, UPDATED, { checkpoint_kind: 'service_outputs_updated', card_row_revision: 2 }));
+    assert.deepEqual(names().slice(0, 2), [UPDATED, SECOND], 'the retried file revises the row its stop opened');
+    assert.equal(rows()[0], launch, 'in the same node');
+    assert.equal(rows().length, 32);
+    logs.emit(service(42, STOPPED));
+    assert.deepEqual(names().slice(0, 2), [UPDATED, SECOND], 'an earlier revision never takes it back');
+    assert.equal(rows().length, 32);
+    assert.equal(card.querySelector('.log-count').textContent, '41 events', 'nor counts as an event of its own');
+});
+
 test('a history owed while hidden merges by time: old rows go before the live ones, and a card keeps its newest state', async (t) => {
     const older = { type: 'test_older_row', ts: at(1) };
     const card = { type: 'task_heartbeat', phase: 'older-phase', task_id: 'busy', ts: at(2) };

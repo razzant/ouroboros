@@ -189,6 +189,26 @@ export class ElementStub {
     // Like a browser, a disabled button dispatches no click.
     click() { if (!this.disabled) for (const fn of this.listeners.get('click') || []) fn({ target: this }); }
 }
+/** The flat stub parses markup into bare children; this gives each parsed child the markup from its own tag onward,
+ *  so a rendered row's text is assertable (`row.innerHTML`). A suite that reads row markup installs it once. */
+export function parseRowMarkup() {
+    const innerHTMLDescriptor = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
+    Object.defineProperty(ElementStub.prototype, 'innerHTML', {
+        configurable: true,
+        get() { return innerHTMLDescriptor.get.call(this); },
+        set(value) {
+            innerHTMLDescriptor.set.call(this, value);
+            const html = String(value || '');
+            let cursor = 0;
+            for (const child of this.children) {
+                const index = html.indexOf(`<${child.tagName.toLowerCase()}`, cursor);
+                if (index < 0) continue;
+                child._innerHTML = html.slice(index);
+                cursor = index + 1;
+            }
+        },
+    });
+}
 export function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) })) {
     const prior = {
         document: globalThis.document, window: globalThis.window,

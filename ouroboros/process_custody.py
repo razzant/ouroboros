@@ -141,6 +141,7 @@ def record_process(
     owner_task_id: str = "",
     reap_process_group: bool = True,
     scope_marker: str = "",
+    service_log_name: str = "",
 ) -> Dict[str, Any]:
     """Append a custody record for an already-spawned process.
 
@@ -169,6 +170,8 @@ def record_process(
         from ouroboros.process_census import birth_text
 
         entry.update(scope_marker=str(scope_marker), scope_birth=birth_text(pid))
+    if service_log_name:
+        entry["service_log_name"] = service_log_name
     if not append_jsonl(ledger_path(drive_root), entry):
         raise OSError("process custody record could not be written")
     from ouroboros.owned_shutdown import record_ledgered_process
@@ -189,6 +192,7 @@ def spawn_supervised(
     new_process_group: bool = True,
     on_spawn: Any = None,
     scope_marker: str = "",
+    service_log_name: str = "",
     **popen_kwargs: Any,
 ) -> subprocess.Popen:
     """Popen + durable custody record (the single supervised chokepoint).
@@ -231,6 +235,7 @@ def spawn_supervised(
             scope=scope,
             owner_task_id=owner_task_id,
             scope_marker=scope_marker,
+            **({"service_log_name": service_log_name} if service_log_name else {}),
         )
     except Exception as exc:
         log.warning("process custody record failed for pid %s (%s)", proc.pid, purpose, exc_info=True)

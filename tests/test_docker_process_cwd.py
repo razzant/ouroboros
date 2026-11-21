@@ -43,7 +43,7 @@ SURFACES = [
 
 @pytest.mark.parametrize("surface,arguments", SURFACES)
 def test_registry_routes_alias_through_guards_and_reads_back_marker(workspace, monkeypatch, surface, arguments):
-    from ouroboros.tools import shell, services
+    from ouroboros.tools import shell
     import ouroboros.safety as safety
 
     ctx, active = workspace
@@ -81,7 +81,7 @@ def test_registry_routes_alias_through_guards_and_reads_back_marker(workspace, m
     monkeypatch.setattr(safety, "check_safety", check)
     monkeypatch.setattr(shell, "executor_execute", effect)
     monkeypatch.setattr(executor, "execute", effect)
-    monkeypatch.setattr(services, "executor_start_service", service)
+    monkeypatch.setattr(executor, "_launch_service", service)
     result = registry.execute(surface, {**arguments, "cwd": "/workspace/project/sub"})
     assert (active / "sub" / "marker.txt").is_file(), result
     assert len(observed) == 1
@@ -98,8 +98,6 @@ def test_file_and_process_consumers_pick_one_target_for_a_colliding_spelling(wor
     real host path inside active_workspace and the alias of ``<active>/active/sub``;
     ``<parent>/only`` exists only as an alias. Distinct bytes name the winner.
     """
-    from ouroboros.tools import services
-
     ctx, active = workspace
     parent = active.parent
     ctx.executor_ref["workspace_backend_path"] = _shared_absolute(parent)
@@ -118,7 +116,7 @@ def test_file_and_process_consumers_pick_one_target_for_a_colliding_spelling(wor
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setattr("ouroboros.tools.shell.executor_execute", effect)
     monkeypatch.setattr(executor, "execute", effect)
-    monkeypatch.setattr(services, "executor_start_service", lambda _ctx, **kw: (
+    monkeypatch.setattr(executor, "_launch_service", lambda _ctx, **kw: (
         effect(_ctx, kw["cmd"], kw["host_cwd"], 5) and {"state": "running", "service_id": "cwd-test:preview"}))
     for text, expected in ((_shared_absolute(host), "host"), (f"{_shared_absolute(parent)}/only", "alias")):
         read = registry.execute("read_file", {"path": f"{text}/marker.txt"})
@@ -143,8 +141,6 @@ def test_registry_refuses_matched_invalid_and_outside_alias(workspace, monkeypat
 
 @pytest.mark.parametrize("surface,arguments", SURFACES)
 def test_identity_mount_keeps_permitted_host_root_on_every_process_door(workspace, monkeypatch, surface, arguments):
-    from ouroboros.tools import services
-
     ctx, active = workspace
     scratch = active.parent / "scratch"
     scratch.mkdir()
@@ -174,7 +170,7 @@ def test_identity_mount_keeps_permitted_host_root_on_every_process_door(workspac
     monkeypatch.setattr("ouroboros.safety.check_safety", safety)
     monkeypatch.setattr("ouroboros.tools.shell.executor_execute", effect)
     monkeypatch.setattr(executor, "execute", effect)
-    monkeypatch.setattr(services, "executor_start_service", lambda _ctx, **kw: (
+    monkeypatch.setattr(executor, "_launch_service", lambda _ctx, **kw: (
         effect(_ctx, kw["cmd"], kw["host_cwd"], 5) and {"state": "running", "service_id": "cwd-test:preview"}))
     result = registry.execute(surface, {**arguments, "cwd": _shared_absolute(scratch)})
     assert calls == [scratch.resolve()], result
@@ -344,7 +340,7 @@ def test_a_relative_output_resolved_outside_backend_mounts_is_refused_before_lau
     monkeypatch.setattr("ouroboros.workspace_executor_paths._docker_output_probe", probe)
     launched = []
     monkeypatch.setattr("ouroboros.tools.shell.executor_execute", lambda *a, **k: launched.append(a) or executor.ExecutorResult(0, ""))
-    monkeypatch.setattr("ouroboros.tools.services.executor_start_service", lambda *a, **k: launched.append(k) or {})
+    monkeypatch.setattr(executor, "_launch_service", lambda *a, **k: launched.append(k) or {})
     args = {"cmd": ["python3", "-c", "print(1)"], "cwd": str(active / "sub"), "outputs": ["../../out.txt"]}
     if surface == "start_service":
         args["name"] = "preview"

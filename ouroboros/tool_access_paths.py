@@ -195,6 +195,40 @@ def paths_overlap_casefold(left: pathlib.Path, right: pathlib.Path) -> bool:
     return _path_is_relative_to_casefold(left, right) or _path_is_relative_to_casefold(right, left)
 
 
+PRIVATE_SERVICE_LOGS = "private_service_logs"
+
+
+def is_private_service_log_path(resolved: pathlib.Path, data_root: pathlib.Path | None = None) -> bool:
+    """Classify an addressed store, never a name found in an ordinary workspace."""
+    names = tuple(part.casefold() for part in resolved.parts)
+    if PRIVATE_SERVICE_LOGS not in names and ("services" not in names or resolved.suffix.lower() != ".log"):
+        return False
+    if data_root is None:
+        from ouroboros.config import DATA_DIR
+
+        data_root = pathlib.Path(DATA_DIR)
+    from ouroboros.task_custody import canonical_owner_root
+
+    data_root = pathlib.Path(data_root).resolve(strict=False)
+    for base in {canonical_owner_root(data_root), data_root}:
+        prefix = tuple(part.casefold() for part in base.parts)
+        if names[:len(prefix)] != prefix:
+            continue
+        relative = names[len(prefix):]
+        # Legacy files remain private in their recognized execution layouts and retirement trash.
+        if relative[:1] == ("task_drives",):
+            relative = relative[2:]
+        elif relative[:2] in {("state", "headless_tasks"), ("state", "custody_trash")}:
+            relative = relative[3:]
+            if relative[:1] == ("data",):
+                relative = relative[1:]
+        if relative[:1] == (PRIVATE_SERVICE_LOGS,):
+            return True
+        if len(relative) == 3 and relative[0] == "services" and relative[2].endswith(".log"):
+            return True
+    return False
+
+
 def workspace_mode_block_reason(ctx: Any) -> str:
     mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
     workspace_root = getattr(ctx, "workspace_root", None)
@@ -250,6 +284,29 @@ def canonical_data_root(ctx: Any) -> pathlib.Path:
         if text:
             return pathlib.Path(text).resolve(strict=False)
     return pathlib.Path(getattr(ctx, "drive_root")).resolve(strict=False)
+
+
+def runtime_data_roots(ctx: Any) -> list[pathlib.Path]:
+    """Physical runtime roots used by file admission, including a forked child's parent."""
+    from ouroboros.config import DATA_DIR
+
+    values = [getattr(ctx, "drive_root", "")]
+    try:
+        values.append(canonical_data_root(ctx))
+    except Exception:
+        pass
+    values.append(DATA_DIR)
+    roots = []
+    for value in values:
+        if not str(value or "").strip():
+            continue
+        try:
+            root = pathlib.Path(value).expanduser().resolve(strict=False)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 def normalize_runtime_data_path(data_root: pathlib.Path, path: str) -> str:

@@ -48,6 +48,8 @@ PLATFORM_SKIPS = (
      r"POSIX test launcher"),
     ("tests/test_chat_history_recovery_browser.py",
      r"POSIX archive permissions|identity bypasses unreadable-file permissions"),
+    ("tests/test_verification_check_row_browser.py::test_unsaved_service_log_row_live_finished_replayed_and_in_logs[",
+     r"POSIX file permissions make the service log unreadable|the current identity bypasses unreadable-file permissions"),
     ("tests/test_widget_stream_download_ui.py", r"native Qt probe is explicitly selected"),
     # Headless Chromium on Linux applies no synthetic touch pinch even to a plain page (CI 40682936207); macOS does.
     ("tests/test_shell_drawer_browser.py::test_a_pinch_magnifies_the_room", r"applies no synthetic touch pinch"),

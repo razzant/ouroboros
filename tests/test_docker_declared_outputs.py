@@ -180,7 +180,7 @@ def test_automatic_docker_service_outputs_and_custody(shell_docker, monkeypatch,
     assert len(results) == 1 and not any(key.startswith("_") for key in results[0])
     pending = outcome in {"stop_failed", "keep_alive", "keep_task", "panic"}
     assert record.durable_record_path.exists() is pending
-    assert bool(executor._services_snapshot()) is pending
+    assert bool(executor._services_snapshot()) is (pending or outcome == "unavailable")
     rows = artifacts.collect_task_artifact_records(ctx.drive_root, ctx.task_id, require_registered=True)
     if pending:
         assert not stopped and not rows and "artifact_outputs" not in results[0]
@@ -190,7 +190,8 @@ def test_automatic_docker_service_outputs_and_custody(shell_docker, monkeypatch,
         assert stopped and results[0]["lifecycle"] == "stopped" and results[0]["cleanup_dispatched"]
         assert results[0]["artifact_output_failed"] is (outcome == "unavailable")
         if outcome == "export":
-            assert len(rows) == 1 and Path(rows[0]["path"]).read_text() == "service-bytes"
+            assert len(rows) == 2 and Path(rows[0]["path"]).read_text() == "service-bytes"
+            assert sum(row.get("immutable") is True for row in rows) == 1
         else:
             assert not rows and "injected post-stop output failure" in results[0]["artifact_outputs"]
 
@@ -267,3 +268,115 @@ def test_incomplete_inspection_is_unavailable_and_never_an_empty_mapping(project
     })
     assert result.code == "CAPABILITY_UNAVAILABLE", result.text
     assert not (active / "marker").exists()
+
+
+@pytest.mark.parametrize("target", ["original", "changed", "natural_exit", "legacy_with_record",
+                                     "legacy_without_record", "unindexed_running", "unindexed_unknown"])
+def test_kept_docker_capture_uses_the_original_launch_identity(shell_docker, monkeypatch, target):
+    from pathlib import Path
+    from ouroboros import workspace_executor as backend
+    from ouroboros import workspace_executor_paths as paths
+    from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.tools import kept_service_outputs as kept
+
+    registry, workspace = shell_docker
+    ctx = registry._ctx
+    identity = "b" * 64
+    launch = "service-" + "a" * 32
+    alias = ctx.executor_ref["container_name"]
+    calls = []
+    changed = False
+
+    def probe(args):
+        calls.append((args[0], args[-1] if args[0] == "inspect" else args[1]))
+        if args[0] == "inspect":
+            return json.dumps({"id": "c" * 64 if changed else identity, "running": True, "network": "none",
+                               "mounts": [{"Type": "bind", "Destination": str(workspace), "Source": str(workspace)}]})
+        assert args[:2] == ["exec", identity]
+        return str(workspace / "report.txt") + "\0"
+    monkeypatch.setattr(paths, "_docker_output_probe", probe)
+    context = paths.prepare_docker_outputs(backend.executor_ref_from_ctx(ctx), workspace, ["report.txt"])
+    record = backend._ExecutorService(
+        service_id=backend.service_key(ctx, "reporter"), record_id=launch, task_id=ctx.task_id, name="reporter",
+        executor=context.executor, output_context=context, cmd=["writer"], host_cwd=workspace,
+        backend_cwd=context.backend_cwd, cwd_root="active_workspace", cwd_base=str(workspace),
+        outputs=["report.txt"], before_outputs={}, backend_pid="42", keep_alive=True, drive_root=ctx.drive_root)
+    if not target.startswith("unindexed"):
+        record.durable_record_path = backend._register_service_process(ctx.drive_root, record, launch)
+    assert kept.declare_kept(ctx, record) == {}
+    declaration = kept.declaration_path(ctx.drive_root, ctx.task_id, launch)
+    facts = json.loads(declaration.read_text())
+    assert facts["context"]["executor_ref"]["container_name"] == identity
+    if target.startswith("legacy"):
+        facts["schema"] = 1
+        facts["context"]["executor_ref"]["container_name"] = alias
+        declaration.write_text(json.dumps(facts))
+    if target == "legacy_without_record":
+        record.durable_record_path.unlink()
+    changed = target == "changed"
+    calls.clear()
+    (workspace / "report.txt").write_bytes(b"original result")
+    if target.startswith("unindexed"):
+        state = target.split("_")[1]
+        def observe(container, pid):
+            assert (container, pid) == (identity, "42")
+            return state
+        monkeypatch.setattr(backend, "_docker_pid_state", observe)
+        with pytest.raises(kept.KeptNamesake) as held:
+            kept.capture_before_reuse(ctx.drive_root, ctx.task_id, "reporter")
+        assert held.value.state == state and declaration.exists() and calls == []
+        return
+    if target == "natural_exit":
+        monkeypatch.setattr(backend, "_docker_pid_state", lambda *_: "exited")
+    answer = kept.capture_kept_service_outputs(ctx.drive_root, ctx.task_id, launch, actor="owner:test", reason="collect",
+                                               verify_exit=target == "natural_exit")
+    if target == "natural_exit":
+        from ouroboros.launch_custody import stop_kept_service
+
+        assert not record.durable_record_path.exists()
+        monkeypatch.setattr(backend, "_docker_pid_state", lambda *_: pytest.fail("probed the successor's group"))
+        assert stop_kept_service(ctx.drive_root, launch, actor="owner:test", reason="repeat")["outcome"] == "not_found"
+    assert all(address == identity for _, address in calls)
+    if target in {"changed", "legacy_without_record"}:
+        assert declaration.exists() and answer["state"] == "incomplete"
+        assert not any(call[0] == "exec" for call in calls) and not answer["registered"]
+        assert registered_task_artifact(ctx.drive_root, ctx.task_id, "report.txt") is None
+    else:
+        assert answer["registered"] and answer["state"] == "captured" and not declaration.exists()
+        assert Path(registered_task_artifact(ctx.drive_root, ctx.task_id, "report.txt")["path"]).read_bytes() == b"original result"
+
+
+@pytest.mark.parametrize("evidence", ["missing", "transport", "existing", "unreadable"])
+def test_docker_absence_needs_the_pinned_container_and_host_bind(shell_docker, monkeypatch, evidence):
+    from pathlib import Path
+    from ouroboros import workspace_executor as backend
+    from ouroboros import workspace_executor_paths as paths
+    from ouroboros.tools import shell_outputs
+
+    registry, workspace = shell_docker
+    ctx = registry._ctx
+    source = workspace / "report.txt"
+    if evidence == "existing":
+        source.write_bytes(b"still owed")
+    context = paths.prepare_docker_outputs(backend.executor_ref_from_ctx(ctx), workspace, ["report.txt"])
+    original = paths._docker_output_probe
+
+    def probe(args):
+        if args[0] == "exec":
+            if evidence == "transport":
+                raise paths.OutputResolutionUnavailable("transport unavailable")
+            return "missing\0" + str(source) + "\0"
+        return original(args)
+    monkeypatch.setattr(paths, "_docker_output_probe", probe)
+    if evidence == "unreadable":
+        lstat = Path.lstat
+        def denied(path):
+            if path == source:
+                raise PermissionError("bind unreadable")
+            return lstat(path)
+        monkeypatch.setattr(Path, "lstat", denied)
+    failures = []
+    _, failed, registered = shell_outputs._register_process_outputs(ctx, ["report.txt"], workspace,
+                                                                    output_context=context, failures=failures)
+    assert failed and not registered
+    assert failures == [("report.txt", "absent" if evidence == "missing" else "owed")]

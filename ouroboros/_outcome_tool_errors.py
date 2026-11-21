@@ -338,12 +338,15 @@ def warns_without_review(*bundles: Any) -> bool:
 
 
 def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    from ouroboros.service_outcomes import output_evidence, output_launch
+
     calls = [item for item in (llm_trace.get("tool_calls") or []) if isinstance(item, dict)]
     unresolved: List[Dict[str, Any]] = []
     recovered_items: List[Dict[str, Any]] = []
     cosmetic_items: List[Dict[str, Any]] = []
     ignored_items: List[Dict[str, Any]] = []
     policy_denials: List[Dict[str, Any]] = []
+    recovered_services = None
     for idx, item in enumerate(calls):
         if not item.get("is_error"):
             continue
@@ -401,6 +404,19 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
                 unresolved.append(_tool_error_record(item))
             else:
                 recovered_items.append(_tool_error_record(item))
+            continue
+        meta = item.get("tool_result_meta") or {}
+        if tool == "stop_service" and status == "artifact_output_error" and (launch := output_launch(meta.get("service_output_launch"))):
+            if recovered_services is None:
+                _, recovered_services = output_evidence(llm_trace)
+            by = next((i for i, later in enumerate(calls[idx + 1:], idx + 2)
+                       if later.get("tool") == "stop_service" and not later.get("is_error")
+                       and (facts := later.get("tool_result_meta") or {}).get("service_output_recovered") is True
+                       and output_launch(facts.get("service_output_launch")) == launch), None)
+            if by is not None or launch in recovered_services:
+                recovered_items.append(_tool_error_record(item, recovered_by=by))
+            else:
+                unresolved.append(_tool_error_record(item))
             continue
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_key, target_paths = _call_target_signature(args)

@@ -100,8 +100,8 @@ def test_a_batched_exit_answer_cannot_discharge_what_an_ordinary_stop_published_
     find C, so its own answer is clean; C is new custody it never judged. Result, log and name stay, the readers hold
     the launch, and the retry ends C and retires it all."""
     from ouroboros import process_scope
-    from ouroboros.loop_budget import _service_identity_projection
     from ouroboros.presence_continuation import _custody_blockers
+    from ouroboros.service_outcomes import identity as _service_identity_projection
     from ouroboros.tools import services
 
     data = tmp_path / "data"

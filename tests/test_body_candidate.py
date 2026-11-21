@@ -264,7 +264,7 @@ def test_candidate_environment_failure_refuses_the_process_and_never_uses_the_se
         assert "operation_outcome" not in result.meta, result
     assert unknown.status == "error" and "registry unreadable" in unknown.text, unknown  # fails closed
     assert not (candidate / "ran.txt").exists()
-    assert not list((data / "services").rglob("env-refused.executor.log"))
+    assert not list((data / "services").rglob("env-refused.executor*.log"))
 
 
 def test_every_candidate_refusal_code_is_a_registered_blocked_tool_code():
@@ -893,6 +893,6 @@ def test_candidate_start_service_uses_isolated_environment(body):
     })
     result, _ = json.JSONDecoder().raw_decode(result_text.lstrip())
     assert result["state"] in {"running", "exited"}
-    log = data / "services" / "root-service" / "candidate-env.log"
+    log = pathlib.Path(result["log_path"])
     assert str(candidate.with_name(candidate.name + ".env") / "data") in log.read_text()
     registry.execute("stop_service", {"name": "candidate-env"})

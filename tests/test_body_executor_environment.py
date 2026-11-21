@@ -136,6 +136,8 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
         monkeypatch.setattr(executor, '_submit_service_command', submit)
         monkeypatch.setattr(executor, '_service_state', lambda record: 'exited')
         monkeypatch.setattr(executor, '_service_payload', lambda record, **kwargs: {'state': 'exited'})
+        # No daemon answers here: the fixture container is its own name (a service without outputs pins it first).
+        monkeypatch.setattr('ouroboros.workspace_executor_paths.pinned_container', lambda ref: ref)
         executor.start_service(ctx, name='env', cmd=probe, host_cwd=candidate,
                                cwd_root='system_repo', readiness={}, outputs=[], before_outputs={}, env={})
         env = captured['env']

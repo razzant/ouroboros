@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from ouroboros.headless import retry_child_task_refs
-
 import json
 import pathlib
 
+import pytest
 
 from ouroboros.headless import (
     copy_child_task_result,
     prepare_task_drive,
     prune_headless_task_drives,
+    retry_child_task_refs,
 )
 from ouroboros.observability import persist_call, read_blob_ref, write_blob
 from ouroboros.task_results import STATUS_COMPLETED, write_task_result
@@ -31,6 +31,54 @@ def _future_now() -> float:
 
 def _manifest(ref: dict) -> dict:
     return json.loads(pathlib.Path(ref["path"]).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("capture", ["complete", "tail", "oversized"])
+def test_stop_log_source_in_the_tool_result_survives_child_retirement(tmp_path, monkeypatch, capture):
+    from types import SimpleNamespace
+
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.service_outcomes import display
+    from ouroboros.source_retention import retain_tree
+    from ouroboros.tools import services
+    from tests._launch_stop_shared import _launch_log
+    from tests._store_shared import release_store_handles
+
+    task = "report"
+    parent, child = _child(tmp_path, task)
+    text, tail = "START\nvisible diagnostic\nDONE\n", "visible diagnostic\nDONE\n"
+    path = _launch_log(child / "services" / task, "preview", text.encode())
+    if capture == "oversized":
+        monkeypatch.setattr(services, "_MAX_SERVICE_LOG_BLOB_BYTES", 10)
+    elif capture == "tail":
+        def unavailable(*_args):
+            raise OSError("sample archive failure")
+
+        monkeypatch.setattr(services, "_store_service_log", unavailable)
+        monkeypatch.setattr(services, "_MAX_SERVICE_LOG_TAIL_CHARS", len(tail))
+    log = services._finalize_service_log_for_drive(child, SimpleNamespace(log_path=path, task_id=task, secret_values=()))
+    shown = display({"artifact_output_unknown": True, "log_finalization": log})
+    payload = {"tool": "stop_service", "result": "Capture unconfirmed.\n\n" + json.dumps(shown)}
+    state = {"status": "complete", "pending_refs": [], "unavailable_refs": [],
+             "promoted_ref_count": 0, "promoted_source_handle_count": 0}
+    kept = retain_tree(write_blob(child, payload), parent, child, task, state)
+    release_store_handles(child)
+    child.rename(tmp_path / "retired")
+
+    assert not state["pending_refs"] and not state["unavailable_refs"]
+    captured = read_blob_ref(parent, kept)["result"].split("\n\n", 1)[1]
+    promoted = json.loads(captured)
+    shown_log = promoted["log_finalization"]
+    assert "tail" not in shown_log and "DONE" not in captured
+    assert display(promoted) == shown == display(shown)
+    if capture == "oversized":
+        assert "source_ref" not in shown_log and shown_log["source_unavailable"] == "tail_masking_unverified"
+        return
+    source = shown_log["source_ref"]
+    assert source["read"]["tool"] == "read_file"
+    assert shown_log["source_scope"] == ("full" if capture == "complete" else "tail")
+    assert read_actor_source_bytes(parent, task, source, retained=False).decode() == (
+        text if capture == "complete" else tail)
 
 
 def test_copyback_promotes_service_full_log_refs_in_durable_evidence_and_tool_payload(tmp_path):

@@ -920,13 +920,10 @@ from ouroboros.loop_budget import (  # noqa: E402, F401 -- intentional public re
     _TREE_ACCOUNTING_MAX_STALE_SEC,
     _loop_tree_accounting,
     _soft_land_exhausted_ceiling,
-    _service_finalization_evidence,
     _LoopExitContext,
     _handle_budget_exceeded,
     _handle_authority_unavailable,
     _cleanup_loop_resources,
-    _service_identity_projection,
-    _finalize_task_services,
     _prepare_post_tool_budget_context,
 )
 from ouroboros.loop_delivery import (  # noqa: E402, F401 -- intentional public re-exports

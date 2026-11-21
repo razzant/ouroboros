@@ -638,7 +638,8 @@ def release_shared_version(root: Any) -> int:
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,
            feed: bool = False, wait_sec: float = WAIT_SEC, idempotent: bool = False,
            emit_live: bool = True, also_feed: Iterable[int] = (), room_revisions: bool = False,
-           appearances: Optional[Iterable[str]] = (), shown_in: Iterable[int] = ()) -> Receipt:
+           appearances: Optional[Iterable[str]] = (), shown_in: Iterable[int] = (),
+           before_write: Optional[Callable[[], bool | None]] = None) -> Receipt:
     """Store exact JSON, room facts and named dispatch in one transaction.
 
     Named inbound duplicates return the existing receipt (the UNIQUE index also
@@ -652,7 +653,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     compares content identity, stamp aside, under the existing room/time index. A provider
     thread in ``transport.conversation`` is stored once (``_by_reference``); ``length``, the
     identity and the receipt's row stay the whole row's.
-    Store failures propagate; append_quietly owns best-effort retry and live fallback.
+    ``before_write`` can refuse (False or raise) under the writer transaction. Store failures propagate;
+    append_quietly owns best-effort retry and live fallback.
     """
     if stream not in STREAMS:
         raise ValueError(f"unknown dialogue stream: {stream!r}")
@@ -701,6 +703,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
             body = encode(row)
             length = len(body.encode("utf-8")) + 1
         stored, parts = _by_reference(row, body)
+        if before_write is not None and before_write() is False:
+            raise OSError("dialogue append refused before write")
         try:
             insert_row(conn, stream, seq, row, stored, length=length, segment=int(marks["live"]), ordinal=int(marks["next_ordinal"]),
                        pos=int(marks["next_pos"]) if counted else None, dispatch=state, dispatch_input=dispatch,

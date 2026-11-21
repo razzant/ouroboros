@@ -16,6 +16,7 @@ import {
     taskPresentation,
 } from './log_events.js';
 import { markView, statusMarkHtml } from './status_mark.js';
+import { serviceRowId } from './task_checkpoints.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { revealStripChoice } from './page_header.js';
 import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
@@ -40,6 +41,8 @@ const GAP_WORDS = { malformed_jsonl: 'malformed line', incomplete_live_line: 'un
 const timeOf = (ts) => formatMsgTime(ts) || { short: '', exact: '' };
 // A task's id said short: its first eight characters, past the `presence-` its live turns' ids begin with.
 const shortTaskId = (id) => String(id || '').replace(/^presence-/, '').slice(0, 8);
+// A launch's row's source order (`card_row_revision`); an unversioned row is the lowest.
+const rowRevision = (evt) => (Number.isSafeInteger(evt?.card_row_revision) ? evt.card_row_revision : 0);
 // Words an author wrote (narration, an executor's message) read as text, without Markdown's marks (chat_activity.js).
 const wordsOf = (view, text) => (view.markdown && text ? plainActivityText(text) : text);
 
@@ -322,13 +325,17 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
             return;
         }
 
+        const earlier = taskGroups.get(groupId);
+        // A launch's own row is ONE row of its task, as on its card: an event that does not revise it is nothing new.
+        const rowId = serviceRowId(evt);
+        const held = rowId ? earlier?.recent.find((item) => item.rowId === rowId) : null;
+        if (held && rowRevision(evt) <= rowRevision(held.evt)) return;
         const view = summarizeLogEvent(evt);
         const eventCategory = categorizeLogEvent(evt, view);
         // A task group stays under Errors once one of its events earned it
         // (#323): the next heartbeat must not flip the card back to amber and
         // drop it out of the Errors filter while the failure is still in its
         // timeline. The phase pill still follows the latest event.
-        const earlier = taskGroups.get(groupId);
         // A wake-up's group is labelled by the origin fact its frames carry
         // (sticky once seen).
         const wake = evt.initiator === 'consciousness' || Boolean(earlier?.wake);
@@ -371,14 +378,19 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
         const last = record.recent[record.recent.length - 1];
         const dedupeKey = duplicateLogEventKey(evt);
         // A row's view and what its view left out come from the same event (an adopted file source changes neither).
-        if (!behind && last && last.dupKey && last.dupKey === dedupeKey) {
+        if (held) {
+            // A launch's later file result says it whole again, in the row where its end stands.
+            Object.assign(held, { ts, view, omitted: omittedNote(evt), evt, rev: held.rev + 1 });
+        } else if (!behind && last && last.dupKey && last.dupKey === dedupeKey) {
             Object.assign(last, { count: last.count + 1, ts, view, omitted: omittedNote(evt), evt, at, rev: last.rev + 1 });
         } else {
-            const row = { ts, view, omitted: omittedNote(evt), evt, at, count: 1, dupKey: dedupeKey, rev: 0 };
+            const row = { ts, view, omitted: omittedNote(evt), evt, at, count: 1, dupKey: dedupeKey, rev: 0, rowId };
             const later = behind ? record.recent.findIndex((item) => item.at > at) : -1;
             if (later >= 0) record.recent.splice(later, 0, row);
             else record.recent.push(row);
-            if (record.recent.length > MAX_TASK_EVENTS) record.recent.shift();
+            // The window bounds telemetry: each launch's own row stays however much telemetry follows it.
+            const telemetry = record.recent.filter((item) => !item.rowId);
+            if (telemetry.length > MAX_TASK_EVENTS) record.recent.splice(record.recent.indexOf(telemetry[0]), 1);
         }
         if (behind) stale.add(record);
         else touch(record);
@@ -503,7 +515,7 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     }
 
     // An open Timeline's rows follow the task's recent events in place: a new event appends its row, the oldest
-    // past MAX_TASK_EVENTS leaves, a collapsed repeat redraws only its own row.
+    // telemetry past MAX_TASK_EVENTS leaves (a launch's own row stays), a collapsed repeat or revision redraws its row.
     function renderTaskTimeline(entry) {
         const { rows } = entry;
         for (const [item, row] of rows) {
@@ -614,8 +626,10 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
         // Dedupe on the natural identity (timestamp has microseconds, so distinct
         // events never collide; rapid same-type repeats differ by ts and still
         // reach the x-N collapse below). Only guard when both ts and type exist.
+        // A launch's row is also its row and revision, as its producer tells one stored row from another.
+        const row = serviceRowId(evt || {}) ? `|${evt.card_row_id}|${evt.card_row_revision ?? ''}` : '';
         return (ts && type)
-            ? `${ts}|${type}|${evt?.task_id || evt?.taskId || ''}|${evt?.execution_id || evt?.round || evt?.tool || ''}`
+            ? `${ts}|${type}|${evt?.task_id || evt?.taskId || ''}|${evt?.execution_id || evt?.round || evt?.tool || ''}${row}`
             : '';
     }
     // The entries and timeline rows holding each event, by exact key: built once per backfill, when its first twin with a

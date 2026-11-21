@@ -220,3 +220,32 @@ def test_candidate_writer_fence_uses_group_not_exited_leader(tmp_path, monkeypat
     (root / "43").rmdir()
     assert live_lineage_processes(ctx.drive_root, ctx.task_id) == []
     assert record.durable_record_path.exists()  # the reader does not retire records
+
+
+@pytest.mark.parametrize("observation", ["unreadable_record", "unknown_group"])
+def test_direct_replacement_never_stops_on_inconclusive_docker_custody(tmp_path, monkeypatch, observation):
+    from ouroboros import launch_custody, owned_shutdown
+    from ouroboros.tools import kept_service_outputs as kept
+
+    ctx, record, _ = _service(tmp_path, monkeypatch)
+    record.keep_alive = True
+    launch = record.durable_record_path.stem
+    record.outputs = ["result.txt"]
+    declaration = kept.declaration_path(ctx.drive_root, ctx.task_id, launch)
+    declaration.parent.mkdir(parents=True, exist_ok=True)
+    declaration.write_text(json.dumps({"schema": 1, "launch_id": launch, "task_id": ctx.task_id,
+        "name": record.name, "outputs": record.outputs, "cwd": str(tmp_path), "context": {
+            "repo_dir": str(tmp_path), "drive_root": str(ctx.drive_root)}}))
+    stored = json.loads(record.durable_record_path.read_text())
+    stored["keep_alive"] = True
+    record.durable_record_path.write_text(json.dumps(stored) if observation == "unknown_group" else "unreadable")
+    monkeypatch.setattr(executor, "_service_state", lambda _record: "exited")
+    monkeypatch.setattr(executor, "_docker_pid_state", lambda *_: "unknown" if observation == "unknown_group" else "exited")
+    monkeypatch.setattr(executor, "_stop_service_record", lambda *_a, **_k: pytest.fail("signalled with unknown custody"))
+    monkeypatch.setattr(owned_shutdown, "_stop_records", lambda *_a, **_k: pytest.fail("Activity signalled an unknown launch"))
+    with pytest.raises(RuntimeError, match="nothing was signalled"):
+        executor.start_service(ctx, name=record.name, cmd=["writer"], host_cwd=tmp_path,
+                               cwd_root="active_workspace", readiness={}, outputs=[], before_outputs={})
+    receipt = launch_custody.stop_kept_service(ctx.drive_root, launch, actor="owner:test", reason="collect")
+    assert receipt["outcome"] == "unknown" and not receipt["ok"]
+    assert record.durable_record_path.is_file() and declaration.is_file()

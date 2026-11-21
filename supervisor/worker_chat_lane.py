@@ -174,7 +174,7 @@ def preload_owner_control_path() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# the worker-side bus (a carrier's broadcasts travel as frames)
+# the worker-side bus (a carrier's broadcasts and a recorded row's one frame travel on it)
 # ---------------------------------------------------------------------------
 
 _WORKER_BUS: Any = None
@@ -184,6 +184,22 @@ def bind_worker_bus(out_q: Any) -> None:
     """A worker process names its event bus once: a carrier's ``task_named`` goes out as a frame."""
     global _WORKER_BUS
     _WORKER_BUS = out_q
+
+
+def publish_recorded_row(row: dict) -> bool:
+    """A worker's one live frame for a row its producer already recorded and whose sink copy is suppressed (a
+    retained service checkpoint: whoever captures it holds no endpoint of the task it belongs to). Queued on the
+    bound bus as the worker log sink forwards a row: stamped only by that row's own task
+    (``log_addressing.stamp_recorded_row``), then addressed and pushed by the supervisor's ``_handle_log_event``.
+    False where no bus is bound: the server process delivers through its bridge, and a headless process keeps
+    the durable row as the record."""
+    if _WORKER_BUS is None:
+        return False
+    from ouroboros.utils import emit_log_event
+    from supervisor.log_addressing import stamp_recorded_row
+
+    emit_log_event(_WORKER_BUS, stamp_recorded_row(dict(row)), log_label="recorded row")
+    return True
 
 
 def _broadcast_task_named(msg: dict) -> None:

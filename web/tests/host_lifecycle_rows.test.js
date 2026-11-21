@@ -313,6 +313,53 @@ test('unconfirmed service cleanup is visible without claiming stopped', () => {
         checkpoint_kind: 'services_stopped' }).dedupeKey);
 });
 
+test('a service row says its producer\'s sentence in its kind\'s tone; an older row keeps its label', () => {
+    // `service_finalization.checkpoints`: the end, then any log or declared output left unsaved, by name.
+    const line = 'Background services stopped · log not saved: paper · declared outputs not saved: paper';
+    const stopped = { type: 'task_checkpoint', task_id: 'task', checkpoint_kind: 'services_stopped',
+        role: 'system', system_type: 'task_checkpoint', detail: line, content: line, text: line };
+    for (const view of [summarizeChatLiveEvent(stopped), summarizeLogEvent(stopped)]) {
+        assert.equal(view.headline, line);
+        assert.equal(view.phase, 'thinking', 'a diagnostic gap is no warning of its own');
+    }
+    const unconfirmed = { ...stopped, checkpoint_kind: 'service_finalization_error',
+        text: 'Background service cleanup unconfirmed' };
+    assert.equal(summarizeChatLiveEvent(unconfirmed).phase, 'warn');
+    assert.equal(summarizeChatLiveEvent(unconfirmed).headline, 'Background service cleanup unconfirmed');
+    const recovered = { ...stopped, checkpoint_kind: 'service_outputs_updated', card_row_id: 'service:output-update',
+        text: 'Background service outputs updated: paper · output 1 saved: report.html' };
+    assert.equal(summarizeChatLiveEvent(recovered).headline, recovered.text);
+    assert.equal(summarizeLogEvent(recovered).headline, recovered.text);
+    assert.notEqual(summarizeChatLiveEvent(recovered).dedupeKey, summarizeChatLiveEvent(stopped).dedupeKey);
+    // A row the older producer wrote carries services and no sentence.
+    const older = { type: 'task_checkpoint', task_id: 'task', checkpoint_kind: 'services_stopped',
+        services: [{ service_id: 'task:svc', lifecycle: 'stopped' }] };
+    assert.equal(taskCheckpointLabel(older), 'Background services stopped');
+    assert.equal(taskCheckpointLabel({ checkpoint_kind: 'context_view', text: 'not a service row' }), 'Context inspected');
+});
+
+test('service rows keep the producer identity on cold replay and a late repeat of either live frame', () => {
+    const base = { type: 'task_checkpoint', task_id: 'task', checkpoint_kind: 'services_stopped',
+        text: 'Background services stopped', ts: '2026-11-18T07:00:05Z' };
+    const record = { items: [] };
+    const events = ['service:first', 'service:second'].map((card_row_id, index) => ({
+        ...base, card_row_id, history_id: `progress:${index}`, history_position: { source: 'progress', offset: index },
+    }));
+    for (const event of [...events, ...events]) {
+        mergeHistoricalTimelineItem(record, summarizeChatLiveEvent(event), event, event.ts);
+    }
+    for (const { history_id, history_position, ...frame } of events) {
+        const view = summarizeChatLiveEvent(frame);
+        updateLiveTimelineItem(record, view, { ts: frame.ts, rawTs: frame.ts, syntheticKey: view.dedupeKey,
+            headline: view.headline });
+    }
+    assert.deepEqual(record.items.map(row => [row.headline, row.sourceHistoryId, row.count]),
+        events.map(event => [event.text, event.history_id, 1]));
+    const legacy = summarizeChatLiveEvent(base);
+    assert.equal(legacy.dedupeKey, summarizeChatLiveEvent({ ...base, history_id: 'progress:3' }).dedupeKey);
+    assert.notEqual(legacy.dedupeKey, summarizeChatLiveEvent({ ...base, ts: '2026-11-18T07:01:00Z' }).dedupeKey);
+});
+
 // ---------------------------------------------------------------------------
 // Threshold crossings (#1748/#1129): one row per crossing, each stating its own fact.
 // The payloads are the shapes `task_pacing` emits; its checkpoint carries no round.

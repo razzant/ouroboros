@@ -156,6 +156,91 @@ def _end(pid: int, birth: str) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+def _wait_for_service_log(log_path, predicate, timeout_sec=15.0):
+    """Wait until the service's live log satisfies ``predicate``.
+
+    The start_service readiness contract without a stdout marker is "process
+    alive == ready" — it never waits for output. These suites assert on log
+    CONTENT, so they must wait for the observable condition themselves: on a
+    slow CI runner the child's first write can land well after start_service
+    returns (a latent race exposed when the guard path got faster), and the
+    assertions below are about redaction/finalization, never about timing.
+    """
+    log_path = Path(log_path)
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            if predicate(log_path.read_bytes() if log_path.exists() else b""):
+                return
+        except OSError:
+            pass
+        time.sleep(0.1)
+    raise AssertionError(
+        f"service log {log_path} did not satisfy the wait predicate within {timeout_sec}s"
+    )
+
+
+def _force_advanced_runtime(monkeypatch):
+    from ouroboros import config as cfg
+
+    cfg.reset_runtime_mode_baseline_for_tests()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+
+
+def _force_light_runtime(monkeypatch):
+    from ouroboros import config as cfg
+
+    cfg.reset_runtime_mode_baseline_for_tests()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.delenv(cfg.BOOT_RUNTIME_MODE_ENV_KEY, raising=False)
+
+
+def _launch_log(directory, name, content, *, needs_value_masking=False):
+    """Model a drive-local log written before the independent private placement existed."""
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, mint_marker
+
+    suffix = ".log" if needs_value_masking else "@standard.log"
+    launch = mint_marker(LAUNCH_SCOPE_PREFIX).removeprefix(LAUNCH_SCOPE_PREFIX)
+    path = directory / f"{name}@{launch}{suffix}"
+    directory.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as handle:
+        handle.write(content)
+    return path
+
+
+def _author_evidence(messages):
+    """The projection and its size inside the author's disclosure, merged or not."""
+    texts = []
+    for message in messages:
+        content = message.get("content")
+        for part in content if isinstance(content, list) else [content]:
+            texts.append(part.get("text", "") if isinstance(part, dict) else str(part or ""))
+    [text] = [text for text in texts if "[SERVICE_FINALIZATION_EVIDENCE]" in text]
+    start = text.index("honestly:\n", text.index("[SERVICE_FINALIZATION_EVIDENCE]")) + len("honestly:\n")
+    return json.JSONDecoder().raw_decode(text[start:])
+
+
+def _refuse_metadata_of(monkeypatch, path):
+    """``stat`` of exactly this log answers EACCES, so neither its capture nor its presence can be read."""
+    original = Path.stat
+    exists = Path.exists
+
+    def stat(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(errno.EACCES, "injected metadata refusal", str(path))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    # Python 3.14 predicates can hide that refusal even when a stat still reports it.
+    monkeypatch.setattr(Path, "exists", lambda self, **kw: False if self == path else exists(self, **kw))
+
+
+def _exit_context(root, tool_ctx, event_queue=None):
+    return SimpleNamespace(drive_root=root, task_id=tool_ctx.task_id, tools=SimpleNamespace(_ctx=tool_ctx),
+                           drive_logs=root / "logs", event_queue=event_queue, llm_trace={})
+
+
 def _payload(text: str) -> dict:
     """The JSON object a stop result carries, after an optional ``⚠️ CODE ...`` head line."""
     body = text.partition("\n\n")[2] if text.startswith("⚠️") else text

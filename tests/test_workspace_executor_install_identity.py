@@ -1,5 +1,6 @@
 """Executor ownership is checked before directories, durable records or launch."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -77,6 +78,8 @@ def test_executor_launch_refuses_foreign_before_any_effect_and_uses_selected_own
     monkeypatch.setattr(executor, "_retire_docker_completion", executor._forget_process)
     monkeypatch.setattr(executor, "_wait_readiness", lambda *a: None)
     monkeypatch.setattr(executor, "_service_state", lambda *a: "exited")
+    # No Docker here: the named container is its own identity (a service without outputs pins it first).
+    monkeypatch.setattr("ouroboros.workspace_executor_paths.pinned_container", lambda ref: ref)
 
     class Process:
         pid, returncode = 12345, 0
@@ -99,8 +102,8 @@ def test_executor_launch_refuses_foreign_before_any_effect_and_uses_selected_own
 
     register = executor._register_process
 
-    def record(root, payload):
-        path = register(root, payload)
+    def record(root, payload, record_id=""):
+        path = register(root, payload, record_id)
         records.append(path)
         return path
 
@@ -142,7 +145,10 @@ def test_executor_launch_refuses_foreign_before_any_effect_and_uses_selected_own
             assert result["backend_pid"] == "12345"
             if kind == "local":
                 assert launches[-1][1]["drive_root"] == root
-                assert (root / "services" / "manual" / "test.executor.log").is_file()
+                log = Path(result["backend_log_path"])  # born private, in the drive's canonical installation
+                assert log.parent == root.parents[3] / "private_service_logs" / "manual" and log.is_file()
+            else:
+                assert result["backend_log_path"].endswith(f"@{records[-1].stem}.log")
             executor._SERVICES.clear()
         else:
             assert result.returncode == 0 and result.operation_outcome == "completed"

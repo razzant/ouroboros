@@ -145,7 +145,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/tasks/{task_id}/reviews/{record_id}/{seat_id}` | saved source; no paths |
 | GET | `/api/tasks/{task_id}/events` | integer rank |
 | POST | `/api/tasks/{task_id}/events` | read-only v2 cursor (§3 history/SSE v2) |
-| GET | `/api/tasks/{task_id}/artifacts/{name}` | own stores: POSIX no-follow/Windows NT relative handles; admission before child-store metadata; SVG `sandbox` CSP + `nosniff` (`gateway/task_archive.py`) |
+| GET | `/api/tasks/{task_id}/artifacts/{name}` | admitted stores (POSIX/NT confinement); masked sources, projected ledger SHA/ranges, SVG CSP/`nosniff` (`task_archive.py`) |
 | POST | `/api/tasks/{task_id}/cancel` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/model` | `ouroboros/gateway/task_model.py`: durable root primary; set/follow/return/wait/keep |
