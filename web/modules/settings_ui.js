@@ -82,7 +82,7 @@ function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, sho
             container.innerHTML = draw(row, ctx);
             unbind = bind?.(container, ctx) || null;
             // A door may name what its page shows first (`view`: Reviewers opens Agents on its reviewers).
-            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to, { view: door.control.view || '' }) });
+            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door, opener) => ctx.openSettings?.(door.control.to, { view: door.control.view || '', opener }) });
             shape = shapeOf(rows);
         };
         const apply = (settings) => {
@@ -226,7 +226,7 @@ function mountNotifications(container, { ctx }) {
     const held = () => container.querySelectorAll('.settings-card-held').forEach((node) => { node.hidden = Boolean(master?.checked); });
     held();
     container.addEventListener('change', held);
-    const doors = bindSettingRows(container.querySelector('[data-notify-doors]'), { openDoor: (door) => ctx.openSettings?.(door.control.to) });
+    const doors = bindSettingRows(container.querySelector('[data-notify-doors]'), { openDoor: (door, opener) => ctx.openSettings?.(door.control.to, { opener }) });
     return { unmount() { container.removeEventListener('change', held); doors.dispose(); } };
 }
 
@@ -279,7 +279,7 @@ function mountVoice(container, { ctx }) {
             + (doors.length ? card({ title: 'Calls', lead: 'Talk to Ouroboros by voice from the message field.', rows: doors.map((row) => settingsRow(row)).join('') }) : '');
         setFact(container, 'voice:dictation', facts.dictation);
         setFact(container, 'voice:read-aloud', facts.readAloud);
-        handle = bindSettingRows(container, { rows, openDoor: (door) => ctx.openSettings?.(door.control.to) });
+        handle = bindSettingRows(container, { rows, openDoor: (door, opener) => ctx.openSettings?.(door.control.to, { opener }) });
     };
     render();
     let gone = false;

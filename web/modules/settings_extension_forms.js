@@ -1,16 +1,17 @@
-/** Skill forms and skill sources in Settings (docs/DESIGN.md "Settings").
+/** Skill forms and skill sources, pages of Extensions (docs/DESIGN.md "Settings"; extensions.js opens them, their old
+ * Settings addresses lead there).
  *
  * `skill` lists the skills that registered a settings form, one door each; search lands on it by the names this
  * list had ("Extension Settings", under Advanced). `skill/<id>` is the form a skill registered (its reviewed,
  * host-rendered settings sections), opened from that list, the skill's card, a place's Connect, Voice and calls,
- * and search. Each opened form has its own host element, `#extension-settings-sections`, let go with its page: the
- * shell never puts a skill's form aside (settings.js), because a skill's page module binds each drawing anew and
- * only the forms in the page. Only that skill's routes are read, and `ouro:extension-settings-mounted` tells
+ * and search. Each opened form has its own host element, `#extension-settings-sections`. A jump retains that same
+ * host until its return is consumed or cleared; ordinary closure releases clean forms. Skill modules bind each drawing
+ * and only their forms in the page. Only that skill's routes are read, and `ouro:extension-settings-mounted` tells
  * a skill's own page module that its form stands (the bundled Calls skill enhances its form on it). The host draws
  * every field, reads the stored values from the route it posts to and owns the Save outcome.
  *
  * `skill-sources` is where skills come from on this computer: the skills folder and the ClawHub address, two rows
- * that save themselves (settings_rows.js). It is opened from the Skills page's sources view and from search. */
+ * that save themselves (settings_rows.js). It is opened over Sources and from search. */
 
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { getContributions } from './contributions.js';
@@ -20,7 +21,7 @@ import { registerSettingsPage } from './settings_pages.js';
 import { rowsOf } from './settings_rows.js';
 import { skillTitle } from './skill_presentation.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus } from './ui_helpers.js';
-import { clearResultOnEdit, errorWords, setResult } from './ui_primitives.js';
+import { errorWords, setResult } from './ui_primitives.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 const pendingExtensionSettings = new Set();
@@ -28,8 +29,8 @@ const pendingExtensionSettings = new Set();
 // A declarative extension form must show what is STORED (posting the bare schema once unbound the
 // Telegram skill's owner chat id). The host reads the current values from the SAME route it posts
 // to. A route with no GET handler (404/405) cannot say what is stored: its fields start locked
-// behind a warning until the owner chooses Edit anyway; any other failed read keeps Save disabled,
-// and a successful `{}` is a real empty document.
+// behind a warning until the owner chooses Edit anyway; any other failed read leaves both fields and Save locked
+// until a new read, and a successful `{}` is a real empty document.
 const EXTENSION_VALUES_UNREADABLE = 'Current values could not be read; Save is disabled so it does not overwrite them. Open this page again to retry.';
 const EXTENSION_VALUES_UNAVAILABLE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 const EXTENSION_EDITING_UNREAD = 'You chose to edit without reading the saved values. Review every field before sending.';
@@ -57,13 +58,17 @@ export function isStatusForm(component = {}) {
     return fields.length > 0 && fields.every((field) => Boolean(field?.disabled));
 }
 
-export async function renderExtensionSettingsSections(root, sections, { isCurrent = () => true } = {}) {
+const submitLabel = (spec, check) => spec.submit_label || spec.label || (check ? 'Check status' : 'Save');
+
+export async function renderExtensionSettingsSections(root, sections, {
+    isCurrent = () => true, edits = new Map(), nextEdit = () => Symbol(),
+} = {}) {
     const host = root.querySelector('#extension-settings-sections');
     if (!host) return;
     const items = Array.isArray(sections) ? sections : [];
     if (!items.length) {
         host.innerHTML = '<div class="muted">No extension settings registered.</div>';
-        globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'));
+        globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted', { detail: { root: host } }));
         return;
     }
     const hydrated = new Map();
@@ -105,7 +110,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             const unread = read === 'unsupported' && !disabled;
             const failed = read === 'failed';
             const fieldOptions = {
-                disabled: disabled || unread,
+                disabled: disabled || failed || unread,
                 fieldClass: 'form-field ui-field',
                 inlineClass: 'settings-extension-checkbox ui-field ui-field-inline',
                 helpClass: 'settings-inline-note ui-field-help',
@@ -115,7 +120,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                     ${unread ? `<div class="settings-inline-status" data-extension-settings-read data-tone="${normalizeTone('warn')}">${escapeHtml(EXTENSION_VALUES_UNAVAILABLE)}</div>` : ''}
                     <div class="form-grid two">${fields.map((field) => renderSafeField(field, values, fieldOptions)).join('')}</div>
                     <div class="settings-extension-actions ui-action-row">
-                        <button class="btn${check ? ' btn-default' : type === 'form' ? ' btn-save' : ''}"${type === 'form' || check ? '' : ' data-primary'} type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
+                        <button class="btn${check ? ' btn-default' : type === 'form' ? ' btn-save' : ''}"${type === 'form' || check ? '' : ' data-primary'} type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(submitLabel(component, check))}</button>
                         ${unread ? '<button class="btn btn-default" type="button" data-extension-settings-edit-anyway>Edit anyway</button>' : ''}
                         <div class="ui-result" data-extension-settings-status${failed ? ` data-tone="${normalizeTone('warn')}"` : ''}>${failed ? escapeHtml(EXTENSION_VALUES_UNREADABLE) : ''}</div>
                     </div>
@@ -141,14 +146,26 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
         `;
     }).join('');
     host.querySelectorAll('[data-extension-settings-form]').forEach((form) => {
-        // An edit clears the form's last result; a warning that its stored values are unreadable is a current fact and stays.
+        const spec = formSpecs.get(form.dataset.extensionSettingsKey) || {};
+        const fields = Array.isArray(spec.fields) ? spec.fields : [];
         const result = form.querySelector('[data-extension-settings-status]');
-        if (!result?.textContent) clearResultOnEdit(form, result);
+        const onEdit = (event) => {
+            const field = event.target;
+            if (form.dataset.extensionSettingsBlocked || field.disabled || !field.name
+                || form.elements?.namedItem?.(field.name) !== field
+                || !fields.some((item) => !item?.disabled && String(item?.name || '') === field.name)) return;
+            // Text already reported its edit on input. Blur may deliver change after Save.
+            if (event.type === 'change' && field.matches('textarea, input:not([type="checkbox"]):not([type="radio"])')) return;
+            edits.set(form, nextEdit());
+            setResult(result, {});
+        };
+        // Capture before a skill's own change handler can redraw its controls. Only a field we submit owns a draft.
+        form.addEventListener('input', onEdit, true);
+        form.addEventListener('change', onEdit, true);
         // The owner's explicit choice to send this form without its stored values: it unlocks
         // the fields the schema does not disable, and Save sends every one of them as before.
         form.querySelector('[data-extension-settings-edit-anyway]')?.addEventListener('click', (event) => {
-            const spec = formSpecs.get(form.dataset.extensionSettingsKey) || {};
-            for (const field of spec.fields || []) {
+            for (const field of fields) {
                 const input = field.disabled ? null : form.elements?.namedItem?.(String(field.name || ''));
                 if (input) input.disabled = false;
             }
@@ -162,16 +179,15 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
             const status = form.querySelector('[data-extension-settings-status]');
             const skill = form.dataset.skill || '';
             const route = form.dataset.route || '';
-            const formKey = form.dataset.extensionSettingsKey || `${skill}:${route}`;
-            const spec = formSpecs.get(formKey) || {};
             const requestKey = `${skill}:${route}`;
             if (!skill || !route || spec.disabled || form.dataset.extensionSettingsBlocked
                 || pendingExtensionSettings.has(requestKey)) return;
-            const values = collectSafeFieldValues(form, spec.fields || []);
+            const values = collectSafeFieldValues(form, fields);
+            const sentRevision = edits.get(form);
             const button = form.querySelector('button[type="submit"]');
-            const idleLabel = spec.submit_label || spec.label || 'Save';
+            const check = isStatusForm(spec);
+            const busy = spec.busy_label || (check ? 'Checking…' : 'Saving…');
             pendingExtensionSettings.add(requestKey);
-            const busy = spec.busy_label || 'Saving…';
             if (button) {
                 button.disabled = true;
                 button.textContent = busy;
@@ -191,7 +207,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 }
                 // A read-only field shows what the route answered just now, from the same source as its
                 // first render; an editable one keeps what the owner typed.
-                for (const field of spec.fields || []) {
+                for (const field of fields) {
                     const name = String(field?.name || '');
                     const input = field?.disabled && name && Object.prototype.hasOwnProperty.call(data, name)
                         ? form.elements?.namedItem?.(name) : null;
@@ -199,32 +215,49 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                     if (input.type === 'checkbox') input.checked = Boolean(data[name]);
                     else input.value = String(data[name] ?? '');
                 }
-                const outcome = extensionActionStatus(data);
-                setResult(status, { ...outcome, ends: outcome.tone === 'ok' });
+                if (data.ok === false) {
+                    setResult(status, { ...extensionActionStatus(data, 'Request failed.'), tone: 'danger' });
+                    return;
+                }
+                const outcome = extensionActionStatus(data, check ? 'Status checked.' : 'Saved.');
+                const stillSent = edits.get(form) === sentRevision;
+                if (!check && !stillSent) {
+                    const note = 'Earlier changes saved. Your latest edits are unsaved.';
+                    setResult(status, { text: outcome.text === 'Saved.' ? note : `${note} ${outcome.text}`, tone: 'warn' });
+                } else {
+                    setResult(status, { ...outcome, ends: outcome.tone === 'ok' });
+                }
                 // A check saves nothing, so it announces no settings change to other pages.
-                if (data.ok !== false && !isStatusForm(spec)) globalThis.window?.dispatchEvent(new CustomEvent('ouro:settings-updated', {
-                    detail: { reason: 'extension settings saved', source: 'settings', skill, route },
-                }));
+                if (!check) {
+                    if (stillSent) edits.delete(form);
+                    globalThis.window?.dispatchEvent(new CustomEvent('ouro:settings-updated', {
+                        detail: { reason: 'extension settings saved', source: 'settings', skill, route },
+                    }));
+                }
             } catch (err) {
                 setResult(status, errorWords(err));
             } finally {
                 pendingExtensionSettings.delete(requestKey);
                 if (button) {
                     button.disabled = Boolean(spec.disabled);
-                    button.textContent = idleLabel;
+                    button.textContent = submitLabel(spec, check);
                 }
             }
         });
     });
     // Already-granted page modules may enhance their own declared forms. The
     // schema, hydration, write route and Save outcome remain host-owned.
-    globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'));
+    globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted', { detail: { root: host } }));
 }
 
 /* ---- The pages ----------------------------------------------------------------------------------------------- */
 
-// The page the owner is looking at: Settings is shown, this path is its open level and the window is not hidden.
-const onScreen = (ctx, path) => ctx?.state?.activePage === 'settings' && ctx.state.settingsPath === path && !globalThis.document?.hidden;
+// The page the owner is looking at: the section that opened it is shown, this path is its top level and the window is
+// not hidden (section_levels.js onScreen). A lifecycle signal reads only for a page on screen; a read already on its
+// way paints only while its page still is (a mount outside a section has no such fact and paints as it always did).
+// A page left or covered is read and drawn again by the shell's "shown" signal when it comes back.
+const onScreen = (ctx, path) => Boolean(ctx?.onScreen?.(path));
+const stillShown = (ctx, path) => typeof ctx?.onScreen !== 'function' || ctx.onScreen(path);
 const FORMS = new Map();  // skill id → { skill, name, sections }: what the last read of the installed skills says
 
 /** One read of the installed skills (`GET /api/extensions`, a passive read). It answers the list and remembers which
@@ -267,7 +300,7 @@ function mountSkillList(container, { path, ctx }) {
     const read = async () => {
         let failure = null;
         try { await readSkills(); } catch (err) { failure = err; }
-        if (!alive) return;
+        if (!alive || !stillShown(ctx, path)) return;
         const doors = failure ? [] : skillForms().map((form) => {
             const name = skillFormTitle(`skill/${encodeURIComponent(form.skill)}`);
             return { id: `skill:${form.skill}`, keys: [], page: path, name, meta: form.name === name ? '' : form.name, control: { kind: 'door' } };
@@ -282,12 +315,12 @@ function mountSkillList(container, { path, ctx }) {
             : `<p class="${failure ? 'ui-result' : 'settings-card-lead'}">${failure ? '' : 'No installed skill has settings.'}</p>`}</section>`;
         if (failure) setResult(container.querySelector('.ui-result'), errorWords(failure));
         rows = bindSettingRows(container, { rows: doors,
-            openDoor: (row) => ctx.openSettings(`skill/${encodeURIComponent(row.id.slice('skill:'.length))}`) });
+            openDoor: (row, opener) => ctx.openSettings(`skill/${encodeURIComponent(row.id.slice('skill:'.length))}`, { opener }) });
     };
     const onShown = (event) => { if (event.detail?.path === path) void draw(); };
     window.addEventListener('ouro:settings-page-shown', onShown);
     // Every way a skill changes ends in the one lifecycle signal (contributions.js): this page's own action, a job
-    // that finished, another window, Ouroboros itself. A Settings that is not on screen reads nothing: the shell says
+    // that finished, another window, Ouroboros itself. A section that is not on screen reads nothing: the shell says
     // "shown" on the way back and the page reads then; so does a list under an open form.
     const offLifecycle = getContributions().onLifecycle(() => { if (onScreen(ctx, path)) void draw(); });
     return draw().then(() => ({
@@ -308,34 +341,33 @@ function mountSkillForm(container, { path, ctx }) {
     let alive = true;
     let serial = 0;
     let filling = null;
+    const edits = new Map();
     // A field the owner is in, or has typed into, is not redrawn: not by a read that starts now and not by one that
     // was on its way when the owner began (a skill changed elsewhere starts such a read at any moment).
-    const untouched = () => !host.dataset.typed && !(host.contains(document.activeElement) && host !== document.activeElement);
+    const untouched = () => !edits.size && !(host.contains(document.activeElement) && host !== document.activeElement);
     // The skills are read, then only this skill's routes.
     const fill = () => (filling ||= (async () => {
         if (!untouched()) return;
         const run = ++serial;
-        const current = () => alive && run === serial && host.parentElement === container && untouched();
+        const current = () => alive && run === serial && host.parentElement === container && untouched() && stillShown(ctx, path);
         try { await readSkills(); } catch (err) {
             if (current() && !host.innerHTML) setResult(host.appendChild(Object.assign(document.createElement('p'), { className: 'ui-result' })), errorWords(err));
             return;
         }
-        if (current()) await renderExtensionSettingsSections(container, FORMS.get(skill)?.sections || [], { isCurrent: current });
+        if (current()) await renderExtensionSettingsSections(container, FORMS.get(skill)?.sections || [], {
+            isCurrent: current, edits, nextEdit: () => ++serial,
+        });
     })().finally(() => { filling = null; }));
-    const onTyped = () => { host.dataset.typed = '1'; };
-    const onSaved = (event) => { if (event.detail?.skill === skill) delete host.dataset.typed; };
     const onShown = (event) => { if (event.detail?.path === path) void fill(); };
-    host.addEventListener('input', onTyped);
-    window.addEventListener('ouro:settings-updated', onSaved);
     window.addEventListener('ouro:settings-page-shown', onShown);
     const offLifecycle = getContributions().onLifecycle(() => { if (onScreen(ctx, path)) void fill(); });  // as the list above
     return Promise.resolve(fill()).then(() => ({
+        unsaved: () => edits.size > 0,
         unmount() {
             alive = false;
-            host.removeEventListener('input', onTyped);
-            window.removeEventListener('ouro:settings-updated', onSaved);
             window.removeEventListener('ouro:settings-page-shown', onShown);
             offLifecycle();
+            window.dispatchEvent(new CustomEvent('ouro:extension-settings-unmounted', { detail: { root: host } }));
             if (host.parentElement === container) host.remove();
         },
     }));
@@ -343,10 +375,10 @@ function mountSkillForm(container, { path, ctx }) {
 
 function mountSkillSources(container, { path, ctx }) {
     container.innerHTML = `<section class="ui-card settings-card">
-        <p class="settings-card-lead">Skills are installed from the sources on the Skills page. These two say where else this computer looks.</p>
+        <p class="settings-card-lead">Skills are installed from the sources under Sources. These two say where else this computer looks.</p>
         <div class="settings-rows">${rowsOf(path).map((row) => settingsRow(row)).join('')}</div></section>`;
     const rows = bindSettingRows(container);
-    const read = () => Promise.resolve(ctx.readSettings?.()).then(() => rows.paint(), () => {});
+    const read = () => Promise.resolve(ctx.readSettings?.()).then(() => { if (stillShown(ctx, path)) rows.paint(); }, () => {});
     const onShown = (event) => { if (event.detail?.path === path) void read(); };
     window.addEventListener('ouro:settings-page-shown', onShown);
     void read();
