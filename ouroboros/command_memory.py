@@ -505,7 +505,9 @@ def _compute(commands: Path):
 
 def _raise_member_score(pid: str, cgroup: Path, score: int) -> None:
     """Read membership and raise the score through one proc directory, never addressing a recycled PID by name."""
-    fd = os.open(_ROOT / "proc" / pid, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    # Windows has neither flag; this reader only runs where /proc does, and the module must still import there.
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(_ROOT / "proc" / pid, flags)
     try:
         def open_member(name, flags):
             return os.open(name, flags, dir_fd=fd)
