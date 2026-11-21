@@ -680,10 +680,9 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     pays (``stat``; the store gates are ``dispatch_choice``'s, read outside Q); also the launch's revalidation under Q
     (``own_claim``: the revalidating launch's own token, the one claim that does not exclude the row). Side-effect free
     except that a moved room's binding refreshes the row's lease identity, a foreign root is named once, off Q, and a
-    row another tree's work keeps out of its Project's or its folder's lane names that holder for the mind's roster
-    and the owner's card (``note_lane_wait``) once the chooser knows that folder (a moved row's own resource may await
-    its read off Q: ``pending_resource``); a walk passes ``waits``, who holds a lane now, so a row it picked and its
-    store gates may yet refuse is never named."""
+    row another tree keeps out of its Project's or folder's lane names that holder (``note_lane_wait``) once the
+    chooser knows that folder (a moved row's own resource may await its read off Q: ``pending_resource``); a walk
+    passes ``waits``, who holds a lane now, so a row it picked and its store gates may yet refuse is never named."""
     from ouroboros.project_lease import candidate_is_leasable, lane_holders, note_lane_wait, running_project_ids
     from ouroboros.project_placement import pending_resource, refresh_pending_placement
     from ouroboros.config import get_max_active_subagents_per_root
