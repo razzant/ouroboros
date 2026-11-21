@@ -78,6 +78,10 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
     # The two positions of an install with no place yet, and a subscription's quota said where it is the one payer.
     assert (FIRST_RUN["off"], FIRST_RUN["on"]) == (POSITION_WORDS[False], ON_WITHOUT_PLACES)
     assert "quota" in FIRST_RUN["subscriptionCost"] and "allowance" not in FIRST_RUN["subscriptionCost"]
+    # On, the wakes go on before a first reply; either position, Start begins the first conversation (owner 21.11, 1C):
+    # no word ties the first message to the switch.
+    assert "even before your first reply" in FIRST_RUN["meaning"] and "Either way, Start begins" in FIRST_RUN["meaning"]
+    assert "only when you write" not in FIRST_RUN["meaning"]
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "observe")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "0")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")
