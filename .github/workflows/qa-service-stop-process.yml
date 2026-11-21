@@ -1,0 +1,143 @@
+name: QA 1868 Service Readers (Isolated Branch)
+
+on:
+  push:
+    branches:
+      - 'qa/1868-launch-results-5e616c73'
+
+concurrency:
+  group: qa-1868-service-readers-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  process-tests:
+    name: Process checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Run targeted service-stop process checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          test -x "$PY" || { echo "Missing .venv Python at $PY"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ci-private"
+          "$PY" -I -S scripts/safe_test.py -- "$PY" -m pytest \
+            tests/test_services_tool_v2.py::test_two_demo_launches_keep_exact_stop_results \
+            tests/test_service_finalization_failure.py \
+            tests/test_activity_gateway_producers.py::test_activity_background_lists_the_gateways_kept_services_and_stops_one_by_its_launch \
+            tests/test_operation_refusal_truth.py::test_retired_service_is_not_whole_call_no_effect \
+            tests/test_launch_stop.py::test_a_kept_service_is_listed_after_its_task_and_one_reasoned_stop_ends_only_that_launch \
+            tests/test_launch_stop.py::test_a_kept_services_output_written_after_its_task_ended_is_captured_into_that_task_by_the_owners_stop \
+            tests/test_services_tool_v2.py::test_task_teardown_maps_the_structured_stop_outcome_to_lifecycle \
+            tests/test_workspace_executor_services.py::test_automatic_local_executor_stop_finalizes_declared_outputs \
+            tests/test_child_drive_settlement.py::test_two_launches_with_one_service_name_keep_their_own_logs \
+            tests/test_services_tool_v2.py::test_a_start_whose_names_earlier_log_stays_in_place_writes_a_file_of_its_own \
+            tests/test_services_tool_v2.py::test_archive_task_service_logs_finalizes_forced_worker_leftovers \
+            tests/test_services_tool_v2.py::test_a_leftover_log_whose_private_copy_is_not_confirmed_stays_where_it_is \
+            tests/test_persistence_inventory.py::test_scan_is_populated_and_pinned \
+            tests/test_child_drive_settlement.py::test_a_leftover_service_log_leaves_with_its_drive_only_as_the_canonical_private_copy \
+            tests/test_child_drive_settlement.py::test_uncertain_child_service_log_inventory_retains_the_original \
+            tests/test_child_drive_settlement.py::test_verified_child_log_stays_in_place_until_the_guarded_move \
+            -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/process-${{ runner.os }}.xml"
+          "$PY" -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k, f, e = [int(s.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')]; print(f'{n} ran, {k} skipped, {f} failed, {e} errors'); sys.exit(0 if n > k and f == e == 0 else 1)" "$RUNNER_TEMP/ci-private/process-${{ runner.os }}.xml"
+      - name: Upload executed process cases
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: process-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-private/process-${{ runner.os }}.xml
+          if-no-files-found: error
+
+  structure-checks:
+    name: Structure checks (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Run focused domain/documentation/inventory/JS-home guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=".venv/bin/python"
+          mkdir -p "$RUNNER_TEMP/ci-private"
+          "$PY" -I -S scripts/safe_test.py -- "$PY" -m pytest \
+            tests/test_domain_manifest.py \
+            tests/test_architecture_facts.py \
+            tests/test_generated_inventories.py \
+            tests/test_docs_sync.py \
+            tests/test_web_utils_ssot.py \
+            -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/structure.xml"
+          "$PY" -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k, f, e = [int(s.get(key, 0)) for key in ('tests', 'skipped', 'failures', 'errors')]; print(f'{n} ran, {k} skipped, {f} failed, {e} errors'); sys.exit(0 if (n >= 5 and k == 0 and f == 0 and e == 0) else 1)" "$RUNNER_TEMP/ci-private/structure.xml"
+      - name: Run the size-ratchet lane
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=".venv/bin/python"
+          "$PY" -I -S scripts/safe_test.py -- "$PY" -c 'import os,sys,pytest; os.environ["OURO_SIZE_RATCHET_BASE_REF"]=sys.argv[1]; sys.exit(pytest.main(sys.argv[2:]))' 541238ef4f7ecf3916326a509f1e0e15f25ea4fc -o addopts="" tests/test_smoke.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py -m size_ratchet -q -rs --tb=short
+      - name: Lint changed Python sources
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --name-only -z --diff-filter=ACMR 541238ef4f7ecf3916326a509f1e0e15f25ea4fc HEAD^ -- '*.py' | xargs -0 -r .venv/bin/python -m ruff check
+      - name: Focused interface rendering checks
+        if: ${{ !cancelled() }}
+        run: node --test web/tests/host_lifecycle_rows.test.js
+      - name: Publish generated-inventories diff (if different)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=".venv/bin/python"
+          "$PY" scripts/check_domains.py --write
+          "$PY" scripts/regenerate_inventories.py
+          if [[ -n "$(git status --porcelain -- docs/inventories docs/DOMAIN_MAP.md ouroboros/domains.toml)" ]]; then
+            git diff -- docs/inventories docs/DOMAIN_MAP.md ouroboros/domains.toml > "$RUNNER_TEMP/qa-generated-docs.diff"
+            test -s "$RUNNER_TEMP/qa-generated-docs.diff"
+            echo "GENERATED_DOCS_DIFF=published ($(wc -c < "$RUNNER_TEMP/qa-generated-docs.diff") bytes)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "GENERATED_DOCS_DIFF=none" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload generated-docs diff
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qa-generated-docs-diff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qa-generated-docs.diff
+          if-no-files-found: ignore
+          retention-days: 14
+
