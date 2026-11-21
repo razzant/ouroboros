@@ -1,147 +1,278 @@
-# Manual browser proof; retain the filename for existing dispatch clients.
-# The default `full` calls the same complete lane as ci.yml's manual/tag runs.
-# Only this entry offers a PARTIAL DIAGNOSTIC, in a separate job: it cannot
-# substitute for the complete lane required by a release. No push/PR/schedule.
-name: UI browser (manual)
-run-name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'UI browser full lane' }}
-
-on:
-  workflow_dispatch:
-    inputs:
-      diagnostic:
-        description: Full lane or a partial UI-only diagnostic (never full-suite proof)
-        type: choice
-        default: full
-        options:
-          - full
-          - viewport
-          - inflight
-
+# Manual, disposable test branch. Only this workflow differs from its parent.
+name: Task card qualification
+on: workflow_dispatch
 permissions:
   contents: read
-
-# No concurrency group: one requested qualification must not cancel or replace
-# another. Full manual runs exercise the complete lane regardless of path changes.
-
 jobs:
-  # The complete lane's one weight table, frozen once before its first leg, as ci.yml's `shard-plan` does.
-  shard-plan:
-    name: shard-plan
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
+  inspect:
+    if: github.repository == 'razzant/ouroboros' && github.ref == 'refs/heads/qa/track04-card-history-r16'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
+    timeout-minutes: 110
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: ./.github/actions/shard-plan
-
-  # Exactly one of the next two jobs runs: the complete lane for `full`, otherwise one scenario.
-  ui-smoke:
-    name: ui-smoke
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
-    needs: shard-plan
-    uses: ./.github/workflows/ui-browser.yml
-    # A called workflow cannot raise its caller's token: the lane reads this run's
-    # shard plan (actions) and the accepted-failure issues (issues), as from ci.yml.
-    permissions:
-      contents: read
-      actions: read
-      issues: read
-
-  # Never full-lane proof: one scenario, with no lane guard, no shard, no manifest,
-  # no reconciliation and no browser-tools smoke. Its name says so wherever it shows.
-  ui-diagnostic:
-    name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'ui-diagnostic' }}
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic != 'full' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 115
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 0
+          fetch-depth: 4
+          persist-credentials: false
+      - name: Select the product chain tip
+        shell: bash
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/ui-browser-push.yml'
+          git checkout --detach HEAD^
+          test "$(git rev-parse HEAD)" = '5d5a71313bef450fff2207659a5070e5e5d6cb40'
+          test "$(git rev-parse 'HEAD^{tree}')" = '15408ded188551ec28cd58214c156b8fb2b79cc6'
+          test "$(git show -s --format=%P HEAD)" = '97a4f91e5de507a1d0b6ef889256664828142d04'
+          test -z "$(git status --porcelain)"
+          echo "OURO_SIZE_RATCHET_BASE_REF=$(git rev-parse HEAD^)" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/qualification"
+          git show -s --format='%H %T %P' HEAD HEAD^ | tee "$RUNNER_TEMP/qualification/product.txt"
       - uses: ./.github/actions/setup-python-env
+        id: setup
         with:
-          interpreter: shipped  # the SQLite and journal mode fresh installs run, as the full lane
+          interpreter: shipped
           install-project: 'false'
-        id: setup_python
-      # Bounded downloads with one retry, the reviewed Node first, as the full lane installs them (#2895).
-      - name: Install UI smoke Chromium and WebKit
-        id: install_browsers
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        timeout-minutes: 70
+      - name: Install the pinned Node and browsers for the named UI tests
+        id: browser
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
         run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
-      - name: Run PARTIAL DIAGNOSTIC host UI scenario
-        id: ui_diagnostic
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+      - name: Selected card, history and Activity journeys
+        id: ui
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
         env:
-          DIAGNOSTIC: ${{ inputs.diagnostic }}
-          OUROBOROS_RUN_UI_SMOKE: "1"
-          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_UI_BROWSER_ENGINE: chromium
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
           PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/ui-run" -- \
+            python -m pytest -n0 -m ui_browser -q --tb=short \
+              'tests/test_model_handover_details_browser.py::test_open_details_show_the_settled_model_handover[chromium]' \
+              'tests/test_model_handover_details_browser.py::test_open_details_show_the_settled_model_handover[webkit]' \
+              'tests/test_model_handover_details_browser.py::test_folded_settled_child_reads_detail_only_when_revealed[chromium]' \
+              'tests/test_model_handover_details_browser.py::test_folded_settled_child_reads_detail_only_when_revealed[webkit]' \
+              'tests/test_model_handover_details_browser.py::test_exact_row_reference_reads_open_details' \
+              tests/test_room_work_browser.py::test_nested_cards_show_their_own_current_work \
+              tests/test_room_work_browser.py::test_first_project_web_echo_with_a_cold_main \
+              tests/test_room_work_browser.py::test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resume \
+              tests/test_chat_history_paging_browser.py::test_delivered_attempt_survives_older_pages_and_reload \
+              tests/test_history_continuity_browser.py::test_project_card_handled_git_refusal_and_cancel_times \
+              'tests/test_human_rows_browser.py::test_selected_claim_bytes_render_without_renderer_normalization' \
+              'tests/test_human_rows_browser.py::test_project_ingress_refusal_settles_only_its_own_sending' \
+              'tests/test_room_work_browser.py::test_controls_follow_the_exact_attempt_partial_census_disconnect_and_finish[chromium]' \
+              'tests/test_chat_history_paging_browser.py::test_history_details_selection_replay_and_project_reopen[chromium]' \
+              'tests/test_card_counters_browser.py::test_selected_counter_in_chat[chromium]' \
+              'tests/test_activity_census_browser.py::test_activity_direct_turn_reaches_shared_control_endpoint[stop_now]' \
+              'tests/test_activity_outcomes_browser.py::test_activity_outcome_rows_and_their_controls_in_a_real_browser[webkit]' \
+              'tests/test_task_evidence_browser.py::test_rotated_out_tool_history_keeps_host_totals[webkit]' \
+              --ci-evidence-dir="$RUNNER_TEMP/qualification/ui"
+      - name: Verify every selected browser case and its full-viewport screenshots
+        if: ${{ !cancelled() && steps.ui.outcome != 'skipped' }}
         shell: bash
         run: |
-          case "$DIAGNOSTIC" in
-            viewport) target=tests/test_ui_smoke_playwright.py::test_ui_smoke_live_card_mutations_preserve_viewport ;;
-            inflight) target=tests/test_ui_smoke_inflight_indicator.py::test_ui_smoke_chat_inflight_indicator_lifecycle ;;
-            *) echo "Unknown UI diagnostic selection" >&2; exit 2 ;;
-          esac
-          python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/host" \
-            -- python -m pytest "$target" -m ui_browser -q --tb=short \
-            --junitxml="${{ runner.temp }}/ci-private/ui/host.xml" \
-            --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
-      - name: Upload UI test evidence
-        id: ui_evidence
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ui-ci-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-evidence/ui/
-          retention-days: 30
-          if-no-files-found: warn
-      # The run's declared diagnostics, apart from its projection, as the full lane publishes them.
-      - name: Select UI diagnostics for publication
-        id: ui_diagnostics_export
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
-        continue-on-error: true
-        run: python -m ouroboros.test_evidence export-diagnostics "${{ runner.temp }}/ci-raw/ui" "${{ runner.temp }}/ci-diagnostics/ui"
-      - name: Upload UI diagnostics
-        id: ui_diagnostics
-        if: ${{ !cancelled() && steps.ui_diagnostics_export.outcome != 'skipped' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ui-diagnostics-${{ inputs.diagnostic }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-diagnostics/ui/
-          retention-days: 30
-          if-no-files-found: ignore
-      - name: Summarize host UI test results
-        id: ui_summary
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        env:
-          PRODUCER_OUTCOME: ${{ steps.ui_diagnostic.outcome }}
-          ARTIFACT_OUTCOME: ${{ steps.ui_evidence.outcome }}
-          ARTIFACT_URL: ${{ steps.ui_evidence.outputs.artifact-url }}
-          DIAGNOSTIC: ${{ inputs.diagnostic }}
-        run: >-
-          python -m tests.ci_evidence summarize
-          --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host"
-          --producer-outcome "$PRODUCER_OUTCOME" --scope "$DIAGNOSTIC"
-          --artifact-outcome "$ARTIFACT_OUTCOME" --artifact-url "$ARTIFACT_URL"
-          --summary "$GITHUB_STEP_SUMMARY"
-      - name: Disclose incomplete UI diagnostics
-        continue-on-error: true
-        if: >-
-          ${{ !cancelled() &&
-          (steps.ui_summary.outcome != 'success' ||
-           steps.ui_evidence.outcome != 'success' || steps.ui_evidence.outputs.artifact-url == '' ||
-           steps.ui_diagnostics_export.outcome == 'failure' || steps.ui_diagnostics.outcome == 'failure') }}
+          python -m ouroboros.test_evidence export-diagnostics "$RUNNER_TEMP/ui-run" "$RUNNER_TEMP/ui-pictures"
+          python - <<'PY'
+          import json, os, pathlib, shutil, struct
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          out = root / 'qualification'
+          picture_dir = out / 'pictures'
+          picture_dir.mkdir()
+          expected_files = {f'{scene}-{w}.png' for w in (1240, 390) for scene in ('nested-members', 'web-echo-main', 'web-echo-project', 'delivered-attempt',
+                      'handled-git-refusal', 'cancel-known-time', 'cancel-unknown-time')}
+          copied = set()
+          for name in sorted(expected_files):
+              files = list((root / 'ui-pictures').rglob(name))
+              if files:
+                  assert len(files) == 1, (name, files)
+                  with files[0].open('rb') as image:
+                      header = image.read(24)
+                  w = int(name.rsplit('-', 1)[1].split('.')[0])
+                  assert header[:16] == b'\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR', name
+                  assert struct.unpack('>II', header[16:24]) == (w, 844), name
+                  shutil.copyfile(files[0], picture_dir / name)
+                  copied.add(name)
+          wanted = {f'tests/test_room_work_browser.py::test_first_project_web_echo_with_a_cold_main[{w}]' for w in (1240, 390)}
+          wanted.update(f'tests/test_room_work_browser.py::test_nested_cards_show_their_own_current_work[{s}]' for s in ('1240-warm', '390-cold'))
+          wanted.update(f'tests/test_chat_history_paging_browser.py::test_delivered_attempt_survives_older_pages_and_reload[{s}]' for s in ('1240-False', '390-True'))
+          wanted.update({
+              'tests/test_room_work_browser.py::test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resume',
+              'tests/test_history_continuity_browser.py::test_project_card_handled_git_refusal_and_cancel_times',
+              'tests/test_human_rows_browser.py::test_selected_claim_bytes_render_without_renderer_normalization',
+              'tests/test_human_rows_browser.py::test_project_ingress_refusal_settles_only_its_own_sending',
+              'tests/test_room_work_browser.py::test_controls_follow_the_exact_attempt_partial_census_disconnect_and_finish[chromium]',
+              'tests/test_chat_history_paging_browser.py::test_history_details_selection_replay_and_project_reopen[chromium]',
+              'tests/test_card_counters_browser.py::test_selected_counter_in_chat[chromium]',
+              'tests/test_activity_census_browser.py::test_activity_direct_turn_reaches_shared_control_endpoint[stop_now]',
+              'tests/test_activity_outcomes_browser.py::test_activity_outcome_rows_and_their_controls_in_a_real_browser[webkit]',
+              'tests/test_task_evidence_browser.py::test_rotated_out_tool_history_keeps_host_totals[webkit]',
+          })
+          wanted.update('tests/test_model_handover_details_browser.py::test_open_details_show_the_settled_model_handover[' + engine + ']' for engine in ('chromium','webkit'))
+          wanted.update(['tests/test_model_handover_details_browser.py::test_folded_settled_child_reads_detail_only_when_revealed[chromium]', 'tests/test_model_handover_details_browser.py::test_folded_settled_child_reads_detail_only_when_revealed[webkit]', 'tests/test_model_handover_details_browser.py::test_exact_row_reference_reads_open_details'])
+          data = json.loads((out/'ui/results.json').read_text())
+          phases = {}
+          for record in data['reports']:
+              d = phases.setdefault(record['nodeid'], {})
+              assert record['phase'] not in d, record
+              d[record['phase']] = record['outcome']
+          assert data['tests_collected'] == len(wanted) and set(phases) == wanted, phases
+          assert all(d == dict(setup='passed', call='passed', teardown='passed') for d in phases.values()), phases
+          assert copied == expected_files, sorted(expected_files-copied)
+          print(f'{len(wanted)} named browser cases passed setup, call and teardown; {len(copied)} full-viewport screenshots retained.')
+          PY
+      - name: Web modules, including the prior replay regressions
+        if: ${{ !cancelled() && steps.browser.outcome == 'success' }}
+        shell: bash
         run: |
-          echo "::warning::UI diagnostics are incomplete; see the original test and reporting steps."
-          echo "UI diagnostics_incomplete. The original test outcomes are unchanged." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          cd web
+          # Keep assertion details in the hosted log, and only test names/counts in the download.
+          node_exit=0
+          "$GITHUB_WORKSPACE/node-standalone/bin/node" --test --test-reporter=tap --test-concurrency=2 --test-timeout=300000 \
+            tests/card_frames.test.js \
+            tests/card_detail_read_custody.test.js \
+            tests/chat_history_reveal.test.js \
+            tests/model_handover_details.test.js \
+            tests/review_presentation.test.js \
+            tests/task_detail_read_sharing.test.js \
+            tests/wire_contract.test.js \
+            tests/card_model.test.js \
+            tests/cancel_origin.test.js \
+            tests/cancel_run.test.js \
+            tests/chat_activity_block.test.js \
+            tests/chat_addressing_card.test.js \
+            tests/chat_card_row_placement.test.js \
+            tests/chat_history_integration.test.js \
+            tests/chat_history_loading.test.js \
+            tests/chat_history_replay.test.js \
+            tests/chat_instance_dom.test.js \
+            tests/chat_thread_routing.test.js \
+            tests/dashboard_read_states.test.js \
+            tests/project_activity.test.js \
+            tests/late_work_after_answer.test.js \
+            tests/i18n_catalog.test.js \
+            tests/liveness_scan.test.js \
+            tests/live_card_disclosure.test.js \
+            tests/model_wait.test.js \
+            tests/older_ending_live_card.test.js \
+            tests/owner_stop_card.test.js \
+            tests/project_hold.test.js \
+            tests/reason_detail.test.js tests/review_truth.test.js tests/no_undef.test.js \
+            tests/render_batch.test.js \
+            tests/room_work.test.js \
+            tests/state_read_recovery.test.js \
+            tests/status_marks_cards.test.js \
+            tests/subagent_queued_observation.test.js \
+            tests/task_continue.test.js \
+            tests/task_episodes.test.js \
+            tests/task_presentation.test.js \
+            tests/task_result_reconciliation.test.js \
+            tests/terminal_delivery_card.test.js \
+            tests/terminal_time_line.test.js \
+            tests/tool_call_record.test.js \
+            tests/ui_result_projections.test.js \
+            tests/verification_check_row.test.js \
+            tests/work_portal.test.js \
+            tests/work_status.test.js \
+            > "$RUNNER_TEMP/web.tap" || node_exit=$?
+          awk '/^[[:space:]]*not ok / || /^# (tests|pass|fail|cancelled|skipped|todo) /' "$RUNNER_TEMP/web.tap" | tee "$RUNNER_TEMP/qualification/web-result.txt"
+          printf 'node exit: %s\n' "$node_exit" >> "$RUNNER_TEMP/qualification/web-result.txt"
+          if (( node_exit )); then cat "$RUNNER_TEMP/web.tap"; fi
+          exit "$node_exit"
+      - name: Default (non-browser) cases in changed modules, contract floor and status readers
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only --diff-filter=AM "$OURO_SIZE_RATCHET_BASE_REF" HEAD -- 'tests/test_*.py' | sort -u)
+          test "${#changed[@]}" -gt 0
+          # These test homes exercise changes which the tests edited by the contribution do not cover.
+          homes=(
+            # The changed fixture's own home and the published browser/server contract twins.
+            tests/test_tool_output_source_retention.py
+            tests/test_authoring_handover_loop.py
+            tests/test_chat_logs_ui.py
+            tests/test_{chat_history_quotas,conversation_activity_block,consciousness_initiator_label}.py
+            tests/test_{gateway_history,acceptance_author_stop,configured_session_prestart,delegate_plural}.py
+            tests/test_{execution_evidence,work_order_source_coverage,consciousness_wake}.py
+            tests/test_client_contract_{doc,coverage}.py
+            tests/test_gateway_client_contract.py
+
+            # History, recorded endings and their unchanged consumers.
+            tests/test_{history_tool_carriers,terminal_truth_projection,terminal_delivery_producer,terminal_projection_archive_bound}.py
+            tests/test_{task_status_flow,task_reads,native_wait_readgap_resume,state_bindings_revision}.py
+            tests/test_{chat_history_paging,history_reply_navigation,main_state_projection,project_unread_latest_arrival,project_pin}.py
+
+            # Queue/member projection and admission neighbours.
+            tests/test_{queue_publication,queue_publication_revision,return_facts,pause_notices,admission_contention}.py
+
+            # Copyback and attempt/replica consumers; no headless glob.
+            tests/test_{child_drive_settlement,copyback_terminal_files,continue_stable_name,cancel_terminal_file_recovery}.py
+            tests/test_{workspace_capture_recovery,startup_terminal_files,terminal_file_boundary,child_raw_evidence_custody}.py
+
+            # Refusal/Resume wording and remaining direct consumers.
+            tests/test_{work_stop_policy,work_stop_selection,budget_pause_holds,billing_authority_unavailable}.py
+            tests/test_{memory_inventory,late_review_marks,tool_classification_differential}.py
+
+            # Unchanged consumers of the extra card-history changes (document, read, write, retention).
+            tests/test_client_contract_bindings.py
+            tests/test_{client_contract_history,chat_history_source_recovery,cancel_custody}.py
+            tests/test_{continue_successor_integration,restart_saved_work,post_task_inputs}.py
+
+            # A carrier's first physical attempt and its queue retry have different numbers.
+            tests/test_{conversation_lane_laws,conversation_lane_admission,conversation_lane_saved_turn_restore}.py
+            tests/test_{budget_limits,budget_paid_admission}.py
+            # Same-id retry, carried clock, Continue and the durable/live terminal consumers.
+            tests/test_{worker_crash_retry,execution_timeout_carry,continue_execution_budget,host_terminal_file_events}.py
+            tests/test_deferred_history_retention.py
+            tests/test_duty_rest.py
+            tests/test_isolated_copy_corrections.py
+            tests/test_headless_task_artifacts.py
+            tests/test_workspace_file_outputs.py
+            tests/test_body_feed.py
+            tests/test_owner_pause_ended_members.py
+            tests/test_{delegate_preflight,lc2_owner_facades,dialogue_phase_timestamps}.py
+            tests/test_{nested_rights_depth_custody,cancel_protocol_inventory_s6,truthful_card_presentation}.py
+
+            # Unchanged consumers of history, work state and the returned result.
+            # The activity test drives the real JS via NODE_BIN (runner's node).
+            tests/test_activity_gateway_producers.py
+            tests/test_{project_completion_mirror,telegram_reply_references}.py
+            tests/test_{work_projection_chat_identity,work_projection_effective_cache,work_projection_shared_fixture}.py
+            tests/test_peer_roster_changes.py
+            tests/test_hot_facts_state.py
+            tests/test_{restart_retention,zombie_prevention,cancel_queue_integration,task_pause_presentation}.py
+
+            # Changed reference books and their structural pins.
+            tests/test_{domain_manifest,domain_report,architecture_facts,docs_sync}.py
+          )
+          mapfile -t suite < <(printf '%s\n' "${changed[@]}" "${homes[@]}" \
+            tests/test_{contracts,gateway_parity,packaging_sync,process_custody,hermetic_data_root,preflight_process_containment,smoke,generated_inventories,safety_policy}.py \
+            tests/test_{available_subagents_ui,chat_lazy_rows,page_chrome,pages_registry,settings_addresses,shell_tokens,widgets_ui}_static.py \
+            | sort -u)
+          for f in "${suite[@]}"; do test -f "$f" || { echo "Missing selected test module: $f"; exit 1; }; done
+          printf '%s\n' "${suite[@]}" > "$RUNNER_TEMP/qualification/selected-python.txt"
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/py-run" -- \
+            python -m pytest -n0 -q --tb=short "${suite[@]}" --ci-evidence-dir="$RUNNER_TEMP/qualification/python"
+      - name: Size lane on the actual contribution base
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/size-run" -- \
+            python -m pytest -o addopts='' -n0 -m size_ratchet -q --tb=short \
+              tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py \
+              --ci-evidence-dir="$RUNNER_TEMP/qualification/size"
+      - name: Retain only synthetic screenshots, revision and redacted test facts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: task-cards-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qualification/product.txt
+            ${{ runner.temp }}/qualification/web-result.txt
+            ${{ runner.temp }}/qualification/selected-python.txt
+            ${{ runner.temp }}/qualification/pictures/*.png
+            ${{ runner.temp }}/qualification/ui/results.json
+            ${{ runner.temp }}/qualification/python/results.json
+            ${{ runner.temp }}/qualification/size/results.json
+          if-no-files-found: error
+          retention-days: 14
