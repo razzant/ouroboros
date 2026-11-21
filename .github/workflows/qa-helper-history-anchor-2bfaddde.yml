@@ -1,0 +1,67 @@
+# One-off workflow for the QA branch only; never part of the product PR.
+name: Helper history anchor - targeted qualification
+'on':
+  push:
+    branches: [qa/helper-history-anchor-2bfaddde]
+permissions:
+  contents: read
+jobs:
+  targeted:
+    name: targeted (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped}
+          - {os: windows-latest, leg: windows, interpreter: setup-python}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 29fcdf454188b0ee413212e1bbcf4a0e041c27e3
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Verify the reviewed source after setup
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          printf 'candidate HEAD: %s\ncandidate tree: %s\n' "$actual_sha" "$actual_tree"
+          test "$actual_sha" = '29fcdf454188b0ee413212e1bbcf4a0e041c27e3'
+          test "$actual_tree" = '2f6ab00c72e44321e684c07e36393c9e19d6e43d'
+          git diff --quiet --
+          git diff --cached --quiet --
+      - name: Targeted Python tests
+        timeout-minutes: 20
+        run: >-
+          python -m pytest -o addopts= -q --tb=short --timeout=300
+          tests/test_conversation_activity_block.py tests/test_consciousness_initiator_label.py tests/test_chat_history_quotas.py tests/test_gateway_history.py tests/test_docs_sync.py
+      - name: Targeted browser-module tests (Node)
+        timeout-minutes: 10
+        run: node --test web/tests/reason_detail.test.js web/tests/chat_history_replay.test.js web/tests/task_presentation.test.js
+
+      - name: Targeted size and book checks
+        timeout-minutes: 10
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: '1f01cd7ee52c2af32100e867822b5d3a75fd00c3'
+        run: >-
+          python -m pytest -o addopts= -q --tb=short -m size_ratchet
+          tests/test_repo_health_smoke.py tests/test_reference_book_budgets.py tests/test_smoke.py
