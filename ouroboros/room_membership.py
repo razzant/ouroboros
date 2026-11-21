@@ -219,7 +219,7 @@ def unknown_target_rooms(row: Mapping[str, Any], project_chat_ids, rooms: Callab
     """The Projects an owner Reply could be a member of while its saved target cannot be read
     (``TARGET_UNKNOWN``): a read of theirs may lack it and says so; empty for every other row."""
     ref = row.get("reply_to") if row.get("direction") == "in" else None
-    if not isinstance(ref, dict) or ref.get("unresolved"):
+    if not isinstance(ref, dict) or ref.get("unresolved") or "telegram_room_chat_id" in ref:  # decided: no gap
         return frozenset()
     home, task, chat = reply_target(rooms, ref)
     if home != TARGET_UNKNOWN:
@@ -236,10 +236,14 @@ def reply_target_room(row: Mapping[str, Any], project_chat_ids, rooms: Callable[
 
     The reference is the host's, resolved when the row was accepted; one saved before
     ``target_home`` existed, or stamped as a private contact once was, is decided by its actual
-    target row (``reply_target``)."""
+    target row (``reply_target``). The bundled Telegram bridge's Reply keeps the room its turn was
+    given at acceptance (``telegram_room_chat_id``; 0: its own conversation's), never decided again."""
     ref = row.get("reply_to") if row.get("direction") == "in" else None
     if not isinstance(ref, dict) or ref.get("unresolved"):
         return 0
+    if "telegram_room_chat_id" in ref:  # the room the host decided once for the bundled bridge's Reply: never again
+        room = ref["telegram_room_chat_id"]
+        return room if type(room) is int and room > 0 and room in project_chat_ids else 0
     home, task, chat = reply_target(rooms, ref)
     if home == TARGET_WORK and task:
         room = int(rooms(task) or 0)
@@ -265,6 +269,17 @@ def row_rooms(entry_chat: int, row: Mapping[str, Any], project_chat_ids, rooms: 
 
     if is_a2a_chat_id(entry_chat):
         return frozenset()
+    from ouroboros.chat_references import telegram_chat_row
+
+    if row.get("direction") == "in" and telegram_chat_row(row.get("source"), entry_chat, row.get("client_message_id")):
+        # The bridge's own chat id is a Telegram address, never a room's: its owner rows are Main's and that
+        # conversation's, never a Project bearing the same number by that number alone; a Reply joins the room the
+        # host decided for its turn, even that Project's (an older row's target there is this conversation's).
+        ref = row.get("reply_to")
+        extra = reply_target_room(row, project_chat_ids, rooms)
+        decided = isinstance(ref, dict) and "telegram_room_chat_id" in ref
+        return frozenset({1, *({entry_chat} if entry_chat not in project_chat_ids else ()),
+                          *({extra} if extra and (decided or extra != entry_chat) else ())})
     if private_main_row(dict(row)):
         return frozenset({1, bound_room_chat(rooms, row)} & {1, *project_chat_ids})
     kind = row.get("type")
@@ -274,6 +289,10 @@ def row_rooms(entry_chat: int, row: Mapping[str, Any], project_chat_ids, rooms: 
         work = bound_room_chat(rooms, row) if kind == "task_summary" else 0
         return frozenset(({entry_chat} if entry_chat != 1 else set()) | ({work} if work in project_chat_ids else set()))
     speech = kind in WORK_SPEECH_ELSEWHERE_TYPES
+    if row.get("direction") == "out" and row.get("logical_room_chat_id") == 1 and not kind:
+        task = str(row.get("task_id") or "")
+        if task not in getattr(rooms, "bindings", {}):
+            return frozenset({1, *({entry_chat} if entry_chat not in project_chat_ids else ())})
     bound = 0 if speech or kind in ORIGIN_ADDRESSED_NOTICE_TYPES else bound_room_chat(rooms, row)
     lifecycle = kind in MAIN_PINNED_ROW_TYPES
     found = set()
@@ -305,6 +324,8 @@ def appearance_keys(row: Mapping[str, Any], project_chat_ids, rooms: Callable[..
         written = int(row.get("chat_id", 1))
     except (TypeError, ValueError):
         written = 1
+    if written != 1 and row.get("direction") == "out" and row.get("logical_room_chat_id") == 1:
+        return ["room:1"]  # membership still follows a later Project binding, if any
     keys: set = set()
     if row.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(dict(row)):
         keys.add(bound_room_chat(rooms, row))

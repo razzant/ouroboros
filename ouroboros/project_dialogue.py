@@ -627,6 +627,7 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "project_scope_conflict": "the task already belongs to another project",
     "missing_task_or_project": "no task or project was named",
     "project_unavailable": "the project is no longer available",
+    "reply_target_unavailable": "the message or card you replied to is unavailable",
     "private_owner_source_invalid": "its owner answer could not be verified",
     "private_owner_source_unavailable": "its owner answer could not be read",
     # Historical routing-card refusal codes, retained for receipt replay.
@@ -635,9 +636,8 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "target_not_found": "that project does not exist",
 }
 
-# Rows that stand alone in the chat that issued them, whatever the named task's room: host
-# routing refusals and a relay's answer (also its work's speech: WORK_SPEECH_ELSEWHERE_TYPES).
-# Never terminal task facts.
+# Host refusals and relay answers stand in their source chat regardless of the task's room;
+# relay answers are also work speech (WORK_SPEECH_ELSEWHERE_TYPES), never terminal facts.
 ORIGIN_ADDRESSED_NOTICE_TYPES = frozenset({"task_not_started", "task_start_unconfirmed", "steer_not_delivered", "relay_reply"})
 
 # A root's deliberate notice to Main (send_user_message destination="main"); never a task's final answer.

@@ -555,6 +555,13 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             },
         },
     }
+    if (task.get("project_id") and not presence_binding_authority_metadata(metadata, task_contract=contract)
+            and consciousness_origin_metadata({**metadata, "task_id": predecessor,
+                                                "origin_message_ref": origin_ref}).get("work_kind") == "owner"):
+        from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+        if surface := reply_transport_from_metadata(q.DRIVE_ROOT, metadata, anchor=False):
+            task["metadata"][TURN_ADDRESS] = surface
     if authority_source:
         task["predecessor_task_id"] = predecessor
         task["predecessor_authority_source"] = authority_source

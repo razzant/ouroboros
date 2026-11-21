@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from tests.test_project_work_card_browser import project_chat
+from tests.test_project_work_card_browser import project_chat as project_chat
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.parametrize(
     "project_chat", [("chromium", "light", 1100), ("webkit", "dark", 1100)], indirect=True,

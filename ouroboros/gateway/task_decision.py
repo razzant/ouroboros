@@ -224,6 +224,20 @@ def _record_quiz_answer_history(
     mark_quiz_history_written(drive_root, task_id, str(block["quiz_id"]), source_row=stored)
 
 
+def _answer_surface(drive_root: pathlib.Path, body: Dict[str, Any], source: str) -> Optional[Dict[str, str]]:
+    """The Telegram bot and chat an answer came from, as the bundled bridge relays it (``surface``); its late answer's
+    turn replies there (``chat_references.late_answer_surface``). None from any other source or shape."""
+    from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+
+    surface = body.get("surface")
+    if source != TELEGRAM_SOURCE or not isinstance(surface, dict) or surface.get("kind") != "telegram":
+        return None
+    bot, chat = str(surface.get("bot_id") or ""), str(surface.get("conversation_id") or "")
+    if not (bot.isdigit() and chat.lstrip("-").isdigit()) or not bundled_bridge(drive_root):
+        return None
+    return {"kind": "telegram", "conversation_id": chat, "bot_id": bot}
+
+
 def _late_answer_destination(
     drive_root: pathlib.Path, task_id: str, block: Dict[str, Any],
 ) -> Tuple[Optional[int], str]:
@@ -510,7 +524,13 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     action = body.get("action", "answer")
     if action not in {"answer", "close", "dismiss"}:
         return _refused("action must be answer, close or dismiss", 400, reason_code="action_invalid")
-    if any(key not in {"request_id", "decision_id", "option_index", "comment", "action", "reason"} for key in body):
+    allowed = {"request_id", "decision_id", "option_index", "comment", "action", "reason"}
+    if "surface" in body:
+        from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+
+        if source == TELEGRAM_SOURCE and bundled_bridge(drive_root):
+            allowed.add("surface")
+    if body.keys() - allowed:
         return _refused(
             "decision accepts only {request_id, decision_id, option_index?, comment?, action?, reason?}",
             400, reason_code="unexpected_fields",
@@ -611,7 +631,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
             # The late answer is accepted (В17a=A); with the task alive the
             # expired state would be a contradiction, so the flag is not set.
             allow_expired=task is None,
-            answer_source=source,
+            answer_source=source, answer_surface=_answer_surface(drive_root, body, source),
         )
         block = outcome.get("block") if isinstance(outcome.get("block"), dict) else {}
         attempt_delivery = False

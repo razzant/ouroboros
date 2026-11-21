@@ -22,7 +22,7 @@ from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
 from ouroboros.project_sources import apply_folder, require_durable_folder
-from ouroboros.store import StoreBusy, open_store
+from ouroboros.store import StoreBusy, StoreMigrating, open_store
 from ouroboros.store_capture import capture
 from ouroboros.store_hot_facts import CHAT_VERSION
 from ouroboros import utils
@@ -619,8 +619,8 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
     admitted ``chat_id``), remembered per task id for the process (an existing task's
     lineage never changes); an id the store does not hold is absent from the answer
     (admission creates it later); ``None`` when the store cannot answer right now, except
-    that a ``strict`` reader keeps positive contention typed (``StoreBusy``) for its
-    acquisition owner to wait out: contention is not unknown lineage."""
+    that a ``strict`` reader propagates a busy or importing store: a temporary
+    inability to read is not unknown lineage."""
     try:
         with open_store(drive_root, write=False) as txn:
             typed = int(txn.meta("schema_version") or 1) >= CHAT_VERSION
@@ -628,8 +628,8 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
             captured = capture(txn.conn, _LINEAGE_SELECT.format(chat=chat), (json.dumps(sorted(task_ids)),),
                                ("task_id", "parent_task_id", "root_task_id", "delegation_role", "chat_id"))
         records = captured.tuples()
-    except StoreBusy as exc:
-        if strict and exc.reason == "contention":
+    except (StoreBusy, StoreMigrating):
+        if strict:
             raise
         log.debug("task lineage read failed", exc_info=True)
         return None
