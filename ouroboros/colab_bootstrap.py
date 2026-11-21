@@ -140,6 +140,7 @@ def build_colab_settings(
     total_budget: Optional[float] = None,
     runtime_mode: Optional[str] = None,
     max_workers: Optional[int] = None,
+    max_active_subagents_per_root: Optional[int] = None,
     models: Dict[str, str] | None = None,
     network_password: str = "",
     existing: Optional[Dict[str, Any]] = None,
@@ -151,7 +152,7 @@ def build_colab_settings(
     the defaults FIRST, so prior owner choices that the Colab launch does not set
     explicitly — a pinned ``TELEGRAM_CHAT_ID``, tweaked model slots, an auto-grant
     preference — survive instead of being reset to defaults. The launch's secrets,
-    host and repo then win. Budget, runtime mode and workers are launch knobs
+    host and repo then win. Budget, runtime mode, workers and the per-root subagent number are launch knobs
     only when given (``None`` is "not given"): an explicit value wins, even one equal to
     the first-launch value, else the Drive document's own value stays, else a document
     that holds none takes the first-launch 200 / advanced and no worker cap. A document
@@ -191,6 +192,8 @@ def build_colab_settings(
         ("TOTAL_BUDGET", None if total_budget is None else float(total_budget)),
         ("OUROBOROS_RUNTIME_MODE", runtime_mode),
         ("OUROBOROS_MAX_WORKERS", None if max_workers is None else int(max_workers)),
+        ("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
+         None if max_active_subagents_per_root is None else int(max_active_subagents_per_root)),
     ):
         if explicit is not None:
             settings[key] = explicit

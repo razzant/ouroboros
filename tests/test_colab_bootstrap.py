@@ -160,6 +160,19 @@ def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, e
     assert out["OUROBOROS_SERVER_HOST"] == "127.0.0.1"
 
 
+@pytest.mark.parametrize(("environment", "drive", "expected"), [
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "3"}, {}, 3),  # an explicit launch number, on an empty Drive
+    ({"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": "3"}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 3),
+    ({}, {"OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 8}, 8),  # not explicit: what Drive saved stays
+    ({}, {}, ""),  # neither: the shipped no number
+])
+def test_notebook_launch_passes_an_explicit_per_root_subagent_number_like_the_worker_cap(
+        monkeypatch, environment, drive, expected):
+    monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    out = _notebook_launch(monkeypatch, environment=environment, drive=drive)
+    assert out["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"] == expected
+
+
 @pytest.mark.parametrize(("drive", "expected"), [
     ({}, FIRST_LAUNCH),  # a first launch: no Drive document at all
     ({"TOTAL_BUDGET": 999.0}, (999.0, "advanced", "")),  # a document holding one keeps it, the rest are first-launch
