@@ -178,6 +178,11 @@ def test_status_for_runtime_state():
         {"desired_live": True, "reason": "load_error"}
     ) == "broken"
     assert extension_health.status_for_runtime_state({"desired_live": False, "reason": "disabled"}) == "inactive"
+    # A desired state showing the health record's open companion failure is broken, as the record is.
+    assert extension_health.status_for_runtime_state(
+        {"desired_live": True, "live_loaded": True, "companion_failed": True}) == "broken"
+    assert extension_health.status_for_runtime_state(
+        {"desired_live": False, "live_loaded": True, "companion_failed": True}) == "live"
 
 
 def test_a_per_call_childs_settings_state_is_as_strict_as_the_servers(tmp_path, monkeypatch):

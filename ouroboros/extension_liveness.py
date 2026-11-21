@@ -14,7 +14,7 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Optional
 
-from ouroboros.extension_registry_state import _extensions, _load_failures, _lock
+from ouroboros.extension_registry_state import _extensions, _load_failures, _lock, companion_process_names
 from ouroboros.skill_loader import (
     LoadedSkill,
     _SkillLocationCandidate,
@@ -99,7 +99,7 @@ def _extension_runtime_state(
     elif matched_failure:
         reason = "load_error"
 
-    return {
+    state = {
         "skill": skill.name,
         "type": skill.manifest.type,
         "runtime_mode": get_runtime_mode(),
@@ -119,6 +119,30 @@ def _extension_runtime_state(
         "reason": reason,
         "process": _process_role(),
     }
+    _observe_retained_companions(state, skill)
+    return state
+
+
+def _observe_retained_companions(state: Dict[str, Any], skill: Optional[LoadedSkill]) -> None:
+    """The server's processes of this installed directory awaiting exit. Off, a load error or unready packages
+    prove no exit, so every reason shows them; another directory's or a worker's state never does."""
+    state.pop("retained_companions", None)
+    if skill is not None and state.get("process") == "server" and not getattr(skill, "identity_collision", False):
+        retained = retained_companions_for_directory(skill.name, str(skill.skill_dir.resolve()), process="server")
+        if retained:
+            state["retained_companions"] = retained
+
+
+def retained_companions_for_directory(
+    skill_name: str, resolved_skill_dir: str, *, process: str | None = None,
+) -> Dict[str, str]:
+    """Read exact-directory server custody, without a manifest or shared per-name skill state."""
+    from ouroboros.extension_companion import get_global_supervisor
+
+    if (process if process is not None else _process_role()) != "server":
+        return {}
+    supervisor = get_global_supervisor()
+    return supervisor.retained_companions(skill_name, resolved_skill_dir) if supervisor is not None else {}
 
 
 def _process_role() -> str:
@@ -180,12 +204,39 @@ def _apply_deps_block(state: Dict[str, Any], drive_root: pathlib.Path, skill: Lo
     return state
 
 
+def _publication_facts(skill_name: str, skill: Optional[LoadedSkill], *, settled: bool,
+                       ) -> tuple[Optional[List[str]], str, bool]:
+    """``(companions, directory, foreign)``: what the name's loaded publication says of ``skill``'s folder.
+
+    Loaded from that folder (its bytes current or older, a reload waiting), its registered names (possibly none) and
+    their observed starts speak for it. Loaded from another folder it is ``foreign``: its names, starts and the
+    failures it left speak for that folder, never this one. Nothing loaded verifies none once a reconcile ``settled``
+    it (the publication left, and its failures with it); otherwise, as for a shared name or none, nothing is known.
+    A reconcile settling a shared name or none while a publication is held cannot place it in any folder: for that
+    write it is ``foreign`` too, and the record its own folder left stays."""
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        if bundle is None:
+            return ([] if settled else None), "", False
+        if skill is None or getattr(skill, "identity_collision", False):
+            return None, "", settled  # nothing known to a read; nothing a settled reconcile may write over
+        if bundle.skill_dir == str(skill.skill_dir.resolve()):
+            return companion_process_names(bundle), bundle.skill_dir, False
+        return None, "", True
+
+
 def _apply_durable_extension_health(
     state: Dict[str, Any], drive_root: pathlib.Path, skill: LoadedSkill
 ) -> Dict[str, Any]:
     from ouroboros.extension_health import apply_companion_failure_to_runtime_state
 
-    return apply_companion_failure_to_runtime_state(state, drive_root, skill.name)
+    companions, directory, foreign = None, "", False  # unknown until this server sees what it holds of the name
+    if state.get("process") == "server" and state.get("loaded_present"):
+        companions, directory, foreign = _publication_facts(skill.name, skill, settled=False)
+    if foreign:  # this read's fact for the listing: none of the name's recorded health is this folder's, On or Off
+        state["foreign_publication"] = True
+    return apply_companion_failure_to_runtime_state(state, drive_root, skill.name, skill_dir=directory,
+                                                   companions=companions, foreign=foreign)
 
 
 def runtime_state_for_skill_name(
@@ -331,11 +382,11 @@ def widget_publication_ready(skill_name: str, generation: str, drive_root: pathl
 def _revert_enabled_after_load_error(
     revert: bool, drive_root: pathlib.Path, skill_name: str, state: Dict[str, Any]
 ) -> None:
-    """Atomic enable: revert enabled.json to False when an enable-time load fails.
+    """Atomic first Enable: revert enabled.json to False when an enable-time load fails.
 
-    Shared by every enable path (UI toggle, agent toggle_skill, post-review
-    auto-enable) so a skill is never left enabled-but-broken regardless of who
-    enabled it.
+    Every path that turns on a skill saved Off asks for it (UI and agent toggle,
+    turn-on-when-ready, post-review auto-enable). Enable on a skill already On is
+    a repair and never asks: its failure is answered and the switch stays On.
     """
     if not revert:
         return

@@ -751,12 +751,11 @@ def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, 
 
 
 def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", skill_name: str = "",
-                   resolved_binding: Any = None) -> tuple[str, Optional[ResolvedResourceBinding], Any]:
-    """``read_file``'s whole admission of one target, unpublished: ``(root, binding, refusal)``.
-
-    ``refusal`` is None when admitted, else the ToolResult to publish (a protected path's is final
-    text). The one sequence for read_file and delegated ``input_files`` (#2593): profile, binding,
-    Presence ceiling (as the registry applies it), runtime-data rules, protected paths."""
+                   resolved_binding: Any = None,
+                   prospective_copy: Optional[pathlib.Path] = None) -> tuple[str, Optional[ResolvedResourceBinding], Any]:
+    """Unpublished admission. For a measured copy about to be handed off, require its exact address
+    instead of hashing a copy not yet published; the actual read still verifies the copy's identity.
+    The profile, runtime-data and protected-path checks always apply."""
     from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED, _presence_binding_allowed
 
     normalized, refusal = _access_refusal(ctx, root, "read")
@@ -769,7 +768,7 @@ def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", 
         refusal = ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}")
     if refusal is not None:
         return normalized, None, refusal
-    if not _presence_binding_allowed(ctx, binding):
+    if not (_presence_binding_allowed(ctx, binding) if prospective_copy is None else binding.target_path == prospective_copy):
         return normalized, binding, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=PRESENCE_RESOURCE_BLOCKED)
     if runtime_block := _runtime_data_read_block(ctx, binding.target_path, root=binding.root):
         return normalized, binding, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block)
