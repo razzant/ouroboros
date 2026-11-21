@@ -201,6 +201,14 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
         createTextNode(data) { return new TextStub(data); },
+        createComment() {
+            const comment = new TextStub();
+            comment.nodeType = 8;
+            // This fixture's children array also stores non-elements; an origin marker has no geometry.
+            comment.getBoundingClientRect = () => ({ top: 0, bottom: 0, width: 0, height: 0 });
+            comment.replaceWith = (node) => comment.parentNode?.replaceChild(node, comment);
+            return comment;
+        },
         createTreeWalker(root) {
             const texts = [];
             const collect = node => { for (const child of node.children || []) {

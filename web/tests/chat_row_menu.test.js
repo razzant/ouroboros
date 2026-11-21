@@ -8,11 +8,16 @@ import { createMessageActions } from '../modules/message_actions.js';
 import { cardMenuActions, emptyWorkState } from '../modules/work_status.js';
 import { installDomDouble } from './dom_double.js';
 
-function fixture({ actions = undefined } = {}) {
+function fixture({ actions = undefined, phone = false } = {}) {
     const env = installDomDouble();
     const { doc, el } = env;
     const feed = el('div', { className: 'chat-messages' });
     doc.body.append(feed);
+    if (phone) {
+        window.ouroLayout = { layout: 'stack' };
+        window.matchMedia = () => ({ matches: true });
+        feed.rect = { left: 0, top: 50, right: 390, bottom: 670, width: 390, height: 620 };
+    }
     const started = [];
     const replies = {
         bubbleRef: (row) => (row.dataset.rowAddress ? { address: row.dataset.rowAddress } : null),
@@ -243,10 +248,9 @@ test('a work card offers Reply, Copy, Open project, Resume, Pause and Stop… ex
         press('reply'); press('project'); press('resume'); press('stop');
         assert.deepEqual(pressed.splice(0), ['project', 'resume', 'stop'], 'each item presses the card\'s own control');
         assert.deepEqual(f.started.splice(0), ['task:t-1'], 'Reply quotes the work by its task address');
-        // A nested child is part of its root's work: its press opens the root's menu, and its own reference is not the root's.
+        // A child without its own loaded record cannot borrow its parent's Reply or work controls.
         child.emit('contextmenu', { clientX: 1, clientY: 1 });
-        assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'resume', 'pause', 'stop']);
-        f.openMenu().emit('keydown', { key: 'Escape', target: f.openMenu().children[0] });
+        assert.equal(f.openMenu(), null);
         // What the card does not offer, the menu does not offer.
         record.resumeRunBtn.remove();
         f.activity.phase = 'budget_paused';
@@ -362,4 +366,34 @@ test('on touch the row sinks while the finger holds, lifts with a haptic while i
         assert.equal(f.bubble.dataset.rowPress, undefined);
         assert.deepEqual(played, ['medium']);
     } finally { delete globalThis.window.Telegram; f.close(); }
+});
+
+
+test('a phone swipe and the actual row menu quote the same exact System row or child card, never the enclosing work', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture({ phone: true });
+    try {
+        const { record, child, summary } = workCard(f);
+        const childTitle = f.el('div', { text: 'Read the other room' });
+        const systemTitle = f.el('span', { className: 'chat-live-line-title', text: 'Work paused' });
+        const systemRow = f.el('div', { className: 'chat-live-line', dataset: {
+            workReplyRow: '1', rowAddress: 'row:1@t#system',
+        } }, systemTitle);
+        child.append(childTitle, systemRow);
+        f.cards.set('child', { groupId: 'child', root: child, titleEl: childTitle, replyable: true });
+
+        for (const [target, row, address] of [[systemTitle, systemRow, 'row:1@t#system'],
+            [childTitle, child, 'task:child'], [summary, record.root, 'task:t-1']]) {
+            target.emit('contextmenu', { clientX: 1, clientY: 1 });
+            f.openMenu().children.find(node => node.dataset.rowAction === 'reply').click();
+            assert.deepEqual(f.started.splice(0), [address]);
+            const fingers = (x) => [{ identifier: 1, clientX: x, clientY: 220 }];
+            target.emit('touchstart', { touches: fingers(300) });
+            for (const x of [280, 205]) target.emit('touchmove', { touches: fingers(x), cancelable: true });
+            assert.equal(row.dataset.rowSwipe, 'drag');
+            target.emit('touchend', { touches: [], changedTouches: fingers(205) });
+            assert.deepEqual(f.started.splice(0), [address]);
+            t.mock.timers.tick(500);
+        }
+    } finally { f.close(); }
 });

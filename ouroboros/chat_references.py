@@ -1,9 +1,8 @@
 """Host-owned message addresses and Reply facts, shared by every owner ingress.
 
-References describe what the sender pointed at. They do not select work or grant
-authority. Hash the persisted row before adding any history/view fields. A row the
-dialogue store cannot answer yet (its archive still importing, or unreadable) leaves
-the reference unresolved; it never blocks the message that carries it.
+References keep the quoted row distinct from any proven work address. Neither grants
+authority to act for the sender. Hash the persisted row before adding view fields;
+an importing or unreadable source leaves the quote unresolved, never guessed.
 """
 from __future__ import annotations
 
@@ -58,11 +57,11 @@ def reference_from_row(row: dict) -> dict:
     # voice wherever Main shows it (project_answer.js::appendProjectRow); the
     # address still hashes the raw System row.
     answer = project_answer_text(row)
+    system = row.get("role") == "system" or row.get("direction") == "system"
     kind = ("question" if kind == "quiz" else "completion" if kind in
-            {"project_completion_summary", "task_summary"} else
-            "system" if row.get("direction") == "system" else "message")
-    role = "assistant" if answer else {"in": "user", "out": "assistant", "system": "system"}.get(
-        row.get("direction"), "system")
+            {"project_completion_summary", "task_summary"} else "system" if system else "message")
+    role = ("assistant" if answer else "system" if system else
+            {"in": "user", "out": "assistant"}.get(row.get("direction"), "system"))
     from ouroboros.room_membership import reply_target_home
     return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
             "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
@@ -100,9 +99,99 @@ def resolve_reply(root, address: str) -> dict:
     return {"address": address, "unresolved": True}
 
 
-def ingress_reply(root, metadata: dict) -> dict:
-    """Shared web/HTTP/skill seam. Raw input is resolved, never trusted as a preview."""
-    return resolve_reply(root, metadata.get("reply_to", ""))
+def ingress_reply(root, metadata: dict, *, route_work: bool = False) -> dict:
+    """Resolve the quoted row and its work separately, before the owner row is written.
+
+    A saved work id is an address, not an assertion that the work still reads.
+    An empty work id records a proven conflict or a read gap; absence leaves an
+    ordinary chat Reply alone. The next Reply can inherit this fact in one read.
+    """
+    address = metadata.get("reply_to", "")
+    if not route_work:
+        return resolve_reply(root, address)
+    if not isinstance(address, str) or not address:
+        return resolve_reply(root, address)
+    if address.startswith("task:"):
+        try:
+            ref = resolve_reply(root, address)
+        except (ValueError, StoreError, OSError):
+            ref = {"address": address, "unresolved": True}
+        return {**ref, "work_task_id": ref.get("task_id", "")}
+    try:
+        row, _ = resolve_history_row(root, address)
+    except (ValueError, StoreError, OSError):
+        row = None
+    if not row:
+        return {"address": address, "unresolved": True, "work_task_id": ""}
+    ref = reference_from_row(row)
+    try:
+        work = _reply_work(root, row)
+    except (ValueError, StoreError, OSError):
+        work = ""
+    return {**ref, "work_task_id": work} if work is not None else ref
+
+
+def _reply_work(root, row: dict) -> str | None:
+    """Use only stamped work relationships and exact stored legacy web Reply links."""
+    # Resolving old dialogue must stay bounded on the ingress path. An incomplete
+    # chain is not the same fact as reaching an ordinary row with no work target.
+    seen = set()
+    while row.get("direction") == "in":
+        quote = row.get("reply_to")
+        if not isinstance(quote, dict):
+            return None
+        if "work_task_id" in quote:
+            return str(quote["work_task_id"] or "")
+        if row.get("source") != "web":
+            return None
+        address = quote.get("address")
+        if not isinstance(address, str) or quote.get("unresolved"):
+            return ""
+        if quote.get("kind") == "work_card" and address == f"task:{quote.get('task_id') or ''}":
+            return str(quote.get("task_id") or "")
+        if not address.startswith("row:") or address in seen or len(seen) >= _MAX_LEGACY_REPLY_HOPS:
+            return ""
+        seen.add(address)
+        parent, _ = resolve_history_row(root, address)
+        if parent is None:
+            return ""
+        row = parent
+    return _outgoing_reply_work(root, row)
+
+
+_MAX_LEGACY_REPLY_HOPS = 16
+
+
+def _outgoing_reply_work(root, row: dict) -> str | None:
+    from ouroboros.dialogue_provenance import row_provenance
+    from ouroboros.presence_owner_contact import private_main_row
+    from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
+    from ouroboros.task_results import load_task_result
+
+    kind = row.get("type") or row.get("system_type") or ""
+    task_id = str(row.get("task_id") or "")
+    if (private_main_row(row) or row_provenance(row) == "place"
+            or kind in ORIGIN_ADDRESSED_NOTICE_TYPES - {"relay_reply"}):
+        return None
+    if linked := row.get("about_work_task_id"):
+        return linked
+    if not task_id:
+        return None
+    if row.get("card_row") or row.get("parent_task_id") or kind in {
+        "project_started", "project_handoff", "project_completion_summary", "task_summary",
+        "relay_entry", "relay_reply",
+    }:
+        return task_id
+    task = load_task_result(root, task_id, strict=True)
+    if not task:
+        return task_id if row.get("is_progress") else None
+    if not task.get("_is_direct_chat") or task.get("detached_at"):
+        return task_id
+    from ouroboros.projects_registry import project_binding_for_task
+
+    if project_binding_for_task(root, task_id, strict=True):
+        return task_id  # conversion preserves the identity of the original turn
+    return None
 
 
 def origin_reply(root, task_id: str, metadata=None) -> dict:

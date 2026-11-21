@@ -288,6 +288,8 @@ def _chat_record(
                 record[key] = dict(meta[key])
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
+        if direction == "out" and isinstance(meta.get("about_work_task_id"), str) and meta["about_work_task_id"]:
+            record["about_work_task_id"] = meta["about_work_task_id"]
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
         if meta.get("card_press"):
@@ -716,7 +718,7 @@ def handle_web_message(
     metadata = dict(task_metadata or {})
     host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
     call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
-    reply = ingress_reply(bus.DATA_DIR, metadata)
+    reply = ingress_reply(bus.DATA_DIR, metadata, route_work=not call_open)
     if reply:  # the obligation of a fresh acceptance replays the same reference
         metadata["reply_reference"] = reply
     if str(project_id or "").strip():

@@ -73,7 +73,7 @@ def _arrival(row: Any = None, received: Any = "") -> Dict[str, Any]:
 
 
 def _stamp_owner_delivery(
-    owner_ctx: Any, *, msg_id: str, client_message_id: str, text: str, ts: str,
+    owner_ctx: Any, *, msg_id: str, client_message_id: str, text: str, ts: str, origin_message_ref: Any = None,
 ) -> Any:
     """Record the latest owner message this turn actually DRAINED (latest wins); returns the chat row held for it.
 
@@ -89,7 +89,7 @@ def _stamp_owner_delivery(
     if owner_ctx is None:
         return None
     from ouroboros.owner_relay import retain_owner_message
-    held = retain_owner_message(owner_ctx, client_message_id=client_message_id)
+    held = retain_owner_message(owner_ctx, client_message_id=client_message_id, origin_message_ref=origin_message_ref)
     owner_ctx.last_owner_delivery = {
         "msg_id": msg_id, "client_message_id": client_message_id, "text": text, "ts": ts,
     }
@@ -352,6 +352,7 @@ def _drain_incoming_messages(
                 client_message_id=str(entry.get("client_message_id") or ""),
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
+                origin_message_ref=entry.get("origin_message_ref"),
             )
             source = living.get("source") or row_source(entry, "owner_mailbox")  # a late answer's press without words is an act
             _loop()._record_owner_directive(

@@ -125,15 +125,26 @@ def held_owner_messages(ctx) -> dict:
     return held
 
 
-def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None, source_root=None):
+def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None, source_root=None, origin_message_ref=None):
     """Hold one owner row of this turn by its address and return it (``None`` when nothing was held), so its corpus
     row can name the same room and time; ``accounts``: the caller's one place snapshot for its rows. A row named
     by client id is looked up in the context's chat, then in the room the room rule names for its tree: a task
     bound to a Project after admission keeps its admitted chat (``control_relay._teller_room``). ``source_root``:
-    the data root the row was read from (a teller's, for a relayed row), kept beside it as ``_owner_source_root``."""
+    the data root the row was read from (a teller's, for a relayed row), kept beside it as ``_owner_source_root``.
+    New mailbox deliveries carry the ingress identity; an unavailable exact source is not a room lookup."""
     if ctx is None:
         return None
-    if row is None and client_message_id and getattr(ctx, "drive_root", None):
+    if origin_message_ref is not None:
+        from ouroboros.project_dialogue import resolve_owner_message_source
+        from ouroboros.store import StoreError
+        from ouroboros.tool_access import canonical_data_root
+
+        source_root = canonical_data_root(ctx)
+        try:
+            row = resolve_owner_message_source(source_root, origin_message_ref)
+        except (StoreError, OSError, ValueError):
+            return None  # source is unavailable; the accepted mailbox words remain
+    elif row is None and client_message_id and getattr(ctx, "drive_root", None):
         from supervisor.message_ingress import accepted_chat_message
         from ouroboros.projects_registry import project_chat_for_task_tree
         from ouroboros.tool_access import canonical_data_root

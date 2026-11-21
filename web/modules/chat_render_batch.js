@@ -542,9 +542,8 @@ const CARD_HEADER = [
     '.chat-live-project-card-btn',
 ];
 
-// The feed's bounded, separately scrolling boxes: a card timeline, a fetched
-// full output, a Reviews group's Record facts. Each clips what it holds.
-const BOUNDED_BOX = '[data-live-timeline], .chat-live-line-body-full, [data-review-attempt-detail]';
+// A card's own timeline, Details (bounded alongside children), full output and Record facts.
+const BOUNDED_BOX = '[data-live-timeline], .chat-live-details, .chat-live-line-body-full, [data-review-attempt-detail]';
 
 /** An explicit exact-line landing scrolls every clipping owner before the feed. */
 export function revealTimelineNode(node, feed, clearance) {
@@ -898,6 +897,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
         }
         const patch = {
             cardRowRevision: summary.cardRowRevision,
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             phase: summary.phase || it.phase,
             headline: headline || it.headline,
             fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
@@ -948,6 +949,8 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
         const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         record.items.push({
             cardRowRevision: summary.cardRowRevision,
+            replyAddress: summary.replyAddress,
+            replyRole: summary.replyRole,
             phase: summary.phase || 'working',
             headline: headline || 'Update',
             fullHeadline: summary.fullHeadline || headline || 'Update',
@@ -970,14 +973,9 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     return { timelineUpdate, patchIndex };
 }
 
-/** The block's folded tool evidence row. Live frames and the host's metrics
- * reach it through the same keyed in-place upsert, so neither route can mint a
- * second row, and the row keeps the position and timestamp of its first frame.
- */
+/** Live frames and host metrics upsert one folded tool row, keeping its first position and time through a burst. */
 export function upsertToolFoldRow(record, view, ts, rawTs) {
     const syntheticKey = `tools|${record.groupId}`;
-    // Stationary: the row keeps the place and the time of the first frame it
-    // counted, so a burst of calls never walks it down the timeline.
     const first = !record.items.some((item) => item.dedupeKey === syntheticKey);
     return updateLiveTimelineItem(record, view, {
         ts: first ? ts : '', rawTs, syntheticKey, headline: view.headline, inPlaceByKey: true,
