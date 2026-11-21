@@ -1483,24 +1483,40 @@ def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0)
             continue
 
 
-def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
-    """``(name, identity)`` of each drive a settlement moved aside (one directory read, an ``lstat`` each)."""
+def custody_trash_scan(canonical_root: Any) -> Tuple[List[Tuple[str, Optional[List[int]]]], bool]:
+    """``(entries, complete)``: each listed name with its identity, and whether enumeration proved the
+    names whole. An unreadable identity is ``None``: its name is still present. Only complete
+    enumeration proves that a name not in the listing is gone."""
     root = pathlib.Path(canonical_root) / _TRASH_DIR
-    entries: List[Tuple[str, List[int]]] = []
+    entries: List[Tuple[str, Optional[List[int]]]] = []
+    if root.is_symlink():
+        return entries, False  # a denied listing is not a proved-empty one
     try:
-        if root.is_symlink():
-            return entries
-        with os.scandir(root) as listing:
-            for entry in listing:
-                with contextlib.suppress(OSError):
-                    stat = os.lstat(entry.path)  # remove_custody_trash's identity, not a Windows listing's copy
-                    entries.append((entry.name, [stat.st_ino, stat.st_mtime_ns]))
-    except (FileNotFoundError, NotADirectoryError):
-        pass
-    return entries
+        listing = os.scandir(root)
+    except FileNotFoundError:
+        return entries, True
+    except NotADirectoryError:
+        return entries, False
+    with listing:
+        for entry in listing:
+            try:
+                stat = os.lstat(entry.path)  # preserve the remover's identity, including on Windows
+            except OSError:
+                entries.append((entry.name, None))
+            else:
+                entries.append((entry.name, [stat.st_ino, stat.st_mtime_ns]))
+    return entries, True
 
 
-def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
+    """Readable ``(name, identity)`` pairs; callers that need absence evidence use the scan."""
+    return [(name, identity) for name, identity in custody_trash_scan(canonical_root)[0] if identity is not None]
+
+
+def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None,
+                         before_unlink: Optional[Callable[[pathlib.Path], None]] = None,
+                         notify_retirement: bool = True,
+                         listing: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
     off the serving process. Returns the count removed, stuck and held entries that survived
@@ -1509,7 +1525,13 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     marker keeps (#2708) has moved into its own ``<id>+scratch-<token>/`` entry, held, re-read every run,
     as ``producer_retained`` (the marker's words, since it was written) until the marker is gone
     (``session_scratch.release_trash_entry``). A failed release or handoff, or a removal it survived, keeps
-    the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure)."""
+    the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure).
+    BEFORE_UNLINK(entry) is the caller's debt record: it runs before each unlink attempt, and a failure of it
+    unlinks nothing more. NOTIFY_RETIREMENT (the default) schedules the removed sources' retirement here; the
+    trash lane passes False because it books that same fact in the transaction that writes its row — one owner
+    for one fact, while a direct caller keeps its own notification. LISTING, when given, is filled by this
+    pass with ``initial`` (the whole enumeration before processing) and ``gone`` (the names already counted
+    removed by this pass). A Stop ends processing, not the earlier enumeration. The report is unchanged."""
     from ouroboros.session_scratch import aggregate_holds, release_trash_entry
     from ouroboros.tools.kept_service_outputs import owed_declarations
 
@@ -1518,9 +1540,20 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     root = pathlib.Path(canonical_root) / _TRASH_DIR
     owed = owed_declarations(canonical_root)  # one selection for the whole pass: every entry reads the same debts
     try:
-        entries = [] if root.is_symlink() else list(root.iterdir())
-    except (FileNotFoundError, NotADirectoryError):
+        if root.is_symlink():
+            raise OSError(f"custody trash listing denied: {root} is a symlink")
+        entries = list(root.iterdir())
+    except FileNotFoundError:
         entries = []
+    except NotADirectoryError:
+        return report if notify_retirement else {**report, "incomplete": True}
+    except OSError:
+        if notify_retirement:
+            raise
+        log.warning("Custody trash listing incomplete", exc_info=True)
+        return {**report, "incomplete": True}
+    if listing is not None:
+        listing.update(initial=[entry.name for entry in entries], gone=[])
     for entry in entries:
         if stop is not None and stop():
             break
@@ -1534,6 +1567,8 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
         else:
             held += [(row["class"], row["example"], row["since"]) for row in retained]
             if not holding:
+                if before_unlink is not None:
+                    before_unlink(entry)  # outside the suppress: a failed debt record unlinks nothing
                 with contextlib.suppress(OSError):
                     _remove_entry(entry)
         try:
@@ -1543,11 +1578,13 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
                 held.append(("removal_failed", failed or f"{entry.name}: survived its removal", stat.st_mtime))
         except FileNotFoundError:
             report["removed"] += 1
+            if listing is not None:
+                listing["gone"].append(entry.name)
         except OSError as exc:
             report["stuck"][entry.name] = [type(exc).__name__]
             held.append(("removal_failed", f"{entry.name}: {type(exc).__name__}", None))
     report["holds"] = aggregate_holds(held)
-    if report["removed"]:  # the bytecode the removed sources left is owed to retirement now
+    if report["removed"] and notify_retirement:  # the bytecode the removed sources left is owed to retirement now
         from ouroboros.maintenance_retirement import artifact_changed
 
         artifact_changed(canonical_root, immediate=True)
