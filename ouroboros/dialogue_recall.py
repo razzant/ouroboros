@@ -34,7 +34,8 @@ _SPEAKER_WORDS = {"owner": "my human", "host": "host"}
 WORDS_DESCRIPTION = (
     "Instead of search (a literal piece of the rendered row: an id, a label, part of a word): alternatives, any "
     "one may match; each is word prefixes that must all occur, in any order, in one field of one row (text, a "
-    "card's question, an option, the comment); a quoted part is an exact word or phrase.")
+    "card's question, an option, the comment); a quoted part is an exact word or phrase. For text without spaces "
+    "use search.")
 
 
 def _room(room_id: Any) -> Optional[int]:

@@ -5,9 +5,16 @@ optional ``words`` and the disposable word postings all read text through this m
 posting stores is exactly a token the predicate compares.
 
 Tokenization. ``normalize`` applies Unicode NFC, then ``str.casefold``, then ``ё``→``е``. ``tokens``
-returns the maximal runs of word characters of the normalized text, in order: Python's ``\\w`` (letters
-and digits of every script, and ``_``), so a hyphen, apostrophe, quote, slash or any other punctuation
-splits, and ``chat_history`` stays one token. Nothing is stemmed, dropped or ranked.
+returns the maximal runs of the normalized text that start with a letter or digit of any script
+(``[^\W_]``) and continue with letters, digits and the combining marks that follow them (Unicode
+categories Mn, Mc, Me), in order. Everything else splits, ``_`` included: ``chat_history`` and
+``memory_view.py`` are the tokens ``chat``, ``history`` and ``memory``, ``view``, ``py``, so ``history``
+finds ``chat_history`` by its own prefix, ``chat_history`` unquoted is two prefixes within one field and
+``"chat_history"`` quoted is the exact consecutive pair. Marks stay inside their word, so a word of a script
+that keeps marks after NFC (Devanagari, Thai, Arabic with diacritics, Hebrew with niqqud) is one token. A
+limit, named: text written without spaces (Chinese, Japanese) is one token per run, so only the start of a
+run is a prefix; a piece inside it is found by the substring ``search``. Nothing is stemmed, dropped or
+ranked.
 
 Query. ``parse`` takes a list; each item is one alternative, and alternatives are ORed. Inside an item,
 whitespace separates words, and each word is a prefix that must occur as the start of some token; all of
@@ -25,7 +32,22 @@ import re
 import unicodedata
 from typing import Any, List, Mapping, NamedTuple, Sequence, Tuple
 
-_WORD = re.compile(r"\w+")
+_WORD: Any = None  # built on first use: the mark classes come from this Python's Unicode data, never a stored table
+
+
+def _word() -> Any:
+    global _WORD
+    if _WORD is None:
+        marks, start = [], None
+        for code in range(0x110000 + 1):
+            mark = code < 0x110000 and unicodedata.category(chr(code)) in ("Mn", "Mc", "Me")
+            if mark and start is None:
+                start = code
+            elif not mark and start is not None:
+                marks.append(f"\\U{start:08x}-\\U{code - 1:08x}")
+                start = None
+        _WORD = re.compile(rf"[^\W_](?:[^\W_]|[{''.join(marks)}])*")
+    return _WORD
 _QUOTED = re.compile(r'"([^"]*)"|“([^”]*)”|«([^»]*)»')
 _QUOTE_CHARS = frozenset('"“”«»')
 
@@ -36,8 +58,8 @@ def normalize(text: str) -> str:
 
 
 def tokens(text: str) -> List[str]:
-    """The normalized tokens of ``text`` in order: the maximal ``\\w`` runs of ``normalize(text)``."""
-    return _WORD.findall(normalize(text))
+    """The normalized tokens of ``text`` in order (the module docstring's rule)."""
+    return _word().findall(normalize(text))
 
 
 class Alternative(NamedTuple):

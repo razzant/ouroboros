@@ -12,7 +12,29 @@ from ouroboros.dialogue_words import Field, fields_of, match_fields, match_text,
 def test_normalize_is_nfc_casefold_and_yo_as_ye():
     decomposed = unicodedata.normalize("NFD", "ЁЛКА Straße")
     assert normalize(decomposed) == "елка strasse"
-    assert tokens("Чат_History, follow-up: «ёж»!") == ["чат_history", "follow", "up", "еж"]
+    assert tokens("Чат_History, follow-up: «ёж»!") == ["чат", "history", "follow", "up", "еж"]
+
+
+def test_underscore_splits_identifiers_into_findable_words():
+    assert tokens("see memory_view.py") == ["see", "memory", "view", "py"]
+    assert match_text(parse(["history"]), "the chat_history tool")
+    assert match_text(parse(["chat_history"]), "history of a chat")  # unquoted: two prefixes, any order
+    assert match_text(parse(['"chat_history"']), "run chat_history now")  # quoted: the consecutive pair
+    assert not match_text(parse(['"chat_history"']), "history of a chat")
+
+
+def test_combining_marks_stay_inside_their_word():
+    assert tokens("हिन्दी नमस्ते") == ["हिन्दी", "नमस्ते"]
+    assert tokens("שָׁלוֹם עולם") == ["שָׁלוֹם", "עולם"]
+    assert match_text(parse(["नमस"]), "हिन्दी नमस्ते")
+    # a mark with no word character before it starts nothing
+    assert tokens("\u0301x") == ["x"]
+
+
+def test_text_without_spaces_is_one_token_per_run_a_named_limit():
+    assert tokens("日本語のテキスト") == ["日本語のテキスト"]
+    assert match_text(parse(["日本"]), "日本語のテキスト")
+    assert not match_text(parse(["テキスト"]), "日本語のテキスト")  # a piece inside a run: use search
 
 
 def test_words_are_prefixes_in_any_order_and_all_required():
