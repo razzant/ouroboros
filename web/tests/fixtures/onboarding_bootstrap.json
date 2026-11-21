@@ -405,6 +405,7 @@
         "footer": "Add more subscriptions or API access later in Settings \u2192 Accounts and keys.",
         "id": "accounts",
         "railCopy": "Subscriptions + API",
+        "railTitle": "Accounts",
         "title": "Connect your accounts"
       },
       {
@@ -412,6 +413,7 @@
         "footer": "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider.",
         "id": "models",
         "railCopy": "model slots",
+        "railTitle": "Models",
         "title": "Choose models"
       },
       {
@@ -419,6 +421,7 @@
         "footer": "",
         "id": "review_mode",
         "railCopy": "Reach",
+        "railTitle": "Access",
         "title": "Choose access"
       },
       {
@@ -426,6 +429,7 @@
         "footer": "",
         "id": "consciousness",
         "railCopy": "When it acts",
+        "railTitle": "Consciousness",
         "title": "Consciousness"
       },
       {
@@ -433,6 +437,7 @@
         "footer": "Add or remove skills any time on the Skills page.",
         "id": "skills",
         "railCopy": "What it can do",
+        "railTitle": "Skills",
         "title": "Skills"
       },
       {
@@ -440,6 +445,7 @@
         "footer": "",
         "id": "budget",
         "railCopy": "Quota + API budget",
+        "railTitle": "Limits",
         "title": "Review limits"
       },
       {
@@ -447,6 +453,7 @@
         "footer": "The same onboarding values remain editable later in Settings.",
         "id": "summary",
         "railCopy": "Final check",
+        "railTitle": "Review",
         "title": "Review before launch"
       }
     ],

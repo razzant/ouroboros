@@ -1020,8 +1020,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             const meta = STEP_META[stepId];
             return `
                 <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}"${active ? ' aria-current="step"' : ''}>
-                    <div class="wizard-step-index"><span class="wizard-step-word">Step&nbsp;</span>${index + 1}</div>
-                    <p class="wizard-step-title">${escapeHtml(meta.title)}</p>
+                    <div class="wizard-step-index"><span class="wizard-step-word">Step&nbsp;</span>${index + 1}<span class="wizard-step-of">&nbsp;of ${STEP_ORDER.length}</span></div>
+                    <p class="wizard-step-title">${escapeHtml(meta.railTitle || meta.title)}</p>
                     <p class="wizard-step-copy">${escapeHtml(meta.railCopy || '')}</p>
                 </div>
             `;
@@ -1073,7 +1073,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
         observeFooter();
-        revealCurrentStep();
     }
 
     // The page's scroll padding clears the pinned footer by its real height, which a wrapped reason changes.
@@ -1091,13 +1090,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     function clearFooterOnFocus(event) {
         const target = event.target;
         if (target instanceof Element && target.matches(':focus-visible') && !target.closest('.wizard-footer')) target.scrollIntoView({ block: 'nearest' });
-    }
-
-    // A rail narrower than its steps scrolls sideways: the current step, the one place this page says where you are, stays in it.
-    function revealCurrentStep() {
-        const rail = root.querySelector('.wizard-steps');
-        const current = rail?.querySelector('.wizard-step.active');
-        if (current && rail.scrollWidth > rail.clientWidth) rail.scrollLeft = current.offsetLeft - rail.offsetLeft - (rail.clientWidth - current.offsetWidth) / 2;
     }
 
         function bindClearButtons() {

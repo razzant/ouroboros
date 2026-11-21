@@ -442,8 +442,14 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
 
     assert {"Connect your accounts", "Choose models", "Choose access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
-    assert "@media (max-width: 720px)" in css
-    assert "scroll-snap-type: x proximity;" in css
+    # The rail names each step by one short word, so seven fit one line; the step heads keep their titles.
+    assert [step["railTitle"] for step in contract["steps"]] == [
+        "Accounts", "Models", "Access", "Consciousness", "Skills", "Limits", "Review"]
+    assert all(" " not in step["railTitle"] for step in contract["steps"])
+    # A phone's rail shows the current pill alone with «N of M» (no sideways rail of clipped pills).
+    phone = css.split("@media (max-width: 720px)", 1)[1].split("\n}\n", 1)[0]
+    assert ".wizard-step {\n    display: none;" in phone and ".wizard-step.active {" in phone and ".wizard-step-of {" in phone
+    assert "scroll-snap-type" not in phone
 
 
 def test_setup_contract_exports_active_model_slots_only():

@@ -143,14 +143,15 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
     _profile_defaults.setdefault("vision", "")
     _profile_defaults.setdefault("safety", "")
 
-_STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
-    ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
-    ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
-    ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
-    ("consciousness", "Consciousness", "When it acts", "", ""),
-    ("skills", "Skills", "What it can do", "Ouroboros starts with the ticked skills; clear any you do not want.", "Add or remove skills any time on the Skills page."),
-    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
-    ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
+# ``railTitle`` names a step in the rail (one short word, so seven fit one line); ``title`` heads the step itself.
+_STEPS = _rows(("id", "title", "railTitle", "railCopy", "copy", "footer"), (
+    ("accounts", "Connect your accounts", "Accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
+    ("models", "Choose models", "Models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
+    ("review_mode", "Choose access", "Access", "Reach", "Choose how much access Ouroboros gets.", ""),
+    ("consciousness", "Consciousness", "Consciousness", "When it acts", "", ""),
+    ("skills", "Skills", "Skills", "What it can do", "Ouroboros starts with the ticked skills; clear any you do not want.", "Add or remove skills any time on the Skills page."),
+    ("budget", "Review limits", "Limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
+    ("summary", "Review before launch", "Review", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 

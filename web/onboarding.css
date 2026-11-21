@@ -182,6 +182,8 @@ textarea::placeholder {
   color: var(--tone-crimson-soft-ink);
 }
 .wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
+/* «of 7» joins the number only where the rail shows the current pill alone (a phone, below). */
+.wizard-step-of { display: none; }
 
 .wizard-step-title {
   margin: 0;
@@ -1366,7 +1368,7 @@ textarea::placeholder {
   }
 }
 
-/* A short window: each pill as wide as its own title, so the rail's titles (seven on a new install) stay on one line where they fit. */
+/* A short window: each pill as wide as its own short title (`railTitle`), so seven stay on one line where they fit. */
 @media (max-height: 820px) {
   .wizard-steps {
     display: flex;
@@ -1428,24 +1430,30 @@ textarea::placeholder {
   }
 }
 
-/* A rail too narrow for its titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
+/* A phone's rail says where you are and clips no neighbour: the current pill alone, «5 of 7» and its short title. */
 @media (max-width: 720px) {
   .wizard-steps {
     display: flex;
-    overflow-x: auto;
-    padding: 0 2px 4px;
-    scroll-snap-type: x proximity;
   }
 
   .wizard-step {
-    flex: 0 0 92px;
-    align-items: center;
-    text-align: center;
-    scroll-snap-align: start;
+    display: none;
   }
 
-  .wizard-step-title {
+  .wizard-step.active {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .wizard-step-word {
     display: none;
+  }
+
+  .wizard-step-of {
+    display: inline;
   }
 }
 

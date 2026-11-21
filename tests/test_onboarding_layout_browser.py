@@ -440,10 +440,27 @@ def _assert_consciousness_step_fits(page, size):
         assert facts["overflow"] == 0 and facts["stepBottom"] <= facts["footerTop"] + 1, facts
 
 
+RAIL = r"""() => { const pills = [...document.querySelectorAll('.wizard-step')].filter((el) => el.offsetParent);
+    const title = document.querySelector('.step-title').getBoundingClientRect();
+    const footer = document.querySelector('.wizard-footer').getBoundingClientRect();
+    return {shown: pills.map((el) => el.innerText.replace(/\s+/g, ' ').trim()),
+        oneLine: pills.map((el) => { const t = el.querySelector('.wizard-step-title');
+            return t.getBoundingClientRect().height < 2 * parseFloat(getComputedStyle(t).fontSize); }),
+        title: {top: title.top, bottom: title.bottom}, footerTop: footer.top}; }"""
+
+
 def _assert_skills_step_usable(page, size):
     """The Skills step (owner 2026-11-21) is taller than any window: it scrolls under the pinned footer, the rail's
-    seven titles stay inside their pills and nothing scrolls sideways, at the top of the list and at its end."""
+    seven titles stay inside their pills and nothing scrolls sideways, at the top of the list and at its end. The rail
+    names each step in one short word on one line; a phone's names the current one alone («5 of 7 Skills»), clipping
+    no neighbour. Entering the step, its title stands clear of the footer."""
     page.wait_for_selector(".skills-starter-card")
+    rail = page.evaluate(RAIL)
+    if size[0] <= 720:
+        assert rail["shown"] == ["5 of 7 Skills"], rail
+    else:
+        assert len(rail["shown"]) == 7 and all(rail["oneLine"]), rail
+    assert rail["title"]["top"] >= 0 and rail["title"]["bottom"] <= rail["footerTop"], rail
     for place in ("top", "end"):
         if place == "end":
             page.locator(".skills-starter-trust").scroll_into_view_if_needed()
