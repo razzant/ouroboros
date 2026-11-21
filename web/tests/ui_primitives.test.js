@@ -1,6 +1,7 @@
 // The home test of web/modules/ui_primitives.js, the portable leaf served to author kits with ui.css: the five
 // field/status exports keep their signatures, the result-of-an-action helpers hold DESIGN "Status and chips"
-// lifetime in both directions, and the shared button role and result/action composition have one owner.
+// lifetime in both directions, the shared button role and result/action composition have one owner, ui.css's
+// register of parts agrees with the sheet both ways, and a switch, Back and a search field have no raw copy.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -274,4 +275,118 @@ test('async actions expose the same busy and status semantics', () => {
     assert.doesNotMatch(catalogJs, /setInlineStatus/);
     assert.match(catalogJs, /refreshModelCatalog\(\{ button \} = \{\}\)/);
     assert.match(catalogJs, /buttonRefreshes\.get\(button\) === refreshSeq/);
+});
+
+// ---- the register of parts and a raw form only in its own part --------------------------------------------------------
+
+/** Every class a rule of `css` selects: comments dropped, at-rule preludes skipped (they hold no selector). */
+function selectedClasses(css) {
+    const plain = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const classes = new Set();
+    for (const [, prelude] of plain.matchAll(/(?<=^|[{};])\s*([^{};]+)\{/g)) {
+        if (prelude.trim().startsWith('@')) continue;
+        for (const [, name] of prelude.matchAll(/\.(-?[A-Za-z_][\w-]*)/g)) classes.add(name);
+    }
+    return classes;
+}
+
+/** The register in `css` (its "- <classes> — <job>" entries) against what `css` selects; [] when both ways hold. */
+function registerFaults(css) {
+    const block = css.match(/\/\* ---- The register of parts[\s\S]*?\*\//)?.[0];
+    if (!block) return ['ui.css has no register of parts'];
+    const named = new Set();
+    const faults = [];
+    for (const entry of block.split(/\n\s*- /).slice(1)) {
+        const head = entry.split(' — ')[0];
+        const classes = [...head.matchAll(/(?<![\w-])\.([A-Za-z][\w-]*)/g)].map(([, name]) => name);
+        if (!classes.length || head === entry) faults.push(`an entry names no class before its job: "${entry.slice(0, 50)}"`);
+        classes.forEach((name) => named.add(name));
+    }
+    const selected = selectedClasses(css);
+    for (const name of named) if (!selected.has(name)) faults.push(`the register names .${name}, which no rule here selects`);
+    for (const name of selected) if (!named.has(name)) faults.push(`.${name} is selected here but no register entry names it`);
+    return faults;
+}
+
+test('ui.css lists every shared part once, and the list and the sheet agree both ways', () => {
+    assert.deepEqual(registerFaults(sharedCss), []);
+    // The two directions, on a sheet small enough to read: an unlisted part and a listed part with no recipe both fail.
+    const register = (entries) => `/* ---- The register of parts ----\n${entries.map((line) => `   - ${line}`).join('\n')} */\n`;
+    const sheet = register(['.ui-a .is-on — a part', '.ui-gone — a part'])
+        + '.ui-a { color: red; }\n.ui-a.is-on { color: blue; }\n@media (pointer: coarse) { .ui-b { margin: 0; } }\n';
+    assert.deepEqual(registerFaults(sheet), ['the register names .ui-gone, which no rule here selects',
+        '.ui-b is selected here but no register entry names it']);
+    assert.deepEqual(registerFaults(register(['.ui-a — a part', '.ui-b — a part']) + '.ui-a, .ui-b { color: red; }'), []);
+    assert.deepEqual(registerFaults('.ui-a { color: red; }'), ['ui.css has no register of parts']);
+    // Comments, at-rules and keyframe steps hold no selector; a file name in a comment is not a class.
+    assert.deepEqual([...selectedClasses('/* .ui-x see ui.js */ @keyframes k { 0%, 52.5% { opacity: 0; } } .ui-y::before { content: "."; }')],
+        ['ui-y']);
+});
+
+const moduleSources = Object.fromEntries(fs.readdirSync(new URL('../modules/', import.meta.url))
+    .filter((name) => name.endsWith('.js'))
+    .map((name) => [name, fs.readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8')]));
+const pageSheets = Object.fromEntries(fs.readdirSync(new URL('../', import.meta.url))
+    .filter((name) => name.endsWith('.css') && name !== 'ui.css')
+    .map((name) => [name, fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')]));
+// Search fields still drawn as a bare hairline field, without the one look DESIGN §3 gives every search field (a
+// capsule with the search glyph at its start). Owed to #3372; each leaves this list when it takes the look.
+const SEARCH_OWED = new Map([
+    ['skills.js', 'Find an installed skill'],
+    ['skill_browse.js', 'Search skills'],
+    ['files.js', 'Filter current folder'],
+]);
+const SWITCH_ROLE = /(?<!\[)role="switch"|role:\s*'switch'|setAttribute\('role',\s*'switch'\)|\.role\s*=\s*'switch'/g;
+const SEARCH_INPUT = /(?<!\[)type="search"|type:\s*'search'|\.type\s*=\s*'search'/g;
+const count = (source, pattern) => (source.match(pattern) || []).length;
+
+/** Where a module draws a switch, Back or a search field in a raw form instead of its part; [] when none does. */
+function rawFormFaults(modules, sheets = {}, searchOwed = SEARCH_OWED) {
+    const faults = [];
+    for (const [name, source] of Object.entries(modules)) {
+        const switches = count(source, SWITCH_ROLE);
+        if (switches && (!/\bui-switch(?![\w-])/.test(source) || count(source, /\bui-switch-track\b/g) < switches
+            || count(source, /\bui-switch-thumb\b/g) < switches)) faults.push(`${name}: a role="switch" outside .ui-switch's track and thumb`);
+        if (name !== 'page_header.js' && /SHELL_ICONS\.back\b|(?<!data-)\bshell-back\b/.test(source))
+            faults.push(`${name}: a Back of its own; page_header.js renderBackControl draws the one Back`);
+        const bare = count(source, SEARCH_INPUT) > 0 && !/SHELL_ICONS\.search\b/.test(source);
+        if (bare && !searchOwed.has(name)) faults.push(`${name}: a search field without its glyph (DESIGN "A search field has one look")`);
+        if (!bare && searchOwed.has(name)) faults.push(`${name}: its search field has the one look now; take it off SEARCH_OWED`);
+    }
+    for (const [name, css] of Object.entries(sheets)) {
+        for (const part of ['ui-switch-track', 'ui-switch-thumb']) {
+            if (selectedClasses(css).has(part)) faults.push(`${name}: repaints .${part}, which only ui.css draws`);
+        }
+    }
+    return faults;
+}
+
+test('a switch, Back and a search field are drawn only as their own part (S4)', () => {
+    assert.deepEqual(rawFormFaults(moduleSources, pageSheets), []);
+    assert.equal(SEARCH_OWED.size <= 3, true, 'a debt list, not a second rule');
+    const part = '<label class="ui-switch"><input type="checkbox" role="switch">'
+        + '<span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>';
+    const none = new Map();
+    // The blocked forms...
+    assert.deepEqual(rawFormFaults({
+        'a.js': '<label class="my-toggle"><input type="checkbox" role="switch"></label>',
+        'b.js': "input.setAttribute('role', 'switch'); input.className = 'ui-switch';",
+        'c.js': '`<button type="button" class="back">${SHELL_ICONS.back}</button>`',
+        'd.js': '<button class="shell-icon-control shell-back">‹</button>',
+        'e.js': '<input type="search" class="ui-control" placeholder="Find">',
+        'f.js': "input.type = 'search';",
+    }, { 'page.css': '.my-row .ui-switch-track { background: red; }' }, none).map((fault) => fault.split(':')[0]),
+    ['a.js', 'b.js', 'c.js', 'd.js', 'e.js', 'f.js', 'page.css']);
+    // ...and the forms that keep working: the part's anatomy, the one Back's owner and readers, a glyph-led search,
+    // selectors that only find a control, a page laying out the switch's label.
+    assert.deepEqual(rawFormFaults({
+        'a.js': part,
+        'page_header.js': '`<button class="shell-icon-control shell-back">${SHELL_ICONS.back}</button>`',
+        'files.js': "page.querySelector('[data-shell-back]')",
+        'e.js': '`<label class="find">${SHELL_ICONS.search}<input type="search"></label>`',
+        'g.js': "field.matches('input[type=\"search\"], [role=\"searchbox\"]'); el.querySelector('[role=\"switch\"]')",
+    }, { 'page.css': '.my-row > .ui-switch { margin-inline-start: auto; }' }, none), []);
+    // An owed field that took the look must leave the list, so the list never outlives its debt.
+    assert.deepEqual(rawFormFaults({ 'skills.js': '`${SHELL_ICONS.search}<input type="search">`' }, {}, new Map([['skills.js', '']])),
+        ['skills.js: its search field has the one look now; take it off SEARCH_OWED']);
 });

@@ -116,7 +116,8 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    a decision the product's owner makes about this system becomes its rule here, cited in the change
    that writes it, and an installation owner's taste lives in that installation's knowledge.
 8. **One of each.** One job has one shared part (a search field, a switch, Back, a tab strip, a
-   section's list, a navigation row, a limit's card, a glyph), and one quantity on one screen is
+   section's list, a navigation row, a limit's card, a glyph; `web/ui.css` lists the parts it draws
+   in its register of parts), and one quantity on one screen is
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
