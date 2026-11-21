@@ -751,7 +751,9 @@ def _section_root_for(env: Any, ctx: Any) -> str:
     A section-floor pointer is a ``read_file(root='artifact_store', ...)``. A Presence
     turn runs under its binding's capability ceiling; when that ceiling does not grant
     ``read_file`` the pointer would name a source the actor cannot resolve, so its host
-    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source).
+    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source), all
+    but the optional attachments (``memory_floor.OPTIONAL_STEPS``): short of room, one
+    keeps its heading, named unavailable to this actor, with no path to read.
     """
     try:
         from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
@@ -820,8 +822,8 @@ def _capture_context_core(
     development_md = book_text["development"]
     from ouroboros.context_layout import task_design_navigation
 
-    # DESIGN follows the selected body, not document names or task prose. Capture
-    # it once for every mode; its root belongs after the shared cache prefix.
+    # DESIGN follows the selected body, not document names or task prose. Capture its
+    # bible once, by the owner's mode; its root belongs after the shared cache prefix.
     design_ctx = ctx if ctx is not None else SimpleNamespace(
         repo_dir=env.repo_dir, system_repo_dir=getattr(env, "system_repo_dir", None),
         drive_root=env.drive_root, budget_drive_root=getattr(env, "budget_drive_root", None),
@@ -829,7 +831,7 @@ def _capture_context_core(
         task_metadata=task.get("metadata") or task, project_id=task.get("project_id", ""),
         is_direct_chat=bool(task.get("_is_direct_chat")),
     )
-    design_nav = task_design_navigation(design_ctx, task)
+    design_nav = task_design_navigation(design_ctx, task, mode=get_context_mode())
 
     # A fork is an execution boundary, not a second mind.  Keep the agent's
     # writable Memory object task-local, but capture identity/dialogue from the

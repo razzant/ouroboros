@@ -872,6 +872,23 @@ class MinimumViewUnfit(ValueError):
                          + (f", required handbook={self.required_book_tokens}" if required_book_tokens else ""))
 
 
+def _admit_required_book(*, fixed: int, memory: int, book: int, ordinary_memory: int, ratio: float, reserve: int,
+                         output_reserve: int, window: int, nano: bool, refuse: bool = True) -> bool:
+    """A directly required handbook's own admission beside a view (owner 1.11.2026): whether it overflows the window
+    with the reply it leaves; ``refuse`` raises the named refusal instead. ``ordinary_memory`` is the view's memory
+    before the handbook's note (what the reply is sized by), ``memory`` the memory the request carries."""
+    ordinary = fixed + ordinary_memory
+    reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=nano, owner_nano=False,
+                                                  input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary,
+                                                  window_tokens=window)
+    overflow = math.ceil((fixed + book + memory) * ratio) + max(reserve, reply) > window
+    if overflow and refuse:
+        raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
+                               fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
+                               window_tokens=window, ratio=ratio, required_book_tokens=book)
+    return overflow
+
+
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
                       tool_schemas: Optional[List[Dict[str, Any]]], window_tokens: int, known_window: bool, output_reserve: int,
                       ratio: float, start: Optional[str] = None, resident: bool = False,
@@ -1043,7 +1060,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             saving=owed(measure(selected, sent, section_views(sections[selected], prior)), reserve) if asked else 0,
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
-            budget_mode=selected if kept is None and target and target < window else None,
+            budget_mode=selected if kept is None and target and (not known_window or target < window) else None,
             window_bound=host_allowances["window"],  # the window's own start bound, whatever target frames the start
             **({"retain": retain} if retain is not None else {}))
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
@@ -1146,22 +1163,22 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                work_room_tokens=work() if core_alone else 0)
     story, room, facts = shown.story, shown.room, shown.facts  # the one view this start delivers: drawn here
     book = whole_core.required_book_tokens(mode)
-    ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
-    note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
-        free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None
-    ) if book and snapshot else ""
+    told = floor.view_tokens(story) + floor.view_tokens(room)  # the view's memory, before the handbook's note
+    admit = dict(book=book, ordinary_memory=told, ratio=ratio, reserve=reserve, output_reserve=output_reserve, window=window,
+                 nano=mode == "nano") if book and kept is None and known_window and current_messages is None else None
+    for retry in (False, True):  # one admission, note included; once refused, optional maps make room (RV1, RVD1)
+        ordinary = book and fixed + told  # the ordinary admission's estimate
+        note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
+            free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None) if book and snapshot else ""
+        memory = floor.view_tokens(story) + floor.view_tokens("\n\n".join(filter(None, (room, note))))
+        if not admit or not _admit_required_book(fixed=fixed, memory=memory, refuse=retry, **admit):
+            break
+        receipts = floor.optional_for_book(sections[mode], receipts, root=core.section_root, task_id=core.section_task_id, retain=retain)
+        fixed = measure(mode, sent, section_views(sections[mode], receipts))
     if note:  # its own cost, like the book's, stays outside every later automatic choice (``required_book_tokens``)
         room, facts = "\n\n".join(filter(None, (room, note))), {**facts, BOOK_NOTE_KEY: floor.view_tokens("\n\n" + note)}
     receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact and (
         {**room_fact, "book_required": True} if book else room_fact), mode, required_book=math.ceil(book * ratio))) if snapshot else {}
-    if book and kept is None and known_window and current_messages is None:
-        reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano", owner_nano=False,
-                                                      input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary, window_tokens=window)
-        memory = floor.view_tokens(story) + floor.view_tokens(room)
-        if math.ceil((fixed + book + memory) * ratio) + max(reserve, reply) > window:
-            raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
-                                   fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
-                                   window_tokens=window, ratio=ratio, required_book_tokens=book)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     contents = {}

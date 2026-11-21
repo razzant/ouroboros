@@ -870,7 +870,9 @@ def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path)
     # The engine facts/lifecycle merge (2026-10-08) adds 161 index chars inside this headroom.
     # The review/swarm/nanny merge (2026-10-22) measures 237,439: its ~20 new modules
     # grew the repository index past the old 234,000 ceiling; same headroom again.
-    assert without_diff < 260_000, without_diff
+    # On 2026-11-21 the tree measured 258,965; the design bible as one whole section for
+    # author and reviewer (item 97: its seed table and recipes) adds 5,627: 264,592, same headroom again.
+    assert without_diff < 288_000, without_diff
     assert sections["repository_index"] > 20_000          # the index really ran
     assert sections["governance_stable_inline"] > 40_000  # BIBLE really inline
     assert sections["change_checklist"] > 0 and sections["coupling_checklist"] > 0

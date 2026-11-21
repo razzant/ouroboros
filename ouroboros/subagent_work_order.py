@@ -440,10 +440,7 @@ def _own_body_source(ctx: Any, target_root: str, source_root: str) -> tuple[Any,
 
     from ouroboros.context_layout import task_design_source
 
-    metadata = getattr(ctx, "task_metadata", {})
-    task = dict(metadata) if isinstance(metadata, Mapping) else {}
-    task["task_contract"] = getattr(ctx, "task_contract", {})
-    selected = task_design_source(ctx, task)
+    selected = task_design_source(ctx, _context_task(ctx))
     if selected is None:
         return None, False
     try:
@@ -461,16 +458,36 @@ def _own_body_source(ctx: Any, target_root: str, source_root: str) -> tuple[Any,
     return source, True
 
 
+def _context_task(ctx: Any) -> dict[str, Any]:
+    """The task facts a design source is selected by: the context's metadata and its contract."""
+    metadata = getattr(ctx, "task_metadata", {})
+    task = dict(metadata) if isinstance(metadata, Mapping) else {}
+    task["task_contract"] = getattr(ctx, "task_contract", {})
+    return task
+
+
 def session_design_navigation(ctx: Any, *, target_root: str, source_root: str) -> str:
-    """Pin body navigation in the prepared session request, beside its work order.
+    """Pin the body's DESIGN in the prepared session request, beside its work order: the author's view, its
+    design bible whole and the rest by headings (``context_layout.design_bible_view``), with the bytes' digest.
 
     The canonical work order is reconstructed for source-range validation and
     cannot depend on mutable files. Session instructions instead ride the durable
     start request and its byte-identical retry (``_own_body_source`` selects the bytes).
+    A session on the task's own working folder that is not the body takes the author's wider choice (item 97, RV1):
+    the installed book for a true ``context_requires_self_body_docs`` or an unknown body. The BIBLE pointer and the
+    environment facts keep ``_own_body_source``.
     """
-    from ouroboros.context_layout import design_navigation
+    from ouroboros.context_layout import author_design_source, design_bible_view
+    from ouroboros.tools.tool_resolution import active_repo_dir_for
+    from ouroboros.workspace_copies import same_directory
 
-    source, _prepared = _own_body_source(ctx, target_root, source_root)
+    source, prepared = _own_body_source(ctx, target_root, source_root)
+    installed = False
+    if source is None and same_directory(target_root, active_repo_dir_for(ctx)):
+        source, installed = author_design_source(ctx, _context_task(ctx))
+    elif source is not None and not prepared:  # declared folderless work reads the installed book: say so (RVD1)
+        root, installed = author_design_source(ctx, _context_task(ctx))
+        installed = installed and same_directory(root, source)
     if source is None:
         return ""
     path = source / "docs/DESIGN.md"
@@ -479,10 +496,9 @@ def session_design_navigation(ctx: Any, *, target_root: str, source_root: str) -
         text = raw.decode("utf-8")
     except (OSError, UnicodeError):
         raw, text = None, None
-    navigation = design_navigation(text, source=str(path))
+    view = design_bible_view(text, source=str(path), installed=installed)
     digest = f"\nSource bytes SHA-256: {sha256(raw).hexdigest()}." if raw is not None else ""
-    return ("\n\nDESIGN NAVIGATION DELIVERY (host instructions, separate from canonical work order)\n"
-            + navigation + digest)
+    return "\n\nDESIGN DELIVERY (host instructions, separate from canonical work order)\n" + view + digest
 
 
 def session_constitution_pointer(ctx: Any, *, target_root: str, source_root: str) -> str:
@@ -637,10 +653,10 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
                             start_body: str | None = None) -> str:
     """Host references pinned in a session's start request, computed once at first start.
 
-    Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
-    inputs included: they govern the work, as BIBLE does), the marks in force, the knowledge outline and the held heads
-    as text (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
-    installed instruction-skill index for any workspace;
+    Own-body DESIGN (its bible whole, the rest by headings) and BIBLE path, the owner's standing rules for every
+    session (declared inputs included: they govern the work, as BIBLE does), the marks in force, the knowledge
+    outline and the held heads as text (``session_memory_references``: outside the work order's fingerprint, at
+    every start of the line), and the installed instruction-skill index for any workspace;
     a skill-payload builder also gets the serving host's skill contract, whatever its input
     selection, and any other private copy its environment facts: dependency files read at the
     copy's repository root, the environment placed where the session may write (``source_root``,
