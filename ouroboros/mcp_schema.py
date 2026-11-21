@@ -356,11 +356,24 @@ def annotation_marks(annotations: Any) -> str:
 SERVER_DESCRIPTION_LABEL = "Server description: "
 
 
+SERVER_METADATA_LABEL = "Server metadata: "
+
+
 def server_description(model_facing: str) -> str:
     """The server's own description inside the host frame ``_model_facing_description`` builds ('' when it gave
-    none): the frame's paragraphs before it carry no label, so the first label is the frame's own."""
+    none). The frame's paragraphs before it carry no label, so the first label is the frame's own; the host's
+    metadata paragraph is always last and a JSON object, so a label inside the server's own text stays its text."""
     _frame, label, rest = str(model_facing or "").partition("\n\n" + SERVER_DESCRIPTION_LABEL)
-    return rest.split("\n\nServer metadata: ", 1)[0] if label else ""
+    if not label:
+        return ""
+    head, metadata, tail = rest.rpartition("\n\n" + SERVER_METADATA_LABEL)
+    if metadata:
+        try:
+            if isinstance(json.loads(tail), dict):
+                return head
+        except ValueError:
+            pass
+    return rest
 
 
 def _model_facing_description(tool: Any) -> str:
@@ -376,5 +389,5 @@ def _model_facing_description(tool: Any) -> str:
     if tool.description:
         parts.append(SERVER_DESCRIPTION_LABEL + str(tool.description))
     if metadata:
-        parts.append("Server metadata: " + json.dumps(metadata, ensure_ascii=False))
+        parts.append(SERVER_METADATA_LABEL + json.dumps(metadata, ensure_ascii=False))
     return "\n\n".join(parts)

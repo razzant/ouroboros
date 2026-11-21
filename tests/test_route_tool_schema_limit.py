@@ -14,7 +14,7 @@ from ouroboros import loop as loop_module
 from ouroboros import loop_model_call
 from ouroboros.provider_models import tool_schema_limit
 from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES
-from ouroboros.tool_policy import fit_tool_schemas_to_limit, route_tool_limit_notice, tool_purpose
+from ouroboros.tool_policy import PURPOSE_CHARS, fit_tool_schemas_to_limit, route_tool_limit_notice, tool_purpose
 from tests.provider_contract_ci import (
     CANARY_TOOL_NAME,
     delegate_start_canary_arguments,
@@ -165,7 +165,9 @@ def test_a_route_that_cannot_carry_every_schema_sends_memory_and_work_and_names_
 
     registered = set(ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)._entries)
     assert ROUTE_TAIL_TOOL_NAMES <= registered and ROUTE_TAIL_TOOL_NAMES.isdisjoint(CORE_TOOL_NAMES)
-    assert {"maintain_harness", "free_storage"}.isdisjoint(CORE_TOOL_NAMES | ROUTE_TAIL_TOOL_NAMES)
+    # Installation upkeep: its reader takes ordinary order, its two actions wait in the tail; the skill runner is sent.
+    assert "inspect_harness" not in CORE_TOOL_NAMES | ROUTE_TAIL_TOOL_NAMES and "skill_exec" in CORE_TOOL_NAMES
+    assert {"maintain_harness", "free_storage"} <= ROUTE_TAIL_TOOL_NAMES
     for skill_tools in (25, 4):  # macOS/Linux and Windows default-on computer-use skills
         catalog = _installed_catalog(tmp_path, skill_tools)
         kept, left_out = fit_tool_schemas_to_limit(catalog, 128)
@@ -174,8 +176,9 @@ def test_a_route_that_cannot_carry_every_schema_sends_memory_and_work_and_names_
         assert tail and set(tail).isdisjoint(_names(kept))
         assert set(_names(kept)) - set(PINNED)  # ordinary schemas were sent while the whole tail waited
         called = tail[0]
-        kept_called, _ = fit_tool_schemas_to_limit(catalog, 128, protect=(called,))
-        assert called in _names(kept_called)
+        for chosen in ({"protect": (called,)}, {"first": (called,)}, {"keep": (called,)}):  # history, this load, an earlier one
+            kept_called, _ = fit_tool_schemas_to_limit(catalog, 128, **chosen)
+            assert called in _names(kept_called), chosen
         skill = [name for name in _names(catalog) if name.startswith("ext_")]
         loaded, _ = fit_tool_schemas_to_limit(catalog, 128, first=skill)
         assert set(skill) <= set(_names(loaded)) and memory <= set(_names(loaded))  # memory stays beside a skill
@@ -183,11 +186,19 @@ def test_a_route_that_cannot_carry_every_schema_sends_memory_and_work_and_names_
                                          schemas=catalog)
         by_name = {schema["function"]["name"]: schema for schema in catalog}
         for name in left_out:
-            assert f"\n- {name}: {tool_purpose(by_name[name])}\n" in notice
+            purpose, cut = tool_purpose(by_name[name])
+            assert f"\n- {name}: {purpose}{'…' if cut else ''}\n" in notice
         assert notice == route_tool_limit_notice(OPENAI_MAIN, 128, len(catalog), left_out,
                                                  selectors=META_TOOL_NAMES, schemas=list(reversed(catalog)))
-    assert tool_purpose(by_name["toggle_evolution"]) == "Enable or disable evolution mode."
-    assert tool_purpose({"function": {"description": "No stop here"}}) == "No stop here"
+    # The one short purpose: the first sentence, bounded with or without a sentence stop.
+    def described(text):
+        return {"function": {"name": "a", "description": text}}
+
+    assert tool_purpose(described("Does one thing. And more.")) == ("Does one thing.", False)
+    assert tool_purpose(described("No stop here")) == ("No stop here", False)
+    for text in ("word " * 60, "Long " * 60 + ". Then more."):
+        purpose, cut = tool_purpose(described(text))
+        assert len(purpose) == PURPOSE_CHARS and cut
     # Every other route carries the same catalog byte for byte, in its own order.
     for model, use_local in (("openai/gpt-5.6-luna", False), ("anthropic::claude-sonnet-5", False),
                              ("claudexor::codex=gpt-6.2-astra", False), (OPENAI_MAIN, True)):
@@ -209,18 +220,33 @@ def test_the_notice_names_an_mcp_tool_by_its_server_text_and_says_when_nothing_c
     bare = {"type": "function", "function": {"name": "mcp_slack__post", "parameters": {"type": "object"},
                                              "description": _model_facing_description(SimpleNamespace(
                                                  server_id="slack", description="", metadata={}))}}
-    assert tool_purpose(framed) == "Channel history." and tool_purpose(bare) == ""
+    assert tool_purpose(framed) == ("Channel history.", False) and tool_purpose(bare) == ("", False)
+
+    def server(description, metadata=None):
+        return tool_purpose({"function": {"name": "mcp_inv__builds", "description": _model_facing_description(
+            SimpleNamespace(server_id="inv", description=description, metadata=metadata or {}))}})[0]
+
+    # Leading blank lines, and the host's own labels inside the server's text, keep the server's purpose.
+    assert server("\n\n\nLists builds. More.") == "Lists builds."
+    assert server("Inventory\n\nServer metadata: returns build information.") == (
+        "Inventory Server metadata: returns build information.")
+    assert server("Inventory\n\nServer description: builds.", {"version": "2"}) == "Inventory Server description: builds."
     schemas = [_schema("read_file"), framed, bare]
     left = ("mcp_slack__history", "mcp_slack__post")
     notice = route_tool_limit_notice(OPENAI_MAIN, 1, 3, left, selectors=META_TOOL_NAMES, schemas=schemas)
     assert "\n- mcp_slack__history: 'Channel history.'\n- mcp_slack__post\n" in notice
     assert "External MCP tool" not in notice and "They stay callable: list_available_tools" in notice
+    # Without the loader nothing promises a load: a usable list still shows them.
+    listed = route_tool_limit_notice(OPENAI_MAIN, 1, 3, left, selectors={"list_available_tools"}, schemas=schemas)
+    assert "They stay callable" not in listed and listed.endswith(
+        "This task has no schema loader, so their schemas cannot be loaded here "
+        "(list_available_tools marks them not loaded).")
     blind = route_tool_limit_notice(OPENAI_MAIN, 1, 3, left, selectors=(), schemas=schemas)
     assert "They stay callable" not in blind and blind.endswith(
-        "No schema loader is available to this task, so their schemas cannot be loaded here.")
+        "This task has no schema loader, so their schemas cannot be loaded here.")
     gated = route_tool_limit_notice(OPENAI_MAIN, 2, 4, left, selectors=(),
                                     schemas=[*schemas, _schema(MCP_GATEWAY_TOOL_NAME)])
-    assert gated.endswith(f"; the MCP ones stay callable through {MCP_GATEWAY_TOOL_NAME}.")
+    assert gated.endswith(f"; {MCP_GATEWAY_TOOL_NAME} reaches the MCP ones this task is permitted to call.")
 
 
 def test_main_leaves_fitting_catalogs_and_other_routes_untouched():

@@ -367,11 +367,14 @@ def test_a_load_goes_first_under_a_route_ceiling_after_selectors_and_history(reg
     from ouroboros import loop as loop_module, provider_models
 
     _servers()
-    resident = [schema for schema in initial_tool_schemas(registry) if schema["function"]["name"] != "call_mcp_tool"]
+    from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES, ROUTE_TAIL_TOOL_NAMES
+
+    # Without the route tail, which a ceiling leaves out first (tests/test_route_tool_schema_limit.py).
+    resident = [schema for schema in initial_tool_schemas(registry)
+                if schema["function"]["name"] not in ROUTE_TAIL_TOOL_NAMES | {"call_mcp_tool"}]
     loop_module._setup_dynamic_tools(registry, resident, [])
     registry._ctx.active_model, registry._ctx.active_use_local = "openai::gpt-fixture", False
-    from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
-    # The last optional built-in: a plain fit would leave it out, so only the history rank keeps it.
+    # The last ordinary built-in: a plain fit would leave it out, so only the history rank keeps it.
     called = [name for name in _names(resident) if name not in CORE_TOOL_NAMES | META_TOOL_NAMES
               and not name.startswith("mcp_")][-1]
     registry._ctx.messages = [{"role": "assistant", "tool_calls": [{"function": {"name": called}}]}]

@@ -31,11 +31,12 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
 # one-off media wait in the tail (``ROUTE_TAIL_TOOL_NAMES``), and the route's notice
 # names every tool left out with its purpose. The provider's limit is the physical fact;
 # this rule only orders the default, and enable_tools still loads any permitted schema.
-# The set's size stays where it is, so one explicitly loaded skill (25 tools) still fits.
+# The set's size stays where it is (103), so one explicitly loaded skill (25 tools) fits beside it; a tool
+# outside the set that this task already called keeps its place ahead of a load and takes one of those 25.
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    # Installation upkeep (maintain_harness, free_storage) is neither this mind's memory nor the work in front of
-    # it: on such a route it takes the remaining room in its own order.
-    "inspect_harness", "inspect_subagent",
+    # Installation upkeep is neither this mind's memory nor the work in front of it: inspect_harness reads in
+    # ordinary order, maintain_harness and free_storage wait in the route tail. skill_exec runs the enabled skills.
+    "inspect_subagent", "skill_exec",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -97,11 +98,13 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 
 # What waits behind every other schema on such a route: the installation's saved
 # settings the owner administers (interface wording, the global tool timeout, the
-# consciousness and evolution switches), and one-off media helpers with the rescue of
+# consciousness and evolution switches), its upkeep (vendor program updates, the
+# Dashboard's Free storage), and one-off media helpers with the rescue of
 # an earlier image attempt. A name this task already called or the actor loaded keeps
 # its place ahead of the tail.
 ROUTE_TAIL_TOOL_NAMES: frozenset[str] = frozenset({
     "pin_ui_translation", "set_tool_timeout", "toggle_consciousness", "toggle_evolution",
+    "maintain_harness", "free_storage",
     "youtube_transcript", "extract_video_frames", "generate_image", "list_image_models", "recover_image",
 })
 

@@ -541,9 +541,9 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             raise ValueError(f"{_arg('op', op)}: use sql, json, jsonl or blob")
         jsonl_only = [_arg(name, value) for name, value, used in (("filter", filter, filter is not None),
                                                                   ("tail", tail, tail != 100)) if used]
-        # A kind exactly one of json/jsonl reads names that operation: the other one is read as it, disclosed
-        # in ``notes`` (DEVELOPMENT 02 "Naming a documented default"). jsonl's filter or tail on a JSON kind asks
-        # for rows that kind does not have: refused here, before the filter's own checks, so the repair is one call.
+        # Every kind has exactly one reader of json/jsonl, so naming the other one has one meaning: it is read
+        # with the kind's reader, disclosed in ``notes``. jsonl's filter or tail on a JSON kind asks for rows that
+        # kind does not have: refused here, before the filter's own checks, so the repair is one call.
         if op in {"json", "jsonl"} and isinstance(kind, str) and (kind in _FILES or kind == "task_result"):
             legal = "jsonl" if _lines_kind(kind) else "json"
             if op != legal and legal == "json" and jsonl_only:
@@ -551,7 +551,10 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                                  f"{'applies' if len(jsonl_only) == 1 else 'apply'} only to op=jsonl: "
                                  f"send op=\"json\" without {'it' if len(jsonl_only) == 1 else 'them'}")
             if op != legal:
-                notes.append(f"op={op!r} read as op={legal!r}: kind={kind} is read only by op={legal}")
+                rows = ("" if legal == "json" or type(tail) is not int else
+                        "; its rows from the start were read (tail=0)" if tail == 0 else
+                        f"; its last {tail} rows were read (tail={tail})")
+                notes.append(f"op={op!r} read as op={legal!r}: kind={kind} is read only by op={legal}{rows}")
                 op = legal
         if format not in {"json", "text"}:
             raise ValueError(f"{_arg('format', format)}: use json or text")

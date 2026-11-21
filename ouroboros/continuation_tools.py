@@ -112,6 +112,7 @@ def _adopt_current_tools(tools: Any, state: dict, messages: list, mode: str, bef
     frozen[:] = fitted
     loaded.intersection_update(fresh)  # current policy forgets a revoked tool; a ceiling never forgets a choice
     ctx._route_left_out_tool_names = earlier | set(left_out)
+    from ouroboros.context_fit import extract_plain_text_from_content
     from ouroboros.usage_accounting import invalidate_task_cache_splits
     from ouroboros.loop_messages import _emit_checkpoint_event
 
@@ -125,7 +126,8 @@ def _adopt_current_tools(tools: Any, state: dict, messages: list, mode: str, bef
         f"~changed {', '.join(changed) or 'none'}.")})
     notice = left_out and route_tool_limit_notice(ctx.active_model, limit, len(candidate), left_out,
                                                   selectors=usable_selectors(tools, fitted), schemas=candidate)
-    if notice and not any(notice in str(row.get("content") or "") for row in messages if row.get("role") == "user"):
+    if notice and not any(notice in extract_plain_text_from_content(row.get("content"))
+                          for row in messages if row.get("role") == "user"):
         messages.append({"role": "user", "content": notice})  # the same cut reads the same: once in the history
     fact = {"checkpoint_kind": "continuation_tools_changed", "from_tools_digest": before,
             "to_tools_digest": after, "added": added, "removed": removed, "changed": changed}

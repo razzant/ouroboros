@@ -198,11 +198,14 @@ def test_a_cold_rebuild_names_one_cut_once_in_the_history(tmp_path, monkeypatch)
         prepared = prepare(root, monkeypatch, frozen=[_schema("old")], current=_catalog(130), history=history)
         prepared[0]._ctx.active_model = prepared[1]["route"]["active_model"] = "openai::unseen-model"
         restore(prepared)
-        return [str(row.get("content")) for row in prepared[2] if "accepts at most 128" in str(row.get("content"))]
+        return [row.get("content") for row in prepared[2] if "accepts at most 128" in str(row.get("content"))]
 
     (notice,) = rebuild(tmp_path / "first", [])
     assert "Not loaded for now:" in notice
     assert rebuild(tmp_path / "second", [{"role": "user", "content": notice}]) == [notice]  # the history's own
+    # Saved as a text part of a multipart message, the same notice is still the history's own.
+    parts = [{"type": "text", "text": "Earlier."}, {"type": "text", "text": notice}]
+    assert rebuild(tmp_path / "third", [{"role": "user", "content": parts}]) == [parts]
 
 
 @pytest.mark.parametrize(("model", "count", "legacy"), [

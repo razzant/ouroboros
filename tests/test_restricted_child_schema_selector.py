@@ -191,7 +191,7 @@ def test_a_selector_the_actor_cannot_call_is_never_recommended(tmp_path, monkeyp
     notice = fitted.messages[-1]["content"]
     for name in ("enable_tools", "list_available_tools"):
         assert (name in notice) is (name not in disabled), notice
-    blind = set(disabled) == {"enable_tools", "list_available_tools"}  # no selector: no promise of a load
+    blind = "enable_tools" in disabled  # without the loader nothing promises a load
     assert notice.rstrip().endswith(".") and ("They stay callable" in notice) is not blind
     assert ("their schemas cannot be loaded here" in notice) is blind
     listing = tool_discovery.list_available_tools(registry, registry._ctx, resident)
