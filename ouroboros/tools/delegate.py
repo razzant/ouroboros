@@ -693,7 +693,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(ctx, request_body, readonly_root))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, inputs.lineage))
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
@@ -722,11 +722,12 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
         if authority.isolation == "live" else ""), None)]
     if snapshot_id:
         facts["write_root"] = ("private copy (execution_root) of authority_target_root, its changes kept as evidence and "
-                               "never applied (integrate_delegated_patch refuses), and it never commits" if authority.investigation
-                               else "private snapshot (execution_root) of authority_target_root: its diff is captured at "
-                               "terminal, nothing lands there until integrate_delegated_patch applies it, and it never commits")
+                               "never applied (integrate_delegated_patch refuses)" if authority.investigation
+                               else "private snapshot (execution_root) of authority_target_root: only a diff captured at "
+                               "terminal can land there, through integrate_delegated_patch") + (
+                               ", and the host's instructions forbid commits (a moved HEAD is disclosed at capture)")
     if input_files is not None:
-        facts.update(inputs=input_files, inputs_when="copied before sending", inputs_outside=sum(
+        facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
             1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
     rendered = render_receipt(build_receipt(facts))
     note += rendered

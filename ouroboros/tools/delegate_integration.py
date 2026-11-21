@@ -287,7 +287,15 @@ def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, reques
     """The started result of the run custody bound for ``invocation_id`` from the engine's own read."""
     from ouroboros.delegate_shared import delegate_result
 
+    from ouroboros.helper_receipt import NO_RECORD, PREPARED, build, render, start_facts
+
     scope = (request.get("scope") if isinstance(request, dict) else None) or {}
+    facts = {**(start_facts(request) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED)}),
+             "access": [("access", held.access, None)]}
+    if isinstance((rows := (held.request_event or {}).get("input_files")), list):  # this invocation's recorded copies
+        facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
+            1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
+    note = f"{note}\n{render(build(facts))}"
     return delegate_result({
         "status": "started", "run_id": held.run_id, "invocation_id": invocation_id, "idempotent_recovery": True,
         "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,

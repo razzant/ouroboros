@@ -223,6 +223,9 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     payload = _start(registry, retry_of=token)
     assert payload["status"] == "started" and payload["recovered_without_start"] is True, payload
     assert payload["run_id"] == accepted["run"] and payload["idempotent_recovery"] is True
+    # The accepted start answers with its receipt, measured from the recorded body it did not send again.
+    assert payload["note"].startswith("The engine had already accepted") and "\nreceipt: " in payload["note"]
+    assert "prepared: assignment: prompt " in payload["note"] and "no record" not in payload["note"]
     assert ("GET", "/v2/agent-capabilities") not in engine.paths, "no route health is asked of work already accepted"
     assert [(kind, key) for kind, key, _ in engine.lookups] == [("run", token)]
     assert engine.lookups[0][2] == engine.creates[0][2], "the lookup carries the recorded start's exact body"

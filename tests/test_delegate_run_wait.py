@@ -865,7 +865,7 @@ def test_review_wait_plan_offers_free_plan_read_without_an_ask(tmp_path, no_revi
                       "tool": "plan_task", "arguments": {}}
 
 
-@pytest.mark.parametrize("differs", [True, False], ids=["differs", "ordinary"])
+@pytest.mark.parametrize("differs", [True, False, None], ids=["differs", "ordinary", "undisclosed"])
 def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, differs):
     """c50-4: the finished run's terminal ``delegate_wait`` payload repeats what still differs from the request,
     from that run's custody rows: the applied access when the engine applied another, and my human's later words
@@ -877,7 +877,7 @@ def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, 
     ctx, _limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
     _ended(tmp_path, "run-1")
-    effective = "workspace_write" if differs else "readonly"
+    effective = {True: "workspace_write", False: "readonly", None: ""}[differs]
     monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
         "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
         "access_evidence": {"requested": "readonly", "effective": effective, "verified": True}}))
@@ -889,6 +889,8 @@ def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, 
     if differs:
         assert wake["receipt"] == ("access applied workspace_write, requested readonly [observed]; my human's later "
                                    "words: 1 accepted (taken by the engine, not read) [observed]")
+    elif differs is None:  # the engine finished without disclosing the profile: unknown is said, never "as asked"
+        assert wake["receipt"] == "access applied: not disclosed by the engine (requested readonly) [observed]"
     else:
         assert wake["receipt"] == NOTHING_ON_RECORD
     spilled = ds._render_wake_payload(ctx, {**wake, "wake_events": [{"type": "x", "text": "y" * 400_000}]})

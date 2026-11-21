@@ -161,11 +161,11 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
     reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
     if folderless:
-        assert "folder: none, folderless selected files (scope or private checking copy: known after start)" in reply
+        assert "folder: none, folderless selected files (scope or checking copy: known after start)" in reply
         assert "Selected input_files replace automatic folderless lineage copies" in reply
         assert "outside the session's folder" not in reply, "a folderless start restages the copies inside its scope"
     else:
-        assert "folder: inherited repository/folder (scope or private checking copy: known after start)" in reply
+        assert "folder: inherited repository/folder (scope or checking copy: known after start)" in reply
         assert "1 retained input copy lies outside the session's folder; reading it is not confirmed" in reply
     assert "supervisor access: profile=" in reply and "supervisor read roots are not a leaf-access guarantee" in reply
     assert "native/nanny tools are not automatically leaf session tools" in reply

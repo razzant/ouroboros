@@ -306,7 +306,10 @@ def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_
     write_root, write_source = emission.get("write_root") or ("", "")
     session = route_kind == "agent_session"
     selected = emission.get("input_files")
-    facts: Dict[str, Any] = {"inputs": selected, "owner_words": emission.get("owner_origin") or {}}
+    facts: Dict[str, Any] = {"inputs": selected, "owner_words": emission.get("owner_task") or {}, "session": session}
+    if selected:
+        facts["inputs_map"] = ("artifact_store:source_handles/delegated_readonly_inputs/"
+                               f"scheduled-{(emission.get('task_ids') or [''])[0]}/inputs.json")
     try:
         profile = summarize_subagent_profile(predicted_subagent_profile(write_surface=write_surface), receipt=True)
     except Exception:
@@ -317,22 +320,32 @@ def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_
         facts["write_root"] = f"{write_root} ({write_source})" + (
             " — children write there (write_surface=external_workspace), you read it via "
             f"root=subagent_projects, path={Path(write_root).name!r}/…" if write_source == "host-minted coop tree" else "")
+    requested = emission.get("requested_access")
     if not session:
-        facts["access"] = [("access", profile, None)]
-        if emission.get("requested_access") is not None:
-            facts["access_ignored"] = (emission["requested_access"], selected_name)
+        facts["access"] = [("access", profile, False)]  # the host's own policy for a native child, known now
+        if requested is not None:
+            facts["access_ignored"] = (requested, selected_name)
+        if str(emission.get("workspace_root") or "").strip():
+            facts["folder"] = f"workspace_root={emission['workspace_root']}"
     else:
-        leaf = str(((emission.get("configured_subagent") or {}).get("access")) or "the row's")
+        from ouroboros.subagents import delegated_run_shape
+
+        row_access = str((emission.get("configured_subagent") or {}).get("access") or "workspace_write")
+        shape = delegated_run_shape(bool(write_surface), row_access, emission.get("delegated_mode"))
+        leaf = shape.access + (f", mode {shape.mode}" if shape.mode != "agent" else "") + (
+            ", evidence-only private copy" if shape.investigation else "")
         facts["access"] = [("supervisor access", profile + " (supervisor read roots are not a leaf-access guarantee, "
                             "native/nanny tools are not automatically leaf session tools)", False),
                            ("session access", leaf, None)]
+        if requested not in (None, "inherit", row_access):
+            facts["access_lowering"] = (requested, row_access)
     if session and not write_surface:
         workspace = str(emission.get("workspace_root") or "").strip()
         folderless = (emission.get("resource_intent") or {}).get("kind") == "explicit_none"
         facts["folder"] = (f"workspace_root={workspace}, one directory" if workspace else
                            ("none, folderless " + ("selected files" if selected else "task/artifact lineage"))
                            if folderless else "inherited repository/folder")
-        facts["folder"] += " (scope or private checking copy: known after start)"
+        facts["folder"] += " (scope or checking copy: known after start)"
         facts["inputs_outside"] = 0 if folderless else len(selected or ())
         facts["inputs_note"] = ("Prompt-only paths are not prepared"
                                 + (". Selected input_files replace automatic folderless lineage copies" if selected and folderless else ""))
@@ -1054,6 +1067,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             drive_root=str(child_drive) if child_drive is not None else "",
             child_drive_root=str(child_drive) if child_drive is not None else "",
             **child_facts,
+            # an API child's access request, kept for its result's receipt line, outside its work order and event
+            **({"requested_access": params.get("access")} if requested_executor == "native" else {}),
             result="Subagent request queued. Awaiting supervisor acceptance.",
         )
     except Exception:
@@ -1083,7 +1098,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
         "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"), "held_note": held_note,
-        "memory_view": fields.get("memory_view"), "owner_origin": owner_origin,
+        "memory_view": fields.get("memory_view"), "owner_task": {**owner_origin, "task_contract": child_contract},
+        "delegated_mode": fields.get("delegated_mode"),
         **{"expected_output": expected_output, "context": context, "constraints": constraints},
         "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
                        else "host-minted coop tree" if str(effective_write_root or "").strip() else "parent workspace"),

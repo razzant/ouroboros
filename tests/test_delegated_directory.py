@@ -170,9 +170,12 @@ def test_a_git_workspace_treats_the_named_default_as_omission_and_still_refuses_
     # key set itself — that is what "took the omitted path" means here.
     per_case = ("root", "execution_root", "snapshot_id", "baseline_sha", "baseline_id",
                 "baseline_manifest_read", "run_id", "invocation_id", "authority_target_root",
-                "snapshot",  # the receipt's provisioning facts carry wall-clock seconds (#1241)
-                "note")  # the receipt measures the host text sent, which names each case's own folder
-    compared = lambda payload: {key: ("<per-case identity>" if key in per_case else value)
+                "snapshot")  # the receipt's provisioning facts carry wall-clock seconds (#1241)
+    import re
+
+    # The note's receipt measures the host text sent, which names each case's own folder: only that count varies.
+    compared = lambda payload: {key: ("<per-case identity>" if key in per_case else re.sub(
+        r"host instructions \d+ chars", "host instructions N chars", value) if key == "note" else value)
                                 for key, value in payload.items()}
     omitted, omitted_engine = _git_workspace_start(tmp_path, monkeypatch, "omit")
     assert omitted["status"] == "started" and omitted["baseline_id"], omitted

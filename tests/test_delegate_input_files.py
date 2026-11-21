@@ -245,6 +245,9 @@ def test_unpreparable_selection_refuses_typed_with_every_entry_before_any_send(t
     assert [row["status"] for row in result["input_files"]] == [
         "checked", "missing", "not_a_file", "denied", "denied"]
     assert not any(row["status"] == "prepared" for row in result["input_files"])
+    # The refusal carries the receipt's lines: each failing entry first, then the one the refusal held back.
+    assert result["receipt"].startswith("receipt:\nnot prepared: task_drive:absent.txt (missing"), result["receipt"]
+    assert result["receipt"].endswith("not delivered, the selection being refused: task_drive:ok.txt [requested]")
     assert engine.requests == [] and not (drive / "delegated_readonly_inputs").exists()
     assert not _retained_home(ctx).exists()
     assert not custody.pending_invocations(ctx.drive_root)
@@ -1737,7 +1740,9 @@ def test_ordinary_input_respects_presence_in_the_receiving_workspace(tmp_path, m
 
     _presence(ctx, *grants, ("active_workspace", "one.md"))
     refused = control._schedule_task(ctx, **options, input_files=[nested_file, inherited_file])
-    assert 'not prepared: active_workspace:nested/one.md (checked)' in refused and "PRESENCE_RESOURCE_BLOCKED" in refused, refused
+    # The failing entry is named with its cause; the one that passed its own check is named as held back, not failed.
+    assert "not delivered, the selection being refused: active_workspace:nested/one.md" in refused, refused
+    assert "not prepared: active_workspace:other.md (denied" in refused and "nested/one.md (checked)" not in refused
     assert not ctx.pending_events and not _retained_home(ctx).exists()
 
     _presence(ctx, ("active_workspace", "."))  # ordinary inherited reads remain available
@@ -1992,8 +1997,12 @@ def test_every_kind_of_helper_answers_with_the_one_receipt(tmp_path, monkeypatch
         receipt = answer[answer.index("receipt:"):].split("\n")
         stages = [row.split(":", 1)[0] for row in receipt if row.split(":", 1)[0] in ("requested", "prepared", "observed")]
         assert stages == sorted(set(stages), key=("requested", "prepared", "observed").index), receipt
-        assert "prepared is not read" in answer and "applied: known after start" in answer, answer
+        assert "prepared is not read" in answer, answer
         assert row_count(receipt) == len(receipt), receipt
+    # Only a session's applied access waits for the engine; a native child's profile is the host's own, known now.
+    assert ["applied: pending engine evidence" in answer for answer in answers] == [False, True, True]
+    assert "room, origin and marked rows read at its start" in answers[0]
+    assert "read at its start" not in answers[1], "a session's work order carries its rows by value"
     # The session child and the direct start both lie outside a session's folder; the native child reads its copies.
     assert ["outside the session's folder" in answer for answer in answers] == [False, True, True]
     assert started["input_files"] and all(row["carrier"] == "outside_scope_path" for row in started["input_files"])
@@ -2017,6 +2026,7 @@ def test_a_memory_view_value_the_view_does_not_know_is_named_at_scheduling(tmp_p
     answer = control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                     memory_view=view)
     assert ctx.pending_events, answer  # the request is queued either way: nothing here refuses it
-    unknown = "memory_view not used (marks is one of all, room_and_global, none): the child default stands [requested]"
+    unknown = ("memory_view {'marks': 'everything'} not used (marks is one of all, room_and_global, none): "
+               "the child default stands [requested]")
     assert (unknown in answer) is named and ("receipt: nothing differs from the request so far" in answer) is not named
     assert ("memory view: child default with knowledge=True" in answer) is not named

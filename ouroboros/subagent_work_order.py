@@ -189,6 +189,22 @@ def assignment_instructions(ctx: Any) -> str:
     )
 
 
+def work_order_owner_rows(task: Mapping[str, Any]) -> tuple | None:
+    """``(rows, absence marker, current)``: my human's rows a session work order carries, one per identity (the
+    field's, then the bound room's), the same set ``_owner_words_section`` renders and the receipt counts; ``None``
+    for a declared task scheduled before ``DECLARED_WORDS_FACT``, whose order holds none."""
+    from ouroboros.contracts.task_contract import task_input_sources
+    from ouroboros.owner_words import FIELD, _deduped, task_governing_words
+
+    if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
+        return None
+    rows, absent = task_governing_words(task)
+    room = work_order_room_words(task)
+    if room is not None:
+        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    return rows, absent, room is not None
+
+
 def work_order_room_words(task: Mapping[str, Any]) -> list | None:
     """The bound room's rows a session task was scheduled with (``owner_words.ROOM_FIELD``, by value, at the top
     level or under ``metadata``); ``None`` for a task scheduled before the key existed, whose work order keeps the
@@ -214,18 +230,14 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     The schedule text it was scheduled with (``owner_words.SCHEDULE_FIELD``) follows them
     in its own section; a record without that field renders as it always did.
     """
-    from ouroboros.contracts.task_contract import task_input_sources
-    from ouroboros.owner_words import (FIELD, _deduped, render_owner_words, render_schedule_text,
-                                       task_governing_words, task_schedule_items)
+    from ouroboros.owner_words import render_owner_words, render_schedule_text, task_schedule_items
 
-    if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
+    carried = work_order_owner_rows(task)
+    if carried is None:
         return ""
-    rows, absent = task_governing_words(task)
-    room = work_order_room_words(task)
-    if room is not None:
-        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    rows, absent, current = carried
     words = render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
-                               current=room is not None)
+                               current=current)
     schedule = render_schedule_text(task_schedule_items(task), audience="session")
     return "\n\n".join(part for part in (words, schedule) if part)
 
@@ -565,9 +577,7 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
             rows.append(row)
     meta = getattr(ctx, "task_metadata", None)
     root = str((meta.get("root_task_id") if isinstance(meta, Mapping) else "") or getattr(ctx, "task_id", "") or "")
-    rendered = render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
-    ctx._session_carried_words = (len(rows), rendered)  # counted where sent (``helper_receipt.start_facts``)
-    return rendered
+    return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
 
 
 def session_memory_references(ctx: Any) -> str:

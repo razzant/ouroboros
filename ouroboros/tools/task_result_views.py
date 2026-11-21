@@ -343,6 +343,9 @@ def render_result_view(
         payload["test_evidence_gap"] = gap
     if effort:
         payload["effort"] = dict(effort)
+    from ouroboros.helper_receipt import task_result_line
+
+    payload["receipt"] = task_result_line(data)  # the same repeat as the full and the compact handoff
 
     reread_arguments = {"task_id": task_id, "view": "answer"}
     authority_arguments = {"task_id": task_id, "include_authority": True}

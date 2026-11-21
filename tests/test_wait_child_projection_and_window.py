@@ -399,9 +399,10 @@ def test_both_child_surfaces_repeat_the_receipt_in_one_line(differs):
     from ouroboros.helper_receipt import NOTHING_ON_RECORD
     from ouroboros.subagent_work_order import compile_external_work_order
 
-    session = {"route": {"kind": "agent_session", "target_id": "codex=x"}}
+    session = {"route": {"kind": "agent_session", "target_id": "codex=x"}, "access": "workspace_write"}
+    evidence = {"delegated_runs_settled": 1, "applied_access_profiles": ["readonly" if differs else "workspace_write"]}
     data = {"task_id": CHILD, "status": STATUS_COMPLETED, "result": "answer", "configured_subagent": session,
-            "objective": "Read", "expected_output": "Findings",
+            "objective": "Read", "expected_output": "Findings", "subagent_envelope": {"execution_evidence": evidence},
             **({"memory_view": {"marks": "everything"}, "resource_intent": {"kind": "explicit_resource", "root": "/r"},
                 "prepared_input_files": [{"root": "task_drive", "path": "a.md", "sha256": "a" * 64, "size": 1}]}
                if differs else {})}
@@ -409,8 +410,13 @@ def test_both_child_surfaces_repeat_the_receipt_in_one_line(differs):
     full = json.loads(mod._subtask_outcome_summary(data, task_id=CHILD))["receipt"]
     assert compact == full
     if differs:
-        assert "memory_view not used (marks is one of" in full and "outside the session's folder" in full
+        assert "memory_view {'marks': 'everything'} not used (marks is one of" in full
+        assert "lay outside the session's folder at scheduling" in full and "the session leaf's start composes" in full
+        assert "applied access of its runs: readonly, requested workspace_write [observed]" in full
         assert NOTHING_ON_RECORD not in full
+        evidence["applied_access_profiles"] = []  # settled runs that disclosed no profile: unknown, never "as asked"
+        assert "applied access of its runs: not disclosed (requested workspace_write)" in mod._compact_child_projection(
+            CHILD, data, None)["receipt"]
     else:
         assert full == NOTHING_ON_RECORD
     order = compile_external_work_order({"id": CHILD, **data})

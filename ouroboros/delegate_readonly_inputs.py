@@ -64,6 +64,7 @@ class ReadonlyInputs(NamedTuple):
     instruction: str      # appended to the run's instructions
     selected: Optional[List[Dict[str, Any]]]  # the receipt: None when nothing was asked, else one row per retained file
     selection_note: str   # the selection's own text, restated in a continuation's prompt
+    lineage: Optional[tuple] = None  # (count, bytes) of the automatic lineage copies this start made, else None
 
     @property
     def custody(self) -> Dict[str, Any]:
@@ -475,9 +476,13 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
     from ouroboros.delegate_shared import _fail
 
     def refuse(code: str, detail: str, **facts):
+        from ouroboros.helper_receipt import build, render
+
         record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), code)
+        receipt = render(build({"refused": facts.get("input_files") or [{"path": "the selection", "status": code,
+                                                                          "detail": detail}]}))
         return NO_INPUTS, _fail("delegate_start", code, detail, definitely_unrun=True,
-                                engine_discovery_completed=True, **facts)
+                                engine_discovery_completed=True, receipt=receipt, **facts)
 
     try:
         entries = selection_entries(input_files)
@@ -556,7 +561,7 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
         "inputs.json maps the selected files, or default native lineage sources, to verified local copies. "
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
-    ) + note, receipt, note)
+    ) + note, receipt, note, (len(lineage), sum(int(row["size"]) for row in lineage)) if lineage else None)
 
 
 def _selected_rel(row: Dict[str, Any]) -> str:

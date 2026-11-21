@@ -283,7 +283,7 @@ Tasks coordinate via `tree_note`/`tree_read`; a parent releases a child's constr
 
 **Selected first-input sources** (`context_input_selection.py`). Every helper starts with my human's words for the work (`owner_words.py`: the tree's rows by value, the room's read at start, a session's kept from its scheduling), the marks in force and the knowledge outline; `declared` adds assignment/evidence, full SYSTEM/BIBLE/owner rules, authority/tools, own observations and applicable DESIGN map; `shared` adds the heads of the notes that claim its room and of the notes their heads link, book maps, identity, life account (not nannies) and room page, never whole dialogue. Children's signed chronicle drafts need the integrating mind's acceptance. Selection changes no read boundary, model/effort or independence/first-position guarantee; tools/mail can broaden evidence.
 
-**Selected inputs** (DELEGATED_ADMISSION §3b): files or commit diffs replace folderless lineage; omission/null/[] keeps it. Each reader binds independently. Thread scope stays; nanny and leaf tools differ.
+**Selected inputs** (DELEGATED_ADMISSION §3b): files or commit diffs replace folderless lineage; omission/null/[] keeps it. Each reader binds independently. Thread scope stays.
 
 **Engine inputs** (`delegate_documents.py`, `claudexor_uploads.py`; DELEGATED_ADMISSION §3a): ready/uncertain keys survive copies/Continue. Owed managed releases feed `runtime_retirement` under tree/Continue/Keep holds, without local files. Keep shares custody with release; late Keep reports uncertainty; open uploads cancel before settlement.
 
