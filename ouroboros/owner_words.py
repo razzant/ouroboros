@@ -582,6 +582,27 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
                   "omit owner_words to start the work as your own.")
 
 
+def cited_owner_time(ctx: Any, basis: Mapping[str, Any] | None) -> str:
+    """When my human wrote the message ``cited_owner_basis`` verified, as the host recorded it: its carrier's send time
+    (``sent_at``) when kept, else the time its room accepted it (``ts``), else its mailbox entry's (``received``);
+    ``""`` unknown. The host checks who wrote and when; what the words mean stays the citing mind's judgment."""
+    def when(item: Mapping[str, Any]) -> str:
+        return str(item.get("sent_at") or item.get("ts") or item.get("received") or "")
+
+    if not basis:
+        return ""
+    if when(basis):  # a press or confirmed place item carried whole
+        return when(basis)
+    ref, content = str(basis.get("msg_id") or ""), basis.get("content")
+    for row in directive_owner_rows(ctx):
+        if str(row.get("ref") or "") == ref and row.get("text") == content:
+            return str(row.get("ts") or "").removeprefix("received ")
+    for item in getattr(ctx, "_owner_directives", None) or []:
+        if isinstance(item, dict) and str(item.get("msg_id") or "") == ref and item.get("content") == content:
+            return when(item)
+    return ""
+
+
 def place_reply_target(message: Any, source: str = "") -> Dict[str, str] | None:
     """The replied message's provider address and any words the connector carried, as context under its author."""
     from ouroboros.presence_message_facts import reply_target
