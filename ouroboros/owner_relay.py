@@ -652,12 +652,12 @@ def takes_source(held: dict, late) -> bool:
             and (late.get("address"), late.get("excerpt")) == (reply.get("address"), reply.get("excerpt")))
 
 
-def _inherited_unread(field: dict, address: str, row: dict) -> dict:
+def _inherited_unread(field: dict, address: str, row: dict, *, earlier_ref: str = "") -> dict:
     """A later source can complete a birth-time citation, only for that same owner row and selection."""
     from ouroboros.chat_references import has_source
     from ouroboros.owner_words import _carrier_ref, _same_selection
 
-    inherited = field.get(_carrier_ref(row, canonical=address)) or {}
+    inherited = field.get(_carrier_ref(row, canonical=address)) or field.get(earlier_ref) or {}
     citation = inherited.get("reply_citation") or {}
     target = row.get("_owner_reply_target")
     if (has_source(target) and citation.get("reply_view") == "unread" and citation.get("excerpt")
@@ -680,6 +680,7 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
 
     fact_of = entry["host_carried"]
     went = str(fact_of.get("went_to") or "")
+    earlier_ref = str(fact_of.get("earlier_ref") or "")
     held = held_owner_messages(ctx) if ctx is not None else {}
     enrich = fact_of.get("enrich")
     birth = _field_rows(task_governing_words(getattr(ctx, "task_metadata", None))[0]) if enrich else {}
@@ -693,11 +694,12 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
             if isinstance(prior, dict):
                 if takes_source(prior, row.get("_owner_reply_target")):
                     prior["_owner_reply_target"] = copy.deepcopy(row["_owner_reply_target"])
-            elif inherited := _inherited_unread(birth, address, row):
+            elif inherited := _inherited_unread(birth, address, row, earlier_ref=earlier_ref):
                 # The birth stamp keeps the words and their standing; this later row supplies only the missing source.
                 carrier = inherited["carrier"]
                 standing = carrier.removeprefix("went to ") if carrier.startswith("went to ") else ""
-                held[address] = {**copy.deepcopy(row), "carried": {"went_to": standing}}
+                birth_ref = {"birth_ref": earlier_ref} if earlier_ref and inherited["ref"] == earlier_ref else {}
+                held[address] = {**copy.deepcopy(row), "carried": {"went_to": standing, **birth_ref}}
             continue
         if isinstance(prior, dict):
             if takes_source(prior, row.get("_owner_reply_target")):
@@ -709,7 +711,7 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
                                                             "went_to": went, "at": str(entry.get("ts") or "")}}
         if isinstance(prior, dict) and takes_source(held[address], prior.get("_owner_reply_target")):
             held[address]["_owner_reply_target"] = copy.deepcopy(prior["_owner_reply_target"])  # addressed now: its source stays
-        refs = {address, _chat_ref(row) if row.get("client_message_id") else "", str(fact_of.get("earlier_ref") or "")}
+        refs = {address, _chat_ref(row) if row.get("client_message_id") else "", earlier_ref}
         seen = [stamps[ref] for ref in refs - {""} if ref in stamps]
         if not seen:
             source_root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or getattr(ctx, "drive_root", None)
@@ -1018,7 +1020,7 @@ def _rows_to_carry(ctx, root) -> list:
     author's words ride inside its row's quote). The quote is built from the chat row the run holds for it (its
     carriage fact stripped), else from the row's recorded form; a row's identities are its printed references
     (now and before its room rode with it) and its address."""
-    from ouroboros.owner_words import (REPLY_TARGET, _chat_ref, _deduped, _earlier_refs,
+    from ouroboros.owner_words import (REPLY_TARGET, _carrier_ref, _deduped, _earlier_refs,
                                       _held_words, _reply_bodies, _tree_words)
 
     held = held_owner_messages(ctx)
@@ -1026,8 +1028,11 @@ def _rows_to_carry(ctx, root) -> list:
     for key, value in held.items():
         if isinstance(value, dict):
             fact = value.get("carried") if isinstance(value.get("carried"), dict) else {}
-            by_ref[_chat_ref(value) if value.get("client_message_id") else str(key)] = (
-                str(key), {k: v for k, v in value.items() if k != "carried"}, str(fact.get("went_to") or ""))
+            canonical = _carrier_ref(value, canonical=key)
+            source = str(key), {k: v for k, v in value.items() if k != "carried"}, str(fact.get("went_to") or "")
+            by_ref[canonical] = (*source, "")
+            if birth_ref := fact.get("birth_ref"):
+                by_ref[birth_ref] = (*source, canonical)
     rows, _root, accounts = _tree_words(ctx)
     rows = _deduped(rows + _held_words(held, root, str(ctx.task_id), context=True, accounts=accounts))
     targets = _reply_bodies(rows)
@@ -1035,10 +1040,10 @@ def _rows_to_carry(ctx, root) -> list:
     for row in rows:
         if row["source"] == REPLY_TARGET:
             continue
-        address, pristine, went = by_ref.get(row["ref"]) or (*_pristine_form(ctx, row, targets), "")
+        address, pristine, went, promoted = by_ref.get(row["ref"]) or (*_pristine_form(ctx, row, targets), "", "")
         pristine = _with_captured_reply(pristine, row.get("reply_citation"), targets)
-        before = earlier.get(row["ref"], "") if row["ref"] else ""
-        identities = {_words_identity(row), address, before} - {""}
+        before = row["ref"] if promoted else earlier.get(row["ref"], "")
+        identities = {_words_identity(row), address, before, promoted} - {""}
         carried.append((identities, address, owner_quote(root, pristine, address=address), went, before))
     return carried
 
@@ -1079,7 +1084,8 @@ def _carry_to_member(root, drive, task_id: str, member: dict, rows: list, teller
         mailed = [entry for entry in (carried, context) if entry in ids]
         row = quote["owner_row"]
         enrich = bool(held and source not in ids and has_source(row.get("_owner_reply_target"))
-                      and (not any(ids[entry] for entry in mailed) if mailed else _inherited_unread(field, address, row)))
+                      and (not any(ids[entry] for entry in mailed) if mailed
+                           else _inherited_unread(field, address, row, earlier_ref=before)))
         if held and not enrich:
             continue
         relay_id = "carry-source" if enrich else "carry-context" if went else "carry"

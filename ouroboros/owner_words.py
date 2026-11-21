@@ -906,8 +906,11 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
         if (source_accounts := accounts_by_root.get(str(source_root))) is None:
             source_accounts = accounts_by_root[str(source_root)] = owner_place_accounts(source_root)
         if quotable_owner_row(row, source_root, accounts=source_accounts):
-            rows += _chat_words(row, key=str(key), carrier=f"went to {went}" if went else "held",
+            found = _chat_words(row, key=str(key), carrier=f"went to {went}" if went else "held",
                                 source="owner_mailbox", task_id=task_id, root=source_root if read or row.get("late_answer") else None, addressed=addressed)
+            if birth_ref := fact.get("birth_ref"):  # this row supplies the source, not new words
+                found[0]["ref"] = birth_ref
+            rows += found
     return rows
 
 

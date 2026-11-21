@@ -856,8 +856,12 @@ def test_a_later_copy_completes_a_held_selection_once_without_raising_its_standi
 
 
 @pytest.mark.parametrize("same_passage", [True, False])
-def test_a_later_copy_completes_a_selection_inherited_at_birth_without_an_earlier_mail(tmp_path, monkeypatch, same_passage):
-    from ouroboros.owner_relay import carry_row_at_receipt, held_owner_messages, owner_row_address
+@pytest.mark.parametrize("renamed_row", [False, True], ids=["receipt", "drain-after-rename"])
+def test_a_later_copy_completes_a_selection_inherited_at_birth_without_an_earlier_mail(
+    tmp_path, monkeypatch, same_passage, renamed_row,
+):
+    from ouroboros.owner_relay import (captured_selection, carry_row_at_receipt, carry_to_members, held_owner_messages,
+                                      owner_row_address)
     from ouroboros.owner_words import UNREAD_TARGET, render_owner_words
     from ouroboros.store import StoreError
     from ouroboros.task_results import write_task_result
@@ -879,10 +883,20 @@ def test_a_later_copy_completes_a_selection_inherited_at_birth_without_an_earlie
     preview = dict(row["reply_to"])
     if not same_passage:
         preview["excerpt"] = {"text": "North trail", "start_utf16": full.index("North trail", 1)}
-    root = _owner_root(tmp_path)
-    root._held_owner_messages = {address: {**row, "reply_to": preview, "_owner_source_root": str(tmp_path)}}
+    if renamed_row:
+        root = _nanny(tmp_path)
+        root.task_id = "t-root"
+        root.task_metadata = {"root_task_id": "t-root", "delegation_role": "root"}
+        _record_owner_directive(root, source="owner_mailbox", content="Which trail?", msg_id="mail-1",
+                                origin={"client_message_id": "owner-reply"},
+                                reply_to={**preview, "author": preview.get("author_label", "")})
+    else:
+        root = _owner_root(tmp_path)
+        root._held_owner_messages = {address: {**row, "reply_to": preview, "_owner_source_root": str(tmp_path)}}
     inherited = governing_words_for_schedule(root)
     assert inherited[FIELD][0]["reply_citation"]["reply_view"] == "unread"
+    if renamed_row:
+        assert inherited[FIELD][0]["ref"] == "msg mail-1"
     write_task_result(tmp_path, "t-nanny", "running", delegation_role="subagent", parent_task_id="t-root",
                       root_task_id="t-root", **inherited)
     nanny = _nanny(tmp_path)
@@ -896,8 +910,17 @@ def test_a_later_copy_completes_a_selection_inherited_at_birth_without_an_earlie
         raise StoreError("history unavailable")
 
     monkeypatch.setattr("ouroboros.chat_chain.resolve_row", unavailable)
+    if renamed_row:
+        selection = captured_selection(tmp_path, row, delivered)
+        assert selection and selection["text"] == full
+        root._held_owner_messages = {address: {**row, "_owner_reply_target": selection,
+                                               "_owner_source_root": str(tmp_path)}}
+        assert governing_words_for_schedule(root)[FIELD][0]["ref"] == "chat 1 / owner-reply"
     for _ in range(2):
-        carry_row_at_receipt(tmp_path, "t-root", 1, "owner-reply", reply=delivered)
+        if renamed_row:
+            carry_to_members(root, delivered=True)
+        else:
+            carry_row_at_receipt(tmp_path, "t-root", 1, "owner-reply", reply=delivered)
     assert list(_mail(tmp_path, "t-nanny")) == ([f"relay:carry-source:{address}:t-nanny"] if same_passage else [])
     controls = _round_top(nanny, messages)
     assert "owner_carried_addressed" not in controls and _said(messages).count("Which trail?") == 1
@@ -910,3 +933,10 @@ def test_a_later_copy_completes_a_selection_inherited_at_birth_without_an_earlie
     restored.task_metadata.update(inherited)
     held_owner_messages(restored)
     assert governing_words_for_schedule(restored)[FIELD] == rows, "the complete source survives the recipient's restore"
+    if renamed_row and same_passage:
+        # A child whose own preview predates the rename can also receive the supplement from this holder.
+        write_task_result(tmp_path, "t-child", "scheduled", delegation_role="subagent", parent_task_id="t-nanny",
+                          root_task_id="t-root", **inherited)
+        carry_to_members(restored, delivered=True)
+        [key] = _mail(tmp_path, "t-child")
+        assert key == f"relay:carry-source:{address}:t-child"
