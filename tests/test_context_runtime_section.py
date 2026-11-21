@@ -999,12 +999,12 @@ def _born(root, origin, **state):
     assert witness.complete(root, identity, adopted=False)
 
 
-def _said(root, *rows):
+def _said(root, *rows, chat_id=1, kind=None):
     from ouroboros import dialogue_store
 
     for stamp, direction in rows:
         dialogue_store.append(root, "chat", {"ts": f"2026-11-21T{stamp}:00.000000+00:00", "direction": direction,
-                                             "chat_id": 1, "text": direction})
+                                             "chat_id": chat_id, "text": direction, **({"type": kind} if kind else {})})
 
 
 @pytest.mark.parametrize("shape", ["first_boot", "owner_reset", "talked", "unread_binding"])
@@ -1034,10 +1034,10 @@ def test_setup_tells_a_fresh_install_from_a_reset_a_bound_one_that_talked_and_an
                                   "unread_binding": "unknown: the owner chat binding is not confirmed",
                                   }.get(shape, "none bound yet: no owner message has bound one")
     assert fact["consciousness"] == ("off" if shape == "talked" else "on")
-    assert fact["main"] == {
-        "talked": "my human first wrote in Main 2026-11-21 10:00 UTC; my first message after it 2026-11-21 10:02 UTC",
-        "unread_binding": "my human first wrote in Main 2026-11-21 10:00 UTC; no message of mine after it yet",
-    }.get(shape, "my human has not written in Main, nor have I")
+    assert fact["exchange"] == {
+        "talked": "my human and I have both written",
+        "unread_binding": "my human has written to me; I have not written to them yet",
+    }.get(shape, "my human and I have not written to each other yet")
     assert "starter_skills" not in fact and "startup_problems" not in fact  # never ran here, nothing recorded
 
 
@@ -1057,7 +1057,7 @@ def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_
                                "budget": {"status": "skipped"}, "identity": {"exists": True, "non_empty": True}}}
     (tmp_path / "logs" / "events.jsonl").write_text(json.dumps(verification) + "\n", encoding="utf-8")
     fact = setup_fact(tmp_path)
-    assert fact["main"] == "my human has not written in Main; my first message there 2026-11-21 10:05 UTC"
+    assert fact["exchange"] == "I have written to my human; they have not written to me yet"
     assert fact["starter_skills"] == "waiting to retry: 3 chosen; 1 installed, 1 pending, 1 failed (state/skill_starter.json)"
     assert fact["startup_problems"] == ("2026-11-21 09:59 UTC, 2 issues: model not set, version_sync warning "
                                         "(its startup_verification row in logs/events.jsonl)")
@@ -1074,26 +1074,47 @@ def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_
     assert fact["owner_chat"].startswith("unknown: runtime state unavailable") and fact["consciousness"] == "unknown"
 
 
-def test_the_first_exchange_steps_only_until_my_first_message_after_theirs():
-    """Main's first rows are stepped lazily and the cursor closed: a talked install stops within its first rows, while
-    one where nobody answered is read to its end or the bound (the parametrized setup test above)."""
-    from ouroboros.context_first_hour import _first_exchange
+def test_the_exchange_counts_only_the_words_of_my_human_and_mine_in_rooms_they_read(tmp_path):
+    """One statement of two indexed existence probes (``dialogue_store.owner_exchange``): host rows, the hidden
+    partition and correspondents' place rooms are no exchange; an untyped answer or a typed message of mine to my human
+    is one; a store that cannot be read is unknown, never no."""
+    from ouroboros import dialogue_store
+    from ouroboros.context_first_hour import setup_fact
+    from ouroboros.places import conversation_chat_id
+    from ouroboros.store import StoreLost
 
-    class Rows:
-        closed = False
+    (tmp_path / "state").mkdir()
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)  # no store at all: nothing was written
+    _said(tmp_path, ("10:00", "system"), ("10:01", "out"), kind="task_summary")  # host rows in Main
+    _said(tmp_path, ("10:02", "out"), ("10:03", "in"), chat_id=0)  # the hidden partition
+    _said(tmp_path, ("10:04", "out"), ("10:05", "in"), chat_id=conversation_chat_id("slack:c1"))  # a place's room
+    assert dialogue_store.owner_exchange(tmp_path) == (False, False)
+    _said(tmp_path, ("10:06", "out"), chat_id=1000 + 7, kind="proactive_message")  # a message of mine, in a Project room
+    assert dialogue_store.owner_exchange(tmp_path) == (False, True)
+    _said(tmp_path, ("10:07", "in"))
+    assert dialogue_store.owner_exchange(tmp_path) == (True, True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
+        assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreLost)"
 
-        def __iter__(self):
-            yield {"ts": "a", "direction": "system", "kind": "task_summary"}
-            yield {"ts": "b", "direction": "in", "kind": None}
-            yield {"ts": "c", "direction": "in", "kind": "quiz_answer"}
-            yield {"ts": "d", "direction": "out", "kind": None}
-            raise AssertionError("stepped past the first exchange")
 
-        def close(self):
-            self.closed = True
+@pytest.mark.parametrize("written", [False, True])
+def test_setup_carries_the_owners_first_meeting_words_only_while_i_have_not_written_and_only_once_they_exist(
+        tmp_path, written):
+    """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
+    words ride the setup facts until I have written to my human, then they leave."""
+    from ouroboros.context_first_hour import setup_fact
 
-    rows = Rows()
-    assert _first_exchange(rows) == ("b", None, "d", 4) and rows.closed
+    (tmp_path / "data" / "state").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    if written:
+        _said(tmp_path / "data", ("10:00", "out"))
+    assert "first_meeting" not in setup_fact(tmp_path / "data", repo)  # no file: nothing
+    (repo / "prompts").mkdir(parents=True)
+    (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")
+    fact = setup_fact(tmp_path / "data", repo)
+    assert fact.get("first_meeting") == (None if written else "Owner-approved words.")
+    assert "first_meeting" not in setup_fact(tmp_path / "data")  # a caller that names no repository carries none
 
 
 def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_path):

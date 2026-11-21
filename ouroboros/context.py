@@ -608,7 +608,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
     if not declared:
         runtime_data["official_update"] = official_update_projection(git_sha)
         from ouroboros.context_first_hour import setup_fact  # how this install began and our first exchange: facts
-        runtime_data["setup"] = setup_fact(canonical_root)
+        runtime_data["setup"] = setup_fact(canonical_root, env.repo_dir)
         from ouroboros import body_candidate
 
         # Absent when none exists, so an ordinary Runtime block stays byte-identical.
