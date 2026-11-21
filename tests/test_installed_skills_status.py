@@ -195,3 +195,53 @@ def test_a_row_that_fails_to_render_is_the_read_failure_line_not_an_exception(tm
     for text in (section.full_text, section.operative_view):
         assert text.endswith("The skill list could not be read (RuntimeError); list_skills() reads it.")
         assert "quiet" not in text
+
+
+def _context_shape(drive: pathlib.Path):
+    """As ``context._capture_context_core`` calls it: discovery first, then the catalog with ``skills=`` filled."""
+    from ouroboros.skill_catalogue import discover_context_skills
+
+    return _build_installed_skills_section(SimpleNamespace(drive_root=drive), skills=discover_context_skills(drive))
+
+
+def test_a_failed_discovery_says_so_and_an_empty_readable_install_says_none(tmp_path, monkeypatch):
+    (tmp_path / "skills" / "external").mkdir(parents=True)
+    empty = _context_shape(tmp_path)
+    for text in (empty.full_text, empty.operative_view):
+        assert text.endswith("\nNo skills are installed.")
+
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", unreadable)
+    failed = _context_shape(tmp_path)
+    for text in (failed.full_text, failed.operative_view):
+        assert text.endswith("The skill list could not be read (OSError); list_skills() reads it.")
+        assert "No skills are installed." not in text
+
+
+def test_a_source_folder_the_walk_cannot_list_is_named_beside_the_readable_cards(tmp_path, monkeypatch):
+    import os
+
+    _skill(tmp_path, "visible")
+    hidden = tmp_path / "skills" / "clawhub"
+    (hidden / "hidden-guide").mkdir(parents=True)
+    (hidden / "hidden-guide" / "SKILL.md").write_text("---\nname: hidden-guide\ndescription: d\nversion: '1'\n"
+                                                      "type: instruction\n---\nB\n", encoding="utf-8")
+    real_iterdir = pathlib.Path.iterdir
+
+    def iterdir(self):
+        if self == hidden:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    section = _context_shape(tmp_path)
+    gap = f"Skill folders that could not be read (their skills are missing here): {hidden} (PermissionError)"
+    for text in (section.full_text, section.operative_view):
+        assert "\n- visible (instruction, v1, " in text and text.endswith(gap)
+        assert "hidden-guide" not in text and "No skills are installed." not in text
+    monkeypatch.setattr(pathlib.Path, "iterdir", real_iterdir)
+    os.utime(hidden)  # its permissions restored: the folder changed, so the walk lists it again
+    readable = _context_shape(tmp_path)
+    assert "- hidden-guide: d" in readable.full_text and "could not be read" not in readable.full_text

@@ -263,9 +263,12 @@ _INSTALLED_SKILLS_HEADING = ("## Installed Skills (enabled and reviewed; then th
 
 def _installed_skills_section(env: Any, skills: Optional[List[Any]]) -> HostSection:
     # ``skills``: the context build's own discovery, so this catalog and its always-on block agree
-    from ouroboros.skill_catalogue import always_in_context_skills, discover_context_skills, off_state, skill_status
+    from ouroboros.skill_catalogue import (always_in_context_skills, discover_context_skills, off_state, skill_status,
+                                           unlisted_skill_sources)
     from ouroboros.skill_loader import summarize_skills
     skills = discover_context_skills(env.drive_root) if skills is None else skills
+    if skills is None:
+        raise OSError("skill discovery failed")  # the failure line, never "No skills are installed."
     summary = summarize_skills(pathlib.Path(env.drive_root), skills)
     always_on = {skill.name for skill in always_in_context_skills(skills)}
 
@@ -345,7 +348,8 @@ def _installed_skills_section(env: Any, skills: Optional[List[Any]]) -> HostSect
         elif skill.get("runnable_via_skill_exec"):
             lines.append("  Tools: skill_exec")
         count += 1
-    _append_unadmitted(lines, operative, summary.get("skills") or [], env.drive_root, _field, off_state, skill_status)
+    _append_unadmitted(lines, operative, summary.get("skills") or [], env.drive_root, _field, off_state, skill_status,
+                       unlisted_skill_sources(env.drive_root))
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 
@@ -366,9 +370,10 @@ def _status_lines(status: dict, field: Any, row: dict) -> List[str]:
 
 
 def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], root: Any, field: Any,
-                       off_state: Any, skill_status: Any) -> None:
+                       off_state: Any, skill_status: Any, unlisted: List[str]) -> None:
     """After the admitted cards: enabled skills no review admits (each with the first reason), then the Off
-    installations, one entry per name (a name several folders claim is one entry), purpose in the full form."""
+    installations, one entry per name (a name several folders claim is one entry), purpose in the full form;
+    then the folders the walk could not list. "No skills are installed." only after a complete walk found none."""
     unadmitted, off, seen = [], [], set()
     for row in rows:
         name = field(row.get("name"), 80) if isinstance(row, dict) else ""
@@ -393,7 +398,10 @@ def _append_unadmitted(lines: List[str], operative: List[str], rows: List[Any], 
         lines.append("Installed, Off (turning one on is the owner's choice):")
         lines.extend(full for full, _short in off)
         operative.append("Installed, Off (turning one on is the owner's choice): " + ", ".join(short for _f, short in off))
-    if not rows:
+    if unlisted:
+        lines.append("Skill folders that could not be read (their skills are missing here): " + "; ".join(unlisted))
+        operative.append(lines[-1])
+    elif not rows:
         lines.append("No skills are installed.")
         operative.append(lines[-1])
 

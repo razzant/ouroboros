@@ -893,14 +893,20 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
     )
 
 
+_UNLISTED_DIRS: Dict[str, str] = {}  # a folder the walk could not list -> its error, until one listing succeeds
+
+
 def _safe_listdir(root: pathlib.Path, *, strict: bool = False) -> List[pathlib.Path]:
     try:
-        return sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
-    except OSError:
+        listed = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    except OSError as exc:
         if strict:
             raise
         log.warning("Failed to list skills repo %s", root, exc_info=True)
+        _UNLISTED_DIRS[str(root)] = type(exc).__name__
         return []
+    _UNLISTED_DIRS.pop(str(root), None)
+    return listed
 
 
 def _looks_like_skill_dir(path: pathlib.Path) -> bool:

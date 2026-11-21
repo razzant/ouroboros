@@ -17,20 +17,37 @@ import json
 import logging
 import pathlib
 from hashlib import sha256
-from typing import Any, List
+from typing import Any, List, Optional
 
 from ouroboros.tool_capabilities import tool_result_limit
 
 
-def discover_context_skills(drive_root: Any) -> List[Any]:
-    """One fail-soft discovery shared by a context build's always-in-context block and its catalog."""
+def discover_context_skills(drive_root: Any) -> Optional[List[Any]]:
+    """One fail-soft discovery shared by a context build's always-in-context block and its catalog; ``None`` when it
+    failed, so a failure is never read as an install without skills (``[]``)."""
     from ouroboros.skill_loader import discover_skills
 
     try:
         return discover_skills(pathlib.Path(drive_root))
     except Exception:
         logging.getLogger(__name__).debug("Skill discovery for context failed", exc_info=True)
-        return []
+        return None
+
+
+def unlisted_skill_sources(drive_root: Any) -> List[str]:
+    """The folders of this drive's skills root or of a connected skill source that the last walk could not list,
+    each with its error's name: their skills are missing from any list built from that walk."""
+    import os
+
+    from ouroboros.skill_loader import _UNLISTED_DIRS
+    from ouroboros.skill_sources import load_sources
+
+    roots = [pathlib.Path(drive_root) / "skills"]
+    roots += [pathlib.Path(row["path"]).expanduser() for row in load_sources(dict(os.environ)) if row["kind"] == "local"]
+    prefixes = [os.path.realpath(root) for root in roots]
+    return [f"{folder} ({error})" for folder, error in sorted(_UNLISTED_DIRS.items()) if os.path.isdir(folder)
+            and any(os.path.realpath(folder) == prefix or os.path.realpath(folder).startswith(prefix + os.sep)
+                    for prefix in prefixes)]
 
 
 def _reviewed_instructions(skills: Any) -> List[Any]:
