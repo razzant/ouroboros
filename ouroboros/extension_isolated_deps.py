@@ -110,13 +110,29 @@ def is_skill_cache_path(path: pathlib.Path, root: pathlib.Path) -> bool:
     return any(part in _SKILL_DIR_CACHE_NAMES for part in rel_parts)
 
 
+def _env_python_minor(env_root: pathlib.Path):
+    """``(major, minor)`` that the environment's ``pyvenv.cfg`` records, or None when it records none."""
+    try:
+        lines = (env_root / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    cfg = {key.strip().lower(): value.strip() for key, sep, value in (line.partition("=") for line in lines) if sep}
+    parts = (cfg.get("version") or cfg.get("version_info") or "").split(".")
+    try:
+        return int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+
+
 def _isolated_python_site_dirs(skill_dir: pathlib.Path) -> List[pathlib.Path]:
-    """The environment's packages for THIS interpreter: an older Python's ``lib/pythonX.Y`` is not importable here."""
+    """The environment's packages for THIS interpreter: another Python's packages are not importable here.
+
+    POSIX names the minor in the path (``lib/pythonX.Y``); Windows keeps one ``Lib`` and records the minor only in
+    ``pyvenv.cfg``, so an environment built by another minor contributes nothing there either."""
     env_root = pathlib.Path(skill_dir) / ".ouroboros_env" / "python"
-    candidates = [
-        env_root / "lib" / "python{}.{}".format(*sys.version_info[:2]) / "site-packages",
-        env_root / "Lib" / "site-packages",
-    ]
+    candidates = [env_root / "lib" / "python{}.{}".format(*sys.version_info[:2]) / "site-packages"]
+    if _env_python_minor(env_root) in (None, tuple(sys.version_info[:2])):
+        candidates.append(env_root / "Lib" / "site-packages")
     out: List[pathlib.Path] = []
     for path in candidates:
         try:
