@@ -124,6 +124,7 @@
  * @property {string=} description
  * @property {string=} pitch  // the catalog's one line for people; "" when it has none
  * @property {?string=} needs  // the prerequisite in words; "" none, null when the catalog says nothing
+ * @property {string=} mark  // `needs` in a few words for a row ("bot token"); "" when the catalog gives none
  * @property {string[]=} category
  * @property {string=} version
  * @property {string=} digest
@@ -256,7 +257,7 @@
 
 /**
  * One skill the setup's Skills step offers; `title` and `pitch` are the catalog's optional words ("" when it has
- * none: show `name` and `description`), `needs` its prerequisite in words ("" none, null when the catalog says
+ * none: show `name` and `description`), `needs` its prerequisite in words and `mark` the same in a few words ("" none, null when the catalog says
  * nothing); `recommended` means ticked by the starter list.
  * @typedef {Object} StarterSkillItem
  * @property {string} id
@@ -264,6 +265,7 @@
  * @property {string=} title
  * @property {string=} pitch
  * @property {?string=} needs
+ * @property {string=} mark
  * @property {string=} description
  * @property {Object=} icon  // the catalog's icon spec, {} for none
  * @property {boolean=} official

@@ -70,6 +70,6 @@ def test_design_catalogue_rows_are_recommended_default_on_and_categorised(tmp_pa
     for name in PAYLOADS:
         assert {key: rows[name].get(key) for key in marks} == {"name": name, "category": ["design"], "recommended": True,
                                                               "default_on": True}
-        assert set(rows[name]) - set(marks) <= {"title", "pitch", "needs"}, "only the catalog's words for people beside"
+        assert set(rows[name]) - set(marks) <= {"title", "pitch", "needs", "mark"}, "only the catalog's words for people beside"
         assert catalog[name]["category"] == ["design"] and catalog[name]["recommended"] is True
     assert set(default_on_names(seeds)) == set(PAYLOADS)

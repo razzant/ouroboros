@@ -123,7 +123,8 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
         category = (item.get("category") or ["other"])[0]
         groups.setdefault(category, []).append({
             "id": item["id"], "name": item["name"], "title": item.get("title", ""), "pitch": item.get("pitch", ""),
-            "needs": item.get("needs"), "description": item.get("description", ""), "icon": item.get("icon") or {},
+            "needs": item.get("needs"), "mark": item.get("mark", ""), "description": item.get("description", ""),
+            "icon": item.get("icon") or {},
             "official": bool(item.get("official")), "builtin": item["source_id"] == "builtin",
             "recommended": item["id"] in ticked, "needs_keys": list(item.get("needs_keys") or []),
         })

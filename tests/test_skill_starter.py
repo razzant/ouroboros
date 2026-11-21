@@ -70,31 +70,31 @@ def test_offer_keeps_configured_id_visible_while_source_is_unavailable(setup, mo
     monkeypatch.setattr("ouroboros.skill_source_catalog.snapshot_for", lambda *a, **kw: (None, {"state": "error"}))
     offer = skill_starter.starter_groups(drive, rows=hub.rows(), repo_dir=repo)
     items = [item for group in offer["groups"] for item in group["items"]]
-    assert items == [{"id": "ouroboros-community/notes", "name": "notes", "title": "", "pitch": "", "needs": None,
+    assert items == [{"id": "ouroboros-community/notes", "name": "notes", "title": "", "pitch": "", "needs": None, "mark": "",
                       "description": "Source details are not available yet.", "icon": {}, "official": False,
                       "builtin": False, "recommended": True, "needs_keys": []}]
 
 
 def test_offer_carries_the_catalogs_own_words_for_people_and_falls_back_without_them(setup):
-    """A ``builtin.json`` row and a hub entry may carry a title, a one-line pitch and the prerequisite in words; a
-    blank ``needs`` says the skill needs nothing, an absent one says nothing (the card then names the settings it
-    reads). Without them the item keeps its name and description, as before."""
+    """A ``builtin.json`` row and a hub entry may carry a title, a one-line pitch, the prerequisite in words and in a
+    few (``mark``); a blank ``needs`` says the skill needs nothing, an absent one says nothing (the row then names the
+    settings it reads). Without them the item keeps its name and description, as before."""
     from ouroboros.skill_source_catalog import refresh_source
 
     drive, hub, repo = setup
     index = json.loads((repo / "skills" / "builtin.json").read_text(encoding="utf-8"))
-    index["skills"][0].update(title="Telegram", pitch="Chat from your phone", needs="Needs a Telegram bot token")
+    index["skills"][0].update(title="Telegram", pitch="Chat from your phone", needs="Needs a Telegram bot token", mark="bot token")
     (repo / "skills" / "builtin.json").write_text(json.dumps(index), encoding="utf-8")
     hub.entries["duckduckgo"].update(title="Web search", pitch="Search the web, free", needs=" ")
     hub.commit()
     refresh_source(drive, hub.rows()[1])
     offer = skill_starter.starter_groups(drive, rows=hub.rows(), repo_dir=repo)
     items = {item["id"]: item for group in offer["groups"] for item in group["items"]}
-    words = lambda item_id: tuple(items[item_id][key] for key in ("title", "pitch", "needs", "description"))
-    assert words("builtin/telegram") == ("Telegram", "Chat from your phone", "Needs a Telegram bot token", "Owner bridge")
-    assert words("ouroboros/duckduckgo") == ("Web search", "Search the web, free", "", "duckduckgo card text")
-    assert words("builtin/unix_computer_use") == ("", "", None, "Desktop tools")
-    assert words("ouroboros/weather") == ("", "", None, "weather card text")
+    words = lambda item_id: tuple(items[item_id][key] for key in ("title", "pitch", "needs", "mark", "description"))
+    assert words("builtin/telegram") == ("Telegram", "Chat from your phone", "Needs a Telegram bot token", "bot token", "Owner bridge")
+    assert words("ouroboros/duckduckgo") == ("Web search", "Search the web, free", "", "", "duckduckgo card text")
+    assert words("builtin/unix_computer_use") == ("", "", None, "", "Desktop tools")
+    assert words("ouroboros/weather") == ("", "", None, "", "weather card text")
 
 
 def test_offer_includes_configured_items_from_other_sources_in_their_category(setup, monkeypatch):

@@ -155,6 +155,7 @@ class SkillCatalogItem(TypedDict, total=False):
     description: str
     pitch: str  # the catalog's one line for people ("" when it has none)
     needs: Optional[str]  # the prerequisite in words ("Needs a Telegram bot token"); "" none, null the catalog says nothing
+    mark: str  # ``needs`` in a few words ("bot token"); "" when the catalog gives none
     category: List[str]
     version: str
     digest: str
@@ -306,7 +307,7 @@ class StarterConnection(TypedDict, total=False):
 class StarterSkillItem(TypedDict, total=False):
     """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
     ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
-    when the catalog says nothing); ``recommended`` means ticked by the starter list; ``needs_keys`` names every
+    when the catalog says nothing) and ``mark`` the same in a few words for its row; ``recommended`` means ticked by the starter list; ``needs_keys`` names every
     setting the skill reads, required or optional."""
 
     id: Required[str]
@@ -314,6 +315,7 @@ class StarterSkillItem(TypedDict, total=False):
     title: str
     pitch: str
     needs: Optional[str]
+    mark: str
     description: str
     icon: Dict[str, Any]  # the catalog's icon spec, {} for none
     official: bool

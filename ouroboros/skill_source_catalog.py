@@ -228,12 +228,13 @@ def _hub_entry(raw: Any, stem: str, clone: pathlib.Path) -> Dict[str, Any]:
     return _with_catalog_words(entry, raw)
 
 
-_CATALOG_WORDS = ("title", "pitch", "needs")
+_CATALOG_WORDS = ("title", "pitch", "needs", "mark")
 
 
 def _with_catalog_words(entry: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
-    """``entry`` with the catalog's own optional words for people from ``raw`` (a hub entry, a ``builtin.json`` row).
-    A blank ``needs`` is kept: the catalog says the skill needs nothing, where an absent one says nothing at all."""
+    """``entry`` with the catalog's own optional words for people from ``raw`` (a hub entry, a ``builtin.json`` row):
+    ``mark`` is ``needs`` in a few words («Gemini key»). A blank ``needs`` is kept: the catalog says the skill needs
+    nothing, where an absent one says nothing at all."""
     entry.update({key: raw[key].strip() for key in _CATALOG_WORDS
                   if isinstance(raw.get(key), str) and (raw[key].strip() or key == "needs")})
     return entry
@@ -491,7 +492,7 @@ def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[D
         item = {
             "id": f"{row['id']}/{entry['name']}", "source_id": row["id"], "source_name": row["name"],
             "trust": row["trust"], "name": entry["name"], "title": entry.get("title", ""), "description": entry.get("description", ""),
-            "pitch": entry.get("pitch", ""), "needs": entry.get("needs"),
+            "pitch": entry.get("pitch", ""), "needs": entry.get("needs"), "mark": entry.get("mark", ""),
             "category": list(entry.get("category") or []), "version": entry.get("version", ""),
             "digest": entry.get("digest", ""), "official": is_official,
             "recommended": is_official and endorsed.get("recommended") is True,
