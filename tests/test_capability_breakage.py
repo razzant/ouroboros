@@ -113,6 +113,8 @@ def test_a_skill_not_live_or_missing_a_permission_is_dated_and_a_live_one_is_not
     assert breakage.start_notice_rows(_work(tmp_path), []) == [{"surface": "skill", "reason": "capability_broken", "error": (
         f"desk: permission accessibility unavailable since {since} (accessibility_untrusted; repair: owner)")}]
     monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: SimpleNamespace(enabled=False))
+    assert breakage.start_notice_rows(_work(tmp_path), []) != []  # no state file changed: no new lookup
+    (path.parent / "enabled.json").write_text(json.dumps({"enabled": False}), encoding="utf-8")  # the owner's Off
     assert breakage.start_notice_rows(_work(tmp_path), []) == []  # an owner-disabled skill is not broken
 
 

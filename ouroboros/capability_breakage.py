@@ -29,6 +29,9 @@ _TOLD = "_capability_breakage_told"  # on the work's ToolContext: the broken fac
 _NOT_MEANT_TO_RUN = frozenset({"disabled", "not_extension", "missing"})
 
 Facts = Dict[str, str]
+# skill name -> (its state files' stat signature, whether it is installed and switched on): a skill lookup parses
+# and hashes the payload, so a round pays it only after one of those files changed (bounded by candidate skills).
+_SWITCH: Dict[str, Tuple[tuple, bool]] = {}
 
 
 def _since(value: Any) -> str:
@@ -130,16 +133,33 @@ def _skill_facts(root: pathlib.Path) -> Tuple[Facts, Facts]:
             if record.get("status") == health.LIVE:
                 working[f"skill:{name}"] = f"live as observed {observed.get('ts')}"
             continue
-        try:  # a record can outlive its skill; an uninstalled or owner-disabled one is not broken
-            from ouroboros.skill_loader import find_skill
-
-            skill = find_skill(root, name)
-            if skill is None or not skill.enabled:
-                continue
-        except Exception:
-            pass
-        broken[f"skill:{name}"] = text
+        if _switched_on(root, name):  # a record can outlive its skill; an uninstalled or owner-disabled one is not broken
+            broken[f"skill:{name}"] = text
     return broken, working
+
+
+def _switched_on(root: pathlib.Path, name: str) -> bool:
+    """Whether the skill is installed and enabled, looked up again only when its state files changed."""
+    def stamp(leaf: str) -> Any:
+        try:
+            info = (root / "state" / "skills" / name / leaf).stat()
+            return info.st_mtime_ns, info.st_size
+        except OSError:
+            return None
+
+    signature = (str(root), *(stamp(leaf) for leaf in ("health.json", "enabled.json", "uninstalled.json")))
+    held = _SWITCH.get(name)
+    if held is not None and held[0] == signature:
+        return held[1]
+    try:
+        from ouroboros.skill_loader import find_skill
+
+        skill = find_skill(root, name)
+        switched = skill is not None and bool(skill.enabled)
+    except Exception:  # an unreadable skill keeps its record's own word, as the regression alarm does
+        switched = True
+    _SWITCH[name] = (signature, switched)
+    return switched
 
 
 def read_facts(root: pathlib.Path, *, mcp: bool = True, skills: bool = True) -> Tuple[Facts, Facts]:
