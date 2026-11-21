@@ -235,11 +235,19 @@ def _gzip_app(tmp_path):
     from starlette.responses import JSONResponse, Response, StreamingResponse
     from starlette.routing import WebSocketRoute
 
+    import sqlite3
+
+    from ouroboros.gateway import files
     from ouroboros.gateway.task_archive import DescriptorResponse
 
     big = JSONResponse({"rows": ["x" * 40] * 200})
     stored = tmp_path / "result.txt"
     stored.write_bytes(b"result line\n" * 500)
+    database = tmp_path / "snapshot.txt"  # a database under a text name is streamed, without ranges
+    with sqlite3.connect(database) as connection:
+        connection.execute("create table t (v text)")
+        connection.executemany("insert into t values (?)", [("row " * 50,)] * 100)
+    connection.close()
 
     async def chunks(*parts):
         for part in parts or (b"data: one\n\n" * 200, b"data: two\n\n" * 200):
@@ -263,6 +271,7 @@ def _gzip_app(tmp_path):
         Route("/image", lambda _r: Response(b"z" * 4096, media_type="image/png")),
         Route("/api/tasks/t1/artifacts/result.txt",
               lambda _r: DescriptorResponse(stored.open("rb"), "result.txt", stored.stat(), "ab" * 32)),
+        Route("/api/files/content", lambda _r: files._file_response(database, media_type="text/plain")),
         WebSocketRoute("/ws", echo),
         *ServedUI(REPO).mounts(),
     ]
@@ -271,7 +280,7 @@ def _gzip_app(tmp_path):
 
 @pytest.mark.parametrize("lines, accepted", [
     ([b"gzip"], True), ([b"GZIP"], True), ([b"br, gzip;q=0.5"], True), ([b"br", b"gzip"], True),
-    ([b"gzip;q=0"], False), ([b"br, gzip; q=0.0"], False), ([b"x-notgzip"], False), ([b"identity"], False), ([], False),
+    ([b"gzip;q=0, gzip;q=0.5"], True), ([b"gzip;q=0.5, gzip;q=0"], True), ([b"gzip;q=0"], False), ([b"br, gzip; q=0.0"], False), ([b"x-notgzip"], False), ([b"identity"], False), ([], False),
 ])
 def test_gzip_is_accepted_by_a_nonzero_gzip_token_in_any_line(lines, accepted):
     from starlette.datastructures import Headers
@@ -352,6 +361,7 @@ def test_the_gzip_variant_of_an_interface_file_has_a_weak_validator_and_no_range
         whole = client.get("/static/ui.css", headers=plain)
         weak = packed.headers["etag"]
         revalidated = client.get("/static/ui.css", headers={**gz, "If-None-Match": weak})
+        strong = client.get("/static/ui.css", headers={**plain, "If-None-Match": whole.headers["etag"]})
         resumed = client.get("/static/ui.css", headers={**gz, "Range": "bytes=0-7", "If-Range": weak})
         ranged = client.get("/static/ui.css", headers={**plain, "Range": "bytes=0-7", "If-Range": whole.headers["etag"]})
         head = client.head("/static/ui.css", headers=gz)
@@ -359,7 +369,8 @@ def test_the_gzip_variant_of_an_interface_file_has_a_weak_validator_and_no_range
     assert weak == "W/" + whole.headers["etag"] and "accept-ranges" not in packed.headers
     assert whole.headers["accept-ranges"] == "bytes" and "content-encoding" not in whole.headers
     assert packed.headers["vary"] == whole.headers["vary"] == revalidated.headers["vary"] == "Accept-Encoding"
-    assert revalidated.status_code == 304
+    assert revalidated.status_code == strong.status_code == 304
+    assert revalidated.headers["etag"] == weak and strong.headers["etag"] == whole.headers["etag"]
     assert resumed.status_code == 200 and resumed.headers["content-encoding"] == "gzip" and resumed.content == css
     assert ranged.status_code == 206 and ranged.content == css[:8] and "content-encoding" not in ranged.headers
     assert "content-encoding" not in head.headers and head.headers["content-length"] == str(len(css))
@@ -372,10 +383,12 @@ def test_stored_files_outside_the_interface_trees_pass_byte_for_byte(tmp_path):
         whole = client.get("/api/tasks/t1/artifacts/result.txt", headers=gz)
         part = client.get("/api/tasks/t1/artifacts/result.txt", headers={**gz, "Range": "bytes=0-9"})
         builtin = client.get("/static/theme.js", headers=gz)
+        database = client.get("/api/files/content", headers=gz)
     assert "content-encoding" not in whole.headers and whole.content == stored
     assert whole.headers["content-length"] == str(len(stored)) and whole.headers["accept-ranges"] == "bytes"
     assert whole.headers["x-ouroboros-artifact-sha256"] == "ab" * 32 and not whole.headers["etag"].startswith("W/")
     assert part.status_code == 206 and part.content == stored[:10]
+    assert database.status_code == 200 and "content-encoding" not in database.headers
     assert builtin.headers["content-encoding"] == "gzip" and builtin.content == (WEB / "theme.js").read_bytes()
 
 

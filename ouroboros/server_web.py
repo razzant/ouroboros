@@ -113,16 +113,17 @@ def _accepts_gzip(headers: Headers) -> bool:
             pairs = (param.partition("=") for param in params.split(";"))
             weight = next((value for key, _, value in pairs if key.strip().lower() == "q"), "1")
             try:
-                return float(weight) > 0
+                if float(weight) > 0:
+                    return True
             except ValueError:
-                return False
+                pass  # an unreadable weight refuses this token; a later one may still accept
     return False
 
 
 class GzipText:
     """gzip a GET's 200 text answer of 1 KiB or more for a client that accepts it, as nginx does: the
-    compressed variant's ETag turns weak and its ``Accept-Ranges`` goes, and every 200 of such a type and
-    every 304 says ``Vary: Accept-Encoding``. HEAD, sockets, event streams and other types, downloads
+    compressed variant's ETag turns weak (a 304 answering that weak form repeats it) and its ``Accept-Ranges``
+    goes, and every 200 of such a type and every 304 says ``Vary: Accept-Encoding``. HEAD, sockets, event streams and other types, downloads
     (``Content-Disposition``), encoded bodies and stored files outside the interface's own trees (an answer
     offering ``Accept-Ranges``) pass untouched. A declared length decides the threshold, else the first
     chunk; a streamed body is flushed per chunk, so compression never holds back what was sent."""
@@ -134,7 +135,9 @@ class GzipText:
         if scope["type"] != "http" or scope["method"] != "GET":
             await self.app(scope, receive, send)
             return
-        wants = _accepts_gzip(Headers(scope=scope))
+        request = Headers(scope=scope)
+        wants = _accepts_gzip(request)
+        validators = {tag.strip() for tag in ",".join(request.getlist("if-none-match")).split(",")}
         interface_file = str(scope.get("path") or "").startswith(tuple(p + "/" for p in ServedUI.STATIC_PREFIXES))
         start: dict | None = None
         gzip: Any = None
@@ -158,6 +161,9 @@ class GzipText:
                     edit = MutableHeaders(raw=list(message["headers"]))
                     edit.add_vary_header("Accept-Encoding")
                     message = {**message, "headers": edit.raw}
+                    etag = edit.get("etag", "")
+                    if message["status"] == 304 and etag[:2] != "W/" and "W/" + etag in validators:
+                        edit["ETag"] = "W/" + etag  # the stored gzip variant is revalidated by its own weak form
                     length = headers.get("content-length", "")
                     if eligible and wants and not (length.isdigit() and int(length) < _GZIP_MIN_BYTES):
                         start = message  # held until the first body: a single message gets its own length
