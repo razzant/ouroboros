@@ -8,6 +8,7 @@ export function bindContextReport(button, mount) {
     let stopTheme = () => {};
     const close = () => {
         stopTheme();
+        stopTheme = () => {};  // spent: a repeated close calls nothing, and the closed frame is no longer reachable from here
         mount.replaceChildren();
         mount.hidden = true;
         button.setAttribute('aria-expanded', 'false');
