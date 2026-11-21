@@ -1542,13 +1542,14 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
                 # Read-only: a worker's row also names the companion failures the server last recorded.
                 live = show_recorded_companion_health(
                     runtime_state_for_loaded_skill(s, drive_root, skills=skills), drive_root, s.name)
-            except Exception:
+            except Exception:  # a gap, never "not an extension": the catalog says it could not read this state
                 log.debug("extension liveness projection failed for %s", s.name, exc_info=True)
                 live = {}
         rows[-1].update({
             "desired_live": bool(live.get("desired_live")),
             "live_loaded": bool(live.get("live_loaded")),
-            "live_reason": str(live.get("reason") or "not_extension"),
+            "live_reason": str(live.get("reason") or ("load_state_unreadable" if s.manifest.is_extension()
+                                                       and not s.identity_collision else "not_extension")),
             "process": str(live.get("process") or ""),
         })
         if live.get("load_error"):

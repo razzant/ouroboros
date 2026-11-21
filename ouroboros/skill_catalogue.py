@@ -235,7 +235,8 @@ def _encode(value: Any) -> str:
 # The load gate's refusals (``desired_live`` false) that readiness does not compute itself; every other one repeats a
 # readiness blocker. A reason over a desired state (``desired_live`` true: loaded or not in this process, a failed load
 # held in its memory, a companion's health) is the running process's, never the skill's configuration.
-_GATE_ONLY_REASONS = ("deployment_untrusted", "deps_declaration_desync")
+_GATE_ONLY_REASONS = ("deployment_untrusted", "deps_declaration_desync", "load_state_unreadable")
+_GATE_WORDS = {"load_state_unreadable": "the host could not read whether this extension is loaded"}
 
 
 def skill_status(row: Any) -> dict:
@@ -255,7 +256,8 @@ def skill_status(row: Any) -> dict:
     gate = str(row.get("live_reason") or "")
     if row.get("type") == "extension" and not row.get("desired_live") and gate and gate != "not_extension" and (
             not reasons or gate in _GATE_ONLY_REASONS):
-        words = str(row.get("load_error") or "") if gate in _GATE_ONLY_REASONS or gate.startswith("deps_") else ""
+        words = _GATE_WORDS.get(gate) or (str(row.get("load_error") or "")
+                                          if gate in _GATE_ONLY_REASONS or gate.startswith("deps_") else "")
         reasons.append(f"{gate}: {words}" if words else gate)
     notes = [str(item) for item in readiness.get("notes") or [] if str(item).strip()]
     return {"ready": not reasons, "reasons": reasons, "notes": notes}

@@ -245,3 +245,30 @@ def test_a_source_folder_the_walk_cannot_list_is_named_beside_the_readable_cards
     os.utime(hidden)  # its permissions restored: the folder changed, so the walk lists it again
     readable = _context_shape(tmp_path)
     assert "- hidden-guide: d" in readable.full_text and "could not be read" not in readable.full_text
+
+
+def test_an_extension_whose_load_state_cannot_be_read_is_not_ready_and_an_instruction_stays_ready(
+        tmp_path, monkeypatch):
+    folder = tmp_path / "skills" / "external" / "mail"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nname: mail\ndescription: Mail.\nversion: '1'\ntype: extension\n"
+                                     "entry: plugin.py\n---\nB\n", encoding="utf-8")
+    (folder / "plugin.py").write_text("def register(api):\n    return None\n", encoding="utf-8")
+    (tmp_path / "state" / "skills" / "mail").mkdir(parents=True)
+    save_enabled(tmp_path, "mail", True, actor="owner_ui")
+    [mail] = [skill for skill in discover_skills(tmp_path) if skill.name == "mail"]
+    (tmp_path / "state" / "skills" / "mail" / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": mail.content_hash}), encoding="utf-8")
+    _skill(tmp_path, "guide")
+
+    def unreadable(*_args, **_kwargs):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr("ouroboros.extension_loader.runtime_state_for_loaded_skill", unreadable)
+    rows = {row["name"]: row for row in summarize_skills(tmp_path)["skills"]}
+    assert rows["mail"]["live_reason"] == "load_state_unreadable"
+    assert skill_status(rows["mail"])["reasons"][-1] == (
+        "load_state_unreadable: the host could not read whether this extension is loaded")
+    assert rows["guide"]["live_reason"] == "not_extension" and skill_status(rows["guide"])["ready"] is True
+    card = _section(tmp_path).full_text.split("\n- mail ", 1)[1].split("\n- ", 1)[0]
+    assert "Status: not ready — load_state_unreadable: the host could not read whether this extension is loaded" in card
