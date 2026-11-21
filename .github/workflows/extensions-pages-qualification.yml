@@ -1,0 +1,458 @@
+# QA transport paths (relative to PRODUCT_SHA):
+#   next-r3.yml        -> .github/workflows/extensions-pages-qualification.yml
+#   check_pages-r3.py  -> .github/qa/check_pages.py
+name: Extensions pages · focused Linux check
+on:
+  push:
+    branches: [qa/extensions-pages-linux-20261118]
+permissions:
+  contents: read
+
+jobs:
+  pages:
+    if: >-
+      github.repository == 'razzant/ouroboros' &&
+      github.ref == 'refs/heads/qa/extensions-pages-linux-20261118' &&
+      github.event.before == '871b20255eedf4a22c07376c303bb44e905cb5a1' &&
+      !github.event.created && !github.event.deleted && !github.event.forced &&
+      github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      PRODUCT_SHA: d64bd45be2198542eb282d8f2c62776c6393cb4b
+      BASE: 1b67be30c583e8ffdfc6bd9e2ca6ed5e23256c67
+      OLD_QA: 871b20255eedf4a22c07376c303bb44e905cb5a1
+      # v1.62.0-noble index sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d
+      IMAGE: mcr.microsoft.com/playwright/python@sha256:51d31fdfacb0cff99a1a724152e34ae408d2bd4e7da310ff157450f49261cc59
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify both transport parents and detach at the product
+        id: pin
+        timeout-minutes: 4
+        env:
+          HOST_KIND: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ $HOST_KIND == github-hosted && $(uname -sm) == 'Linux x86_64' ]]
+          [[ $PRODUCT_SHA =~ ^[0-9a-f]{40}$ && $BASE =~ ^[0-9a-f]{40}$ && $BASE != "$PRODUCT_SHA" ]]
+          [[ $(git rev-parse HEAD) == "$GITHUB_SHA" ]]
+          [[ $(git rev-list --parents -n1 HEAD) == "$GITHUB_SHA $PRODUCT_SHA $OLD_QA" ]]
+          git merge-base --is-ancestor "$BASE" "$PRODUCT_SHA"
+          if git merge-base --is-ancestor "$OLD_QA" "$PRODUCT_SHA"; then exit 1; else test "$?" -eq 1; fi
+          workflow=.github/workflows/extensions-pages-qualification.yml
+          helper=.github/qa/check_pages.py
+          diff -u <(printf 'A\t%s\n' "$helper" "$workflow") <(git diff --no-renames --name-status "$PRODUCT_SHA" HEAD)
+          q="$RUNNER_TEMP/extensions-next"
+          mkdir -p "$q"/{kit,deps,results/source}
+          cp "$helper" "$q/kit/check_pages.py"
+          git checkout --quiet --detach "$PRODUCT_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          tree=$(git rev-parse HEAD^{tree})
+          test "$(git write-tree)" = "$tree"
+          base_tree=$(git rev-parse "$BASE^{tree}")
+          git diff --no-renames --name-only --diff-filter=AM "$BASE" "$PRODUCT_SHA" -- 'web/tests/*.test.js' |
+            sed 's|^web/||' > "$q/kit/changed-node.txt"
+          # Local clones keep their own index and object store. Only these clean repositories enter the guest.
+          for root in product base; do
+            rev=$PRODUCT_SHA
+            if [[ $root == base ]]; then rev=$BASE; fi
+            git clone --quiet --no-checkout -- "$GITHUB_WORKSPACE" "$q/$root"
+            git -C "$q/$root" checkout --quiet --detach "$rev"
+            git -C "$q/$root" remote remove origin
+            test ! -e "$q/$root/.git/objects/info/alternates"
+          done
+          printf 'transport=%s\nproduct=%s\nbase=%s\ntree=%s\n' "$GITHUB_SHA" "$PRODUCT_SHA" "$BASE" "$tree" > "$q/results/source/commits.txt"
+          printf 'Q=%s\nPRODUCT_TREE=%s\nBASE_TREE=%s\n' "$q" "$tree" "$base_tree" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        timeout-minutes: 3
+        with:
+          version: '0.12.1'
+          enable-cache: false
+
+      - name: Stage the pinned public runtimes and browser image
+        id: setup
+        timeout-minutes: 18
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/amd64
+          deps="$Q/deps"
+          (cd "$deps"; PYTHON_STANDALONE_DEST="$deps/python" PYTHON_STANDALONE_INTERPRETER_ONLY=1 bash "$GITHUB_WORKSPACE/scripts/download_python_standalone.sh")
+          UV_PROJECT_ENVIRONMENT="$deps/venv" uv sync --locked --extra browser --group dev --no-install-project --no-python-downloads --python "$deps/python/bin/python3"
+          python3 -I -S scripts/download_node_standalone.py --destination "$deps/node"
+          test "$("$deps/node/bin/node" --version)" = v24.22.3
+          # Read node:test's structured events. Never forward test stdout, stderr or assertion payloads.
+          cat > "$Q/kit/node-report.mjs" <<'JS'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          import { relative } from 'node:path';
+
+          const editor = 'a form kept for a server removed elsewhere stays reachable from the list and is not replaced by a new server of its ID';
+          const knownSkips = new Map([
+            ['tests/chat_card_row_placement.test.js::cold bounded receipt history renders canonical truth in a new Chat',
+              [true, 'The paired pytest supplies COLD_RECEIPT_PROJECTION.']],
+            ['tests/main_durable_edges.test.js::native Project nonclean final keeps one answer and limitation live and after actual history assembly',
+              ['The paired pytest generates the production history payload.', 'MAIN_REVIEW_HISTORY_PAYLOAD']],
+            ['tests/review_landing_relation.test.js::two real commits under one record: the adopted one keeps its own decision after a cold reload',
+              [true, 'The paired pytest supplies OURO_TEST_LANDING_SOURCES.']],
+          ]);
+
+          export default async function* report(events) {
+            const focused = process.env.QA_FOCUSED === '1';
+            const pending = new Set(focused ? ['tests/settings_tools_models.test.js'] :
+              readFileSync('/qa/changed-node.txt', 'utf8').trim().split('\n').filter(Boolean));
+            let summary, passed = 0, fileOnly = 0, skipped = 0, todo = 0, editorPasses = 0, unexpected = 0;
+            for await (const { type, data } of events) {
+              if (type === 'test:summary' && !data.file) summary = data;
+              if (type !== 'test:pass' && type !== 'test:fail') continue;
+              const file = data.file ? relative(process.cwd(), data.file) : '';
+              const key = file + '::' + data.name;
+              const row = { file: file.slice(0, 180), case: data.name.slice(0, 240) };
+              const directive = ['skip', 'todo', 'expectFailure'].find(k => data[k] !== undefined);
+              if (directive) {
+                if (directive === 'skip') skipped++;
+                if (directive === 'todo') todo++;
+                const known = knownSkips.get(key);
+                const reviewed = !focused && directive === 'skip' && known?.[0] === data.skip;
+                if (!reviewed) unexpected++;
+                const reason = typeof data[directive] === 'string' ? data[directive].slice(0, 240) : '';
+                yield JSON.stringify({ ...row, outcome: directive, reason, basis: known?.[1], reviewed }) + '\n';
+              } else if (type === 'test:fail') {
+                unexpected++;
+                yield JSON.stringify({ ...row, outcome: 'failed' }) + '\n';
+              } else if (data.details?.type !== 'suite') {
+                if (data.name === file || data.name === data.file) {
+                  fileOnly++;
+                  continue;
+                }
+                passed++;
+                pending.delete(file);
+                if (file === 'tests/settings_tools_models.test.js' && data.name === editor) {
+                  editorPasses++;
+                  yield JSON.stringify({ ...row, outcome: 'passed' }) + '\n';
+                }
+              }
+            }
+            const c = summary?.counts;
+            const ok = summary?.success && c.passed === passed + fileOnly && passed > 0 && c.failed === 0 && c.cancelled === 0
+              && c.skipped === skipped && c.todo === todo && c.tests === passed + fileOnly + skipped + todo
+              && unexpected === 0 && pending.size === 0 && editorPasses === 1 && (!focused || c.tests === 1);
+            const verdict = !ok ? 'failed' : skipped || todo ? 'partial' : 'passed';
+            yield JSON.stringify({ verdict, counts: c, actualPasses: passed, fileOnly, pending: [...pending], unexpected, editorPasses }) + '\n';
+            appendFileSync('/results/summary.txt', 'node=' + verdict + ' passed=' + passed + ' skipped=' + skipped + ' todo=' + todo + '\n');
+            if (!ok) process.exitCode = 1;
+          }
+          JS
+          # Keep absolute interpreter/venv paths valid in the guest; expose just these dependencies.
+          cat > "$Q/lane" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          name=$1 seconds=$2 engine=$3; shift 3
+          dest="$Q/results/$name"; mkdir "$dest"
+          deps="$Q/deps"
+          root=product rev=$PRODUCT_SHA tree=$PRODUCT_TREE
+          if [[ $name == *-base ]]; then root=base rev=$BASE tree=$BASE_TREE; fi
+          browser_env=()
+          if [[ $engine != none ]]; then
+            case "$engine" in
+              chromium|webkit) default_engine=$engine; expected=$engine ;;
+              native) default_engine=chromium; expected=chromium,webkit ;;
+              *) exit 2 ;;
+            esac
+            browser_env=(--env "PLAYWRIGHT_NODEJS_PATH=$deps/node/bin/node" --env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+              --env OUROBOROS_RUN_UI_SMOKE=1 --env "OUROBOROS_UI_BROWSER_ENGINE=$default_engine"
+              --env "OUROBOROS_EXPECT_BROWSER_ENGINES=$expected")
+          fi
+          rc=0
+          docker run --rm --pull never --platform linux/amd64 --init --network none \
+            --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            --shm-size=1g --workdir /src \
+            --volume "$Q/$root:/src:ro" --volume "$Q/kit:/qa:ro" \
+            --volume "$deps:$deps:ro" --volume "$dest:/results:rw" \
+            --volume /usr/bin/git:/usr/bin/git:ro --volume /usr/lib/git-core:/usr/lib/git-core:ro \
+            --env HOME=/tmp/extensions-home --env USER=qa --env LOGNAME=qa --env CI=true --env LANG=C.UTF-8 \
+            --env "PATH=$deps/node/bin:$deps/venv/bin:/usr/local/bin:/usr/bin:/bin" \
+            "${browser_env[@]}" --env "EXPECTED_SHA=$rev" --env "EXPECTED_TREE=$tree" \
+            --env "VIRTUAL_ENV=$deps/venv" --env PYTHONPATH=/src --env PYTHONDONTWRITEBYTECODE=1 \
+            --env "OURO_SIZE_RATCHET_BASE_REF=$BASE" --env OURO_BOOK_GROWTH_MODE=block \
+            --env GIT_OPTIONAL_LOCKS=0 --env GIT_TERMINAL_PROMPT=0 --env GIT_CONFIG_NOSYSTEM=1 --env GIT_CONFIG_GLOBAL=/dev/null \
+            "$IMAGE" timeout -k 10s "$seconds" bash -ceu '
+              mkdir -m 700 -p "$HOME"
+              verify_root() {
+                test -d .git && test ! -e .git/objects/info/alternates || return 2
+                [[ $(git rev-parse --absolute-git-dir) == "$PWD/.git" && $(git rev-parse HEAD) == "$EXPECTED_SHA" ]]
+                [[ $(git rev-parse HEAD^{tree}) == "$EXPECTED_TREE" && $(git remote) == "" ]]
+                git cat-file -e "$OURO_SIZE_RATCHET_BASE_REF^{commit}"
+                git ls-files --error-unmatch -- tests/test_docs_sync.py scripts/regenerate_inventories.py >/dev/null
+                git diff --exit-code --quiet HEAD --
+                git diff --cached --exit-code --quiet HEAD --
+                local others
+                others=$(git ls-files --others)
+                test -z "$others"
+              }
+              verify_root
+              printf "mounted_commit=%s mounted_tree=%s\n" "$EXPECTED_SHA" "$EXPECTED_TREE" >> /results/summary.txt
+              # Python suites may create fixtures beside their own sources. Give them disposable,
+              # independent files and Git metadata. The originals stay mounted read-only.
+              if [[ ${2:-} == /qa/check_pages.py && ( ${3:-} == python || ${3:-} == broad ) ]]; then
+                cp -R --preserve=mode,timestamps --reflink=auto -- /src /tmp/qa-checkout
+                cd /tmp/qa-checkout
+                export PYTHONPATH=$PWD
+                verify_root
+              fi
+              exec "$@"
+            ' sh "$@" >/dev/null 2>&1 || rc=$?
+          printf 'lane=%s exit=%s budget_seconds=%s\n' "$name" "$rc" "$seconds" >> "$dest/summary.txt"
+          cat "$dest/summary.txt"
+          if grep -q '^pytest=partial ' "$dest/summary.txt"; then
+            printf '%s: ' "$name" >> "$GITHUB_STEP_SUMMARY"
+            grep '^pytest=partial ' "$dest/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+          SH
+          chmod +x "$Q/lane"
+          "$Q/lane" runtime 45 chromium python -c '
+          import os, sys, subprocess
+          from importlib.metadata import version
+          from playwright._impl._driver import compute_driver_executable
+          assert sys.version_info[:3] == (3, 12, 15) and version("playwright") == "1.62.0"
+          assert sys.prefix == os.environ["VIRTUAL_ENV"] and version("mcp") == "1.30.0"
+          assert os.path.samefile(compute_driver_executable()[0], os.environ["PLAYWRIGHT_NODEJS_PATH"])
+          assert subprocess.check_output(["node", "--version"], text=True).strip() == "v24.22.3"
+          assert os.getuid() and not os.path.exists("/var/run/docker.sock")
+          assert os.listdir("/sys/class/net") == ["lo"]
+          from pathlib import Path
+          Path("/results/runtime.txt").write_text("Python 3.12.15; Playwright 1.62.0; Node v24.22.3; linux/amd64\n")
+          '
+          "$Q/lane" checkout-base 45 none git ls-files --error-unmatch -- tests/test_docs_sync.py
+
+      - name: Render the desktop and phone MCP lists first
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          rc=0
+          for engine in chromium webkit; do
+            "$Q/lane" "picture-$engine" 120 "$engine" python /qa/check_pages.py "$engine" /qa/check_pages.py::test_picture || rc=1
+          done
+          exit "$rc"
+
+      - name: Retain each available picture and its actual outcome
+        if: ${{ always() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: extensions-pictures-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extensions-next/results/source/commits.txt
+            ${{ runner.temp }}/extensions-next/results/picture-*/summary.txt
+            ${{ runner.temp }}/extensions-next/results/picture-*/cases.jsonl
+            ${{ runner.temp }}/extensions-next/results/picture-chromium/extensions-chromium-1440-light.png
+            ${{ runner.temp }}/extensions-next/results/picture-webkit/extensions-webkit-390-dark.png
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Visit all four pages, follow returns and recover a focused draft in both browsers
+        timeout-minutes: 25
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          rc=0
+          routes=tests/test_extensions_routes_browser.py
+          kept="$routes::test_retained_form_survives_accounts_then_another_extension"
+          for engine in chromium webkit; do
+            "$Q/lane" "routes-$engine" 535 "$engine" python /qa/check_pages.py "$engine" \
+              /qa/check_pages.py::test_four_pages_and_returns /qa/check_pages.py::test_circles_return /qa/check_pages.py::test_status_loss_and_recovery \
+              "$routes::test_settings_and_extensions_lead_to_each_other_and_back" \
+              "$routes::test_empty_skills_browse_link_returns_to_pressed_button" \
+              "$routes::test_browse_open_installed_returns_to_its_origin" \
+              "$routes::test_skill_form_draft_and_opener_survive_rail_switch_and_nested_return" \
+              "$routes::test_extensions_counts_label_retained_data_after_refresh_failure" \
+              "$routes::test_sources_last_page_arrival_uses_one_read_for_the_rail_and_list" \
+              "$routes::test_browse_widgets_closes_sheet_and_returns_to_its_origin" \
+              tests/test_live_conversation_browser.py::test_leaving_calls_settings_stops_the_preview_and_keeps_the_draft \
+              "$routes::test_publish_one_returns_to_the_pressed_sources_door" \
+              "$kept[draft-mcp-browser-back-390-1087]" "$kept[draft-skill-button-1440-390]" \
+              "$routes::test_voice_skill_return_restores_the_pressed_door[escape-phone]" \
+              tests/test_settings_home_browser.py::test_search_opens_a_row_where_it_lives_and_the_ask_line_leaves_a_draft || rc=1
+          done
+          # These existing cases choose Chromium and WebKit themselves.
+          geometry=tests/test_ui_skill_publication.py::test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card
+          "$Q/lane" routes-catalog 320 native python /qa/check_pages.py native \
+            "$geometry[chromium]" "$geometry[webkit]" \
+            tests/test_skills_sources_browser.py::test_addressed_installed_card_opens_through_search_and_filter \
+            tests/test_skills_sources_browser.py::test_the_detail_sheet_reads_the_entry_and_returns_focus tests/test_skills_sources_browser.py::test_one_name_two_sources_compare_and_replace_is_one_install tests/test_skills_sources_browser.py::test_browse_words_hold_when_the_source_list_answers_late_with_another_setting || rc=1
+          exit "$rc"
+
+      - name: Retain navigation results before editor and wider checks
+        if: ${{ always() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: extensions-routes-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extensions-next/results/routes-*/summary.txt
+            ${{ runner.temp }}/extensions-next/results/routes-*/cases.jsonl
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Exercise the editor after Save, overlapping writes and delayed reads
+        timeout-minutes: 23
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          rc=0
+          editor=tests/test_settings_tools_models_browser.py
+          for engine in chromium webkit; do
+            "$Q/lane" "editor-$engine" 450 "$engine" python /qa/check_pages.py "$engine" \
+              "$editor::test_mcp_address_typed_after_save_belongs_to_the_next_save" \
+              "$editor::test_mcp_draft_after_save_and_another_list_write" \
+              "$editor::test_mcp_header_stored_by_one_save_is_kept_by_the_next" \
+              tests/test_extensions_routes_browser.py::test_skill_save_preserves_edits_until_their_own_save || rc=1
+          done
+          "$Q/lane" editor-loopback 400 native python /qa/check_pages.py native \
+            tests/test_mcp_headers_browser.py::test_late_status_keeps_typed_field \
+            tests/test_mcp_headers_browser.py::test_mcp_header_editor_ui || rc=1
+          exit "$rc"
+
+      - name: Check the editor regression, real MCP stdio, static contracts and component map
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 14
+        run: |
+          rc=0
+          "$Q/lane" previous-editor 60 none bash -ceu 'cd web; export QA_FOCUSED=1
+            node --test --test-reporter=/qa/node-report.mjs --test-reporter-destination=/results/cases.jsonl \
+            --test-name-pattern="^a form kept for a server removed elsewhere stays reachable from the list and is not replaced by a new server of its ID$" tests/settings_tools_models.test.js' || rc=1
+          grep -Fxq 'node=passed passed=1 skipped=0 todo=0' "$Q/results/previous-editor/summary.txt" || rc=1
+          # The selection unit case supplies its own driver; both SDK cases start synthetic stdio children.
+          "$Q/lane" mcp-stdio 120 none python /qa/check_pages.py python \
+            tests/test_node_runtime_policy.py::test_a_stdio_mcp_server_gets_the_driver_node_unless_its_config_chose_one \
+            tests/test_mcp_client.py::test_real_stdio_process_observes_selected_environment_and_cwd \
+            tests/test_mcp_client.py::test_real_stdio_invalid_stdout_does_not_leak_environment_in_sdk_traceback || rc=1
+          inherited=tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module
+          "$Q/lane" structure 400 none python /qa/check_pages.py python -m 'not size_ratchet' \
+            tests/test_*_static.py tests/test_docs_sync.py tests/test_reference_book_budgets.py tests/test_reference_book_balance.py \
+            tests/test_domain_manifest.py tests/test_domain_report.py tests/test_architecture_facts.py \
+            --deselect="$inherited" || rc=1
+          if "$Q/lane" docs-map 85 none python /qa/check_pages.py docs-map "$inherited"; then
+            decision=passed
+          else
+            product_rc=$?
+            base_rc=0
+            "$Q/lane" docs-map-base 85 none python /qa/check_pages.py docs-map "$inherited" || base_rc=$?
+            gap=ouroboros/gateway/places_api.py
+            if [[ $product_rc == 1 && $base_rc == 1 ]] &&
+                grep -Fxq "$gap" "$Q/results/docs-map/known-map-failure.txt" &&
+                grep -Fxq "$gap" "$Q/results/docs-map-base/known-map-failure.txt"; then
+              decision="inherited assertion on both commits ($gap)"
+            else
+              decision="failed (product=$product_rc base=$base_rc)"
+              rc=1
+            fi
+          fi
+          printf 'Component map: %s\n' "$decision" | tee -a "$GITHUB_STEP_SUMMARY" "$Q/results/docs-map/summary.txt"
+          exit "$rc"
+
+      - name: Run the whole web Node suite with the bundled executable
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 9
+        run: |
+          "$Q/lane" node-all 510 none bash -ceu 'cd web; exec node --test --test-concurrency=2 \
+            --test-reporter=/qa/node-report.mjs --test-reporter-destination=/results/cases.jsonl tests/*.test.js'
+          grep -E '^node=(passed|partial) passed=[1-9][0-9]* skipped=[0-9]+ todo=[0-9]+$' \
+            "$Q/results/node-all/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the committed inventories and size limits against BASE
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 16
+        run: |
+          rc=0
+          "$Q/lane" inventories 140 none bash -ceu '
+            python scripts/regenerate_inventories.py --check && verdict=passed || verdict=failed
+            printf "inventory_check=%s\n" "$verdict" >> /results/summary.txt
+            test "$verdict" = passed
+          ' || rc=1
+          "$Q/lane" inventory-tests 180 none python /qa/check_pages.py python tests/test_generated_inventories.py || rc=1
+          smoke=tests/test_smoke.py
+          books=tests/test_reference_book_budgets.py
+          "$Q/lane" size 555 none python /qa/check_pages.py python -m size_ratchet \
+            "$smoke::test_no_oversized_modules" "$smoke::test_size_ratchet_manifest_matches_live_tree" \
+            "$smoke::test_size_ratchet_transition_against_explicit_base" "$smoke::test_no_extremely_oversized_functions" \
+            tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact \
+            "$books::test_a_change_does_not_grow_a_reference_book" "$books::test_a_change_does_not_grow_bible_or_the_prompts" || rc=1
+          exit "$rc"
+
+      - name: Run the floor and the changed modules' own Python tests, pairing a red with BASE
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 37
+        run: |
+          rc=0
+          mark='not integration and not browser and not ui_browser and not ui_browser_docker and not skill_smoke and not portable_detail and not size_ratchet'
+          mapfile -t floor < <(python3 -I -c 'import ast; t = ast.parse(open("ouroboros/test_selection.py", "rb").read()); print("\n".join(sorted(next(ast.literal_eval(n.value) for n in t.body if isinstance(n, ast.Assign) and any(getattr(v, "id", "") == "FLOOR_TESTS" for v in n.targets)))))')
+          owners=(tests/test_mcp_server_identity.py tests/test_client_contract_bindings.py tests/test_skill_mcp_management_contract.py tests/test_builtin_skill_source.py tests/test_builtin_skill_platforms.py tests/test_platform_install_targets.py tests/test_platform_guard.py tests/test_extension_loader.py tests/test_extension_loader_extraction.py tests/test_skill_catalogue.py tests/test_skill_lifecycle_actions.py tests/test_mcp_client.py tests/test_mcp_catalog.py tests/test_mcp_api.py tests/test_mcp_import.py tests/test_mcp_oauth_loopback.py tests/test_mcp_headers_loopback.py tests/test_skill_exec.py tests/test_skill_publish.py tests/test_skill_publish_preflight.py tests/test_skill_publish_destination.py tests/test_tool_result.py tests/test_tool_name_recovery.py tests/test_tool_classification_differential.py tests/test_deployment_extensions.py tests/test_deployment_trusted_extensions.py tests/test_extensions_api.py tests/test_live_conversation.py tests/test_live_conversation_config.py tests/test_web_utils_ssot.py tests/test_ui_control_commands.py tests/test_ui_skill_publication.py)
+          (( ${#floor[@]} > 5 && ${#owners[@]} > 20 ))
+          printf '%s\n' "${floor[@]}" > "$Q/results/source/floor.txt"
+          printf '%s\n' "${owners[@]}" > "$Q/results/source/owners.txt"
+          pair() {  # Diagnostic only. A candidate failure still fails this step.
+            local name=$1 seconds=$2 failed=()
+            [[ -s $Q/results/$name/cases.jsonl ]] || return 0
+            python3 -I -c 'import json, sys; rows = map(json.loads, open(sys.argv[1])); print(*sorted({r["case"] for r in rows if r.get("outcome") == "failed" and r.get("phase") in ("setup", "call", "teardown")}), sep="\n")' \
+              "$Q/results/$name/cases.jsonl" > "$Q/$name-failed.txt"
+            mapfile -t failed < "$Q/$name-failed.txt"
+            [[ ${#failed[@]} -gt 0 && -n ${failed[0]} ]] || return 0
+            local base_rc=0
+            "$Q/lane" "$name-base" "$seconds" none python /qa/check_pages.py broad "${failed[@]}" || base_rc=$?
+            printf 'base_replay_exit=%s (candidate remains red)\n' "$base_rc" >> "$Q/results/$name/summary.txt"
+          }
+          "$Q/lane" floor 700 none python /qa/check_pages.py broad -m "$mark" "${floor[@]}" || { rc=1; pair floor 100; }
+          "$Q/lane" owners 1200 none python /qa/check_pages.py broad -m "$mark" "${owners[@]}" || { rc=1; pair owners 120; }
+          exit "$rc"
+
+      - name: Additional changed UI suites within the remaining navigation scope
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 33
+        run: |
+          git diff --name-only --diff-filter=AM "$BASE" "$PRODUCT_SHA" -- 'tests/*_browser.py' > "$Q/results/source/changed-ui.txt"
+          extra=()
+          for suite in settings_containment settings_shell skills_read_state model_concurrency_setting; do
+            file="tests/test_${suite}_browser.py"
+            if grep -Fxq "$file" "$Q/results/source/changed-ui.txt"; then extra+=("$file"); fi
+          done
+          extra+=(tests/test_secondary_place_browser.py::test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages)
+          "$Q/lane" additional-ui 1800 native python /qa/check_pages.py native "${extra[@]}"
+
+      - name: Verify the product checkout after all attempts
+        if: ${{ always() && steps.pin.outcome == 'success' }}
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          for repo in "$GITHUB_WORKSPACE" "$Q/product" "$Q/base"; do
+            rev=$PRODUCT_SHA tree=$PRODUCT_TREE
+            if [[ $repo == "$Q/base" ]]; then rev=$BASE tree=$BASE_TREE; fi
+            test "$(git -C "$repo" rev-parse HEAD)" = "$rev"
+            test "$(git -C "$repo" rev-parse HEAD^{tree})" = "$tree"
+            test "$(git -C "$repo" write-tree)" = "$tree"
+            git -C "$repo" diff --exit-code --quiet HEAD --
+            test -z "$(git -C "$repo" ls-files --others)"
+          done
+          printf 'unchanged_tree=%s\n' "$PRODUCT_TREE" > "$Q/results/source/readback.txt"
+
+      - name: Retain bounded case reports and phase exit codes
+        if: ${{ always() && steps.pin.outcome == 'success' }}
+        timeout-minutes: 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: extensions-checks-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/extensions-next/results/*/summary.txt
+            ${{ runner.temp }}/extensions-next/results/*/cases.jsonl
+            ${{ runner.temp }}/extensions-next/results/runtime/runtime.txt
+            ${{ runner.temp }}/extensions-next/results/source/*.txt
+          retention-days: 7
+          if-no-files-found: error
