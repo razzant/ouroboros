@@ -266,7 +266,7 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
         lines.append("author_accepted=true: Current payload accepted by its author; "
                      "reviewer evidence remains at its original hash.")
     operative = list(lines)
-    count = 0
+    count, listed = 0, False
     for skill in summary.get("skills") or []:
         if not isinstance(skill, dict) or not skill.get("enabled") or not skill.get("executable_review"):
             continue
@@ -317,11 +317,10 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
             if token_effect:
                 lines.append(f"  Token effect: {token_effect}")
         if surfaces:
-            shown, more = surfaces[:8], len(surfaces) - min(len(surfaces), 8)
-            # Eight names fit the legend; a silent cut read as the whole set (the 27.10 call enabled
-            # 7 of 24 desktop tools and told the owner the rest did not exist).
-            lines.append(f"  Tools: {', '.join(shown)}" + (
-                f"; and {more} more: list_available_tools(namespace={name!r}) names them all" if more else ""))
+            # Every name, sorted so registration order never moves these cached bytes: a cut list read as the
+            # whole set (the 27.10 call enabled 7 of 24 desktop tools and told the owner the rest did not exist).
+            lines.append(f"  Tools: {', '.join(sorted(surfaces))}")
+            listed = True
         elif skill.get("runnable_via_skill_exec"):
             lines.append("  Tools: skill_exec")
         if skill.get("type") == "extension" and not skill.get("live_loaded"):
@@ -330,6 +329,9 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
         count += 1
     if count == 0:
         return ""
+    if listed:
+        lines.insert(1, 'A skill\'s "Tools" line names every tool it registers; enable_tools("<skill name>") loads '
+                        "all of them in one call where their schemas are not in the request yet.")
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
 
 

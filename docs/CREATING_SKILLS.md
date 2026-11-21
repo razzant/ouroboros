@@ -1994,7 +1994,8 @@ Companion framing and call doors: `CLIENT_CONTRACT.md`, “Live Conversation”.
 
 ```python
 def register(api):
-    # Tools — agent-callable, namespaced as ext_<len>_<token>_<name>.
+    # Tools — agent-callable, namespaced as ext_<len>_<token>_<name>. The Installed Skills
+    # catalog names all of them; enable_tools("<skill name>") loads every one in one call.
     api.register_tool(
         "search",
         handler=do_search,

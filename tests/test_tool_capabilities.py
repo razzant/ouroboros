@@ -684,26 +684,52 @@ def test_escalate_is_available_wherever_planning_runs():
                (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES))
 
 
-def test_enable_tools_answers_a_skill_name_with_its_namespace_tools():
-    """A call asked for screenshots, saw "ext_19_r_unix_computer_use: 24 tools" in the overview and
-    asked enable_tools for "unix_computer_use": the skill's name, not a tool's. The miss now names the
-    namespace and its callable tools by the exact naming rule; an unrelated miss stays a plain miss."""
+def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
+    """The 27.10 call enabled 7 of 24 desktop tools one name at a time and told the owner the rest did not
+    exist. A skill's name (or its extension namespace) now loads each of its tools exactly as naming it alone
+    would: the request's tools change once, a withheld tool is counted and never named, resident schemas
+    answer "already loaded", and a skill that is not loaded or a stray name loads nothing."""
+    from ouroboros import extension_loader
     from ouroboros.extension_surface_names import extension_surface_name
     from ouroboros.tools import tool_discovery as td
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    names = [extension_surface_name("unix_computer_use", short) for short in ("screenshot", "click")]
+    shorts = ("screenshot", "click", "key", "type_text", "scroll")
+    names = [extension_surface_name("unix_computer_use", short) for short in shorts]
+    for name in names:
+        monkeypatch.setitem(extension_loader._tools, name, {
+            "name": name, "handler": lambda ctx, **kwargs: "ok", "description": f"{name} tool",
+            "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": "unix_computer_use"})
+    monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_contract = {"disabled_tools": [names[4]]}
+    registry.set_context(ctx)
+    resident = [registry.get_schema_by_name("read_file")]
+    enabled = set()
 
-    class Registry:
-        def callable_rows(self, namespace=""):
-            rows = [{"name": name} for name in [*names, "read_file"]]
-            return [row for row in rows if not namespace or td.tool_namespace(row["name"]) == namespace]
+    out = td.enable_tools(registry, ctx, "unix_computer_use", resident, enabled)
+    loaded = sorted(names[:4])
+    assert [s["function"]["name"] for s in resident[1:]] == loaded and enabled == set(loaded)
+    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out
+    assert "unix_computer_use — 1 of its 5 tools are not callable in this task (names withheld)" in out
+    assert names[4] not in out
+    # Every member resolves exactly as when named alone: the withheld one is refused, the others load.
+    assert td._load_set(registry, [names[4]])[0] == {}
+    assert set(td._load_set(registry, names[:4])[0]) == set(loaded)
 
-    namespace = td.tool_namespace(names[0])
-    lines = td._named_namespace_guidance(Registry(), ["unix_computer_use"], discovery=True)
-    assert lines[0] == f"unix_computer_use names the namespace {namespace}, not one tool; enable its tools by their names."
-    assert any(names[0] in line for line in lines) and any(names[1] in line for line in lines)
-    assert td._named_namespace_guidance(Registry(), [namespace], discovery=True)[0].startswith(f"{namespace} names")
-    assert td._named_namespace_guidance(Registry(), ["definitely_not_a_tool", "read"], discovery=True) == []
+    again = td.enable_tools(registry, ctx, td.tool_namespace(names[0]), resident, enabled)
+    assert "Already loaded: " in again and "Call schemas loaded" not in again and len(resident) == 5
+
+    one = [registry.get_schema_by_name("read_file")]
+    single = td.enable_tools(registry, ctx, names[1], one, set())
+    assert [s["function"]["name"] for s in one] == ["read_file", names[1]] and "(all" not in single
+
+    for missing in ("windows_computer_use", "definitely_not_a_tool"):
+        untouched = [registry.get_schema_by_name("read_file")]
+        refusal = td.enable_tools(registry, ctx, missing, untouched, set())
+        assert f"❌ Not found: {missing}." in refusal and "only while that skill is enabled" in refusal
+        assert len(untouched) == 1
 
 
 def test_every_catalog_that_names_extract_pdf_text_names_read_archive():
