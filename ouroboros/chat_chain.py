@@ -83,6 +83,15 @@ def format_address(address: Dict[str, Any]) -> str:
     return f"row:{int(address['chat_id'])}@{address['ts']}#{str(address['row_sha256'])[:12]}"
 
 
+def address_text(address: Any) -> str:
+    """A recorded address as a reader prints it: ``format_address`` of a stored address, a text one as it is, ``?``
+    for none or for a stored one missing its parts (``memory_read`` covers, ranges and member listings)."""
+    try:
+        return format_address(address) if isinstance(address, dict) else str(address or "?")
+    except (KeyError, TypeError, ValueError):
+        return "?"
+
+
 def parse_address(text: str) -> Dict[str, Any]:
     match = _TEXT_ADDRESS.fullmatch(str(text or "").strip())
     if match is None:
