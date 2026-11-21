@@ -1231,6 +1231,19 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
                 assert frame.locator("#source-versions").text_content().startswith("Not read: this report did not open")
+                # The first reader wrote `not_recorded` beside `not_linked` without opening any record: its versions are
+                # as unknown as when not read, and the report's own fields stay as written. A usage-reported attempt
+                # never had a record, so its `not_recorded` keeps saying that none were recorded.
+                unread = frame.locator("#source-versions").text_content()
+                choose(gap(body="not_linked", file_trace="not_recorded", attempt_id="unlinked-first-reader"),
+                       "unlinked-first-reader", "#attempt-facts")
+                assert frame.locator("#source-versions").text_content() == unread
+                assert "No supported source versions were recorded" not in frame.locator("#source-versions").text_content()
+                written = json.loads(frame.locator("#record-body").text_content())
+                assert (written["body"], written["file_trace"]) == ("not_linked", "not_recorded")
+                choose(gap(body="receipt_only", file_trace="not_recorded", attempt_id="usage-reported"),
+                       "usage-reported", "#attempt-facts")
+                assert frame.locator("#source-versions").text_content().startswith("No supported source versions were recorded")
                 for facts_of_gap, headline, words in (
                         ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152,
                           "retry_max_bytes": 2258277}, "sealed record is larger",

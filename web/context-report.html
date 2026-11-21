@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-gSSKDIBb1SN5paNDohdKtNbxlgNPei3OFsYYBQWwDrY='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-A9eEN/GLzr6taFlNRWX2LYqbyKsA3t/FlC3BrlN9hT4='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -467,9 +467,11 @@ function show(facts, name) {
   }
   const trace = Array.isArray(facts.file_trace) ? facts.file_trace.filter((row) => row && typeof row === 'object'
     && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
+  // The first reader wrote `not_recorded` beside `not_linked` without opening any record: as unknown as `not_read`.
+  const unread = facts.file_trace === 'not_read' || (facts.file_trace === 'not_recorded' && facts.body === 'not_linked');
   byId('source-versions').textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
     'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
-    : facts.file_trace === 'not_read' ? 'Not read: this report did not open the attempt’s sealed record, so the source versions it recorded are unknown.'
+    : unread ? 'Not read: this report did not open the attempt’s sealed record, so the source versions it recorded are unknown.'
     : 'No supported source versions were recorded. Other files and offsets remain unknown.';
   byId('record-body').textContent = pretty(facts);
   status.textContent = `Showing ${name}.`;
