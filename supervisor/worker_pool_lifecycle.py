@@ -197,9 +197,11 @@ def _write_failure_result(
 ) -> str:
     """Write failure result for a crashed/orphaned task.
 
-    Returns the FINAL persisted status: if the task already reached a terminal state, the monotonic
-    guard preserves it and that existing status is returned (so the UI event matches disk);
-    otherwise the written failure status.
+    Returns the FINAL persisted status: a task that already reached a terminal state keeps its whole
+    row, and that status is returned (so the UI event matches disk); otherwise the written failure
+    status. The read below only spares work: the reducer lets a rewrite with the SAME terminal status
+    through, so a writer that settles the task before this write's transaction wins there, in the
+    projector, which leaves its row untouched.
 
     ``stop_source`` is the typed cause a known stop door passes (the owner's Restart, a graceful
     server shutdown). It lands as ``cancel_origin`` — the field a settled cancel intent records —
@@ -212,37 +214,47 @@ def _write_failure_result(
         return ""
     try:
         from ouroboros.task_results import (
-            _TRULY_TERMINAL_STATUSES, STATUS_CANCELLED, STATUS_FAILED, load_task_result,
-            write_task_result,
+            STATUS_FAILED, STATUS_COMPLETED, STATUS_REJECTED_DUPLICATE,
+            STATUS_CANCELLED, load_task_result, observed_cancel_axes, write_task_result,
         )
+        # STATUS_INTERRUPTED is not final; it is written before requeue.
+        _FINAL_STATUSES = {STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE, STATUS_CANCELLED}
         existing = load_task_result(_pool().DRIVE_ROOT, task_id, strict=True)
-        if existing and existing.get("status") in _TRULY_TERMINAL_STATUSES:
+        if existing and existing.get("status") in _FINAL_STATUSES:
             return str(existing.get("status") or "")
         final_status = status or STATUS_FAILED
-        reason_code = "worker_terminal_failure" if final_status == STATUS_FAILED else final_status
         # Reconstruct from durable llm_usage so an abnormally-finalized task does
         # not record zero cost/rounds (understating per-task + campaign metrics).
         f_cost_fields = _pool().reconstruct_task_cost(str(task_id), fields=True)
         cause = (_recorded_cancel_fields(task_id, stop_source=stop_source, reason=reason)
                  if stop_source or final_status == STATUS_CANCELLED else {})
-
-        def only_if_unsettled(current, fields):
-            if current.get("status") in _TRULY_TERMINAL_STATUSES:
-                return None  # another writer settled it during cost/intent reconstruction
-            return fields
+        def keep_settled_row(current, fields):
+            # The read above leaves a gap before this transaction, and the reducer lets a rewrite with the SAME
+            # terminal status through: a writer that settled the row meanwhile keeps its whole row (result, cause,
+            # author, stop origin). A live row's leftover code is no cause here: the cancel states its own.
+            if current.get("status") in _FINAL_STATUSES:
+                return None
+            pause = current.get("resource_limit")
+            if (final_status != STATUS_CANCELLED or current.get("reason_code") != "budget_exhausted"
+                    or not isinstance(pause, dict) or pause.get("status") != "paused_before_dispatch"
+                    or not pause.get("paused_at")):
+                return fields  # a code without its producer's dated pause record proves no event: nothing is guessed
+            # An observation only, never the cause and never read by Continue: the budget pause this work recorded, also
+            # when a Resume has since lifted it. No attempt is named: the record carries none.
+            return {**fields, "outcome_axes": observed_cancel_axes(fields["outcome_axes"], earlier_stop="budget_exhausted")}
 
         stored = write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
             final_status,
             strict_existing_dict=True,
+            _field_projector=keep_settled_row,
             result=reason,
-            _field_projector=only_if_unsettled,
-            reason_code=reason_code,
+            reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
             outcome_axes=terminal_outcome_axes(
                 lifecycle=final_status,
                 execution=EXECUTION_INFRA_FAILED if final_status == STATUS_FAILED else str(final_status or ""),
-                reason_code=reason_code,
+                reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
                 review_trigger="worker_terminal",
             ),
             **f_cost_fields,

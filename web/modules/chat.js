@@ -2276,7 +2276,11 @@ export function createChatInstance({
                     _historyRow = msg;
                     if (['quiz_answer', 'quiz_closed'].includes(msg.system_type)) chatDecision.applyQuizStateFrame(messagesDiv, { ...msg.quiz, task_id: msg.task_id });
                     if (msg.system_type !== 'task_evidence' && (isReplayEvidenceRow(msg) || msg.system_type === 'project_question_pointer')) continue;
-                    if (msg.role !== 'user') noteToolMetrics(msg.task_id, msg, msg.ts, { attempt: endings.get(msg.task_id)?.stamp.attempt });
+                    if (msg.role !== 'user' && (msg.is_progress
+                            || ['task_summary', 'task_evidence'].includes(msg.system_type)
+                            || ['task_metrics_event', 'task_eval', 'task_done'].includes(msg.type || msg.event))) {
+                        noteToolMetrics(msg.task_id, msg, msg.ts, { attempt: endings.get(msg.task_id)?.stamp.attempt });
+                    }
                     if (admitCardMetadata(msg) !== undefined) continue;
                     if (attachReviewFromRow(msg, msg.ts || '') !== undefined) continue;
                     if (attachCardRow(msg, msg.ts || '', { suppressDomInsert: true }) !== undefined) {

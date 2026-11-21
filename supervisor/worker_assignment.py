@@ -974,12 +974,13 @@ def assign_tasks() -> None:
         evo_block = "" if fenced else evolution_block_reason()
         blocked_ids = _pool()._drop_assignable_evolution_tasks(unresolved_invalid_id_set) if evo_block else []
         if blocked_ids:
-            from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+            from ouroboros.task_results import STATUS_CANCELLED, observed_cancel_axes, write_task_result
             for tid in blocked_ids:
                 try:
                     write_task_result(
-                        _pool().DRIVE_ROOT, tid, STATUS_CANCELLED, _cancel_observed=True,
-                        result="Evolution is disabled in light runtime mode.",
+                        _pool().DRIVE_ROOT, tid, STATUS_CANCELLED, _cancel_observed=True, result="Evolution is disabled in light runtime mode.",
+                        # Its own cause: the code and the execution cause a paused row kept (a budget pause's) never speak for this cancel; its other axes stay.
+                        _field_projector=lambda row, fields: {**fields, "reason_code": STATUS_CANCELLED, "outcome_axes": observed_cancel_axes(row.get("outcome_axes"), status=STATUS_CANCELLED, reason_code=STATUS_CANCELLED, cancel_policy_reason="evolution_disabled_in_light_mode")},
                     )
                 except Exception:
                     log.debug("Failed to cancel light-mode evolution task %s", tid, exc_info=True)

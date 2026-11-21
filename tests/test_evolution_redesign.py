@@ -1179,6 +1179,59 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
     clock = terminal_time_fact(stored)
     assert (clock["source"], clock["occurred_at"]) == ("supervisor_cancel", observed)
     assert not stored.get("started_at") and "cancel_origin" not in stored
+    from ouroboros.project_dialogue import _completion_verdict
+
+    assert stored["outcome_axes"]["execution"]["cancel_policy_reason"] == "evolution_disabled_in_light_mode"
+    assert "Evolution is disabled in light runtime mode" in _completion_verdict(stored, {})
+
+
+def test_light_mode_cancel_states_its_own_cause_over_the_pause_a_row_still_carries(tmp_path, monkeypatch):
+    """#3212: a budget pause leaves its code and record on the evolution row; the cancel before assignment is the
+    light-mode policy, so no card or Continue refusal reads that pause as its cause."""
+    import supervisor.workers as workers
+    import supervisor.queue as queue
+    from supervisor import state as supervisor_state
+    from ouroboros.owner_continue import continuation_eligibility
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    supervisor_state.init(tmp_path)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
+    st = supervisor_state.load_state()
+    st["spent_usd"] = 0.0
+    supervisor_state.save_state(st)
+    independent = {"objective": {"status": "not_evaluated", "source": "none"},
+                   "review": {"status": "skipped", "trigger": "not_evaluated"}}  # axes that are no part of the cause
+    write_task_result(tmp_path, "evo1", "scheduled", reason_code="budget_exhausted", outcome_axes=independent, resource_limit={
+        "status": "paused_before_dispatch", "scope": "global", "physical_calls": 0, "replay_safe": True,
+        "auto_resume": False, "resume_policy": "manual_same_generation", "paused_at": "2026-11-17T09:00:00+00:00"})
+
+    orig_drive = workers.DRIVE_ROOT
+    orig_q_drive = queue.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    queue.DRIVE_ROOT = tmp_path
+    workers.WORKERS.clear()
+    workers.RUNNING.clear()
+    workers.PENDING[:] = [{"id": "evo1", "type": "evolution", "text": "x"}]
+    queue.PENDING = workers.PENDING
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "light blocked")
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
+
+    try:
+        workers.assign_tasks()
+    finally:
+        workers.DRIVE_ROOT = orig_drive
+        queue.DRIVE_ROOT = orig_q_drive
+        workers.PENDING[:] = []
+
+    stored = load_task_result(tmp_path, "evo1")
+    execution = stored["outcome_axes"]["execution"]
+    assert stored["status"] == stored["reason_code"] == execution["reason_code"] == "cancelled"
+    assert {key: stored["outcome_axes"][key] for key in independent} == independent, "its other axes stay"
+    assert execution["cancel_policy_reason"] == "evolution_disabled_in_light_mode" and "earlier_stop" not in execution
+    assert _completion_verdict(stored, {}) == "Evolution is disabled in light runtime mode."
+    assert continuation_eligibility(stored, "evo1")["refusal"] == "interruption_cause_unrecorded"
 
 
 def test_toggle_evolution_tool_blocked_in_light_mode(monkeypatch):

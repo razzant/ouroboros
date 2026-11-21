@@ -232,8 +232,10 @@ test('a paged old row carries the current outcome\'s own rounds into Details onc
         const current = { ...latePass(R3, 2).current_outcome, rounds: 17, wake_summary: SECOND };
         const old = { ...saved(doneFrame(1, T1, FIRST, { rounds: 4, tool_calls: 3 }), 'old'),
             current_outcome: current };
-        await read([old]);
-        await read([old]);
+        const narration = { task_id: TASK, role: 'assistant', is_progress: true, narration: true,
+            text: 'Inspecting the current attempt', history_id: 'current-progress', task_attempt: 2, ts: T2 };
+        await read([narration, old]);
+        await read([narration, old]);
         const shown = facts(card());
         assert.match(shown.details, /<dt>Rounds<\/dt><dd>17 · usable solve responses<\/dd>/);
         assert.doesNotMatch(shown.details, /4 · usable solve responses/);

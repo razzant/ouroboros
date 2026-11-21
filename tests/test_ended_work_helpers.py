@@ -436,41 +436,6 @@ def test_a_failed_capture_returns_the_row_and_the_watchdog_finishes_it(env, monk
     _closed(env)
 
 
-@pytest.mark.parametrize("ended", [1, 2, 3, None], ids=["earlier", "same", "later", "unnamed"])
-def test_a_closure_skips_the_publication_check_only_for_a_proven_earlier_attempts_end(env, monkeypatch, ended):
-    """The child drive still holds a settled end beside the helper's open row, which names attempt 2. Only an end with a
-    smaller integer attempt is proven no end of it (copy-back declines it): the closure goes on to its own capture
-    without asking for a publication. An equal, later or unnamed end keeps the check, and a publication that cannot
-    say holds the closure as before: the row is given back and the watchdog retries."""
-    import ouroboros.headless as headless
-    from ouroboros.headless import prepare_task_drive
-
-    _work_root(env.root)
-    child = prepare_task_drive(env.root, CHILD, "empty")
-    placement = {"drive_root": str(child), "budget_drive_root": str(env.root)}
-    _paused_helper(env.root, env.monkeypatch, extra=placement)
-    write_task_result(env.root, CHILD, "scheduled", task_attempt=2, **placement)
-    write_task_result(child, CHILD, "completed", result="An earlier attempt's answer",
-                      **({} if ended is None else {"task_attempt": ended}))
-    asked = []
-
-    def cannot_say(root, row):
-        asked.append(row["id"])
-        return {"task_id": row["id"], "result": None, "error": "", "terminal_source_present": None}
-
-    monkeypatch.setattr(headless, "prepare_terminal_task_files", cannot_say)
-    minted, outcomes = _sweep(env)
-    assert minted == [CHILD]
-    if ended == 1:
-        assert outcomes == {CHILD: "cancelled"} and asked == []
-        assert "artifact_error" not in _closed(env)
-    else:
-        assert outcomes == {CHILD: "failed"} and asked == [CHILD]
-        assert _pending(env) is not None and ci.active_intent(env.root, CHILD)
-        row = load_task_result(env.root, CHILD)
-        assert row["status"] == "scheduled" and "artifact_error" not in row
-
-
 def test_a_closed_helper_lets_the_last_root_fence_go_and_its_card_settles_after_task_done(env):
     from supervisor import events
 
@@ -1406,13 +1371,17 @@ def _closures_capture_stands(row, first):
 
 
 def _entered(env, task):
-    """The resumed worker's entry, as ``loop._resume_continuation`` makes it once the continuation is consumed and
-    before any effect (that order, through the real handover, is pinned in test_resume_handover): on the canonical
-    row the loop names, its budget root, else its own drive."""
+    """The resumed worker's entry. Its start first records itself on its own drive, naming its attempt (the ``agent``
+    start write): for a split helper that is the child drive its end then extends, as the dispatch mirror named the
+    attempt on the canonical row. Then ``loop._resume_continuation`` reopens the capture once the continuation is
+    consumed and before any effect (that order, through the real handover, is pinned in test_resume_handover): on the
+    canonical row the loop names, its budget root, else its own drive."""
     import pathlib
 
     from ouroboros.headless import reopen_capture_at_entry
 
+    if task.get("drive_root"):  # only a split helper runs on a drive of its own
+        write_task_result(task["drive_root"], CHILD, "running", task_attempt=task["_attempt"])
     reopen_capture_at_entry(pathlib.Path(task.get("budget_drive_root") or task.get("drive_root") or env.root), CHILD)
 
 
@@ -1434,7 +1403,7 @@ def test_a_resumed_helper_hands_in_its_new_work_not_the_withdrawn_closures_captu
     env.workers.assign_tasks()
     assert [launched["id"] for launched in sent] == [CHILD]
     _closures_capture_stands(load_task_result(env.root, CHILD), first)  # put: nothing reopened before the worker
-    _entered(env, task)
+    _entered(env, sent[0])
     entered = load_task_result(env.root, CHILD)
     assert entered["artifact_status"] == entered["artifact_bundle"]["status"] == "pending"  # the new execution owes one
     assert set(first) <= {item["path"] for item in entered["artifacts"] if item.get("kind") == "workspace_capture_history"}

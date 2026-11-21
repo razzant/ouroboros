@@ -95,12 +95,12 @@ export function episodeSpan(started, ended) {
     return `${date(a)}, ${clock(a)} – ${date(b)}, ${clock(b)}`;
 }
 
-function episodeTime(episode, finished) {
+function episodeTime(episode, finished, addedAt = episode.addedAt) {
     if (episode.endSource !== 'supervisor_cancel' && !(finished && !toDate(episode.ended))) {
         return episodeSpan(episode.started, episode.ended);
     }
     const started = formatMsgTime(episode.started);
-    const end = terminalTimeNote({ source: episode.endSource, occurred_at: episode.ended }, episode.addedAt).short;
+    const end = terminalTimeNote({ source: episode.endSource, occurred_at: episode.ended }, addedAt).short;
     return started ? [fmt('Started {time}', { time: started.short }), end].join(' · ') : end;
 }
 
@@ -182,7 +182,7 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             }
             const facts = previous.episode || {};
             const label = [fmt('Episode {n}', { n: index + 1 }), facts.name,
-                episodeTime(facts, true), facts.phase && taskPresentation(facts.phase).headline,
+                episodeTime(facts, true, ''), facts.phase && taskPresentation(facts.phase).headline,
                 facts.cause, facts.summary !== facts.name && facts.summary].filter(Boolean).join(' · ');
             if (disclosure.firstElementChild.textContent !== label) disclosure.firstElementChild.textContent = label;
             const codes = disclosure.querySelector('.chat-episode-codes');

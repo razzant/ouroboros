@@ -157,9 +157,10 @@ def post_task_checkpoint_witness(row: dict) -> dict:
 
 def post_task_attempt_matches(task: dict, current: dict) -> bool:
     """A delayed original callback cannot acquire the canonical successor's phase."""
-    from ouroboros.terminal_time import stated_task_attempt
-
-    saved, incoming = (int(stated_task_attempt(row, include_zero=False) or 1) for row in (current, task))
+    def attempt(row):
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        return int(row.get("task_attempt") or row.get("_attempt") or meta.get("task_attempt") or meta.get("attempt") or 1)
+    saved, incoming = attempt(current), attempt(task)
     if current and saved != incoming:
         return False
     # The actor persists its measured start; the admitted raw task need not carry
@@ -264,83 +265,6 @@ def canonical_name_fields(canonical_fields: Dict[str, Any]) -> tuple:
     return tuple(field for field in ("title", "suggested_name") if field in canonical_fields)
 
 
-def _replica_attempt_conflicts(canonical: dict, replica: dict) -> bool:
-    """A replica may catch up a lagging mirror, but never rewind a known attempt or end it anonymously."""
-    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
-    from ouroboros.terminal_time import replica_advances_attempt, stated_task_attempt, task_attempt_witness
-
-    if canonical.get("task_id") and replica.get("task_id") and canonical["task_id"] != replica["task_id"]:
-        return True
-    if not replica.get("status"):
-        return False
-    current, incoming = stated_task_attempt(canonical), stated_task_attempt(replica)
-    if type(current) is int and type(incoming) is int and min(current, incoming) >= 0 and current != incoming:
-        return not replica_advances_attempt(canonical, replica)
-    terminal = replica["status"] in _TRULY_TERMINAL_STATUSES
-    # Compare what a partial write would keep, including attempt fields inside replaced metadata.
-    before = task_attempt_witness(canonical)
-    other = task_attempt_witness(replica)
-    settled = canonical.get("status") in _TRULY_TERMINAL_STATUSES
-    named = current is not None or bool(before["started_at"])
-    if (terminal and named) or (settled and (named or incoming is not None or other["started_at"])):
-        same_number = type(current) is int and type(incoming) is int and current == incoming and current >= 0
-        same_start = (before["started_at"] and type(before["started_at"]) is type(other["started_at"])
-                      and before["started_at"] == other["started_at"])
-        if not (same_number or same_start):
-            return True
-    if settled:  # Missing slots in a legacy replica cannot erase the settled witness.
-        return any(value not in (None, "") and other[key] not in (None, "")
-                   and (value != other[key] or type(value) is not type(other[key])) for key, value in before.items())
-    after = task_attempt_witness({**canonical, **replica})
-    return any(value is not None and value != "" and (value != after[key] or type(value) is not type(after[key]))
-               for key, value in before.items())
-
-
-def select_replica_attempt(canonical: dict, replica: dict) -> tuple[bool, str | None]:
-    """Can the replica supply execution fields, and what prior stop belongs to that attempt?"""
-    from ouroboros.task_results import (
-        STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES, recorded_attempt_stop, replica_earlier_stop,
-    )
-
-    if _replica_attempt_conflicts(canonical, replica):
-        return False, None
-    status = replica.get("status")
-    if status == STATUS_CANCELLED or recorded_attempt_stop(replica) or (
-            recorded_attempt_stop(canonical) and status not in _TRULY_TERMINAL_STATUSES):
-        return replica_earlier_stop((canonical or replica).get("task_id"), canonical, replica)
-    return True, None
-
-
-_ATTEMPT_OUTCOME_FIELDS = frozenset({
-    "result", "_result_text_present", "final_answer", "error", "reason_code", "reason_detail", "outcome_axes", "loop_outcome",
-    "result_status", "review_status", "terminal_origin", "terminal_host_notice", "terminal_provider_notice",
-    "terminal_salvage_path", "cancel_origin", "resource_limit", "status_reconciled_from", "earlier_stop",
-    "wake_summary", "fold_read",  # the ending's closing sentence and its fold flag: written and cleared as one pair
-})
-
-
-def replica_task_annotations(canonical: dict, replica: dict) -> dict:
-    """A nonmatching result carries at most independent annotations of the settled task."""
-    from ouroboros.task_custody import merge_unread_mail
-    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, cancellation_blocks_child_result
-
-    task_id = canonical.get("task_id")
-    if (not task_id or replica.get("task_id", task_id) != task_id or cancellation_blocks_child_result(canonical)
-            or canonical.get("status") not in _TRULY_TERMINAL_STATUSES):
-        return {}
-    fields = {}
-    metadata = canonical.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    other = replica.get("metadata")
-    if isinstance(other, dict) and "note" in other and "note" not in metadata:
-        fields["metadata"] = {**metadata, "note": other["note"]}
-    if replica.get("task_id") == task_id and replica.get("unread_mailbox"):
-        unread = merge_unread_mail(canonical.get("unread_mailbox"), replica["unread_mailbox"])
-        if unread is not None and unread != canonical.get("unread_mailbox"):
-            fields["unread_mailbox"] = unread
-    return fields
-
-
 def project_replica_task_result_fields(
     canonical_fields: Dict[str, Any],
     replica_fields: Dict[str, Any],
@@ -351,41 +275,18 @@ def project_replica_task_result_fields(
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
     rules below, and a titled record's name (``canonical_name_fields``). The
-    replica owns ordinary result and trace fields only for the selected attempt.
-    A conflicting replica can contribute task annotations, but no attempt payload.
-    Its cancellation needs a matching witness.
-    Review snapshots retain the newest host publication of each panel, and a
+    replica continues to own result and trace fields;
+    review snapshots retain the newest host publication of each panel, and a
     verification ledger stays canonical while the replica carries the same capture.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
     """
-    from ouroboros.terminal_time import preserve_terminal_attempt, replica_advances_attempt, replica_terminal_time
+    from ouroboros.terminal_time import preserve_terminal_attempt, replica_terminal_time
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
-    replica_status = replica_fields.get("status")
-    selected, earlier = select_replica_attempt(canonical_fields, replica_fields)
-    if not selected:
-        return replica_task_annotations(canonical_fields, replica_fields)
     overlay = preserve_terminal_attempt(canonical_fields, replica_fields)
-    if earlier:
-        overlay["earlier_stop"] = earlier
-    canonical_status = canonical_fields.get("status")
-    if canonical_status in _TRULY_TERMINAL_STATUSES and replica_status and replica_status != canonical_status:
-        for key in (*_ATTEMPT_OUTCOME_FIELDS, "ts"):
-            overlay.pop(key, None)
-        overlay["status"] = canonical_status
-        if replica_status in _TRULY_TERMINAL_STATUSES:
-            overlay["child_status"] = replica_status  # distinct observation, not the canonical ending
-    elif replica_advances_attempt(canonical_fields, replica_fields):
-        # It is a replacement of the execution payload, not enrichment of it.
-        for key in _ATTEMPT_OUTCOME_FIELDS | {"task_attempt", "_attempt", "started_at", "execution_owner"}:
-            if key in canonical_fields:
-                overlay.setdefault(key, None)
-        if "metadata" not in overlay and isinstance(canonical_fields.get("metadata"), dict):
-            overlay["metadata"] = {key: value for key, value in canonical_fields["metadata"].items()
-                                   if key not in {"attempt", "task_attempt"}}
-    if canonical_status in _TRULY_TERMINAL_STATUSES or replica_status in _TRULY_TERMINAL_STATUSES:
-        overlay["terminal_time"] = replica_terminal_time(canonical_fields, replica_fields,
-                                                         selected={**canonical_fields, **overlay})
+    if (canonical_fields.get("status") in _TRULY_TERMINAL_STATUSES
+            or replica_fields.get("status") in _TRULY_TERMINAL_STATUSES):
+        overlay["terminal_time"] = replica_terminal_time(canonical_fields, replica_fields)
     # The receiving drive's first accepted terminal transition owns provenance,
     # including its absence on historical rows; replicas cannot originate it.
     overlay.pop("canonical_terminal_projection_origin", None)

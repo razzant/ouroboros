@@ -306,6 +306,31 @@ def _load_terminal_result(data_dir: pathlib.Path, task_id: str, cache: Dict[Any,
     return cache[task_id]
 
 
+# An ending's own writer records these beside its terminal status. The effective read lends an overlaid replica's
+# copies under a canonical status (``task_status.effective_task_result``), and those name the replica's attempt.
+_OWN_ENDING_FACTS = ("loop_outcome", "terminal_origin")
+
+
+def _own_ending_facts(data_dir: pathlib.Path, reads: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """The card's view of a canonical failure, cancellation or duplicate beside an overlaid replica: its own
+    rounds and origin, absence included. The effective read and its copy policy stay as they are elsewhere."""
+    from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE
+
+    task_id = result.get("task_id")
+    if reads is None or not task_id or task_id not in reads.replica_results:
+        return result
+    try:
+        own = reads.load(data_dir, task_id) or {}
+    except Exception:  # the effective read already held this document; an unanswerable store keeps its view
+        return result
+    status = own.get("status")
+    if status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or status != result.get("status"):
+        return result
+    view = {key: value for key, value in result.items() if key not in _OWN_ENDING_FACTS}
+    view.update({key: own[key] for key in _OWN_ENDING_FACTS if key in own})
+    return view
+
+
 def _annotate_terminal_task_truth(
     combined: list[Dict[str, Any]],
     data_dir: pathlib.Path,
@@ -416,6 +441,7 @@ def _annotate_terminal_task_truth(
         unread_tasks: set = set()  # no answer from the store (``_load_terminal_result``'s {}): unknown, not absent
         for task_id in result_task_ids:
             result = _load_terminal_result(data_dir, task_id, cache)
+            result = _own_ending_facts(data_dir, cache.get(_READS), result)
             endings = ending_rows.get(task_id, [])
             if task_id not in summaries and (carrier := carriers.get(task_id) or plain_finals.get(task_id)):
                 endings = [*endings, carrier]
@@ -456,9 +482,12 @@ def _annotate_terminal_task_truth(
             has_ending = task_id in finalizing_tasks or task_id in terminal_status_by_task
             offer = continuation_offer(result, task_id) if has_ending else None
             current = attach_current_outcomes(endings, result, data_dir, offer=offer, open_phase=open_phase)
-            if has_ending:
+            if has_ending or task_id in unfinished_tasks:
+                # An answered open result is its task's current truth too (its rows carry it with
+                # outcome_final False); an unread one stays unknown — no axis is invented for it.
                 terminal_truth_by_task[task_id] = same_attempt_ending(
-                    result, current, offer, final=task_id not in finalizing_tasks)
+                    result, current, offer, final=has_ending and task_id not in finalizing_tasks)
+            if has_ending:
                 envelope = result.get("subagent_envelope")
                 evidence = (
                     envelope.get("execution_evidence")

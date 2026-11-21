@@ -249,6 +249,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     phase = str(row.get("phase") or "unknown")
     state: Dict[str, Any] = {"task_id": task_id, "activity": "unknown", "transition": "none", "call": "",
                              "reasons": [], "turn": [], "release": "self", "confirmed": True, "live": False}
+    if type(attempt := raw.get("queue_attempt")) is int and attempt >= 0:
+        state["queue_attempt"] = attempt
     if phase == "unknown":
         state["confirmed"] = False
         return state
@@ -543,6 +545,7 @@ def _member_state(member: Mapping[str, Any], runs: List[Mapping[str, Any]],
     tails += awaited + model_tails(handoffs)
     return {**state, "because": member["reasons"], "tails": tails,
             "mark": mark_of(member["activity"], member["confirmed"], live=member["live"]),
+            **({"queue_attempt": member["queue_attempt"]} if "queue_attempt" in member else {}),
             **({"last_resume": member["last_resume"]} if member.get("last_resume") else {})}
 
 

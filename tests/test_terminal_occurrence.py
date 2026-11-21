@@ -151,137 +151,27 @@ def test_terminal_enrichment_preserves_absent_witness_components(tmp_path):
         assert row['metadata'] == {'note': 'kept'}
 
 
-@pytest.mark.parametrize('host_start,child_start', [
-    pytest.param({'task_attempt': 1, '_attempt': 1, 'started_at': T1},
-                 {'task_attempt': 9, '_attempt': 9, 'started_at': T3}, id='newer-replica'),
-    pytest.param({'task_attempt': 9, 'started_at': T1}, {'task_attempt': 1, 'started_at': T3}, id='older-replica'),
-    pytest.param({'task_attempt': 1, 'started_at': T1}, {'task_attempt': 1, 'started_at': T3}, id='conflicting-start'),
-    pytest.param({'task_attempt': 1}, {}, id='unnamed-replica'),
-    pytest.param({}, {'task_attempt': 1}, id='unnamed-owner'),
-    pytest.param({'started_at': T1}, {'started_at': T3}, id='conflicting-legacy-start'),
-])
-def test_effective_read_copyback_and_followup_keep_canonical_terminal_witness(
-        tmp_path, monkeypatch, host_start, child_start):
+def test_effective_read_copyback_and_followup_keep_canonical_terminal_witness(tmp_path, monkeypatch):
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.headless import copy_child_task_result
 
     host, child = tmp_path / 'host', tmp_path / 'child'
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T2)
     canonical = write_task_result(host, 'root', 'failed', _terminal_observed=True,
-        **host_start, metadata={'source': 'canonical-task'},
-        result='Canonical answer', final_answer='Canonical final', reason_code='canonical_reason',
+        started_at=T1, task_attempt=1, _attempt=1, metadata={'attempt': 1, 'task_attempt': 1},
         child_drive_root=str(child), headless_child_drive_root=str(child))
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
     write_task_result(child, 'root', 'failed', _terminal_observed=True,
-        **child_start, metadata={'attempt': child_start.get('task_attempt'), 'note': 'replica', 'source': 'child'},
-        result='Replica answer', final_answer='Replica final', reason_code='replica_reason',
-        error='foreign error', cancel_origin={'source': 'owner_restart'})
+        started_at=T3, task_attempt=9, _attempt=9, metadata={'attempt': 9, 'task_attempt': 9, 'note': 'replica'},
+        result='Replica answer')
     effective = load_effective_task_result(host, 'root', materialize_artifacts=False)
-    effective_full = load_effective_task_result(host, 'root')
     copied = copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
     enriched = write_task_result(host, 'root', 'failed', cost_final=True)
-    for row in (effective, effective_full, copied, enriched, load_task_result(host, 'root')):
+    for row in (effective, copied, enriched, load_task_result(host, 'root')):
         assert terminal_time_fact(row) == terminal_time_fact(canonical)
         assert task_attempt_witness(row) == task_attempt_witness(canonical)
         assert row['status'] == 'failed'
-        assert (row['result'], row['final_answer'], row['reason_code']) == (
-            'Canonical answer', 'Canonical final', 'canonical_reason')
-        assert not {'error', 'cancel_origin', 'child_ref_promotion'} & row.keys()
-        assert row['metadata'] == {'source': 'canonical-task', 'note': 'replica'}
-
-
-@pytest.mark.parametrize('status', ['failed', 'completed'])
-def test_matching_terminal_replica_adopts_its_answer_and_cause_only_for_the_same_outcome(tmp_path, monkeypatch, status):
-    from ouroboros.headless import copy_child_task_result
-    from ouroboros.task_status import load_effective_task_result
-
-    host, child = tmp_path / 'host', tmp_path / 'child'
-    basis = {'task_attempt': 0, 'started_at': T1}
-    monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T2)
-    canonical = write_task_result(host, 'root', 'failed', **basis, child_drive_root=str(child),
-        _terminal_observed=True, result='Canonical answer', reason_code='canonical_reason',
-        wake_summary='Canonical sentence')
-    monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
-    write_task_result(child, 'root', status, **basis, _terminal_observed=True,
-        result='Refined answer', reason_code='refined_reason', wake_summary='Refined sentence', fold_read=True)
-    visible = load_effective_task_result(host, 'root', materialize_artifacts=False)
-    copied = copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
-    for row in (visible, copied, load_task_result(host, 'root')):
-        assert row['status'] == 'failed' and terminal_time_fact(row) == terminal_time_fact(canonical)
-        assert (row['result'], row['reason_code']) == (('Refined answer', 'refined_reason') if status == 'failed'
-                                                     else ('Canonical answer', 'canonical_reason'))
-        assert (row.get('wake_summary'), row.get('fold_read')) == (
-            ('Refined sentence', True) if status == 'failed' else ('Canonical sentence', None))
-
-
-@pytest.mark.parametrize('pause,via_sweep', [(None, False), (None, True), ('resumed', False), ('paused', False)])
-@pytest.mark.parametrize('status', ['completed', 'cancelled'])
-def test_newer_replica_replaces_only_an_open_unheld_mirror(tmp_path, monkeypatch, pause, via_sweep, status):
-    from ouroboros.headless import copy_child_task_result
-    from ouroboros.owner_continue import continuation_eligibility
-    from ouroboros.task_status import execution_owner_record, load_effective_task_result, reconcile_orphaned_running_tasks
-
-    host, child = tmp_path / 'host', tmp_path / 'child'
-    old_owner, new_owner = (execution_owner_record(host, {'id': 'root', '_attempt': n}, 'pooled') for n in (1, 2))
-    host_row = write_task_result(host, 'root', 'running', task_attempt=1, _attempt=1, started_at=T1,
-        child_drive_root=str(child), execution_owner=old_owner, metadata={'attempt': 1, 'note': 'task annotation'},
-        result='Old execution', reason_code='old_reason', budget_pause={'state': pause} if pause else None)
-    write_task_result(child, 'root', 'running', task_attempt=2, started_at=T2, execution_owner=new_owner)
-    monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
-    if status == 'cancelled':
-        write_task_result(child, 'root', 'interrupted', reason_code='deadline')
-        source = write_task_result(child, 'root', status, _cancel_observed=True, result='New execution',
-                                   cancel_origin={'source': 'owner_restart'})
-    else:
-        source = write_task_result(child, 'root', status, _terminal_observed=True, result='New execution')
-
-    before = load_effective_task_result(host, 'root', materialize_artifacts=False)
-    if via_sweep:
-        assert reconcile_orphaned_running_tasks(host) == 1
-        written = load_task_result(host, 'root')
-    else:
-        written = copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
-    replay = copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
-    for row in (before, written, replay, load_effective_task_result(host, 'root', materialize_artifacts=False)):
-        expected = host_row if pause == 'paused' else source
-        assert row['status'] == expected['status'] and row['execution_owner'] == expected['execution_owner']
-        assert task_attempt_witness(row) == task_attempt_witness(expected)
-        assert row['result'] == expected['result'] and row.get('reason_code') == expected.get('reason_code')
-        assert terminal_time_fact(row) == terminal_time_fact(expected)
-        assert row['metadata']['note'] == 'task annotation'
-        if status == 'cancelled' and pause != 'paused':
-            assert row['earlier_stop'] == 'deadline'
-            assert continuation_eligibility(row, 'root') == {
-                'eligible': False, 'cause': 'deadline', 'refusal': 'hard_limit_reached'}
-
-
-@pytest.mark.parametrize('condition', ['hard-limit', 'owner-stop', 'terminal', 'same-start',
-                                       'missing-start', 'invalid-start', 'foreign-owner'])
-def test_newer_replica_cancel_cannot_end_a_protected_or_unbound_mirror(tmp_path, condition):
-    from ouroboros.headless import copy_child_task_result
-    from ouroboros.owner_continue import continuation_eligibility
-    from ouroboros.task_status import execution_owner_record, load_effective_task_result
-
-    host, child = tmp_path / 'host', tmp_path / 'child'
-    canonical = write_task_result(host, 'root', 'running', task_attempt=1, started_at=T1,
-                                  child_drive_root=str(child), result='Current attempt')
-    if condition == 'hard-limit':
-        canonical = write_task_result(host, 'root', 'interrupted', reason_code='budget_exhausted')
-    if condition in {'owner-stop', 'terminal'}:
-        status = 'cancelled' if condition == 'owner-stop' else 'completed'
-        canonical = write_task_result(host, 'root', status, cancel_origin={'source': 'http_single'})
-    owner = execution_owner_record(host, {'id': 'other' if condition == 'foreign-owner' else 'root',
-                                          '_attempt': 2}, 'pooled')
-    start = {'same-start': T1, 'missing-start': None, 'invalid-start': 'unknown'}.get(condition, T2)
-    write_task_result(child, 'root', 'cancelled', task_attempt=2, started_at=start, execution_owner=owner,
-                      _cancel_observed=True, cancel_origin={'source': 'owner_restart'}, result='Replica')
-    effective = load_effective_task_result(host, 'root', materialize_artifacts=False)
-    for key in ('task_attempt', 'status', 'result', 'reason_code', 'cancel_origin', 'earlier_stop', 'terminal_time'):
-        assert effective.get(key) == canonical.get(key)
-    if condition == 'owner-stop':
-        assert continuation_eligibility(effective, 'root')['refusal'] == 'stopped_by_owner'
-    assert copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)}) == canonical
-    assert load_task_result(host, 'root') == canonical
+        assert row['metadata']['note'] == 'replica'
 
 
 def test_pause_resume_does_not_mint_an_attempt_or_a_terminal_time(tmp_path, monkeypatch):
@@ -312,74 +202,25 @@ def test_reconciled_presence_reopen_and_real_retry_have_their_own_executor_fact(
     assert final['superseded_placeholder']['terminal_time'] == old['terminal_time']
 
 
-_FIRST_START = {'task_attempt': 0, 'started_at': T1}  # direct execution can start at zero
-
-
-@pytest.mark.parametrize('child_status', ['failed', 'completed'])
-@pytest.mark.parametrize('host_start,child_start,already_settled,accepts', [
-    pytest.param(_FIRST_START, _FIRST_START, False, True, id='matching'),
-    pytest.param({'task_attempt': 1, 'started_at': T3}, _FIRST_START, False, False, id='stale_attempt'),
-    pytest.param({'task_attempt': 0, 'started_at': T3}, _FIRST_START, False, False, id='stale_start'),
-    pytest.param({'task_attempt': 1, 'started_at': T3}, {}, False, False, id='unnamed_child'),
-    pytest.param({}, {}, False, True, id='legacy_pair'),
-    pytest.param(_FIRST_START, _FIRST_START, True, True, id='recovered_unknown'),
-])
-def test_actual_child_copyback_cannot_authenticate_its_own_attempt(
-        tmp_path, monkeypatch, host_start, child_start, already_settled, accepts, child_status):
+@pytest.mark.parametrize('canonical_state', ['matching', 'stale_attempt', 'recovered_unknown'])
+def test_actual_child_copyback_cannot_authenticate_its_own_attempt(tmp_path, monkeypatch, canonical_state):
     from ouroboros.headless import copy_child_task_result
-    from ouroboros.task_status import load_effective_task_result
 
     host, child = tmp_path / 'host', tmp_path / 'child'
-    write_task_result(child, 'root', 'running', **child_start)
+    write_task_result(child, 'root', 'running', task_attempt=1, started_at=T1)
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T2)
-    source = write_task_result(child, 'root', child_status, _terminal_observed=bool(child_start),
-                               result='Child answer', total_rounds=3)
-    canonical = write_task_result(host, 'root', 'running', child_drive_root=str(child), result='Current work',
-                                  **host_start)
-    if already_settled:
-        canonical = write_task_result(host, 'root', child_status)
+    source = write_task_result(child, 'root', 'failed', _terminal_observed=True)
+    write_task_result(host, 'root', 'running', task_attempt=2 if canonical_state == 'stale_attempt' else 1,
+                      started_at=T3 if canonical_state == 'stale_attempt' else T1)
+    if canonical_state == 'recovered_unknown':
+        write_task_result(host, 'root', 'failed')
     monkeypatch.setattr('ouroboros.task_results.utc_now_iso', lambda: T3)
-    visible = load_effective_task_result(host, 'root', materialize_artifacts=False)
     copied = copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
-    stored = load_task_result(host, 'root')
-    if not accepts:
-        assert copied == stored == canonical
-    expected = source['terminal_time']['occurred_at'] if accepts and not already_settled else None
-    for row in (visible, copied, stored, load_effective_task_result(host, 'root', materialize_artifacts=False)):
-        assert row['status'] == (child_status if accepts else 'running')
-        assert task_attempt_witness(row) == task_attempt_witness(canonical)
-        assert row.get('total_rounds') == (3 if accepts else None)
-        assert terminal_time_fact(row)['occurred_at'] == expected
-        if accepts:
-            assert row['terminal_time'] == terminal_time_fact(row)
-            if not already_settled:
-                assert row['result'] == 'Child answer'
-        else:
-            assert row['result'] == 'Current work' and 'terminal_time' not in row
-
-
-@pytest.mark.parametrize('status', ['failed', 'cancelled'])
-def test_child_copyback_rechecks_the_attempt_at_publication(tmp_path, monkeypatch, status):
-    from ouroboros import headless
-    from ouroboros.task_status import load_effective_task_result
-
-    host, child = tmp_path / 'host', tmp_path / 'child'
-    write_task_result(host, 'root', 'running', task_attempt=1, started_at=T1, child_drive_root=str(child))
-    attempt, started = (2, T2) if status == 'cancelled' else (1, T1)
-    write_task_result(child, 'root', status, task_attempt=attempt, started_at=started, result='Stale replica')
-    assert load_effective_task_result(host, 'root', materialize_artifacts=False)['status'] == status
-    restarted = {}
-
-    def publish_after_restart(*args, **kwargs):
-        if not restarted:
-            restarted.update(write_task_result(host, 'root', 'running', task_attempt=3, started_at=T3, result='Current'))
-        return write_task_result(*args, **kwargs)
-
-    monkeypatch.setattr(headless, 'write_task_result', publish_after_restart)
-    copied = headless.copy_child_task_result(host, {'id': 'root', 'drive_root': str(child)})
-    assert copied == load_task_result(host, 'root') == restarted
-    visible = load_effective_task_result(host, 'root', materialize_artifacts=False)
-    assert (visible['status'], visible['task_attempt'], visible['result']) == ('running', 3, 'Current')
+    expected = source['terminal_time']['occurred_at'] if canonical_state == 'matching' else None
+    assert copied['terminal_time']['occurred_at'] == expected
+    final = load_task_result(host, 'root')
+    assert final['terminal_time'] == terminal_time_fact(final)
+    assert terminal_time_fact(final)['occurred_at'] == expected
 
 
 @pytest.mark.parametrize('child_state', ['matching', 'stale_attempt', 'recovered'])

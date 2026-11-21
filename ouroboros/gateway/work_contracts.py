@@ -196,6 +196,7 @@ class WorkMemberState(TypedDict):
     because: List[WorkReason]
     tails: List[WorkTail]  # run/review IDs are external run IDs; model IDs are attempt IDs
     mark: str  # the member's own mark, independent of its tails
+    queue_attempt: NotRequired[int]  # observed queue ordinal of this member's state, not an executor ordinal
     last_resume: NotRequired[LastResume]
 
 

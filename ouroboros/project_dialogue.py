@@ -815,6 +815,7 @@ TASK_CAUSE_PHRASES = {
     "reaper_wedged_worker_alive": "The task timed out and its worker could not be confirmed stopped",
     "workers_unavailable": "The worker pool was unavailable, so the task was not scheduled",
     "worker_pool_unavailable": "No worker was available to run the task",
+    "evolution_disabled_in_light_mode": "Evolution is disabled in light runtime mode",
     "worker_crash_signal": "The worker process running the task crashed",
     "worker_crash_retry_exhausted": "The worker process running the task kept crashing until its retries ran out",
     "worker_crash_owner_wait": "The worker process died while the task was waiting; completed actions were not retried",
@@ -1258,7 +1259,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
                                  "outcome_axes": {"execution": execution}})[1] == "stop"
     reason, custody = _custody_debt_reason(raw_reason, result, event)
     typed = str(execution.get("reason_code") or "")
-    if reason in {REASON_FINAL_MESSAGE, ""} and typed != WARN_DELEGATED_CUSTODY_UNRECONCILED:
+    earlier = execution.get("earlier_stop") if phase == "cancelled" else None
+    if ((reason in {REASON_FINAL_MESSAGE, ""} and typed != WARN_DELEGATED_CUSTODY_UNRECONCILED)
+            or (typed == "cancelled" and reason == earlier)):
         reason = typed or reason
     author_stop = completion.get("action") == "stop" and execution.get("status") != "cancelled" and not origin
     review_cause = (cause if status and (status != ACCEPTANCE_ACCEPTED or cause in TASK_CAUSE_PHRASES)
@@ -1304,6 +1307,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     warnings = list(objective.get("warnings") or []) if isinstance(objective.get("warnings"), list) else []
     warnings.append(objective.get("warning") or "")
     excluded = {"", "delegated_custody_unreconciled", "terminal_delivery_unknown", "terminal_delivery_exhausted"}
+    context = [f"Earlier recorded stop: {_cause_phrase(earlier, undescribed)}"] if isinstance(earlier, str) and earlier else []
+    if phase == "cancelled" and execution.get("cancel_policy_reason") == "evolution_disabled_in_light_mode":
+        context.insert(0, TASK_CAUSE_PHRASES["evolution_disabled_in_light_mode"])
     if not include_review_details:
         excluded |= DETAIL_ONLY_WARNINGS
     # The failure the record holds, in owner words; a record without the fact keeps its code's sentence.
@@ -1324,7 +1330,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     remainder_clause = ("Uncommitted files in the saved candidate could not be checked" if remainder.get("state") == "unknown"
                         else f"{count} uncommitted file{'s' if count != 1 else ''} remain{'s' if count == 1 else ''} in the saved candidate"
                         if remainder.get("state") == "known" and type(count) is int and count > 0 else "")
-    line = _join_cause_clauses([clause, *warning_clauses, _cause_phrase(review_cause, undescribed),
+    line = _join_cause_clauses([clause, *context, *warning_clauses, _cause_phrase(review_cause, undescribed),
                                 _author_stop_rationale(decision, completion), remainder_clause,
                                 str((execution.get("evolution_cleanup") or {}).get("line") or ""),
                                 *_incident_cause_clauses(decision, reason),
@@ -1491,7 +1497,7 @@ def project_completion_delivery_outcome(
         # promising the same action in prose would duplicate it. Salvaged bytes exist nowhere else in this row.
         from ouroboros.terminal_projection import completion_notice, current_answer_delivery
         excerpt = _completion_excerpt(result, chat_id=1, salvage_only=True)
-        delivery = current_answer_delivery(drive_root, {**task, **result, "task_id": tid}, source_delivery, receipts=receipts)
+        delivery = current_answer_delivery(drive_root, {**result, "task_id": tid}, source_delivery, receipts=receipts)
         clause = terminal_delivery_clause(delivery)
         source_clause = f"Source Project: {clause}" if clause else ""
         verdict = _join_cause_clauses([_completion_verdict(result, task_done_event), source_clause])

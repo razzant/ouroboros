@@ -159,7 +159,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs, summarizeChatLiveEvent)"
+    "value": "            const changed = summary && placeReplayedEvidence(record, summary, facts.evidence, anchor, normalizeLogTs, summarizeChatLiveEvent)"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",

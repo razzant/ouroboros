@@ -144,6 +144,7 @@
  * @property {Array<WorkReason>} because
  * @property {Array<WorkTail>} tails  // only this task's runs, reviews and model handoffs
  * @property {string} mark  // the member's own mark, independent of its tails
+ * @property {number=} queue_attempt  // observed queue ordinal of this member's state, not an executor ordinal
  * @property {LastResume=} last_resume
  */
 /**

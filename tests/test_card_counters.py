@@ -68,6 +68,52 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     assert summaries and all(row["rounds"] == 3 for row in summaries)
 
 
+def _card_attempt(frame):
+    """The attempt a card folds a frame into (``settled_card.attemptOf``): its own number, else its task's owner."""
+    owner = frame.get("execution_owner") if isinstance(frame.get("execution_owner"), dict) else {}
+    ordinals = (frame.get("task_attempt"), frame.get("_attempt"),
+                owner.get("task_attempt") if owner.get("task_id") == frame.get("task_id") else None)
+    return next((value for value in ordinals if type(value) is int and value >= 0), None)
+
+
+@pytest.mark.parametrize("running", ["same", "next", "gone"])
+@pytest.mark.parametrize("lane", ["first-direct", "pooled"])
+def test_a_round_drained_after_the_next_assignment_keeps_its_own_attempt(tmp_path, monkeypatch, lane, running):
+    """The round ended, its worker died and the same task was assigned again before the bus was drained. The
+    endpoint made for that attempt names it, so the drain's RUNNING owner (the next attempt's, or none) never
+    counts the round toward another attempt's card; an explicit producer number still wins."""
+    from ouroboros import loop_llm_call
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from ouroboros.task_status import execution_owner_record
+    from supervisor.log_addressing import task_event_queue
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    clock, queue_sink, pushed = _Clock(), queue.Queue(), []
+    monkeypatch.setattr(loop_llm_call, "time", clock)
+    task = {"id": "drained-round", "chat_id": 7}
+    if lane == "first-direct":  # admitted without a queue ordinal: physical attempt 0, the loop's number None
+        task["_is_direct_chat"] = True
+        task["_execution_owner"] = {**execution_owner_record(tmp_path, task, "direct"),
+                                    "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
+        own, ordinal, newer = 0, None, 2
+    else:
+        task["_attempt"] = 2
+        task["_execution_owner"] = execution_owner_record(tmp_path, task, "pooled")
+        own, ordinal, newer = 2, 2, 3
+    assert task["_execution_owner"]["task_attempt"] == own
+    llm = _TimedLLM(clock, [({"content": "Checked.", "tool_calls": []}, {})])
+    call_llm_with_retry(llm, [{"role": "user", "content": "check"}], "fixture/model", None, "medium", 2, logs,
+                        task["id"], 1, task_event_queue(queue_sink, task), {}, task_attempt=ordinal)
+    raw = next(evt for evt in queue_sink.queue if evt.get("data", {}).get("type") == "llm_round_finished")
+    assigned = {**task, "_attempt": newer, "_execution_owner": {**task["_execution_owner"], "task_attempt": newer}}
+    rows = {"same": {task["id"]: {"task": task}}, "next": {task["id"]: {"task": assigned}}, "gone": {}}[running]
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=rows, bridge=SimpleNamespace(push_log=pushed.append),
+                          append_jsonl=lambda *_: None)
+    _handle_log_event(json.loads(json.dumps(raw)), ctx)
+    assert pushed[-1]["rounds"] == 1 and _card_attempt(pushed[-1]) == own
+
+
 @pytest.mark.parametrize('owner', [{}, {'task_id': 'other', 'task_attempt': 0},
                                    {'task_id': 'root', 'task_attempt': False}, {'task_id': 'root', 'task_attempt': '0'}])
 def test_evaluation_does_not_invent_attempt_from_unbound_execution(tmp_path, monkeypatch, owner):
@@ -117,6 +163,37 @@ def test_history_rounds_override_stale_physical_summary_only_when_known(tmp_path
         else:
             assert "rounds" not in row, "physical task.total_rounds is never a fallback"
     assert read_result(tmp_path, "old") == full
+
+
+@pytest.mark.parametrize(("own", "replica_attempt", "expected"), [
+    pytest.param({"loop_outcome": {"usage": {"total_rounds": 0}}, "terminal_origin": "host_notice"}, 1,
+                 (0, "host_notice"), id="own-zero-foreign-replica"),
+    pytest.param({}, 1, (None, None), id="own-unknown-foreign-replica"),
+    pytest.param({"loop_outcome": {"usage": {"total_rounds": 0}}, "terminal_origin": "host_notice"}, None,
+                 (0, "host_notice"), id="own-zero-unnumbered-replica"),
+    pytest.param({}, None, (None, None), id="own-unknown-unnumbered-replica"),
+    pytest.param(None, 2, (3, "model_final"), id="replica-supplies-the-ending"),
+])
+def test_a_canonical_failure_shows_only_its_own_rounds_and_origin(tmp_path, own, replica_attempt, expected):
+    """Attempt 2 failed on the canonical drive while the actor drive still holds an older completed result. The
+    effective read keeps the failure's status and number beside that replica's loop facts; on reload its card shows
+    the failure's own count and origin, an unknown one staying unknown. A replica that supplies the ending itself
+    (its canonical row still running) keeps its own."""
+    child = tmp_path / "actor"
+    pipeline.write_task_result(tmp_path, "split-root", "running" if own is None else "failed", chat_id=7,
+                               task_attempt=2, child_drive_root=str(child), _terminal_observed=own is not None,
+                               **(own or {}))
+    pipeline.write_task_result(child, "split-root", "completed", chat_id=7, _terminal_observed=True,
+                               loop_outcome={"usage": {"total_rounds": 3}}, terminal_origin="model_final",
+                               **({} if replica_attempt is None else {"task_attempt": replica_attempt}))
+    pipeline._record_task_facts(SimpleNamespace(drive_root=tmp_path),
+                                {"id": "split-root", "chat_id": 7, "_attempt": 2}, {}, {"tool_calls": []},
+                                tmp_path / "logs")
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "7"})))
+    assert response.status_code == 200
+    [row] = [r for r in json.loads(response.body)["messages"] if r.get("system_type") == "task_summary"]
+    assert row["task_attempt"] == 2 and row["task_terminal_status"] == ("completed" if own is None else "failed")
+    assert (row["rounds"], row.get("terminal_origin")) == expected
 
 
 @pytest.mark.parametrize("source, expected", [("no_response", 0), ("unavailable", None)])

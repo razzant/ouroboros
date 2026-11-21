@@ -223,6 +223,10 @@ def test_unreadable_registry_is_an_error_for_the_complete_list_and_the_exact_id(
 
 @pytest.mark.parametrize("url", ["/api/projects", "/api/projects?all=1"])
 def test_project_list_accepts_known_empty_and_hides_tombstones(pin_client, url):
+    from unittest.mock import patch
+
+    from ouroboros import project_admission
+
     client, root = pin_client
     path = root / "state/projects.json"
     for initialized in (False, True):
@@ -230,7 +234,10 @@ def test_project_list_accepts_known_empty_and_hides_tombstones(pin_client, url):
             path.parent.mkdir(exist_ok=True)
             path.write_text('{"projects": []}', encoding="utf-8")
         assert path.exists() is initialized
-        assert registry.readable_rooms(root) == set()
+        with patch.object(project_admission, "_registry_snapshot",
+                          wraps=project_admission._registry_snapshot) as snapshot:
+            assert registry.readable_rooms(root) == set()
+            snapshot.assert_called_once()
         response = client.get(url)
         assert response.status_code == 200 and response.json() == {"projects": []}
     project = registry.create_project(root, "hidden", origin="owner_ui")

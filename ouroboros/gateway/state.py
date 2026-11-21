@@ -570,7 +570,9 @@ def _raw_work_facts(row: dict) -> dict:
                                         "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
                                         "_presence_turn", "silence_attention") if row.get(key)}
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
-    return {**facts, **({"continuation": edges} if edges else {})}
+    attempt = row.get("_queue_attempt", row.get("_attempt"))
+    return {**facts, **({"queue_attempt": attempt} if type(attempt) is int and attempt >= 0 else {}),
+            **({"continuation": edges} if edges else {})}
 
 
 def _ended_tail(drive_root: Any, root_id: str) -> tuple:
@@ -691,6 +693,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 (str(task_id), {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
+                    "_queue_attempt": meta.get("attempt"),  # unlike _attempt above, never defaulted
                     "context_attempt": meta.get("context_attempt"), "lead": meta.get("lead"),
                     "_lead_request_id": meta.get("_lead_request_id"), "processing_last": meta.get("processing_last"),
                     "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(

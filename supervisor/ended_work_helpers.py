@@ -365,18 +365,6 @@ def _capture_workspace(q: Any, task: Dict[str, Any], task_id: str) -> str:
     return "attempted"
 
 
-def _earlier_attempts_end(stored: Dict[str, Any], ended: Dict[str, Any]) -> bool:
-    """Proof, not a guess, that a settled ``ended`` of the child drive is no end of the open row ``stored``: both name an
-    integer attempt and ``ended``'s is the smaller, the ground on which copy-back declines it. A settled row (it may owe
-    its own capture) and an unnamed, equal or later attempt prove nothing, so the publication check stays."""
-    from ouroboros.task_status import SETTLED_STATUSES
-    from ouroboros.terminal_time import stated_task_attempt
-
-    past, now = stated_task_attempt(ended), stated_task_attempt(stored)
-    return (str(stored.get("status") or "") not in SETTLED_STATUSES
-            and type(past) is int and type(now) is int and 0 <= past < now)
-
-
 def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional[Dict[str, Any]], awaiting: Any,
                     cost_fields: Dict[str, Any]) -> Union[None, str, Dict[str, Any]]:
     """``None`` for any other cancel; this closure's verdict when it ended here; else what its one cancelled write adds,
@@ -419,11 +407,8 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
     try:
         stored = load_task_result(root, task_id, strict=True) or {}
         child = _child_drive_from_task(task)
-        ended = {}
-        if child is not None and not terminal_task_files_ready(root, task, stored):
-            ended = load_task_result(child, task_id, strict=True) or {}
-        # An earlier attempt's end beside the open row is no end of it: copy-back declines it, so nothing is left to publish.
-        if str(ended.get("status") or "") in SETTLED_STATUSES and not _earlier_attempts_end(stored, ended):
+        if (child is not None and not terminal_task_files_ready(root, task, stored)
+                and str((load_task_result(child, task_id, strict=True) or {}).get("status") or "") in SETTLED_STATUSES):
             if prepare_terminal_task_files(root, task).get("terminal_source_present") is not True:
                 raise RuntimeError("terminal file publication is unresolved")
             stored = load_task_result(root, task_id, strict=True) or {}

@@ -203,14 +203,10 @@ def continuation_eligibility(result: Dict[str, Any], task_id: str) -> Dict[str, 
     if (result.get("metadata") or {}).get("execution_transport") is not None:
         return {"eligible": False, "cause": "realtime_transport", "refusal": "realtime_restart_required"}
     reason = recorded_cause(result)
-    # The pool's cancellation can retain a stop that preceded it. A bound from that stop still
-    # applies, but only the cause of the terminal transition can authorize Continue below.
-    earlier = result.get("earlier_stop") if status == "cancelled" else None
-    for bound in (reason, earlier if isinstance(earlier, str) else ""):
-        if bound in HARD_LIMIT_REASON_CODES:
-            return {"eligible": False, "cause": bound, "refusal": "hard_limit_reached"}
-        if bound == "billing_authority_refused":  # Continue cannot supply missing/foreign lineage
-            return {"eligible": False, "cause": bound, "refusal": "billing_lineage_refused"}
+    if reason in HARD_LIMIT_REASON_CODES:
+        return {"eligible": False, "cause": reason, "refusal": "hard_limit_reached"}
+    if reason == "billing_authority_refused":  # missing/foreign lineage: Continue cannot supply one
+        return {"eligible": False, "cause": reason, "refusal": "billing_lineage_refused"}
     author_stopped = status == "completed" and recorded_stop_rationale(result) is not None
     if status == "completed" and reason not in EXECUTION_LIMIT_RAILS and not author_stopped:
         return {"eligible": False, "cause": "finished", "refusal": "author_finished"}

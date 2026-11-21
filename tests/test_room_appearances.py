@@ -1150,11 +1150,16 @@ class TestStampedRoomEchoKeepsItsDisplayAddress:
         from ouroboros.room_membership import row_rooms
 
         nova, vega = _project(tmp_path, "nova"), _project(tmp_path, "vega")
+        # The accepted echo is already in the store before any key was derived (appearances=None:
+        # an older body's rows, the mark left behind), so the job below is the replay that owes
+        # the Reply its explicit appearance.
         target = ds.append(tmp_path, "chat", {"ts": "2026-11-18T04:00:00Z", "direction": "out", "chat_id": vega,
-                                              "text": "A word in Vega", "client_message_id": "vega-1"})
+                                              "text": "A word in Vega", "client_message_id": "vega-1"},
+                           appearances=None)
         echo = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:00:00Z", "chat_id": nova,
                                             "text": "Owner words replying", "client_message_id": "echo-2",
-                                            "reply_to": reference_from_row(dict(target.row)), **self.ECHO})
+                                            "reply_to": reference_from_row(dict(target.row)), **self.ECHO},
+                         appearances=None)
         projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
         assert row_rooms(nova, echo.row, projects, rooms) == {nova, vega}
         assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"

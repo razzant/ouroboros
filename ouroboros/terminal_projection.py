@@ -61,10 +61,11 @@ def _witness(row: dict) -> dict:
             "artifact_bundle": row.get("artifact_bundle")}
 
 
-def _files_ready(root: Any, tid: str, row: dict) -> bool:
+def _files_ready(root: Any, tid: str, stored: dict, *, task: dict | None = None) -> bool:
     from ouroboros.headless import terminal_task_files_ready
 
-    return terminal_task_files_ready(pathlib.Path(root), {**row, "id": tid}, row)
+    # Captured task context can locate a drive; it cannot supply result or capture evidence.
+    return terminal_task_files_ready(pathlib.Path(root), {**(task or {}), **stored, "id": tid}, stored)
 
 
 def _open(row: dict) -> bool:
@@ -474,9 +475,10 @@ def _append_project(root: Any, tid: str, task: dict, event: dict, *,
             cause, receipts = _publication_inputs(root, tid, task, stored)
             if cause:
                 return False
-        delivery = current_answer_delivery(root, effective, receipts=receipts)
-    row = _project_row(tid, effective, {key: event[key] for key in ("ts", "chat_id") if key in event}, ready,
-                       delivery=delivery)
+        delivery = current_answer_delivery(root, stored, receipts=receipts)
+    clock = ready.get("terminal_time") or terminal_time_fact(stored)
+    row = _project_row(tid, effective, {key: event[key] for key in ("ts", "chat_id") if key in event},
+                       {**ready, "terminal_time": clock}, delivery=delivery)
     appended = False
     # A readiness minted in this very call has no row yet: nothing to scan for.
     existing_row = None if minted_now or not is_root else _already_in_chat(root, row)
@@ -664,7 +666,7 @@ def _publication_inputs(root: Any, tid: str, task: dict | None, stored: dict) ->
         return "synthesis_open", {}
     if not _settled(stored):
         return "not_settled", {}
-    if not _files_ready(root, tid, {**(task or {}), **stored}):
+    if not _files_ready(root, tid, stored, task=task):
         return "child_files", {}
     receipts = _delivery_disposition(root, tid)
     return ("terminal_delivery" if receipts.get("state") == "owed" else ""), receipts

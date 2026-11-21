@@ -176,12 +176,14 @@ def same_attempt_ending(result: dict, current: dict, offer, *, final: bool) -> d
     """What a row of the stored result's own attempt, or of a wholly unnumbered legacy pair, shows of that result.
 
     ``current`` is ``attach_current_outcomes``'s answer for the page: a delivery warning there revises the
-    axes and the phase. ``final`` is False while post-task finalization is open. A row of another attempt
-    takes none of this; it carries the result separately as ``current_outcome``.
+    axes and the phase. ``final`` is False while post-task finalization is open; a final row also carries the
+    attempt's proven end (``terminal_time``), so a row shown before its ending row keeps the clock. A row of
+    another attempt takes none of this; it carries the result separately as ``current_outcome``.
     """
     from ouroboros.history_retention import retention_summary
     from ouroboros.project_dialogue import outcome_phase
     from ouroboros.subagent_messages import initiator_meta
+    from ouroboros.terminal_time import terminal_time_fact
 
     axes = normalize_outcome_axes(result)
     phase = outcome_phase(result, {})
@@ -205,6 +207,8 @@ def same_attempt_ending(result: dict, current: dict, offer, *, final: bool) -> d
     rounds = ((result.get("loop_outcome") or {}).get("usage") or {}).get("total_rounds")
     if type(rounds) is int and rounds >= 0:
         ending["rounds"] = rounds
+    if final and (ended := terminal_time_fact(result))["source"] != "unknown":
+        ending["terminal_time"] = ended  # observed for this attempt; an unknown end is never shown as one
     if retention:
         ending["history_retention"] = retention
     if result.get("reason_code"):

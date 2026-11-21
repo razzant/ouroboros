@@ -558,6 +558,21 @@ def test_new_debt_during_project_append_holds_main_without_rereading_per_consume
     assert mirror["progress_meta"]["completion_answer"] == "Current answer"
 
 
+def test_project_publication_needs_stored_adoption_evidence_even_with_a_richer_task_input(project_root):
+    root, task = project_root.root, project_root.task
+    tid, child = task["id"], str(root / "child-drive")
+    adoption = {"headless_child_drive_root": child,
+                "child_ref_promotion": {"schema_version": 1, "status": "complete"}}
+    _store(root, chat_id=task["chat_id"], child_drive_root=child)
+    waits = {}
+    assert settle_terminal_projection(root, tid, task={**task, **adoption}, waits=waits) == SETTLEMENT_DEFERRED
+    assert waits == {"on": "child_files"}
+    assert not _project_rows(root, tid) and not project_root.queued
+    write_task_result(root, tid, STATUS_COMPLETED, **adoption)
+    assert settle_terminal_projection(root, tid, task=task) == SETTLEMENT_SETTLED
+    assert len(_project_rows(root, tid)) == len(project_root.queued) == 1
+
+
 def test_main_address_and_retry_claim_are_durable_before_live_queue(project_root, monkeypatch):
     _store(project_root.root)
 

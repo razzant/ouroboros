@@ -38,7 +38,8 @@ const list = (value) => (Array.isArray(value) ? value : []);
 function displayedMember(member) {
     if (!member) return null;
     if (member.confirmed === true && Object.hasOwn(MEMBER_MARKS, member.activity)) return member;
-    return { ...UNKNOWN_MEMBER, confirmed: false, tails: list(member.tails) };
+    return { ...UNKNOWN_MEMBER, confirmed: false, tails: list(member.tails),
+        ...(Number.isSafeInteger(member.queue_attempt) ? { queue_attempt: member.queue_attempt } : {}) };
 }
 
 /** Whether one member state independently evidences the member's own current activity: its own phase is

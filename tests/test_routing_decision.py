@@ -690,22 +690,16 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
     end time, the Continue offer and the stop's own reason labelled as that author's account (never an owner
     instruction), computed on the loaded row; an answer-only turn newer than the stop moves the room's pointer,
     never the stopped root's open offer; continue_task is a valid action."""
-    from ouroboros import budget_pause
     from ouroboros.projects_registry import create_project
     from ouroboros.server_routing_context import STOP_REASON_LABEL, _decision_turn_metadata, _main_routing_manifest
-    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_results import load_task_result
 
     project = create_project(tmp_path, "room", name="Room")
     _ended(tmp_path, "r-bound", "2026-11-10T09:00:00Z", stop=True,
            continued_by={"successor_task_id": "r-next", "state": "bound", "action_nonce": "nonce-0001"})
-    _ended(tmp_path, "r-owner", "2026-11-10T10:00:00Z", "cancelled", stop=True, reason_code="reaper_wedged_worker_alive",
+    _ended(tmp_path, "r-owner", "2026-11-10T10:00:00Z", "cancelled", stop=True, reason_code="",
            cancel_origin={"source": "http_single", "reason": "owner stopped it"})
-    write_task_result(tmp_path, "r-paused", "running", task_attempt=1)
-    park = budget_pause.set_budget_pause(tmp_path, "r-paused", {
-        "state": budget_pause.STATE_PAUSED, "reason": "owner", "pause_id": "p", "task_attempt": 1})
-    write_task_result(tmp_path, "r-paused", "scheduled", reason_code="owner_paused",
-                      resource_limit=budget_pause.exact_pause_marker(park))
-    _ended(tmp_path, "r-paused", "2026-11-10T08:00:00Z", "cancelled", reason_code="cancelled",
+    _ended(tmp_path, "r-paused", "2026-11-10T08:00:00Z", "cancelled", reason_code="owner_paused",
            cancel_origin={"source": "agent_tool", "reason": "superseded by a newer plan"})
     # An inline Presence turn that Stop now ended writes its own cancelled row under the rail's reason.
     _ended(tmp_path, "r-inline", "2026-11-10T07:00:00Z", "cancelled", reason_code="owner_requested_finalization",
@@ -728,7 +722,8 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
     assert finished["continuation_offer"] == {"eligible": False, "cause": "finished", "refusal": "author_finished"}
     assert listed["r-owner"]["outcome"] == "Stopped" and listed["r-owner"]["continuation_offer"]["refusal"] == "stopped_by_owner"
     assert "stop_reason" not in listed["r-owner"], "an owner's Stop is never the author's account"
-    # Only the second cancellation followed a recorded park.
+    # A cancel ended these two (audit 08-11.11 item 6): the cause is the cancel and who asked for it; the
+    # reason code a row kept from the stop before the cancel is the earlier stop, never the cause.
     assert (listed["r-owner"]["cause"], listed["r-owner"]["cancelled_by"]) == ("cancelled", "http_single")
     assert "earlier_stop" not in listed["r-owner"]
     paused = listed["r-paused"]

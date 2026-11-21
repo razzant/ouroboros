@@ -530,8 +530,9 @@ export function taskReasonDetail(evt, codes = []) {
     const completion = record.task_completion ?? record.outcome_axes?.execution?.task_completion;
     const [storedReason, custody] = custodyDebtReason(record);
     const typedReason = String(record.outcome_axes?.execution?.reason_code || '');
-    const reason = ['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON
-        ? (typedReason || storedReason) : storedReason;
+    const earlier = severity === 'cancelled' ? execution?.earlier_stop : null;
+    const reason = ((['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON)
+        || (typedReason === 'cancelled' && storedReason === earlier)) ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
     const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
     const authorStop = completion?.action === 'stop' && record.outcome_axes?.execution?.status !== 'cancelled' && !Object.keys(origin || {}).length;
@@ -581,7 +582,12 @@ export function taskReasonDetail(evt, codes = []) {
         : remainder?.state === 'known' && Number.isInteger(count) && count > 0
             ? `${count} uncommitted file${count === 1 ? '' : 's'} remain${count === 1 ? 's' : ''} in the saved candidate` : '';
     const cleanupClause = String(record.outcome_axes?.execution?.evolution_cleanup?.line || '');  // the host's stored words
-    const line = joinCauseClauses([clause, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
+    const context = typeof earlier === 'string' && earlier
+        ? [fmt('Earlier recorded stop: {cause}', { cause: phrase(earlier) })] : [];
+    if (severity === 'cancelled' && execution?.cancel_policy_reason === 'evolution_disabled_in_light_mode') {
+        context.unshift(phrase('evolution_disabled_in_light_mode'));
+    }
+    const line = joinCauseClauses([clause, ...context, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
         ...acceptanceIncidentClauses(decision, reason, causePhraseLookup),
         ...terminalLimitations(record, reason, held, authorStop), custody ? taskReasonPhrase(custody) : '',
         terminalDeliveryClause(record.terminal_delivery)]);  // the host twin appends the delivery clause last too
@@ -1252,11 +1258,13 @@ function summarizeChatLiveEventView(evt) {
         const resultText = describeText(evt.result || '', 320, { markdown: true });
         const traceText = describeText(evt.trace_summary || '', 320);
         const errorText = describeText(evt.error || '', 220);
-        const cancelDetail = evt.cancel_origin && (rawEvent === 'cancelled'
+        const earlier = evt.outcome_axes?.execution?.earlier_stop;
+        const cancelDetail = (evt.cancel_origin || (typeof earlier === 'string' && earlier)) && (rawEvent === 'cancelled'
             || (rawEvent === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'))
             // The child's OWN lineage rides along, so the cancel clause can prove the
             // parent relation instead of naming the swept root as an initiator (#1061).
             ? taskReasonDetail({ status: 'cancelled', cancel_origin: evt.cancel_origin,
+                outcome_axes: { execution: { earlier_stop: earlier } },
                 task_id: evt.subagent_task_id || evt.task_id,
                 parent_task_id: evt.parent_task_id, root_task_id: evt.root_task_id }) : '';
         const stopDetail = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop' ? taskReasonDetail(evt) : '';

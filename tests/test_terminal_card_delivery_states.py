@@ -120,6 +120,43 @@ def test_a_new_owed_primary_is_not_masked_by_an_older_delivered_receipt(tmp_path
     assert len(_terminal_rows(tmp_path, tid)) == 1      # and published once it is delivered
 
 
+@pytest.mark.parametrize(("ended", "facts_attempt"), [("observed", 2), ("unrecorded", 2), ("observed", 1)],
+                         ids=["own-clock", "no-clock", "other-attempt"])
+def test_the_visible_facts_row_keeps_the_proven_end_while_the_answer_is_owed(tmp_path, ended, facts_attempt):
+    """The primary is still owed, so the terminal row waits; on reload the same attempt's facts row is final and
+    carries the stored end. An unrecorded end stays unknown, and another attempt's row keeps only its own reading."""
+    import asyncio
+
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.post_task_synthesis import _record_task_facts
+
+    tid = "root-owed-clock"
+    owed = {"type": "send_message", "chat_id": 1, "task_id": tid, "text": "Current primary answer.",
+            "delivery_id": td.delivery_id_for(tid, "Current primary answer.")}
+    assert td.register_pending_delivery(tmp_path, owed)
+    stored = write_task_result(tmp_path, tid, "completed", _terminal_observed=ended == "observed", chat_id=1,
+                               task_attempt=2, result="Current primary answer.")
+    assert settle_terminal_projection(tmp_path, tid) == SETTLEMENT_DEFERRED and _terminal_rows(tmp_path, tid) == []
+    task = {"id": tid, "chat_id": 1, "_attempt": facts_attempt}
+    _record_task_facts(types.SimpleNamespace(drive_root=tmp_path), task, {"rounds": 3}, {"tool_calls": []},
+                       tmp_path / "logs")
+    request = types.SimpleNamespace(query_params={"chat_id": "1"})
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(request))
+    assert response.status_code == 200
+    [row] = [r for r in json.loads(response.body)["messages"]
+             if r.get("task_id") == tid and r.get("system_type") == "task_summary"]
+    assert row["task_attempt"] == facts_attempt
+    if facts_attempt == 2:
+        assert row["outcome_final"] is True and row["task_terminal_status"] == "completed"
+    if (ended, facts_attempt) == ("observed", 2):
+        assert row["terminal_time"] == stored["terminal_time"]
+        assert row["terminal_time"]["source"] == "executor_terminal"
+    else:
+        assert "terminal_time" not in row
+    if facts_attempt == 1:  # the stored end stays with its own attempt, beside this row
+        assert row["current_outcome"]["terminal_time"] == stored["terminal_time"]
+
+
 def test_an_unreadable_registry_publishes_the_card_instead_of_hiding_it(tmp_path):
     """DEL-2: unknown is a disclosed state, never an indefinite hold (owner: «неизвестная доставка честно»)."""
     tid = "root-corrupt-registry"
@@ -215,12 +252,13 @@ def test_running_cancel_owes_the_salvage_before_its_terminal_row_and_the_card_fo
 
     monkeypatch.setattr("ouroboros.task_results.write_task_result", write_then_probe)
     monkeypatch.setattr(qenv.q, "_emit_cancel_task_done", lambda *_a, **_kw: None)
-    task = {"id": task_id, "chat_id": 9}
+    task = {"id": task_id, "chat_id": 9, "_attempt": 2}
     proc = _LiveProc()
     qenv.workers.WORKERS[0] = types.SimpleNamespace(wid=0, proc=proc, busy_task_id=task_id, reaping=False)
-    qenv.q.RUNNING[task_id] = {"task": task, "worker_id": 0}
-    real_write(qenv.drive, task_id, STATUS_RUNNING, result="working", chat_id=9)
-    _seed_llm_response(qenv.drive, task_id, "the salvaged partial answer")
+    qenv.q.RUNNING[task_id] = {"task": task, "worker_id": 0, "attempt": 2}
+    earlier = "Earlier attempt's intermediate draft."
+    _seed_llm_response(qenv.drive, task_id, earlier)  # legacy manifest; the retry saved no response
+    real_write(qenv.drive, task_id, STATUS_RUNNING, result="working", chat_id=9, task_attempt=2)
     intent = ci.request_cancel(qenv.drive, task_id, reason="stop")
     try:
         assert qenv.tl.cancel_task_custody(task_id) == qenv.tl.CANCEL_CANCELLED
@@ -231,9 +269,12 @@ def test_running_cancel_owes_the_salvage_before_its_terminal_row_and_the_card_fo
     assert probes == [SETTLEMENT_DEFERRED], "a settle between the row and the send sees the debt"
     assert _terminal_rows(qenv.drive, task_id) == []
     (owed,) = [row for row in td.pending_deliveries(qenv.drive) if row["delivery_id"] == expected]
-    assert "the salvaged partial answer" in owed["text"]
+    assert "This saved task text may come from an earlier attempt.\n\n" + earlier in owed["text"]
     stored = load_task_result(qenv.drive, task_id)
     assert stored["status"] == "cancelled" and stored["cancel_receipt"]["delivery_id"] == expected
+    assert stored.get("terminal_origin") != "model_final"
+    assert "may be from an earlier attempt; not a final answer):\n" + earlier in stored["result"]
+    assert pathlib.Path(stored["cancel_receipt"]["salvage"]["path"]).read_text(encoding="utf-8") == earlier
     sent = []
     delivery._handle_send_message({**owed, "type": "send_message"}, _ctx(qenv.drive, sent))
     assert sent == [(9, owed["text"])]

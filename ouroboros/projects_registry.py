@@ -843,7 +843,7 @@ def readable_rooms(drive_root: Any) -> Optional[set]:
     when the registry names no room it can vouch for: it cannot be read, is lost beside its commit witness, or
     holds rows none of which is readable. That is an unknown set, never "no Projects"."""
     try:
-        return {row["chat_id"] for row in list_reserved_projects(drive_root, require_readable=True)}
+        return {project["chat_id"] for project in list_reserved_projects(drive_root, require_readable=True)}
     except Exception as error:
         # Main's saved history and the room set wait on this answer, and a broken registry can outlast a restart:
         # its cause is named once a process and cause, where a person reading the log looks.

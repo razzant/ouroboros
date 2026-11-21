@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { applyPayload, setMissTransport, CODE_PREFIX } from '../modules/i18n.js';
-import { taskPresentation, taskReasonPhrase } from '../modules/log_events.js';
+import { taskPresentation, taskReasonDetail, taskReasonPhrase } from '../modules/log_events.js';
 import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
 import { questionPresentation } from '../modules/question_presentation.js';
 import { acceptanceIncidentClauses } from '../modules/acceptance_incident_presentation.js';
@@ -114,6 +114,17 @@ test('an install language reads the same tables by code; what the memory lacks s
     // Switching back restores every reading byte for byte.
     applyPayload(EN);
     assert.equal(JSON.stringify(englishReadings()), before);
+});
+
+test('an earlier stop translates its template and typed cause separately', t => {
+    t.after(() => applyPayload(EN));
+    applyPayload({ ...RU, entries: { ...RU.entries,
+        'Earlier recorded stop: {cause}': { text: 'Предыдущая остановка: {cause}' },
+        [CODE_PREFIX + 'task.cause.budget_exhausted']: { text: 'Бюджет исчерпан' },
+    } });
+    assert.equal(taskReasonDetail({ status: 'cancelled', reason_code: 'budget_exhausted',
+        outcome_axes: { execution: { reason_code: 'cancelled', earlier_stop: 'budget_exhausted' } },
+    }), 'Предыдущая остановка: Бюджет исчерпан.');
 });
 
 test('the raw cause table still works as the presenter lookup for callers outside the seam', () => {

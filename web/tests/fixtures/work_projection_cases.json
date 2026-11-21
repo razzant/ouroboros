@@ -2194,7 +2194,18 @@
           ]
          }
         ],
-        "tails": [],
+        "tails": [
+         {
+          "code": "awaited_helpers_mind",
+          "text": "1 subagent it waits for is paused until Ouroboros resumes it",
+          "count": 1,
+          "ids": [
+           "sw-c"
+          ],
+          "kind": "helper",
+          "state": "held"
+         }
+        ],
         "mark": "still"
        },
        "sw-c": {
