@@ -571,8 +571,9 @@ owner-conversation events — those are its purpose. Reviewers score the skill's
 
 A control skill FAILS only for being **unsafe** on one of those properties,
 never for being **powerful**. The capability itself is already gated by the
-host (token auth, fresh executable review, enablement, content-hash-bound
-grants) and by core owner/chat binding (`server._process_bridge_updates`) — not
+host (token auth, fresh executable review, enablement, owner grants: a key grant
+holds while the same installation declares the key, permissions on the owner's
+behalf only for the accepted version) and by core owner/chat binding (`server._process_bridge_updates`) — not
 by withholding control from the skill. Items 9–12 below are scored against these
 safety properties, not against the breadth of control the skill exposes.
 
@@ -655,7 +656,9 @@ hash so an edit to the skill invalidates the previous verdict.
 `update_backup.json` and marketplace/self-authored provenance are skill
 trust/control-plane state:
 they are mutated only through the review, toggle, launcher-grant, self-authored
-finalize, installer and owner-edit paths, not through generic agent/browser
+finalize, installer, owner-edit and acceptance paths (an acceptance carries the
+installation's grants to the accepted bytes; the startup import and uninstall name
+or end the installation a grant belongs to), not through generic agent/browser
 file writes.
 
 A source the owner trusts is the named, digest-pinned exception to a first
@@ -709,7 +712,12 @@ for each revision it writes. Each binds to exact bytes; any later edit leaves it
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is default-on as of v6.10.0 (the owner
 may disable it), in which case a fresh executable review grants only
 manifest-declared settings keys and host permissions for that exact content
-hash; when disabled, key and permission grants remain explicit.
+hash; when disabled, key and permission grants remain explicit. A key grant
+(core provider keys included) holds while the same installation (the install
+record's source and the payload's place) still declares the key, through edits of
+its bytes; permissions on the owner's behalf hold only for the accepted version,
+and every acceptance carries the installation's grants to the accepted bytes.
+Cyber Pro alone grants nothing new: an edit neither revokes a key nor adds one.
 
 The Skills UI Repair affordance starts an ordinary managed development task; no
 automatic repair exists. Keep the selected skill, source request and admitted payload

@@ -954,13 +954,25 @@ Some settings keys are protected: the provider, GitHub and network keys of `FORB
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
-until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
+until the owner grants it: it is not passed, the skill keeps running with its other approvals and readiness names it
+(`grant_notes`). A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
 a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
 `notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
 consent. The desktop launcher's owner-grant bridge records these grants.
+
+A key grant, core provider keys included, belongs to the installation it was given to (the install record's
+source and the payload's place, `ouroboros/skill_grant_scope.py`): it holds through edits of that payload while
+the manifest still declares the key, and ends at uninstall, for a same-named payload from another source or folder,
+and while a release of a source that reviews each skill waits for acceptance. Permissions stay bound to the accepted
+bytes. After an edit, a permission the host checks at each use (`notify_owner`, `inject_chat`, `call_peer`,
+`presence`) keeps the extension running and refuses that use, saying it waits for the check of the edited version;
+`page_module`, `context_snapshot`, `live_conversation` and chat event subscriptions act through what the load
+publishes, so the extension waits for the check. Every acceptance (a finished review, the author's acceptance, the
+owner's Skip or edit, an accepted release, a built-in re-seed) carries the installation's granted keys and its
+permissions to the accepted bytes.
 
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are
@@ -972,13 +984,14 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the skill gate and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
+label alone; see the Skill Review Checklist. Editing the payload leaves the permission grants with the earlier
+version until an acceptance; readiness, the execution and toggle refusals and the skill card then also say
 that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
 values are untouched.
 
-Every review, grant and acceptance is bound to the skill's release digest: its
+Every review, permission grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
-same release has one identity on every install.
+same release has one identity on every install. A key grant also names its installation (above).
 
 Transport/control skills are first-class local-UI replacements: every owner command (Panic included), supervised
 polling and justified owner-event mirroring. Their review and runtime obligations belong to [CHECKLISTS](CHECKLISTS.md#transport-and-control-skills-are-first-class-binding-for-all-reviewers).

@@ -161,7 +161,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_PREFLIGHT_TIMEOUT_SEC | unset | Env-only: a bounded preflight's total budget (selected/argv; `preflight_runner.py`); unset: 1800; Android: 3600; full: none |
 | OUROBOROS_PREFLIGHT_SERIAL | unset | Env-only: `1` selects one serial pytest pass; scrubbed from the candidate |
 | OUROBOROS_PREFLIGHT_TEST_WORKERS | unset | Env-only: requested xdist workers, capped by memory and other runs (`test_parallelism.py`); scrubbed from the candidate |
-| OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | true | Auto-grant manifest requests to accepted bytes (clean review or trusted install; hash-bound) |
+| OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS | true | Auto-grant manifest requests to accepted bytes (clean review or trusted install); keys then follow the installation, permissions the accepted bytes |
 | OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS | true | Derived Built in trust (`false`: review); once a source list is saved its Built in row decides |
 | OUROBOROS_CONTEXT_MODE | max | Main's `nano`/`low`/`max`; owner-selected outside Cyber. Review stays independent (§6 Context fitting) |
 | OUROBOROS_CONTEXT_MODE_AUTO_LOW | false | Provenance tombstone, not a toggle: normalization writes `false`; a persisted `low` is honoured only beside it (`context_mode_compat.py`) |
