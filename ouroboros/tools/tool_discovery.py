@@ -529,10 +529,10 @@ def get_tools() -> List[ToolEntry]:
                 "name": "enable_tools",
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
-                    '"mcp_<server>" selects the whole server. Text tasks with call_mcp_tool loaded show MCP '
-                    "schemas here instead of adding them to the request's tools array. Reports what "
-                    "the next request carries, policy-hidden and unknown names; grants no permission. Another "
-                    "namespace or a skill's name answers with its tools' names. In a live call the new schemas "
+                    '"mcp_<server>" selects the whole server, a skill\'s name every tool of that skill. Text '
+                    "tasks with call_mcp_tool loaded show MCP schemas here instead of adding them to the "
+                    "request's tools array. Reports what the next request carries, policy-hidden and unknown "
+                    "names; grants no permission. In a live call the new schemas "
                     "reach the voice session (an engine that cannot take them in place reconnects once)."
                 ),
                 "parameters": {
