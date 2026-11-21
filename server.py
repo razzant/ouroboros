@@ -356,8 +356,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         from ouroboros.server_control import external_owner_binding
 
         ext_known, owner_ext_id, bound_pair = external_owner_binding(st)
-        if panic and external_identity_present and ext_known and owner_ext_id is not None and (
-                bound_pair == (user_id, chat_id)):
+        bound_owner = external_identity_present and ext_known and owner_ext_id is not None and bound_pair == (user_id, chat_id)
+        if panic and bound_owner:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset
 
@@ -383,7 +383,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 live["owner_id"] = user_id
                 live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
-            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_pair == (user_id, chat_id), message=origin_message_ref, at=now_iso)
+            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_owner, message=origin_message_ref, at=now_iso)
 
         try:
             ctx.update_state(_stamp_owner_activity)
