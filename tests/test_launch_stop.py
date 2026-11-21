@@ -959,7 +959,7 @@ def test_a_kept_service_is_listed_after_its_task_and_one_reasoned_stop_ends_only
     _start(registry, scripts, tmp_path / "plain.port", "plain")
     servers = {name: _server(tmp_path / f"{name}.port") for name in ("kept", "other", "plain")}
     drive = tmp_path / "data"
-    log = pathlib.Path(started["log_path"])
+    log = Path(started["log_path"])
     with log.open("a", encoding="utf-8") as handle:
         handle.write("  Local:   http://127.0.0.1:4173/?token=secret\n")
     try:

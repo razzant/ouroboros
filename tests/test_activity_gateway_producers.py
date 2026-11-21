@@ -98,8 +98,8 @@ def test_activity_background_lists_the_gateways_kept_services_and_stops_one_by_i
         pytest.skip("kept-service custody is read by the POSIX launch census")
     leader, (port, pid, birth) = _ledgered_service(tmp_path, write_scripts(tmp_path), "storybook-preview",
                                                    owner_task="producer", drive=tmp_path)
-    _, stream = open_local_service_log(tmp_path, "producer", "storybook-preview",
-                                       leader._ouroboros_custody["scope_marker"], keep_alive=True)
+    log, stream = open_local_service_log(tmp_path, "producer", "storybook-preview",
+                                         leader._ouroboros_custody["scope_marker"], keep_alive=True)
     with stream:
         stream.write(b"Storybook started on http://localhost:6006/\n")
     write_task_result(tmp_path, "producer", "completed", title="Redesign the retention banner")
