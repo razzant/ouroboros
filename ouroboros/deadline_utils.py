@@ -104,6 +104,15 @@ def parse_deadline_ts(value: Any) -> Optional[datetime]:
         return None
 
 
+def naive_instant(raw: str) -> bool:
+    """True when an ISO instant names no UTC offset: ``parse_deadline_ts`` reads such a time as UTC, so a caller
+    that must not guess (``schedule_followup`` beside a zone, ``set_next_wakeup(at)``) refuses it."""
+    try:
+        return datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw).tzinfo is None
+    except ValueError:
+        return False
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 

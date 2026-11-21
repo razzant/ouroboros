@@ -231,6 +231,7 @@ D20 = "Presence"
 "ouroboros/consciousness_wake.py" = "D15"
 "ouroboros/consciousness_standing.py" = "D15"  # what stands in every wake: answerable cards, works that ended without success
 "ouroboros/consciousness_transitions.py" = "D15"
+"ouroboros/consciousness_clock.py" = "D15"
 "ouroboros/chat_chain.py" = "D15"
 "ouroboros/chronicle_store.py" = "D15"
 "ouroboros/chronicle_quotes.py" = "D15"

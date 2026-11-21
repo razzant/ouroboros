@@ -27,6 +27,7 @@ from ouroboros.consciousness import (
     NEXT_WAKE_STATE_KEY,
     BackgroundConsciousness,
 )
+from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
 from supervisor.active_activity import get_direct_activity_registry
 from tests._store_shared import seed_result
 
@@ -936,6 +937,144 @@ def test_runner_failure_backs_off_by_doubling_until_a_wake_succeeds(clock, monke
         finished = _launched(clock, now=clock.clock.next_wake_at)
         finished(clock.receipt["task_id"], ok)
         assert clock.clock.next_wake_at == T0 + 5000 + delay
+
+
+# --- a named time (set_next_wakeup(at), consciousness_clock) ------------------------
+
+
+def _call_clock_tool(monkeypatch, *, now, at=None, seconds=None):
+    """``set_next_wakeup`` as the mind calls it at ``now``: from inside a wake or from a Main turn."""
+    from ouroboros.tools import control_runtime
+
+    monkeypatch.setattr(clock_module.time, "time", lambda: now)
+    return control_runtime._set_next_wakeup(SimpleNamespace(task_id="caller"), seconds=seconds,
+                                            at=None if at is None else _iso(at))
+
+
+def _wake(clock, monkeypatch, task_id, *, start, end, ok=True, seconds=None, at=None):
+    """One own wake launched at ``start`` and settled at ``end``; it may call the tool in between."""
+    clock.receipt["task_id"] = task_id
+    finished = _launched(clock, now=start)
+    if seconds is not None or at is not None:
+        _call_clock_tool(monkeypatch, now=start + 10, seconds=seconds, at=at)
+    monkeypatch.setattr(clock_module.time, "time", lambda: end)
+    finished(task_id, ok)
+
+
+def _named(at, *, standing=None):
+    return {"at": _iso(at), "stored_at": _iso(at - 3600), "standing_appointment": standing}
+
+
+def test_a_named_time_ahead_sets_the_next_wake_and_the_wake_it_appointed_consumes_it(clock, monkeypatch):
+    start = T0 + FLOOR + 1
+    target = start + 60 + 1800
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60, at=target)
+    assert clock.clock.next_wake_at == target, "the earlier of the interval (3300 s) and the named time"
+    assert clock.store[WAKE_TARGET_STATE_KEY]["at"] == _iso(target), "a wake ending before it leaves it standing"
+    _wake(clock, monkeypatch, "wake0002", start=target, end=target + 60)
+    assert WAKE_TARGET_STATE_KEY not in clock.store and clock.clock.next_wake_at == target + 60 + DEFAULT
+    # Never sooner than MIN after a wake's end, however close the named time.
+    _wake(clock, monkeypatch, "wake0003", start=clock.clock.next_wake_at, end=clock.clock.next_wake_at + 60,
+          at=clock.clock.next_wake_at + 300)
+    assert clock.clock.next_wake_at - clock.store[LAST_WAKE_STATE_KEY] == FLOOR
+
+
+def test_a_named_time_beyond_max_is_reached_through_intermediate_wakes_that_set_seconds(clock, monkeypatch):
+    start = T0 + FLOOR + 1
+    # More than MAX (14400 s) after the first wake's end: one default step (3300 s), then 1800 s steps of 60 s wakes.
+    target = start + 60 + (DEFAULT + 60) + 7 * (1800 + 60) + 1200
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60, at=target)
+    starts, index = [], 1
+    while WAKE_TARGET_STATE_KEY in clock.store:
+        index += 1
+        begin = clock.clock.next_wake_at
+        assert FLOOR <= begin - clock.store[LAST_WAKE_STATE_KEY] <= CEILING and index < 30
+        starts.append(begin)
+        _wake(clock, monkeypatch, f"wake{index:04d}", start=begin, end=begin + 60, seconds=1800)  # the habitual call
+    assert starts[-1] == target and all(begin < target for begin in starts[:-1]), "consumed by the wake it appointed"
+    assert clock.store[INTERVAL_STATE_KEY] == 1800 and clock.clock.next_wake_at == target + 60 + 1800
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_a_wake_appointed_after_the_time_consumes_it_at_its_end_success_or_failure(clock, monkeypatch, ok):
+    start = T0 + FLOOR + 1
+    target = start + 60 + 1500
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60, at=target)
+    _wake(clock, monkeypatch, "wake0002", start=target, end=target + 60, ok=ok)
+    assert WAKE_TARGET_STATE_KEY not in clock.store
+    assert clock.clock.next_wake_at == target + 60 + (DEFAULT if ok else DEFAULT * 2)
+
+
+def test_a_wake_pending_when_the_time_was_stored_keeps_it_for_the_next(clock, monkeypatch):
+    start = T0 + FLOOR + 1
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60)
+    pending = clock.clock.next_wake_at
+    receipt = _call_clock_tool(monkeypatch, now=start + 120, at=pending + 600)  # a Main turn between the wakes
+    assert f"appointed for {clock_module._iso(pending)[:19]}Z keeps its time and does not consume it" in receipt
+    assert clock.store[WAKE_TARGET_STATE_KEY]["standing_appointment"] == pending
+    _wake(clock, monkeypatch, "wake0002", start=pending, end=pending + 900)  # it ran past the named time
+    assert clock.store[WAKE_TARGET_STATE_KEY]["at"] == _iso(pending + 600), "the wake that stood appointed keeps it"
+    assert clock.clock.next_wake_at == pending + 900 + DEFAULT, "a passed named time shortens nothing"
+    _wake(clock, monkeypatch, "wake0003", start=clock.clock.next_wake_at, end=clock.clock.next_wake_at + 60)
+    assert WAKE_TARGET_STATE_KEY not in clock.store
+
+
+def test_a_refused_admission_retries_on_the_ordinary_path_shortened_only_by_a_time_ahead(clock):
+    now = T0 + FLOOR + 1
+    clock.store[WAKE_TARGET_STATE_KEY] = passed = _named(now - 60)
+    clock.receipt.update({"admitted": False, "task_id": "", "reason": "budget_exhausted"})
+    assert clock.clock.tick(now) == "rejected:budget_exhausted"
+    assert clock.clock.next_wake_at == now + DEFAULT, "a passed named time never pins retries to MIN"
+    assert clock.store[WAKE_TARGET_STATE_KEY] == passed, "a refusal never consumes it"
+    clock.store[WAKE_TARGET_STATE_KEY], clock.clock._next_wake_at = _named(now + 1200), now
+    assert clock.clock.tick(now) == "rejected:budget_exhausted" and clock.clock.next_wake_at == now + 1200
+
+
+def test_after_a_failed_wake_a_named_time_still_fires_once_then_the_backoff_resumes(clock, monkeypatch):
+    start = T0 + FLOOR + 1
+    target = start + 60 + 2000
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60, ok=False, at=target)
+    assert clock.clock.next_wake_at == target, "earlier than the doubled interval (6600 s)"
+    _wake(clock, monkeypatch, "wake0002", start=target, end=target + 60, ok=False)
+    assert WAKE_TARGET_STATE_KEY not in clock.store and clock.clock.next_wake_at == target + 60 + DEFAULT * 4
+
+
+def test_a_newer_named_time_written_during_a_settlement_survives_its_compare_and_delete(clock, monkeypatch):
+    from supervisor import state
+
+    start = T0 + FLOOR + 1
+    target = start + 60 + 1000
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60, at=target)
+    newer = _named(target + 7200, standing=target)
+    settle_write = state.update_state
+
+    def racing(mutator, **kwargs):
+        if getattr(mutator, "__name__", "") == "settle":  # a Main turn's at lands between the read and the write
+            clock.store[WAKE_TARGET_STATE_KEY] = newer
+        return settle_write(mutator, **kwargs)
+
+    monkeypatch.setattr(state, "update_state", racing)
+    _wake(clock, monkeypatch, "wake0002", start=target, end=target + 60)
+    assert clock.store[WAKE_TARGET_STATE_KEY] == newer
+
+
+def test_a_restart_keeps_the_named_time_and_the_appointment_that_stood_when_it_was_stored(clock, monkeypatch):
+    start = T0 + FLOOR + 1
+    _wake(clock, monkeypatch, "wake0001", start=start, end=start + 60)
+    pending = clock.clock.next_wake_at
+    _call_clock_tool(monkeypatch, now=start + 120, at=pending + 600)
+    alarm = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: 7, now=pending - 100)  # a new process
+    assert alarm.next_wake_at == pending + 800, "the boot floor still holds"
+    clock.receipt["task_id"] = "wake0002"
+    assert alarm.tick(alarm.next_wake_at) == "launched"
+    monkeypatch.setattr(clock_module.time, "time", lambda: pending + 860)
+    clock.finish("wake0002", True, alarm=alarm)
+    assert clock.store[WAKE_TARGET_STATE_KEY]["at"] == _iso(pending + 600), "it stood appointed before the restart"
+    clock.receipt["task_id"] = "wake0003"
+    assert alarm.tick(alarm.next_wake_at) == "launched"
+    monkeypatch.setattr(clock_module.time, "time", lambda: alarm.next_wake_at + 60)
+    clock.finish("wake0003", True, alarm=alarm)
+    assert WAKE_TARGET_STATE_KEY not in clock.store
 
 
 # --- events never move the wake (#1603) --------------------------------------------

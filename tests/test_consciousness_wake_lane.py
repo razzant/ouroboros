@@ -570,6 +570,69 @@ def test_set_next_wakeup_clamps_persists_and_speaks_honestly(tmp_path, monkeypat
         assert state.load_state()["consciousness_next_interval_sec"] == 300
 
 
+def test_set_next_wakeup_names_a_time_with_its_offset_and_the_pending_wake_keeps_its_own(tmp_path, monkeypatch):
+    """``at``: an explicit UTC offset and the future, at least one argument, and a refusal stores nothing (``seconds``
+    beside it included). Off stores it; ``seconds`` leaves it standing; with a wake pending a time at or before it is
+    refused, naming it and schedule_followup; the receipt names the stored time, MIN, MAX, the pending appointment
+    and its moved attempt, or a running wake's end."""
+    from datetime import datetime, timezone
+
+    from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
+    from ouroboros.tools import control
+    from supervisor import state
+
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "locks").mkdir(parents=True)
+    state.init(tmp_path)
+    state.save_state({})
+    now = 1_900_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    ctx = SimpleNamespace(task_id="m1")
+
+    def iso(ts):
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def stored():
+        live = state.load_state()
+        return live.get("consciousness_next_interval_sec"), live.get(WAKE_TARGET_STATE_KEY)
+
+    with mock.patch.dict(os.environ, {"OUROBOROS_BG_WAKEUP_MIN": "300", "OUROBOROS_BG_WAKEUP_MAX": "3600"}):
+        for refused in (control._set_next_wakeup(ctx), control._set_next_wakeup(ctx, at="  "),
+                        control._set_next_wakeup(ctx, seconds=900, at="2030-03-18T09:00:00"),
+                        control._set_next_wakeup(ctx, at="2030-03-15"), control._set_next_wakeup(ctx, at=iso(now - 60))):
+            assert refused.startswith("⚠️ TOOL_ARG_ERROR (set_next_wakeup): ") and "stored" in refused, refused
+        assert stored() == (None, None), "a refused call changes nothing, the seconds beside it included"
+        # Off, beside an appointment left from before the stop: nothing is pending, so the time is stored.
+        state.update_state(lambda st: st.update({"consciousness_appointment_at": now + 7 * 86400}))
+        off = control._set_next_wakeup(ctx, seconds=900, at="2030-03-18T09:00:00+03:00")
+        assert off.startswith("OK: the named next wake-up time is now 2030-03-18T09:00:00+03:00 (2030-03-18T06:00:00Z). "
+                              "Consciousness is off: it is stored for when it is enabled.")
+        assert "MIN (300 s)" in off and "MAX (3600 s)" in off and off.endswith(" The wake-up interval is now 900 s.")
+        record = {"at": "2030-03-18T09:00:00+03:00", "stored_at": iso(now), "standing_appointment": None}
+        assert stored() == (900, record)
+        rhythm = control._set_next_wakeup(ctx, 1800)
+        assert stored() == (1800, record) and "The named time 2030-03-18T09:00:00+03:00 still stands" in rhythm
+
+        pending = now + 1200
+        state.update_state(lambda st: st.update({
+            "bg_consciousness_enabled": True, "consciousness_appointment_at": pending,
+            "consciousness_next_wake_at": pending + 300, "consciousness_own_wake": {"task_id": "w0", "finished": True}}))
+        for early in (pending, pending - 600):
+            refusal = control._set_next_wakeup(ctx, seconds=600, at=iso(early))
+            assert f"already appointed for {iso(pending)}, which keeps its time" in refusal
+            assert "schedule_followup(run_at=…)" in refusal and stored() == (1800, record)
+        later = control._set_next_wakeup(ctx, at=iso(pending + 60))
+        assert (f"The wake-up appointed for {iso(pending)} keeps its time and does not consume it (a skip or refused "
+                f"admission moved its next attempt to {iso(pending + 300)}).") in later
+        assert stored()[1]["standing_appointment"] == pending
+
+        state.update_state(lambda st: st.update({  # a wake running: its own call, or a Main turn beside it
+            "consciousness_appointment_at": now - 30, "consciousness_own_wake": {"task_id": "w1", "finished": False}}))
+        running = control._set_next_wakeup(ctx, at=iso(now + 600))
+        assert "A wake-up is running: from its end the next one comes at the earlier of the interval and this time." in running
+        assert stored()[1] == {"at": iso(now + 600), "stored_at": iso(now), "standing_appointment": now - 30}
+
+
 def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_facts(tmp_path, monkeypatch):
     """#1324: status is a read for the caller, never a line in the owner's chat;
     in-memory clock facts are named as not read, not guessed. The newest skip is a
@@ -594,7 +657,8 @@ def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_fac
         facts = json.loads(control._toggle_consciousness(ctx, "status"))
     assert ctx.pending_events == []  # nothing for the supervisor to publish
     assert facts["source"] == str(tmp_path / "state" / "state.json") and facts["observed_at"]
-    assert "source_modified_at" not in facts and "read_gap" not in facts and facts["not_recorded"] == ["stopped_by"]
+    assert "source_modified_at" not in facts and "read_gap" not in facts
+    assert facts["not_recorded"] == ["stopped_by", "named_wake_time"]
     assert facts["enabled"] is True and facts["chosen_interval_sec"] == 900
     assert facts["stored_next_wake_at"] == "2026-09-26T10:00:00+00:00"
     assert facts["last_wake_ended_at"] == "2026-09-26T09:00:00+00:00"
@@ -658,7 +722,7 @@ def test_consciousness_status_reads_the_callers_canonical_root_and_writes_nothin
     assert facts["source"] == str(canonical / "state" / "state.json")
     assert facts["enabled"] is False and facts["chosen_interval_sec"] == 1800
     assert facts["stored_next_wake_at"] == 0  # recorded zero stays zero, not a guessed time
-    assert facts["not_recorded"] == ["stopped_by", "last_wake_ended_at", "last_skip"]
+    assert facts["not_recorded"] == ["stopped_by", "last_wake_ended_at", "last_skip", "named_wake_time"]
     assert "last_wake_ended_at" not in facts
     # A root task with no budget root reads its own drive, which IS its canonical root.
     facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=forked), "status"))
@@ -677,9 +741,9 @@ def test_consciousness_status_names_a_read_gap_instead_of_defaults(tmp_path):
         facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=root), "status"))
         assert _tree(root) == before, "a status read must not write"
         assert facts["not_read"] == ["enabled", "stopped_by", "stored_next_wake_at", "last_wake_ended_at",
-                                     "chosen_interval_sec", "last_skip"]
+                                     "chosen_interval_sec", "last_skip", "named_wake_time"]
         assert not {"enabled", "stopped_by", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec",
-                    "last_skip"} & set(facts)
+                    "last_skip", "named_wake_time"} & set(facts)
         assert facts["source"] == str(root / "state" / "state.json") and facts["observed_at"]
         return facts["read_gap"]
 
@@ -749,6 +813,17 @@ def test_consciousness_status_names_who_stopped_it_and_an_unrecorded_stop_stays_
     assert recovered["stopped_by"] == {"status": "unknown", "reason": "unconfirmed after a state recovery"}
 
 
+def test_consciousness_status_reports_the_named_wake_time_as_stored(tmp_path):
+    from ouroboros.tools import control
+
+    root = tmp_path / "named"
+    record = {"at": "2030-03-15T09:00:00+03:00", "stored_at": "2030-03-15T01:00:00Z", "standing_appointment": None}
+    _initialized_state(root, {"bg_consciousness_enabled": True, "consciousness_wake_target": record})
+    facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=root), "status"))
+    assert facts["named_wake_time"] == record and "named_wake_time" not in facts["not_recorded"]
+    assert facts["notes"][2].startswith("named_wake_time is the time set_next_wakeup(at) stored")
+
+
 def test_wake_affordances_describe_the_real_alarm_and_the_status_audience():
     from ouroboros.tools.control import get_tools
 
@@ -763,6 +838,12 @@ def test_wake_affordances_describe_the_real_alarm_and_the_status_audience():
     # #1603 (owner 12 Oct): only the scheduled time; no event pulls the alarm earlier
     assert "brings the next wake-up forward" not in wake and "pending event" not in wake
     assert len(wake) < 600, "an operational paragraph, not the alarm's whole algorithm"
+    # The named time: the earlier of it and the interval; the ISO rule lives in its own parameter.
+    assert "and/or at, a named time; the earlier wins" in wake
+    parameters = schemas["set_next_wakeup"]["parameters"]
+    assert parameters["required"] == [] and set(parameters["properties"]) == {"seconds", "at"}
+    assert "ISO 8601 with an explicit UTC offset or Z" in parameters["properties"]["at"]["description"]
+    assert "a wake-up already appointed (that one keeps its time)" in parameters["properties"]["at"]["description"]
     assert "answered to you only" in schemas["toggle_consciousness"]["description"]
     assert "a start does not lift a stop the owner or Panic placed" in schemas["toggle_consciousness"]["description"]
 
