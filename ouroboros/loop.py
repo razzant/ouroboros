@@ -177,17 +177,20 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="m
     """Bind the one discovery implementation to this loop's resident schema list.
 
     The tools a task starts without schemas for are named by the connections map in the
-    system view (``tool_connections``), not by a per-task notice.
+    system view (``tool_connections``), not by a per-task notice. Broken servers and skills join
+    this one notice once, dated by their records (``capability_breakage``); later changes reach the
+    round tail, never this row.
     """
+    from ouroboros.capability_breakage import start_notice_rows
     from ouroboros.tools.tool_discovery import bind_resident_schemas
 
     enabled_extra = bind_resident_schemas(tools_registry, tool_schemas, gateway=gateway)  # MCP via call_mcp_tool where resident
     tools_registry._ctx._actor_loaded_tool_names = enabled_extra  # a route's schema ceiling keeps these
-    omissions = (
+    omissions = start_notice_rows(getattr(tools_registry, "_ctx", None), (
         tools_registry.capability_omissions()
         if hasattr(tools_registry, "capability_omissions")
         else []
-    )
+    ))
     if omissions:
         _append_or_merge_user_message(
             messages,

@@ -868,9 +868,11 @@ def _dispatch_round_model(
     from ouroboros.send_clock import main_clock_policy
     from ouroboros.subagent_bootstrap import is_configured_api_child
     from ouroboros.loop_messages import append_context_facts
+    from ouroboros.capability_breakage import append_change_row
 
     _loop()._retire_main_reasoning(ctx)
-    if append_context_facts(ctx):
+    changed = append_change_row(ctx)  # a capability that broke or recovered since this work was told: its own tail row
+    if append_context_facts(ctx) or changed:
         disposition = _loop()._measure_round_main_fit(
             ctx, automatic_pass_used=bool(getattr(disposition, "automatic_pass_used", False)))
     mailbox_peek = OwnerMailboxPeek()
