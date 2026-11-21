@@ -126,10 +126,11 @@ def test_a_change_under_web_carries_the_design_bible_when_the_whole_book_does_no
     assert rows["docs/DESIGN.md"]["disposition"] == "navigation" and "inline share exhausted" in rows["docs/DESIGN.md"]["reason"]
     assert rows["docs/DESIGN.md#Design bible"]["disposition"] == "inline"
     assert "under web/" in rows["docs/DESIGN.md#Design bible"]["reason"]
-    # A window too small even for the principles: both are named, nothing is carried.
+    # A window too small even for the principles: the book, its bible and its principles are named, nothing carried.
     context, rows = delivered(0)
     assert DESIGN_BIBLE.strip() not in context.selected_inline
-    assert {row["disposition"] for row in rows.values()} == {"navigation"} and len(rows) == 2
+    assert {row["disposition"] for row in rows.values()} == {"navigation"} and set(rows) == {
+        "docs/DESIGN.md", "docs/DESIGN.md#Design bible", "docs/DESIGN.md#Design bible principles"}
     # A book with no design bible says so by name.
     _design(governance_repo, DESIGN + "\nA recipe line.\n" * 200_000)
     context, rows = delivered(1_000_000)
@@ -200,6 +201,34 @@ def test_bible_excerpt_is_its_whole_section_wherever_its_list_ends(governance_re
                                                     drive_root=governance_repo.parent / "data", task_metadata={}), {})
     assert author.section_id == "design_bible"  # the author of this body carries it in its own context
     assert author.full_text.startswith(reviewed + "\n\n## DESIGN.md (navigation map)")  # one text, byte for byte
+
+
+def test_a_share_too_small_for_the_whole_bible_still_carries_its_principles(governance_repo):
+    """Before the whole section, a small reviewer share carried the numbered principles; it still does, labelled as
+    only those and cut from the same section, before the heading map alone (RV1, Astra 6)."""
+    seed = "\n**Seed**\n\n| Role | Light |\n| --- | --- |\n" + "| A role | `#ffffff` |\n" * 400
+    _design(governance_repo, DESIGN_BIBLE + seed + DESIGN.removeprefix("# Design\n") + "\nA recipe line.\n" * 20_000)
+
+    def delivered(window):
+        context = governance_context(governance_repo, surface="triad", touched_paths=["web/ui.css"],
+                                     usable_window_tokens=window)
+        return context, {row["path"]: row for row in context.manifest if row["path"].startswith("docs/DESIGN.md")}
+
+    window, seen = 1_000, {}
+    while "whole" not in seen:  # the smallest windows that carry the principles, then the whole section
+        context, rows = delivered(window)
+        if rows["docs/DESIGN.md#Design bible"]["disposition"] == "inline":
+            seen["whole"] = (context, rows)
+        elif rows.get("docs/DESIGN.md#Design bible principles", {}).get("disposition") == "inline":
+            seen.setdefault("principles", (context, rows))
+        window = int(window * 1.05)
+    context, rows = seen["principles"]
+    assert "(excerpt: principles 1–7 only)" in context.selected_inline and "Principle 7." in context.selected_inline
+    assert "| A role |" not in context.selected_inline  # the seed stays with the whole section
+    assert "inline share exhausted" in rows["docs/DESIGN.md#Design bible"]["reason"]
+    assert rows["docs/DESIGN.md#Design bible principles"]["chars"] == len(DESIGN_BIBLE.strip())
+    context, rows = seen["whole"]
+    assert "| A role |" in context.selected_inline and "docs/DESIGN.md#Design bible principles" not in rows
 
 
 def test_missing_bible_excerpt_never_falls_back_to_whole_design(governance_repo):
