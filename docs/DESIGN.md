@@ -3471,7 +3471,7 @@ leaves every box where the owner scrolled it: only the owner, or the page on pur
 something else in the same box (another folder) sends it to its top itself. A page draws in one step, since a box
 emptied now and filled later has lost its place. Putting back a box that an engine drops as it is drawn again is one
 module's work, not each page's (`web/modules/page_places.js`); a room's feed and the Logs list keep their own reading
-place.
+place. In Accounts, More stays put through release, updates and close, even at the list's end.
 
 ### Haptics
 
