@@ -361,10 +361,10 @@ def test_the_incident_replayed_as_facts_a_stop_over_running_work_reaches_the_nex
     assert run.usage["wake_summary"] == summary and stored["wake_summary"] == summary
     assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
 
-    from tests.test_project_routing_v664 import _ctx
-
     turns = []
-    ctx = _ctx(data, direct=lambda *_a, **kwargs: turns.append(kwargs["task_metadata"]))
+    ctx = SimpleNamespace(DRIVE_ROOT=data, PENDING=[], RUNNING={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},
+                          update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
+                          handle_chat_direct=lambda *_a, **kwargs: turns.append(kwargs["task_metadata"]))
     _route_owner_message(object(), ctx, {"chat_id": 7, "text": "почему остановился? доделали?",
                                          "client_message_id": "cm-why-stopped", "log_text": "почему остановился?",
                                          "origin_message_ref": {"chat_id": 7, "client_message_id": "cm-why-stopped"}})

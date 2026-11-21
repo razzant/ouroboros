@@ -752,10 +752,10 @@ def test_main_without_projects_reads_a_root_as_main_beside_them_does_and_a_new_i
     from ouroboros.projects_registry import create_project
     from ouroboros.server_routing_context import STOP_REASON_LABEL, main_lane_routing_metadata
     from ouroboros.store import StoreBusy
-    from tests.test_project_routing_v664 import _ctx
 
     turns, gate_reads = [], []
-    ctx = _ctx(tmp_path, direct=lambda *_a, **kwargs: turns.append(kwargs["task_metadata"]))
+    ctx = _decision_ctx(tmp_path)
+    ctx.handle_chat_direct = lambda *_a, **kwargs: turns.append(kwargs["task_metadata"])
     real_gate = server_owner_routing._root_results_exist
     monkeypatch.setattr(server_owner_routing, "_root_results_exist",
                         lambda gate_ctx: gate_reads.append(1) or real_gate(gate_ctx))
@@ -790,6 +790,7 @@ def test_main_without_projects_reads_a_root_as_main_beside_them_does_and_a_new_i
     unknown = route("m-busy")["main_routing_manifest"]
     assert unknown["final_results"] == []
     assert unknown["omissions"]["final_results_error"].startswith("result_store_unreadable")
+    assert main_lane_routing_metadata(ctx, 1)["main_routing_manifest"]["omissions"]["final_results_error"]
 
     create_project(tmp_path, "racer", name="Racer")
     before = len(gate_reads)
