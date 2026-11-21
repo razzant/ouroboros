@@ -175,9 +175,10 @@ def _text(page, selector: str) -> str:
 
 def _system_rows(url: str) -> list:
     """Main's System rows as ``(system_type, text)``: what the owner reads as the host speaking. Rows a work card
-    draws (web/modules/chat_preview.js ``CARD_ROWS``: a task's summary and evidence, a quiz, a card) are not one."""
+    draws (web/modules/chat_preview.js ``CARD_ROWS``: a task's summary and evidence, a quiz, a card) are not one, nor
+    a work's progress rows (``is_progress``, that filter's other half: a task's checkpoints fold into its card)."""
     return [(row.get("system_type"), row.get("text", "")) for row in _get(url, "/api/chat/history?limit=100")["messages"]
-            if (row.get("role") == "system" or row.get("system_type"))
+            if (row.get("role") == "system" or row.get("system_type")) and not row.get("is_progress")
             and row.get("system_type") not in {"task_evidence", "task_summary", "quiz", "card"}]
 
 
