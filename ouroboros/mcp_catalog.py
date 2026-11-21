@@ -4,21 +4,29 @@ The server publishes one envelope per configured identity. Readers stat before
 loading and retain parsed bytes until atomic replacement. Policy and provider
 schema presentation belong to the client, not this store; the typed fact one
 name lookup yields (``MCPNameResolution``) and its refusal text live here.
+
+Beside the listing's ``latest_attempt`` the envelope keeps ``latest_call``: whether
+the server answered its latest observed tool call (an answer with ``isError`` is an
+answer), written by any process only when that changes, under the file's name lock,
+so a listing publication never drops it. A failed listing or call keeps the start
+of its open failing series (``since``) on repeats; a record without one has an
+unknown start.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from ouroboros import config
 from ouroboros.mcp_schema import redact_metadata, wrap_schema_text
 from ouroboros.tools.tool_result import ToolResult
-from ouroboros.utils import atomic_write_json
+from ouroboros.utils import atomic_write_json, read_json_dict
 
 log = logging.getLogger(__name__)
 
@@ -82,9 +90,59 @@ def attempt_envelope(cfg: Any, previous: dict | None, *, at: str, error: str = "
     if items is not None and (complete or not envelope["complete"]):
         envelope.update(items=items, complete=complete, listed_at=at, instructions=instructions)
         envelope["schema_omissions"] = list(schema_omissions or [])
+    prior = envelope.get("latest_attempt") or {}
     envelope["latest_attempt"] = {"at": at, "ok": items is not None, "error": error,
                                   "partial": items is not None and not complete}
+    if items is None:  # the failing series' start survives a repeat; an older record's start stays unknown
+        envelope["latest_attempt"]["since"] = prior.get("since") if prior.get("ok") is False else at
     return envelope
+
+
+def call_changed(current: Any, *, ok: bool, code: str = "") -> bool:
+    """Whether a call outcome changes ``latest_call`` (its answer state, or the kind of a failure)."""
+    current = current if isinstance(current, dict) else {}
+    return not current or current.get("ok") is not ok or str(current.get("code") or "") != ("" if ok else code)
+
+
+def call_mark(current: Any, *, ok: bool, code: str, method: str, at: str) -> dict:
+    """The ``latest_call`` a changed outcome writes: ``at`` dates this mark (the change), never a later call;
+    a failure keeps the open series' ``since`` while the server still does not answer."""
+    current = current if isinstance(current, dict) else {}
+    mark = {"ok": ok, "code": "" if ok else str(code or ""), "method": str(method or ""), "at": at}
+    if not ok:
+        mark["since"] = current.get("since") if current.get("ok") is False else at
+    return mark
+
+
+@contextlib.contextmanager
+def _file_lock(server_id: str, *, wait_sec: float) -> Iterator[None]:
+    """The catalog file's cross-process name lock (``store.name_lock``; its holder removes it on release)."""
+    from ouroboros import store
+
+    with store.name_lock(config.DATA_DIR, f"mcp/catalogs/server-{server_id}.lock", timeout_sec=wait_sec):
+        yield
+
+
+def _same_record(data: Any, cfg: Any) -> bool:
+    return isinstance(data, dict) and data.get("server_id") == cfg.id and data.get("identity") == identity(cfg)
+
+
+def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
+    """Write a changed call outcome into this server's published envelope; False when nothing was written
+    (unchanged on disk, no published envelope of this identity, or the lock is busy: the next changed call
+    writes it). Never discovers, and never replaces the listing."""
+    from ouroboros import store
+
+    try:
+        with _file_lock(cfg.id, wait_sec=0):
+            data = read_json_dict(catalog_path(cfg.id))
+            if not _same_record(data, cfg) or not call_changed(data.get("latest_call"), ok=ok, code=code):
+                return False
+            data["latest_call"] = call_mark(data.get("latest_call"), ok=ok, code=code, method=method, at=at)
+            atomic_write_json(catalog_path(cfg.id), data)
+            return True
+    except store.StoreBusy:
+        return False
 
 
 class CatalogReader:
@@ -122,8 +180,17 @@ class CatalogReader:
 
 
 def publish(cfg: Any, envelope: dict) -> None:
-    """Atomic replacement, including the shared Windows replace retry."""
-    atomic_write_json(catalog_path(cfg.id), envelope)
+    """Atomic replacement, including the shared Windows replace retry. Under the file's lock the call outcome
+    on disk wins over the publisher's snapshot, so a worker's concurrent call mark is never lost."""
+    from ouroboros.runtime_limits import MCP_CATALOG_LOCK_WAIT_SEC
+
+    with _file_lock(cfg.id, wait_sec=MCP_CATALOG_LOCK_WAIT_SEC):
+        current = read_json_dict(catalog_path(cfg.id))
+        if _same_record(current, cfg):
+            envelope = {key: value for key, value in envelope.items() if key != "latest_call"}
+            if isinstance(current.get("latest_call"), dict):
+                envelope["latest_call"] = current["latest_call"]
+        atomic_write_json(catalog_path(cfg.id), envelope)
 
 
 def prune_catalogs(configs: list) -> None:

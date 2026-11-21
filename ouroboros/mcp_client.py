@@ -1412,6 +1412,22 @@ class MCPManager:
         with self._lock:
             return self._resolve_locked(prefixed_name)[0]
 
+    def _note_call(self, cfg: MCPServerConfig, method: str, *, ok: bool, code: str = "") -> None:
+        """Date a change of whether ``cfg``'s server answers calls (``latest_call`` in its published envelope).
+
+        An outcome equal to the adopted envelope's costs nothing (the call's own ``rebind`` already stat-checked
+        it); a change is written under the file lock and adopted by every process's next read. Never fails the
+        call it describes."""
+        with self._lock:
+            runtime = self._servers.get(cfg.id)
+            current = (runtime.catalog or {}).get("latest_call") if runtime is not None else None
+        if not mcp_catalog.call_changed(current, ok=ok, code=code):
+            return
+        try:
+            mcp_catalog.record_call(cfg, ok=ok, code=code, method=method, at=datetime.now(timezone.utc).isoformat())
+        except Exception:  # noqa: BLE001 - a lost mark is written by the next changed call
+            log.debug("MCP call outcome mark failed for %s", cfg.id, exc_info=True)
+
     def _task_session_live(self, cfg: MCPServerConfig, register: Optional[Callable[[], None]] = None) -> bool:
         """Whether ``cfg`` is still this manager's task-session configuration; ``register`` runs under the lock
         ``reconfigure`` retires sessions under, so every later retirement sees what it registers."""
@@ -1480,23 +1496,30 @@ class MCPManager:
                    "and remote cancellation is not confirmed. Use the server-specific status/read "
                    "tool, if available, to reconcile the operation before retrying.")
             ) + server_stderr_note(exc)
+            self._note_call(cfg, tool.raw_name, ok=False, code="MCP_TIMEOUT")  # no answer, sent or not
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
         except mcp_oauth.MCPAuthRequired as exc:  # the server ran nothing: no grant, refused refresh or token
+            self._note_call(cfg, tool.raw_name, ok=False, code="MCP_AUTH_REQUIRED")
             return ToolResult(status="unavailable", code="MCP_AUTH_REQUIRED", text=f"⚠️ {exc}",
                               meta={"dynamic_provider": True, "mcp_call_not_sent": True, "sign_in_reason": exc.reason})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             if isinstance(exc, PhysicalDispatchInterrupted):
                 raise  # caller control is not a provider error; exited() already settled proven no-send custody
+            from ouroboros.model_wait import ModelWaitInterrupted
+            from ouroboros.usage_accounting import UsageAccountingError
             not_sent = unsent(exc)
             if not_sent and isinstance(exc, (OwnerPauseRefused, StoreError)):
                 from ouroboros.tools.tool_result import launch_refusal_result
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
+            if not (not_sent and isinstance(exc, (ModelWaitInterrupted, UsageAccountingError))):
+                self._note_call(cfg, tool.raw_name, ok=False, code="MCP_ERROR")  # a local refusal says nothing of it
             body = f"⚠️ MCP_TOOL_ERROR: {_exception_text(exc, cfg)}"
             return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
                               meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
         # The remote call is complete here; projecting it never turns it into a failure.
+        self._note_call(cfg, tool.raw_name, ok=True)  # the server answered (an isError answer is an answer)
         if result.status == "ok" and getattr(ctx, "drive_root", None):  # a post I made as an account: never my human's
             from ouroboros.own_sends import record_result
             from ouroboros.tool_access import canonical_data_root

@@ -669,3 +669,95 @@ def test_old_catalog_computed_omissions_reach_model_notice():
     notices = json.dumps(reader.catalog_notices())
     assert "MCP_SCHEMA_LITERAL_SECRET: bad" in notices and "MCP_SCHEMA_OPTIONAL_DROPPED: optional" in notices
     assert secret not in notices + json.dumps(reader.list_tools_for_registry())
+
+
+def envelope_now():
+    return json.loads(mcp_catalog.catalog_path("demo").read_text(encoding="utf-8"))
+
+
+def call_with(manager, outcome):
+    """One call of ``mcp_demo__ping`` whose transport returns ``outcome`` or raises it."""
+    async def call(cfg, name, arguments, timeout):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+    manager._async_call_tool = call
+    return manager._call_tool_result("mcp_demo__ping", {})
+
+
+def test_a_failing_listing_keeps_its_series_start_and_a_listing_closes_it():
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"] and "since" not in envelope_now()["latest_attempt"]
+    fail(manager)
+    first = envelope_now()["latest_attempt"]
+    assert first["ok"] is False and first["since"] == first["at"]
+    fail(manager)
+    again = envelope_now()["latest_attempt"]
+    assert again["since"] == first["since"] and again["at"] >= first["at"]
+    manager._async_list_tools = publisher()._async_list_tools
+    assert manager.refresh_server("demo")["ok"] and "since" not in envelope_now()["latest_attempt"]
+    # A failing record written before starts were kept: its start stays unknown, never "now".
+    path = mcp_catalog.catalog_path("demo")
+    old = envelope_now()
+    old["latest_attempt"] = {"at": "2026-11-19T23:43:00+00:00", "ok": False, "error": "offline", "partial": False}
+    path.write_text(json.dumps(old), encoding="utf-8")
+    fail(manager)
+    assert envelope_now()["latest_attempt"]["since"] is None
+
+
+def test_a_call_failure_opens_a_dated_series_a_repeat_keeps_it_and_an_answer_closes_it():
+    from ouroboros import mcp_oauth
+    from ouroboros.tools.tool_result import ToolResult
+
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"] and "latest_call" not in envelope_now()
+    assert call_with(manager, TimeoutError("slow")).code == "MCP_TIMEOUT"
+    opened = envelope_now()["latest_call"]
+    assert opened == {"ok": False, "code": "MCP_TIMEOUT", "method": "ping", "at": opened["at"], "since": opened["at"]}
+    stamp = mcp_catalog.catalog_path("demo").stat().st_mtime_ns
+    call_with(manager, TimeoutError("slow"))  # the same failure again: nothing is written
+    assert envelope_now()["latest_call"] == opened and mcp_catalog.catalog_path("demo").stat().st_mtime_ns == stamp
+    refused = mcp_oauth.MCPAuthRequired("demo", "token_rejected")
+    refused.mcp_unsent_joined = True
+    assert call_with(manager, refused).code == "MCP_AUTH_REQUIRED"
+    changed = envelope_now()["latest_call"]
+    assert changed["code"] == "MCP_AUTH_REQUIRED" and changed["since"] == opened["since"]  # still no answer since
+    answered = ToolResult(status="error", code="MCP_ERROR", text="bad argument", meta={"mcp_is_error": True})
+    assert call_with(manager, answered).code == "MCP_ERROR"  # an isError answer is an answer
+    closed = envelope_now()["latest_call"]
+    assert closed["ok"] is True and closed["code"] == "" and "since" not in closed and closed["at"] >= changed["at"]
+    stamp = mcp_catalog.catalog_path("demo").stat().st_mtime_ns
+    assert call_with(manager, ToolResult(status="ok", code="OK", text="pong")).status == "ok"
+    assert envelope_now()["latest_call"] == closed and mcp_catalog.catalog_path("demo").stat().st_mtime_ns == stamp
+
+
+def test_a_local_refusal_before_sending_is_not_a_server_failure_but_a_timeout_is():
+    from ouroboros import owner_pause, store
+
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"]
+    for local in (owner_pause.OwnerPauseRefused("owner_pause"), store.StoreBusy("store busy", reason="contention")):
+        local.mcp_unsent_joined = True
+        assert call_with(manager, local).meta.get("control_reason")
+        assert "latest_call" not in envelope_now()
+    assert call_with(manager, TimeoutError("slow")).code == "MCP_TIMEOUT"
+    opened = envelope_now()["latest_call"]
+    assert opened["ok"] is False
+    paused = owner_pause.OwnerPauseRefused("owner_pause")
+    paused.mcp_unsent_joined = True
+    call_with(manager, paused)  # an owner pause neither closes nor restarts the open series
+    assert envelope_now()["latest_call"] == opened
+
+
+def test_a_listing_publication_never_drops_a_call_mark_written_meanwhile():
+    writer = publisher()
+    assert writer.refresh_server("demo")["published"]
+
+    async def list_while_a_worker_marks(cfg, timeout):  # another process marks a call during this listing
+        assert mcp_catalog.record_call(cfg, ok=False, code="MCP_ERROR", method="ping", at="2026-11-21T10:00:00+00:00")
+        return listing("ping")
+    writer._async_list_tools = list_while_a_worker_marks
+    assert writer.refresh_server("demo")["published"]
+    assert envelope_now()["latest_call"] == {"ok": False, "code": "MCP_ERROR", "method": "ping",
+                                             "at": "2026-11-21T10:00:00+00:00", "since": "2026-11-21T10:00:00+00:00"}
+    assert envelope_now()["latest_attempt"]["ok"] is True
