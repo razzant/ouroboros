@@ -152,8 +152,14 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
         if "ends" not in capture:
             capture["ends"] = _stream_ends(root)
         ends = capture["ends"]
-    if held is not None and held[1:] == (identity, revision, ends):
-        return held[0][0], str(ref.get("task_id") or ""), _ref_chat(ref), False
+    # A cached miss is a fact of the stream ends it was decided under: an import between two of
+    # one pass's lookups moves them and stores the target at its exact address, so read them
+    # again now before reusing one -- no absence outlives an import the pass itself may meet.
+    # A found target never pays for that, and a lookup outside a pass read its pair above, as before.
+    if held is not None and held[3] is not None:
+        fresh = ends if capture is None else _stream_ends(root)
+        if held[1:] == (identity, revision, fresh):
+            return held[0][0], str(ref.get("task_id") or ""), _ref_chat(ref), False
     from ouroboros import dialogue_positions as dp
     from ouroboros.chat_chain import _row_chat_id, resolve_row
     from ouroboros.presence_owner_contact import private_main_row
