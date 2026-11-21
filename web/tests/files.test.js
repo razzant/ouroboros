@@ -103,3 +103,18 @@ test('focus on the round Back goes to the file\'s row when both panes come back 
     context.showPane('file');
     assert.equal(context.document.activeElement, editor);
 });
+
+test('a Files dialog takes its tone from its caller, never from its words', async () => {
+    const source = readFileSync(new URL('../modules/files.js', import.meta.url), 'utf8');
+    const asked = [];
+    const context = vm.createContext({ openConfirmDialog: async (options) => { asked.push(options); return true; } });
+    vm.runInContext(source.match(/    async function showModal\([\s\S]+?\n    \}/)[0], context);
+    await context.showModal({ title: 'Delete the note?', message: 'This cannot be undone.', confirmLabel: 'Delete' });
+    await context.showModal({ title: 'Remove the note?', message: 'This cannot be undone.', confirmLabel: 'Remove', danger: true });
+    assert.deepEqual(asked.map((options) => options.danger), [false, true], 'the word Delete is not red and Remove is when the caller says so');
+    // Each of the page's three dialogs says its tone: Discard and Delete are destructive, Create is not.
+    const calls = source.split('await showModal({').slice(1).map((call) => call.split('})')[0]);
+    assert.deepEqual(calls.map((call) => [call.match(/confirmLabel: '([^']+)'/)?.[1], call.match(/danger: (true|false)/)?.[1]]),
+        [['Discard', 'true'], ['Create', 'false'], ['Delete', 'true']]);
+    assert.doesNotMatch(source, /danger:\s*\/[^/]+\/i?\.test\(/, 'no tone guessed from a label');
+});

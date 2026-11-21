@@ -737,7 +737,7 @@ export function initSkills(ctx = {}) {
         const listingTools = snapshot?.rawSkills?.some((skill) => (skill.mcp_servers || [])
             .some((server) => server.configured && !server.listed && !server.error));
         const rows = projected();
-        const reviewing = reviewingSkills.size > 0 || rows.some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
+        const reviewing = reviewingSkills.size > 0 || rows.some((skill) => installedSkillModel(skill).reviewing);
         const exiting = snapshot?.rawSkills?.some((skill) => Object.keys(skill.retained_companions || {}).length);
         const listed = new Map((snapshot?.rawSkills || []).map((skill) => [skill.name, skill]));
         const facts = pageModuleFacts();
