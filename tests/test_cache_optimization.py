@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from tests._work_life import CX, OPUS, OPUS_NAMED, Life, Place, breaches, run_life
+from tests._work_life import CX, MARKED_LOOKBACK, OPUS, OPUS_NAMED, WHOLE_REQUESTS, Life, Place, breaches, run_life
 from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_subscription_main_wait import main_call as main_fixture
@@ -799,3 +799,30 @@ def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monk
         assert all(second["narrowed"]), f"{name}: the row needs two narrowed stories, got {second['narrowed']}"
         assert second["common"] == 3, (f"{name}: the second work read {second['read']} of {second['tokens']} tokens "
                                        f"({second['common']} of {second['elements']} elements) from the first work's start")
+
+
+@pytest.mark.parametrize("rule", [MARKED_LOOKBACK, WHOLE_REQUESTS])
+def test_consecutive_full_folds_and_a_restore_read_what_their_cache_rule_holds(rule, main_call, monkeypatch, tmp_path):
+    """Test 2 of the C07 consilium, under each named cache rule, the clock row production sends read like any row: a
+    full fold whose own call follows its note leaves the request sent after it standing, so the request after the
+    next full fold reads that whole earlier request (on marked prefixes: its marked end lies within the lookback),
+    not only the start. Here the work's start carries an untyped host row (the capability omission notice), so the
+    first fold's note lands before the typed start rows and leaves no anchor: from the second fold on the anchor
+    holds. A restore reads what its rewritten start leaves: the leading system group, or the marked stable part."""
+    place = (Place("opus", OPUS, density=1.4, marked=True, rule=rule) if rule == MARKED_LOOKBACK else _a(rule=rule))
+    life = Life(places=(place,), primary=place.name, reads=(_WIDE,) * 8,
+                acts=((3, ("fold",)), (5, ("fold",)), (7, ("fold",))), door=10)
+    record = run_life(life, main_call, monkeypatch, tmp_path)
+    answered = [entry for entry in record["log"] if entry["kind"] == "answered"]
+    after = [entry for before, entry in zip(answered, answered[1:]) if before["action"] == "fold"]
+    assert [entry["n"] for entry in after] == [4, 7, 10], [(entry["n"], entry["action"]) for entry in answered]
+    held, reading = after[1], after[2]  # the request after the second fold, and the one after the third
+    marked_end = sum(held["sizes"][:max(held["marks"]) + 1]) if held["marks"] else 0
+    assert reading["read"] >= (held["tokens"] if rule == WHOLE_REQUESTS else marked_end) > held["start_tokens"], (
+        held, reading)
+    if rule == WHOLE_REQUESTS:
+        assert reading["read"] == held["tokens"]  # the whole earlier answered request, its clock row included
+        assert after[1]["read"] == after[1]["start_tokens"]  # the first fold left no anchor (untyped start row)
+    restore = answered[11]
+    assert restore["read"] == (restore["start_tokens"] if rule == WHOLE_REQUESTS else restore["read"])
+    assert 0 < restore["read"] <= restore["start_tokens"]
