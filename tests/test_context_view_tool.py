@@ -96,11 +96,10 @@ def test_receipt_itself_is_included_in_final_fit_before_publication(tmp_path, mo
         return {"accepted": not candidate[-1].get("content", "").startswith("[Context view receipt]")
                 if isinstance(candidate[-1].get("content"), str) else True}
     result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch, fit))
-    # The candidate, then with its receipt, then with the list of removed bodies and then the list of notes counted
-    # instead of listed: a receipt that fits no window still undoes nothing it did not have to.
-    assert len(calls) == 4 and result is messages
-    assert '"bodies_removed": ' in calls[1][-1]["content"] and '"bodies_removed_omitted": 1' in calls[2][-1]["content"]
-    assert '"notes_kept": ' in calls[2][-1]["content"] and '"notes_kept_omitted": 1' in calls[3][-1]["content"]
+    # The candidate, then with its receipt, whose lists already stand behind its address as counts: a receipt that
+    # fits no window undoes the view, and no list is dropped on the way.
+    assert len(calls) == 2 and result is messages
+    assert '"at_source": {"bodies_removed": 1, "notes_kept": 1}' in calls[1][-1]["content"]
     assert ctx._context_view_receipt["status"] == "fit_rejected"
 
 
@@ -166,7 +165,7 @@ def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_pa
             assert '"receipt_source": "unavailable"' in candidate[-1]["content"]
         else:
             notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
-            assert notice["receipt_source"]["read"]["tool"] == "read_file"
+            assert set(notice["receipt_source"]) == {"kind", "root", "path", "size", "sha256"}
         return
 
     source = event["receipt_source"]
@@ -187,8 +186,7 @@ def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_pa
         assert event["view_revision"] == event["after_transcript_sha256"] == receipt["view_revision"]
         assert event["fit_after"] == {"accepted": True, "measured_final": True}
         model_notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
-        assert "task_id" not in model_notice["receipt_source"]
-        assert model_notice["receipt_source"]["read"]["tool"] == "read_file"
+        assert set(model_notice["receipt_source"]) == {"kind", "root", "path", "size", "sha256"}  # read_file's address
 
 
 @pytest.mark.parametrize("accepted", [True, False])
@@ -400,11 +398,12 @@ def _receipt(rows):
     return json.loads(rows[index]["content"].split("\n", 1)[1]), rows[:index]
 
 
-def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_restorable_address(tmp_path, monkeypatch):
-    """Both directions: an applied fold's receipt lists every note in view (id, write time or "not recorded", first
-    line) and every source body that left (what it was, its address), facts only; the address restores that body; a
-    restore that removes nothing names no body; a receipt the window cannot hold drops a list for a count (the bodies,
-    then the notes) rather than undoing the view, and the retained receipt keeps every list the notice counts."""
+def test_a_fold_receipt_counts_its_notes_and_bodies_and_keeps_their_lists_at_its_address(tmp_path, monkeypatch):
+    """Both directions: an applied fold's receipt row counts the notes in view and the bodies that left
+    (``at_source``) beside the exact address of the full receipt, and lists neither; the stored receipt there lists
+    every note (id, write time or "not recorded", first line) and every body that left (what it was, its address),
+    and that address restores the body; a restore that removes nothing counts no body."""
+    from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.context_compaction import context_units
     from tests._working_notes import _note, _undated
 
@@ -415,46 +414,50 @@ def test_a_fold_receipt_names_the_notes_in_view_and_each_body_that_left_by_a_res
     _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
     folded = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch))
     notice, view = _receipt(folded)
+    assert notice["at_source"] == {"bodies_removed": 1, "notes_kept": 2}
+    assert not {"bodies_removed", "notes_kept", "restore_checkpoint"} & set(notice)
+    stored = json.loads(read_actor_source_bytes(tmp_path, "view-task", notice["receipt_source"]))["receipt"]
     capsule_ids = [unit.unit_id for unit in context_units(view) if unit.start >= 2]
-
-    assert [set(note) for note in notice["notes_kept"]] == [{"id", "written", "first_line"}] * 2
-    assert [note["id"] for note in notice["notes_kept"]] == capsule_ids
-    assert [note["first_line"] for note in notice["notes_kept"]] == ["The read confirms the goal.",
+    assert [set(note) for note in stored["notes_kept"]] == [{"id", "written", "first_line"}] * 2
+    assert [note["id"] for note in stored["notes_kept"]] == capsule_ids
+    assert [note["first_line"] for note in stored["notes_kept"]] == ["The read confirms the goal.",
                                                                      "Goal: keep the owner's exact wording."]
-    assert notice["notes_kept"][1]["written"] == "not recorded" and notice["notes_kept"][0]["written"].endswith(" UTC")
+    assert stored["notes_kept"][1]["written"] == "not recorded" and stored["notes_kept"][0]["written"].endswith(" UTC")
     read = context_units(messages, scope="dialogue")[0]
-    assert notice["bodies_removed"] == [{"source": "tool read_file {}",
+    assert stored["bodies_removed"] == [{"source": "tool read_file {}",
                                          "address": {"unit_id": read.unit_id, "raw_sha256": read.raw_sha256}}]
-    assert set(notice["restore_checkpoint"]) == {"kind", "root", "path", "size", "sha256"}
+    assert set(stored["restore_checkpoint"]) == {"kind", "root", "path", "size", "sha256"}
 
     record_context_view(ctx, view, [])
-    ref = {"checkpoint_ref": notice["restore_checkpoint"], **notice["bodies_removed"][0]["address"]}
+    ref = {"checkpoint_ref": stored["restore_checkpoint"], **stored["bodies_removed"][0]["address"]}
     assert "requested" in _compact_context(ctx, restore_unit_refs=[ref])
     restored = _run_round_compaction(copy.deepcopy(view), _context(tmp_path, ctx, [], monkeypatch))
     again, _ = _receipt(restored)
     assert ctx._context_view_receipt["status"] == "applied" and "Long exact evidence" in json.dumps(restored)
-    assert "bodies_removed" not in again and "restore_checkpoint" not in again and len(again["notes_kept"]) == 2
+    assert again["at_source"] == {"notes_kept": 2} and len(ctx._context_view_receipt["notes_kept"]) == 2
 
-    def window(rows, _tools):  # a window that holds the view and its receipt, but not the list of bodies
-        return {"accepted": '"bodies_removed": ' not in str(rows[-1].get("content"))}
 
-    record_context_view(ctx, messages, [])
-    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
-    held = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch, fit=window))
-    counted, _ = _receipt(held)
-    assert ctx._context_view_receipt["status"] == "applied" and counted["bodies_removed_omitted"] == 1
-    assert "restore_checkpoint" not in counted and len(counted["notes_kept"]) == 2
-
-    def no_notes_list(rows, _tools):  # a window that holds the view and its receipt, but not the list of notes
-        return {"accepted": '"notes_kept": ' not in str(rows[-1].get("content"))}
-
-    record_context_view(ctx, messages, [])
-    _compact_context(ctx, working_note="The read confirms the goal.", keep_unit_ids=[])
-    fitted = _run_round_compaction(copy.deepcopy(messages), _context(tmp_path, ctx, [], monkeypatch, fit=no_notes_list))
-    assert ctx._context_view_receipt["status"] == "applied"  # the fold that fits is kept, never undone by a list
-    noted, _ = _receipt(fitted)
-    assert noted["notes_kept_omitted"] == 2 and noted["bodies_removed_omitted"] == 1 and "notes_kept" not in noted
-    assert len(ctx._context_view_receipt["notes_kept"]) == 2 and ctx._context_view_receipt["bodies_removed"]
+def test_a_full_folds_receipt_row_is_one_size_class_for_five_bodies_and_a_hundred(tmp_path, monkeypatch):
+    """The scale invariant: the receipt row of a full fold that removed 100 bodies is the size of one that removed 5
+    (only its counts differ), and with one note in view it stays within about 350 tokens (1,050 characters at three
+    characters a token; N6 measured 4.9k tokens at the median while it listed every body)."""
+    rows = {}
+    for count in (5, 100):
+        messages = [*_source()[:2]]
+        for index in range(count):
+            messages += [{"role": "assistant", "tool_calls": [{"id": f"r{index}", "function": {
+                "name": "read_file", "arguments": json.dumps({"path": f"src/module_{index}.py"})}}]},
+                {"role": "tool", "tool_call_id": f"r{index}", "content": f"evidence {index} " * 40}]
+        ctx = SimpleNamespace(active_context_mode="low")
+        record_context_view(ctx, messages, [])
+        _compact_context(ctx, working_note="One note over every read.", keep_unit_ids=[])
+        folded = _run_round_compaction(messages, _context(tmp_path / str(count), ctx, [], monkeypatch))
+        row = next(row["content"] for row in folded if str(row.get("content")).startswith("[Context view receipt]"))
+        rows[count] = row
+        assert json.loads(row.split("\n", 1)[1])["at_source"] == {"bodies_removed": count, "notes_kept": 1}
+        assert len(ctx._context_view_receipt["bodies_removed"]) == count  # the stored receipt lists them all
+    assert abs(len(rows[100]) - len(rows[5])) <= 40, rows
+    assert len(rows[100]) <= 1_050, rows[100]
 
 
 def test_inspect_sends_its_shared_fields_on_page_one_only_and_every_unit_once(tmp_path, monkeypatch):
@@ -525,7 +528,7 @@ def test_a_receipt_transfer_that_does_not_complete_keeps_the_round_and_names_its
     names the error neutrally, its type and text, and the round goes on with the local receipt; a completed
     transfer names none. Either way the transfer's time rides the next round's receipt
     (``prologue.source_retention``)."""
-    from ouroboros import loop, observability
+    from ouroboros import artifacts, loop, observability
     from ouroboros.loop_round_limits import _run_authored_context_view
 
     ctx = SimpleNamespace(active_context_mode="low")
@@ -547,7 +550,7 @@ def test_a_receipt_transfer_that_does_not_complete_keeps_the_round_and_names_its
     event, = events
     assert ctx._context_view_receipt["status"] == event["status"] == "applied"
     notice = json.loads(candidate[-1]["content"].split("\n", 1)[1])
-    assert notice["receipt_source"]["read"]["tool"] == "read_file"  # the local receipt stays readable
+    assert artifacts.read_actor_source_bytes(tmp_path, "view-task", notice["receipt_source"])  # the local receipt stays readable
     if error is None:
         assert "receipt_retention_error" not in notice and "receipt_source" in event
     else:
