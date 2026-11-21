@@ -38,7 +38,9 @@ from ouroboros.skill_token import SkillToken
 #      tool_effects.py). A payload using them declares at least 2.5, so an older host refuses it before import.
 # 2.6: the running tool call's Stop (``get_stop_state``), read-only in both execution modes; a field-less legacy
 #      payload is refused it. A payload relying on it declares 2.6, so an older host refuses it before import.
-PLUGIN_API_VERSION = "2.6"
+# 2.7: no method changes; a place-bound finish is a record wherever its connector declares a message door (owner 21.11,
+#      1A). A connector that stops following work for finals declares 2.7, so an older host refuses it before import.
+PLUGIN_API_VERSION = "2.7"
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -212,6 +214,7 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.7": "6c8caf340396e1e1f091a54a401c846c19635cc45156c8d20a91712f667996cc",
     "2.6": "0f47e50817ed993991d5cf163af8bbc4de737d454fdb8f09eb962ed6bf2cf8fa",
     "2.5": "b1539cbdb03a6b4d05111f645c94f9de32c3113b36be68d21fd6cc8d809a5a52",
     "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",

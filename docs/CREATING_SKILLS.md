@@ -1259,7 +1259,9 @@ Use the connector's ordinary content-hash-bound skill token for:
   focus, a root it handed off, a schedule's run) is its record and people hear only what it sends
   through that tool: the outcome is `silent` and the text stays on the card. A connector without such a
   tool (a peer URL) keeps the final as its reply. A connector with one therefore has no final to follow:
-  its custody of an event can close at the admission receipt.
+  its custody of an event can close at the admission receipt; a release that stops polling work for finals
+  declares PluginAPI 2.7, so an older host, whose handed-off roots still answer by their final, refuses it
+  before import.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1886,14 +1888,15 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
-with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
+(PluginAPI 2.7; a payload declaring any 2.x minimum negotiates the host's 2.7, methods included; a tool row
+with `touches` needs "2.5", a payload relying on `get_stop_state` "2.6" and a connector that stops following work for
+finals "2.7", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.6"            # major strict; minor = required minimum
+plugin_api: "2.7"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.6"
+#   version: "2.7"
 #   capabilities: [register_tool, subscribe_event]
 ```
 

@@ -144,8 +144,9 @@ def test_plugin_api_keeps_memory_voice_and_every_prior_minimum(monkeypatch):
                                                 VALID_EXTENSION_PERMISSIONS, negotiate_plugin_api, plugin_api_surface_fingerprint)
 
     # 2.3 united the memory reader and voice; 2.4 added settings state and a companion refresh beside them; 2.5 added
-    # no method (the minimum a connector's target groups, ``touches``, declare); 2.6 adds the running call's Stop.
-    assert PLUGIN_API_VERSION == "2.6"
+    # no method (the minimum a connector's target groups, ``touches``, declare); 2.6 added the running call's Stop; 2.7
+    # adds no method (the minimum a connector that stops following work for finals declares, owner 21.11 1A).
+    assert PLUGIN_API_VERSION == "2.7"
     assert PLUGIN_API_SURFACE_FINGERPRINTS == {
         "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
         "2.1": "7e288212fd5bcaaa5de961bde9180ca8669e45c00bbfa8d59ffbccccf9442cdb",
@@ -153,8 +154,11 @@ def test_plugin_api_keeps_memory_voice_and_every_prior_minimum(monkeypatch):
         "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
         "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",
         "2.5": "b1539cbdb03a6b4d05111f645c94f9de32c3113b36be68d21fd6cc8d809a5a52",
-        "2.6": plugin_api_surface_fingerprint(),
+        "2.6": "0f47e50817ed993991d5cf163af8bbc4de737d454fdb8f09eb962ed6bf2cf8fa",
+        "2.7": plugin_api_surface_fingerprint(),
     }
+    monkeypatch.setattr(papi, "PLUGIN_API_VERSION", "2.6")  # the same surface under 2.6's name: no method was added
+    assert plugin_api_surface_fingerprint() == PLUGIN_API_SURFACE_FINGERPRINTS["2.6"]
     # 2.6's one new method is the whole difference from 2.5: without it, under 2.5's name, the live surface is 2.5's.
     monkeypatch.setattr(papi, "PLUGIN_API_VERSION", "2.5")
     monkeypatch.setattr(papi, "ALWAYS_AVAILABLE_CAPABILITIES", papi.ALWAYS_AVAILABLE_CAPABILITIES - {"get_stop_state"})
@@ -164,11 +168,11 @@ def test_plugin_api_keeps_memory_voice_and_every_prior_minimum(monkeypatch):
     assert {"realtime_provider", "live_conversation", "call_peer"} <= VALID_EXTENSION_PERMISSIONS
 
     from types import SimpleNamespace
-    for minimum in ("2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6"):
+    for minimum in ("2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7"):
         for capabilities in (["read_memory"], ["register_realtime_provider", "register_live_conversation"],
                              ["get_stop_state"]):
             result = negotiate_plugin_api(SimpleNamespace(plugin_api={"version": minimum, "capabilities": capabilities}))
-            assert result.ok and result.generation == "2.6", result
+            assert result.ok and result.generation == "2.7", result
 
 
 def test_new_fit_ports_keep_old_host_defaults():
