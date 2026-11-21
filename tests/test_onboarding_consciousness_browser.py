@@ -224,11 +224,26 @@ def _next(page, steps: int) -> None:
         page.wait_for_function("t => document.querySelector('.step-title')?.textContent !== t", arg=title, timeout=30_000)
 
 
-def _meeting_rows(data_dir: pathlib.Path) -> list:
-    """The outcomes ``supervisor.first_meeting`` recorded in ``logs/events.jsonl``: one row a start that tried."""
+def _meetings(data_dir: pathlib.Path) -> list:
+    """The rows ``supervisor.first_meeting`` wrote to ``logs/events.jsonl``: one a start that tried."""
     events = data_dir / "logs" / "events.jsonl"
     lines = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
-    return [row.get("outcome") for row in map(json.loads, filter(None, lines)) if row.get("type") == "first_meeting"]
+    return [row for row in map(json.loads, filter(None, lines)) if row.get("type") == "first_meeting"]
+
+
+def _settled(url: str, task_id: str, timeout: float = 240.0) -> str:
+    """The task's status once it is terminal (``task_results._TRULY_TERMINAL_STATUSES``): a stop before that holds the
+    work for Resume, and the restart's notice says so in Main."""
+    deadline, status = time.time() + timeout, None
+    while time.time() < deadline:
+        try:
+            status = _get(url, f"/api/tasks/{task_id}").get("status")
+        except Exception as exc:  # not readable yet
+            status = f"unreadable: {exc}"
+        if status in {"completed", "failed", "cancelled", "rejected_duplicate"}:
+            return status
+        time.sleep(1)
+    raise AssertionError(f"task {task_id} stayed {status!r}")
 
 
 def _browser(pw, engine="webkit", theme="light", size=(980, 752)):
@@ -239,9 +254,9 @@ def _browser(pw, engine="webkit", theme="light", size=(980, 752)):
 
 def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(setup_server, tmp_path):
     """A first setup without a provider: the step starts on, the completion carries it, the page sends no command and
-    the supervisor the save starts mints a state born on, which admits the one first meeting Start opens. After a
-    first message and a restart Main holds no System row, the state still shows on and no second meeting opened; a
-    later ordinary Stop wins and survives a restart."""
+    the supervisor the save starts mints a state born on, which admits the one first meeting Start opens, in Main, and
+    it completes on its own. After a first message and a restart Main holds no System row, the state still shows on
+    and no second meeting opened; a later ordinary Stop wins and survives a restart."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 
@@ -281,10 +296,13 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
             browser.close()
     saved = json.loads((srv.data_dir / "settings.json").read_text(encoding="utf-8"))
     assert saved.get("OUROBOROS_ONBOARDING_COMPLETED_AT") and saved.get("OUROBOROS_ONBOARDING_CONSCIOUSNESS") == "on"
+    [meeting] = _meetings(srv.data_dir)  # Start opened one first meeting, in Main, and it ends on its own
+    assert (meeting["outcome"], meeting["chat_id"]) == ("admitted", 1)
+    assert _settled(srv.url, meeting["task_id"]) == "completed"
     srv.stop()
     srv.start(supervisor=True)
     assert _control(srv.url) is True, "born on, and still on after a restart"
-    assert _meeting_rows(srv.data_dir) == ["admitted"], "Start opened one first meeting, and the restart none"
+    assert _meetings(srv.data_dir) == [meeting], "the restart opened no second meeting"
     assert _system_rows(srv.url) == [], "no System row in Main after setup, a first message and a restart"
     with sync_playwright() as pw:
         browser, page = _browser(pw)
@@ -335,7 +353,7 @@ def test_an_older_install_with_a_state_shows_no_step_and_stays_as_its_state_says
             assert len(seen["completions"]) == 1 and "consciousness" not in seen["completions"][0]
             time.sleep(3)
             assert _control(srv.url) is False
-            assert _meeting_rows(srv.data_dir) == [], "a setup finished over an existing state opens no first meeting"
+            assert _meetings(srv.data_dir) == [], "a setup finished over an existing state opens no first meeting"
             assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()
