@@ -435,6 +435,15 @@
  */
 
 /**
+ * A host notice on a System row (ouroboros/host_notice.py): the row's `text` is its one phrase.
+ * @typedef {Object} HostNotice
+ * @property {string=} code  // the notice's stable code
+ * @property {string=} step  // the owner's next step, a key of host_notice.STEPS; absent = no step
+ * @property {string=} details  // the raw facts behind Details
+ * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
+ */
+
+/**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
@@ -445,6 +454,7 @@
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
+ * @property {HostNotice=} notice  // a host notice: code, step, details and its line in the install's language
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in

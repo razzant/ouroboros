@@ -910,6 +910,7 @@ class Memory:
         """The newest ``limit`` progress rows, oldest first; each run of host waits among them is
         one line that does not count against ``limit`` (``checkpoint_waits.fold_progress``)."""
         from ouroboros.checkpoint_waits import fold_progress
+        from ouroboros.host_notice import mind_text
 
         lines, own = [], 0
         for e in reversed(fold_progress(entries or [])):
@@ -917,7 +918,7 @@ class Memory:
             if own > limit:
                 break
             ts = str(e.get('ts', ''))
-            lines.append(f"⚙️ {ts[11:16] if len(ts) >= 16 else ''} {short(str(e.get('text', '')), 800)}")
+            lines.append(f"⚙️ {ts[11:16] if len(ts) >= 16 else ''} {short(str(e.get('text', '')) + mind_text(e), 800)}")
         return "\n".join(reversed(lines))
 
     def summarize_tools(self, entries: List[Dict[str, Any]]) -> str:

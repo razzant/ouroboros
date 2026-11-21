@@ -36,6 +36,7 @@ from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.history_retention import retention_summary
+from ouroboros.host_notice import view as notice_view
 from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS, historical_terminal_projection
@@ -880,10 +881,9 @@ def _collect_chat_rows(
             _copy_task_summary_metadata(rec, entry)
             # Lineage, the origin label, the host's card placement (card_row / card_row_id) and a late-review
             # row's evidence pointer (#1369, stored on that type only) replay verbatim; an absent key is omitted.
-            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "place_origin", "card_row", "card_row_id",
-                          "card_row_revision", "late_evidence", "narration"):
-                if field in entry:
-                    rec[field] = entry[field]
+            rec.update({field: entry[field] for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "place_origin",
+                        "card_row", "card_row_id", "card_row_revision", "late_evidence", "narration") if field in entry})
+            rec.update(notice_view(entry))  # a host notice's step and details, and its line in the install's language
             combined.append(rec)
     except StoreMigrating:
         raise  # the endpoint's own typed 503 (the store is importing), never a disclosed gap
@@ -956,9 +956,7 @@ def _collect_progress_rows(
                         rec[field] = str(entry.get(field) or "")
             if isinstance(entry.get("lifecycle"), dict):
                 rec["lifecycle"] = dict(entry.get("lifecycle") or {})
-            for field in _PROGRESS_META_FIELDS:
-                if field in entry:
-                    rec[field] = entry[field]
+            rec.update({field: entry[field] for field in _PROGRESS_META_FIELDS if field in entry}, **notice_view(entry))
             # Replay re-checks task-bound progress facts with the emitter's own validators.
             for key, validate in (("executor_observation", executor_observation_meta),
                                   ("delegated_activity", delegated_activity_meta)):

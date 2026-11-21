@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
-from ouroboros.gateway.reference_contracts import ChatReplyReference
+from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNotice
 
 try:
     from typing import Literal, Required, TypedDict
@@ -144,6 +144,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     row_address: str
     row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
     reply_to: ChatReplyReference
+    notice: HostNotice  # a host notice's code, step, details and its line in the install's language
     relay: Dict[str, Any]
     reply_to_relay: str
     room_revisions: Dict[str, int]  # a row shown in several rooms: the revision it took in each room it counted in

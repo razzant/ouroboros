@@ -247,6 +247,7 @@
  * @property {number=} answered_index
  * @property {string=} comment
  * @property {string=} host_facts
+ * @property {import('./client_contract_types.js').HostNotice=} notice A host notice's code, step, raw details and assembled line.
  * @property {"chat"} type
  * @property {"user"|"assistant"|"system"} role
  * @property {string} content

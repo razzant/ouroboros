@@ -1,13 +1,15 @@
-// Display-only form of a host sentence that its producer opens with a decorative
-// pictograph (DESIGN "Chat authorship and System rows"). The stored row keeps its bytes:
-// history, message keys, Copy, Telegram, the model's context and outcomes.py, which
-// reads their warning marks, see exactly what the producer wrote.
+// How the window says a host sentence (DESIGN principle 7 and "Chat authorship and System rows").
 //
-// A closed table, keyed by the row's typed `system_type`; each entry is one producer's
-// exact source prefix. Only a row whose type and opening both match loses the leading
-// mark and its space. Every other row renders as stored: another type, an untyped or
-// pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix
-// not listed here. Future producer changes must keep this display mapping in sync.
+// A host notice (ouroboros/host_notice.py) is drawn as it is: the one line its server assembled, the phrase and its
+// next step in the install's language, which Telegram and Copy say too (`noticeLine`); its raw details sit behind
+// Details. A notice has no pictograph to hide.
+//
+// Rows written before notices keep the display-only table below: a producer opened its sentence with a decorative
+// pictograph, and the stored row keeps its bytes (history, message keys, Copy, Telegram, the model's context). A
+// closed table, keyed by the row's typed `system_type`; each entry is one producer's exact source prefix. Only a row
+// whose type and opening both match loses the leading mark and its space. Every other row renders as stored: another
+// type, an untyped or pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix not listed
+// here. A producer that moves to a notice moves its prefixes to RETIRED_HOST_NOTICE_PREFIXES for the rows it wrote.
 import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
@@ -123,9 +125,14 @@ export function hostSentenceText(text) {
  *  task, so its row says who wrote it instead of «Message from task unknown». */
 export const hostTaskMessage = (evt) => evt?.provenance === 'system' && (!evt.source_task_id || evt.source_task_id === 'unknown');
 
+/** A host notice's line, the one its server assembled for every reader (`notice.line`); '' for any other row. */
+export const noticeLine = (row) => (row?.role === 'system' && row.narration !== true
+    && typeof row.notice?.line === 'string' ? row.notice.line : '');
+
 // Authored narration outranks a stale host type, on both bubble and timeline paths.
 export function hostRowDisplayText(row, shown = row.text ?? row.content ?? '') {
     if (row.role !== 'system' || row.narration === true) return shown;
+    if (noticeLine(row)) return noticeLine(row);
     let text = String(row.text ?? row.content ?? '');
     // A progress envelope is not authored content. Remove it only together with
     // a recognized host opening; unknown and authored rows keep every character.

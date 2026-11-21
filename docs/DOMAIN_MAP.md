@@ -19,7 +19,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D09 | Cancellation, owner control & process custody | 29 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 124 | 0 |
-| D12 | Settings & configuration | 28 | 0 |
+| D12 | Settings & configuration | 29 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 74 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 42 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1068** | **0** |
+| **total** | | **1069** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -979,6 +979,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/composer_cognition.py`
 - `ouroboros/config.py`
 - `ouroboros/deployment_policy.py`
+- `ouroboros/host_notice.py`
 - `ouroboros/i18n_memory.py`
 - `ouroboros/launch_roots.py`
 - `ouroboros/launcher_onboarding.py`

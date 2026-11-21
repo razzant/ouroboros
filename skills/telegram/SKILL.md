@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.17
+version: 1.4.18
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -222,7 +222,9 @@ The bridge speaks the install's interface language (Settings → Appearance → 
 one writer, and the bridge's own menu, buttons, card hints and notifications are
 English source read through the install's translation memory (a line it lacks is
 generated like a browser miss), so the bot ships no dictionary and follows any
-chosen language. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
+chosen language. A host notice arrives as the host's one line (`ouroboros/host_notice.py`): its
+phrase and its next step, each translated before they are joined; its raw details stay behind
+Details in the web. The retired bridge-only `TELEGRAM_LANGUAGE` setting is migrated once.
 
 The bridge starts the Mini App when the Ouroboros server is a container's
 PID 1 without an init. PID 1 counts as the server only when the host named

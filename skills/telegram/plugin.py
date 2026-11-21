@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 import httpx
 
+from ouroboros.host_notice import notice_line
 from ouroboros.net_transport import env_proxies_configured
 from ouroboros.project_facts import project_display_name
 from ouroboros.utils import in_worker_process
@@ -1091,10 +1092,8 @@ def _make_outbound(api, cue: TypingCue | None = None):
                     await _telegram_client(api, event, chat_id).send_message(chat_id, notice, parse_mode="")
                 return
 
-            text = str(event.get("text") or "").strip()
-            if (event.get("system_type") == "task_pause_notice" and event.get("role") == "system"
-                    and event.get("pause_reason") == "authority"):
-                text = telegram_i18n.host_sentence(text, lang)
+            # The host's one line (a notice's phrase and step, the technical pause), each part translated first.
+            text = notice_line(event, lang, drive_root=telegram_i18n.drive_root())
             # A relay quotes the owner's own words above Ouroboros's note; they are sent verbatim, as plain text.
             relayed = event.get("system_type") == "relay_entry" and isinstance(event.get("relay"), dict)
             if relayed:

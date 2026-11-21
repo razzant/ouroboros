@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
+from ouroboros.gateway.reference_contracts import ChatReferenceFields, HostNotice, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
@@ -179,6 +179,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     answered_index: NotRequired[int]
     comment: NotRequired[str]
     host_facts: NotRequired[str]  # the mirrored card's host sentence (QuizOutbound.host_facts)
+    notice: NotRequired[HostNotice]  # a host notice's code, step, details and its assembled line (DESIGN principle 7)
     closed_reason: NotRequired[str]
     closed_at: NotRequired[str]
     closed_by_task_id: NotRequired[str]

@@ -540,6 +540,31 @@ def test_phone_notice_uses_available_translation(phone, monkeypatch, mirror_prog
         plugin.telegram_i18n.configure(None)
 
 
+def test_a_host_notice_reaches_the_phone_as_its_one_line_each_part_translated_first(phone, monkeypatch):
+    """Telegram says a notice row as the host's one line (``host_notice.notice_line``): the phrase by its exact text
+    and the step by its code, translated before they are joined; its raw details stay in the web's Details."""
+    from ouroboros.host_notice import STEPS, fields
+    from tests.test_telegram_i18n import _seed
+
+    plugin = phone.plugin
+    plugin.telegram_i18n.configure(phone.data)
+    monkeypatch.setattr(plugin, "_load_settings", lambda _: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "all"})
+    phrase = "The total budget is spent, so this turn did not start."
+    event = {"text": phrase, "role": "system", "system_type": "task_not_started",
+             **fields("budget_exhausted", step="raise_total_budget", details="budget_exhausted at 12:00")}
+    try:
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        assert phone.sent()[-1]["text"] == f"{phrase} {STEPS['raise_total_budget']}", "English: the phrase, then its step"
+        monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+        _seed(phone.data, "ru", {phrase: {"text": "Общий бюджет исчерпан, ход не начался."},
+                                 "code:notice.step.raise_total_budget": {"text": "Поднимите Total budget в Settings → Costs."}})
+        asyncio.run(plugin._make_outbound(phone.api)(event))
+        assert phone.sent()[-1]["text"] == "Общий бюджет исчерпан, ход не начался. Поднимите Total budget в Settings → Costs."
+        assert "12:00" not in phone.sent()[-1]["text"], "the details never ride the line"
+    finally:
+        plugin.telegram_i18n.configure(None)
+
+
 @pytest.mark.parametrize("legacy", [True, False])
 def test_queued_technical_notice_uses_the_translation_under_its_original_receipt(phone, monkeypatch, legacy):
     from ouroboros import obligations, pause_notices
