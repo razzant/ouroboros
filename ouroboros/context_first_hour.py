@@ -24,11 +24,13 @@ import collections
 import datetime
 import logging
 import pathlib
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 _MAIN_ROWS = 500  # Main's first rows one read covers (an index range, no bodies): a read bound, never a judgement
+_MAIN_FIRST_ROWS = ("SELECT ts, direction, kind FROM dialogue INDEXED BY dialogue_room "
+                    "WHERE stream='chat' AND chat_id=? ORDER BY seq LIMIT ?")
 _RESET_DELETES = "a Reset deletes memory, chats, logs, task results, uploads and settings"
 _STARTER_WORDS = {"fresh": "not run yet", "running": "installing", "pending": "waiting to retry", "done": "done"}
 _QUIET = frozenset({"ok", "skipped", "unconfigured"})
@@ -125,32 +127,51 @@ def _main(root: pathlib.Path) -> str:
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.store import StoreError
 
-    rows: list = []
+    first = before = after = None
+    read = 0
     if dialogue_store.present(root):
         try:
             with dialogue_store.transaction(root, write=False) as conn:
-                rows = conn.execute("SELECT ts, direction, kind FROM dialogue INDEXED BY dialogue_room "
-                                    "WHERE stream='chat' AND chat_id=? ORDER BY seq LIMIT ?",
-                                    (WEB_UI_CHAT_ID, _MAIN_ROWS)).fetchall()
+                rows = conn.execute(_MAIN_FIRST_ROWS, (WEB_UI_CHAT_ID, _MAIN_ROWS))
+                first, before, after, read = _first_exchange(rows)
         except StoreError as exc:
             return f"unknown: Main could not be read ({type(exc).__name__})"
     elif dialogue_store.holds_dialogue_files(root):
         return "unknown: the dialogue store is not created yet"
-    # Untyped inbound rows are my human's words; untyped outbound rows are my messages (host rows are typed or System).
-    first = next((at for at, row in enumerate(rows) if row["direction"] == "in" and row["kind"] is None), None)
-    start = 0 if first is None else first + 1
-    mine = next((row for row in rows[start:] if row["direction"] == "out" and row["kind"] is None), None)
-    whole = len(rows) < _MAIN_ROWS
+    whole = read < _MAIN_ROWS
     if first is None:
         if not whole:
             return f"my human's first message is not among Main's first {_MAIN_ROWS} rows"
-        return "my human has not written in Main" + (f"; my first message there {_minute(mine['ts'])}" if mine
+        return "my human has not written in Main" + (f"; my first message there {_minute(before)}" if before
                                                     else ", nor have I")
-    said = f"my human first wrote in Main {_minute(rows[first]['ts'])}"
-    if mine is not None:
-        return f"{said}; my first message after it {_minute(mine['ts'])}"
+    said = f"my human first wrote in Main {_minute(first)}"
+    if after is not None:
+        return f"{said}; my first message after it {_minute(after)}"
     return said + ("; no message of mine after it yet" if whole
                    else f"; none of mine after it in Main's first {_MAIN_ROWS} rows")
+
+
+def _first_exchange(rows: Any) -> Tuple[Optional[str], Optional[str], Optional[str], int]:
+    """The stamps of my human's first message, my first message before it and my first after it, and the rows stepped.
+    Untyped inbound rows are my human's words and untyped outbound rows mine (host rows are typed or System). The cursor
+    is stepped lazily and closed: an install that has talked stops within its first rows."""
+    first = before = after = None
+    read = 0
+    try:
+        for row in rows:
+            read += 1
+            if row["kind"] is not None:  # a card or a notice, nobody's words
+                continue
+            if row["direction"] == "in" and first is None:
+                first = row["ts"]
+            elif row["direction"] == "out" and first is None:
+                before = before or row["ts"]
+            elif row["direction"] == "out":
+                after = row["ts"]
+                break
+    finally:
+        rows.close()
+    return first, before, after, read
 
 
 def _starter(root: pathlib.Path) -> str:

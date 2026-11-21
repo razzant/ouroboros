@@ -1074,6 +1074,28 @@ def test_setup_names_what_setup_left_running_and_a_first_message_of_mine_before_
     assert fact["owner_chat"].startswith("unknown: runtime state unavailable") and fact["consciousness"] == "unknown"
 
 
+def test_the_first_exchange_steps_only_until_my_first_message_after_theirs():
+    """Main's first rows are stepped lazily and the cursor closed: a talked install stops within its first rows, while
+    one where nobody answered is read to its end or the bound (the parametrized setup test above)."""
+    from ouroboros.context_first_hour import _first_exchange
+
+    class Rows:
+        closed = False
+
+        def __iter__(self):
+            yield {"ts": "a", "direction": "system", "kind": "task_summary"}
+            yield {"ts": "b", "direction": "in", "kind": None}
+            yield {"ts": "c", "direction": "in", "kind": "quiz_answer"}
+            yield {"ts": "d", "direction": "out", "kind": None}
+            raise AssertionError("stepped past the first exchange")
+
+        def close(self):
+            self.closed = True
+
+    rows = Rows()
+    assert _first_exchange(rows) == ("b", None, "d", 4) and rows.closed
+
+
 def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_path):
     env = _make_health_env(tmp_path)
     shared = json.loads(build_runtime_section(env, {"id": "task-1", "type": "task"}).split("\n\n", 1)[1])
