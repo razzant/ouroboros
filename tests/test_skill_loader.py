@@ -1339,6 +1339,115 @@ def test_skill_grants_are_content_and_request_bound(tmp_path):
     assert unsupported["granted_keys"] == ["OPENROUTER_API_KEY"]
 
 
+
+def _installed_extension(drive_root, *, name="calendarish", bucket="ouroboroshub", source_id="hub-a",
+                         env=("GOOGLE_OAUTH_CLIENT_ID",), permissions=("notify_owner",)):
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_install_record import write_install_record
+
+    skill_dir = drive_root / "skills" / bucket / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    if source_id:
+        write_install_record(drive_root, name, {"source": {"id": source_id, "kind": "hub"},
+                                                "release": {"digest": "a" * 64}, "basis": "trusted"})
+    manifest = SkillManifest(name=name, description="d", version="1", type="extension",
+                             env_from_settings=list(env), permissions=list(permissions))
+    return LoadedSkill(name=name, skill_dir=skill_dir, manifest=manifest, content_hash="hash-a",
+                       review=SkillReviewState(status="pass", content_hash="hash-a"))
+
+
+def test_key_grants_follow_the_installation_and_permissions_the_accepted_bytes(tmp_path, monkeypatch):
+    """Owner 1A (21.11): an edit of the same installation keeps its granted keys; a same-named payload from
+    another source or folder, an unaccepted review-each release and an uninstall end that; permissions stay with
+    the accepted bytes, and only a use-time permission granted to earlier files of the install lets it load."""
+    from ouroboros import config
+    from ouroboros.skill_grant_scope import end_identity, install_identity
+    from ouroboros.skill_install_record import update_install_record, write_install_record
+    from ouroboros.skill_loader import grant_status_for_skill, save_skill_grants
+
+    monkeypatch.setattr(config, "load_settings", lambda: {"GOOGLE_OAUTH_CLIENT_ID": "id"})
+    drive_root = tmp_path / "drive"
+    skill = _installed_extension(drive_root)
+
+    def grant(target):
+        save_skill_grants(drive_root, target.name, ["GOOGLE_OAUTH_CLIENT_ID"], content_hash=target.content_hash,
+                          requested_keys=["GOOGLE_OAUTH_CLIENT_ID"], granted_permissions=["notify_owner"],
+                          requested_permissions=["notify_owner"],
+                          install_identity=install_identity(drive_root, target))
+
+    grant(skill)
+    assert grant_status_for_skill(drive_root, skill)["all_granted"] is True
+    skill.content_hash = skill.review.content_hash = "hash-b"  # an edit of the same installation (Cyber Pro)
+    edited = grant_status_for_skill(drive_root, skill)
+    assert edited["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"] and edited["missing_keys"] == []
+    assert edited["granted_permissions"] == [] and edited["missing_permissions"] == ["notify_owner"]
+    assert edited["waiting_permissions"] == ["notify_owner"]  # refused at use, does not unload
+    assert edited["blocked"] is False and edited["usable"] is True and edited["all_granted"] is False
+    assert edited["earlier_grant"] == {"keys": [], "permissions": ["notify_owner"]}
+
+    # A permission the host checks only at load still waits for the check: the extension does not load.
+    skill.manifest.permissions = ["page_module"]
+    save_skill_grants(drive_root, skill.name, ["GOOGLE_OAUTH_CLIENT_ID"], content_hash="hash-a",
+                      requested_keys=["GOOGLE_OAUTH_CLIENT_ID"], granted_permissions=["page_module"],
+                      requested_permissions=["page_module"], install_identity=install_identity(drive_root, skill))
+    page = grant_status_for_skill(drive_root, skill)
+    assert page["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"] and page["waiting_permissions"] == []
+    assert page["blocked"] is True and page["usable"] is False
+    skill.manifest.permissions = ["notify_owner"]
+    grant(_installed_extension(drive_root))  # the owner's grant for the accepted bytes "hash-a" again
+
+    # An unaccepted release of a source that reviews each skill gets no keys (05.10 D-A3) ...
+    update_install_record(drive_root, skill.name, pending_update={"version": "2", "digest": "b" * 64})
+    pending = grant_status_for_skill(drive_root, skill)
+    assert pending["granted_keys"] == [] and pending["blocked"] is True and pending["waiting_permissions"] == []
+    # ... and once it is accepted, the same installation's key follows it.
+    update_install_record(drive_root, skill.name, pending_update=None)
+    assert grant_status_for_skill(drive_root, skill)["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"]
+
+    # The same name installed from another source, or in another folder, inherits nothing.
+    write_install_record(drive_root, skill.name, {"source": {"id": "hub-b", "kind": "hub"},
+                                                  "release": {"digest": "c" * 64}, "basis": "trusted"})
+    other_source = grant_status_for_skill(drive_root, skill)
+    assert other_source["granted_keys"] == [] and other_source["blocked"] is True
+    write_install_record(drive_root, skill.name, {"source": {"id": "hub-a", "kind": "hub"},
+                                                  "release": {"digest": "a" * 64}, "basis": "trusted"})
+    moved = _installed_extension(drive_root, bucket="external", source_id="")
+    moved.content_hash = "hash-b"
+    assert grant_status_for_skill(drive_root, moved)["granted_keys"] == []
+
+    # Uninstall ends the installation: edited bytes lose the key, the same bytes keep their exact grant.
+    end_identity(drive_root, skill.name)
+    assert grant_status_for_skill(drive_root, skill)["granted_keys"] == []
+    skill.content_hash = skill.review.content_hash = "hash-a"
+    assert grant_status_for_skill(drive_root, skill)["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"]
+
+
+def test_a_key_saved_after_the_grant_is_not_passed_and_unloads_nothing(tmp_path, monkeypatch):
+    """B″: a custom secret that joins the request because Settings now holds it, which the grant decision
+    never covered, is not granted and does not block; a key the decision covered and did not grant blocks."""
+    from ouroboros import config
+    from ouroboros.skill_loader import grant_status_for_skill, save_skill_grants
+
+    settings = {"GOOGLE_OAUTH_CLIENT_ID": "id"}
+    monkeypatch.setattr(config, "load_settings", lambda: dict(settings))
+    drive_root = tmp_path / "drive"
+    skill = _installed_extension(drive_root, env=("GOOGLE_OAUTH_CLIENT_ID", "TELEGRAM_PAIRING_CODE"),
+                                 permissions=())
+    save_skill_grants(drive_root, skill.name, ["GOOGLE_OAUTH_CLIENT_ID"], content_hash="hash-a",
+                      requested_keys=["GOOGLE_OAUTH_CLIENT_ID"])
+    assert grant_status_for_skill(drive_root, skill)["blocked"] is False
+    settings["TELEGRAM_PAIRING_CODE"] = "123456"  # saved later (a wizard, a secret card)
+    later = grant_status_for_skill(drive_root, skill)
+    assert later["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"]  # the new key is not passed
+    assert later["missing_keys"] == ["TELEGRAM_PAIRING_CODE"] and later["pending_keys"] == ["TELEGRAM_PAIRING_CODE"]
+    assert later["blocked"] is False and later["usable"] is True and later["all_granted"] is False
+    # A key the owner's decision covered but did not grant still blocks, as before.
+    save_skill_grants(drive_root, skill.name, ["GOOGLE_OAUTH_CLIENT_ID"], content_hash="hash-a",
+                      requested_keys=["GOOGLE_OAUTH_CLIENT_ID", "TELEGRAM_PAIRING_CODE"])
+    declined = grant_status_for_skill(drive_root, skill)
+    assert declined["pending_keys"] == [] and declined["blocked"] is True and declined["usable"] is False
+
+
 def test_grant_status_supports_extension_skills(tmp_path):
     """v5.2.2 dual-track grants: ``type: extension`` skills are now
     eligible for owner core-key grants alongside ``type: script``."""

@@ -632,6 +632,9 @@ def save_review_state(
     )
 
 
+REQUESTABLE_WHEN_ABSENT = frozenset({"TELEGRAM_BOT_TOKEN"})  # requested before Settings holds it
+
+
 def requested_core_setting_keys(env_keys: List[str], settings: Optional[Dict[str, Any]] = None) -> List[str]:
     """Return manifest-requested setting keys that require explicit owner grants.
 
@@ -640,7 +643,6 @@ def requested_core_setting_keys(env_keys: List[str], settings: Optional[Dict[str
     if not env_keys:
         return []  # nothing requested, nothing to classify: no settings read
     forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
-    requestable_when_absent = {"TELEGRAM_BOT_TOKEN"}
     try:
         from ouroboros.config import SETTINGS_DEFAULTS, load_settings
         settings = load_settings() if settings is None else settings
@@ -653,7 +655,7 @@ def requested_core_setting_keys(env_keys: List[str], settings: Optional[Dict[str
     out: List[str] = []
     for raw_key in env_keys or []:
         key = str(raw_key or "").strip().upper()
-        if key and (key in forbidden_upper or key in custom_secret_upper or key in requestable_when_absent) and key not in out:
+        if key and (key in forbidden_upper or key in custom_secret_upper or key in REQUESTABLE_WHEN_ABSENT) and key not in out:
             out.append(key)
     return out
 
@@ -718,6 +720,8 @@ def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
         "requested_permissions": requested_permissions,
         "content_hash": str(data.get("content_hash") or ""),
         "updated_at": str(data.get("updated_at") or ""),
+        "install_identity": data.get("install_identity") if isinstance(data.get("install_identity"), dict) else None,
+        "identity_ended_at": str(data.get("identity_ended_at") or ""),
     }
 
 
@@ -730,15 +734,18 @@ def save_skill_grants(
     requested_keys: List[str],
     granted_permissions: Optional[List[str]] = None,
     requested_permissions: Optional[List[str]] = None,
+    install_identity: Optional[Dict[str, str]] = None,
 ) -> None:
-    """Persist grants, merging partial approvals only for the same content hash. The same bytes keep
-    earlier approvals of items still requested: a key set grown by saved Settings adds a missing key,
-    never revokes another or grants it (``_merge_allowed`` keeps only the current request)."""
+    """Persist grants, merging partial approvals for the same content hash (keys also for the same
+    ``install_identity``, ``skill_grant_scope``). Earlier approvals of items still requested stay: a key set
+    grown by saved Settings adds a missing key, never revokes another or grants it (``_merge_allowed`` keeps
+    only the current request). Without ``install_identity`` the record binds the exact bytes only."""
     allowed = set(requested_core_setting_keys(requested_keys))
     existing = load_skill_grants(drive_root, name)
     persisted_match = str(existing.get("content_hash") or "") == str(content_hash or "")
+    same_install = bool(install_identity) and existing.get("install_identity") == install_identity
     merged = _merge_allowed(
-        existing.get("granted_keys") if persisted_match else [],
+        existing.get("granted_keys") if persisted_match or same_install else [],
         granted_keys,
         allowed=allowed,
         upper=True,
@@ -762,6 +769,7 @@ def save_skill_grants(
                 "requested_permissions": sorted(allowed_permissions),
                 "content_hash": str(content_hash or ""),
                 "updated_at": utc_now_iso(),
+                **({"install_identity": dict(install_identity)} if install_identity else {}),
             },
             SKILL_OWNER_STATE_SCHEMA_VERSION,
         ),
@@ -782,6 +790,9 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
             "missing_permissions": [],
             "all_granted": True,
             "usable": False,
+            "blocked": False,
+            "pending_keys": [],
+            "waiting_permissions": [],
             "unsupported_for_skill_type": False,
             "content_hash": "",
             "updated_at": "",
@@ -792,30 +803,13 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         list(skill.manifest.permissions or []),
         list(getattr(skill.manifest, "subscribe_events", []) or []),
     )
+    from ouroboros.skill_grant_scope import grant_view
+
+    # Keys follow the installation, permissions the accepted bytes; what keeps nothing from running is
+    # named apart (``pending_keys``, ``waiting_permissions``): ``skill_grant_scope``.
     grants = load_skill_grants(drive_root, skill.name)
-    grant_hash_ok = str(grants.get("content_hash") or "") == str(skill.content_hash or "")
-    permission_request_ok = sorted(grants.get("requested_permissions") or []) == sorted(requested_permissions)
-    # Same bytes: an approved key stays approved while still requested, whatever else saved Settings
-    # now adds to the request (a newly present custom key joins it missing, never granted).
-    persisted_grants = set(grants.get("granted_keys") or []) if grant_hash_ok else set()
-    persisted_permissions = (
-        set(grants.get("granted_permissions") or [])
-        if grant_hash_ok and permission_request_ok
-        else set()
-    )
-    granted = [key for key in requested if key in persisted_grants]
-    granted_permissions = [perm for perm in requested_permissions if perm in persisted_permissions]
-    # A grant saved for other bytes belongs to an earlier version of the skill's files. Readiness, the
-    # execution refusal and the card name that fact instead of reporting the keys as absent; the
-    # binding to bytes itself is unchanged.
-    earlier_grant = None
-    if grants.get("content_hash") and not grant_hash_ok:
-        earlier_keys = [key for key in requested if key in set(grants.get("granted_keys") or [])]
-        earlier_permissions = [
-            perm for perm in requested_permissions if perm in set(grants.get("granted_permissions") or [])
-        ]
-        if earlier_keys or earlier_permissions:
-            earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions}
+    view = grant_view(drive_root, skill, grants, requested, requested_permissions)
+    granted, granted_permissions, earlier_grant = view["granted_keys"], view["granted_permissions"], view["earlier_grant"]
     missing = [key for key in requested if key not in set(granted)]
     missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
     review_ready = skill.review.gate_for(skill.content_hash)["executable_review"]
@@ -823,6 +817,8 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     # Instruction skills cannot receive core keys.
     eligible_type = skill.manifest.is_script() or skill.manifest.is_extension()
     unsupported = bool((requested or requested_permissions) and not eligible_type)
+    blocked = unsupported or bool(set(missing) - set(view["pending_keys"])) or bool(
+        set(missing_permissions) - set(view["waiting_permissions"]))
     return {
         "requested_keys": requested,
         "granted_keys": granted,
@@ -831,12 +827,23 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         "granted_permissions": granted_permissions,
         "missing_permissions": missing_permissions,
         "all_granted": not missing and not missing_permissions and not unsupported,
-        "usable": review_ready and not missing and not missing_permissions and not unsupported,
+        "usable": review_ready and not blocked,
+        "blocked": blocked,
+        "pending_keys": view["pending_keys"],
+        "waiting_permissions": view["waiting_permissions"],
         "unsupported_for_skill_type": unsupported,
         "content_hash": grants.get("content_hash", ""),
         "updated_at": grants.get("updated_at", ""),
         "earlier_grant": earlier_grant,
     }
+
+
+def bytes_accepted(skill: LoadedSkill) -> bool:
+    """Whether the current bytes are accepted: an executable verdict, or a pending status through an acceptance
+    basis for these bytes (trusted source, owner skip/edit, author finish), never Cyber alone."""
+    gate = skill.review.gate_for(skill.content_hash)
+    return bool(gate["executable_review"]) and not (
+        gate["status"] == _REVIEW_STATUS_PENDING and gate["blocking_reason"] not in ACCEPTANCE_REASONS)
 
 
 @dataclass
@@ -865,16 +872,12 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         return outcome
     if not get_auto_grant_enabled():
         return outcome
-    if skill.load_error:
-        return outcome
-    gate = skill.review.gate_for(skill.content_hash)
-    # A pending status grants only through an acceptance basis for these bytes
-    # (trusted source, owner skip/edit, author finish), never Cyber alone.
-    if (not gate["executable_review"] or (gate["status"] == _REVIEW_STATUS_PENDING
-        and gate["blocking_reason"] not in ACCEPTANCE_REASONS)):
+    if skill.load_error or not bytes_accepted(skill):
         return outcome
     if not requested_keys and not requested_permissions:
         return outcome
+    from ouroboros.skill_grant_scope import install_identity
+
     save_skill_grants(
         drive_root,
         skill.name,
@@ -883,6 +886,7 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         requested_keys=requested_keys,
         granted_permissions=requested_permissions,
         requested_permissions=requested_permissions,
+        install_identity=install_identity(drive_root, skill),
     )
     return AutoGrantOutcome(
         granted=True,
@@ -1522,6 +1526,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             # `brew:ffmpeg` installed by a human is otherwise reported ready
             # and fails only at execution time.
             "manual_dependencies": list(getattr(readiness, "manual_dependencies", []) or []),
+            "grant_notes": list(getattr(readiness, "grant_notes", []) or []),
         })
         # Extension liveness is a different fact from script executability: the
         # same producer /api/extensions reads, so the catalogue and the HTTP
@@ -1571,7 +1576,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
 
 __all__ = [
     "AutoGrantOutcome", "LoadedSkill",
-    "SkillReviewState", "auto_grant_if_enabled",
+    "SkillReviewState", "auto_grant_if_enabled", "bytes_accepted",
     "VALID_REVIEW_STATUSES", "compute_content_hash", "reduce_skill_content_hash", "discover_skills",
     "discover_selected_skill_candidates", "discover_skill_identity", "find_skill",
     "enabled_skill_conflicts", "skill_conflict_status",

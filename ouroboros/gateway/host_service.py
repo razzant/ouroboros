@@ -328,6 +328,10 @@ class HostServiceContext:
             permissions = set(str(item or "").strip() for item in (loaded.manifest.permissions or []))
             if topic == "skill.lifecycle" and "subscribe_event" in permissions and topic in declared:
                 return
+        if permission in set(status.get("waiting_permissions") or []):  # granted to earlier files of this install
+            from ouroboros.skill_grant_scope import waiting_refusal
+
+            raise HostServiceAuthError(waiting_refusal(skill_name, permission))
         if permission not in granted:
             raise HostServiceAuthError(f"skill {skill_name!r} lacks grant {permission!r}")
 

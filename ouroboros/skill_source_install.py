@@ -345,7 +345,8 @@ def accept_and_turn_on(drive_root: pathlib.Path, name: str, *, repo_path: Option
     from ouroboros.marketplace.install import _MarketplaceReviewCtx
     from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready
     from ouroboros.skill_dependencies import ensure_skill_dependencies
-    from ouroboros.skill_loader import auto_grant_if_enabled, find_skill
+    from ouroboros.skill_acceptance import accept_grants
+    from ouroboros.skill_loader import find_skill
     from ouroboros.skill_review import run_acceptance_preflight
 
     drive = pathlib.Path(drive_root)
@@ -360,7 +361,7 @@ def accept_and_turn_on(drive_root: pathlib.Path, name: str, *, repo_path: Option
                 "setup_error": "Its files did not pass the check; it remains off."}
     loaded = find_skill(drive, name, repo_path=repo_path)
     if loaded is not None and not loaded.load_error and loaded.review.gate_for(loaded.content_hash)["executable_review"]:
-        grant = auto_grant_if_enabled(drive, loaded)
+        grant = accept_grants(drive, loaded)  # an accepted release: this installation's grants follow it
         out.update(accepted=True, granted_keys=list(grant.granted_keys),
                    granted_permissions=list(grant.granted_permissions))
         out["deps_status"], deps_error = ensure_skill_dependencies(drive, loaded)

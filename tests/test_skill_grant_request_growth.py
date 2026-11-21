@@ -79,7 +79,10 @@ def test_a_new_shared_key_joins_the_request_missing_and_keeps_other_approvals(tm
     assert after["requested_keys"] == ["MAILER_HOST_TOKEN", "SHARED_API_KEY"]
     assert after["granted_keys"] == ["MAILER_HOST_TOKEN"], "the earlier approval of the same bytes survives"
     assert after["missing_keys"] == ["SHARED_API_KEY"], "the newly present key is never granted by itself"
-    assert after["all_granted"] is False and after["usable"] is False
+    # Owner 1A/B″ (21.11): the key the grant decision never covered is named and not passed, and it no
+    # longer stops the skill: it keeps running with its previous access (``skill_grant_scope``).
+    assert after["all_granted"] is False and after["pending_keys"] == ["SHARED_API_KEY"]
+    assert after["blocked"] is False and after["usable"] is True
     other_after = grant_status_for_skill(drive, other)
     assert other_after["granted_keys"] == [] and other_after["missing_keys"] == ["SHARED_API_KEY"]
     assert load_skill_grants(drive, "other")["granted_keys"] == []  # reading wrote nothing

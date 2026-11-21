@@ -22,6 +22,9 @@ class SkillReadiness:
     # G3 (capinv-447): declared dependencies that need manual installation —
     # disclosed ("kind:package"), never silently dropped; not a hard blocker.
     manual_dependencies: List[str] = field(default_factory=list)
+    # Grant facts that keep nothing from running (``skill_grant_scope.grant_notes``): a key saved in Settings
+    # after the grant, not passed; a use-time permission waiting for the check of edited files.
+    grant_notes: List[str] = field(default_factory=list)
     next_actions: List[Dict[str, str]] = field(default_factory=list)
 
 
@@ -281,22 +284,26 @@ def skill_readiness_for_execution(
         next_actions.append({"phase": "conflict", "tool": "toggle_skill", "reason": "Resolve conflicting enablement according to owner intent."})
 
     grants: Dict[str, Any] = {}
+    notes: List[str] = []
     if require_grants:
+        from ouroboros.skill_grant_scope import blocking_lists, grant_notes
         from ouroboros.skill_loader import grant_status_for_skill
 
         grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
-        if not grants.get("all_granted", True):
-            missing_keys = grants.get("missing_keys") or []
-            missing_permissions = grants.get("missing_permissions") or []
+        notes = grant_notes(grants)
+        if grants.get("blocked"):
+            missing_keys, missing_permissions = blocking_lists(grants)
             cause = grant_gap_sentence(grants)
             msg = f"missing_grants:keys={missing_keys},permissions={missing_permissions}" + (f"; {cause}" if cause else "")
             blockers.append(msg)
             owner_action.append(msg)
-            reason = "Grant only manifest items covered by expressed owner intent; repeating review does not supply owner permission."
+            reason = ("Grant only manifest items covered by expressed owner intent (skill_owner_action grant). With "
+                      "automatic grants for reviewed skills on, an acceptance of the current files (a finished "
+                      "executable review or another acceptance basis) grants what the manifest requests.")
             if cause:
-                reason += (" A grant for the current files restores it: skill_owner_action grant carrying the owner's words, "
-                           "or, for a skill installed from a source, an accepted release (skill_update), which re-grants when "
-                           "automatic grants for reviewed skills are on; its replace mode also replaces in-place edits of the payload.")
+                reason += (" The same acceptance carries this installation's earlier grants to the current files; "
+                           "for a skill installed from a source an accepted release (skill_update) does too, and its "
+                           "replace mode also replaces in-place edits of the payload.")
             next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": reason})
 
     try:
@@ -341,5 +348,6 @@ def skill_readiness_for_execution(
         grant_status=grants,
         conflict=conflict,
         manual_dependencies=manual_dependencies,
+        grant_notes=notes,
         next_actions=next_actions,
     )

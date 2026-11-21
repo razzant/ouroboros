@@ -779,11 +779,11 @@ def _author_finish_existing_skill_review(
     save_review_state(drive_root, skill_name, review_state)
     from ouroboros.review_overrides import note_skill_over_review
     from ouroboros.skill_dependencies import ensure_skill_dependencies
-    from ouroboros.skill_loader import auto_grant_if_enabled
+    from ouroboros.skill_acceptance import accept_grants
     from ouroboros.skill_review_runner import _reconcile_extension_payload
 
     loaded.review = review_state
-    auto_grant_if_enabled(drive_root, loaded)
+    accept_grants(drive_root, loaded)  # the author's acceptance: grants carry, then the automatic grant
     deps_status, deps_error = ensure_skill_dependencies(drive_root, loaded)
     extension = (_reconcile_extension_payload(ctx, skill_name, drive_root=drive_root,
                                              repo_path=None, binding=binding)
@@ -996,11 +996,12 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
 
 
 def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
-    """The execution refusal while the owner has not granted the request for these bytes: what is
-    missing, and the plain-words cause when the grant belongs to an earlier version of the files
-    (``grant_gap_sentence``). Empty when nothing is missing."""
-    missing_core = list(grants.get("missing_keys") or [])
-    missing_permissions = list(grants.get("missing_permissions") or [])
+    """The execution refusal while the owner has not granted the request: what is missing, and the plain-words
+    cause when the grant belongs to an earlier version of the files (``grant_gap_sentence``). Empty when nothing
+    blocks: a pending key or a waiting permission (``skill_grant_scope``) is not passed and refuses nothing."""
+    from ouroboros.skill_grant_scope import blocking_lists
+
+    missing_core, missing_permissions = blocking_lists(grants)
     if not (missing_core or missing_permissions):
         return ""
     requested = []

@@ -144,7 +144,7 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         if not facts["executable_review"]:
             need = executable_review_requirement(facts["review_gate"], strict_review=_strict_review(skill))
             return _refusal("It turns on after a review passes.", code="acceptance", detail=need, **facts)
-        if not facts["grants"].get("all_granted", True):
+        if facts["grants"].get("blocked"):
             return _refusal("Grant it the keys and permissions it asks for first.", code="grants",
                             detail=grant_gap_sentence(facts["grants"]), **facts)
         from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_dependencies
@@ -288,9 +288,12 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
     if request.get("error"):
         return request
     keys, granted_permissions = request["keys"], request["permissions"]
+    from ouroboros.skill_grant_scope import install_identity
+
     save_skill_grants(drive_root, skill.name, keys, content_hash=skill.content_hash,
                       requested_keys=request["allowed_keys"], granted_permissions=granted_permissions,
-                      requested_permissions=request["allowed_permissions"])
+                      requested_permissions=request["allowed_permissions"],
+                      install_identity=install_identity(drive_root, skill))
     if enable_after_grant:
         # The owner's explicit Enable survives an answered-pending grant, without another job or pip attempt.
         try:

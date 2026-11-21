@@ -484,6 +484,9 @@ def _persist_projection(ctx: Any, skill: Any, drive_root: pathlib.Path, outcome:
             outcome.error = f"{outcome.error}; the projection into review.json failed ({exc}); record {outcome.record_id} stands".strip("; ")
             return
         skill.review = state
+    from ouroboros.skill_acceptance import carry_if_accepted
+
+    carry_if_accepted(drive_root, skill)  # an acceptance event: this installation's grants follow first
     _apply_auto_grant_outcome(outcome, skill, auto_grant_if_enabled(drive_root, skill))
 
 

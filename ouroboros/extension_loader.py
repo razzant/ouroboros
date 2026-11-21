@@ -536,7 +536,7 @@ def ensure_companions_running(
                 "reason": deps_reason,
             }
     grant_status = grant_status_for_skill(drive_root, skill)
-    if not grant_status.get("all_granted", True):
+    if grant_status.get("blocked"):
         return {
             "action": "missing_grants",
             "started": [],
@@ -690,18 +690,12 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
 
             return dependency_sentence(deps_reason)  # the same sentence liveness shows for this code
 
-    # Core settings and privileged host capabilities require hash-bound grants.
+    # Core settings and privileged host capabilities require owner grants (``skill_grant_scope``).
     grant_status = grant_status_for_skill(pathlib.Path(drive_root), skill)
-    if not grant_status.get("all_granted", True):
-        missing_bits = []
-        if grant_status.get("missing_keys"):
-            missing_bits.append(f"keys={grant_status.get('missing_keys')}")
-        if grant_status.get("missing_permissions"):
-            missing_bits.append(f"permissions={grant_status.get('missing_permissions')}")
-        return (
-            f"skill {skill.name!r} is missing owner grants for "
-            f"{', '.join(missing_bits)}. Grant access from the Skills tab."
-        )
+    if grant_status.get("blocked"):
+        from ouroboros.skill_grant_scope import blocking_items
+
+        return f"skill {skill.name!r} is missing owner grants for {blocking_items(grant_status)}. Grant access from the Skills tab."
     granted_core = list(grant_status.get("granted_keys") or [])
     if not _force_in_process:
         try:

@@ -18,8 +18,10 @@ the review (``strict_review``); records converted from earlier installs keep the
 
 The owner-edit seam is the admitted selected-skill development task
 (``skill_repair_admission.advance_repair_expected_hash``): after each payload write of a
-task whose run the owner's own door started, the observed digest is recorded here and
-the grants are re-bound to it when the requested sets did not change.
+task whose run the owner's own door started, the observed digest is recorded here.
+Every acceptance event re-binds the installation's grants to the accepted bytes
+(``carry_grants_to_current`` through ``accept_grants``); between acceptances its keys
+follow the installation and its permissions wait (``skill_grant_scope``).
 """
 
 from __future__ import annotations
@@ -74,42 +76,64 @@ def admitted_acceptance(facts: Dict[str, Any], manifest: Any) -> Dict[str, Any]:
 
 
 def carry_grants_to_current(drive_root: pathlib.Path, skill: Any) -> bool:
-    """Re-bind the owner's grants to the current digest when the skill still requests
-    exactly the same keys and permissions; a changed request keeps the ordinary
-    re-grant flow. Returns whether grants were carried. Never raises."""
+    """Re-bind this installation's grants to the current digest. Callers are acceptance events of the
+    current bytes (end of a review, the author's acceptance, the owner's Skip or edit, an accepted release, a
+    built-in re-seed; ``accept_grants``). Carried: the granted keys the manifest still declares (compared with
+    its declaration, not with the keys Settings happens to hold), and the granted permissions when the skill
+    still requests exactly the same permissions. Only within the same installation
+    (``skill_grant_scope.identity_holds``): another source or folder, an unaccepted release and an uninstall
+    carry nothing. Returns whether grants were carried. Never raises."""
     try:
-        from ouroboros.skill_loader import (
-            load_skill_grants,
-            requested_core_setting_keys,
-            requested_skill_permissions,
-            save_skill_grants,
-        )
+        from ouroboros.skill_grant_scope import identity_holds, install_identity
+        from ouroboros.skill_loader import load_skill_grants, requested_skill_permissions, save_skill_grants
 
         if skill is None or skill.load_error or not skill.content_hash:
             return False
         grants = load_skill_grants(drive_root, skill.name)
-        old_hash = str(grants.get("content_hash") or "")
-        if not old_hash or old_hash == skill.content_hash:
+        if str(grants.get("content_hash") or "") in {"", skill.content_hash} or not identity_holds(
+                drive_root, skill, grants):
             return False
-        granted_keys = list(grants.get("granted_keys") or [])
-        granted_permissions = list(grants.get("granted_permissions") or [])
-        if not granted_keys and not granted_permissions:
-            return False
-        keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+        declared = {str(key or "").strip().upper() for key in skill.manifest.env_from_settings or []}
+        keys = [key for key in grants.get("granted_keys") or [] if key in declared]
         permissions = requested_skill_permissions(
             list(skill.manifest.permissions or []), list(skill.manifest.subscribe_events or []),
         )
-        if sorted(grants.get("requested_keys") or []) != sorted(keys):
+        same_request = sorted(grants.get("requested_permissions") or []) == sorted(permissions)
+        carried_permissions = list(grants.get("granted_permissions") or []) if same_request else []
+        if not keys and not carried_permissions:
             return False
-        if sorted(grants.get("requested_permissions") or []) != sorted(permissions):
-            return False
-        save_skill_grants(drive_root, skill.name, granted_keys, content_hash=skill.content_hash,
-                          requested_keys=keys, granted_permissions=granted_permissions,
-                          requested_permissions=permissions)
+        # The request the owner's decision covered stays the covered one: a key Settings gained later stays
+        # pending (``skill_grant_scope``) instead of turning into a declined one.
+        save_skill_grants(drive_root, skill.name, keys, content_hash=skill.content_hash,
+                          requested_keys=[key for key in grants.get("requested_keys") or [] if key in declared],
+                          granted_permissions=carried_permissions, requested_permissions=permissions,
+                          install_identity=install_identity(drive_root, skill))
         return True
     except Exception:
         log.warning("Grant carry failed for %s", getattr(skill, "name", "?"), exc_info=True)
         return False
+
+
+def carry_if_accepted(drive_root: pathlib.Path, skill: Any) -> bool:
+    """At an acceptance event: carry this installation's grants when the current bytes are accepted
+    (``skill_loader.bytes_accepted``, the condition the automatic grant reads). Never raises."""
+    from ouroboros.skill_loader import bytes_accepted
+
+    try:
+        accepted = skill is not None and not skill.load_error and bytes_accepted(skill)
+    except Exception:
+        log.warning("Acceptance read failed for %s", getattr(skill, "name", "?"), exc_info=True)
+        return False
+    return accepted and carry_grants_to_current(pathlib.Path(drive_root), skill)
+
+
+def accept_grants(drive_root: pathlib.Path, skill: Any) -> Any:
+    """An acceptance event of the current bytes: ``carry_if_accepted``, then the owner's automatic grant for what
+    is still requested (``auto_grant_if_enabled``, which reads its own setting); returns its outcome."""
+    from ouroboros.skill_loader import auto_grant_if_enabled
+
+    carry_if_accepted(drive_root, skill)
+    return auto_grant_if_enabled(drive_root, skill)
 
 
 def record_owner_edit(
@@ -148,8 +172,10 @@ def record_owner_edit(
 
 __all__ = [
     "OWNER_EDIT_FILENAME",
+    "accept_grants",
     "admitted_acceptance",
     "carry_grants_to_current",
+    "carry_if_accepted",
     "load_acceptance_facts",
     "record_owner_edit",
 ]

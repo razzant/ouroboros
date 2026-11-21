@@ -136,6 +136,9 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
         content_hash=content_hash,
         review_profile="owner_attested",
     )
+    from ouroboros.skill_acceptance import carry_if_accepted
+
+    carry_if_accepted(drive_root, skill)  # the owner's Skip accepts these bytes: this installation's grants follow
     _sr._apply_auto_grant_outcome(outcome, skill, _sr.auto_grant_if_enabled(drive_root, skill))
     return outcome
 
