@@ -56,13 +56,13 @@ export function openConfirmDialog({
     if (activeClose) activeClose(false);
     return new Promise((resolve) => {
         const backdrop = document.createElement('div');
-        backdrop.className = 'marketplace-modal-backdrop confirm-dialog-backdrop';
+        backdrop.className = 'ui-modal-backdrop confirm-dialog-backdrop';
         backdrop.innerHTML = `
-            <div class="marketplace-modal confirm-dialog${content?.mount ? ' has-content' : ''}" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
-                <div class="marketplace-modal-head">
+            <div class="ui-modal confirm-dialog${content?.mount ? ' has-content' : ''}" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+                <div class="ui-modal-head">
                     <h3 id="confirm-dialog-title">${escapeHtml(title || 'Confirm action')}</h3>
                 </div>
-                <div class="marketplace-modal-body">
+                <div class="ui-modal-body">
                     ${content?.mount ? `<section class="confirm-dialog-content" data-confirm-content tabindex="0" aria-label="${escapeHtml(String(content.label || 'Details'))}"></section>` : ''}
                     <p>${escapeHtml(body || 'Continue?')}</p>
                     ${renderConfirmDialogDetails(details)}
@@ -70,7 +70,7 @@ export function openConfirmDialog({
                         ? `<select class="ui-control files-modal-input confirm-dialog-input" data-confirm-input aria-labelledby="confirm-dialog-title">${choices.map((choice) => `<option value="${escapeHtml(String(choice?.value ?? ''))}">${escapeHtml(String(choice?.label ?? choice?.value ?? ''))}</option>`).join('')}</select>`
                         : `<input class="ui-control files-modal-input confirm-dialog-input" data-confirm-input type="text" aria-labelledby="confirm-dialog-title" value="${escapeHtml(initialValue)}">`}
                 </div>
-                <div class="marketplace-modal-actions">
+                <div class="ui-modal-actions">
                     ${alert ? '' : `<button type="button" class="btn btn-default" data-confirm-cancel>${escapeHtml(cancelLabel)}</button>`}
                     <button type="button" class="btn${danger ? ' btn-danger' : ''}"${danger ? '' : ' data-primary'} data-confirm-ok>${escapeHtml(confirmLabel)}</button>
                 </div>

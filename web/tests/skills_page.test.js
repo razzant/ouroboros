@@ -75,6 +75,39 @@ test('a skill opens Widgets as a jump; a nested visit cannot replace the tab sav
     restore(); assert.deepEqual(selected, ['installed']);
 });
 
+test('the page polls while a review of a skill runs, by the review\'s own facts, never by its chip\'s words', () => {
+    const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
+    const polled = (row) => {
+        const timers = [];
+        const context = vm.createContext({
+            pollTimer: 0, clearTimeout() {}, setTimeout: (fn, ms) => { timers.push(ms); return 1; }, destroyed: false, visible: true,
+            document: { hidden: false }, listingReadState: 'ok', snapshot: { rawSkills: [row], queue: null }, pendingListingHint: false,
+            inFlightCount: () => 0, lifecycleEventsFromQueue: () => [], projected: () => [row], reviewingSkills: new Set(),
+            installedSkillModel, pageModuleFacts: () => ({}), awaitsNewerListing: () => false, WORK_POLL_MS: 3000, REVIEW_POLL_MS: 15000,
+        });
+        vm.runInContext(source.match(/    function schedulePoll\(\) \{[\s\S]+?\n    \}/)[0], context);
+        context.schedulePoll();
+        return timers.length > 0;
+    };
+    const running = byName('whoop-health');  // its review job runs
+    assert.equal(installedSkillModel(running).reviewing, true);
+    assert.equal(polled(running), true);
+    const update = { ...byName('weather'), install: { ...(byName('weather').install || {}), pending_update: { version: '2.0.0' } } };
+    assert.match(renderInstalledSkillCard(update), />Reviewing…</);
+    assert.deepEqual([installedSkillModel(update).reviewing, polled(update)], [true, true], 'an update waits for its review');
+    const idle = byName('weather');
+    assert.deepEqual([installedSkillModel(idle).reviewing, polled(idle)], [false, false]);
+    // A chip that only says the word (here a job's own message) is no review: the words decide nothing.
+    const wordy = { ...idle, lifecycle_pending: true, lifecycle_kind: 'enable', lifecycle_message: 'Reviewing the files before turning on…' };
+    assert.match(renderInstalledSkillCard(wordy), />Reviewing the files before turning on…</);
+    assert.deepEqual([installedSkillModel(wordy).reviewing, polled(wordy)], [false, false]);
+    // A queue-only card (two folders share the name, so no listed row owns the job) answers the same fact.
+    const virtual = (kind) => mergeLifecycleEvents([{ name: 'notes' }, { name: 'notes' }], [{ target: 'notes', status: 'running', kind }])
+        .find((row) => row.lifecycle_virtual);
+    assert.match(renderInstalledSkillCard(virtual('review')), />Reviewing…</);
+    assert.deepEqual([installedSkillModel(virtual('review')).reviewing, installedSkillModel(virtual('install')).reviewing], [true, false]);
+});
+
 test('the active lifecycle job joins the event stream once', () => {
     const active = { id: 'j2', target: 'b', status: 'running', kind: 'install' };
     assert.deepEqual(lifecycleEventsFromQueue({ events: [{ id: 'j1', target: 'a', status: 'failed' }, active], active }),
