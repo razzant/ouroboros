@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from tests._phone_touch import touch
 from tests._shared import producer_evidence_dir
 from tests._work_projection_shared import with_work_fields
 from tests.ui_console_errors import PageErrors
@@ -334,6 +335,12 @@ def test_portal_row_says_a_same_named_project_once_and_keeps_a_long_name_on_one_
     assert page.evaluate("window.titleWatches") == 0, "no portal watches its title"
 
 
+# The engine's own clicks (trusted), each read once its dispatch is over: whether the page took it as no press.
+ENGINE_CLICKS = """() => { const seen = window.engineClicks = [];
+    addEventListener('click', (event) => { if (event.isTrusted) seen.push(event); }, true); }"""
+TAKEN_CLICKS = "() => window.engineClicks.splice(0).map((event) => ({detail: event.detail, prevented: event.defaultPrevented}))"
+
+
 def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(project_chat, tmp_path):
     page, expect = project_chat["page"], project_chat["expect"]
     card = _card(page, "creation")
@@ -357,21 +364,57 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
     expect(menu.locator('[role="menuitem"]')).to_have_text(keyboard_items)
     page.keyboard.press("Escape")
     expect(answer.locator('.chat-message-copy')).to_be_focused()
-    # Touch: a held finger (no movement) opens it; the lifting finger presses nothing.
+    # Touch: a finger held still (no movement) on the answer opens its menu where it rests. Under a touch screen in
+    # Chromium the finger is real (CDP, as in test_status_marks_nav_browser) and lifts before Chromium's own long press,
+    # so the engine sends its lift the click a tap makes, where the menu now lies: that click is the finger's, never a
+    # press of the item under it. WebKit and a window without touch keep a dispatched finger, whose lift sends no click.
+    real = project_chat["engine"] == "chromium" and project_chat["width"] < 980
     box = answer.locator('.message').bounding_box()
     point = {"x": box["x"] + 20, "y": box["y"] + 8}
-    page.evaluate("""p => { const t = document.elementFromPoint(p.x, p.y);
-        t.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'touch', isPrimary: true, pointerId: 7,
-            clientX: p.x, clientY: p.y})); }""", point)
-    page.wait_for_timeout(600)
-    expect(menu.locator('[role="menuitem"]')).to_have_text(["Reply", "Copy", "Select text"])
-    # Where the finger lifts the menu now lies (it opened at the finger): the item under it is not pressed.
-    page.evaluate("""p => { const t = document.elementFromPoint(p.x + 12, p.y + 12);
-        document.querySelector('[data-task-id]')?.closest('#chat-messages')
-            .dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerType: 'touch', pointerId: 7}));
-        t.click(); }""", point)
-    expect(menu).to_have_count(1)
+    items = menu.locator('[role="menuitem"]')
+    page.evaluate(ENGINE_CLICKS)
+
+    def hold_and_lift():
+        """The finger held past the long press, then lifted; the engine's own clicks since the last lift."""
+        if real:
+            touch(page, point["x"], point["y"], 600)
+            page.wait_for_function("() => window.engineClicks.length > 0", timeout=2000)
+        else:
+            page.evaluate("""p => document.elementFromPoint(p.x, p.y).dispatchEvent(new PointerEvent('pointerdown',
+                {bubbles: true, pointerType: 'touch', isPrimary: true, pointerId: 7, clientX: p.x, clientY: p.y}))""", point)
+            page.wait_for_timeout(600)
+            expect(items).to_have_count(3)
+            # A touch is captured by its first target: its end reaches the feed wherever the finger lifts.
+            page.evaluate("""() => document.getElementById('chat-messages').dispatchEvent(new PointerEvent('pointerup',
+                {bubbles: true, pointerType: 'touch', pointerId: 7}))""")
+        expect(items).to_have_count(3)
+        return page.evaluate(TAKEN_CLICKS)
+
+    lift = hold_and_lift()
+    expect(items).to_have_text(["Reply", "Copy", "Select text"])
     assert page.evaluate("() => document.querySelectorAll('.chat-quote--composer').length") == 0, "the lift pressed no item"
+    if real:
+        assert lift and all(click["prevented"] for click in lift), ("the lift's own click is no press", lift)
+    # An activation no finger made is no lift's: a script's click on Copy acts at once, while the dispatched finger's
+    # lift is still waiting for a click of its own.
+    menu.locator('[data-row-action="copy"]').evaluate("item => item.click()")
+    expect(menu).to_have_count(0)
+    assert "audit the review runner" in page.evaluate("() => window.copiedText || ''"), "Copy acted"
+    # So is the keyboard's: Enter on Reply, the moment after another lift.
+    lift = hold_and_lift()
+    if real:
+        assert lift and all(click["prevented"] for click in lift), ("the lift's own click is no press", lift)
+    menu.locator('[data-row-action="reply"]').focus()
+    page.keyboard.press("Enter")
+    expect(menu).to_have_count(0)
+    expect(page.locator('.chat-quote--composer')).to_have_count(1)
+    # Select text, after one more lift, gives the touched body to native selection and presses nothing else.
+    box = answer.locator('.message').bounding_box()
+    point = {"x": box["x"] + 20, "y": box["y"] + 8}
+    lift = hold_and_lift()
+    if real:
+        assert lift and all(click["prevented"] for click in lift), ("the lift's own click is no press", lift)
+    expect(page.locator('.chat-quote--composer')).to_have_count(1)
     menu.get_by_role("menuitem", name="Select text").click()
     expect(menu).to_have_count(0)
     assert answer.locator('.message').evaluate("""body => {

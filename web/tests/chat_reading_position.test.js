@@ -14,7 +14,8 @@ function fixture(t, exact = true, restoreTo = 80) {
         return { listeners, addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type) }; };
     const ownerDocument = { ...target(), body: {}, documentElement: {} };
     const feed = { scrollTop: 0, scrollHeight: 300, clientHeight: 500, clientWidth: 400, ownerDocument, ...target(),
-        contains: node => node === feed || Boolean(node?.inFeed) };
+        contains: node => node === feed || Boolean(node?.inFeed), get offsetHeight() { return this.clientHeight; },
+        getBoundingClientRect() { return { top: 0, height: this.clientHeight }; } };
     const dispatch = event => {
         if (feed.contains(event.target)) feed.listeners.get(event.type)?.(event);
         ownerDocument.listeners.get(event.type)?.(event);
@@ -151,7 +152,8 @@ test('a bounded box that can still move absorbs wheel, touch and keys: no follow
     f.feed.ownerDocument.defaultView = { getComputedStyle: node => ({ overflowY: node.overflowY || 'visible' }) };
     // An overflowing but unscrollable card, a bounded full body, the text read in it.
     const card = { inFeed: true, parentElement: f.feed, scrollTop: 0, scrollHeight: 900, clientHeight: 600 };
-    const body = { inFeed: true, parentElement: card, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400 };
+    const body = { inFeed: true, parentElement: card, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400,
+        getBoundingClientRect: () => ({ top: 20 }) };
     const text = { inFeed: true, parentElement: body };
     f.reading.bindGestures(direction => navigation.push(direction));
     Object.assign(f.feed, { scrollHeight: 1000, scrollTop: 560, clientHeight: 400 }); // 40px above the end
@@ -232,6 +234,283 @@ test('a wheel burst or touch stays with the box it began on, even at that box ed
     assert.equal(f.reading.stick, false);
     f.gesture({ type: 'wheel', deltaY: -1, target: text, timeStamp: 3500 }); f.frame();
     assert.deepEqual(navigation, [-1, -1, -1, -1], 'an older box scroll proves nothing about a new burst');
+});
+
+for (const input of ['wheel', 'touch']) {
+    test(`successive ${input} gestures inside a box keep their own movement through resizes`, t => {
+        const previous = globalThis.requestAnimationFrame, frames = [];
+        globalThis.requestAnimationFrame = callback => frames.push(callback);
+        t.after(() => { globalThis.requestAnimationFrame = previous; });
+        const listeners = new Map(), navigation = [];
+        const doc = { addEventListener() {}, defaultView: { getComputedStyle: () => ({ overflowY: 'auto' }) } };
+        const feed = { ownerDocument: doc, clientWidth: 390, offsetWidth: 390, clientHeight: 400, scrollHeight: 1000,
+            scrollTop: 600, get offsetHeight() { return this.clientHeight; },
+            getBoundingClientRect() { return { top: 0, height: this.clientHeight }; },
+            contains: node => node === box && box.isConnected,
+            addEventListener: (type, fn) => listeners.set(type, fn) };
+        let boxY = 680, lineY = 140, captures = 0, boxReads = 0;
+        const restored = [];
+        const box = { parentElement: feed, isConnected: true, clientHeight: 200, scrollHeight: 500, scrollTop: 100,
+            getBoundingClientRect() { boxReads++; return { top: boxY - feed.scrollTop }; } };
+        const line = { parentElement: box, getBoundingClientRect: () => ({ top: boxY - feed.scrollTop + lineY - box.scrollTop }) };
+        const anchors = {
+            capture() { captures++; return { node: line, offset: line.getBoundingClientRect().top }; },
+            restore(anchor) {
+                if (!anchor) return false;
+                restored.push(anchor.node);
+                feed.scrollTop += anchor.node.getBoundingClientRect().top - anchor.offset;
+                return true;
+            },
+        };
+        const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+            anchors, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+        reading.bindGestures(direction => navigation.push(direction));
+        reading.reflow(() => {}); // pinned height-only fast path, no bookmark or transcript scan
+        assert.equal(captures, 0);
+        const generation = reading.generation;
+        const emit = (type, extra) => listeners.get(type)({ type, target: line, ...extra });
+        const readBox = (start, steps) => {
+            if (input === 'touch') emit('touchstart', { touches: [{ clientX: 150, clientY: 100 }] });
+            for (let i = 0; i < steps; i++) {
+                const at = start + i * 16;
+                if (input === 'touch') emit('touchmove', { timeStamp: at, touches: [{ clientX: 150, clientY: 124 + i * 24 }] });
+                else emit('wheel', { timeStamp: at, deltaY: -24 });
+                box.scrollTop -= 24; // browser default runs AFTER the event reaches the reading owner
+                listeners.get('scroll')({ target: box, timeStamp: at + 1 });
+            }
+            frames.splice(0).forEach(callback => callback());
+        };
+        readBox(1000, 2);
+        assert.deepEqual([reading.stick, reading.generation, feed.scrollTop, navigation], [false, generation, 600, []]);
+        const at = line.getBoundingClientRect().top;
+        reading.reflow(() => { feed.clientHeight -= 75; boxY -= 24; });
+        assert.equal(line.getBoundingClientRect().top, at, 'the same line stays put after the box moves');
+        assert.equal(box.scrollTop, 52, 'the gesture still moved the inner box; the outer feed did not undo it');
+        reading.scroll();    // the app's first placement arrives as a feed scroll
+        reading.reflow();    // a follow-up measurement must not select an inner line
+        readBox(1400, 1);
+        assert.deepEqual([feed.scrollTop, box.scrollTop, line.getBoundingClientRect().top], [576, 28, at + 24]);
+        if (input === 'touch') {
+            // A room grows: its clamp may notify before the ResizeObserver's placement.
+            Object.assign(feed, { clientHeight: 435, scrollTop: 565 });
+            reading.scroll();
+        }
+        reading.reflow(() => { if (input === 'wheel') feed.clientHeight -= 23; boxY -= 30; });
+        assert.deepEqual([feed.scrollTop, box.scrollTop, line.getBoundingClientRect().top], [546, 28, at + 24],
+            'the next resize compensates only the box geometry, not the second inner move');
+        assert.deepEqual([boxReads, captures, reading.generation, navigation], [4, 0, generation, []],
+            'geometry needs one box read per restoration, neither a viewport scan nor a capture per gesture event');
+
+        reading.mutate(() => { lineY += 18; return true; });
+        assert.equal(restored.at(-1), line, 'a true content write still captures and restores the exact visible line');
+        assert.deepEqual([feed.scrollTop, box.scrollTop, line.getBoundingClientRect().top], [564, 28, at + 24]);
+    });
+}
+
+// A card timeline the reader scrolled inside, in a feed the keyboard resizes (style.css: its max-height follows the viewport).
+// The box sits 680 px down the feed; its passage line 440 px down its own content; anchors capture the passing line.
+function nestedRoom(t) {
+    const previous = globalThis.requestAnimationFrame, frames = [];
+    globalThis.requestAnimationFrame = callback => frames.push(callback);
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    const target = () => { const heard = new Map();
+        return { heard, addEventListener: (type, fn) => heard.set(type, fn), removeEventListener: type => heard.delete(type) }; };
+    const doc = { ...target(), body: {}, documentElement: {}, defaultView: { getComputedStyle: () => ({ overflowY: 'auto' }) } };
+    const clamped = { get scrollTop() { return this.top; },
+        set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); } };
+    const feed = Object.defineProperties({ ...target(), ownerDocument: doc, clientWidth: 390, offsetWidth: 390, clientHeight: 400,
+        scrollHeight: 3000, top: 600, get offsetHeight() { return this.clientHeight; },
+        getBoundingClientRect() { return { top: 0, height: this.clientHeight }; },
+        contains: node => node === feed || node === box || node === line }, Object.getOwnPropertyDescriptors(clamped));
+    const place = { boxY: 680, passing: true }; // `passing: false`: the write finds no line to hold (its row is being replaced)
+    const box = Object.defineProperties({ parentElement: feed, isConnected: true, clientHeight: 65, scrollHeight: 500, top: 435,
+        getBoundingClientRect: () => ({ top: place.boxY - feed.scrollTop }) }, Object.getOwnPropertyDescriptors(clamped));
+    const line = { parentElement: box, getBoundingClientRect: () => ({ top: place.boxY - feed.scrollTop + 440 - box.scrollTop }) };
+    const anchors = { capture: () => (place.passing ? { node: line, offset: line.getBoundingClientRect().top } : null),
+        restore(anchor) { if (!anchor) return false; feed.scrollTop += anchor.node.getBoundingClientRect().top - anchor.offset; return true; } };
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+        anchors, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+    reading.bindGestures(() => {});
+    reading.stick = false; reading.remember(true);
+    let at = 1000;
+    const emit = (node, type, extra) => {
+        const event = { type, target: node, timeStamp: at += 16, ...extra };
+        if (node === feed || feed.contains(node)) feed.heard.get(type)?.(event);
+        doc.heard.get(type)?.(event);
+    };
+    // The browser moves the box after the event reached the reading owner, then reports the box's scroll.
+    const moveBox = by => { box.scrollTop += by; emit(box, 'scroll'); };
+    const swipeBox = by => {
+        emit(line, 'touchstart', { touches: [{ clientX: 150, clientY: 100 }] });
+        emit(line, 'touchmove', { touches: [{ clientX: 150, clientY: 100 - by }] });
+        moveBox(by);
+        frames.splice(0).forEach(callback => callback());
+    };
+    return { reading, feed, box, line, place, emit, moveBox, swipeBox, passage: () => line.getBoundingClientRect().top };
+}
+
+test('a box grown with the viewport keeps the passage its clamped scroll would drop, and gets its scroll back', t => {
+    const { reading, feed, box, moveBox, swipeBox, passage } = nestedRoom(t);
+    swipeBox(-24); // the reader reads up inside the timeline
+    const read = passage();
+    assert.deepEqual([box.scrollTop, feed.scrollTop, read], [411, 600, 109]);
+    // The keyboard goes away: the feed and the timeline grow 65 -> 132 px; the timeline's own scroll clamps 411 -> 368.
+    reading.reflow(() => { feed.clientHeight += 67; box.clientHeight = 132; box.scrollTop = box.scrollTop; });
+    assert.equal(box.scrollTop, 368, 'the clamp is the box\'s own geometry');
+    assert.equal(passage(), read, 'the outer feed lifts the box by the clamp: the passage stays');
+    assert.equal(feed.scrollTop, 643);
+    moveBox(0); // the clamp's own scroll arrives after the reflow
+    reading.scroll();
+    reading.reflow();
+    assert.deepEqual([passage(), feed.scrollTop], [read, 643], 'a follow-up measurement keeps it');
+    // The keyboard rises again: the box can reach its scroll again, and is unmoved since.
+    reading.reflow(() => { feed.clientHeight -= 67; box.clientHeight = 65; });
+    assert.deepEqual([box.scrollTop, feed.scrollTop, passage()], [411, 600, read], 'the box and its scroll are back');
+    // A reader's move after a lift starts from where the box is.
+    reading.reflow(() => { feed.clientHeight += 67; box.clientHeight = 132; box.scrollTop = box.scrollTop; });
+    moveBox(0);
+    swipeBox(-30);
+    const moved = passage();
+    assert.equal(moved, read + 30);
+    reading.reflow(() => { feed.clientHeight -= 30; });
+    assert.deepEqual([passage(), box.scrollTop], [moved, 338], 'the inner move is the reader\'s, the outer lift stays');
+});
+
+test('a state poll while the keyboard is away keeps the box\'s own scroll and its lift for the keyboard\'s return', t => {
+    const { reading, feed, box, moveBox, swipeBox, passage } = nestedRoom(t);
+    swipeBox(-24);
+    const read = passage();
+    reading.reflow(() => { feed.clientHeight += 67; box.clientHeight = 132; box.scrollTop = box.scrollTop; });
+    moveBox(0);
+    reading.scroll();
+    reading.mutate(() => true); // /api/state polling while the keyboard is away
+    assert.deepEqual([box.scrollTop, feed.scrollTop, passage()], [368, 643, read], 'the write moves nothing');
+    reading.reflow(() => { feed.clientHeight -= 67; box.clientHeight = 65; });
+    assert.deepEqual([box.scrollTop, feed.scrollTop, passage()], [411, 600, read], 'the box and its scroll are back');
+    assert.ok(passage() < 680 - feed.scrollTop + box.clientHeight, 'the passage is inside the box, not under its edge');
+});
+
+for (const via of ['swipe', 'scrollbar']) {
+    test(`a state poll during ${via === 'swipe' ? 'a lifted swipe\'s momentum' : 'a box scrollbar drag'} keeps the box, not the passing line`, t => {
+        const { reading, feed, box, emit, moveBox, swipeBox, passage } = nestedRoom(t);
+        if (via === 'swipe') swipeBox(-24);
+        else { emit(box, 'pointerdown'); moveBox(-24); }
+        reading.mutate(() => true); // /api/state polling every few seconds, or a live frame
+        moveBox(-20); // momentum, or the drag going on
+        reading.mutate(() => true);
+        moveBox(-20);
+        if (via === 'scrollbar') emit(box, 'pointerup');
+        const top = feed.scrollTop, read = passage();
+        assert.equal(box.scrollTop, 371);
+        reading.reflow(() => { feed.clientHeight -= 75; }); // the keyboard rises
+        assert.deepEqual([feed.scrollTop, passage()], [top, read], 'the next reflow does not undo the inner movement with the feed');
+        box.isConnected = false; // the card re-rendered: the ordinary capture takes over
+        reading.mutate(() => true);
+        reading.reflow(() => { feed.clientHeight += 75; });
+        assert.equal(feed.scrollTop, top);
+    });
+}
+
+// A phone room 150 px high whose reader is not following: rows 100 px apart, the last one (M) 99 px down the feed, the
+// feed at its end. Anchors keep the first row in sight at its offset, as chat_render_batch.js does.
+function shortRoom() {
+    const feed = { clientWidth: 390, offsetWidth: 390, clientHeight: 150, scrollHeight: 3000, top: 2850,
+        get scrollTop() { return this.top; },
+        set scrollTop(value) { this.top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); },
+        get offsetHeight() { return this.clientHeight; },
+        getBoundingClientRect() { return { top: 0, bottom: this.clientHeight, height: this.clientHeight }; },
+        contains: node => node === feed || rows.includes(node) };
+    const rows = Array.from({ length: 30 }, (_, i) => ({ historyId: `chat:${i}`, parentElement: feed, isConnected: true, y: 49 + 100 * i,
+        getBoundingClientRect() { const top = this.y - feed.scrollTop; return { top, bottom: top + 100, width: 390, height: 100 }; } }));
+    const shown = row => { const r = row.getBoundingClientRect(); return r.bottom > 0 && r.top < feed.clientHeight; };
+    const anchors = { serialize: () => null,
+        capture() { const node = rows.find(shown); return node ? { node, historyId: node.historyId, offset: node.getBoundingClientRect().top } : null; },
+        restore(anchor) {
+            if (!anchor?.node?.isConnected) return false;
+            feed.scrollTop += anchor.node.getBoundingClientRect().top - anchor.offset;
+            return true;
+        } };
+    const reading = createChatReadingPosition({ feed, visible: () => true, alive: () => true, ready: () => true,
+        anchors, changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+    reading.stick = false; reading.remember(true);
+    // The keyboard goes (+) or comes (-): the room's height moves and the browser clamps the feed to its new limit.
+    const room = by => { feed.clientHeight += by; feed.scrollTop = feed.scrollTop; };
+    return { reading, feed, rows, room, m: () => rows.at(-1).getBoundingClientRect().top };
+}
+
+for (const order of ['clamp-scroll-first', 'reflow-first']) for (const poll of [false, true]) {
+    test(`a place the feed's scroll limit keeps it from is still the place when the room comes back (${order}${poll ? ', a state poll between' : ''})`, () => {
+        const { reading, room, m } = shortRoom();
+        assert.equal(m(), 99);
+        // The keyboard goes: the room grows 420 px and the feed, at its end, cannot keep M where it was read.
+        if (order === 'clamp-scroll-first') { room(420); reading.scroll(); reading.reflow(() => {}); }
+        else { reading.reflow(() => room(420)); reading.scroll(); }
+        assert.equal(m(), 519, 'the taller room shows the feed\'s end: nothing more can be done');
+        if (poll) reading.mutate(() => true); // /api/state while the keyboard is away
+        reading.reflow(() => room(-420)); // the keyboard comes back
+        assert.equal(m(), 99, 'the message is back where it was read');
+        reading.scroll();
+        reading.reflow(() => room(-20)); // a second line in the composer
+        assert.equal(m(), 99, 'and is an ordinary place again');
+    });
+}
+
+test('a held place comes back as far as each smaller room allows, follows a reply in, and yields to the reader\'s own move', () => {
+    let { reading, feed, room, m } = shortRoom();
+    reading.reflow(() => room(420));
+    reading.scroll();
+    reading.reflow(() => room(-144)); // the keyboard half way up
+    assert.equal(m(), 375, 'the feed gives back what the room took, px for px');
+    reading.reflow(() => room(144));
+    assert.equal(m(), 519);
+    // A reply arrives below while the room is tall: the feed moves toward the place with it, as a follower's would.
+    reading.mutate(() => { feed.scrollHeight += 200; return true; }, { remoteContent: true });
+    assert.deepEqual([m(), reading.stick], [319, false]);
+    reading.reflow(() => room(-420));
+    assert.equal(m(), 99);
+    // The reader's own scroll while the place is out of reach is the new place.
+    ({ reading, feed, room, m } = shortRoom());
+    reading.reflow(() => room(420));
+    reading.scroll();
+    feed.scrollTop -= 100; reading.scroll(); // read 100 px back in the tall room
+    assert.equal(m(), 619);
+    reading.mutate(() => true);
+    reading.reflow(() => room(-420));
+    assert.equal(m(), 619, 'the row the reader left in sight stays; nothing pulls the old place back');
+});
+
+test('a state poll while the feed\'s limit holds a lifted box back keeps the place for the keyboard\'s return', t => {
+    const { reading, feed, box, place, moveBox, swipeBox, passage } = nestedRoom(t);
+    feed.scrollHeight = 1000; // the timeline is the feed's last card: the feed is at its end
+    swipeBox(-24);
+    const read = passage();
+    assert.deepEqual([feed.scrollTop, read], [600, 109]);
+    // The keyboard goes: the feed grows 67 px and clamps to 533; the box clamps 411 -> 368 and the feed cannot lift it.
+    const away = () => reading.reflow(() => { feed.clientHeight += 67; feed.scrollTop = feed.scrollTop; box.clientHeight = 132; box.scrollTop = box.scrollTop; });
+    const back = () => reading.reflow(() => { feed.clientHeight -= 67; box.clientHeight = 65; });
+    away();
+    moveBox(0);
+    reading.scroll();
+    assert.deepEqual([feed.scrollTop, box.scrollTop, passage()], [533, 368, read + 110], 'at the limit the passage drops by what could not be applied');
+    back();
+    assert.deepEqual([feed.scrollTop, box.scrollTop, passage()], [600, 411, read], 'control: without a poll it comes back');
+    away();
+    moveBox(0);
+    reading.scroll();
+    reading.mutate(() => true); // one /api/state poll while the keyboard is away
+    back();
+    assert.deepEqual([feed.scrollTop, box.scrollTop, passage()], [600, 411, read], 'a poll that moved nothing rebases nothing');
+    // A write that does move the box on screen (a row above it re-rendered 30 px taller, no passing line to hold) moves
+    // the place by that much, with the box's own scroll and the lift standing in for its clamp untouched.
+    away();
+    moveBox(0);
+    reading.scroll();
+    place.passing = false;
+    reading.mutate(() => { place.boxY += 30; feed.scrollHeight += 30; return true; });
+    place.passing = true;
+    assert.deepEqual([feed.scrollTop, passage()], [533, read + 140], 'the write moved the box 30 px down the screen');
+    back();
+    assert.deepEqual([box.scrollTop, passage()], [411, read + 30], 'the returning passage is those 30 px lower, no more');
 });
 
 test('a feed scrollbar drag follows where it leaves the feed and pages nothing', t => {
@@ -600,7 +879,8 @@ test('reading inside a box ends what an earlier feed gesture still owes, not a s
 test('a box gesture supersedes a ↓ still awaiting history; with nothing pending it cancels nothing', t => {
     const f = fixture(t);
     f.feed.ownerDocument.defaultView = { getComputedStyle: node => ({ overflowY: node.overflowY || 'visible' }) };
-    const body = { inFeed: true, parentElement: f.feed, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400 };
+    const body = { inFeed: true, parentElement: f.feed, overflowY: 'auto', scrollTop: 200, scrollHeight: 1000, clientHeight: 400,
+        getBoundingClientRect: () => ({ top: 20 }) };
     const text = { inFeed: true, parentElement: body };
     f.reading.bindGestures(() => {});
     f.reading.cancel();

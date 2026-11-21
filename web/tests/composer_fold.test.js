@@ -9,7 +9,7 @@
 // Real frames are in the browser lane (tests/test_composer_fold_browser.py).
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { FOLD, createComposerFold } from '../modules/composer_fold.js';
+import { FOLD, createComposerFold, shortRoom } from '../modules/composer_fold.js';
 
 function rig({ stack = true } = {}) {
     const timers = new Map();
@@ -322,4 +322,17 @@ test('a resize of the room leaves a fold of the owner\'s reading back', () => {
     r.scroll(false);
     r.scroll(false);
     assert.equal(r.fold.folded(), false);
+});
+
+test('shortRoom measures the room height left below its bar without relying on @property', () => {
+    const room = (height, bar = 0) => ({
+        getBoundingClientRect: () => ({ height }),
+        querySelector: () => (bar ? { getBoundingClientRect: () => ({ height: bar }) } : null),
+    });
+    assert.equal(shortRoom(room(250, 93)), true, 'Telegram fullscreen at 250px leaves 157px under its 93px band');
+    assert.equal(shortRoom(room(340, 93)), false, '340px under the 93px band keeps 247px for the row and feed');
+    assert.equal(shortRoom(room(250, 56)), false, '250px with an ordinary 56px bar keeps 194px');
+    assert.equal(shortRoom(room(210, 56)), true, '210px with a 56px bar drops under 164px');
+    assert.equal(shortRoom({}), false);
+    assert.equal(shortRoom(null), false);
 });
