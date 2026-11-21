@@ -1,0 +1,783 @@
+name: Model recovery qualification (synthetic Linux QA)
+on:
+  push:
+    branches: ['qa/model-recovery-p01-20261120']
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # GitHub-hosted maximum; the per-step ceilings below still apply
+    env:
+      BASE: 'c96d2b272b4130c57b862a7dd72be3ad700a58ab' # exact public product parent
+      PRODUCT_TREE: 'e3bf61c55dfdd703c46899c4d248b8c77b8421cf' # exact product tree, without the diagnostic files
+      PYTHONDONTWRITEBYTECODE: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Separate the three diagnostic files from the pinned product
+        id: subject
+        run: |
+          set -euo pipefail
+          # A binding failure prints what was expected and what was found, so it is not mistaken for another failure.
+          require_equal() {
+            if [[ "$2" != "$3" ]]; then
+              echo "::error::Subject binding mismatch: $1"
+              printf 'expected:\n%s\nactual:\n%s\n' "$3" "$2"
+              exit 1
+            fi
+          }
+          if ! [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$PRODUCT_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Subject binding mismatch: BASE and PRODUCT_TREE must be 40 lowercase hex characters"
+            exit 1
+          fi
+          require_equal 'checked-out HEAD is the pushed commit' "$(git rev-parse HEAD)" "$GITHUB_SHA"
+          product=$(git rev-parse --verify --quiet 'HEAD^1') || { echo '::error::Subject binding mismatch: the pushed commit has no parent'; exit 1; }
+          require_equal 'pushed commit has exactly one parent, the product' "$(git rev-list --parents -n 1 HEAD)" "$GITHUB_SHA $product"
+          require_equal 'product has exactly one parent, the base' "$(git rev-list --parents -n 1 "$product")" "$product $BASE"
+          require_equal 'product tree is the pinned tree' "$(git rev-parse "$product^{tree}")" "$PRODUCT_TREE"
+          # The emitted cases arrive as one committed public-fixture carrier; no other repository is read.
+          carrier=.github/qa/claudexor-emitted-cases.json
+          witness=.github/qa/test_claudexor_emitted_witness.py
+          workflow=.github/workflows/qa-model-recovery.yml
+          expected=$(printf 'A\t%s\nA\t%s\nA\t%s' "$carrier" "$witness" "$workflow")
+          require_equal 'file status between product and pushed commit' "$(git diff --name-status --no-renames "$product" HEAD)" "$expected"
+          for path in "$carrier" "$witness" "$workflow"; do
+            require_equal "object mode of $path" "$(git ls-tree --format='%(objectmode) %(objecttype)' HEAD -- "$path")" '100644 blob'
+          done
+          mkdir -p "$RUNNER_TEMP/p01/images" "$RUNNER_TEMP/p01-input"
+          git show "HEAD:$carrier" > "$RUNNER_TEMP/p01-input/claudexor-emitted-cases.json"
+          git show "HEAD:$witness" > "$RUNNER_TEMP/p01-input/test_claudexor_emitted_witness.py"
+          git checkout --detach "$product"
+          require_equal 'checked-out product tree' "$(git rev-parse 'HEAD^{tree}')" "$PRODUCT_TREE"
+          require_equal 'checked-out product is clean' "$(git status --porcelain --untracked-files=all)" ''
+          printf 'product=%s\n' "$product" >> "$GITHUB_OUTPUT"
+          printf 'diagnostic %s\nproduct %s\ntree %s\nbase %s\n' "$GITHUB_SHA" "$product" "$PRODUCT_TREE" "$BASE" | tee "$RUNNER_TEMP/p01/subject.txt"
+      - name: Install the repository's locked test dependencies
+        id: python
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        id: node
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        with:
+          node-version: '24.22.3'
+      - name: Replay 26 cells against the real product consumer (mock HTTP only)
+        id: replay
+        timeout-minutes: 32
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          PRODUCT: ${{ steps.subject.outputs.product }}
+        run: |
+          set -euo pipefail
+          runner_py=$(python -c 'import sys; print(sys.executable)')
+          [[ "$runner_py" == /* && -x "$runner_py" ]]
+          git worktree add --detach "$RUNNER_TEMP/p01-replay" "$PRODUCT"
+          cd "$RUNNER_TEMP/p01-replay"
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          witness=tests/test_claudexor_emitted_witness.py
+          [[ ! -e "$witness" && ! -L "$witness" ]]
+          install -m 0644 "$RUNNER_TEMP/p01-input/${witness##*/}" "$witness"
+          test "$(git status --porcelain --untracked-files=all)" = "?? $witness"
+          "$runner_py" -I -S scripts/safe_test.py --timeout 1780 --evidence-dir "$RUNNER_TEMP/source-replay" -- \
+            "$runner_py" "$witness" "$RUNNER_TEMP/p01-input/claudexor-emitted-cases.json" \
+            "$RUNNER_TEMP/p01/cells.tsv" "$RUNNER_TEMP/p01/producer.json"
+      - name: Focused consumer paths (mock transports only)
+        id: focused
+        timeout-minutes: 45
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          homes=(
+            tests/test_subscription_main_wait.py tests/test_provider_wall_rail_contract.py
+            tests/test_native_fallback_binding_acceptance.py tests/test_claudexor_failure_evidence.py
+            tests/test_claudexor_model_transport.py tests/test_llm_claudexor.py tests/test_provider_failure_reporting.py
+            tests/test_safety_rate_limit.py tests/test_safety_second_check.py tests/test_benchmark_provenance_v6810.py
+            tests/test_output_exhaustion.py tests/test_completion_selection.py tests/test_commit_review_processing.py
+            tests/test_finalize_marker_nudge.py
+            tests/test_delivery_forced_finalization.py tests/test_helper_owner_words_flow.py tests/test_working_checkpoint.py tests/test_wrapup_real_send_parity.py
+            tests/test_stream_timeout_recovery.py tests/test_unknown_fallback_first.py tests/test_transport_repeat_owner_stop.py
+            tests/test_transport_unknown_continuation.py tests/test_local_context_evidence.py
+            tests/test_local_input_measurement.py tests/test_model_concurrency.py tests/test_local_gigachat_send_deadlines.py
+            tests/test_capability_probe_accounting_v664.py
+            tests/test_context_minimum_view_unfit.py tests/test_required_development_book.py
+            tests/test_model_substitution_rail.py tests/test_rail_cause_coverage.py tests/test_send_clock.py
+            tests/test_processing_claudexor.py tests/test_transport_death_retry.py tests/test_provider_terminal_notice.py
+            tests/test_openai_responses.py tests/test_transport_b_stream_deadlines.py tests/test_record_contract.py
+            tests/test_monitoring_examples.py tests/test_finish_reason_facts.py tests/test_llm_provider_golden.py
+            tests/test_live_fit_refused.py tests/test_live_contracts.py tests/test_live_host_fit_evidence.py
+            tests/test_live_preparation_fit_refusal.py tests/test_live_serving_capacity.py
+            tests/test_forced_model_binding.py tests/test_route_switch_facts.py tests/test_abandoned_model_operation.py
+            tests/test_openai_chat_dispatch.py tests/test_transcript_provider_shapes.py
+            tests/test_observability_outcomes_v2.py tests/test_usage_response_contracts.py
+            tests/test_context_physical_exposure.py tests/test_message_cache_boundary.py
+            tests/test_usage_abandoned_reconciliation.py tests/test_maintenance_rest_and_arrivals.py tests/test_effort_resolution_evidence.py
+            tests/test_model_wait_controls.py tests/test_swarm_provider_disclosure.py tests/test_terminal_provenance.py
+            tests/test_presence_preparation_fit_refusal.py tests/test_presence_attempt_end.py tests/test_presence_call_door.py
+            tests/test_output_exhaustion_recovery.py
+            tests/test_executor_inventory.py tests/test_multimodal_chat.py
+            tests/test_owner_pause_storage_wait.py tests/test_transport_custody.py
+            tests/test_model_wait.py tests/test_nano_local_exact.py tests/test_priced_response_consumers.py
+            tests/test_terminal_duty_open_sets.py tests/test_loop_compaction.py
+          )
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/source-focused" -- python -m pytest -q --tb=short \
+            "${homes[@]}" --junitxml="$RUNNER_TEMP/focused.xml"
+          python - "$RUNNER_TEMP/focused.xml" "${homes[@]}" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          def passed(case):
+              return all(case.find(tag) is None for tag in ('failure', 'skipped', 'error'))
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          ran = {part for c in cases if passed(c) for part in c.attrib['classname'].split('.')}
+          missing = {Path(home).stem for home in sys.argv[2:]} - ran
+          assert not missing, f'No passing case in these focused modules: {sorted(missing)}'
+          required = {
+              'test_an_incomplete_answer_from_another_model_is_refused_too': 1,
+              'test_received_output_cut_is_not_a_one_shot_answer_and_survives_restore': 2,
+              'test_engine_output_limit_is_a_computed_finish_on_the_accepted_round': 1,
+              'test_warm_and_retained_receipt_agree_on_message_delivery': 18,
+              'test_cold_restore_leaves_original_operation_owed_when_the_store_changes': 1,
+              'test_warm_create_rejoins_only_a_bound_store': 10,
+              'test_control_after_observer_wins_over_unverified_create_binding': 2,
+              'test_empty_native_cut_rejoins_the_length_policy_without_replaying_the_attempt': 2,
+              'test_main_deadline_uses_only_its_completed_received_reply': 24,
+              'test_main_deadline_does_not_take_the_preparing_helpers_reply': 1,
+              'test_the_rolling_mark_counts_the_same_words_in_typed_and_plain_history': 1,
+              'test_control_during_final_receipt_keeps_the_physical_result': 6,
+              'test_cold_processing_refusal_releases_before_ordinary_standard_admission': 5,
+              'test_later_provider_failure_keeps_multipart_tool_history_only_as_salvage': 3,
+              'test_ordered_assistant_parts_count_as_exposed_only_when_their_words_were_sent': 1,
+              'test_older_unbound_attempt_needs_a_retained_receipt': 1,
+              'test_text_presence_start_keeps_measured_failed_silence': 2,
+              'test_degraded_host_replays_the_same_silent_capacity_terminal': 2,
+              'test_place_call_closes_once_and_keeps_its_typed_preparation_result': 3,
+              'test_forced_dispatch_checkpoint_only_recovers_its_existing_reply': 23,
+              'test_live_forced_final_reads_the_direct_stop_its_own_drain_delivered': 4,
+              'test_an_answered_smaller_send_keeps_its_saved_claim_until_the_loop_incorporates_the_reply': 3,
+              'test_a_deadline_at_the_restored_read_takes_only_its_exact_claimed_reply': 2,
+              'test_live_one_turn_wrap_up_not_current_after_the_same_words_become_addressed': 1,
+              'test_reconcile_read_closes_only_the_exact_matching_claim': 1,
+              'test_reconcile_read_mismatch_keeps_the_claim_and_drops_the_reply': 1,
+              'test_reconcile_read_without_a_claim_passes_the_reply_through': 1,
+              'test_send_smaller_covers_only_what_its_own_answer_read': 2,
+              'test_restored_read_of_the_informed_send_runs_its_tool_once_then_finishes_normally': 2,
+              'test_a_forced_blank_refusal_beside_an_unrun_call_keeps_the_incomplete_rail': 4,
+              'test_a_forced_mixed_refusal_records_its_words_never_its_unrun_calls': 1,
+              'test_a_forced_refusals_own_finish_call_keeps_its_path_and_reads_as_unrun': 1,
+              'test_an_accepted_wrap_up_read_ends_at_its_grace_on_the_forced_rail': 3,
+              'test_a_grace_never_widens_the_round_deadline_nor_does_the_calendar': 1,
+              'test_the_control_owner_rules_a_wrap_up_read_its_deadline_ended': 3,
+              'test_a_withdrawn_wrap_up_reads_the_settled_reply_and_never_sends_it_again': 5,
+              'test_only_this_calls_own_attempt_binds_a_withdrawn_read_before_any_effect': 3,
+              'test_a_reply_read_past_its_bound_needs_one_open_read_that_never_waits': 5,
+              'test_a_control_during_the_status_read_starts_no_result_read_and_cancels_nothing': 4,
+              'test_upstream_probe_is_non_generating_and_uses_resolved_route': 5,
+              'test_an_old_listener_cannot_speak_for_the_new_endpoint': 2,
+              # tests/test_subscription_main_wait.py
+              'test_only_this_api_attempts_settled_resource_refusal_enters_a_wait': 15,
+              'test_direct_api_wait_uses_the_received_status_and_its_own_limit_source': 7,
+              'test_foreign_evidence_does_not_open_an_api_key_wait': 7,
+              'test_ordinary_api_refusal_reaches_the_owner_only_after_configured_routes': 11,
+              'test_fallback_choice_and_first_request_from_its_saved_round': 10,
+              'test_forced_wait_switch_reprices_the_request_that_is_sent': 2,
+              'test_forced_repair_binds_its_own_role_after_a_separate_settled_400': 6,
+              # tests/test_provider_wall_rail_contract.py
+              'test_forced_send_compares_the_acting_routes_refused_parameter': 21,
+              # tests/test_native_fallback_binding_acceptance.py
+              'test_old_ready_round_sends_once_and_never_retries_its_unknown': 4,
+              'test_identified_unknown_stays_with_its_original_attempt': 2,
+              'test_unmarked_pending_requires_its_own_saved_round_and_physical_attempt': 1,
+              'test_cold_restore_waits_for_the_same_operation': 9,
+              'test_a_restored_reply_finishes_only_the_owner_input_it_saw': 2,
+              'test_retained_main_reply_belongs_to_this_calls_own_settled_attempt': 1,
+              'test_warm_paused_refusal_resumes_without_recounting': 1,
+              'test_pause_during_final_receipt_resumes_the_settled_refusal_once': 1,
+              'test_a_reasonless_unsent_receipt_restores_the_ordinary_round_without_a_success_receipt': 4,
+              'test_a_native_create_binds_only_its_rounds_own_landed_ready_state': 4,
+              'test_a_landed_ready_state_binds_at_once_and_an_unsupported_continuation_is_no_failed_save': 2,
+              'test_a_native_create_is_refused_while_its_ready_state_is_owed_and_no_writer_is_bound': 1,
+              'test_a_released_typed_refusal_is_met_by_its_rounds_own_call_and_never_sent_over': 9,
+              'test_a_restored_resource_refusal_waits_before_it_sends_when_no_route_follows': 1,
+              'test_a_cold_auth_changed_release_keeps_only_the_reissue_its_own_record_proves_unused': 4,
+              'test_a_received_failure_is_met_by_its_rounds_own_call': 3,
+              'test_what_is_not_carried_ends_as_it_did_and_sends_nothing_over': 2,
+              'test_the_known_end_survives_a_snapshot_between_its_read_and_its_decision': 2,
+              'test_a_known_end_is_met_once_and_only_by_its_own_round_model_and_role': 1,
+              'test_a_restored_size_refusal_meets_the_size_owner_and_sends_nothing_over': 2,
+              'test_a_restored_failures_terminal_never_reads_this_rounds_estimate_as_its_request_size': 2,
+              'test_a_pause_keeps_the_arrivals_bound_to_its_own_read_for_a_cold_resume': 1,
+              'test_arrivals_bound_to_a_read_stay_with_exactly_that_read': 1,
+              'test_ready_checkpoint_reads_a_retained_answer_offline': 18,
+              'test_a_withdrawn_wrap_up_reads_a_received_failure_once_and_never_sends_again': 2,
+              'test_a_withdrawn_wrap_up_keeps_its_reply_as_words_when_a_carried_row_came_with_it': 1,
+              'test_a_withdrawn_wrap_up_leaves_a_restored_reply_that_reads_own_result': 4,
+              'test_a_restored_reply_answers_only_what_its_send_provably_saw': 5,
+              'test_keep_unseen_reply_proves_coverage_only_from_every_drain_since_the_send': 1,
+              'test_a_withdrawn_wrap_up_ends_the_forced_rail_on_its_own_settled_request': 6,
+              'test_what_a_redrained_round_top_drained_still_keeps_the_restored_reply_as_words': 4,
+              'test_a_restored_forced_reply_never_answers_a_carried_row_its_send_never_saw': 3,
+              'test_cold_create_without_receipt_uses_dispatch_evidence': 5,
+              'test_primary_wait_honors_a_direct_api_access_refusal': 5,
+              'test_a_restored_rejected_receipt_never_opens_the_fallback_chain': 4,
+              'test_a_restored_unusable_reply_marks_its_failure_row_terminal': 1,
+              'test_mail_landing_after_a_restored_read_binds_before_its_reply_or_tools': 3,
+              'test_a_pause_while_a_restored_operation_still_runs_parks_its_read_and_cancels_nothing': 1,
+              'test_a_restored_reads_poll_types_the_owner_fence_as_the_owner_seam_reads_it': 4,
+              'test_a_live_rejected_receipt_ends_known_before_any_route_wrap_up_or_grace': 2,
+              'test_a_restored_rejected_receipt_ends_the_round_before_any_new_admission': 1,
+              'test_a_stop_now_any_forced_drain_reads_outranks_every_exit_of_the_wrap_up': 6,
+              'test_a_wrap_ups_own_rejected_receipt_is_never_followed_by_a_second_forced_send': 2,
+              # tests/test_claudexor_failure_evidence.py
+              'test_create_rejoin_and_completed_history': 8,
+              'test_negotiated_ordinary_text_stays_a_string': 1,
+              'test_settled_content_refusal_ends_request_with_safe_evidence': 14,
+              'test_cold_reader_keeps_explicit_terminal_refusal_without_renegotiating': 1,
+              'test_similar_words_status_or_unbound_legacy_code_are_not_the_new_terminal': 5,
+              'test_inconsistent_explicit_code_cannot_resume_the_request': 4,
+              'test_refusal_detail_without_body_cannot_release_the_attempt': 1,
+              'test_unexpected_completed_refusal_retains_evidence_without_returning_a_verdict': 4,
+              'test_negotiated_malformed_refusal_retains_the_received_message': 1,
+              'test_vision_child_preserves_only_a_settled_refusal': 2,
+              'test_a_control_read_after_a_received_refusal_keeps_its_exit_and_the_refusals_custody': 4,
+              'test_a_control_after_a_received_refusal_keeps_its_exit_and_never_sends_again': 3,
+              'test_a_received_refusal_ends_one_request_where_its_caller_sends_nothing_more': 1,
+              'test_a_refused_caption_is_unavailable_for_the_task_and_asks_no_other_model': 1,
+              'test_a_caption_refusal_read_beside_a_control_is_kept_before_the_control_leaves': 2,
+              'test_a_refused_extraction_keeps_the_review_unparsed_after_its_one_send': 1,
+              'test_a_final_answer_is_read_only_inside_one_ordinary_run': 1,
+              # tests/test_claudexor_model_transport.py
+              'test_evidence_opt_ins_preserve_create_body': 4,
+              'test_query_negotiation_uses_exact_wire_descriptor': 3,
+              # tests/test_llm_claudexor.py
+              'test_stop_after_lost_create_does_not_guess_the_operation_id': 1,
+              # tests/test_provider_failure_reporting.py
+              'test_gateway_typed_input_limit_needs_no_guessed_window': 2,
+              # tests/test_safety_rate_limit.py
+              'test_checker_request_refusal_is_a_hold_without_another_send': 2,
+              'test_an_advertised_typed_checker_refusal_holds_before_parse_or_repair': 2,
+              'test_the_verdict_parser_reads_no_verdict_from_typed_refusal_parts': 1,
+              # tests/test_safety_second_check.py
+              'test_a_failed_second_check_keeps_the_first_verdict': 7,
+              # tests/test_output_exhaustion.py
+              'test_accepted_tool_calls_keep_only_a_finish_label_in_the_round': 2,
+              'test_completed_refusal_is_a_literal_reply_even_with_configured_alternates': 4,
+              'test_a_forced_refusal_keeps_its_exact_blank_words_bound_without_another_send': 2,
+              'test_a_final_answer_comes_only_from_one_ordinary_run_on_either_exit': 4,
+              'test_a_forced_refusal_turns_neither_glued_nor_refused_words_into_a_request': 2,
+              'test_handle_task_stores_blank_refusal_words_exact_with_the_hosts_notice_beside': 2,
+              'test_forced_call_returns_the_refusal_without_another_send': 2,
+              # tests/test_completion_selection.py
+              'test_completed_refusal_waits_for_result_review_and_author_selection': 2,
+              'test_mixed_completed_executes_only_its_structured_call_and_preserves_history': 1,
+              # tests/test_finalize_marker_nudge.py
+              'test_marker_nudge_reads_this_refusal_replys_own_marker_run_as_latch_and_selection_do': 1,
+              # tests/test_delivery_forced_finalization.py
+              'test_second_forced_owner_arrival_returns_exact_resume_fallback': 2,
+              'test_a_forced_send_abandoned_to_a_warm_pause_is_never_bought_twice': 1,
+              'test_a_forced_descriptor_under_grace_is_read_never_sent_again': 1,
+              'test_forced_completion_reads_real_call_beside_literal_control_json': 2,
+              # tests/test_working_checkpoint.py
+              'test_a_sourceless_pausing_seed_is_completed_from_the_same_attempts_working_state': 3,
+              # tests/test_wrapup_real_send_parity.py
+              'test_priced_forced_request_matches_the_native_sender': 2,
+              'test_last_fit_wrapup_keeps_late_owner_words_without_buying_a_second_send': 1,
+              # tests/test_unknown_fallback_first.py
+              'test_unsent_observed_primary_does_not_lend_its_endpoint_to_the_configured_route': 1,
+              # tests/test_transport_repeat_owner_stop.py
+              'test_ordinary_transient_or_empty_response_keeps_its_retry': 2,
+              # tests/test_transport_unknown_continuation.py
+              'test_managed_unknown_waits_for_upstream_then_adds_new_input': 2,
+              'test_same_connection_name_with_a_new_url_needs_its_own_observation': 1,
+              'test_send_rechecks_the_endpoint_after_a_successful_observation': 1,
+              'test_reachable_server_does_not_replace_an_operation_that_can_be_rejoined': 1,
+              'test_wait_observes_the_chosen_role_again_if_locality_changes_mid_probe': 1,
+              # tests/test_local_context_evidence.py
+              'test_builtin_observation_binds_the_selected_listener': 9,
+              'test_managed_local_recovery_rechecks_its_observed_listener': 12,
+              'test_a_route_observation_declines_a_busy_slot_and_opens_no_connection': 1,
+              'test_the_count_opens_no_connection_to_an_endpoint_this_lane_does_not_dispatch_to': 2,
+              'test_ordinary_builtin_send_names_the_endpoint_its_sdk_client_reaches': 1,
+              'test_a_bound_candidate_takes_its_serving_facts_from_the_named_endpoint': 1,
+              'test_a_bound_count_accepts_the_owners_own_process_without_a_service_binding': 1,
+              'test_a_bound_count_requires_a_published_workers_endpoint_digest': 2,
+              'test_the_advisory_lookahead_counts_under_the_endpoint_it_names': 1,
+              'test_the_advisory_lookahead_names_the_lane_endpoint_and_trusts_no_other': 1,
+              # tests/test_local_gigachat_send_deadlines.py
+              'test_local_send_narrows_its_timeout_to_the_window_left_after_preparation': 2,
+              # tests/test_model_concurrency.py
+              'test_a_limit_nobody_chose_leaves_api_routes_free_and_the_builtin_server_one': 14,
+              'test_unset_local_limit_keeps_the_second_request_outside_the_server': 1,
+              'test_only_a_blank_limit_queues_the_built_in_servers_count': 10,
+              'test_the_built_in_route_is_the_queue_of_the_lanes_generation_and_the_servers_count': 1,
+              'test_a_count_waiting_for_the_built_in_servers_slot_ends_at_its_callers_deadline': 1,
+              'test_a_count_waiting_in_line_polls_the_dispatch_controls_and_gives_its_place_up': 1,
+              'test_a_best_effort_count_declines_a_busy_slot_and_opens_nothing': 1,
+              # tests/test_capability_probe_accounting_v664.py
+              'test_local_capability_probes_take_the_builtin_servers_slot_and_keep_its_count_out': 1,
+              'test_local_model_capability_checks_are_accounted_and_inherit_task_scope': 1,
+              'test_the_settings_probe_queues_at_the_endpoint_its_own_client_reaches': 1,
+              'test_the_settings_test_handler_keeps_the_loop_and_its_attempt_alive': 1,
+              # tests/test_context_minimum_view_unfit.py
+              'test_refusal_reports_the_input_limiter_of_the_last_frame_not_its_total_equivalent': 1,
+              'test_legacy_fit_frame_without_limit_evidence_does_not_invent_a_limit': 1,
+              'test_reply_shortfall_below_an_input_limit_does_not_claim_input_overflow': 1,
+              # tests/test_required_development_book.py
+              'test_handbook_refusal_keeps_the_input_cap_when_its_reply_outgrows_the_frame_reserve': 1,
+              'test_a_direct_turn_keeps_its_own_typed_owner': 1,
+              'test_a_presence_turn_owns_its_capacity_terminal_even_on_a_legacy_thread': 1,
+              # tests/test_model_substitution_rail.py
+              'test_a_budget_only_wrapup_prices_the_ordinary_model_mismatch_redo': 2,
+              # tests/test_rail_cause_coverage.py
+              'test_the_refusal_and_resource_no_resend_terminals_have_owner_sentences_in_both_twins': 1,
+              # tests/test_send_clock.py
+              'test_the_one_drift_repair_re_admits_the_fresh_request_on_the_original_balances': 2,
+              'test_a_drift_repairs_reprepare_keeps_the_original_balances_and_never_a_byte_anchor': 2,
+              'test_an_unpriced_reprepare_without_balances_keeps_the_inherited_guard': 1,
+              # tests/test_processing_claudexor.py
+              'test_only_explicit_no_start_advisory_proof_allows_retry': 5,
+              # tests/test_transport_death_retry.py
+              'test_legacy_count_permits_the_original_first_call_only': 14,
+              'test_stale_legacy_record_leaves_the_next_round_its_normal_transient_retry': 1,
+              'test_direct_call_returns_a_lost_response_without_resending': 1,
+              'test_recovery_hint_does_not_infer_dispatch_from_an_old_count': 1,
+              # tests/test_openai_responses.py
+              'test_assistant_history_preserves_both_content_and_refusal': 1,
+              # tests/test_finish_reason_facts.py
+              'test_wire_finish_and_lane_policy_reach_their_own_consumers': 18,
+              'test_sdk_defaults_are_not_provider_fields': 12,
+              'test_assembled_terminal_and_responses_classification_reach_the_round': 1,
+              # tests/test_live_host_fit_evidence.py
+              'test_connection_refusal_keeps_an_observed_input_cap_not_its_total_equivalent': 2,
+              # tests/test_live_preparation_fit_refusal.py
+              'test_preparation_overflow_is_typed_for_an_admitted_call': 5,
+              'test_text_carriers_use_the_same_typed_terminal_without_closing_the_call': 2,
+              # tests/test_live_serving_capacity.py
+              'test_late_refusal_uses_one_measurement_of_the_binding_renewal_input_limit': 1,
+              'test_guard_preserves_a_numberless_old_fit_gate': 1,
+              # tests/test_abandoned_model_operation.py
+              'test_not_started_conflicting_detail_remains_unknown_on_reread': 4,
+              # tests/test_transcript_provider_shapes.py
+              'test_local_assistant_history_preserves_ordered_text_and_refusal_bytes': 1,
+              # tests/test_observability_outcomes_v2.py
+              'test_supervised_salvage_preserves_mixed_reply_without_parsing_refusal_as_control': 1,
+              # tests/test_usage_response_contracts.py
+              'test_only_uninterrupted_normal_text_can_supply_a_verdict': 1,
+              # tests/test_output_exhaustion_recovery.py
+              'test_keep_unseen_reply_places_a_stale_reply_before_the_drained_words_without_its_tools': 1,
+              # tests/test_transport_custody.py
+              'test_httpx_proxy_error_is_pre_dispatch': 1,
+              'test_requests_chunked_body_disconnect_keeps_its_typed_cause': 1,
+              'test_requests_proxy_error_needs_connect_evidence_to_prove_pre_dispatch': 1,
+              'test_a_loopback_listener_never_proves_upstream_recovery_but_an_external_endpoint_does': 1,
+              # tests/test_model_wait.py
+              'test_a_live_wait_row_carries_what_its_confirmed_refusal_proved_for_the_card': 4,
+              'test_a_wait_without_a_confirmed_refusal_proves_no_access_reason': 1,
+              'test_confirmed_quota_pauses_the_clock_but_an_unconfirmed_declared_wait_does_not': 1,
+              'test_confirmed_mixed_pool_waits_and_heals_on_the_same_live_call': 2,
+              # tests/test_nano_local_exact.py
+              'test_a_waiting_local_request_opens_no_connection_for_its_count_before_it_holds_the_slot': 1,
+              'test_a_number_of_the_owners_keeps_the_count_outside_the_queue': 1,
+              'test_a_local_request_waiting_for_its_count_ends_at_its_callers_deadline_with_nothing_sent': 1,
+              'test_the_budget_lookahead_declines_a_busy_slot_and_prices_from_its_estimate': 1,
+              'test_the_budget_lookahead_counts_once_under_the_free_slot': 1,
+              # tests/test_commit_review_processing.py
+              'test_local_candidate_keeps_captured_processing_or_inherits_when_unspecified': 3,
+              # tests/test_priced_response_consumers.py
+              'test_a_settled_price_cannot_close_an_incomplete_response': 6,
+              # tests/test_delivery_forced_finalization.py
+              'test_a_refused_parameter_wrap_up_honors_the_stop_its_own_drain_read': 2,
+              # tests/test_forced_model_binding.py
+              'test_a_live_forced_reply_never_answers_a_carried_row_its_send_never_saw': 3,
+              'test_a_withdrawn_wrap_up_never_delivers_a_forced_reply_its_provider_cut': 1,
+              # tests/test_helper_owner_words_flow.py
+              'test_a_carried_row_never_buys_the_forced_rail_a_second_send': 3,
+              # tests/test_native_fallback_binding_acceptance.py
+              'test_a_restored_temporary_failure_keeps_its_own_place_in_the_burst': 3,
+              'test_a_restored_substituted_answer_spends_only_the_redos_its_admission_recorded': 3,
+              'test_a_restored_reply_with_nothing_usable_is_a_rejected_end_its_rounds_call_meets': 1,
+              'test_a_withdrawn_wrap_up_returns_a_restored_failure_or_cut_to_its_policy_once': 2,
+              # tests/test_output_exhaustion_recovery.py
+              'test_a_read_known_end_of_the_claimed_informed_attempt_is_met_by_that_step': 4,
+              # tests/test_terminal_duty_open_sets.py
+              'test_a_request_that_recorded_no_store_closes_at_unknown_price_without_probing_one': 1,
+              'test_a_retained_receipt_settles_a_request_that_recorded_no_store': 1,
+              'test_a_bound_request_whose_store_moved_stays_retryable_until_it_is_verified': 1,
+          }
+          problems = []
+          for name, count in required.items():
+              found = [c for c in cases if c.attrib['name'].split('[', 1)[0] == name]
+              if len(found) != count or not all(passed(c) for c in found):
+                  problems.append(f'{name}: expected {count}, found {len(found)}, passed {sum(passed(c) for c in found)}')
+          assert not problems, 'Required nodes differ from the pinned product:\n' + '\n'.join(problems)
+          PY
+      - name: Same local-cap test on the public base, with explicit choices as controls
+        id: base_control
+        timeout-minutes: 20
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          runner_py=$(python -c 'import sys; print(sys.executable)')
+          [[ "$runner_py" == /* && -x "$runner_py" ]]
+          git worktree add --detach "$RUNNER_TEMP/p01-base" "$BASE"
+          cd "$RUNNER_TEMP/p01-base"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cp "$GITHUB_WORKSPACE/tests/test_model_concurrency.py" tests/test_model_concurrency.py
+          node=test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it
+          rc=0
+          "$runner_py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/source-base" -- "$runner_py" -m pytest \
+            -o addopts= -q --tb=short "tests/test_model_concurrency.py::$node" --junitxml="$RUNNER_TEMP/base.xml" || rc=$?
+          test "$rc" = 1
+          "$runner_py" - "$RUNNER_TEMP/base.xml" "$node" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          failed = [c for c in cases if c.find('failure') is not None]
+          assert len(cases) == 5 and len(failed) == 2
+          assert all(c.get('name', '').startswith(sys.argv[2] + '[') for c in cases)
+          assert all(c.find('error') is None and c.find('skipped') is None for c in cases)
+          assert all(c.get('name', '').startswith(sys.argv[2] + '[3-False-') for c in failed)
+          assert all('mc._cap(True)' in (c.find('failure').text or '') for c in failed)
+          print('The old implicit limit failed twice; all three explicit limits passed.')
+          PY
+      - name: Structural witnesses
+        id: structure
+        timeout-minutes: 30
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        run: |
+          python -m ruff check . --select F
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/source-structure" -- python -m pytest -q --tb=short \
+            tests/test_domain_manifest.py tests/test_domain_report.py tests/test_architecture_facts.py tests/test_module_handle_extraction.py \
+            tests/test_docs_sync.py tests/test_generated_inventories.py --junitxml="$RUNNER_TEMP/structure.xml"
+          python - "$RUNNER_TEMP/structure.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          ran = {part for c in cases for part in c.attrib['classname'].split('.')}
+          missing = {'test_domain_manifest', 'test_domain_report', 'test_architecture_facts',
+                     'test_module_handle_extraction', 'test_docs_sync', 'test_generated_inventories'} - ran
+          assert not missing, f'No case ran in these structural modules: {sorted(missing)}'
+          assert not any(any(c.find(k) is not None for k in ('failure', 'skipped', 'error')) for c in cases)
+          PY
+      - name: Apply the code and book size gates against the pinned base
+        id: size
+        timeout-minutes: 45
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: |
+          # Qualify this single pinned product delta, not the diagnostic branch push as a release span.
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/source-size" -- python -m pytest -q --tb=short \
+            -o addopts= -m size_ratchet tests/ --junitxml="$RUNNER_TEMP/size.xml"
+          python - "$RUNNER_TEMP/size.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          names = {c.attrib['name'] for c in cases}
+          required = {'test_a_change_does_not_grow_a_reference_book', 'test_a_change_does_not_grow_bible_or_the_prompts',
+                      'test_no_oversized_modules', 'test_size_ratchet_manifest_matches_live_tree',
+                      'test_size_ratchet_transition_against_explicit_base', 'test_no_extremely_oversized_functions',
+                      'test_checked_in_manifest_generator_check_is_exact'}
+          assert required <= names, f'Size gates absent from the run: {sorted(required - names)}'
+          assert not any(any(c.find(k) is not None for k in ('failure', 'skipped', 'error')) for c in cases)
+          PY
+      - name: Install the pinned browser driver and both UI engines
+        id: browsers
+        timeout-minutes: 60
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/p01-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --pinned-chromium chromium webkit
+      - name: Observe the wait card, concurrency field and end of a voice call
+        id: ui
+        timeout-minutes: 30
+        if: ${{ !cancelled() && steps.browsers.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/p01-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/p01/images
+          OUROBOROS_BROWSER_EVIDENCE_OUT: ${{ runner.temp }}/p01/switch
+        run: |
+          xvfb-run -a python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/source-ui" -- python -m pytest -q --tb=short -o addopts= -m 'ui_browser or browser' \
+            tests/test_model_concurrency_setting_browser.py::test_concurrency_field \
+            tests/test_model_wait_browser.py::test_direct_api_wait_never_offers_subscription_login_or_auto_rotation \
+            tests/test_card_model_browser.py::test_fallback_card_reports_the_failed_routes_access \
+            tests/test_model_wait_browser.py::test_engine_wait_follows_the_access_its_refusal_proved_and_offers_sign_in_only_for_authentication \
+            tests/test_model_wait_browser.py::test_proven_authentication_opens_the_exact_profiles_sign_in \
+            tests/test_model_wait_browser.py::test_an_unconfirmed_quota_wait_keeps_its_control_and_promises_no_quota \
+            tests/test_main_waiting_controls_browser.py::test_main_change_model_applies_wait_role_and_reads_resumed_result \
+            tests/test_live_conversation_browser.py::test_context_capacity_shows_the_call_detail_and_allows_text \
+            --junitxml="$RUNNER_TEMP/ui.xml"
+          python - "$RUNNER_TEMP/ui.xml" <<'PY'
+          import os, sys, xml.etree.ElementTree as ET
+          from collections import Counter
+          from pathlib import Path
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          waits = ('key', 'billing', 'unconfirmed', 'legacy')
+          cards = ('key', 'billing', 'legacy', 'subscription')
+          accesses = ('auth', 'quota', 'combined', 'unavailable', 'unconfirmed')
+          engine_wait = 'test_engine_wait_follows_the_access_its_refusal_proved_and_offers_sign_in_only_for_authentication'
+          expected = ['test_concurrency_field', 'test_main_change_model_applies_wait_role_and_reads_resumed_result',
+                      'test_context_capacity_shows_the_call_detail_and_allows_text',
+                      *[f'test_direct_api_wait_never_offers_subscription_login_or_auto_rotation[{c}]' for c in waits],
+                      *[f'test_fallback_card_reports_the_failed_routes_access[{c}]' for c in cards],
+                      *[f'{engine_wait}[{c}]' for c in accesses],
+                      'test_proven_authentication_opens_the_exact_profiles_sign_in',
+                      'test_an_unconfirmed_quota_wait_keeps_its_control_and_promises_no_quota']
+          assert len(expected) == 18, len(expected)  # the eleven earlier checks, five access cards, sign-in, no-quota control
+          actual = [c.attrib['name'] for c in cases]
+          assert Counter(actual) == Counter(expected), actual
+          assert not any(any(c.find(k) is not None for k in ('failure', 'skipped', 'error')) for c in cases)
+          shots = Path(os.environ['OUROBOROS_UI_EVIDENCE_DIR'])
+          required = [shots / f'waiting-direct-api-{c}{width}.png' for c in waits for width in ('', '-narrow')]
+          required += [shots / f'fallback-access-{c}-phone390.png' for c in cards]
+          required += [shots / f'concurrency-light-1232-saved-blank-field-{e}.png' for e in ('chromium', 'webkit')]
+          required += [shots / 'live-context-capacity.png', Path(os.environ['OUROBOROS_BROWSER_EVIDENCE_OUT']) /
+                       'main-change-model/project-model-after-applied-switch.png']
+          required += [shots / f'waiting-access-{c}{width}.png' for c in accesses for width in ('', '-narrow')]
+          required.append(shots / 'waiting-access-auth-accounts.png')
+          required += [shots / f'waiting-access-quota-unconfirmed{width}.png' for width in ('', '-narrow')]
+          assert len(required) == len(set(required)) == 29, len(required)  # sixteen earlier, the eleven access, the no-quota pair
+          for path in required:
+              with path.open('rb') as fh:
+                  assert fh.read(8) == bytes.fromhex('89504e470d0a1a0a'), path.name
+          PY
+      - name: Exercise the local server measurement lock without running inference
+        id: local_server
+        timeout-minutes: 40
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/p01-local-env
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+          CMAKE_ARGS: '-DGGML_NATIVE=OFF -DGGML_BACKEND_DL=OFF -DGGML_RPC=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF'
+        run: |
+          set -euo pipefail
+          # Keep optional server dependencies outside the ordinary locked test environment.
+          unset VIRTUAL_ENV
+          uv sync --locked --no-install-project --extra local-model --group dev --python "$OUROBOROS_CI_INTERPRETER"
+          local_py="$UV_PROJECT_ENVIRONMENT/bin/python"
+          "$local_py" -m pip freeze > "$RUNNER_TEMP/p01-local-constraints.txt"
+          uv pip install --python "$local_py" --constraint "$RUNNER_TEMP/p01-local-constraints.txt" 'llama-cpp-python[server]==0.3.34'
+          "$local_py" -m pip check
+          "$local_py" -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/source-local" -- "$local_py" -m pytest \
+            -q --tb=short tests/test_local_input_measurement.py --junitxml="$RUNNER_TEMP/local_server.xml"
+          "$local_py" - "$RUNNER_TEMP/local_server.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).iter('testcase'))
+          witness = 'test_count_waits_for_generation_without_using_its_interrupt_lock'
+          assert sum(c.get('name') == witness for c in cases) == 1
+          assert all(all(c.find(k) is None for k in ('skipped', 'failure', 'error')) for c in cases)
+          PY
+      - name: Save machine-readable test outcomes without test output
+        id: outcomes
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        env:
+          SUBJECT_OUTCOME: ${{ steps.subject.outcome }}
+          PYTHON_OUTCOME: ${{ steps.python.outcome }}
+          NODE_OUTCOME: ${{ steps.node.outcome }}
+          REPLAY_OUTCOME: ${{ steps.replay.outcome }}
+          FOCUSED_OUTCOME: ${{ steps.focused.outcome }}
+          BASE_OUTCOME: ${{ steps.base_control.outcome }}
+          STRUCTURE_OUTCOME: ${{ steps.structure.outcome }}
+          SIZE_OUTCOME: ${{ steps.size.outcome }}
+          BROWSERS_OUTCOME: ${{ steps.browsers.outcome }}
+          UI_OUTCOME: ${{ steps.ui.outcome }}
+          LOCAL_SERVER_OUTCOME: ${{ steps.local_server.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          names = ('subject', 'python', 'node', 'replay', 'focused', 'base', 'structure', 'size', 'browsers', 'ui', 'local_server')
+          reports = ('focused', 'base', 'structure', 'size', 'ui', 'local_server')
+          needs = {'python': ('subject',), 'node': ('python',), 'replay': ('python',), 'focused': ('python',),
+                   'base': ('python',), 'structure': ('python',), 'size': ('python',), 'browsers': ('python',),
+                   'ui': ('browsers',), 'local_server': ('python',)}
+          out = {name: {'step_outcome': os.environ.get(f'{name.upper()}_OUTCOME') or 'unknown'} for name in names}
+          for name in names:
+              # A step that never ran says why; that is not a missing report and never counts as a pass.
+              if out[name]['step_outcome'] in ('skipped', 'unknown'):
+                  out[name]['not_run_because'] = [d for d in needs.get(name, ()) if out[d]['step_outcome'] != 'success']
+          for name in reports:
+              report = root / (name + '.xml')
+              if not report.is_file():
+                  out[name]['report'] = 'not_run' if out[name]['step_outcome'] in ('skipped', 'unknown') else 'absent'
+                  continue
+              try:
+                  cases = list(ET.parse(report).iter('testcase'))
+              except (OSError, ET.ParseError):
+                  out[name]['report'] = 'unreadable'
+                  continue
+              out[name]['cases'] = [{'name': c.get('classname', '') + '::' + c.get('name', ''),
+                  'outcome': next((k for k in ('error', 'failure', 'skipped') if c.find(k) is not None), 'passed')}
+                  for c in cases]
+          if (root / 'p01' / 'cells.tsv').is_file():
+              out['replay']['report'] = 'present'
+          else:
+              out['replay']['report'] = 'not_run' if out['replay']['step_outcome'] in ('skipped', 'unknown') else 'absent'
+          (root / 'p01' / 'checks.json').write_text(json.dumps(out), encoding='utf-8')
+          print({k: (v['step_outcome'], len(v['cases']) if 'cases' in v else v.get('report', '')) for k, v in out.items()})
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: upload_focused
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        with:
+          name: model-recovery-focused-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/p01/subject.txt
+            ${{ runner.temp }}/p01/checks.json
+            ${{ runner.temp }}/p01/cells.tsv
+            ${{ runner.temp }}/p01/producer.json
+            ${{ runner.temp }}/p01/images/live-context-capacity*.png
+            ${{ runner.temp }}/p01/images/waiting-direct-api-*.png
+            ${{ runner.temp }}/p01/images/waiting-access-*.png
+            ${{ runner.temp }}/p01/images/fallback-access-*-phone390.png
+            ${{ runner.temp }}/p01/switch/main-change-model/project-model-after-applied-switch.png
+            ${{ runner.temp }}/p01/images/concurrency-light-1232-saved-blank-field-*.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: Context gate
+        id: context_gate
+        timeout-minutes: 25
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        run: python scripts/context_gate.py --workers 2 --evidence-dir "$RUNNER_TEMP/ci-context"
+      - name: Repository selection plus contract floor and Node suite
+        id: selected
+        timeout-minutes: 145
+        if: ${{ !cancelled() && steps.python.outcome == 'success' && steps.node.outcome == 'success' }}
+        env:
+          PRODUCT: ${{ steps.subject.outputs.product }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCT_TREE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          extras=(
+            tests/test_primary_view_return.py tests/test_presence_round_recovery.py tests/test_wrapup_real_send_parity.py
+            tests/test_nano_physical_output.py tests/test_processing_call_tiers.py tests/test_response_limit_consumers.py
+            tests/test_response_limit_refresh.py tests/test_batch4_upstream_integration.py tests/test_vision_model_wait.py
+            tests/test_vision_child_deadline.py tests/test_pause_model_receiver.py tests/test_subagent_history_attempt_facts.py
+            tests/test_terminal_duty_open_sets.py tests/test_live_delivery_owner.py tests/test_live_deferred_custody.py
+          )
+          duplicates=$(printf '%s\n' "${extras[@]}" | sort | uniq -d)
+          if [[ -n "$duplicates" ]]; then echo "::error::Duplicate extra test modules: $duplicates"; exit 1; fi
+          args=()
+          for extra in "${extras[@]}"; do
+            if [[ ! -f "$extra" ]]; then echo "::error::Extra test module is absent from the pinned product: $extra"; exit 1; fi
+            args+=(--extra-test "$extra")
+          done
+          python scripts/run_tests.py --selected --base "$BASE" --keep-going "${args[@]}" \
+            --test-reason 'Indirect routing, terminal controls and wrap-up consumers' \
+            --evidence-dir "$RUNNER_TEMP/ci-selected"
+      - name: Check and name the second set of receipts
+        id: selection_check
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        env:
+          CONTEXT_OUTCOME: ${{ steps.context_gate.outcome }}
+          SELECTED_OUTCOME: ${{ steps.selected.outcome }}
+        run: |
+          printf 'context %s\nselected %s\n' "$CONTEXT_OUTCOME" "$SELECTED_OUTCOME" > "$RUNNER_TEMP/p01/selection-status.txt"
+          test "$CONTEXT_OUTCOME" = success && test "$SELECTED_OUTCOME" = success || exit 1
+          test -s "$RUNNER_TEMP/ci-context/verdict.json"
+          test -s "$RUNNER_TEMP/ci-selected/selection.json"
+          python - "$RUNNER_TEMP/ci-selected/selection.json" "$RUNNER_TEMP/p01/selection-reach.txt" <<'PY'
+          import ast, json, sys
+          from pathlib import Path
+          record = json.load(open(sys.argv[1], encoding='utf-8'))
+          files, reasons = set(record['files']), {}
+          for path, why in record['reasons']:
+              reasons.setdefault(path, []).append(why)
+          lines = ['tier %s base %s modules %d/%d' % (record['tier'], record['base'][:12], len(files), record['available'])]
+          problems = []
+          if record['tier'] != 'selected':
+              problems.append('tier is %r, not selected: %s' % (record['tier'], [r for r in record['reasons'] if 'direct import' not in r[1]][:5]))
+          # Each moved shared helper and the two modules that import it: the selector must name the helper as the reason.
+          reach = {'tests._forced_model_binding_fixtures': ('tests/test_forced_model_binding.py', 'tests/test_native_fallback_binding_acceptance.py'),
+                   'tests._main_fit_fixtures': ('tests/test_loop_compaction.py', 'tests/test_output_exhaustion_recovery.py'),
+                   'tests._worker_loss_fixtures': ('tests/test_output_exhaustion_recovery.py', 'tests/test_stream_timeout_recovery.py')}
+          for helper, readers in reach.items():
+              for reader in readers:
+                  via = [w for w in reasons.get(reader, []) if w.startswith('direct import: ') and helper in w[len('direct import: '):].split(', ')]
+                  lines.append('%s <- %s: %s' % (helper, reader, via[0] if via else 'NOT SELECTED THROUGH THE HELPER'))
+                  if not via:
+                      problems.append('%s is not selected through %s' % (reader, helper))
+          # Independent of the selector: every test module that imports a moved helper or an old owner of one must be selected.
+          moved = set(reach) | {'tests.test_loop_compaction', 'tests.test_forced_model_binding', 'tests.test_stream_timeout_recovery'}
+          def imported(path):
+              names = set()
+              for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+                  if isinstance(node, ast.Import):
+                      names.update(a.name for a in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                      names.add(node.module)
+                      names.update(node.module + '.' + a.name for a in node.names)
+              return names
+          readers = sorted(p.as_posix() for p in Path('tests').glob('test_*.py') if imported(p) & moved)
+          lines.append('%d test modules import a moved helper or an old owner of one; selected: %d' % (len(readers), len(set(readers) & files)))
+          lines.extend('  ' + r + ('' if r in files else '  NOT SELECTED') for r in readers)
+          problems.extend('%s imports a moved helper or its old owner but is not selected' % r for r in readers if r not in files)
+          Path(sys.argv[2]).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          print('\n'.join(lines))
+          assert not problems, problems
+          PY
+      - name: Save selection and context-gate receipts
+        id: upload_selection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() && steps.subject.outcome == 'success' }}
+        with:
+          name: model-recovery-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/p01/subject.txt
+            ${{ runner.temp }}/p01/selection-status.txt
+            ${{ runner.temp }}/p01/selection-reach.txt
+            ${{ runner.temp }}/ci-context/verdict.json
+            ${{ runner.temp }}/ci-selected/selection.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Require every stage to succeed
+        id: gate
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOMES: |
+            subject=${{ steps.subject.outcome }}
+            python=${{ steps.python.outcome }}
+            node=${{ steps.node.outcome }}
+            replay=${{ steps.replay.outcome }}
+            focused=${{ steps.focused.outcome }}
+            base_control=${{ steps.base_control.outcome }}
+            structure=${{ steps.structure.outcome }}
+            size=${{ steps.size.outcome }}
+            browsers=${{ steps.browsers.outcome }}
+            ui=${{ steps.ui.outcome }}
+            local_server=${{ steps.local_server.outcome }}
+            outcomes_file=${{ steps.outcomes.outcome }}
+            upload_focused=${{ steps.upload_focused.outcome }}
+            context_gate=${{ steps.context_gate.outcome }}
+            selected=${{ steps.selected.outcome }}
+            selection_check=${{ steps.selection_check.outcome }}
+            upload_selection=${{ steps.upload_selection.outcome }}
+        run: |
+          # Raw outcomes stay visible; a skipped or missing stage is a failure here, never a pass.
+          bad=0
+          printf '| stage | raw outcome |\n|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+          while IFS='=' read -r stage outcome; do
+            [[ -n "$stage" ]] || continue
+            printf '%-18s %s\n' "$stage" "$outcome"
+            printf '| %s | %s |\n' "$stage" "$outcome" >> "$GITHUB_STEP_SUMMARY"
+            [[ "$outcome" == success ]] || bad=1
+          done <<< "$OUTCOMES"
+          if [[ "$bad" != 0 ]]; then
+            echo '::error::At least one required stage did not succeed (failed, skipped or unknown). A skipped stage is not a pass.'
+            exit 1
+          fi
