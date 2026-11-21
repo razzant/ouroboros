@@ -635,6 +635,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             )
             if client_message_id:
                 from supervisor.message_bus import accept_local_message
+                from supervisor.message_ingress import NotAccepted
 
                 try:
                     _, rejoined = await run_sync_to_completion(
@@ -644,6 +645,9 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                     )
                 except ValueError as exc:
                     return _json_error(str(exc), 409)
+                except NotAccepted as exc:  # this attempt wrote nothing: the caller may send it again
+                    return JSONResponse({"ok": False, "error": str(exc), "code": "not_accepted", **correlated},
+                                        status_code=503)
             else:
                 # Custody passes BEFORE the handoff: dispatch may enqueue and then raise, so from
                 # here a failure is unknown. The copies stay (an orphan at worst), never deleted

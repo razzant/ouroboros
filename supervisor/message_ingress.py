@@ -41,6 +41,12 @@ _INGRESS_LOCK = threading.Lock()
 _DISPATCHERS: Dict[str, Callable[..., Any]] = {}
 
 
+class NotAccepted(RuntimeError):
+    """This attempt was refused before it wrote anything: tried again, the same delivery is decided afresh.
+    Raised only where this attempt's acceptance is known not to have begun (it says nothing of earlier
+    attempts under the same id); its cause says why."""
+
+
 def _bus_dispatch(bridge: Any, text: str, **message: Any) -> None:
     bridge.enqueue_local_message(text, **message)
 
@@ -518,7 +524,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             room, decided = telegram_reply_room(root, reply, chat_id)
         except (OSError, ValueError, StoreError) as exc:
             if isinstance(exc, (StoreBusy, StoreMigrating)):
-                raise  # not accepted: the bridge says so, and the owner's next try is decided afresh
+                raise NotAccepted("the store was busy before this attempt was accepted") from exc  # the next try decides afresh
             room, decided = None, True  # unreadable for good: refused, never guessed to be this conversation
         if decided:
             reply = {**reply, "telegram_room_chat_id": room}

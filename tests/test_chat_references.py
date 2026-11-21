@@ -456,8 +456,11 @@ def test_a_busy_store_during_the_room_decision_accepts_nothing_and_the_next_try_
         return decide(*args, **kwargs)
 
     monkeypatch.setattr(chat_references, "telegram_reply_room", busy_once)
-    with pytest.raises(StoreBusy):
+    from supervisor.message_ingress import NotAccepted
+
+    with pytest.raises(NotAccepted) as refused:
         _bot_message(bridge, tmp_path, "task:helper", mid=50)
+    assert isinstance(refused.value.__cause__, StoreBusy)
     assert message_bus.accepted_chat_message(tmp_path, 42, "tg:123:42:50") is None, "nothing accepted, nothing refused"
     assert _bot_message(bridge, tmp_path, "task:helper", mid=50)["reply_to"]["telegram_room_chat_id"] == project["chat_id"]
 

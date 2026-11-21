@@ -401,3 +401,51 @@ def test_solitary_inline_photo_retains_a_staged_original_after_acceptance(tmp_pa
     assert decode_block(block) == raw
     assert client.post("/chat/inject", headers=_headers(), json=body).json()["rejoined"] is True
     assert bridge._inbox.empty()
+
+
+@pytest.mark.parametrize("refusal", ["busy", "migrating"])
+def test_a_room_decision_refused_before_acceptance_answers_not_accepted_and_the_same_delivery_lands_once(
+        tmp_path, monkeypatch, refusal):
+    """The exact Reply's room decision finds the store busy or still migrating: the host answers ``503
+    not_accepted`` and this attempt writes nothing; the same delivery sent again is accepted once and queued once,
+    and a third rejoins it."""
+    from ouroboros import chat_references
+    from ouroboros.store import StoreBusy, StoreMigrating
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    client = _client(tmp_path, bridge)
+    tries = []
+
+    def busy_once(_root, _reply, _chat):
+        tries.append(1)
+        if len(tries) == 1:
+            raise (StoreBusy("room facts busy", reason="contention") if refusal == "busy"
+                   else StoreMigrating("room facts still importing"))
+        return 0, True
+
+    monkeypatch.setattr(chat_references, "exact_reply_ingress", lambda *_args: True)
+    monkeypatch.setattr(chat_references, "telegram_reply_room", busy_once)
+    body = {"chat_id": CHAT, "client_message_id": MSG, "text": "About this", "reply_to": "task:helper"}
+    refused = client.post("/chat/inject", headers=_headers(), json=body)
+    assert refused.status_code == 503 and refused.json()["code"] == "not_accepted"
+    assert message_bus.accepted_chat_message(tmp_path, CHAT, MSG) is None and bridge._inbox.empty()
+    accepted = client.post("/chat/inject", headers=_headers(), json=body)
+    assert accepted.status_code == 202 and not accepted.json().get("rejoined")
+    again = client.post("/chat/inject", headers=_headers(), json=body)
+    assert again.status_code == 202 and again.json()["rejoined"] is True
+    assert len(chat_rows(tmp_path)) == 1 and bridge._inbox.qsize() == 1 and len(tries) == 2
+
+
+def test_a_failure_after_the_decision_is_no_not_accepted_answer(tmp_path, monkeypatch):
+    """A busy store met while accepting (the write attempted) is an unknown outcome: never ``not_accepted``."""
+    from ouroboros.store import StoreBusy
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    client = _client(tmp_path, bridge)
+    monkeypatch.setattr(message_bus, "accept_chat",
+                        lambda *a, **kw: (_ for _ in ()).throw(StoreBusy("busy while writing", reason="contention")))
+    reply = client.post("/chat/inject", headers=_headers(), json={"chat_id": CHAT, "client_message_id": MSG,
+                                                                  "text": "one message"})
+    assert reply.status_code == 500 and reply.json().get("code") != "not_accepted"

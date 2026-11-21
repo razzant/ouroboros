@@ -371,13 +371,30 @@ async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict
     return int(response.status_code), (body if isinstance(body, dict) else {})
 
 
+class InjectNotAccepted(RuntimeError):
+    """The host answered that this attempt was not recorded (``503``, ``code: not_accepted``): it may come again."""
+
+
+def _panic_update(update: Dict[str, Any]) -> bool:
+    """Whether an update is a /panic message: the one test for an owner Panic, early or in order; its sender is
+    checked by the caller (``_authorized_owner``)."""
+    message = update.get("message") or {}
+    return str(message.get("text") or message.get("caption") or "").strip().lower().startswith("/panic")
+
+
+# The pause before an update the host did not accept is asked again; any other failure is never retried.
+_NOT_ACCEPTED_RETRY_SEC = 2.0
+
+
 async def _inject(api, payload: Dict[str, Any]) -> None:
     settings = _load_settings(api)
     pinned_chat = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
     if not pinned_chat:
         api.log("warning", "Host inject refused: TELEGRAM_CHAT_ID is not configured or bound.")
         return
-    status, _body = await _host_post(api, "/chat/inject", payload)
+    status, body = await _host_post(api, "/chat/inject", payload)
+    if status == 503 and body.get("code") == "not_accepted":
+        raise InjectNotAccepted("Host inject did not record this attempt")
     if status >= 400:
         raise RuntimeError(f"Host inject returned HTTP {status}")
     # A new user turn starts here — break the silent-mode chain so the next
@@ -633,13 +650,22 @@ async def _poller(api) -> None:
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
 
-            for update in updates[:max_updates]:
+            deferred = False
+            for index, update in enumerate(updates):
                 if not binding.current(generation):
                     break  # the rest stays unconfirmed for the new token's client
                 authorized_chat, confirmed = None, (offset, len(handled))
                 try:  # Isolate one bad update without changing offset/retry semantics.
+                    if (not deferred and index >= max_updates) or (deferred and not _panic_update(update)):
+                        # Past the per-poll limit, or behind an update the host did not record, the rest of the
+                        # batch waits in order. Only a Panic already received in the batch goes now, past the
+                        # limit too (below); one Telegram has not returned yet (beyond its getUpdates page of at
+                        # most 100 updates from the held one) waits with the others.
+                        if cursor.is_replay(update):
+                            handled.append(update_key(update))  # one taken earlier (an early Panic) stays taken
+                        continue
                     update_id = int(update.get("update_id") or 0)
-                    if update_id > 0:
+                    if update_id > 0 and not deferred:  # an early Panic is marked handled, the cursor stays
                         # Confirm what the server returned, even below the offset: a server
                         # that lost its queue answers from its oldest update, again each poll.
                         offset = update_id + 1
@@ -818,6 +844,16 @@ async def _poller(api) -> None:
                     else:
                         api.log("info", "Telegram bot token changed after an update was applied; its reply was not sent.")
                     break
+                except InjectNotAccepted:
+                    if confirmed is not None and not deferred:
+                        # The host said this attempt was not recorded (its store was busy before acceptance): this
+                        # update and the rest stay unconfirmed and are asked again, with the same ids, after a
+                        # pause. Only that answer brings an update back; an unknown outcome is never sent again.
+                        offset, handled = confirmed[0], handled[:confirmed[1]]
+                        deferred = True
+                        api.log("info", "The host did not record a Telegram update; it will be delivered again.")
+                        continue
+                    api.log("warning", "Telegram update was not accepted after its local effect; it is not retried.")
                 except Exception as exc:
                     api.log(
                         "warning",
@@ -831,7 +867,7 @@ async def _poller(api) -> None:
                             api.log("warning", "Telegram update failure notice could not be delivered.")
             if updates and (handled or offset != cursor.offset):
                 cursor.save(offset, handled)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_NOT_ACCEPTED_RETRY_SEC if deferred else 0.1)
         except (TelegramBindingChanged, TelegramTokenMissing):
             continue  # the next cycle builds the client of the accepted token, or waits for one
         except (TelegramRequestRejected, TelegramTransportError) as exc:
@@ -906,7 +942,7 @@ async def _handle_owner_message(
         await client.send_message(chat_id, help_text)
         return
 
-    if text.lower().startswith("/panic"):
+    if _panic_update(update):
         # Compare Telegram's whole-second date with the host clock at import.
         # This assumes aligned clocks: a host ahead rejects fresh commands until
         # Telegram reaches that second; a host behind may admit retained ones.
