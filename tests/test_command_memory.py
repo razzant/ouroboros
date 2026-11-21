@@ -948,3 +948,26 @@ def test_the_slow_probe_does_not_hold_the_lock_that_guards_the_cached_verdict(mo
         release.set()
         worker.join(10)
     assert isinstance(cm._PROBED, cm.Unavailable)
+def test_show_gives_user_bus_without_a_login_session(monkeypatch):
+    """The packaged service inherits no session env; --user must still reach its own bus."""
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.clear()
+        seen.update(kw)
+        seen["cmd"] = cmd
+
+        class _R:
+            stdout = "LoadState=loaded\n"
+
+        return _R()
+
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+    assert cm._show("--user", "show", "ouroboros.service")["LoadState"] == "loaded"
+    assert seen["env"]["XDG_RUNTIME_DIR"] == f"/run/user/{cm._uid()}"
+    assert seen["env"]["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path=/run/user/{cm._uid()}/bus"
+    cm._show("show", "user@1.service")  # system scope keeps the inherited env untouched
+    assert "XDG_RUNTIME_DIR" not in seen["env"]
+    assert "DBUS_SESSION_BUS_ADDRESS" not in seen["env"]
