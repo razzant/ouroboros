@@ -246,42 +246,47 @@ PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
 # serially, so cap/dedup/enqueue remain single-threaded and safe.
 PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
 
-# More calls that may run at the same time as their neighbours within one response: plain reads whose handlers write
-# no shared context field, rely on no context variable an earlier call of the response set and publish nothing another
-# call of it could list. A tool joins only by name, after its handler is checked; any tool not named runs alone, the
-# safe default. Kept alone on purpose: github_read (a download or large answer publishes a file a following
-# list_files(root="artifact_store") sees), list_available_tools (it rebuilds the registry's shared omission list),
-# browse_page and view_image (the page and ctx.messages), producers and heavy reads, extension and MCP tools.
-RUN_TOGETHER_EXTRA_TOOLS: frozenset[str] = frozenset({
-    "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
-    "memory_map", "list_skills", "list_image_models", "youtube_transcript", "compare_subagent_patches",
-    "review_status",
-})
-RUN_TOGETHER_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS | RUN_TOGETHER_EXTRA_TOOLS
-
-# History, not a property of a tool: the names whose all-of-them responses ran whole in the pool before calls ran in
-# groups. Only the executor's rule for an escaped exception reads it (loop_tool_execution.escaped_errors_become_rows),
-# so naming a read in the sets above never changes which responses turn an escaped exception into a row.
-POOL_EXCEPTION_ROW_TOOLS: frozenset[str] = frozenset({
+# The legacy pool, frozen history and not a property of a tool: a response of more than one call, every one named
+# here, ran whole in the pool before calls ran in segments and still runs exactly so (``legacy_pool_response``);
+# naming a read in the sets above never changes which responses do.
+LEGACY_POOL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness", "inspect_subagent", "read_file", "list_files", "read_archive", "search_code", "query_code",
     "query_data", "recent_tasks", "web_search", "chat_history", "vcs_read", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read", "search_ui_translations", "schedule_subagent",
 })
 
+# Every other response runs in segments (``call_segments``): consecutive inert reads run at the same time, every
+# other call alone, in written order. An inert read writes no shared context field, publishes no file or record
+# another call of the response could observe, costs no money and mutates nothing; a tool joins only by name, after
+# its handler and its observable effects are checked. Any tool not named runs alone, the safe default.
+INERT_READ_TOOLS: frozenset[str] = frozenset({
+    "read_file", "list_files", "read_archive", "search_code", "query_code", "recent_tasks", "chat_history",
+    "vcs_read", "service_status", "service_logs", "get_task_result", "list_projects", "memory_read",
+    "search_ui_translations", "inspect_subagent",
+    "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
+    "memory_map", "list_skills", "youtube_transcript", "compare_subagent_patches",
+})
+
+
+def legacy_pool_response(names: list[str]) -> bool:
+    """Whether this response runs whole in the pool under its old exception rule (``LEGACY_POOL_TOOLS``)."""
+    return len(names) > 1 and all(name in LEGACY_POOL_TOOLS for name in names)
+
 
 def call_segments(names: Iterable[str]) -> list[list[int]]:
-    """One response's calls, by index, in the written order: each maximal run of consecutive ``RUN_TOGETHER_TOOLS``
+    """One response's calls, by index, in the written order: each maximal run of consecutive ``INERT_READ_TOOLS``
     is one group that runs at once; every other call is a segment of its own and runs alone."""
     segments: list[list[int]] = []
     previous = False
     for index, name in enumerate(names):
-        together = name in RUN_TOGETHER_TOOLS
+        together = name in INERT_READ_TOOLS
         if together and previous:
             segments[-1].append(index)
         else:
             segments.append([index])
         previous = together
     return segments
+
 
 # Browser tools run one at a time on the task's sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({

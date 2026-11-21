@@ -297,14 +297,6 @@ def test_a_control_taken_while_a_group_runs_starts_no_later_single(host_world, m
     for name, event in held.items():
         ordinary_tool(host, name, entered, held=event, release=release)
     ordinary_tool(host, 'send_user_message', entered)
-    paused = threading.Event()
-    gate = owner_pause.require_tool_dispatch
-
-    def pausing_gate(source):  # Pause refuses a launch at this gate: the owner pressed it while the group ran
-        if paused.is_set():
-            raise owner_pause._start_phase(owner_pause.OwnerPauseRefused('owner_pause'), source)
-        return gate(source)
-    monkeypatch.setattr(owner_pause, 'require_tool_dispatch', pausing_gate)
 
     async def scenario():
         batch = asyncio.create_task(host.tool_batch([invocation('first', 'get_task_result', task_id='none'),
@@ -319,8 +311,9 @@ def test_a_control_taken_while_a_group_runs_starts_no_later_single(host_world, m
             drain = asyncio.create_task(host.mailbox())
             await asyncio.wait({drain}, timeout=10)
             assert drain.done() and host._end_reason[0] == 'owner_stop'
-        elif control == 'pause':
-            paused.set()
+        elif control == 'pause':  # the owner's real Pause: the tree's fence, read by the launch gate of every call
+            root_drive, root_id, _task = owner_pause._member_coordinates(host.ctx)
+            owner_pause.install_fence(root_drive, root_id, request_id='pause-while-the-group-ran')
         release.set()
         outcome = await outcome_of(batch)
         assert 'get_task_result finished.' in tool_row(host, 'first') and 'knowledge_read finished.' in tool_row(host, 'note')
@@ -332,6 +325,7 @@ def test_a_control_taken_while_a_group_runs_starts_no_later_single(host_world, m
         assert 'NOT STARTED' in tool_row(host, 'second') and 'may have happened' not in tool_row(host, 'second')
         if control == 'pause':
             assert not isinstance(outcome, BaseException), 'a Pause refusal is that call\'s row, as before'
+            assert 'OWNER_PAUSE_NOT_STARTED' in tool_row(host, 'second')
         else:
             assert_stopped(outcome, {'hard-stop': 'cancelled'}.get(control, 'owner_stop'))
     asyncio.run(scenario())

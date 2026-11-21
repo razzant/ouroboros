@@ -682,6 +682,12 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
+def attach_confirmed_receipts(row: dict, confirmed: Any) -> None:
+    """Tool sends the host confirmed while a successful call ran ride that call's row (``tool_delivered``)."""
+    if confirmed and row and not row.get("is_error"):
+        row.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)
+
+
 PLACEHOLDERS = ("who", "act", "place", "when", "facts_line", "what", "event", "speak_line", "place_state", "notes",
                 "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line", "reported")
 

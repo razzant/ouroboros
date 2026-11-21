@@ -31,7 +31,7 @@ from ouroboros.tool_call_log import (
     worker_position,
 )
 from ouroboros.tool_capabilities import (
-    FOREGROUND_MUTATIVE_TOOLS, POOL_EXCEPTION_ROW_TOOLS, call_segments,
+    FOREGROUND_MUTATIVE_TOOLS, call_segments, legacy_pool_response,
     REVIEWED_MUTATIVE_TOOLS,
     STATEFUL_BROWSER_TOOLS,
     requested_result_view, routing_action_for_tool, completion_control_call, substantive_tool_calls,
@@ -1138,14 +1138,6 @@ def _call_name(tc: Dict[str, Any]) -> str:
     return str(tc.get("function", {}).get("name") or "").strip()
 
 
-def escaped_errors_become_rows(tool_calls: List[Dict[str, Any]]) -> bool:
-    """Whether an exception escaping one call of this response becomes that call's error row while the rest settle,
-    instead of ending the batch. It is the rule of the response that, before calls ran in groups
-    (``tool_capabilities.call_segments``), ran whole in the pool: more than one call, every one named in the frozen
-    ``POOL_EXCEPTION_ROW_TOOLS``. It no longer decides how calls run."""
-    return len(tool_calls) > 1 and all(_call_name(tc) in POOL_EXCEPTION_ROW_TOOLS for tc in tool_calls)
-
-
 def handle_tool_calls(
     tool_calls: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -1177,11 +1169,10 @@ def handle_tool_calls(
     return errors
 
 
-def _batch_error_result(tools: ToolRegistry, tc: Dict[str, Any], text: str,
-                        tool_result: Optional[ToolResult] = None) -> Dict[str, Any]:
+def _batch_error_result(tools: ToolRegistry, tc: Dict[str, Any], text: str) -> Dict[str, Any]:
     """A result only the batch can state about one of its calls, in the shape of any other."""
     fn_name = str(tc.get("function", {}).get("name", "unknown") or "").strip()
-    tool_result = tool_result or ToolResult(status="error", code="EXECUTOR_ERROR", text=text)
+    tool_result = ToolResult(status="error", code="EXECUTOR_ERROR", text=text)
     return {
         "round_id": getattr(tools._ctx, "_current_llm_call_meta", {}).get("round_id"),
         "tool_call_id": tc.get("id", ""),
@@ -1210,27 +1201,6 @@ def _left_by_control(tools: ToolRegistry, tc: Dict[str, Any], control: BaseExcep
         f"⚠️ TOOL_ERROR ({fn_name}): NOT STARTED: {reason} ended this batch before the handler was entered."))
 
 
-def _escaped_row(tools: ToolRegistry, tc: Dict[str, Any], error: BaseException) -> Dict[str, Any]:
-    """A pooled call's escaped exception as its row; a refused entry (Pause, the store) says NOT STARTED and why."""
-    if getattr(error, "invocation_not_started", None) is not True:
-        return _unexpected_batch_error(tools, tc, error)
-    from ouroboros.tools.tool_result import launch_refusal_result
-    refused = launch_refusal_result(error, not_started=True)
-    return _batch_error_result(tools, tc, refused.text, refused)
-
-
-def _sibling_after_control(tools: ToolRegistry, tc: Dict[str, Any], future: Any, control: BaseException,
-                           control_errors: Tuple[type, ...]) -> Dict[str, Any]:
-    """A parallel call once its pool has settled: the shutdown cancelled only those still queued."""
-    if future.cancelled():
-        return _left_by_control(tools, tc, control, started=False)
-    error = future.exception()
-    if isinstance(error, (UsageAccountingError, ModelWaitInterrupted)) or (
-            isinstance(error, control_errors) and getattr(error, "invocation_not_started", None) is not True):
-        return _left_by_control(tools, tc, error, started=not getattr(error, "invocation_not_started", False))
-    return future.result() if error is None else _escaped_row(tools, tc, error)
-
-
 def execute_tool_calls(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, drive_logs: pathlib.Path, task_id: str,
                        stateful_executor: StatefulToolExecutor, llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Run one batch's effects and return their results; ``process_tool_results`` records them."""
@@ -1256,6 +1226,10 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)
 
+    names = [_call_name(tc) for tc in tool_calls]
+    legacy = legacy_pool_response(names)  # exactly the old pool; every other response runs in segments
+    from ouroboros.presence_context import attach_confirmed_receipts, confirmed_delivery_receipts
+
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:
         receipt = validation_by_id.get(str(tc.get("id") or ""))
         if receipt is not None and not receipt.allows_execution:
@@ -1272,7 +1246,6 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "is_code_tool": fn_name in tools.CODE_TOOLS,
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
-        from ouroboros.presence_context import confirmed_delivery_receipts
         from ouroboros.tools.extension_dispatch import extension_call_scope
         before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
@@ -1280,56 +1253,78 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
             from ouroboros.place_reply import note_dispatch
             note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
-        confirmed = confirmed_delivery_receipts(tools._ctx) - before
-        if confirmed and not result.get("is_error"):
-            result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)
+        if legacy:  # elsewhere the segment carries what it confirmed (below)
+            attach_confirmed_receipts(result, confirmed_delivery_receipts(tools._ctx) - before)
         return result
 
-    # Which escaped exception ends the batch is the response's rule, chosen once; a group's own pool never changes it.
-    control_errors = ((UsageAccountingError, ModelWaitInterrupted) if escaped_errors_become_rows(tool_calls)
-                      else (Exception,))
-    results: List[Any] = [None] * len(tool_calls)
-    control: Optional[Exception] = None
+    ending = (UsageAccountingError, ModelWaitInterrupted) if legacy else (Exception,)  # what ends the response
+    outcomes: Dict[int, Tuple[bool, Any]] = {}  # index -> (returned, row or exception), in the order calls settled
+    entered: set = set()  # a pool item a failed submit queued is cancelled or settled by the shutdown, never left
 
-    for segment in call_segments([_call_name(tc) for tc in tool_calls]):
-        if len(segment) == 1:  # alone, in the caller's context, after everything before it has returned
-            idx, tc = segment[0], tool_calls[segment[0]]
-            try:
-                results[idx] = _execute(tc)
-            except Exception as exc:
-                control = exc
-                results[idx] = _left_by_control(tools, tc, exc, started=not getattr(exc, "invocation_not_started", False))
-                break
-            continue
-        executor = ThreadPoolExecutor(max_workers=min(len(segment), 8))
-        batch_raised = True
+    def member(idx: int) -> None:
+        entered.add(idx)
         try:
-            future_to_index = {executor.submit(contextvars.copy_context().run, _execute, tool_calls[idx]): idx
-                               for idx in segment}
-            for future in as_completed(future_to_index):
-                idx = future_to_index[future]
+            outcomes[idx] = (True, _execute(tool_calls[idx]))
+        except Exception as exc:
+            outcomes[idx] = (False, exc)
+            raise
+
+    def pool(segment: List[int]) -> None:  # the segment's calls at once, at most 8 threads, each in a context copy
+        executor, stopped = ThreadPoolExecutor(max_workers=min(len(segment), 8)), True
+        try:
+            futures = []
+            for idx in segment:
                 try:
-                    results[idx] = future.result()
-                except control_errors as exc:
-                    control = exc
-                    break
-                except Exception as exc:
-                    results[idx] = _escaped_row(tools, tool_calls[idx], exc)
-            else:
-                batch_raised = False
+                    futures.append(executor.submit(contextvars.copy_context().run, member, idx))
+                except RuntimeError:  # no thread to start (a PID-limited container): the rest run alone below
+                    if legacy:
+                        raise
+                    return
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except ending:
+                    return
+                except Exception:
+                    pass  # a legacy response's row
+            stopped = False
         finally:
             # A batch leaving on an exception (BudgetExceeded) must not strand an
             # already-running wrapper that has not yet registered its inner future
             # with budget-pause quiescence: cancel the queued ones, WAIT for the
             # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
-            executor.shutdown(wait=batch_raised, cancel_futures=True)
-        if control is not None:
-            for future, idx in future_to_index.items():
-                if results[idx] is None:
-                    results[idx] = _sibling_after_control(tools, tool_calls[idx], future, control, control_errors)
+            executor.shutdown(wait=stopped, cancel_futures=True)
+
+    control: Optional[BaseException] = None
+    for segment in [list(range(len(tool_calls)))] if legacy else call_segments(names):
+        before = confirmed_delivery_receipts(tools._ctx)
+        if len(segment) > 1:
+            pool(segment)
+        raised = [idx for idx in (outcomes if legacy else sorted(outcomes)) if idx in segment and not outcomes[idx][0]
+                  and isinstance(outcomes[idx][1], ending)]
+        for idx in [] if raised else [idx for idx in segment if idx not in entered]:  # alone, in order, here
+            try:
+                member(idx)
+            except Exception:
+                raised = [idx]
+                break
+        if not legacy:  # what was confirmed while the segment ran rides one row, as with one call at a time
+            attach_confirmed_receipts(next((outcomes[i][1] for i in segment if outcomes.get(i, (False,))[0]
+                                   and not outcomes[i][1].get("is_error")), {}), confirmed_delivery_receipts(tools._ctx) - before)
+        if raised:
+            control = outcomes[raised[0]][1]
             break
-    if control is not None:  # the segments after the one control ended were never entered
-        results = [row or _left_by_control(tools, tc, control, started=False) for row, tc in zip(results, tool_calls)]
+    results: List[Any] = []
+    for idx, tc in enumerate(tool_calls):
+        returned, value = outcomes.get(idx, (False, None))
+        if returned:
+            results.append(value)
+        elif value is None:  # never entered: only a control can have left it
+            results.append(_left_by_control(tools, tc, control, started=False))
+        elif isinstance(value, ending):
+            results.append(_left_by_control(tools, tc, value, started=not getattr(value, "invocation_not_started", False)))
+        else:
+            results.append(_unexpected_batch_error(tools, tc, value))
     return results, control
 
 

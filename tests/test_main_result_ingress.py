@@ -42,7 +42,7 @@ def _register_results(fixture, monkeypatch, outputs):
     ))
     # The fixture is pure/read-only; exercise the existing parallel batch path.
     from ouroboros import tool_capabilities
-    monkeypatch.setattr(tool_capabilities, "RUN_TOGETHER_TOOLS", tool_capabilities.RUN_TOGETHER_TOOLS | {TOOL})
+    monkeypatch.setattr(tool_capabilities, "INERT_READ_TOOLS", tool_capabilities.INERT_READ_TOOLS | {TOOL})
     return calls
 
 

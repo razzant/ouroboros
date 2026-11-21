@@ -397,7 +397,7 @@ ouroboros/ — agent core and shared runtime (§6)
   argv_budget.py — Argv admission counts encoded bytes of argv plus environment (ARG_MAX charges both); asked by skill_exec before exec
   workspace_executor.py, workspace_executor_paths.py, docker_process_observer.py — backends/output paths (§6); liveness needs `sh`, `cat`, `/proc` (§9)
   deliverables_paths.py — Lexical and case-folded deliverables path views
-  tool_capabilities.py — SSOT for the core, parallel-safe, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
+  tool_capabilities.py — SSOT for the core, inert-read, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check
   tool_access_types.py, tool_access_roots.py, tool_access_paths.py, tool_access_user_files.py, tool_access_reads.py — Matrix types and physical roots; inherited reads, separate action authority (§6 Resource roots and physical file identity)
   tool_policy.py — Round-one tool visibility, Nano's standing set (others: tool_capabilities.py)
