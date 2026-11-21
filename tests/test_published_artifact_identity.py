@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +24,7 @@ from ouroboros.tools.control_task_results import _get_task_result
 from ouroboros.tools.join_ledger import _child_result_sha256, _current_child_result_disposition
 from ouroboros.tools.recent_tasks import _handle_recent_tasks
 from ouroboros.tools.task_tree import _tree_note
+from tests._workspace_git import git_repository
 
 PARENT, CHILD = "parent1", "child1"
 HOST_KINDS = {"workspace_patch_manifest", "memory_export", "deliverable_manifest"}
@@ -81,9 +81,7 @@ def _bytes_on_disk(result: dict) -> dict:
 
 
 def _workspace(tmp_path: Path) -> Path:
-    workspace = (tmp_path / "workspace").resolve()
-    workspace.mkdir()
-    subprocess.run(["git", "init", "--quiet", str(workspace)], check=True, capture_output=True)
+    workspace = git_repository((tmp_path / "workspace").resolve(), unborn=True)
     (workspace / "answer.txt").write_text("source output\n", encoding="utf-8")
     return workspace
 
@@ -178,9 +176,8 @@ def test_an_unmeasurable_failure_manifest_keeps_the_capture_error_first(tmp_path
             raise PermissionError(13, "fixture read-back denial", str(path))
         return real(path, *args, **kwargs)
 
-    data, workspace = (tmp_path / "data").resolve(), (tmp_path / "workspace").resolve()
-    workspace.mkdir()
-    subprocess.run(["git", "init", "--quiet", str(workspace)], check=True, capture_output=True)
+    data = (tmp_path / "data").resolve()
+    workspace = git_repository((tmp_path / "workspace").resolve(), unborn=True)
     drive = headless.prepare_task_drive(data, CHILD, "empty")
     lineage = {"parent_task_id": PARENT, "root_task_id": PARENT, "delegation_role": "subagent"}
     task = {"id": CHILD, "drive_root": str(drive), "workspace_root": str(workspace), "memory_mode": "empty", **lineage}

@@ -22,7 +22,6 @@ Regressions of the same class are pinned here:
 from __future__ import annotations
 
 import json
-import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,14 +29,13 @@ import pytest
 from ouroboros.tools.core import _data_read, _read_file, _write_file
 from ouroboros.tools.edit_ops import _edit_batch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._workspace_git import git_repository
 
 
 def _ctx(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "repo", unborn=True)
     drive = tmp_path / "data"
     drive.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     return ToolContext(repo_dir=repo, drive_root=drive)
 
 

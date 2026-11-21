@@ -162,9 +162,15 @@ def test_unknown_observation_is_disclosed_and_relay_is_still_ancestor_only(tmp_p
 
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
 def test_settled_presence_is_not_a_new_mailbox_target(tmp_path, status):
+    """Both directions: the refusal says nothing was delivered and names the read where the caller may make it;
+    a contract that withholds get_task_result keeps the bare fact, never a call dispatch would refuse."""
     tid = _inline(tmp_path)
     write_task_result(tmp_path, tid, status, result="settled")
-    assert "TASK_NOT_ACTIVE" in _forward_to_worker(_ctx(tmp_path), tid, "no")
+    lead = f"⚠️ TASK_NOT_ACTIVE: task {tid} is already {status}; the message was not delivered."
+    assert _forward_to_worker(_ctx(tmp_path), tid, "no") == f"{lead} get_task_result(task_id={tid!r}) reads its result."
+    withheld = _ctx(tmp_path)
+    withheld.task_metadata = {"disabled_tools": ["get_task_result"]}
+    assert _forward_to_worker(withheld, tid, "no") == lead
     assert drain_owner_entries(tmp_path, tid) == []
 
 
