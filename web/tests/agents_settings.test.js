@@ -474,10 +474,19 @@ test('At once, for one task is the owner\'s optional number: the server\'s blank
     await settle();
     assert.deepEqual(page.server.generic.at(-1), { [key]: '' }, 'No limit is sent as the server\'s blank');
     assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
-    field.value = '4';
-    await fold.fire('input', { target: field });
-    await fold.fire('change', { target: field });
-    await settle();
+    const type = async (text) => {
+        field.value = text;
+        await fold.fire('input', { target: field });
+        await fold.fire('change', { target: field });
+        await settle();
+    };
+    for (const typo of ['0', '-2', '1000', 'six']) {  // a number outside 1..500 is refused here, as before No limit
+        const writes = page.server.generic.length;
+        await type(typo);
+        assert.equal(page.server.generic.length, writes, `${typo} is not sent`);
+        assert.match(row.querySelector('[data-setting-result]').textContent, /Enter a number from 1 to 500\./, typo);
+    }
+    await type('4');
     assert.deepEqual(page.server.generic.at(-1), { [key]: 4 });
     assert.equal(noLimit.getAttribute('aria-pressed'), 'false');
     page.server.plain[key] = '';  // a fresh install: nothing chosen reads as No limit

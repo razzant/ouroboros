@@ -652,6 +652,10 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     const cap = advanced.row('OUROBOROS_MAX_WORKERS');
     const noLimit = cap.querySelector('[data-setting-no-limit]');
     assert.deepEqual([cap.querySelector('[data-setting-control]').value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
+    const sent = advanced.server.writes('/api/settings').length;
+    await type('OUROBOROS_MAX_WORKERS', '0');  // its declared lower bound refuses here: a zero is no number
+    assert.equal(advanced.server.writes('/api/settings').length, sent);
+    assert.match(advanced.line('OUROBOROS_MAX_WORKERS'), /Enter a number, 1 or more\./);
     await type('OUROBOROS_MAX_WORKERS', '4');
     assert.deepEqual(advanced.server.writes('/api/settings').at(-1), { OUROBOROS_MAX_WORKERS: 4 });
     assert.equal(advanced.line('OUROBOROS_MAX_WORKERS'), 'Saved · was no limit');
