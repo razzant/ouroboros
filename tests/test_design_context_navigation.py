@@ -421,12 +421,13 @@ def test_without_a_measured_window_the_bible_still_pays_before_memory(tmp_path, 
     assert rows == ["design_bible"] and not steps and "the owner's Nano mode budget" in text
 
 
-def test_an_actor_without_a_reader_sees_the_map_named_unreadable_never_a_dead_pointer(tmp_path, monkeypatch):
+def test_an_actor_without_a_reader_gets_the_whole_bible_or_its_name_unavailable(tmp_path, monkeypatch):
     """A Presence turn whose ceiling has no read_file keeps host forms whole: a pointer would name a source it cannot
-    open. The optional bible still yields to the room before memory, behind no pointer, its map naming the source an
-    authorized reader opens (RV1, Astra 2); with room it stays whole."""
+    open (BIBLE P1). The optional bible rides whole while it fits; short of room it still yields before memory, and
+    only its heading stays, named unavailable to this actor: no map, path or instruction to read (RV1, RVD1 Astra 3)."""
     design, fitted = _fitting(tmp_path, monkeypatch, section_root="")
     plan, *_ = fitted(2_000_000, "max")
+    assert design.full_text in _shown(plan.projection("max"))[2]  # with room, the whole bible
     total = plan.projection("max").estimated_tokens
     window, seen = int(total * 1.6), None
     while seen is None or not seen[0]:
@@ -434,8 +435,10 @@ def test_an_actor_without_a_reader_sees_the_map_named_unreadable_never_a_dead_po
         seen, window = fitted(window, "max")[2:], int(window * 0.99)
     rows, steps, text = seen
     assert rows == ["design_bible"] and not steps  # the other host forms stay whole for this actor
-    assert design.operative_view in text and BIG_BIBLE.strip() not in text
-    assert "this actor has no reader for them" in text and "artifact_store" not in text
+    assert '## Design bible: "Airy dopamine"\n\n[Omitted for ' in text and "unavailable to this actor." in text
+    assert BIG_BIBLE.strip() not in text and "DESIGN.md (navigation map)" not in text
+    assert str(tmp_path / "repo/docs/DESIGN.md") not in text and "artifact_store" not in text
+    assert "Use this exact source path" not in text
 
 
 def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_path, monkeypatch):

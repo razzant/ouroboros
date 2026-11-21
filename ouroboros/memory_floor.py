@@ -1043,8 +1043,8 @@ def _optional_steps(sections, receipts, *, measure, saving, physical, bound, bud
 
 
 def _address_optional(part, receipts, addressed, *, root, task_id, retain=None, start_room=False):
-    """Take one optional attachment to its map: its full text retained behind a pointer, or, for an actor with no reader
-    (``root`` empty), behind no pointer: its map names the source an authorized reader opens. Returns tokens saved."""
+    """Take one optional attachment to its map, its full text retained behind a pointer; for an actor with no reader
+    (``root`` empty) only its heading stays, named unavailable to this actor (``relocated_text``). Returns tokens saved."""
     if part.operative_view is None or len(part.operative_view) >= len(part.full_text):
         return 0
     row = {"section_id": part.section_id, "source_ref": None, "reader": ""}

@@ -751,7 +751,9 @@ def _section_root_for(env: Any, ctx: Any) -> str:
     A section-floor pointer is a ``read_file(root='artifact_store', ...)``. A Presence
     turn runs under its binding's capability ceiling; when that ceiling does not grant
     ``read_file`` the pointer would name a source the actor cannot resolve, so its host
-    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source).
+    sections stay whole instead (BIBLE P1: a disclosure names a resolvable source), all
+    but the optional attachments (``memory_floor.OPTIONAL_STEPS``): short of room, one
+    keeps its heading, named unavailable to this actor, with no path to read.
     """
     try:
         from ouroboros.presence_authority import presence_ceiling_allows_tool, presence_ceiling_from_context
