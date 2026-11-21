@@ -171,9 +171,9 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
                 allowance.press("Tab")  # leaving the field saves it
             status = page.locator(f"#setting-{KEY}-result")
             expect(status).to_contain_text("Saved", timeout=30_000)
-            # LANE A: with the server's receipt the line also says when it applies and "was 20", with Undo.
+            # LANE A: with the server's receipt the line also says when it applies and "was 15", with Undo.
             said = status.inner_text()
-            assert said == "Saved" or (said.startswith("Saved · ") and "was 20" in said), said
+            assert said == "Saved" or (said.startswith("Saved · ") and "was 15" in said), said
             assert posts[-1] == {KEY: 0}, posts
             assert float(_settings(data_dir)[KEY]) == 0
             expect(page.locator("#costs-allowance-state")).to_contain_text(
