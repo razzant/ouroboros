@@ -2,7 +2,8 @@
 
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
 (``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
-reads a room's saved messages for a word search (``gateway/chat_search.py``). The JSDoc twin is
+reads a room's saved messages for a word search (``gateway/chat_search.py``); ``GET /api/recall`` is the
+neighbour door over the words reader (``gateway/recall.py``). The JSDoc twin is
 ``web/modules/client_contract_types.js``.
 """
 
@@ -385,10 +386,75 @@ class ChatSearchResponse(TypedDict, total=False):
     reason_code: str
 
 
+class RecallReader(TypedDict):
+    """A read the caller can run with this door alone: ``path`` on this server (``GET``), or ``cli`` as the
+    arguments after the ``ouroboros`` command."""
+
+    path: str
+    cli: List[str]
+
+
+class RecallField(TypedDict):
+    """One typed field of a dialogue row with its own speaker: ``text`` (the message), ``question``,
+    ``option <n>``, ``press``, ``comment``, ``closure`` or ``receipt`` (a secret request's non-value record,
+    the only field such a card has). ``text`` is an excerpt on a search answer, whole on a reopened row."""
+
+    name: str
+    speaker: str
+    text: str
+
+
+class RecallRow(TypedDict, total=False):
+    """One original dialogue row. ``address`` is its full content address (``row:<room>@<time>#<sha256>``);
+    ``rooms`` every room it shows in, its own first; ``speaker`` the author with its provenance, and "API door,
+    sender not recorded" on a row the API door stamped; ``matched`` the fields a search matched ([] on reopen);
+    ``reply_to`` the recorded reply target's address, ``reply_unresolved`` when it was not resolved;
+    ``reopen`` this row whole."""
+
+    address: Required[str]
+    room_id: Required[str]
+    room: Required[str]
+    rooms: Required[List[str]]
+    ts: Required[str]
+    speaker: Required[str]
+    matched: Required[List[str]]
+    fields: Required[List[RecallField]]
+    reply_to: str
+    reply_unresolved: bool
+    reopen: Required[RecallReader]
+
+
+class RecallSearchResponse(TypedDict):
+    """``GET /api/recall?words=…``: one page of admitted dialogue rows of every room (or ``room_id``) whose words
+    match, in the caller's ``order`` of time, never ranked. ``total`` is exact when the read was complete, else
+    null with ``observed`` and the named ``gaps``; ``next`` continues the same capture (``snapshot``)."""
+
+    mode: Literal["search"]
+    words: List[str]
+    room_id: str
+    voice: str
+    order: Literal["newest", "oldest"]
+    total: Optional[int]
+    observed: int
+    offset: int
+    more: int
+    snapshot: Optional[str]
+    next: Optional[RecallReader]
+    gaps: List[str]
+    rows: List[RecallRow]
+
+
+class RecallRowResponse(TypedDict):
+    """``GET /api/recall?row=<address>``: one admitted dialogue row reopened whole."""
+
+    mode: Literal["row"]
+    row: RecallRow
+
+
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
     "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
-    "ChatSearchResponse",
+    "ChatSearchResponse", "RecallReader", "RecallField", "RecallRow", "RecallSearchResponse", "RecallRowResponse",
 ]

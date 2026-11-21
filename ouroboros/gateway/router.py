@@ -65,12 +65,15 @@ def _owner_answer_routes() -> list[BaseRoute]:
 
 def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
     """A room's saved messages as the owner's UI reads them from the dialogue store: its history pages
-    (``/api/chat/history``) and the search of their words (``/api/chat/search``)."""
+    (``/api/chat/history``) and the search of their words (``/api/chat/search``); and the neighbour door, the
+    words reader over every room for a program on this computer (``/api/recall``)."""
     from ouroboros.gateway.chat_search import make_chat_search_endpoint
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.gateway.recall import make_recall_endpoint
 
     return [Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
-            Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir))]
+            Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir)),
+            Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"])]
 
 
 def _setup_routes() -> list[BaseRoute]:

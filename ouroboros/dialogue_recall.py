@@ -194,11 +194,13 @@ def _line(root: pathlib.Path, row: Dict[str, Any], hit: Mapping[str, Any], query
                           for field in shown)
 
 
-def words_history(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "", order: str = "",
-                  count: int = 100, offset: int = 0, snapshot: str = "", filters: Mapping[str, str]) -> str:
-    """One page of rows whose typed fields satisfy ``query``, as text (see the module docstring)."""
-    from ouroboros.dialogue_provenance import (RoomLabelResolver, in_reading_order, owner_speech,
-                                               rooms_read_by_time, row_author)
+def collect(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "", order: str = "",
+            filters: Mapping[str, str]) -> Dict[str, Any]:
+    """Every row of one words read, before paging, for the two faces that print it (``words_history`` here,
+    the neighbour door ``gateway/recall.py``): ``rows`` one per source row in the caller's ``order``; ``hits``
+    by ``id(row)`` (``author``, ``fields``, ``matched``); ``gaps`` as named lines; ``said`` (a label note);
+    ``coverage``; ``snapshot``, the token of this capture and query."""
+    from ouroboros.dialogue_provenance import in_reading_order, owner_speech, rooms_read_by_time, row_author
     from ouroboros.memory import _chat_history_filter, _normalized_chat_history_query
 
     root = pathlib.Path(memory.drive_root)
@@ -251,11 +253,6 @@ def words_history(memory: Any, query: WordQuery, *, room: Optional[int], voice: 
         unique.reverse()
     normalized = {**_normalized_chat_history_query(filters, ""), "words": list(query.items),
                   "room_id": "" if room is None else str(room), "voice": voice, "order": order or "newest"}
-    current = _snapshot(coverage, normalized)
-    requested = str(snapshot or "").strip().lower()
-    if requested and (not coverage.get("snapshot_stable") or requested != current):
-        return ("CHAT_HISTORY_SNAPSHOT_CHANGED: the query or archive/live generations "
-                "changed; no mixed page was returned; restart with offset=0 and no snapshot.")
     gaps = [f"{gap.get('kind') or 'unknown'}" + (f" ({gap['detail']})" if gap.get("detail") else "")
             for gap in coverage.get("gaps") or []] + notes
     if examined["bounded"] and examined["last"] is not None:
@@ -263,6 +260,22 @@ def words_history(memory: Any, query: WordQuery, *, room: Optional[int], voice: 
         gaps.append(f"recheck_bound: {RECHECK_BOUND} candidate rows re-checked in stored order, through "
                     f"{format_address(row_address(last))} ({last.get('ts')}); later rows were not examined: "
                     "narrow with room_id or date_from/date_to")
+    return {"root": root, "rows": unique, "hits": hits, "gaps": gaps, "said": said, "coverage": coverage,
+            "snapshot": _snapshot(coverage, normalized)}
+
+
+def words_history(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "", order: str = "",
+                  count: int = 100, offset: int = 0, snapshot: str = "", filters: Mapping[str, str]) -> str:
+    """One page of rows whose typed fields satisfy ``query``, as text (see the module docstring)."""
+    from ouroboros.dialogue_provenance import RoomLabelResolver
+
+    found = collect(memory, query, room=room, voice=voice, order=order, filters=filters)
+    root, unique, hits, gaps, said, coverage, current = (found[key] for key in (
+        "root", "rows", "hits", "gaps", "said", "coverage", "snapshot"))
+    requested = str(snapshot or "").strip().lower()
+    if requested and (not coverage.get("snapshot_stable") or requested != current):
+        return ("CHAT_HISTORY_SNAPSHOT_CHANGED: the query or archive/live generations "
+                "changed; no mixed page was returned; restart with offset=0 and no snapshot.")
     offset, count = max(0, int(offset)), max(1, int(count))
     page = unique[offset:offset + count]
     rooms = RoomLabelResolver(root)

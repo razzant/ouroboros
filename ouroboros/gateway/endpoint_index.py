@@ -117,6 +117,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/fs/dirs",
     "GET /api/chat/history",
     "GET /api/chat/search",
+    "GET /api/recall",
     "GET /api/logs/{name}",
     "GET /api/logs/{name}/raw",
     "POST /api/chat/upload",
@@ -396,6 +397,11 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/chat/search": Shape(
         "200,400,409,503:ChatSearchResponse", query="chat_id q cursor",
         note="read-only; one bounded read of the room's saved messages as candidates, newest first; the cursor continues older"),
+    "GET /api/recall": Shape(
+        "200:RecallSearchResponse|RecallRowResponse 400,403,404,409,503:ErrorResponse",
+        query="words room_id voice order date_from date_to count offset snapshot row",
+        note="read-only neighbour door: a raw loopback peer without forwarding headers only (403 recall_peer_closed "
+             "before any read, whatever the password); words (repeatable) or one row; no model turn"),
     "POST /api/chat/upload": Shape("200:UploadResponse 400:ErrorResponse", "multipart", note="form field file"),
     "DELETE /api/chat/upload": Shape("200:ChatUploadDeleteResponse 400,404,409:ErrorResponse", "ChatUploadDeleteRequest",
                                      note="pending uploads only; a repeat answers 404"),

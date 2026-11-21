@@ -360,6 +360,15 @@ ouroboros run --start \
 
 Use `--jsonl` for a machine-readable event stream and `--detach` when the caller will follow the task with `ouroboros tasks watch <task_id>` or inspect it with `ouroboros tasks show <task_id>`. External workspace runs keep Ouroboros's own repository and governance context separate, then export changes as reviewable patch artifacts.
 
+To find what was said in Ouroboros's conversation without waking it, a program on the same computer reads the recall door. A default install listens on `127.0.0.1:8765`; when that port was busy, the one in use is in `~/Ouroboros/data/state/server_port`. Neither command needs `ouroboros` on PATH (on Linux the packaged command is `./Ouroboros/bin/ouroboros`, on Windows `Ouroboros\bin\ouroboros.cmd`):
+
+```bash
+curl -sG http://127.0.0.1:8765/api/recall --data-urlencode 'words=archive decision' --data-urlencode order=oldest
+/Applications/Ouroboros.app/Contents/Resources/bin/ouroboros recall --row 'row:1@…#…'  # an address from the answer
+```
+
+It answers only direct loopback connections, never a request relayed by a proxy or tunnel; in Docker with ordinary port publishing only programs inside the container reach it. Shapes: [docs/CLIENT_CONTRACT.md](docs/CLIENT_CONTRACT.md).
+
 To change Ouroboros itself, follow [CONTRIBUTING.md](CONTRIBUTING.md): read [docs/CHECKLISTS.md](docs/CHECKLISTS.md) in full, and map [BIBLE.md](BIBLE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md), and [docs/DESIGN.md](docs/DESIGN.md) by their headings, reading every section relevant to your change in full before editing.
 
 #### Configuration

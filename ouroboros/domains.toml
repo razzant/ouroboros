@@ -402,6 +402,7 @@ D20 = "Presence"
 "ouroboros/gateway/desktop_autostart.py" = "D11"
 "ouroboros/gateway/projects.py" = "D11"
 "ouroboros/gateway/router.py" = "D11"
+"ouroboros/gateway/recall.py" = "D11"  # GET /api/recall: the neighbour door over the words reader
 "ouroboros/gateway/schema.py" = "D11"
 "ouroboros/gateway/schedules.py" = "D11"
 "ouroboros/gateway/secret_rows.py" = "D11"

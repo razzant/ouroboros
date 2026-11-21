@@ -230,3 +230,146 @@ def test_a_refusal_logs_sanitized_origins_once_per_expected_origin(client, refus
     assert len(lines) == 5 and "\n" not in lines[4]
     assert path.startswith("/api/x%0Aforgedaaa") and path.endswith("…") and len(path) == 201
     assert not any(word in line for line in lines for word in ("hunter2", "token", "t0ps3cret", "user"))
+
+
+# The neighbour door ``GET /api/recall`` (gateway/recall.py) admits a program on this computer only: the accepted
+# connection's own peer is a numeric loopback address and no forwarding header is present. It is decided on the raw
+# transport tuple before uvicorn's proxy-header middleware can rewrite the client (server_auth.recall_serving_app,
+# which server.py hands to uvicorn.Config), and the door is never more open than /api/chat/history.
+DOOR_CASES = [
+    ("127.0.0.1", {}, True), ("127.8.9.10", {}, True), ("::1", {}, True), ("::ffff:127.0.0.1", {}, True),
+    ("localhost", {}, False),  # a name is not a peer (the gate's own loopback helper accepts it)
+    ("testclient", {}, False), ("172.17.0.1", {}, False),  # Docker's bridge: host traffic into a container
+    ("203.0.113.5", {}, False), ("::ffff:203.0.113.5", {}, False), ("fe80::1", {}, False),
+    ("127.0.0.1", {"x-forwarded-for": "203.0.113.9"}, False),  # relayed by a tunnel or proxy on this computer
+    ("127.0.0.1", {"forwarded": "for=203.0.113.9"}, False), ("127.0.0.1", {"x-real-ip": "203.0.113.9"}, False),
+    ("127.0.0.1", {"x-forwarded-proto": "https"}, False),
+    ("203.0.113.5", {"x-forwarded-for": "127.0.0.1"}, False),  # forged: under trust "*" history would see loopback
+]
+
+
+def _served(app, *, door: bool = True):
+    import uvicorn
+
+    config = (uvicorn.Config(**server_auth.recall_serving_app(app), log_config=None) if door
+              else uvicorn.Config(app, log_config=None))
+    config.load()
+    return config.loaded_app
+
+
+async def _echo(request: Request) -> JSONResponse:
+    HANDLED.append((request.method, request.url.path, b""))
+    return JSONResponse({"client": request.client[0] if request.client else None, "scheme": request.url.scheme})
+
+
+@pytest.fixture
+def door(monkeypatch, tmp_path):
+    import contextlib
+
+    from ouroboros.gateway import recall
+
+    reads, started = [], []
+
+    def answer(root, items):
+        reads.append(list(items))
+        return 200, {"mode": "search"}, "search"
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        started.append("up")
+        yield
+
+    monkeypatch.setattr(recall, "answer", answer)
+    monkeypatch.setattr(recall, "_count", lambda *_args: None)
+    HANDLED.clear()
+    gate = server_auth.NetworkAuthGate(Starlette(routes=[
+        Route("/api/recall", endpoint=recall.make_recall_endpoint(tmp_path)),
+        Route("/api/chat/history", endpoint=_record), Route("/api/echo", endpoint=_echo),
+        WebSocketRoute("/ws", endpoint=_ws)], lifespan=lifespan))
+    return gate, reads, started
+
+
+@pytest.mark.parametrize("trust", ["127.0.0.1", "*"])
+@pytest.mark.parametrize("password", ["", "pw"])
+@pytest.mark.parametrize("peer,headers,admitted", DOOR_CASES)
+def test_the_recall_door_admits_only_a_raw_loopback_peer_and_is_never_more_open_than_history(
+        monkeypatch, door, trust, password, peer, headers, admitted):
+    from ouroboros.server_auth import RECALL_CLOSED
+
+    gate, reads, _started = door
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", trust)
+    monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: password)
+    client = TestClient(_served(gate), client=(peer, 50000))
+    for given in (headers, {**headers, "x-ouroboros-password": "pw"}):  # a valid password does not open the door
+        reads.clear()
+        response = client.get("/api/recall?words=x", headers=given)
+        history = client.get("/api/chat/history", headers=given)
+        if admitted:
+            assert response.status_code == 200 and reads == [[("words", "x")]]
+            assert history.status_code == 200
+        else:
+            assert response.status_code == 403 and response.json() == RECALL_CLOSED and reads == []
+            assert response.headers["cache-control"] == "no-store"
+    malformed = client.get("/api/recall?words=a&row=b&count=x", headers=headers)  # closed before any parse
+    assert malformed.status_code == (200 if admitted else 403)
+
+
+def test_the_peer_is_read_before_proxy_headers_and_the_handler_requires_the_admission(monkeypatch, door):
+    from ouroboros.server_auth import RECALL_CLOSED
+
+    gate, reads, _started = door
+    monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: "pw")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    forged = TestClient(_served(gate), client=("203.0.113.5", 1))
+    # Inside, uvicorn's proxy middleware still rewrites the client (every other route sees "127.0.0.1" and passes
+    # the password gate as loopback under this trust); the door was decided on the raw peer before it.
+    assert forged.get("/api/echo", headers={"x-forwarded-for": "127.0.0.1"}).json()["client"] == "127.0.0.1"
+    assert forged.get("/api/recall?words=x", headers={"x-forwarded-for": "127.0.0.1"}).status_code == 403
+    assert reads == []
+    # Without the serving composition no request carries the admission, so the handler closes even loopback.
+    bare = TestClient(gate, client=("127.0.0.1", 1)).get("/api/recall?words=x")
+    assert bare.status_code == 403 and bare.json() == RECALL_CLOSED and reads == []
+    assert TestClient(_served(gate), client=("127.0.0.1", 1)).get("/api/recall?words=x").status_code == 200
+    assert reads == [[("words", "x")]]
+    reads.clear()
+    # The gate answers before the password gate: a remote caller hears the door's refusal, never the login's 401.
+    assert TestClient(_served(gate, door=False), client=("203.0.113.5", 1)).get("/api/recall").status_code == 401
+    assert TestClient(_served(gate), client=("203.0.113.5", 1)).get("/api/recall").status_code == 403
+    # A cross-origin page on this computer still meets the browser boundary first.
+    page = TestClient(_served(gate), client=("127.0.0.1", 1)).get(
+        "/api/recall?words=x", headers={"origin": "http://evil.example", "sec-fetch-site": "cross-site"})
+    assert page.status_code == 403 and page.json()["code"] == "cross_origin_request" and reads == []
+
+
+@pytest.mark.parametrize("password", ["", "pw"])
+def test_every_other_route_keeps_its_forwarded_client_password_gate_sockets_and_lifespan(monkeypatch, door, password):
+    gate, _reads, started = door
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: password)
+    requests = [("127.0.0.1", {"x-forwarded-for": "203.0.113.9", "x-forwarded-proto": "https"}),
+                ("127.0.0.1", {}), ("203.0.113.5", {}), ("203.0.113.5", {"x-ouroboros-password": "pw"}),
+                ("203.0.113.5", {"x-forwarded-for": "127.0.0.1"})]
+    for peer, headers in requests:
+        served, default = (TestClient(app, client=(peer, 1)).get("/api/echo", headers=headers)
+                           for app in (_served(gate), _served(gate, door=False)))
+        assert (served.status_code, served.text) == (default.status_code, default.text), (peer, headers)
+    with TestClient(_served(gate), client=("127.0.0.1", 1)) as client, client.websocket_connect("/ws") as ws:
+        assert ws.receive_json() == {"ok": True}
+    assert started == ["up"]
+
+
+def test_server_serves_through_the_recall_peer_composition():
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+    call = source[source.index("server.config = uvicorn.Config("):]
+    assert call.split("\n", 2)[1].strip().startswith("**recall_serving_app(app),")
+    assert server_auth.recall_serving_app(object())["proxy_headers"] is False
+
+
+def test_the_raw_peer_predicate_reads_only_the_transport_tuple():
+    assert server_auth.recall_peer_admitted({"client": ("127.0.0.1", 1), "headers": [(b"accept", b"*/*")]})
+    assert not server_auth.recall_peer_admitted({"client": None, "headers": []})
+    assert not server_auth.recall_peer_admitted({"headers": []})
+    assert not server_auth.recall_peer_admitted({"client": ("", 1), "headers": []})
+    assert not server_auth.recall_peer_admitted({"client": ("127.0.0.1", 1), "headers": [(b"X-Forwarded-Host", b"a")]})

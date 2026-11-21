@@ -350,6 +350,18 @@ def _chat_history_command(args: argparse.Namespace) -> int:
     return 0
 
 
+_RECALL_OPTIONS = ("room_id", "voice", "order", "date_from", "date_to", "count", "offset", "snapshot")
+
+
+def _recall_command(args: argparse.Namespace) -> int:
+    """``GET /api/recall`` on the server this command finds as ``chat send`` does; it never starts one."""
+    pairs = [("row", args.row)] if args.row is not None else [("words", item) for item in args.words]
+    pairs += [(name, str(getattr(args, name))) for name in _RECALL_OPTIONS if getattr(args, name) not in (None, "")]
+    query = urllib.parse.urlencode(pairs, quote_via=urllib.parse.quote)
+    _print_json(_client(args).request("GET", f"/api/recall?{query}"))
+    return 0
+
+
 def _logs_tail_command(args: argparse.Namespace) -> int:
     query = f"?limit={int(args.limit)}"
     if args.task_id:
@@ -631,6 +643,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="conversation rows to fetch (server-capped; omitted, zero or negative = the server's default window)",
     )
     chat_history.set_defaults(func=_chat_history_command)
+
+    recall = subparsers.add_parser("recall", help="find dialogue rows by words or reopen one row (no model turn)")
+    form = recall.add_mutually_exclusive_group(required=True)
+    form.add_argument("--words", action="append", help="words that must all occur in one field; repeat for alternatives")
+    form.add_argument("--row", help="reopen one row by the address a search printed")
+    recall.add_argument("--room-id", dest="room_id", help="one room's chat id (1 is Main); default every room")
+    recall.add_argument("--voice", choices=["owner"], help="only my human's own words")
+    recall.add_argument("--order", choices=["newest", "oldest"], help="direction of time (default newest)")
+    recall.add_argument("--date-from", dest="date_from", help="ISO-8601 lower bound")
+    recall.add_argument("--date-to", dest="date_to", help="ISO-8601 upper bound")
+    recall.add_argument("--count", type=int, help="rows per page (server default 20, at most 100)")
+    recall.add_argument("--offset", type=int, help="continue a page")
+    recall.add_argument("--snapshot", help="the snapshot a page printed, to continue the same capture")
+    recall.set_defaults(func=_recall_command)
 
     logs = subparsers.add_parser("logs", help="read runtime logs")
     logs_sub = logs.add_subparsers(dest="logs_command", required=True)
