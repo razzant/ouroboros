@@ -861,16 +861,6 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         snapshots = self.quota_state().get("snapshots")
         return [row for row in (snapshots or []) if isinstance(row, dict)]
 
-    def quota_absences(self) -> List[Dict[str, Any]]:
-        """Profiles whose quota could NOT be read (a 429/failed refresh, no login).
-
-        Legacy compatibility projection of the same one-epoch quota envelope.
-        An absence is typed evidence that quota could not be read for a profile;
-        route health treats that state as unknown and therefore fail-open.
-        """
-        absences = self.quota_state().get("absences")
-        return [row for row in (absences or []) if isinstance(row, dict)]
-
     def register_project(self, root: str) -> str:
         """Register a run root and return its project id (idempotent per root).
 
