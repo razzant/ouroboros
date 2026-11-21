@@ -673,12 +673,12 @@ _STOPPED_AXES = {"execution": {"status": "ok", "reason_code": "final_message", "
     "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}}
 
 
-def _ended(root, task_id, ts, status="completed", *, stop=False, **fields):
-    """One root result of project ``room`` through the real lifecycle writer, its terminal time observed;
-    ``stop`` is the author's own typed ``finish_task(action="stop")``."""
+def _ended(root, task_id, ts, status="completed", *, stop=False, project_id="room", **fields):
+    """One root result of project ``room`` (``""``: Main's) through the real lifecycle writer, its terminal time
+    observed; ``stop`` is the author's own typed ``finish_task(action="stop")``."""
     from ouroboros.task_results import write_task_result
 
-    write_task_result(root, task_id, status, _terminal_observed=True, project_id="room", root_task_id=task_id,
+    write_task_result(root, task_id, status, _terminal_observed=True, project_id=project_id, root_task_id=task_id,
                       delegation_role="root", objective=f"work {task_id}", ts=ts,
                       **({"outcome_axes": _STOPPED_AXES} if stop else {}),
                       **{"reason_code": "final_message", **fields})
@@ -739,6 +739,63 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
     assert "continue_task" in metadata["routing_contract"]["valid_actions"]
     main = {row["task_id"]: row for row in _main_routing_manifest(_decision_ctx(tmp_path))["final_results"]}
     assert main["r-stop"]["continuation_offer"]["eligible"] is True and main["r-stop"]["stop_reason"] == stopped["stop_reason"]
+
+
+def test_main_without_projects_reads_a_root_as_main_beside_them_does_and_a_new_install_reads_nothing(
+        tmp_path, monkeypatch):
+    """Owner decision of 21.11.2026: Main's routing facts are the same with Projects or without. A Main message of an
+    install with no Project and no live work used to get none, so a stopped root's open Continue reached it only by
+    digging. Any root's record now opens the decision lane through the owner ingress and keeps the manifest, a wake
+    gets the same, and an unreadable store is unknown, never "no ended work"; a new install's store holds no root, so
+    its message stays exactly as it was, and an install beside Projects never reads the root index for its gate."""
+    from ouroboros import server_owner_routing, task_store
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import STOP_REASON_LABEL, main_lane_routing_metadata
+    from ouroboros.store import StoreBusy
+
+    turns, gate_reads = [], []
+    ctx = _decision_ctx(tmp_path)
+    ctx.handle_chat_direct = lambda *_a, **kwargs: turns.append(kwargs["task_metadata"])
+    real_gate = server_owner_routing._root_results_exist
+    monkeypatch.setattr(server_owner_routing, "_root_results_exist",
+                        lambda gate_ctx: gate_reads.append(1) or real_gate(gate_ctx))
+
+    def route(message_id):
+        server_owner_routing._route_owner_message(object(), ctx, {
+            "chat_id": 1, "text": "why did it stop?", "client_message_id": message_id, "log_text": "why did it stop?",
+            "origin_message_ref": {"chat_id": 1, "client_message_id": message_id}})
+        return turns[-1]
+
+    fresh = route("m-new")
+    assert not {"main_routing_manifest", "routing_contract", "current_chat"} & set(fresh)
+    assert main_lane_routing_metadata(ctx, 1) == {}
+
+    _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True, project_id="")
+    owner = route("m-why")
+    manifest = owner["main_routing_manifest"]
+    assert (manifest["projects"], manifest["root_tasks"]) == ([], [])
+    [stopped] = manifest["final_results"]
+    assert (stopped["task_id"], stopped["outcome"]) == ("r-stop", "Stopped")
+    assert stopped["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
+    assert stopped["stop_reason"] == {"verbatim": STOP_REASON, "label": STOP_REASON_LABEL}
+    assert "continue_task" in owner["routing_contract"]["valid_actions"]
+    assert owner["routing_contract"]["source_lane"] == "main"
+    wake = main_lane_routing_metadata(ctx, 1)
+    assert wake["main_routing_manifest"] == manifest and "client_message_id" not in wake
+
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("index busy", reason="contention")
+
+    monkeypatch.setattr(task_store, "newest_root_ids", busy)
+    unknown = route("m-busy")["main_routing_manifest"]
+    assert unknown["final_results"] == []
+    assert unknown["omissions"]["final_results_error"].startswith("result_store_unreadable")
+    assert main_lane_routing_metadata(ctx, 1)["main_routing_manifest"]["omissions"]["final_results_error"]
+
+    create_project(tmp_path, "racer", name="Racer")
+    before = len(gate_reads)
+    beside = route("m-racer")["main_routing_manifest"]
+    assert [row["project_id"] for row in beside["projects"]] == ["racer"] and len(gate_reads) == before == 3
 
 
 def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path, monkeypatch):

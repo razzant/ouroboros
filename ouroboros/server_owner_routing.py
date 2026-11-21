@@ -23,6 +23,7 @@ from ouroboros.server_routing_context import (
     addressable_roots,
     _project_id_for_registered_chat,
     _reserved_project_for_chat,
+    _root_results_exist,
     _scoped_task_metadata,
 )
 
@@ -797,8 +798,10 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     except Exception:
         log.warning("Unable to inspect Projects for owner routing", exc_info=True)
         has_projects = True
-    # Unknown roots, like unknown Projects, go to the decision lane, which is told so.
-    needs_decision_lane = bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
+    # Unknown roots, like unknown Projects, go to the decision lane, which is told so. So does any
+    # root's record: Main without Projects reads a stop and its open Continue as Main with them does.
+    needs_decision_lane = (bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
+                           or _root_results_exist(ctx))
     if needs_decision_lane:
         task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
 
