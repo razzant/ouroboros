@@ -56,7 +56,7 @@ class ToolSchemaRequest:
 class ToolSchemaProvider(Protocol):
     """Minimal registry contract needed by the loop/discovery helpers."""
 
-    def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+    def schemas(self) -> List[Dict[str, Any]]:
         ...
 
 

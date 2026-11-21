@@ -37,10 +37,8 @@ from ouroboros.tool_capabilities import (
     ACTING_SUBAGENT_MODE,
     acting_tool_names_for_context,
     schema_selection_tools_for_context,
-    CORE_TOOL_NAMES,
     LOCAL_READONLY_SUBAGENT_MODE,
     LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
-    META_TOOL_NAMES,
 )
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -476,16 +474,6 @@ class ToolRegistry:
             and not bool(bootstrap.get("zero_run_receipt_recorded"))
         )
 
-    def initial_tool_names(self) -> frozenset[str]:
-        if self._is_local_readonly_subagent():
-            names = set(LOCAL_READONLY_SUBAGENT_TOOL_NAMES | schema_selection_tools_for_context(self._ctx))
-            if self._readonly_tool_allowed("verify_and_record"):
-                names.add("verify_and_record")
-            return frozenset(names)
-        if self._is_acting_subagent():
-            return acting_tool_names_for_context(self._ctx, self._entries)
-        return frozenset(set(self.available_tools()) | set(META_TOOL_NAMES))
-
     def available_tools(self) -> List[str]:
         acting_subagent = self._is_acting_subagent()
         local_readonly_subagent = self._is_local_readonly_subagent()
@@ -498,6 +486,7 @@ class ToolRegistry:
             if e.name not in disabled  # declarative tool policy (task_contract.disabled_tools)
             if _presence_tool_allowed(self._ctx, e.name)
             if _builtin_tool_availability(e.name, self._ctx)[0]
+            if registry_guards._builtin_network_allowed(self._ctx, e.name)
             if not local_readonly_subagent or self._readonly_tool_allowed(e.name)
             if not acting_subagent or e.name in acting_tool_names_for_context(self._ctx, self._entries)
         ]
@@ -728,7 +717,7 @@ class ToolRegistry:
                                               "error": f"{notice['id']}: {notice['detail']}"})
         return rows
 
-    def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+    def schemas(self) -> List[Dict[str, Any]]:
         acting_subagent = self._is_acting_subagent()
         local_readonly_subagent = self._is_local_readonly_subagent()
         # Dispatch-only policy (В31=B): a consciousness-origin task is filtered by nothing here and
@@ -778,51 +767,24 @@ class ToolRegistry:
             except Exception as exc:
                 self._capability_omissions.append({"surface": "extensions", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
 
-        if not core_only:
-            mcp_schemas = []
-            # Owner-configured MCP tools retain the network resource gate.
-            if not _resource_allowed(self._ctx, "network"):
-                self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
-            else:
-                try:
-                    mcp_schemas = [_dynamic_tool_schema(tool) for tool in self._mcp_rows(record=True)]
-                except Exception as exc:
-                    self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
-            combined = built_in + extension_schemas + mcp_schemas
-            if disabled_tools:
-                # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
-                # built-ins, so a disabled name can never surface from any discovery source.
-                combined = [
-                    s for s in combined
-                    if (s.get("function", {}) or {}).get("name") not in disabled_tools
-                ]
-            return combined
-        # Core tools plus meta-tools for enabling extended tools.
-        result = []
-        for e in self._entries.values():
-            if _alias_hidden(self._ctx, e):
-                continue
-            if e.name in disabled_tools:  # declarative tool policy (task_contract.disabled_tools)
-                continue
-            if not _presence_tool_allowed(self._ctx, e.name):
-                continue
-            if e.name in unavailable_tools or not registry_guards._builtin_network_allowed(self._ctx, e.name):
-                continue
-            if local_readonly_subagent and not self._readonly_tool_allowed(e.name):
-                continue
-            if acting_subagent and e.name not in acting_tool_names_for_context(self._ctx, self._entries):
-                continue
-            if (
-                (local_readonly_subagent and self._readonly_tool_allowed(e.name))
-                or (acting_subagent and e.name in acting_tool_names_for_context(self._ctx, self._entries))
-                or e.name in CORE_TOOL_NAMES
-                or e.name in ("list_available_tools", "enable_tools")
-            ):
-                result.extend(self._schemas_for_entry(e))
-        ext = extension_schemas
+        mcp_schemas = []
+        # Owner-configured MCP tools retain the network resource gate.
+        if not _resource_allowed(self._ctx, "network"):
+            self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
+        else:
+            try:
+                mcp_schemas = [_dynamic_tool_schema(tool) for tool in self._mcp_rows(record=True)]
+            except Exception as exc:
+                self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
+        combined = built_in + extension_schemas + mcp_schemas
         if disabled_tools:
-            ext = [s for s in ext if (s.get("function", {}) or {}).get("name") not in disabled_tools]
-        return result + ext
+            # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
+            # built-ins, so a disabled name can never surface from any discovery source.
+            combined = [
+                s for s in combined
+                if (s.get("function", {}) or {}).get("name") not in disabled_tools
+            ]
+        return combined
 
     def capability_omissions(self) -> List[Dict[str, Any]]:
         return [dict(item) for item in self._capability_omissions]

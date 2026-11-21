@@ -16,6 +16,7 @@ from ouroboros.contracts.task_constraint import (
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TOOL_NAMES, META_TOOL_NAMES
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
+from ouroboros.tool_policy import initial_tool_schemas
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
 from tests._store_shared import seed_result
@@ -176,7 +177,7 @@ def test_cyber_acting_registry_exposes_review_skill_and_runtime_tools(tmp_path, 
     reg = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     reg._ctx = ctx
 
-    names = set(reg.initial_tool_names())
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
     assert {"review_status", "plan_task", "skill_review", "skill_exec", "toggle_evolution"} <= names
     assert "commit_reviewed" in names
     schemas = {
@@ -275,9 +276,13 @@ def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
 
 def test_acting_tool_visibility_is_acting_set(tmp_path):
     reg, _ctx, _wt = _acting_registry(tmp_path)
-    names = set(reg.initial_tool_names())
+    # The array the child's first request really carries: the acting set less the compat
+    # aliases, which stay callable and are never advertised.
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(reg)}
+    aliases = {entry.name for entry in reg._entries.values() if entry.alias_for}
     # The schema selectors ride every role (#1860): they load schemas and grant nothing.
-    assert names == set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES
+    assert META_TOOL_NAMES <= names
+    assert names == (set(ACTING_SUBAGENT_TOOL_NAMES) | META_TOOL_NAMES) - aliases
     assert "commit_reviewed" not in names
     assert "integrate_subagent_patch" in names
 
