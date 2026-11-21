@@ -1236,7 +1236,8 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
     if payload.get("status") == "terminal":  # where the starter judges the result: what still differs, by run
         from ouroboros.helper_receipt import run_result_line
 
-        payload["receipt"] = run_result_line(ctx, held, payload.get("access_evidence"))
+        if receipt := run_result_line(ctx, held, payload.get("access_evidence")):  # observed differences only
+            payload["receipt"] = receipt
     payload["coordination_context"] = coordination_live_context(ctx)
     _publish_wake_facts(ctx, descriptor, woke_by, payload, live_input)
     if descriptor.get("ignored_arguments"):

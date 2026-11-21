@@ -390,34 +390,40 @@ def test_a_slow_final_read_still_ends_inside_the_kill_timer(tmp_path, monkeypatc
     assert took < out["window_sec"] + 1.5 and executor - took >= 28
 
 
-@pytest.mark.parametrize("differs", [True, False], ids=["differs", "ordinary"])
-def test_both_child_surfaces_repeat_the_receipt_in_one_line(differs):
+@pytest.mark.parametrize("case", ["differs", "ordinary", "ask"])
+def test_both_child_surfaces_repeat_the_receipt_in_one_line(case):
     """c50-4: where the parent judges a child's answer (``[SUBTASK_OUTCOME]`` and the compact batch row) the
-    receipt repeats what still differs from the request, from the child's saved fields; in the ordinary case it
-    says nothing on record differs, and stops (no call rebuilds the full receipt, so it names none). It never
-    enters the child's work order."""
-    from ouroboros.helper_receipt import NOTHING_ON_RECORD
+    receipt repeats only the differences and gaps observed, from the child's saved fields; with none observed
+    neither surface carries a line (nothing assures that nothing differs). A child run in ``mode="ask"`` is
+    compared with the read-only shape its leaf ran in, never with the row's wider access. It never enters the
+    child's work order."""
     from ouroboros.subagent_work_order import compile_external_work_order
 
+    differs = case == "differs"
     session = {"route": {"kind": "agent_session", "target_id": "codex=x"}, "access": "workspace_write"}
-    evidence = {"delegated_runs_settled": 1, "applied_access_profiles": ["readonly" if differs else "workspace_write"]}
+    applied = {"differs": "readonly", "ordinary": "workspace_write", "ask": "readonly"}[case]
+    evidence = {"delegated_runs_settled": 1, "applied_access_profiles": [applied]}
     data = {"task_id": CHILD, "status": STATUS_COMPLETED, "result": "answer", "configured_subagent": session,
             "objective": "Read", "expected_output": "Findings", "subagent_envelope": {"execution_evidence": evidence},
+            **({"delegated_mode": "ask"} if case == "ask" else {}),
             **({"memory_view": {"marks": "everything"}, "resource_intent": {"kind": "explicit_resource", "root": "/r"},
                 "prepared_input_files": [{"root": "task_drive", "path": "a.md", "sha256": "a" * 64, "size": 1}]}
                if differs else {})}
-    compact = mod._compact_child_projection(CHILD, data, None)["receipt"]
-    full = json.loads(mod._subtask_outcome_summary(data, task_id=CHILD))["receipt"]
+    compact = mod._compact_child_projection(CHILD, data, None).get("receipt")
+    full = json.loads(mod._subtask_outcome_summary(data, task_id=CHILD)).get("receipt")
     assert compact == full
     if differs:
         assert "memory_view {'marks': 'everything'} not used (marks is one of" in full
         assert "lay outside the session's folder at scheduling" in full and "the session leaf's start composes" in full
         assert "applied access of its runs: readonly, requested workspace_write [observed]" in full
-        assert NOTHING_ON_RECORD not in full
         evidence["applied_access_profiles"] = []  # settled runs that disclosed no profile: unknown, never "as asked"
         assert "applied access of its runs: not disclosed (requested workspace_write)" in mod._compact_child_projection(
             CHILD, data, None)["receipt"]
+        evidence.update(applied_access_profiles=["workspace_write"], delegated_runs_settled=2)
+        data.pop("memory_view"), data.pop("prepared_input_files")
+        assert mod._compact_child_projection(CHILD, data, None)["receipt"] == (
+            "whether each of its 2 runs disclosed its applied access is not recorded [observed]")
     else:
-        assert full == NOTHING_ON_RECORD
+        assert full is None, "nothing observed to differ: neither surface adds a line"
     order = compile_external_work_order({"id": CHILD, **data})
     assert "receipt" not in order

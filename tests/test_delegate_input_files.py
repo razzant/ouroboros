@@ -149,7 +149,7 @@ def test_folderless_start_copies_the_selection_inside_its_scope_even_from_a_prio
     second = _start(ctx, input_files=selection)
     assert second["status"] == "started", second
     assert "automatic lineage" not in second["note"] and "outside the session's folder" not in second["note"]
-    assert "receipt: nothing differs from the request so far" in second["note"], "a copy inside its scope differs in nothing"
+    assert second["note"].startswith("receipt:\nrequested: "), "a copy inside its scope differs in nothing: no line"
     scope = pathlib.Path(engine.requests[1]["scope"]["root"])
     assert scope != prior and scope.parent == prior.parent
     [row] = second["input_files"]
@@ -2028,5 +2028,5 @@ def test_a_memory_view_value_the_view_does_not_know_is_named_at_scheduling(tmp_p
     assert ctx.pending_events, answer  # the request is queued either way: nothing here refuses it
     unknown = ("memory_view {'marks': 'everything'} not used (marks is one of all, room_and_global, none): "
                "the child default stands [requested]")
-    assert (unknown in answer) is named and ("receipt: nothing differs from the request so far" in answer) is not named
+    assert (unknown in answer) is named and ("receipt:\nrequested: " in answer) is not named
     assert ("memory view: child default with knowledge=True" in answer) is not named

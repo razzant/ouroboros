@@ -79,7 +79,7 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
     from ouroboros.helper_receipt import task_result_line
 
     assert f"access={access!r} ignored (api_model)" in task_result_line(saved) and "requested_access" not in event
-    assert "requested access: no record" in task_result_line({k: v for k, v in saved.items() if k != "requested_access"})
+    assert task_result_line({k: v for k, v in saved.items() if k != "requested_access"}) == "", "an older record: no line"
     assert saved["task_constraint"] == event["task_constraint"]
 
 
@@ -89,10 +89,10 @@ def test_api_omitted_access_keeps_result_free_of_an_ignored_field_notice(registr
     })
     assert (result.status, result.code) == ("ok", "OK"), result.text
     assert "ignored" not in result.text
-    from ouroboros.helper_receipt import NOTHING_ON_RECORD, task_result_line
+    from ouroboros.helper_receipt import task_result_line
 
     event, = [row for row in registry._ctx.pending_events if row["type"] == "schedule_subagent"]
-    assert task_result_line(read_result(registry._ctx.drive_root, event["task_id"])) == NOTHING_ON_RECORD
+    assert task_result_line(read_result(registry._ctx.drive_root, event["task_id"])) == "", "nothing observed: no line"
 
 
 @pytest.mark.parametrize("access", ["full", "", {}])

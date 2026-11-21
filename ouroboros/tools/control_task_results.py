@@ -77,7 +77,7 @@ def _handoff_disclosures(data: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.helper_receipt import task_result_line
 
     facts = {"capability_delta": disclosable_capability_delta(data), "effort": disclosable_effort_fact(data)}
-    return {**{key: value for key, value in facts.items() if value}, "receipt": task_result_line(data)}
+    return {key: value for key, value in {**facts, "receipt": task_result_line(data)}.items() if value}
 
 
 def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "",

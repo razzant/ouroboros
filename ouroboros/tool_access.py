@@ -80,7 +80,7 @@ def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = ""
     The second line names shared readable roots; the context supplies their
     physical bindings, including the parent's inherited folders and runtime.
     ``receipt``: one line for the delegating mind's receipt (``helper_receipt``), the
-    readable roots named by their complement when some are unreadable."""
+    readable roots named by their complement, which is shorter and says the same."""
     matrix = _POLICY.get(_effective_policy_profile(profile), {})
     shell_roots = sorted(root for root, ops in matrix.items() if "shell" in ops)
     write_roots = sorted(root for root, ops in matrix.items() if ops & {"write", "edit"})
@@ -97,7 +97,7 @@ def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = ""
     lineage = " (including inherited parent folders and runtime data)"
     unreadable = ', '.join(sorted(_ALL_ROOTS - set(read_roots))) or 'none'
     if receipt:
-        return " · ".join([*bits, "readable=all roots, parent folders included" if unreadable == "none" else f"unreadable={unreadable}"])
+        return " · ".join([*bits, f"unreadable={unreadable}"])
     return (
         "child capabilities — " + " · ".join(bits)
         + f"\nreadable={', '.join(read_roots) or 'none'}{lineage}"

@@ -872,7 +872,6 @@ def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, 
     whose last outcome is not ``delivered`` (``accepted`` is not read). In the ordinary case nothing on record
     differs, and the line stops there. The spilled envelope keeps it."""
     from ouroboros import delegate_message_store, delegate_supervision as ds
-    from ouroboros.helper_receipt import NOTHING_ON_RECORD
 
     ctx, _limit = _nanny(tmp_path)
     _run(tmp_path, "run-1")
@@ -892,6 +891,6 @@ def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, 
     elif differs is None:  # the engine finished without disclosing the profile: unknown is said, never "as asked"
         assert wake["receipt"] == "access applied: not disclosed by the engine (requested readonly) [observed]"
     else:
-        assert wake["receipt"] == NOTHING_ON_RECORD
+        assert "receipt" not in wake, "nothing observed to differ: no line, no assurance"
     spilled = ds._render_wake_payload(ctx, {**wake, "wake_events": [{"type": "x", "text": "y" * 400_000}]})
-    assert _armed(spilled)["receipt"] == wake["receipt"], "the shortened envelope keeps the line"
+    assert _armed(spilled).get("receipt") == wake.get("receipt"), "the shortened envelope keeps the line, or none"

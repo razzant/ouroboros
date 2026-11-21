@@ -352,7 +352,7 @@ def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_
     facts["memory_view"] = {"view": emission.get("memory_view"), "role": "nanny" if session else "child",
                             "session_leaf": session}
     asked = [str(emission.get(key) or "") for key in ("objective", "expected_output", "context", "constraints")]
-    facts["assignment"] = (f"{sum(map(len, asked))} chars as given (objective, output, context, constraints)", REQUESTED)
+    facts["assignment"] = (f"{sum(map(len, asked))} chars given (objective, output, context, constraints)", REQUESTED)
     return facts
 
 
@@ -1067,8 +1067,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             drive_root=str(child_drive) if child_drive is not None else "",
             child_drive_root=str(child_drive) if child_drive is not None else "",
             **child_facts,
-            # an API child's access request, kept for its result's receipt line, outside its work order and event
-            **({"requested_access": params.get("access")} if requested_executor == "native" else {}),
+            # the call's access request, kept for its result's receipt line, outside its work order and event
+            requested_access=params.get("access"),
             result="Subagent request queued. Awaiting supervisor acceptance.",
         )
     except Exception:
@@ -1127,8 +1127,8 @@ def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_t
     except InputSelectionError as exc:
         from ouroboros.helper_receipt import build, render
 
-        text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued.\n"
-                        + render(build({"refused": exc.results}))), exc.code
+        receipt = render(build({"refused": exc.results}))  # "" when the refusal's own cause is the whole story
+        text, reason = f"⚠️ {exc.code}: {exc.detail} The child was not queued." + (f"\n{receipt}" if receipt else ""), exc.code
     except (OSError, ValueError) as exc:
         text, reason = f"⚠️ input_files_unavailable: {type(exc).__name__}: {exc} The child was not queued.", "input_files_unavailable"
     code = refusal_host_code(reason)

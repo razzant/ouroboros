@@ -105,7 +105,7 @@ from ouroboros.delegate_directory import (
 from ouroboros.delegate_registration_policy import minted_root, resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
 from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
-from ouroboros.helper_receipt import build as build_receipt, render as render_receipt, start_facts
+from ouroboros.helper_receipt import NO_RECORD, build as build_receipt, render as render_receipt, start_facts
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -693,7 +693,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, inputs.lineage))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, inputs.lineage or (NO_RECORD if recovering else None)))
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
@@ -725,7 +725,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
                                "never applied (integrate_delegated_patch refuses)" if authority.investigation
                                else "private snapshot (execution_root) of authority_target_root: only a diff captured at "
                                "terminal can land there, through integrate_delegated_patch") + (
-                               ", and the host's instructions forbid commits (a moved HEAD is disclosed at capture)")
+                               ", and the host's instructions forbid commits")
     if input_files is not None:
         facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
             1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))

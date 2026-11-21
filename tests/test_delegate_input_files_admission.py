@@ -485,6 +485,14 @@ def test_frozen_range_reaches_the_reader_after_refs_move(chain, monkeypatch, tmp
         recovered = pathlib.Path(paths["range.patch"]).read_bytes()
     assert manifest["commits"] == commits and manifest["changes"] == [{"path": literal, "status": "M"}]
     assert recovered == expected and manifest["patch"]["sha256"] == hashlib.sha256(expected).hexdigest()
+    # c50-5: a retained range.json that no longer matches its recorded digest gives no count: unknown, never 0.
+    from ouroboros.helper_receipt import inputs_text
+
+    retained = next(row for row in event["prepared_input_files"] if row["path"] == "range.json")
+    assert "1 changed file" in inputs_text(event["prepared_input_files"])
+    original = pathlib.Path(retained["retained"]).read_bytes()
+    pathlib.Path(retained["retained"]).write_bytes(original.split(b"\n", 1)[0] + b"\n")
+    assert "changed files unknown" in inputs_text(event["prepared_input_files"])
 
 
 def test_historic_entry_with_static_user_files_root_uses_normal_dispatch(chain):  # noqa: F811

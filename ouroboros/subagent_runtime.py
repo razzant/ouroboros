@@ -1318,8 +1318,9 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         except InputSelectionError as exc:
             from ouroboros.helper_receipt import build, render
 
-            raise SubagentSelectionError(exc.code, exc.detail, {"input_files": exc.results, "receipt": render(
-                build({"refused": exc.results}))}) from exc
+            receipt = render(build({"refused": exc.results}))  # "" when the refusal's own cause is the whole answer
+            raise SubagentSelectionError(exc.code, exc.detail, {"input_files": exc.results,
+                                                                **({"receipt": receipt} if receipt else {})}) from exc
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
