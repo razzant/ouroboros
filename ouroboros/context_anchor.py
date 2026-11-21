@@ -155,10 +155,12 @@ def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int,
                          candidate: Any = None) -> None:
     """Remember the smallest input estimate ``plan``'s model refused by size in this task.
 
-    ``measured`` (the estimate is anchored on an accepted request) also bounds the refusing account's
-    window when the provider stated no limit; a cold estimate stays task-local. ``candidate``, the refused
-    request, says how that size was known: a local instance's exact count (its ``input_tokens`` with its
-    ``context_window_tokens``) is stored as such, any other as an anchored estimate (``WindowLimit.basis``)."""
+    ``measured`` (the estimate is anchored on an accepted request, or calibrated by a fresh
+    exact-route/model density witness — ``fresh_route_usage``/``fresh_model_usage``) also bounds
+    the refusing account's window when the provider stated no limit; a cold estimate stays
+    task-local. ``candidate``, the refused request, says how that size was known: a local
+    instance's exact count (its ``input_tokens`` with its ``context_window_tokens``) is stored
+    as such, any other as an anchored estimate (``WindowLimit.basis``)."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
     from ouroboros.context_window import record_refusal
