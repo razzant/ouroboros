@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import pathlib
-import subprocess
+from ouroboros import work_domain
 
 from ouroboros.runtime_mode_policy import (
     mode_has_unrestricted_agency,
@@ -221,18 +221,18 @@ def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
     """Worktree tripwire for light-mode shell writes, not rollback machinery."""
     from ouroboros.git_observation import host_git_env
     try:
-        repo = pathlib.Path(repo_dir)
-        status = subprocess.run(
+        repo = work_domain.settle(repo_dir)
+        status = work_domain.run(
             ["git", "status", "--porcelain=v1", "--untracked-files=all"],
             cwd=str(repo), capture_output=True, text=True, timeout=5, env=host_git_env(),
         )
         if status.returncode != 0:
             return None
-        unstaged = subprocess.run(
+        unstaged = work_domain.run(
             ["git", "diff", "--binary", "--no-ext-diff"],
             cwd=str(repo), capture_output=True, text=True, timeout=10, env=host_git_env(),
         )
-        staged = subprocess.run(
+        staged = work_domain.run(
             ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
             cwd=str(repo), capture_output=True, text=True, timeout=10, env=host_git_env(),
         )
@@ -243,10 +243,10 @@ def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
         digest.update((staged.stdout if staged.returncode == 0 else "").encode("utf-8", errors="replace"))
         for rel in paths:
             try:
-                target = (repo / _registry().safe_relpath(rel)).resolve(strict=False)
-                target.relative_to(repo.resolve(strict=False))
-                if target.is_file() and rel in (status.stdout or ""):
-                    stat = target.stat()
+                target = work_domain.settle(repo / _registry().safe_relpath(rel))
+                target.relative_to(repo)
+                if work_domain.is_file(target) and rel in (status.stdout or ""):
+                    stat = work_domain.lstat(target)
                     digest.update(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}".encode("utf-8"))
             except Exception:
                 continue
@@ -274,12 +274,12 @@ def _format_light_repo_write_note(before: Dict[str, Any], after: Dict[str, Any],
 
 def _git_ref_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, str]]:
     try:
-        repo = pathlib.Path(repo_dir)
-        head = subprocess.run(
+        repo = work_domain.settle(repo_dir)
+        head = work_domain.run(
             ["git", "rev-parse", "HEAD"],
             cwd=str(repo), capture_output=True, text=True, timeout=5,
         )
-        refs = subprocess.run(
+        refs = work_domain.run(
             ["git", "show-ref", "--head", "--dereference"],
             cwd=str(repo), capture_output=True, text=True, timeout=5,
         )

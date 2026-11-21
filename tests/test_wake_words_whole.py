@@ -228,3 +228,30 @@ def test_an_overflow_delivers_the_bare_pointer_while_a_measured_shortfall_keeps_
     ctx, _ = _ctx(tmp_path, window=0, status="failed", wake={**WAKE, "projection_text": inline, "pointer_text": pointer})
     assert _project_wake_input(ctx) is False and ctx.messages[1]["content"] == FULL
     assert _project_wake_input(ctx, overflowed=True) is True and ctx.messages[1]["content"] == pointer
+
+
+def test_a_heard_arrival_says_why_it_woke_nothing_and_a_change_reads_as_one(tmp_path, place):
+    import time
+    from dataclasses import replace
+    from ouroboros.place_intake import settle_heard
+    from ouroboros.presence_admission import admit_presence_turn
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import PresenceTurnEvent, capture_presence_event
+
+    admission = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill="bridge", provider="chat",
+                                    account_id="qa", conversation_id="design")
+    change = PresenceTurnEvent("ev-change", "chat", "qa", "design", "", conversation_key("chat", "qa", "design", ""),
+                               {"attribution": "unknown"}, {}, {"non_text": [{"kind": "state_change",
+                                                                              "description": "Merged by someone unnamed"}]},
+                               "", facts=("any_message",))
+    settle_heard(tmp_path, capture_presence_event(admission, change, drive_root=tmp_path), change, "change_actor_unknown")
+    words = replace(change, source_event_id="ev-words", actor={"platform_actor_id": "qa-author", "display_name": "qa-author"},
+                    message={}, text="Plain new words")
+    capture_presence_event(admission, words, drive_root=tmp_path)  # undecided yet: nothing is said for it
+    observation = wake.observe_wake(tmp_path, boundary=None, since=0.0, now=time.time(), reason="heartbeat")
+    change_line, words_line = [line for kind, _offset, line in observation.events if kind == "correspondent_message"]
+    assert "(heard: change_actor_unknown): [" in change_line
+    assert 'Content without words, state_change: "Merged by someone unnamed".' in change_line
+    assert "heard" not in words_line and words_line.endswith("Plain new words")
+    stored = [json.loads(line) for line in observation.source_bytes().decode("utf-8").splitlines()[1:]]
+    assert change_line in [row["line"] for row in stored], "the stored source (the pointer form's reader) says it too"

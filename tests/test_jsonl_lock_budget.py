@@ -86,9 +86,10 @@ def test_an_append_lands_exact_bytes_on_every_platform(tmp_path, monkeypatch, fa
     monkeypatch.setattr(pathlib.Path, "open", spy_path_open)
     monkeypatch.setattr(utils.time, "sleep", lambda _seconds: None)
     path = tmp_path / "tools.jsonl"
-    assert append_jsonl(path, {"event": "probe", "text": "a\nb"})
+    row = {"event": "probe", "text": "a\nb"}
+    assert append_jsonl(path, row)
     monkeypatch.undo()
-    assert path.read_bytes() == b'{"event": "probe", "text": "a\\nb"}\n'
+    assert path.read_bytes() == (utils.machine_json(row) + "\n").encode()
     appends = [flags for flags in flags_seen if flags & _os.O_APPEND]
     assert appends and all(flags & fake_o_binary for flags in appends)
     assert all("b" in mode for mode in modes) and any(mode.startswith("a") for mode in modes) == fallback

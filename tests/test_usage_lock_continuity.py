@@ -588,6 +588,9 @@ def test_real_loop_round_two_wait_keeps_tool_and_live_leaf(root, short_acquisiti
     write_task_result(root, "t-wait", "running", root_task_id="t-wait")
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx.task_id = "t-wait"
+    # The finish door's one notice about the still-open leaf has its own home (test_nanny_finalization_nudge.py):
+    # silenced here, so the two scripted rounds stay the accounting wait's.
+    monkeypatch.setattr("ouroboros.loop_nudges._claim_pre_delivery_notice", lambda *_a, **_k: "")
     leaf = custody.RunCustody(run_id="accounting-live-leaf", task_id="t-wait", route_id="stub", model="stub")
     assert custody.record_started(root, leaf)
     releases, tools, sends = [], [], []
@@ -635,6 +638,41 @@ def test_real_loop_round_two_wait_keeps_tool_and_live_leaf(root, short_acquisiti
     assert [row["state"] for row in rows(root)] == ["settled"] * 2
 
 
+@pytest.mark.parametrize("cause, settled", [("accounting_wait_expired", ("host_error", None)),
+                                            ("owner_pause_authority_unreadable", ("host_error", None)),
+                                            ("owner_pause", ("interrupted", "owner_pause"))])
+def test_a_tool_whose_own_send_meets_a_host_failure_journals_the_hosts_failure(root, short_acquisitions, monkeypatch,
+                                                                               cause, settled):
+    """The real producers of two words for the host's own failure, a direct turn's accounting wait past its window and
+    an owner-Pause fence the send cannot read, end a tool's own model send through the interruption type, under the
+    task's own usage scope as the agent's body binds it (``model_wait.dispatch_control_reason`` reads the fence there).
+    The tool's journal row is the host's failure, never an interruption the feed would show as no error (Carbon on
+    #3211); the exception keeps its word for the loop's technical rails. A closed owner Pause stays an interruption."""
+    from ouroboros import config, owner_pause
+    from ouroboros.tool_call_log import logical_calls
+    from tests._tool_call_log_shared import _Registry, _call, _rows
+
+    monkeypatch.setattr(config, "get_task_idle_timeout_sec", lambda: .08)
+    if cause == "owner_pause_authority_unreadable":
+        monkeypatch.setattr(owner_pause, "read_fence", lambda *_a, **_k: (_ for _ in ()).throw(OSError("fence unreadable")))
+    elif cause == "owner_pause":
+        owner_pause.install_fence(root, "dominant", request_id="press")  # the owner's real Pause of the tree
+
+    def tool(_name, _args):  # a model-backed tool: its own send goes through the real accounting
+        ua.execute_physical_attempt(request(root), lambda: pytest.fail("sent"))
+
+    scope = ua.UsageScope(task_id="child", root_task_id="dominant", drive_root=root)
+    with owner(root, task={"_is_direct_chat": True}), ua.usage_scope(scope), (
+            held_lock(root) if cause == "accounting_wait_expired" else contextlib.nullcontext()):
+        with pytest.raises(PhysicalDispatchInterrupted) as error:
+            _call(_Registry(root, tool), root, name="web_search", args={"query": "q"})
+    assert error.value.control_reason == cause
+    assert all(row["state"] == "released" for row in rows(root))  # nothing was sent; a reserved claim went back
+    [call] = logical_calls(_rows(root / "child" / "logs" / "tools.jsonl"))
+    assert (call["settled"]["status"], call["settled"].get("control_reason")) == settled
+    assert call["settled"]["result_preview"].endswith(cause)
+
+
 def test_async_unowned_maintenance_wait_is_bounded(root, short_acquisitions, monkeypatch):
     from ouroboros import _usage_wait as wait
     monkeypatch.setattr(wait, "USAGE_LOCK_TIMEOUT_SEC", .06)
@@ -664,8 +702,11 @@ def test_interactive_expiry_rejoins_real_loop_no_call_terminal(root, short_acqui
             propagate_model_control(exc)  # real call_llm_with_retry's typed boundary
             raise
     monkeypatch.setattr(loop, "call_llm_with_retry", call)
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    kwargs = _loop_kwargs(root, registry, [])
+    ua.usage_projection(root, root_task_id="dominant")
     with owner(root, task={"_is_direct_chat": True}) as events, held_lock(root):
-        text, usage, trace = loop.run_llm_loop(**_loop_kwargs(root, ToolRegistry(repo_dir=root, drive_root=root), []))
+        text, usage, trace = loop.run_llm_loop(**kwargs)
     assert calls == [1] and not rows(root)
     assert usage["reason_code"] == "accounting_wait_expired"
     assert usage["execution_status"] == "infra_failed"

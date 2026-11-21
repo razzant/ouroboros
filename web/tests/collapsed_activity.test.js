@@ -6,7 +6,7 @@ import {
     boundActivityPreview,
     clearStickyCardState,
     projectCollapsedActivity,
-} from '../modules/chat.js';
+} from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { bindContentButton, plainActivityText, selectionInside, subagentIdentityTitle, subagentTwin } from '../modules/chat_activity.js';
 

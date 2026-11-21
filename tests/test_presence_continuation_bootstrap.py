@@ -267,6 +267,7 @@ def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tm
         row = load_task_result(h.data, initial.task_id)
         # The delivery bound the author's own settled result review: the turn's review axis is eligible.
         assert row["status"] == "completed" and row["review_status"]["eligibility"] == "eligible"
+        assert row["review_status"]["mode"] == review_mode
     finally:
         h.release.set()
         if h.entered.is_set():

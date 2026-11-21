@@ -30,8 +30,15 @@ SKILLS = ('live_conversation', 'gemini_live', 'openai_realtime', 'grok_realtime'
 PROVIDERS = {'gemini': 'gemini_live:gemini', 'openai': 'openai_realtime:openai', 'grok': 'grok_realtime:grok'}
 
 
-def install(root):
+def install(root, monkeypatch):
+    from ouroboros import config
+
     settings = {key: 'synthetic-unused-key' for key in ('OPENAI_API_KEY', 'GEMINI_API_KEY', 'XAI_API_KEY')}
+    # Gemini's and xAI's keys are custom secrets: saved in the owner's document, as Settings saves them, they are
+    # requested and their grants recorded (OpenAI's is a core key, and a model credential the stack's routes would see).
+    document = root.parent / 'owner-settings.json'
+    document.write_text(json.dumps({key: settings[key] for key in ('GEMINI_API_KEY', 'XAI_API_KEY')}), encoding='utf-8')
+    monkeypatch.setattr(config, 'SETTINGS_PATH', document)
     for name in SKILLS:
         result = install_builtin_skill(name, drive_root=root, seed_dir=ROOT / 'skills', turn_on_when_ready=True)
         assert result['ok'], result
@@ -147,7 +154,7 @@ async def stack(state, monkeypatch, engine, *, thinking=False, languages=False):
     monkeypatch.setenv('OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS', 'true')
     run = Stack(state, engine)
     run.provider.thinking = thinking
-    feature = install(run.root)
+    feature = install(run.root, monkeypatch)
     config = LiveConfig(enabled=True, provider=PROVIDERS[engine],
         model='gemini-3.8-live-extended-thinking' if thinking else '', search=False, interruptions=True,
         instructions='Synthetic owner call instruction, kept verbatim.')

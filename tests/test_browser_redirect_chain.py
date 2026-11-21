@@ -1,6 +1,8 @@
-"""Every redirect hop meets the same target decision before any page result."""
+"""Every navigation target meets the browser's decision before any page result: each redirect hop the same target
+policy, and this installation's own UI page opens as an observer view (DESIGN "Unread")."""
 from __future__ import annotations
 
+import ipaddress
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -8,10 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import browser_policy, config, server_process
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.server_entrypoint import bound_service_socket
 from ouroboros.tools import browser
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._browser_fakes import close_generations
 
 
 class FakeRequest:
@@ -33,17 +37,23 @@ class FakePage:
     def set_default_timeout(self, ms):
         pass
 
-    def goto(self, url, **_kwargs):
+    async def goto(self, url, **_kwargs):
         self.url = self.response.request.url
         return self.response
 
-    def inner_text(self, selector):
+    async def inner_text(self, selector):
         self.calls.append("inner_text")
         return "FINAL_ALLOWED_CONTENT"
 
-    def screenshot(self, **_kwargs):
+    async def screenshot(self, **_kwargs):
         self.calls.append("screenshot")
         return b"png"
+
+    async def wait_for_function(self, *_args, **_kwargs):
+        return None
+
+    async def evaluate(self, *_args, **_kwargs):
+        return None
 
 
 @pytest.fixture
@@ -54,7 +64,8 @@ def readonly_child(tmp_path, monkeypatch):
                       task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False))
     tools = ToolRegistry(tmp_path, ctx.drive_root)
     tools.set_context(ctx)
-    return ctx, tools
+    yield ctx, tools
+    close_generations(ctx.browser_state)
 
 
 def test_allowed_blocked_allowed_chain_withholds_content(readonly_child, monkeypatch):
@@ -78,6 +89,111 @@ def test_observed_navigation_chain_keeps_actions_refused_until_a_new_document(re
     assert "origin_not_granted" in refused and "10.9.8.7" in refused and page.calls == []
     ctx.browser_state.navigations = [chain("http://127.0.0.1:3000/final")]
     assert "Screenshot captured" in tools.execute("browser_action", {"action": "screenshot"})
+
+
+# The observer view: ``browse_page`` adds ``observer=1`` only when the UI document (``/``) is proven this installation's
+# main UI by ``browser_policy.runtime_service_kind`` (the live binding and process facts), keeping the address's
+# spelling; the page then moves no read cursor (``web/modules/read_ahead.js``). An API or file path, another service, an
+# unrelated port (a candidate UI included), an unknown or unreadable identity and any other site open as given.
+MAIN, HOST, OTHER = 9471, 9472, 9474  # this installation's UI, its Host Service, an unrelated application
+
+
+def _installation(tmp_path, monkeypatch, host="127.0.0.1"):
+    """A data root whose main UI (bound on ``host``) and Host Service are this live process, as a server records them;
+    ``ouroboros.lan`` resolves to loopback and ``unresolvable.lan`` to nothing, without a resolver."""
+    root = tmp_path / "data"
+    root.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    server_process.record_service_binding(root, "main", host, MAIN, pid=os.getpid())
+    server_process.record_service_binding(root, "host_service", "127.0.0.1", HOST, pid=os.getpid())
+    resolve = browser_policy._resolved_addresses
+
+    def names(name):
+        if name == "ouroboros.lan":
+            return {ipaddress.ip_address("127.0.0.1")}
+        if name == "unresolvable.lan":
+            raise OSError("no address for unresolvable.lan")
+        return resolve(name)
+
+    monkeypatch.setattr(browser_policy, "_resolved_addresses", names)
+    return ToolContext(repo_dir=tmp_path, drive_root=root)
+
+
+@pytest.mark.parametrize("url, expected", [
+    (f"http://127.0.0.1:{MAIN}", f"http://127.0.0.1:{MAIN}?observer=1"),
+    (f"http://127.0.0.1:{MAIN}/", f"http://127.0.0.1:{MAIN}/?observer=1"),
+    (f"http://127.0.0.1:{MAIN}/?a=b%20c&flag#/projects/p1",
+     f"http://127.0.0.1:{MAIN}/?a=b%20c&flag&observer=1#/projects/p1"),
+    (f"http://localhost:{MAIN}/#/settings", f"http://localhost:{MAIN}/?observer=1#/settings"),
+    (f"http://ouroboros.lan:{MAIN}/", f"http://ouroboros.lan:{MAIN}/?observer=1"),  # a name the proof resolves
+    (f"http://127.0.0.1:{MAIN}/?observer=1", f"http://127.0.0.1:{MAIN}/?observer=1"),  # already asked
+    # The builtin's own visits stay observers: an exit in the address it was given does not take the mode away.
+    (f"http://127.0.0.1:{MAIN}/?observer=0", f"http://127.0.0.1:{MAIN}/?observer=0&observer=1"),
+])
+def test_the_proven_ui_page_opens_as_an_observer_with_its_spelling_kept(tmp_path, monkeypatch, url, expected):
+    ctx = _installation(tmp_path, monkeypatch)
+    assert browser_policy.runtime_service_kind(url, ctx) == "main"
+    assert browser._observer_url(url, ctx) == expected
+
+
+@pytest.mark.parametrize("url", [
+    f"http://127.0.0.1:{MAIN}/api/state",  # the UI's own API, files and assets are no view
+    f"http://127.0.0.1:{MAIN}/api/files/download?path=notes.md",
+    f"http://127.0.0.1:{MAIN}/static/app.js",
+    f"http://127.0.0.1:{HOST}/",  # the Host Service, a proven service but not the UI
+    f"http://127.0.0.1:{OTHER}/",  # an unrelated application, or a candidate UI on another port
+    f"http://unresolvable.lan:{MAIN}/",  # the recorded port behind a name the proof cannot resolve: unknown
+    "http://192.0.2.10:9474/",
+    "file:///tmp/index.html",
+])
+def test_anything_but_the_proven_ui_page_opens_as_given(tmp_path, monkeypatch, url):
+    ctx = _installation(tmp_path, monkeypatch)
+    assert browser._observer_url(url, ctx) == url
+
+
+def test_a_ui_bound_to_every_interface_is_proven_by_a_local_name(tmp_path, monkeypatch):
+    ctx = _installation(tmp_path, monkeypatch, host="0.0.0.0")
+    assert browser._observer_url(f"http://ouroboros.lan:{MAIN}/", ctx) == f"http://ouroboros.lan:{MAIN}/?observer=1"
+
+
+@pytest.mark.parametrize("kind", ["local_model", "host_service", browser_policy.SERVICE_IDENTITY_UNKNOWN, "", "boom"])
+def test_only_a_main_proof_asks_for_the_observer_mode(tmp_path, monkeypatch, kind):
+    ctx = _installation(tmp_path, monkeypatch)
+
+    def identity(_url, _ctx):
+        if kind == "boom":
+            raise RuntimeError("bindings unreadable")
+        return kind
+
+    monkeypatch.setattr(browser_policy, "runtime_service_kind", identity)
+    assert browser._observer_url(f"http://127.0.0.1:{MAIN}/", ctx) == f"http://127.0.0.1:{MAIN}/"
+
+
+class _RecordingPage(FakePage):
+    def __init__(self):
+        super().__init__(None)
+        self.asked = []
+
+    async def goto(self, url, **_kwargs):
+        self.asked.append(url)
+        self.response = chain(url)
+        self.url = url
+        return self.response
+
+
+def test_browse_page_navigates_to_the_observer_address_only_for_the_ui(tmp_path, monkeypatch):
+    ctx = _installation(tmp_path, monkeypatch)
+    tools = ToolRegistry(tmp_path, ctx.drive_root)
+    tools.set_context(ctx)
+    page = _RecordingPage()
+    monkeypatch.setattr(browser, "_ensure_browser", lambda ctx, *_a, **_k: (page, ctx.browser_state))
+    try:
+        results = [tools.execute("browse_page", {"url": url}) for url in (
+            f"http://127.0.0.1:{MAIN}/#/projects", f"http://127.0.0.1:{OTHER}/start")]
+    finally:
+        close_generations(ctx.browser_state)
+    assert page.asked == [f"http://127.0.0.1:{MAIN}/?observer=1#/projects", f"http://127.0.0.1:{OTHER}/start"], results
+    assert all("FINAL_ALLOWED_CONTENT" in result for result in results), results
 
 
 @pytest.mark.browser
@@ -144,7 +260,7 @@ def test_real_redirect_through_a_control_endpoint_withholds_content(tmp_path, en
                 clean = tools.execute("browse_page", {"url": origins["app"] + "/final", "engine": engine})
                 assert "FINAL_ALLOWED_CONTENT" in clean, clean
                 assert "Screenshot captured" in tools.execute("browser_action", {"action": "screenshot"})
-                # Real tasks own separate worker threads; one Playwright Sync API loop per thread.
+                # The child's session closes before the root opens its own.
                 browser.cleanup_browser(ctx)
                 assert "FINAL_ALLOWED_CONTENT" in browser._browse_page(
                     root_ctx, origins["app"] + "/start", engine=engine)

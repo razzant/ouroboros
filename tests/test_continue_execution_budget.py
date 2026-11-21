@@ -198,7 +198,7 @@ def test_an_owner_restart_cancel_that_wins_the_race_closes_the_attempt(pool):
     _admit_root(pool)
     _start(pool, "budget-1", executed=400)
     proc = pool.workers.WORKERS[7].proc = _LiveProc()
-    pool.mp.setattr(pool.workers, "respawn_worker", lambda wid: None, raising=False)
+    pool.mp.setattr(pool.workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     pool.mp.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {}, raising=False)
     pool.mp.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {}, raising=False)
     pool.mp.setattr(pool.queue, "_emit_cancel_task_done", lambda *_a, **_k: None)

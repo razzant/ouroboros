@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
 import logging
 import pathlib
 import re
 from typing import Any, List, Optional
 
 from ouroboros.context_budget import LARGE_CONTEXT_SECTION_CHARS
-from ouroboros.context_health import safe_read
 from ouroboros.section_floor import HostSection
 from ouroboros.context_timing import timed_section
 
@@ -22,13 +22,42 @@ log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
+def revision_line(noun: str, shown: str, revision: str) -> str:
+    """The line after a resident text naming its revision, so a write needs no read for its token: ``revision`` is the
+    sha256 of the bytes the text shown was decoded from (one capture), never of a second read."""
+    return ("" if shown.endswith("\n") else "\n") + f"\nRevision of this {noun}: {revision}.\n"
+
+
 # An unauthored common orientation is a VISIBLE GAP, never silence. Static text: this
 # section is cached with the semi-stable block, so it carries no timestamp.
 _SHARED_UNDERSTANDING_GAP = (
     "## Shared understanding\n\nNot authored yet. "
-    "knowledge_write(topic='overview', scope='global', content=...) creates it; "
+    "knowledge_write(topic='overview', scope='global', mode='overwrite', content=...) creates it; "
     "it is then loaded here in every context."
 )
+
+
+def _shared_understanding(address):
+    from ouroboros.knowledge import OVERVIEW_TOPIC, overview_residency, read_knowledge_note
+
+    try:
+        overview = read_knowledge_note(address)
+        overview_text = overview.source.text_at(overview.source.body_span) if overview.source else overview.text
+        if overview_text.strip():
+            reader = f"knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global')"
+            heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
+            # Its revision rides after the body, so a write needs no read for its token. The revision covers
+            # the whole note, its summary too: a summary-only edit moves this last line and no byte before it.
+            revision = revision_line("overview", overview_text, overview.revision)
+            # The whole authored orientation rides whole in every request: the window never
+            # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
+            return HostSection("shared_understanding", heading + overview_text + revision, reader=reader), overview
+        return _SHARED_UNDERSTANDING_GAP, overview  # present but empty is still unauthored
+    except FileNotFoundError:
+        return _SHARED_UNDERSTANDING_GAP, None
+    except (OSError, UnicodeDecodeError) as exc:
+        return (f"Shared understanding source unavailable: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global'). "
+                f"{type(exc).__name__}.", None)
 
 
 @timed_section("knowledge")
@@ -37,36 +66,23 @@ def build_knowledge_sections(
     *,
     project_id: str = "",
     warn_large: bool = False,
+    global_capture: Optional[dict] = None,
+    held_capture: Optional[dict] = None,
 ) -> List[str]:
-    sections: List[str] = []
-    # One mind keeps its authored common orientation across rooms. The generated
-    # inventory is navigation, not a substitute for that understanding; a
-    # project's shelf adds focus without hiding the common corpus.
-    from ouroboros.knowledge import (OVERVIEW_TOPIC,
-                                     read_knowledge_note, resolve_knowledge_address)
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     global_address = resolve_knowledge_address(env.drive_path("memory").parent, OVERVIEW_TOPIC, "global")
-    overview = None
-    try:
-        overview = read_knowledge_note(global_address)
-        overview_text = overview.source.text_at(overview.source.body_span) if overview.source else overview.text
-        if overview_text.strip():
-            reader = f"knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global')"
-            from ouroboros.knowledge import overview_residency
-
-            heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
-            # The whole authored orientation rides whole in every request: the window never
-            # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
-            sections.append(HostSection("shared_understanding", heading + overview_text, reader=reader))
-        else:
-            sections.append(_SHARED_UNDERSTANDING_GAP)  # present but empty is still unauthored
-    except FileNotFoundError:
-        sections.append(_SHARED_UNDERSTANDING_GAP)
-    except (OSError, UnicodeDecodeError) as exc:
-        sections.append(f"Shared understanding source unavailable: knowledge_read(topic='{OVERVIEW_TOPIC}', scope='global'). {type(exc).__name__}.")
+    captured = held_capture or {}
+    companions = captured.get("companions", {})
+    if saved := companions.get("shared_understanding"):
+        section, overview = HostSection(**saved), None
+    else:
+        section, overview = _shared_understanding(global_address)
+    held_rows = {row["topic"]: row for entry in captured.get("entries", ()) if (row := entry.get("index_row"))}
+    sections = [section]
     sections.extend(knowledge_navigation_sections(global_address.canonical_root, pid, overview=overview,
-                                                  warn_large=warn_large))
+                                                  warn_large=warn_large, global_capture=global_capture, held_rows=held_rows))
     if pid:
         # Bounded per-project journal tail + workpad (multi-project, v6.32.0):
         # the project's durable progress memory rides along with its knowledge.
@@ -80,7 +96,9 @@ def build_knowledge_sections(
                     f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
                     "(journal_read shows the full history; journal_write appends.)"
                 )
-            workpad = safe_read(project_workpad_path(pid))
+            page = project_workpad_path(pid)
+            raw = page.read_bytes() if page.is_file() else b""  # one capture: the page shown and its revision
+            workpad = raw.decode("utf-8")
             if workpad.strip():
                 # Cognitive artifact: never silently prefix-slice (BIBLE P1 — that
                 # is partial amnesia). The project's own working memory rides in
@@ -88,20 +106,41 @@ def build_knowledge_sections(
                 # consolidate, not a reason to amputate context.
                 if len(workpad) > _LARGE_CONTEXT_SECTION_CHARS:
                     log.warning("context: project workpad (%s) is large (%d chars)", pid, len(workpad))
-                sections.append(f"## Project workpad ({pid})\n\n{workpad}")
+                sections.append(f"## Project workpad ({pid})\n\n{workpad}"
+                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()))
         except Exception:
             log.debug("project journal/workpad context injection failed", exc_info=True)
     return sections
 
 
+def _navigation_views(address, overview, *, whole: bool, global_capture: Optional[dict], held_rows=None):
+    from ouroboros.knowledge import inventory_knowledge, knowledge_index_views
+
+    if global_capture is None or address.scope != "global":
+        return knowledge_index_views(address, overview=overview, whole=whole)
+    rows = inventory_knowledge(address, navigation=True, known_note=overview, bodies=global_capture.get("bodies"),
+                               body_claims=global_capture.get("names", ()))
+    if held_rows:
+        # Keep the referenced rows alongside the current addresses, in shelf order.
+        current = {row["topic"]: row for row in rows}
+        current.update(held_rows)
+        rows = tuple(current[topic] for topic in sorted(current, key=lambda topic: f"{topic}.md".split("/")))
+    global_capture.update(inventory=rows, overview=overview)
+    forms = knowledge_index_views(address, overview=overview, whole=whole, inventory=rows)
+    global_capture.update(whole=whole, outline=True)
+    return forms
+
+
+@timed_section("knowledge.navigation")
 def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: Any = None,
-                                  warn_large: bool = False) -> List[str]:
+                                  warn_large: bool = False, global_capture: Optional[dict] = None,
+                                  held_rows: Optional[dict] = None) -> List[str]:
     """One knowledge navigation rendering for integrating contexts and first delegations.
 
     Captured full/outline forms retain the same source addresses and canonical root.
     ``overview`` is the global note its caller already read, if any.
     """
-    from ouroboros.knowledge import OVERVIEW_TOPIC, knowledge_index_views, resolve_knowledge_address
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     global_address = resolve_knowledge_address(root, OVERVIEW_TOPIC, "global")
@@ -118,7 +157,7 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
         # when a previous writer could not publish its generated index.
         reader = f"knowledge_list(scope={address.scope!r})"
         try:
-            text, outline = knowledge_index_views(address, overview=overview)
+            text, outline = _navigation_views(address, overview, whole=True, global_capture=global_capture, held_rows=held_rows)
         except (OSError, UnicodeDecodeError) as exc:
             text = outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
         if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:
@@ -130,11 +169,12 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
     return sections
 
 
-def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
+@timed_section("knowledge_outline")
+def helper_navigation_sections(root: Any, project_id: str = "", *, global_capture: Optional[dict] = None) -> List[str]:
     """A helper's knowledge at its start: the global shelf's outline and its room's (every active note by address and
     title, people's summaries kept: ``knowledge.render_knowledge_outline``), each under its own heading; the whole
     index arrives with its first accepted delegation (``delegation_knowledge_index``)."""
-    from ouroboros.knowledge import OVERVIEW_TOPIC, knowledge_index_views, resolve_knowledge_address
+    from ouroboros.knowledge import OVERVIEW_TOPIC, resolve_knowledge_address
 
     pid = str(project_id or "").strip()
     shelves = [("knowledge_outline", "## Knowledge outline", resolve_knowledge_address(root, OVERVIEW_TOPIC, "global"))] + (
@@ -144,7 +184,7 @@ def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
     for section_id, header, address in shelves:
         reader = f"knowledge_list(scope={address.scope!r})"
         try:
-            outline = knowledge_index_views(address)[1]
+            outline = _navigation_views(address, None, whole=False, global_capture=global_capture)[1]
         except (OSError, UnicodeDecodeError) as exc:
             outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
         sections.append(HostSection(section_id, f"{header}\n\n{outline}", reader=reader))
@@ -223,10 +263,10 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
     ]
     if any(isinstance(skill, dict) and skill.get('enabled') and skill.get('executable_review')
            and skill.get('review_gate', {}).get('author_accepted') for skill in summary.get('skills') or []):
-        lines.append("author_accepted=true: Current payload accepted by author under Advisory; "
+        lines.append("author_accepted=true: Current payload accepted by its author; "
                      "reviewer evidence remains at its original hash.")
     operative = list(lines)
-    count = 0
+    count, listed = 0, False
     for skill in summary.get("skills") or []:
         if not isinstance(skill, dict) or not skill.get("enabled") or not skill.get("executable_review"):
             continue
@@ -277,11 +317,10 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
             if token_effect:
                 lines.append(f"  Token effect: {token_effect}")
         if surfaces:
-            shown, more = surfaces[:8], len(surfaces) - min(len(surfaces), 8)
-            # Eight names fit the legend; a silent cut read as the whole set (the 27.10 call enabled
-            # 7 of 24 desktop tools and told the owner the rest did not exist).
-            lines.append(f"  Tools: {', '.join(shown)}" + (
-                f"; and {more} more: list_available_tools(namespace={name!r}) names them all" if more else ""))
+            # Every name, sorted so registration order never moves these cached bytes: a cut list read as the
+            # whole set (the 27.10 call enabled 7 of 24 desktop tools and told the owner the rest did not exist).
+            lines.append(f"  Tools: {', '.join(sorted(surfaces))}")
+            listed = True
         elif skill.get("runnable_via_skill_exec"):
             lines.append("  Tools: skill_exec")
         if skill.get("type") == "extension" and not skill.get("live_loaded"):
@@ -290,7 +329,44 @@ def _build_installed_skills_section(env: Any, *, skills: Optional[List[Any]] = N
         count += 1
     if count == 0:
         return ""
+    if listed:  # a skill_exec line names no registered tool, and its skill's name loads nothing
+        lines.insert(1, 'A "Tools" line that lists a skill\'s registered tools names all of them; '
+                        'enable_tools("<skill name>") loads them in one call where their schemas are not in the '
+                        "request yet.")
+        operative.insert(1, 'enable_tools("<skill name>") loads all tools a skill registers in one call.')
     return HostSection("installed_skills", "\n".join(lines), "\n".join(operative), "list_skills")
+
+
+def _places_imported(root: Any) -> bool:
+    """Whether the place store exists with its legacy import done (a plain read, so it never runs the import)."""
+    from ouroboros.utils import read_json_dict
+
+    document = read_json_dict(pathlib.Path(root) / "state" / "places.json") or {}
+    return bool((document.get("migration") or {}).get("presence_bindings_v1"))
+
+
+def _switch_fact(root: Any, observed: Any, authority: Any) -> str:
+    """The switch as a sentence while my places only hear (owner 15.11, 5A: on 7 Nov I read the bare key and told my
+    human the places work separately); nothing while it is on, unknown, or no place hears. The switch and the Panic
+    flag are read first, from the state this section already holds; the place store only when the fact can be said."""
+    from ouroboros.consciousness import STOP_SOURCE_KEY, panic_blocks_wake
+    from ouroboros.consciousness_view import mind_fact
+    from supervisor.state import control_value
+
+    try:
+        known, enabled = control_value(authority, "bg_consciousness_enabled")
+        panic = panic_blocks_wake(root)
+        if not (panic or (known and not enabled)):
+            return ""
+        from ouroboros.places import load_places
+        if not _places_imported(root):
+            return ""  # the legacy import runs on a real place read, never from building context (review r3)
+        source_known, source = control_value(authority, STOP_SOURCE_KEY)  # unconfirmed: who stopped it stays unsaid
+        fact = mind_fact(load_places(root), enabled=bool(enabled) if known else None,
+                         stop_source=str(source or "") if source_known else "", panic=panic)
+    except Exception:
+        return ""
+    return f"\n\n{fact}" if fact else ""
 
 
 @timed_section("drive_state")
@@ -301,11 +377,12 @@ def _drive_state_section(env: Any) -> str:
     authority. P1: disclosed omission — keys NAMED, full file one read away."""
     keys = ("session_id", "current_branch", "current_sha", "evolution_mode_enabled",
             "evolution_owner_stopped", "evolution_cycle", "evolution_consecutive_failures",
-            "last_evolution_task_at", "bg_consciousness_enabled", "post_task_autostop",
+            "last_evolution_task_at", "bg_consciousness_enabled", "bg_consciousness_stop_source", "post_task_autostop",
             "budget_drift_pct", "budget_drift_alert", "last_owner_message_at")
     from supervisor.state import CONTROL_KEYS, RECOVERY_KEY, control_value, read_state
 
-    observed = read_state(env.drive_path("state/state.json").parent.parent)
+    root = env.drive_path("state/state.json").parent.parent
+    observed = read_state(root)
     raw = observed.values
     authority = observed.projection()
     projected = {k: (raw[k] if k not in CONTROL_KEYS or control_value(authority, k)[0]
@@ -318,7 +395,7 @@ def _drive_state_section(env: Any) -> str:
             + ((" Omitted keys: " + ", ".join(omitted) + ". Full raw source: "
                 "read_file(root='runtime_data', path='state/state.json').") if omitted else ""))
     heading = "## Drive state\n\n"
-    values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str)
+    values = json.dumps(projected, ensure_ascii=False, indent=1, sort_keys=True, default=str) + _switch_fact(root, observed, authority)
     operative = (heading + values + f"\n\nState authority: {observed.quality}; {observed.reason}. "
                  + f"Unknown controls: {', '.join(observed.unconfirmed) or 'none'}. "
                  + f"{len(omitted)} other state keys retained in the full source.")
@@ -374,9 +451,27 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
 
 
 # The review-continuity host section (moved from review_state, which keeps its extraction bound).
+def earlier_obligation_lines(state: Any, repo_key: str, limit: Optional[int] = None) -> List[str]:
+    """The open obligations this checkout recorded before obligations retired, until a commit lands in it
+    (``earlier_open_obligations``): one rendering for both Review Continuity views; ``limit`` cuts each reason
+    with the explicit omission notice."""
+    from ouroboros.utils import truncate_review_artifact
+
+    rows = state.earlier_open_obligations(repo_key)
+    if not rows:
+        return []
+    lines = [f"- earlier_open_obligations={len(rows)} (recorded before obligations retired; "
+             "shown until a commit lands in this checkout)"]
+    for row in rows:
+        reason = str(row.get("reason") or "")
+        reason = truncate_review_artifact(reason, limit=limit) if limit is not None else reason
+        lines.append(f"  [{row.get('obligation_id') or '?'}] {row.get('item') or '?'}: {reason.replace(chr(10), ' ')}")
+    return lines
+
+
 def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                             stale_status: tuple[dict, str] = ({}, "")) -> List[str]:
-    """Current debts and uncertainty once, whole; historical executions have a reader.
+    """Current facts and uncertainty once, whole; historical executions have a reader.
     ``stale_status`` is ``review_state.stale_marker_status`` for this checkout."""
     from ouroboros.review_state import make_repo_key
 
@@ -388,25 +483,20 @@ def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                   f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}"]
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
-    debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
-    lines.append(f"- commit_readiness_debt={len(debts)}")
-    for debt in debts:
-        lines += [f"- [{debt.debt_id}] status={debt.status} category={debt.category} source={debt.source}",
-                  f"  {debt.title}: {debt.summary}"]
-        if debt.source_obligation_ids:
-            lines.append(f"  obligation_ids={', '.join(debt.source_obligation_ids)}")
-        lines.extend(f"  evidence={e}" for e in dict.fromkeys(debt.evidence or []) if e != debt.summary)
-    obligations = state.get_open_obligations(repo_key=repo_key)
-    lines.append(f"- open_obligations={len(obligations)}")
-    for ob in obligations:
-        lines += [f"- [{ob.obligation_id}] [{ob.severity}] {ob.item}: {ob.reason}",
-                  f"  Source: {ob.source_attempt_ts} — {ob.source_attempt_msg}"]
-    return lines
+    latest = state.latest_attempt_for(repo_key=repo_key)
+    warnings = [str(w) for w in (getattr(latest, "readiness_warnings", None) or []) if str(w).strip()
+                and getattr(latest, "status", "") != "succeeded"]  # a landed attempt owes none
+    if warnings:
+        lines.append(f"- readiness_warnings={len(warnings)} (latest attempt, {getattr(latest, 'status', '') or '?'})")
+        lines.extend(f"  {warning}" for warning in warnings)
+    return lines + earlier_obligation_lines(state, repo_key)
 
 
 def review_status_host_section(state: Any, repo_dir: pathlib.Path, drive_root: pathlib.Path) -> str:
     from ouroboros.review_state import format_status_section, make_repo_key, stale_marker_status
 
-    return HostSection('review_continuity', format_status_section(state, repo_dir),
-                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, make_repo_key(repo_dir)))
+    repo_key = make_repo_key(repo_dir)
+    return HostSection('review_continuity',
+                       '\n'.join([format_status_section(state, repo_dir), *earlier_obligation_lines(state, repo_key, 120)]),
+                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, repo_key))
                                  + ['Historical review ledger: review_status().']))

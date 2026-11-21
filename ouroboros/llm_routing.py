@@ -15,15 +15,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
 
 from ouroboros.request_wire_recovery import request_wire_scoped
 from ouroboros.model_wait import dispatch_deadline_remaining_sec
-from ouroboros import __version__
-from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS, OPENROUTER_APP_URL
+from ouroboros.opencode_go import is_go_chat_route
+from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS, is_openrouter_endpoint
 from ouroboros.provider_connections import connection_rows, connection_values
 from ouroboros.provider_models import (
     CONNECTIONS_KEY,
@@ -34,6 +33,7 @@ from ouroboros.provider_models import (
     resolve_zai_base_url,
     normalize_anthropic_model_id,
     normalize_model_identity,
+    openai_api_surface,
     parse_claudexor_model,
     parse_model_route,
     resolve_minimax_base_url,
@@ -44,54 +44,6 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Asks OpenRouter to report its upstream attempts, so a router's final status
 # cannot hide the cause an upstream returned (the attribution headers stay their own SSOT).
 OPENROUTER_METADATA_HEADERS = {"X-OpenRouter-Metadata": "enabled"}
-
-
-# OpenCode's Go endpoint asks every client to name itself in User-Agent and to send one
-# stable ``x-opencode-session`` per conversation (https://opencode.ai/docs/console/go/);
-# without the session a chat request is refused (HTTP 400 ``MissingSessionID``,
-# ``openai-compatible@<connection>`` on ``/inference/go/openai/v1``, 2026-11-16). The
-# facts are keyed on that parsed endpoint, never a model name or a connection label.
-OPENCODE_CLIENT_HEADERS = {"User-Agent": f"Ouroboros/{__version__} (+{OPENROUTER_APP_URL})"}
-OPENCODE_SESSION_HEADER = "x-opencode-session"
-OPENCODE_GO_PATH = "/inference/go/openai/v1"
-
-
-def _opencode_go_endpoint(base_url: Any) -> bool:
-    """Exactly the documented Go endpoint (a trailing slash aside), whatever the connection's name."""
-    try:
-        parts = urlsplit(str(base_url or "").strip())
-        exact = (parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment)
-    except ValueError:
-        return False
-    return exact == ("https", "opencode.ai", OPENCODE_GO_PATH, "", "")
-
-
-def provider_session_headers(target: Dict[str, Any], cache_affinity: str = "", *,
-                             one_shot: bool = False) -> Dict[str, str]:
-    """Per-request headers naming the conversation one compatible send belongs to.
-
-    Only the OpenCode Go endpoint takes one. The conversation is the bound task (never
-    its root, which would merge children) and its review slot, plus a caller-declared
-    affinity, under the route's model: every round and retry of one task's tool loop (and
-    a resume that keeps the task id) shares a session while tasks, children, slots and
-    models never do; nothing is derived from prompt content. Taskless reviews retain their
-    slot and caller affinity, not repeating system task IDs. A ``one_shot`` call (the Provider
-    Test) or an unscoped call without that identity gets a fresh session. Credential-free; it is sent
-    per request and rides the physical payload, so pooled clients stay shared.
-    """
-    if target.get("provider") != "openai-compatible" or not _opencode_go_endpoint(target.get("base_url")):
-        return {}
-    from ouroboros.usage_accounting import current_usage_scope
-
-    scope = None if one_shot else current_usage_scope()
-    parts = (("", "") if scope is None else
-             ("" if scope.non_task_operation else str(scope.task_id or ""), str(scope.review_slot_id or "")))
-    affinity = "" if one_shot else str(cache_affinity or "").strip()
-    if not any(parts) and not affinity:
-        return {OPENCODE_SESSION_HEADER: f"ouroboros-{uuid.uuid4().hex}"}
-    model = str(target.get("usage_model") or target.get("resolved_model") or "")
-    digest = hashlib.sha256("\0".join((model, *parts, affinity)).encode("utf-8")).hexdigest()[:32]
-    return {OPENCODE_SESSION_HEADER: f"ouroboros-session-{digest}"}
 
 
 _OR_PROVIDER_PRESETS = {
@@ -149,17 +101,21 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
     mapping; without it the runtime view is read. Building a target builds no client.
     """
     explicit_settings = settings is not None
+    snapshot = {}
 
     def configured(key: str, default: Any = "") -> Any:
-        if explicit_settings:
-            return settings.get(key, default)  # type: ignore[union-attr]
-        return runtime_setting(key, default)
+        if key not in snapshot:
+            read = settings.get if explicit_settings else runtime_setting
+            snapshot[key] = copy.deepcopy(read(key, default))
+        return snapshot.get(key, default)
 
     route = _resolver_route(model)
     provider, resolved_model = route.kind, route.model.strip()
     if provider == "claudexor" and route.valid:
         source, native_model = parse_claudexor_model(model)
         return {
+            "capability_route": {"provider": provider, "model": model, "base_url": "",
+                                 "dispatch_base_url": "http://127.0.0.1"},
             "provider": provider, "source": source, "resolved_model": native_model,
             "usage_model": f"claudexor::{resolved_model}", "api_key": "", "default_headers": {},
             # The daemon's address as route identity only; discovery never uses it, and each
@@ -172,22 +128,77 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
         resolved_model = normalize_anthropic_model_id(resolved_model)
     usage_model = (f"{provider}@{route.connection}::{resolved_model}" if route.connection
                    else _ProviderRoutingMixin._qualified_model_name(provider, resolved_model))
-    return {"provider": provider, "resolved_model": resolved_model, "usage_model": usage_model,
+    target = {"provider": provider, "resolved_model": resolved_model, "usage_model": usage_model,
             **_kind_target(provider, get, route.connection, configured,
                            api_key_override=None if explicit_settings else api_key_override,
                            openrouter_base_url=OPENROUTER_BASE_URL if explicit_settings else openrouter_base_url),
             "connection": route.connection}
+    from ouroboros.provider_models import capability_base_url
+
+    # Preserve existing capability keys (including fixed-provider empty endpoints
+    # and OpenAI's legacy alias), alongside the endpoint this target really sends to.
+    if provider == "openai" and not route.connection:
+        # Metadata's legacy alias is not a dispatch read (deployment policy tracks those).
+        read = dict(settings).get if explicit_settings else runtime_setting
+        snapshot["OPENAI_BASE_URL"] = copy.deepcopy(read("OPENAI_BASE_URL", ""))
+    target["capability_route"] = {"provider": provider, "model": model,
+        "base_url": capability_base_url(model, snapshot), "dispatch_base_url": target["base_url"]}
+    return target
 
 
 _DIRECT_LANE = {"supports_openrouter_extensions": False, "supports_generation_cost": False}
+
+
+def _create_fn(client: Any, target: Dict[str, Any]) -> Any:
+    """The SDK method this target's API takes: Responses for a connection on it, else Chat Completions."""
+    from ouroboros.openai_responses import responses_route
+
+    return client.responses.create if responses_route(target) else client.chat.completions.create
+
+
+def _reply_dict(response: Any, target: Dict[str, Any]) -> Dict[str, Any]:
+    """The reply body the normalizer reads; a Responses reply keeps exactly the fields its wire carried."""
+    from ouroboros.openai_responses import response_body, responses_route
+
+    return response_body(response) if responses_route(target) else response.model_dump()
+
+
+def _remote_http_client(target: Dict[str, Any], *, async_client: bool = False) -> Tuple[Any, Dict[str, str]]:
+    """The keepalive client and default headers for ``target``'s SDK client.
+
+    If the SDK cannot disable redirects, omit optional OpenRouter attribution and
+    keep its route/key. OpenCode Go requires its conversation header, so cannot use
+    that fallback; neither identity may be carried to a redirect destination."""
+    from ouroboros.net_transport import keepalive_http_client
+
+    refuses = target.get("follow_redirects") is False
+    http_client = keepalive_http_client(async_client=async_client, follow_redirects=not refuses)
+    headers = dict(target.get("default_headers") or {})
+    if http_client is None and refuses:
+        if is_go_chat_route(target.get("provider"), target.get("base_url")):
+            # Go requires the conversation headers, so the SDK's ordinary fallback
+            # (which may follow redirects) cannot serve this route.
+            raise RuntimeError("the OpenAI SDK cannot build a redirect-free client for OpenCode Go")
+        logging.getLogger(__name__).warning(
+            "openai SDK cannot build a client that refuses redirects; OpenRouter app attribution omitted")
+        headers = {key: value for key, value in headers.items() if key not in OPENROUTER_APP_HEADERS}
+    return http_client, headers
 
 
 def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
                  api_key_override: Optional[str], openrouter_base_url: str) -> Dict[str, Any]:
     """One kind's transport facts from its connection's fields (``get``)."""
     if provider == "openai":
+        # The connection's own API (``api_surface``): a never-chosen one keeps Chat Completions; an unreadable
+        # value refuses before any send ($0), never guessed from the model and never retried on the other API.
+        try:
+            surface = openai_api_surface(get("api_surface", ""))
+        except ValueError:
+            from ouroboros.llm_attempt import ConnectionUnavailable
+
+            raise ConnectionUnavailable(f"openai@{connection}" if connection else "openai", "invalid_api_surface")
         return {"api_key": get("api_key", ""), "base_url": "https://api.openai.com/v1", "default_headers": {},
-                **_DIRECT_LANE}
+                "api_surface": surface, **_DIRECT_LANE}
     if provider == "anthropic":
         return {"api_key": get("api_key", ""), "base_url": "https://api.anthropic.com/v1", "default_headers": {},
                 "contract_headers": {"anthropic-version": "2023-06-01"}, **_DIRECT_LANE}
@@ -242,8 +253,11 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
             keyless = not api_key and compatible_endpoint_configured(setting)
         # A pair configured without a key is the endpoint's no-auth setting; its
         # transport sends no credential (net_transport.openai_client_class).
+        # OpenRouter's own endpoint hears the app identity; a redirect is then an error, never a carrier elsewhere.
+        attributed = is_openrouter_endpoint(base_url)
         return {"api_key": api_key, "base_url": base_url, "keyless": keyless,
-                "default_headers": dict(OPENCODE_CLIENT_HEADERS) if _opencode_go_endpoint(base_url) else {},
+                "default_headers": dict(OPENROUTER_APP_HEADERS) if attributed else {},
+                **({"follow_redirects": False} if attributed or is_go_chat_route(provider, base_url) else {}),
                 **_DIRECT_LANE}
     return {
         "api_key": get("api_key", "") if connection or api_key_override is None else api_key_override,
@@ -354,13 +368,13 @@ class _ProviderRoutingMixin:
                     kwargs["timeout"] = self._no_proxy_timeout(timeout)
                 prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
                 resp = self._create_chat_completion_with_retries(
-                    _oa_client.chat.completions.create,
+                    _create_fn(_oa_client, target),
                     kwargs,
                     target,
                 )
                 # Skip cost fetch here; it would re-enter OS proxy lookup.
                 return self._normalize_remote_response(
-                    resp.model_dump(),
+                    _reply_dict(resp, target),
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
@@ -390,12 +404,12 @@ class _ProviderRoutingMixin:
             kwargs["timeout"] = getattr(client, "timeout", None)
         prompt_cache_ttl = self._normalize_payload_cache_ttl(target, kwargs)
         resp = self._create_chat_completion_with_retries(
-            client.chat.completions.create,
+            _create_fn(client, target),
             kwargs,
             target,
         )
         return self._normalize_remote_response(
-            resp.model_dump(),
+            _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
             wire_completion=resp,
@@ -519,7 +533,6 @@ class _ProviderRoutingMixin:
 
     # Non-chat provider facets share the same route, credential and header owner.
     resolve_remote_target = _resolve_remote_target
-    provider_session_headers = staticmethod(provider_session_headers)
 
     def _get_client(self):
         target = self._resolve_remote_target("openrouter::")
@@ -528,19 +541,18 @@ class _ProviderRoutingMixin:
     @staticmethod
     def _new_remote_client(target: Dict[str, Any]):
         # The keepalive transport carries SDK-equivalent pool limits (an
-        # explicit transport ignores the Client-level limits); on proxy-routed
-        # installs the helper returns None and SDK defaults keep proxy mounts.
-        from ouroboros.net_transport import keepalive_http_client, openai_client_class
+        # explicit transport ignores the Client-level limits); proxy-routed
+        # installs keep their proxy mounts (see keepalive_http_client).
+        from ouroboros.net_transport import openai_client_class
 
         kwargs: Dict[str, Any] = {
             "api_key": str(target.get("api_key") or ""),
             "max_retries": 0,
         }
-        http_client = keepalive_http_client()
+        http_client, headers = _remote_http_client(target)
         if http_client is not None:
             kwargs["http_client"] = http_client
         base_url = str(target.get("base_url") or "")
-        headers = dict(target.get("default_headers") or {})
         if base_url:
             kwargs["base_url"] = base_url
         if headers:
@@ -596,19 +608,19 @@ class _ProviderRoutingMixin:
 
         client = self._async_remote_clients.get(cache_key)
         if client is None:
-            from ouroboros.net_transport import keepalive_http_client, openai_client_class
+            from ouroboros.net_transport import openai_client_class
 
             kwargs: Dict[str, Any] = {
                 "api_key": api_key,
                 "max_retries": 0,
             }
-            http_client = keepalive_http_client(async_client=True)
+            http_client, sent_headers = _remote_http_client(target, async_client=True)
             if http_client is not None:
                 kwargs["http_client"] = http_client
             if base_url:
                 kwargs["base_url"] = base_url
-            if headers_dict:
-                kwargs["default_headers"] = headers_dict
+            if sent_headers:
+                kwargs["default_headers"] = sent_headers
             client = openai_client_class(target, async_client=True)(**kwargs)
             self._async_remote_clients[cache_key] = client
         return client

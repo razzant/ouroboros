@@ -35,8 +35,10 @@ class Engine:
             raise self.catalog.pop(0)
         return list(self.routes)
 
-    def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+    def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
         if targets == [{"runId": obs.PROBE_RUN_ID, "seen": None}]:
+            if include_blocking:  # a strict input that predates the opt-in (claudexor #628)
+                raise ClaudexorUnavailable("invalid_request", "Unrecognized key(s): 'includeBlocking'", status_code=400)
             self.probes.append(wait_ms)
             if not self.repaired:
                 raise ClaudexorUnavailable("invalid_request", "targets[0].seen: expected string", status_code=400)
@@ -74,9 +76,10 @@ class RuleEngine(Engine):
         super().__init__(wakes=[], details=[])
         self.held, self.finished = 0, False
 
-    def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+    def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
         if targets == [{"runId": obs.PROBE_RUN_ID, "seen": None}]:
-            return super().wait_run_attention(targets, wait_ms=wait_ms, timeout_sec=timeout_sec)
+            return super().wait_run_attention(targets, wait_ms=wait_ms, timeout_sec=timeout_sec,
+                                              include_blocking=include_blocking)
         self.requests.append({"targets": targets, "wait_ms": wait_ms})
         assert len(self.requests) <= 50, "busy loop: the slot never let the engine hold"
         target = targets[0]

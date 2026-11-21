@@ -31,6 +31,7 @@ from ouroboros.task_results import (
 )
 from ouroboros.cost_projection import LIVE_ROOT_COSTS, carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
 from ouroboros.subagent_messages import subagent_message_meta  # noqa: F401
+from ouroboros.physical_attempt_context import attempt_view, fold_attempt
 from supervisor.cognitive_operations import EVENT_HANDLERS as _CEH, _handle_cognitive_operation  # noqa: F401
 from supervisor.task_model_wait import EVENT_HANDLERS as _MWH
 from supervisor.task_dispatch import (  # noqa: F401 -- facade name tests import
@@ -118,6 +119,48 @@ from supervisor.steering import (  # noqa: E402 -- intentional re-import
 )
 
 
+def _fold_context_attempt(direct: Any, meta: Any, fact: Dict[str, Any], active: bool) -> None:
+    """One frame's attempt context into its work's record: the private newest-first attempts and, derived from them, the
+    public ``context_attempt``. An outcome of an older attempt lands on it after its call closed (an owner Pause's sender
+    settles late) and beside a newer call (``physical_attempt_context.fold_attempt``)."""
+    held = (direct.context_attempts if direct is not None else meta.get("context_attempts")) or []
+    folded = fold_attempt(held, fact, active=active)
+    if folded is None:
+        return
+    if direct is not None:
+        direct.context_attempts, direct.context_attempt = folded, attempt_view(folded)
+    else:
+        meta["context_attempts"], meta["context_attempt"] = folded, attempt_view(folded)
+
+
+def _handle_work_lead(evt: Dict[str, Any], ctx: Any) -> None:
+    """Fold this attempt's acting route beside its call facts, never onto an ended work."""
+    task_id, fact = str(evt.get("task_id") or ""), evt.get("lead")
+    if not task_id or not isinstance(fact, dict) or not fact.get("model"):
+        return
+    meta = (getattr(ctx, "RUNNING", None) or {}).get(task_id)
+    direct = None
+    if isinstance(meta, dict):
+        task = meta.get("task") or {}
+        attempt = meta.get("attempt") or task.get("_attempt") or 1
+    else:
+        from supervisor.active_activity import get_direct_activity_registry
+
+        direct = get_direct_activity_registry().get(task_id)
+        owner = getattr(getattr(getattr(direct, "actor", None), "tools", None), "_ctx", None)
+        waiter = getattr(owner, "model_wait_context", None)
+        if waiter is None or waiter.closed or waiter.task_id != task_id:
+            return
+        attempt = waiter.attempt
+    if evt.get("task_attempt") != attempt:
+        return
+    if direct is not None:
+        direct.lead = dict(fact)
+    else:
+        meta["lead"] = dict(fact)
+        meta["_lead_request_id"] = evt.get("lead_request_id")
+
+
 def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = str(evt.get("task_id") or "")
     phase = str(evt.get("phase") or "").strip().lower()
@@ -126,7 +169,7 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     round_id = str(evt.get("round_id") or "")
     if (
         not task_id
-        or phase not in {"started", "observed", "finished", "failed"}
+        or phase not in {"started", "dispatched", "observed", "finished", "failed"}
         or not llm_call_id
         or not execution_id
         or not round_id
@@ -181,15 +224,20 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         "round_id": round_id,
         "call_attempt": call_attempt,
     }
-    if phase != "observed":
+    if phase not in {"observed", "dispatched"}:
         # A call opened (its reservation is an open ledger row) or closed: the root's live cost figure is
         # read again at the next flush, so the card says "up to" while the call is in flight (RV_MAIN M7).
         root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta, dict) else None
         LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or evt.get("root_task_id") or task_id)
+    in_call = isinstance(active, dict) and all(active.get(key) == value for key, value in identity.items())
+    if phase != "started" and isinstance(fact := evt.get("context_attempt"), dict):
+        _fold_context_attempt(direct, meta, {**fact, **identity}, in_call)
+    if phase != "started" and not in_call:
+        return  # a frame of a call that is not this task attempt's active one: only its attempt's context counted
+    if phase == "dispatched":  # the ledger's dispatch of the active call: only its context, the call stays open
+        return
     if phase == "started":
         updated = {**identity, "started_at": time.time()}
-    elif not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):
-        return
     elif phase == "observed":
         activity = evt.get("model_activity")
         if not isinstance(activity, dict):
@@ -296,8 +344,8 @@ from supervisor.events_task_done import (  # noqa: E402, F401 -- intentional pub
 )
 from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentional public re-exports
     _handle_acceptance_fence,
-    _handle_external_wait_lease,
     _handle_log_event,
+    _handle_mcp_configuration_changed,
     _handle_mcp_signed_in,
     _handle_skill_lifecycle,
     _handle_task_dispatch_resolved,
@@ -332,7 +380,6 @@ from supervisor.events_mind_controls import handle_mind_task_control
 
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
-    "external_wait_lease": _handle_external_wait_lease,
     "owner_wait": handle_owner_wait,
     "worker_quiescent": handle_worker_quiescent,
     # A conversation carrier's frames: its start phases for the census, its coined title.
@@ -345,6 +392,7 @@ EVENT_HANDLERS = {
     **_MWH,
     **_CDE,
     "main_llm_call_state": _handle_main_llm_call_state,
+    "work_lead": _handle_work_lead,
     "budget_pause": _handle_budget_pause,
     "budget_root_fence": _handle_budget_root_fence,
     "budget_resume_child": _handle_budget_resume_child,
@@ -382,6 +430,7 @@ EVENT_HANDLERS = {
     "skill_exec_finished": _handle_skill_lifecycle,
     "skill_exec_failed": _handle_skill_lifecycle,
     "acceptance_fence": _handle_acceptance_fence,
+    "mcp_configuration_changed": _handle_mcp_configuration_changed,
 }
 
 
@@ -450,5 +499,6 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
                 "type": "worker_event_handler_error",
                 "event_type": event_type,
                 "error": repr(e),
+                **_event_shape(evt),  # the event's own task ids (content-free): the row stays attributable
             },
         )

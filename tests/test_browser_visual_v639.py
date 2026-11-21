@@ -7,6 +7,15 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.tools import browser
+from tests._browser_fakes import close_generations, track_sessions
+
+
+@pytest.fixture(autouse=True)
+def _sessions_close(monkeypatch):
+    """Each generation these fakes run on closes with its test: no session loop outlives it."""
+    seen = track_sessions(monkeypatch)
+    yield
+    close_generations(*seen)
 
 
 def test_evaluate_runtime_error_not_misreported_as_syntax(monkeypatch):
@@ -16,7 +25,7 @@ def test_evaluate_runtime_error_not_misreported_as_syntax(monkeypatch):
         def set_default_timeout(self, ms):
             pass
 
-        def evaluate(self, js):
+        async def evaluate(self, js):
             if "})()" not in js:
                 raise RuntimeError("SyntaxError: Illegal return statement")
             raise RuntimeError("ReferenceError: missingFn is not defined")
@@ -39,7 +48,7 @@ def test_evaluate_runtime_error_not_misreported_as_syntax(monkeypatch):
 def test_browser_disconnect_after_click_never_replays_action(monkeypatch):
     seen = []
     page = _RecordingPage()
-    def click(*args, **kwargs):
+    async def click(*args, **kwargs):
         seen.append("click")
         raise RuntimeError("connection disconnected after dispatch")
     page.click = click
@@ -63,17 +72,17 @@ class _RecordingPage:
     def set_default_timeout(self, ms):
         self.default_ms = ms
 
-    def evaluate(self, js):
+    async def evaluate(self, js):
         self.evaluated.append(js)
         return self._result
 
-    def title(self):
+    async def title(self):
         return "t"
 
-    def inner_text(self, _selector):
+    async def inner_text(self, _selector):
         return "body text"
 
-    def goto(self, url, timeout=None, wait_until=None):
+    async def goto(self, url, timeout=None, wait_until=None):
         self.evaluated.append(("goto", url, timeout))
 
 

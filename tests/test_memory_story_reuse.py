@@ -102,12 +102,12 @@ def _rename(root, rooms):
 
 
 @pytest.mark.parametrize("change", [
-    "chat_row", "correction", "legacy_binding"])
+    "chat_row", "correction", "legacy_binding", "route"])
 def test_every_source_change_is_seen_and_the_reuse_equals_a_fresh_capture(tmp_path, captures, monkeypatch, change):
     """A change of each source moves the story (it differs from before), and the capture after it equals a fresh
     full capture byte for byte, story and whole view: a reuse never serves a state that no longer holds."""
-    route = ["light-one"]
-    monkeypatch.setattr("ouroboros.model_slots.get_light_model", lambda: route[0])
+    route = [("light-one", False)]  # the folding helper's route as the one rule gives it: model and lane
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: route[0])
     rooms = shared.world(tmp_path)
     page = _page(tmp_path, "1", 10, 12, author=WRITER)
     alpha = _page(tmp_path, str(rooms["alpha"]), 13, 13)
@@ -133,8 +133,8 @@ def test_every_source_change_is_seen_and_the_reuse_equals_a_fresh_capture(tmp_pa
                                                    reason="tells it").ok
     elif change == "label":
         _rename(tmp_path, rooms)
-    elif change == "route":
-        route[0] = "light-two"
+    elif change == "route":  # the same model, now on the local runtime (Light's box ticked): the line names the lane
+        route[0] = ("light-one", True)
     elif change == "binding":
         from ouroboros.projects_registry import bind_task_to_project
 

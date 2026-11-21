@@ -107,3 +107,19 @@ def test_unstored_narration_and_missing_task_never_create_display_truth(tmp_path
     assert "last_line" not in load_task_result(tmp_path, "work")
     record_narration(tmp_path, {"task_id": "missing", "narration": True, "text": "Hello"})
     assert load_task_result(tmp_path, "missing") is None
+
+
+def test_a_place_born_works_census_row_carries_its_place_origin_and_other_work_none(tmp_path, monkeypatch):
+    """A Main portal of a place-born Project work sees no frame of it: its census row says where it came from."""
+    focus = {"place_id": "pl-1", "matched_wakes": ["new_pull_request"],
+             "actor": {"platform_actor_id": "731", "display_name": "qa-contributor", "owner_confirmed": False}}
+    write_task_result(tmp_path, "born", "running", chat_id=1, metadata={
+        "initiator": "consciousness", "focus": focus,
+        "presence": {"place": {"label": "Ouroboros"}, "event": {"provider": "github"}}})
+    write_task_result(tmp_path, "plain", "running", chat_id=1)
+    _queue(monkeypatch, tmp_path, running={tid: {"task": {"id": tid, "chat_id": 1}, "attempt": 1, "started_at": 100.0}
+                                           for tid in ("born", "plain")})
+    rows = {row["activity_id"]: row for row in _chat_activities_snapshot_safe(tmp_path, direct_turns=[])}
+    assert rows["born"]["place_origin"] == {"place_id": "pl-1", "place_label": "Ouroboros", "provider": "github",
+                                            "actor": {"id": "731", "label": "qa-contributor"}, "wakes": ["new_pull_request"]}
+    assert "place_origin" not in rows["plain"]

@@ -51,12 +51,17 @@ def record_tool_count(ctx, activity):
 
 
 def card_facts(task):
+    """The census card's facts; ``place_origin`` (``subagent_messages.place_origin``) too, the one present a Main portal
+    of a place-born Project work has (no frame of it reaches Main)."""
+    from ouroboros.subagent_messages import place_origin
+
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    calls = task.get("tool_calls")
+    calls, origin = task.get("tool_calls"), place_origin(metadata)
     return {"last_line": str(task.get("last_line") or ""),
             "last_line_at": str(task.get("last_line_at") or ""),
             "tool_calls": calls if type(calls) is int and calls >= 0 else 0,
-            "detached": bool(task.get("detached_at") or metadata.get("detached_at"))}
+            "detached": bool(task.get("detached_at") or metadata.get("detached_at")),
+            **({"place_origin": origin} if origin else {})}
 
 
 def enrich_activity(activity, facts, projects):

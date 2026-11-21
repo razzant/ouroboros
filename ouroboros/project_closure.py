@@ -25,12 +25,13 @@ def apply_closed(project: dict, value: dict | None) -> bool:
     return True
 
 
-def select_projects(projects, *, closed: bool | None = None, oldest_first: bool = False) -> list[dict]:
-    """Filter before limiting; recency comes from the caller's captured room facts."""
+def select_projects(projects, *, closed: bool | None = None, oldest_first: bool = False,
+                    by: str = "last_active_at") -> list[dict]:
+    """Filter before limiting; recency (``by``: activity, or the newest message) comes from the caller's
+    captured room facts, then the id."""
     if closed is not None and type(closed) is not bool:
         raise ValueError("closed must be a boolean or None")
     if type(oldest_first) is not bool:
         raise ValueError("oldest_first must be a boolean")
     rows = [p for p in projects if closed is None or ("closed" in p) == closed]
-    return sorted(rows, key=lambda p: (str(p.get("last_active_at") or ""), str(p.get("id") or "")),
-                  reverse=not oldest_first)
+    return sorted(rows, key=lambda p: (str(p.get(by) or ""), str(p.get("id") or "")), reverse=not oldest_first)

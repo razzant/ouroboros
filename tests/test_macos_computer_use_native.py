@@ -14,7 +14,9 @@ themselves. Three cases use foreground input: one hands the front to one fixture
 it (targeted ``key``/``type_text`` with ``raise_policy="never"`` must refuse rather than take it back), one
 sends Command-A spelled ``cmd+a`` and ``cmd+A`` and reads the modifiers the front app received, and one
 clicks Commit at a point read off a downscaled screenshot. A fourth, only with ``OUROBOROS_MACOS_DESKTOP_QA=clipboard``
-because it replaces the clipboard, pastes into the paste fixture under whatever keyboard layout is active (#2589).
+because it replaces the clipboard, pastes into the paste fixture under whatever keyboard layout is active (#2589);
+another, on a qualified layout, sends cmd+g and cmd+} there and requires their menu items to fire (cmd+? is judged by
+its event only, its menu recorded), and one waits with until_text for a status the target shows after a single press.
 The calls run as an owner task's would
 (``work_kind`` owner). A grant the run lacks becomes the skip reason, never a pass.
 Further cases read a named window's rich tree, tell the window an ``observe=true`` action kept from a same-process
@@ -276,14 +278,15 @@ def _between(rows: list[dict], start: float, end: float, *events: str) -> list[d
     return [row for row in rows if start < row["t"] < end and row["event"] in events]
 
 
-def _input_ready(call, **also: str) -> None:
-    """Foreground input needs the grants to post it and cliclick to send it; without them the case is skipped."""
+def _input_ready(call, *, cliclick: bool = True, **also: str) -> None:
+    """Foreground input needs the grants to post it and cliclick to send it (Command and one character go through
+    osascript, cliclick=False); without them the case is skipped."""
     grants = _grants(call)
     required = {"accessibility": "trusted", "post_events": "granted", **also}
     lacking = {key: grants.get(key, "absent") for key, value in required.items() if grants.get(key) != value}
     if lacking:
         pytest.skip(f"unsupported here, not passed: this process lacks {lacking} (no grant is requested)")
-    if (call("capabilities").get("input") or {}).get("cliclick") is not True:
+    if cliclick and (call("capabilities").get("input") or {}).get("cliclick") is not True:
         pytest.skip("unsupported here, not passed: cliclick is not installed, so key, type_text and click send nothing")
 
 
@@ -479,9 +482,10 @@ def test_never_policy_leaves_the_front_with_the_app_that_took_it(host, launch):
 def test_command_a_arrives_as_command_a_however_its_letter_is_cased(host, launch):
     """key("cmd+a") and key("cmd+A") both name Command-A: a letter's case in a combination is not a Shift. The front
     fixture logs every key event it receives with its modifiers. Command-A is harmless there (the fixture has no
-    menu that acts on it); no quit or logout key is ever sent."""
+    menu that acts on it); no quit or logout key is ever sent. It is the Command chord program's: the characters the
+    event types under Command are "a" in any layout (charactersIgnoringModifiers is the typing plane: "ф" in Russian)."""
     call, _schema = host
-    _input_ready(call)
+    _input_ready(call, cliclick=False)
     front = launch("front")
     _hand_front(call, front)
     problems: list[str] = []
@@ -497,8 +501,8 @@ def test_command_a_arrives_as_command_a_however_its_letter_is_cased(host, launch
         except AssertionError as exc:
             problems.append(f"{keys} never arrived: {exc}")
             continue
-        if (row["chars_ignoring"], row["modifiers"]) != ("a", ["cmd"]):
-            problems.append(f"{keys} arrived as {row['modifiers']} + {row['chars_ignoring']!r}, not Command-A: "
+        if (row["characters"], row["modifiers"], sent.get("method")) != ("a", ["cmd"], "command_chord"):
+            problems.append(f"{keys} arrived as {row['modifiers']} + {row['characters']!r}, not Command-A: "
                             f"{json.dumps(row)} (sent {json.dumps(sent.get('cmd'))})")
     after = front.mark("after")
     assert not problems and after["text"] == "", "\n".join(problems) or after
@@ -573,6 +577,88 @@ def test_paste_arrives_as_the_active_layouts_command_v_and_pastes_through_the_ed
         check(f"{focus}: Edit > Paste {'performed' if lands else 'not performed'}", pasted == (["paste:"] if lands else []), rows)
         check(f"{focus}: text", (after["text"], after.get("pasteboard_is_token")) == ((token if lands else ""), True), after)
     assert not problems, "\n".join(problems)
+
+
+# The layouts the Command chord program is qualified on (12.11.2026 guest matrix): two ignore Shift under Command (ABC,
+# Dvorak), three give Command+Shift characters of their own.
+QUALIFIED_LAYOUTS = {f"com.apple.keylayout.{name}" for name in ("ABC", "Dvorak", "DVORAK-QWERTYCMD", "RussianWin", "Russian")}
+
+
+@desktop_only
+def test_command_shortcuts_reach_the_menu_by_the_character_command_gives(host, launch, tmp_path):
+    """key("cmd+g"), key("cmd+}") and key("cmd+?") under the active layout, one of the qualified ones: cmd+g and cmd+}
+    must be sent (never refused) and fire the paste fixture's own Find Next and Shortcut } items, the consumer's
+    answer. cmd+? is checked by its event only: one key down with exactly Command and Shift that the layout itself reads
+    as ? (its characters, or charactersIgnoringModifiers where the key types under Command alone what it typed with
+    Shift: the layout ignored Shift). Whether the app's own Shortcut ? item fires is recorded, not judged: in the guest
+    no ⌘? sent on key code 44 reached it, the base's cliclick included, and what took it is not established. So this
+    case does not prove ⌘? reaches an app's command."""
+    call, _schema = host
+    _input_ready(call, cliclick=False)
+    paste = launch("paste")
+    _hand_front(call, paste)
+    layout = (paste.mark("layout").get("input_source") or {}).get("layout")
+    if layout not in QUALIFIED_LAYOUTS:
+        pytest.skip(f"unsupported here, not passed: {layout!r} is not one of the qualified layouts {sorted(QUALIFIED_LAYOUTS)}")
+    problems: list[str] = []
+    for keys, char, modifiers, item in (("cmd+g", "g", ["cmd"], "Find Next"), ("cmd+}", "}", ["cmd", "shift"], "Shortcut }"),
+                                        ("cmd+?", "?", ["cmd", "shift"], "Shortcut ?")):
+        before = paste.mark(f"before-{keys}")
+        sent = call("key", keys=keys, app=f"pid:{paste.pid}", raise_policy="never")
+        time.sleep(1.0)  # a late key or menu action lands before the mark below
+        after = paste.mark(f"after-{keys}")
+        rows = _between(paste.rows(), before["t"], after["t"], "key_down", "find_next")
+        downs = [r for r in rows if r["event"] == "key_down"]
+        chosen = [r["sender"] for r in rows if r["event"] == "find_next"]
+        seen = {"layout": layout, "receipt": {k: sent.get(k) for k in ("ok", "dispatched", "method", "reason", "helper_stderr")},
+                "downs": [{k: r.get(k) for k in ("key_code", "modifiers", "characters", "chars_ignoring", "command_characters")}
+                          for r in downs], "menu": chosen}
+        sent_ok = (sent.get("ok") is True and sent.get("dispatched") is True and sent.get("method") == "command_chord"
+                   and (sent.get("delivered_to") or {}).get("pid") == paste.pid)
+        one = len(downs) == 1 and downs[0]["modifiers"] == modifiers
+        if char != "?":
+            if not (sent_ok and one and chosen == [item]):
+                problems.append(f"{keys}: {json.dumps(seen, ensure_ascii=False)[:1500]}")
+            continue
+        row = downs[0] if one else {}
+        ignored = bool(row) and row.get("command_characters") == row.get("characters")
+        reads = row.get("chars_ignoring") if ignored else row.get("characters")
+        if not (sent_ok and one and reads == "?"):
+            problems.append(f"{keys}: {json.dumps(seen, ensure_ascii=False)[:1500]}")
+        with (tmp_path / "diagnostics.jsonl").open("a", encoding="utf-8") as out:  # kept beside the receipts as evidence
+            out.write(json.dumps({"case": keys, **seen, "judged": "event only", "menu_item_fired": chosen == [item],
+                                  "gap": "whether ⌘? reaches an app's own command is not established here"},
+                                 ensure_ascii=False) + "\n")
+    assert not problems, "\n".join(problems)
+
+
+@desktop_only
+def test_until_text_waits_for_delayed_text_after_one_press(host, launch):
+    """The target shows "committed:" a second after Commit (mode delay; "loading" until then). element_act with
+    observe=true and until_text presses ONCE and rereads only that window until the text is there; an absent text read
+    by ax_tree ends at its deadline as not_observed, or as unknown that names a deadline-cut latest read and the whole
+    earlier tree it kept (the fixture's own log says the press count)."""
+    call, schema = host
+    _new_interface(schema)
+    if _grants(call).get("accessibility") != "trusted":
+        pytest.skip("unsupported here, not passed: this process lacks the Accessibility grant (none is requested)")
+    target = launch("target")
+    target.send("mode delay")
+    target.wait_for("mode_set", mode="delay")
+    before = target.mark("before")
+    acted = call("element_act", app=f"pid:{target.pid}", do="press", select={"identifier": "qa.commit"},
+                 window=target.title, observe=True, until_text="committed:", timeout_ms=5000)
+    shown = target.wait_for("status_shown", after=before["t"], timeout=5)
+    seen = acted.get("observation") or {}
+    assert acted.get("action_outcome") == "completed" and acted.get("dispatched") is True, acted
+    assert (seen.get("until_text") or {}).get("status") == "matched" and seen["until_text"]["reads"] >= 2, seen
+    absent = call("ax_tree", app=f"pid:{target.pid}", window=target.title, until_text="never-shown-text", timeout_ms=1500)
+    wait = absent.get("until_text") or {}
+    after = target.mark("after")
+    assert shown["count"] == after["count"] == 1, (shown, after)
+    assert wait.get("status") == "not_observed" or (
+        wait.get("status") == "unknown" and "timeout" in (wait.get("latest") or {}).get("truncated_by", [])
+        and wait.get("tree_read", 0) >= 1 and absent.get("ok") is True), absent
 
 
 @desktop_only

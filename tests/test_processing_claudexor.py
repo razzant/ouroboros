@@ -73,7 +73,9 @@ def test_response_received_with_proved_no_generation_reprepares_standard(setup, 
     assert [row["state"] for row in finals] == ["released", "settled"]
     assert finals[0]["candidate_raw_sha256"] != finals[1]["candidate_raw_sha256"]
     assert all(row["processing_preference"] == preference for row in finals)
-    assert usage["processing"] == receipt()
+    # The engine's receipt answers the Standard retry; the call asked the work's tier, which its receipt keeps.
+    assert usage["processing"] == {**receipt(), "requested": preference, "reason": "submitted_mode_differs"}
+    assert finals[1]["processing"] == receipt()
 
 
 @pytest.mark.parametrize("axis", ["unknown_outcome", "exact_native", "standard"])
@@ -120,6 +122,59 @@ def test_legacy_empty_and_captured_target_do_not_probe_again(setup, monkeypatch)
     target = {"source": "codex", "processing_preference": "fast", "processing_preferences": ["fast"]}
     assert cx.prepare_processing_target(target) is target
     assert "processingPreference" not in gateway.uploads[0][0]["options"]
+
+
+def test_a_found_source_list_serves_its_engine_build_and_anything_else_is_asked_again(monkeypatch):
+    """A source's declared list is a fact of the exact engine build: once a read found it, later calls on that build
+    and source get the same list without asking; a failed read, a missing list, another source, another build or an
+    unknown build asks the engine again and remembers nothing it did not find."""
+    reads, build = [], {"engine": ("6.1.2", "sha-a")}
+
+    def sources(**kwargs):
+        reads.append(kwargs)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return {"sources": [answer]}
+
+    monkeypatch.setattr(cx, "_PROCESSING_PREFERENCES", {})
+    monkeypatch.setattr(cx, "current_engine", lambda: build["engine"])
+    monkeypatch.setattr(cx, "model_sources", sources)
+    codex, claude = ({"source": name, "processing_preference": "fast"} for name in ("codex", "claude"))
+    listed = lambda name, *values: {"id": name, "processingPreferences": list(values)}  # noqa: E731
+    answers = [cx.ClaudexorUnavailable("daemon_unreachable", "down"), {"id": "codex"}, listed("codex", "standard", "fast"),
+               listed("claude", "standard"), listed("codex", "standard"), listed("codex", "fast"), listed("codex", "fast")]
+    assert [cx.prepare_processing_target(codex)["processing_preferences"] for _ in range(4)] == [
+        [], [], ["standard", "fast"], ["standard", "fast"]]
+    assert len(reads) == 3 and reads[-1] == {"processing_view": True}, "the found list served the fourth call"
+    assert cx.prepare_processing_target(claude)["processing_preferences"] == ["standard"] and len(reads) == 4
+    build["engine"] = ("6.1.2", "sha-b")
+    assert cx.prepare_processing_target(codex)["processing_preferences"] == ["standard"] and len(reads) == 5
+    build["engine"] = None
+    assert [cx.prepare_processing_target(codex)["processing_preferences"] for _ in range(2)] == [["fast"], ["fast"]]
+    assert len(reads) == 7 and not answers
+
+
+def test_a_found_list_is_kept_only_for_the_build_that_answered_it(monkeypatch):
+    """A list is kept under the engine build that answered it: a replacement whose handshake is remembered while the
+    read is in flight keeps nothing, so A's list never serves B, which is asked and then serves itself."""
+    reads, build = [], {"engine": ("6.1.2", "sha-a")}
+
+    def sources(**_kwargs):
+        reads.append(build["engine"])
+        answer = {"id": "codex", "processingPreferences": ["standard"] if build["engine"][1] == "sha-a" else
+                  ["standard", "fast"]}
+        if len(reads) == 1:
+            build["engine"] = ("6.1.2", "sha-b")  # announced by another caller before A's answer is kept
+        return {"sources": [answer]}
+
+    monkeypatch.setattr(cx, "_PROCESSING_PREFERENCES", {})
+    monkeypatch.setattr(cx, "current_engine", lambda: build["engine"])
+    monkeypatch.setattr(cx, "model_sources", sources)
+    codex = {"source": "codex", "processing_preference": "fast"}
+    assert cx.prepare_processing_target(codex)["processing_preferences"] == ["standard"], "A's answer, for this call"
+    assert [cx.prepare_processing_target(codex)["processing_preferences"] for _ in range(2)] == [["standard", "fast"]] * 2
+    assert reads == [("6.1.2", "sha-a"), ("6.1.2", "sha-b")], "B was asked once; its own list then served it"
 
 
 def test_processing_retry_does_not_replace_owner_turn_before_success(setup, monkeypatch):

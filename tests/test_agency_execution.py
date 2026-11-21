@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from ouroboros import config, safety
+from ouroboros import safety
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
@@ -17,8 +17,6 @@ def context(tmp_path, monkeypatch, mode, coverage):
         path.mkdir()
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", coverage)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
-    monkeypatch.setattr(safety, "get_runtime_mode", lambda: mode)
     monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": coverage)
     ctx = ToolContext(repo_dir=repo, system_repo_dir=repo, drive_root=data,
                       workspace_root=work, workspace_mode="external", task_id="agency")
@@ -33,8 +31,8 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
     ctx, registry, work = context(tmp_path, monkeypatch, mode, coverage)
     checks = []
 
-    def assessment(name, arguments, messages, actor, binding=None):
-        checks.append((name, arguments, binding))
+    def assessment(name, arguments, messages, actor, binding=None, ext_tool=None):
+        checks.append((name, arguments, binding, ext_tool))
         return False, "Independent DANGEROUS finding: fixture criticism"
 
     monkeypatch.setattr(safety, "_run_llm_check", assessment)
@@ -43,6 +41,8 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
         "cmd": [sys.executable, "-c", script], "cwd": str(work), "outputs": ["once.txt"],
     })
     assert len(checks) == (1 if coverage == "full" else 0)
+    if checks:
+        assert checks[0][3] is None  # run_command is a builtin, not a bound extension handler
     permitted = coverage != "full" or mode == "cyber_pro"
     assert (work / "once.txt").exists() is permitted
     if permitted:
@@ -51,7 +51,7 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
     else:
         assert result.status == "blocked"
     if mode == "cyber_pro" and coverage == "full":
-        assert "SAFETY_ADVICE" in result.text
+        assert "⚠️ SAFETY_NOTE: let through without a Safety reading (" in result.text
         events = [json.loads(line) for line in (ctx.drive_logs() / "events.jsonl").read_text().splitlines()]
         advice = next(row for row in events if row["type"] == "safety_advisory")
         assert advice["assessment_allowed"] is False
@@ -96,11 +96,14 @@ def test_supervisor_backend_failure_keeps_original_evidence(tmp_path, monkeypatc
     def failed(*args, **kwargs):
         raise RuntimeError("fixture backend unavailable")
     monkeypatch.setattr(safety, "_run_llm_check", failed)
-    allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
+    allowed, message = safety.check_safety("fixture_remote_write", {}, ctx=ctx)
     assert allowed == (mode == "cyber_pro")
-    assert "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message
-    if mode == "cyber_pro":
-        assert "SAFETY_ADVICE" in message
+    assert "backend unavailable" in message
+    assert message.startswith("⚠️ SAFETY_NOTE: let through without a Safety reading (" if mode == "cyber_pro"
+                              else "⚠️ SAFETY_UNAVAILABLE: not run.")
+    # An MCP call that is no declared read waits like words to people when no verdict exists, in every mode.
+    allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
+    assert not allowed and "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message
 
 
 def test_cyber_does_not_swallow_owner_stop(tmp_path, monkeypatch):

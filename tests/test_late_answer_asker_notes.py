@@ -171,7 +171,8 @@ def test_the_next_answer_to_a_live_head_of_the_same_asker_arrives_as_mail_withou
     messages = [{"role": "user", "content": "the first late answer"}]
     _drain_incoming_messages(messages, queue_mod.Queue(), root, "head-1", None, set(), owner_ctx=owner_ctx)
     delivered = json.dumps(messages[1:], ensure_ascii=False)
-    assert LATE_HEAD.format(ASKER) in delivered and "The owner chose option 2: postgres" in delivered
+    assert LATE_HEAD.format(ASKER) in delivered and (
+        f"The owner pressed option 2 and wrote no words. The label «postgres» is the text of task {ASKER}") in delivered
     assert NOTE not in delivered and "[ASKER_NOTES]" not in delivered
 
 

@@ -11,6 +11,8 @@ an absent key leaves the choice to the environment; a merged save never authors 
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import pathlib
 import re
@@ -207,6 +209,189 @@ def test_a_new_generation_replaces_the_whole_selection(custom_ui, tmp_path, appl
     assert _state(app) == {"source": "builtin"} and applied_settings["OUROBOROS_UI_DIR"] == ""
 
 
+def test_only_builtin_static_files_carry_the_private_revalidation_mark(custom_ui, tmp_path, applied_settings):
+    """The Telegram proxy keeps exactly this mark and stores nothing else; both trees still revalidate."""
+    served = ServedUI(REPO)
+    app = _app(served, tmp_path)
+    with TestClient(app) as client:
+        first = client.get("/static/ui.css")
+        again = client.get("/static/ui.css", headers={"If-None-Match": first.headers["etag"]})
+    assert first.headers["cache-control"] == again.headers["cache-control"] == "private, no-cache, must-revalidate"
+    assert again.status_code == 304 and again.content == b""
+    served.apply(app, {"OUROBOROS_UI_DIR": str(custom_ui)})
+    with TestClient(app) as client:
+        directory = client.get("/static/modules/app.js")
+        onboarding = client.get("/onboarding/static/ui.css")
+    assert directory.status_code == 200 and directory.headers["cache-control"] == "no-cache, must-revalidate"
+    assert onboarding.headers["cache-control"] == "private, no-cache, must-revalidate"
+
+
+_NOISE = b"".join(hashlib.sha256(bytes([n])).hexdigest().encode() for n in range(200))  # gzips to over 1 KiB
+
+
+def _gzip_app(tmp_path):
+    import gzip
+
+    from starlette.responses import JSONResponse, Response, StreamingResponse
+    from starlette.routing import WebSocketRoute
+
+    import sqlite3
+
+    from ouroboros.gateway import files
+    from ouroboros.gateway.task_archive import DescriptorResponse
+
+    big = JSONResponse({"rows": ["x" * 40] * 200})
+    stored = tmp_path / "result.txt"
+    stored.write_bytes(b"result line\n" * 500)
+    database = tmp_path / "snapshot.txt"  # a database under a text name is streamed, without ranges
+    with sqlite3.connect(database) as connection:
+        connection.execute("create table t (v text)")
+        connection.executemany("insert into t values (?)", [("row " * 50,)] * 100)
+    connection.close()
+
+    async def chunks(*parts):
+        for part in parts or (b"data: one\n\n" * 200, b"data: two\n\n" * 200):
+            yield part
+
+    async def echo(socket):
+        await socket.accept()
+        await socket.send_text(await socket.receive_text())
+        await socket.close()
+
+    routes = [
+        Route("/api/state", lambda _r: big),
+        Route("/small", lambda _r: JSONResponse({"ok": True})),
+        Route("/events", lambda _r: StreamingResponse(chunks(), media_type="text/event-stream")),
+        Route("/log", lambda _r: StreamingResponse(chunks(), media_type="text/plain")),
+        Route("/tiny", lambda _r: StreamingResponse(chunks(b"x"), media_type="text/plain")),
+        Route("/encoded", lambda _r: Response(gzip.compress(_NOISE), media_type="text/plain",
+                                               headers={"Content-Encoding": "gzip"})),
+        Route("/download", lambda _r: Response(b"y" * 4096, media_type="text/plain",
+                                                headers={"Content-Disposition": "attachment; filename=y.txt"})),
+        Route("/image", lambda _r: Response(b"z" * 4096, media_type="image/png")),
+        Route("/api/tasks/t1/artifacts/result.txt",
+              lambda _r: DescriptorResponse(stored.open("rb"), "result.txt", stored.stat(), "ab" * 32)),
+        Route("/api/files/content", lambda _r: files._file_response(database, media_type="text/plain")),
+        WebSocketRoute("/ws", echo),
+        *ServedUI(REPO).mounts(),
+    ]
+    return Starlette(routes=routes, middleware=server_web.TEXT_COMPRESSION), bytes(big.body), stored.read_bytes()
+
+
+@pytest.mark.parametrize("lines, accepted", [
+    ([b"gzip"], True), ([b"GZIP"], True), ([b"br, gzip;q=0.5"], True), ([b"br", b"gzip"], True),
+    ([b"gzip;q=0, gzip;q=0.5"], True), ([b"gzip;q=0.5, gzip;q=0"], True), ([b"gzip;q=0"], False), ([b"br, gzip; q=0.0"], False), ([b"x-notgzip"], False), ([b"identity"], False), ([], False),
+])
+def test_gzip_is_accepted_by_a_nonzero_gzip_token_in_any_line(lines, accepted):
+    from starlette.datastructures import Headers
+
+    assert server_web._accepts_gzip(Headers(raw=[(b"accept-encoding", line) for line in lines])) is accepted
+
+
+def test_text_answers_are_gzipped_only_for_clients_that_accept_it(tmp_path):
+    import zlib
+
+    app, big, _stored = _gzip_app(tmp_path)
+    gz = {"Accept-Encoding": "gzip"}
+    with TestClient(app) as client:
+        state = client.get("/api/state", headers=gz)
+        plain = client.get("/api/state", headers={"Accept-Encoding": "identity"})
+        head = client.head("/api/state", headers=gz)
+        small = client.get("/small", headers=gz)
+        tiny = client.get("/tiny", headers=gz)
+        encoded = client.get("/encoded", headers=gz)
+        untouched = {path: client.get(path, headers=gz) for path in ("/events", "/download", "/image")}
+        with client.websocket_connect("/ws", headers=gz) as socket:
+            socket.send_text("ping")
+            echoed = socket.receive_text()
+    assert state.headers["content-encoding"] == "gzip" and state.headers["vary"] == "Accept-Encoding"
+    assert state.content == big and int(state.headers["content-length"]) < len(big) // 4
+    assert "content-encoding" not in plain.headers and plain.content == big and plain.headers["vary"] == "Accept-Encoding"
+    assert "content-encoding" not in small.headers and small.headers["vary"] == "Accept-Encoding"
+    # HEAD describes the uncompressed answer; an already encoded body is never compressed twice.
+    assert "content-encoding" not in head.headers and head.headers["content-length"] == str(len(big))
+    assert encoded.headers["content-encoding"] == "gzip" and encoded.content == _NOISE
+    # A stream without a declared length whose first chunk is short passes whole, unbuffered.
+    assert "content-encoding" not in tiny.headers and tiny.content == b"x"
+    for path, response in untouched.items():
+        assert "content-encoding" not in response.headers, path
+    assert untouched["/events"].content == b"data: one\n\n" * 200 + b"data: two\n\n" * 200
+    assert echoed == "ping"
+
+    # A streamed text body is flushed per chunk: each message decodes alone, so nothing waits for the next.
+    # A held start goes out before a server's pathsend, the file then passing uncompressed.
+    sent: list[dict] = []
+    pathsend: list[dict] = []
+
+    async def scenario():
+        requested = []
+
+        async def receive():
+            if requested:
+                await asyncio.Event().wait()  # no disconnect: the response ends on its own
+            requested.append(True)
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            (pathsend if requested == ["file"] else sent).append(message)
+
+        scope = {"type": "http", "method": "GET", "path": "/log", "raw_path": b"/log", "query_string": b"",
+                 "headers": [(b"accept-encoding", b"gzip")], "scheme": "http", "server": ("t", 80),
+                 "root_path": "", "http_version": "1.1"}
+        await app(scope, receive, send)
+        requested[:] = ["file"]
+        await app({**scope, "path": "/static/ui.css", "raw_path": b"/static/ui.css",
+                   "extensions": {"http.response.pathsend": {}}}, receive, send)
+
+    asyncio.run(scenario())
+    decoder = zlib.decompressobj(31)
+    bodies = [m["body"] for m in sent if m["type"] == "http.response.body" and m.get("body")]
+    assert decoder.decompress(bodies[0]) == b"data: one\n\n" * 200
+    assert b"".join(decoder.decompress(b) for b in bodies[1:]) == b"data: two\n\n" * 200
+    assert [m["type"] for m in pathsend] == ["http.response.start", "http.response.pathsend"]
+
+
+def test_the_gzip_variant_of_an_interface_file_has_a_weak_validator_and_no_ranges(tmp_path):
+    """As nginx does: the identity variant keeps its strong ETag and byte ranges, HEAD stays uncompressed."""
+    app, _big, _stored = _gzip_app(tmp_path)
+    css = (WEB / "ui.css").read_bytes()
+    gz, plain = {"Accept-Encoding": "gzip"}, {"Accept-Encoding": "identity"}
+    with TestClient(app) as client:
+        packed = client.get("/static/ui.css", headers=gz)
+        whole = client.get("/static/ui.css", headers=plain)
+        weak = packed.headers["etag"]
+        revalidated = client.get("/static/ui.css", headers={**gz, "If-None-Match": weak})
+        strong = client.get("/static/ui.css", headers={**plain, "If-None-Match": whole.headers["etag"]})
+        resumed = client.get("/static/ui.css", headers={**gz, "Range": "bytes=0-7", "If-Range": weak})
+        ranged = client.get("/static/ui.css", headers={**plain, "Range": "bytes=0-7", "If-Range": whole.headers["etag"]})
+        head = client.head("/static/ui.css", headers=gz)
+    assert packed.headers["content-encoding"] == "gzip" and packed.content == css
+    assert weak == "W/" + whole.headers["etag"] and "accept-ranges" not in packed.headers
+    assert whole.headers["accept-ranges"] == "bytes" and "content-encoding" not in whole.headers
+    assert packed.headers["vary"] == whole.headers["vary"] == revalidated.headers["vary"] == "Accept-Encoding"
+    assert revalidated.status_code == strong.status_code == 304
+    assert revalidated.headers["etag"] == weak and strong.headers["etag"] == whole.headers["etag"]
+    assert resumed.status_code == 200 and resumed.headers["content-encoding"] == "gzip" and resumed.content == css
+    assert ranged.status_code == 206 and ranged.content == css[:8] and "content-encoding" not in ranged.headers
+    assert "content-encoding" not in head.headers and head.headers["content-length"] == str(len(css))
+
+
+def test_stored_files_outside_the_interface_trees_pass_byte_for_byte(tmp_path):
+    app, _big, stored = _gzip_app(tmp_path)
+    gz = {"Accept-Encoding": "gzip"}
+    with TestClient(app) as client:
+        whole = client.get("/api/tasks/t1/artifacts/result.txt", headers=gz)
+        part = client.get("/api/tasks/t1/artifacts/result.txt", headers={**gz, "Range": "bytes=0-9"})
+        builtin = client.get("/static/theme.js", headers=gz)
+        database = client.get("/api/files/content", headers=gz)
+    assert "content-encoding" not in whole.headers and whole.content == stored
+    assert whole.headers["content-length"] == str(len(stored)) and whole.headers["accept-ranges"] == "bytes"
+    assert whole.headers["x-ouroboros-artifact-sha256"] == "ab" * 32 and not whole.headers["etag"].startswith("W/")
+    assert part.status_code == 206 and part.content == stored[:10]
+    assert database.status_code == 200 and "content-encoding" not in database.headers
+    assert builtin.headers["content-encoding"] == "gzip" and builtin.content == (WEB / "theme.js").read_bytes()
+
+
 def test_state_reports_the_builtin_default_until_a_generation_applies(tmp_path):
     from ouroboros.gateway.state import _served_ui_state
 
@@ -230,6 +415,7 @@ def test_the_server_composes_the_served_interface_and_applies_it_in_the_lifespan
     paths = [getattr(route, "path", "") for route in server.routes]
     assert paths[0] == "/" and paths[-3:] == ["/auth", "/onboarding/static", "/static"]
     assert isinstance(server.served_ui, ServedUI) and server.routes[0].endpoint is server.index_page
+    assert [entry.cls for entry in server.app.app.user_middleware] == [server_web.GzipText]
     source = (REPO / "server.py").read_text(encoding="utf-8")
     lifespan = source[source.index("async def lifespan(app):"):]
     # Applied after the settings read and env projection, before any extension or supervisor work.
@@ -242,6 +428,7 @@ _IMPORT = re.compile(r"""(?:import\s+(?:[^'"]*?\s+from\s+)?|import\(\s*|export\s
 
 
 def test_the_wizard_document_and_its_module_graph_never_reach_the_selected_static_tree():
+    # This source walk includes JSDoc import() references; shared wire types must not pull in chat renderers.
     template = (WEB / "onboarding_template.html").read_text(encoding="utf-8")
     references = re.findall(r"""(?:src|href)="([^"]+)"|from '([^']+)'""", template)
     urls = [a or b for a, b in references]

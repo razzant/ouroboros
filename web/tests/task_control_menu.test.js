@@ -113,7 +113,7 @@ test('Resume retires an unconfirmed Pause id, but a refused Resume leaves it ret
 test('tree Resume keeps helpers for selection and source refusals use the server sentence', async () => {
     const seen = [], toast = (text) => seen.push(text);
     await resumeTaskAction('answered', { resume: async () => ({ ok: true, tree_only: true }), toast });
-    assert.equal(seen.pop(), 'Resumed. Ouroboros or you choose which helpers continue.');
+    assert.equal(seen.pop(), 'Resumed. Ouroboros or you choose which subagents continue.');
     const refusal = Object.assign(new Error('pause_source_unreadable'), {
         body: { message: 'Resume refused: Its saved state could not be restored' },
     });
@@ -228,6 +228,57 @@ test('Chat and Activity both wire the shared dropdown', () => {
     assert.match(chat, /TASK_CONTROL_TRIGGER_LABEL/);
     assert.match(activity, /taskControlTriggerLabel\(/);
     assert.equal(typeof TASK_CONTROL_TRIGGER_LABEL, 'string');
+});
+
+test('a compensated feed scroll keeps an anchored menu; moving or losing its trigger still dismisses it', async (t) => {
+    const { closeTaskControlMenu, openTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = globalThis.IntersectionObserver;
+    let observed;
+    globalThis.IntersectionObserver = class {
+        constructor(callback) { observed = callback; }
+        observe() {} disconnect() {} takeRecords() { return []; }
+    };
+    t.after(() => { closeTaskControlMenu(); globalThis.IntersectionObserver = prior; env.restore(); });
+    const feed = env.el('div'), other = env.el('div'), anchor = env.el('button');
+    feed.nodeType = other.nodeType = 1;
+    env.doc.body.append(feed, other);
+    feed.append(anchor);
+    const open = () => openTaskControlMenu(anchor, { actions: [ACTION_HURRY, ACTION_STOP_NOW] });
+    const scroll = (target) => {
+        for (const listener of [...env.doc.captures.get('scroll') || []]) listener({ type: 'scroll', target });
+    };
+    let menu = open();
+    feed.scrollTop = 26;  // a late card fact grew above the trigger; the feed restored its place
+    scroll(feed);
+    assert.equal(menu.isConnected, true, 'the same on-screen trigger still owns the open choice');
+    scroll(menu);
+    assert.equal(menu.isConnected, true, 'a constrained menu can scroll inside itself');
+    anchor.rect = { ...anchor.rect, top: 10, bottom: 40 };
+    scroll(other);
+    assert.equal(menu.isConnected, true, 'an unrelated scroller does not own dismissal');
+    scroll(feed);
+    assert.equal(menu.isConnected, false, 'a scroll that moved the trigger dismisses');
+    assert.equal(env.doc.activeElement, anchor);
+    menu = open();
+    anchor.rect = { ...anchor.rect, left: 12, right: 112 };
+    scroll(feed);
+    assert.equal(menu.isConnected, false, 'horizontal movement dismisses too');
+    menu = open();
+    scroll(env.doc);
+    assert.equal(menu.isConnected, false, 'the document keeps its page-level dismissal contract');
+    menu = open();
+    env.doc.defaultView.emit('resize');
+    assert.equal(menu.isConnected, false, 'a changed viewport still dismisses');
+    menu = open();
+    observed([{ target: anchor, isIntersecting: false }]);
+    assert.equal(menu.isConnected, false, 'an off-screen trigger cannot own a menu');
+    menu = open();
+    anchor.remove();
+    observed([{ target: anchor, isIntersecting: true }]);
+    assert.equal(menu.isConnected, false, 'a detached trigger cannot keep the old menu');
+    assert.equal(env.doc.captures.get('scroll').size, 0, 'dismissal releases its listener');
 });
 
 test('a single offered action is the trigger itself: it names the action and a stop asks first', async (t) => {
@@ -425,6 +476,15 @@ test('a held tool call is worded by what is known, never as a call that has not 
     assert.ok(!menuSrc.includes('has not returned'), 'the false sentence is gone');
 });
 
+test('a held merge request is worded by what its receipt shows', () => {
+    const base = { kind: 'merge_operation', task_id: 't-1', receipt_id: 'r-1' };
+    assert.equal(heldWorkFacts([{ ...base, reason: 'merge_effect_unknown' }]),
+        'the outcome of a merge request of task t-1 is unknown');
+    assert.equal(heldWorkFacts([{ ...base, reason: 'merge_queued' }]), 'a merge of task t-1 is queued on GitHub');
+    assert.equal(heldWorkFacts([{ ...base, reason: 'merge_call_unreturned' }]), 'a merge of task t-1 is not settled');
+    assert.equal(heldWorkFacts([base]), 'a merge of task t-1 is not settled');
+});
+
 test('a refused Resume of a held Continue toasts its facts, with wait-or-stop only for running work', async () => {
     const toasts = [];
     const toast = (text, kind) => toasts.push([text, kind]);
@@ -510,7 +570,7 @@ test('an accepted Resume keeps its own words and names the gap its Pause did not
     toasts.length = 0;
     await resumeTaskAction('tree-gap', { resume: async () => ({ ok: true, tree_only: true,
         membership_gaps: { rows: [{ task_id: 'x', reason: 'identity_mismatch' }], count: 1 } }), toast });
-    assert.equal(toasts[0][0], 'Resumed. Ouroboros or you choose which helpers continue.');
+    assert.equal(toasts[0][0], 'Resumed. Ouroboros or you choose which subagents continue.');
     assert.match(toasts[1][0], /^The Pause did not wait for 1 saved task record .* \(x\); whether it belongs here is unknown\.$/);
     toasts.length = 0;
     await resumeTaskAction('plain', { resume: async () => ({ ok: true }), toast });

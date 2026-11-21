@@ -1,16 +1,16 @@
-// Dialogs of the Skills page. Plain confirmations go through the shared
+// Dialogs of the skill views of Extensions. Plain confirmations go through the shared
 // openConfirmDialog; a choice between consequences is drawn as offered-answer
 // cards (the question card's recipe), one chosen, the confirm button's words and
 // tone following the chosen card. Cancel, Close, the backdrop, Escape and a newer
 // dialog never confirm. Add source is the one two-step flow (address, then what
 // was found with the one-time trust choice).
 import { openConfirmDialog } from './confirm_dialog.js';
-import { skillSourcesApi } from './api_client.js';
+import { apiClient, skillSourcesApi } from './api_client.js';
 import { bindDialogFocus, bindMenu } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import {
     canUpdateWithoutReview, displayAddress, officialPromise, permissionWords, plural, publicationDisclosure, sourceAddressText, statusHtml,
-    updateRejectionSentence, versionText,
+    skillTitle, updateRejectionSentence, versionText,
 } from './skill_presentation.js';
 
 let activeClose = null;
@@ -177,6 +177,48 @@ export async function updateWithoutReview(skill, { dialog = openConfirmDialog, u
     return update(skill.name, 'replace', release.digest, '', { skipReview: true });
 }
 
+/**
+ * Connect tools (owner decision): the host's passive preview, one shared confirmation naming what will run and
+ * every other server turning MCP on starts, then the confirm with the preview's settings digest and payload revision.
+ * Resolves the confirm's answer, or null when nothing was asked or the owner cancelled.
+ */
+export async function connectSkillTools(skill, { dialog = openConfirmDialog, api = apiClient } = {}) {
+    const preview = await api.skillMcpConnectPreview(skill.name);
+    const servers = preview.servers || [];
+    const conflict = servers.find((server) => server.change === 'conflict');
+    if (!preview.ready || conflict) {
+        // The host's blockers are readiness tokens and launch diagnostics: the body says the outcome, Details keep them.
+        const blockers = preview.blockers || [];
+        await dialog({ title: `${skillTitle(skill)} can’t connect its tools yet`, alert: true,
+            body: conflict ? `${conflict.conflict}. Remove or rename that server in Extensions → MCP servers.`
+                : 'It can’t run them now, so nothing was changed.',
+            details: conflict ? null : { summary: 'What stops it', rows: [
+                ...(blockers.length ? [{ label: blockers.length > 1 ? 'Reasons' : 'Reason', value: blockers.join('; ') }] : []),
+                ...(preview.next_action ? [{ label: 'Next step', value: preview.next_action }] : []),
+            ] } });
+        return null;
+    }
+    if (!preview.changed) return { ok: true, saved: false, changed: false };
+    const others = preview.other_servers || [];
+    const names = (changes) => servers.filter((server) => changes.includes(server.change)).map((server) => server.title || server.id).join(', ');
+    const added = names(['add']), again = names(['enable', 'repair']);
+    const confirmed = await dialog({
+        title: `Connect the tools of ${skillTitle(skill)}?`,
+        body: [added && `Ouroboros adds ${added} to MCP servers.`, again && `Ouroboros turns ${again} on again in MCP servers.`,
+            preview.enables_mcp && 'It turns MCP on.', 'Ouroboros starts the server to list its tools, then uses it for tool calls.'].filter(Boolean).join(' ')
+            + (others.length ? ` Turning MCP on also starts ${plural(others.length, 'server')} previously enabled in Settings: ${others.map((item) => item.name || item.id).join(', ')}.` : ''),
+        details: { summary: 'What will run', rows: servers.flatMap((server) => [
+            { label: server.title || server.id, value: [server.executable?.command, ...(server.executable?.args || [])].filter(Boolean).join(' ') },
+            { label: 'Folder', value: server.executable?.cwd || '' },
+            { label: 'Lifetime', value: `${server.task_session ? 'one process per task' : 'one process per call'}${server.browser_policy ? '; Ouroboros checks its browser requests' : ''}` },
+        ]) },
+        confirmLabel: 'Connect tools',
+    });
+    if (confirmed !== true) return null;
+    return api.skillMcpConnect(skill.name, { expected_content_hash: preview.content_hash, settings_digest: preview.settings_digest,
+        confirm_other_servers: others.length > 0 });
+}
+
 /** Two skills with one name (B5b): keep mine or use the other. Resolves 'keep' | 'replace' | null. */
 export function openCompareDialog({ mine = {}, other = {} }) {
     const line = (skill) => [skill.name, skill.official ? 'Official' : '', skill.source, skill.owner ? `by ${skill.owner}` : '',
@@ -189,8 +231,8 @@ export function openCompareDialog({ mine = {}, other = {} }) {
             { value: 'keep', label: 'Keep yours', detail: `${line(mine)}\n${mine.description || ''}`, confirmLabel: 'Keep mine', tone: 'primary' },
             { value: 'replace', label: 'Use this one instead', detail: `${line(other)}\n${other.description || ''}`, confirmLabel: 'Use this one', tone: 'danger' },
         ],
-        // The host replaces in one install and keeps the replaced copy as its backup.
-        note: `Keeping yours changes nothing. Using the other one replaces yours and keeps a backup of it${other.reviewed ? '; the new one is reviewed before it runs' : ''}.`,
+        // The host replaces in one install, by its source's setting as it finds it then, and keeps the replaced copy as its backup.
+        note: 'Keeping yours changes nothing. Using the other one replaces yours and keeps a backup of it; its source’s setting in Sources decides whether it is reviewed first.',
     });
 }
 
@@ -249,8 +291,8 @@ export async function createMySkillsDestination(create) {
     } catch (error) {
         const code = error?.body?.code;
         throw new Error({
-            no_token: 'Add GITHUB_TOKEN in Settings → Secrets, then try creating My skills again.',
-            cannot_create: 'GitHub couldn’t create or connect My skills; allow repository access for GITHUB_TOKEN in Settings → Secrets, then try again.',
+            no_token: 'Add GITHUB_TOKEN in Settings › Accounts and keys, then try creating My skills again.',
+            cannot_create: 'GitHub couldn’t create or connect My skills; allow repository access for GITHUB_TOKEN in Settings › Accounts and keys, then try again.',
             failed: 'My skills couldn’t be connected; check your GitHub connection and try again.',
         }[code] || 'My skills couldn’t be connected; check your GitHub connection and try again.');
     }
@@ -468,7 +510,7 @@ export function firstStartTrustHtml(rows = []) {
     return `<p>Ouroboros comes connected to its public hub. Confirm how its skills install — you do this once.</p>
         <div class="skills-first-rows">${rows.map(choice).join('')}</div>
         <p class="skills-dialog-note">Suggested choices apply until you choose. Official doesn’t skip the review by itself: if you choose “Review each skill” for Ouroboros, its Official skills are reviewed too. A review sends the skill’s files to your review models.</p>
-        <p class="skills-dialog-note">You choose once. You can change it later in Skills → Sources.</p>`;
+        <p class="skills-dialog-note">You choose once. You can change it later in Extensions → Sources.</p>`;
 }
 
 /** First start of the public hub (B3). Resolves {id: trust} or null (Later). */

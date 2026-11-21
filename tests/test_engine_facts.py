@@ -95,10 +95,11 @@ def test_row_renders_ledger_snapshot_and_stored_engine_without_a_daemon(tmp_path
     assert "dispatch→answer median 60.0s, p90 84.0s" in line
     assert "engine: loop utilisation 0.97, delay p50 12ms p99 80ms samples 20, observed 2026-11-04T12:00:00+00:00" in line
     assert "control latency: discovery 0.012s, accounts 0.040s, total 0.080s, observed 2026-11-04 12:00:00,000" in line
-    # A document from before the ceiling and demand were published: each absent count is named.
-    assert ("project worker pool: ceiling not observed, total 8, dispatch-enabled 4, with a task not observed, "
-            "booting not observed, reaping (incl. booting) not observed, assignable idle 2, admissible pending not observed, "
-            "pending rows 3; conversation carriers not observed") in line
+    # A document from before the cap and the acting counts were published: each absent count is named.
+    assert ("project worker pool: owner cap on acting tasks not observed, total 8, with a task not observed, "
+            "acting not observed, waiting on their process not observed, booting not observed, "
+            "reaping (incl. booting) not observed, assignable idle 2, pending rows 3; conversation carriers not observed; "
+            "memory admission: not read yet") in line
     assert "completions last hour 1" in line
     lowered = line.lower()
     for word in ("busy", "saturated", "healthy", "degraded", "share", "not delivered", "%"):

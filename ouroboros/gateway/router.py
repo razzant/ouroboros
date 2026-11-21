@@ -14,6 +14,13 @@ from typing import Any
 from starlette.routing import BaseRoute, Route, WebSocketRoute
 
 
+def _kept_service_routes() -> list[BaseRoute]:
+    """Activity › Background: the services tasks kept running and the owner's Stop of one launch."""
+    from ouroboros.gateway.kept_services import kept_service_routes
+
+    return kept_service_routes()
+
+
 def _ui_client_routes() -> list[BaseRoute]:
     """Installation-wide owner UI preferences and the install's
     interface language with its translation memory (``/api/ui/*``)."""
@@ -56,6 +63,35 @@ def _owner_answer_routes() -> list[BaseRoute]:
             Route("/api/decisions/secret", endpoint=api_secret_decision, methods=["POST"]), *card_routes()]
 
 
+def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
+    """A room's saved messages as the owner's UI reads them from the dialogue store: its history pages
+    (``/api/chat/history``) and the search of their words (``/api/chat/search``)."""
+    from ouroboros.gateway.chat_search import make_chat_search_endpoint
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    return [Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+            Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir))]
+
+
+def _setup_routes() -> list[BaseRoute]:
+    """What the setup wizard asks before and at its Finish: the preview of its draft and the draft's own model
+    catalog (neither saves), the one atomic owner-scoped completion (D-8: it replaced the wizard's old
+    POST /api/settings + POST /api/owner/runtime-mode pair) and the read-back of one completion attempt."""
+    from ouroboros.gateway.onboarding import (
+        api_onboarding_complete,
+        api_onboarding_model_catalog,
+        api_onboarding_subagents_preview,
+    )
+    from ouroboros.gateway.onboarding_host import api_onboarding_attempt
+
+    return [
+        Route("/api/onboarding/subagents/preview", endpoint=api_onboarding_subagents_preview, methods=["POST"]),
+        Route("/api/onboarding/model-catalog", endpoint=api_onboarding_model_catalog, methods=["POST"]),
+        Route("/api/onboarding/complete", endpoint=api_onboarding_complete, methods=["POST"]),
+        Route("/api/onboarding/complete", endpoint=api_onboarding_attempt, methods=["GET"]),
+    ]
+
+
 def collect_routes(
     *,
     data_dir: pathlib.Path,
@@ -74,13 +110,12 @@ def collect_routes(
         api_extensions_index,
         api_skill_daemons,
         api_skill_delete,
-        api_skill_grants,
         api_owner_skill_attest_review,
         api_skill_lifecycle_queue,
-        api_skill_reconcile,
         api_skill_review,
         api_skill_review_history_detail,
         api_skill_toggle,
+        skill_setup_routes,
     )
     from ouroboros.gateway.widgets import api_widget_fault_post, api_widgets
     from ouroboros.gateway.widget_assets import api_widget_asset_lease, api_widget_bridge_script
@@ -90,8 +125,8 @@ def collect_routes(
         api_chat_upload_delete,
         file_browser_routes,
     )
-    from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
-    from ouroboros.gateway.logs import api_logs_tail
+    from ouroboros.gateway.history import make_cost_breakdown_endpoint
+    from ouroboros.gateway.logs import api_logs_raw, api_logs_tail
     from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
         api_hub_installed,
@@ -116,10 +151,6 @@ def collect_routes(
     )
     from ouroboros.gateway.claudexor_quota import api_claudexor_account_reset, api_claudexor_quota_refresh
     from ouroboros.gateway.harness_maintenance import harness_maintenance_routes
-    from ouroboros.gateway.onboarding import (
-        api_onboarding_complete,
-        api_onboarding_subagents_preview,
-    )
     from ouroboros.gateway.settings import api_review_pool
     from ouroboros.gateway.mcp import mcp_routes
     from ouroboros.gateway.models import (
@@ -151,6 +182,7 @@ def collect_routes(
     from ouroboros.gateway.projects import (
         api_fs_dirs,
         api_project_delete,
+        api_project_folder,
         api_project_from_task,
         api_project_update,
         api_projects_create,
@@ -159,6 +191,7 @@ def collect_routes(
     from ouroboros.gateway.state import api_consciousness, api_contract, api_health, api_state
     from ouroboros.gateway.skill_publish import skill_publish_routes
     from ouroboros.gateway.task_reviews import task_review_routes
+    from ouroboros.gateway.task_model import api_task_model
     from ouroboros.gateway.tasks import (
         api_task_artifact,
         api_task_cancel,
@@ -170,14 +203,13 @@ def collect_routes(
         api_tasks_list,
     )
     from ouroboros.gateway import desktop_autostart as desktop_host
-    from ouroboros.gateway.onboarding_host import api_onboarding_attempt, api_onboarding_bootstrap, onboarding_page
-    from ouroboros.gateway.owner_effort import api_owner_effort_range, api_owner_subagents_mode
+    from ouroboros.gateway.onboarding_host import api_onboarding_bootstrap, onboarding_page
+    from ouroboros.gateway.owner_effort import owner_composer_routes
     from ouroboros.gateway.safety_settings import api_owner_safety_rules, api_owner_safety_model, api_owner_safety_mode
     from ouroboros.gateway.settings import (
         api_acknowledge_capability,
         api_onboarding,
         api_owner_auto_grant,
-        api_owner_context_mode,
         api_owner_runtime_mode,
         api_settings_get,
         api_settings_post,
@@ -225,8 +257,7 @@ def collect_routes(
         ),
         Route("/api/owner/skills/{skill}/attest-review", endpoint=api_owner_skill_attest_review, methods=["POST"]),
         *places_routes(),
-        Route("/api/skills/{skill}/grants", endpoint=api_skill_grants, methods=["POST"]),
-        Route("/api/skills/{skill}/reconcile", endpoint=api_skill_reconcile, methods=["POST"]),
+        *skill_setup_routes(),
         Route("/api/marketplace/clawhub/search", endpoint=api_marketplace_search, methods=["GET"]),
         Route("/api/marketplace/clawhub/installed", endpoint=api_marketplace_installed, methods=["GET"]),
         Route("/api/marketplace/ouroboroshub/installed", endpoint=api_hub_installed, methods=["GET"]),
@@ -244,12 +275,7 @@ def collect_routes(
         Route("/api/onboarding", endpoint=onboarding),
         # The same wizard bootstrap as JSON, for a client that renders its own setup.
         Route("/api/onboarding/bootstrap", endpoint=api_onboarding_bootstrap, methods=["GET"]),
-        # ONE atomic owner-scoped completion (D-8): replaces the wizard's old
-        # POST /api/settings + POST /api/owner/runtime-mode pair.
-        Route("/api/onboarding/subagents/preview", endpoint=api_onboarding_subagents_preview, methods=["POST"]),
-        Route("/api/onboarding/complete", endpoint=api_onboarding_complete, methods=["POST"]),
-        # Reads back one completion attempt by the id its client sent; writes nothing.
-        Route("/api/onboarding/complete", endpoint=api_onboarding_attempt, methods=["GET"]),
+        *_setup_routes(),
         Route("/api/settings", endpoint=settings_get, methods=["GET"]),
         Route("/api/settings", endpoint=settings_post, methods=["POST"]),
         Route("/api/settings/secret", endpoint=api_settings_secret, methods=["POST"]),
@@ -260,9 +286,7 @@ def collect_routes(
         Route("/api/desktop/background", endpoint=desktop_host.api_desktop_background_post, methods=["POST"]),
         Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
-        Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
-        Route("/api/owner/effort-range", endpoint=api_owner_effort_range, methods=["POST"]),
-        Route("/api/owner/subagents-mode", endpoint=api_owner_subagents_mode, methods=["POST"]),
+        *owner_composer_routes(),
         Route("/api/owner/safety-mode", endpoint=api_owner_safety_mode, methods=["POST"]),
         Route("/api/owner/safety-rules", endpoint=api_owner_safety_rules, methods=["POST"]),
         Route("/api/owner/safety-model", endpoint=api_owner_safety_model, methods=["POST"]),
@@ -273,6 +297,7 @@ def collect_routes(
         Route("/api/projects/from-task", endpoint=api_project_from_task, methods=["POST"]),
         Route("/api/projects/{project_id}/update", endpoint=api_project_update, methods=["POST"]),
         Route("/api/projects/{project_id}/delete", endpoint=api_project_delete, methods=["POST"]),
+        Route("/api/projects/{project_id}/folder", endpoint=api_project_folder, methods=["GET", "POST"]),
         Route("/api/fs/dirs", endpoint=api_fs_dirs, methods=["GET"]),
         Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"]),
         Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),
@@ -281,6 +306,7 @@ def collect_routes(
         Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET", "POST"]),
         Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),
         Route("/api/tasks/{task_id}/hurry", endpoint=api_task_hurry, methods=["POST"]),
+        Route("/api/tasks/{task_id}/model", endpoint=api_task_model, methods=["POST"]),
         *owner_tree_control_routes(),
         *task_review_routes(),
         Route("/api/tasks/{task_id}/resume", endpoint=api_task_resume, methods=["POST"]),
@@ -300,10 +326,11 @@ def collect_routes(
         Route("/api/update/description", endpoint=api_update_description, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
-        *storage_routes(data_dir),
+        *storage_routes(data_dir), *_kept_service_routes(),
         Route("/api/evolution-data", endpoint=api_evolution_data),
-        Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+        *_room_reading_routes(data_dir),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
+        Route("/api/logs/{name}/raw", endpoint=api_logs_raw, methods=["GET"]),
         Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
         Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
         Route("/api/openai-compatible/models", endpoint=api_openai_compatible_models, methods=["POST"]),

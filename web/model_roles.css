@@ -44,7 +44,7 @@
 .model-role-row + .model-role-row { margin-top: var(--space-2); }
 .model-role-controls > input,
 .model-role-controls > .ui-model-chooser { flex: 2 1 220px; min-width: 0; }
-.model-role-controls > select { flex: 1 1 170px; min-width: 0; }
+.model-role-controls > :is(select, .ui-source-picker) { flex: 1 1 170px; min-width: 0; }
 .model-role-controls > [data-model-role-account] { flex-basis: 220px; }
 .model-role-order { flex: 0 0 auto; }
 .model-role-order .btn { --control-pad-x: var(--space-2); }
@@ -75,6 +75,6 @@
     .model-role-controls { flex-wrap: wrap; }
     .model-role-controls > input,
 .model-role-controls > .ui-model-chooser { flex-basis: 100%; order: 1; }
-    .model-role-controls > select { flex-basis: 150px; }
+    .model-role-controls > :is(select, .ui-source-picker) { flex-basis: 150px; }
     .model-role-order { order: 2; margin-left: auto; }
 }

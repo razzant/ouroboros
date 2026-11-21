@@ -6,7 +6,10 @@
 // | clone a git URL (server-side, typed auth_required). The dialog carries the
 // honest trust line: attaching gives the agent write+shell in that folder
 // (notification model — attaching IS the grant; no second confirmation).
+// "No folder" is sent as the owner's recorded choice (`no_folder`): the project keeps none until one is chosen in
+// its Working folder… dialog (project_folder.js), whose folder browser this dialog shares.
 import { openConfirmDialog } from './confirm_dialog.js';
+import { mountFolderBrowser, openProjectFolderDialog } from './project_folder.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 import { errorWords, setResult } from './ui_primitives.js';
 import { bindDialogFocus, bindMenu } from './ui_interactions.js';
@@ -15,7 +18,7 @@ import { bindDialogFocus, bindMenu } from './ui_interactions.js';
 const PROJECT_NAME_MAX = 80;
 // A working folder's short name in the choice, and the line said under the choice for the chosen one only (U025).
 const SOURCES = [
-    ['fileless', 'No folder', 'A chat and research project with no files of its own.'],
+    ['fileless', 'No folder', 'A chat and research project with no folder of its own: tasks work in their own temporary area.'],
     ['genesis', 'New folder', 'A new folder with a fresh Git repository, under the projects folder.'],
     ['attach', 'Existing folder…', 'A folder on this computer; Git is optional.'],
     ['clone', 'Clone from Git…', 'A copy of a repository, cloned from its Git URL.'],
@@ -49,11 +52,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                         <p class="ui-field-help" data-np-help>${SOURCES[0][2]}</p>
                     </fieldset>
                     <div data-np-attach hidden>
-                        <div class="new-project-browser">
-                            <div class="new-project-browser-path" data-np-path></div>
-                            <div class="new-project-browser-list" data-np-dirs></div>
-                        </div>
-                        <p class="new-project-selected-target ui-field-help" data-np-selected role="status" aria-live="polite">No folder selected.</p>
+                        <div data-np-browser></div>
                         <label class="local-toggle ui-field ui-field-inline" title="Runs git init + an 'attach snapshot' commit of the current state with a local identity. Never done without this checkbox.">
                             <input class="ui-checkbox" type="checkbox" name="project-init-git" data-np-initgit>
                             Initialize Git and commit current files
@@ -77,75 +76,15 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
             </div>
         `;
         const q = (sel) => backdrop.querySelector(sel);
-        let selectedDir = '';
-        let browsePath = '';
         let settled = false;
-        let browseRequest = 0;
         let disposeFocus = () => {};
 
         const setError = (result) => setResult(q('[data-np-error]'), typeof result === 'string' ? { text: result, tone: 'danger' } : result || {});
-
-        async function renderDirs(path) {
-            const request = ++browseRequest;
-            const listEl = q('[data-np-dirs]');
-            const pathEl = q('[data-np-path]');
-            listEl.textContent = 'Loading…';
-            try {
-                const data = await apiClient.fsDirs(path);
-                if (settled || request !== browseRequest) return;
-                browsePath = data.path;
-                pathEl.textContent = '';
-                const cur = document.createElement('strong');
-                cur.textContent = data.path;
-                pathEl.appendChild(cur);
-                const select = document.createElement('button');
-                select.type = 'button';
-                select.className = 'btn btn-sm ' + (selectedDir === data.path ? 'btn-primary' : 'btn-default');
-                select.textContent = selectedDir === data.path ? 'Selected ✓' : 'Select this folder';
-                select.addEventListener('click', () => {
-                    selectedDir = data.path;
-                    q('[data-np-trust]').hidden = false;
-                    q('[data-np-selected]').textContent = `Selected folder: ${selectedDir}`;
-                    select.classList.replace('btn-default', 'btn-primary');
-                    select.textContent = 'Selected ✓';
-                });
-                pathEl.appendChild(select);
-                listEl.textContent = '';
-                if (data.parent) {
-                    const up = document.createElement('button');
-                    up.type = 'button';
-                    up.className = 'new-project-dir-row new-project-dir-up';
-                    up.textContent = '.. (up)';
-                    up.addEventListener('click', () => renderDirs(data.parent));
-                    listEl.appendChild(up);
-                }
-                for (const dir of data.dirs || []) {
-                    const row = document.createElement('button');
-                    row.type = 'button';
-                    row.className = 'new-project-dir-row';
-                    row.textContent = `${dir.name}${dir.is_git ? '  ⎇' : ''}`;
-                    row.title = dir.path + (dir.is_git ? ' (git repository)' : '');
-                    row.addEventListener('click', () => renderDirs(dir.path));
-                    listEl.appendChild(row);
-                }
-                if (!(data.dirs || []).length) {
-                    const empty = document.createElement('div');
-                    empty.className = 'new-project-dir-empty';
-                    empty.textContent = '(no subfolders)';
-                    listEl.appendChild(empty);
-                }
-                if (data.truncated) {
-                    const more = document.createElement('div');
-                    more.className = 'new-project-dir-empty';
-                    more.textContent = '(more folders exist — showing the first 500)';
-                    listEl.appendChild(more);
-                }
-            } catch (e) {
-                if (settled || request !== browseRequest) return;
-                listEl.textContent = '';
-                setError(failureWords(e));
-            }
-        }
+        const browser = mountFolderBrowser(q('[data-np-browser]'), {
+            apiClient,
+            onSelect: () => { q('[data-np-trust]').hidden = false; },
+            onError: (e) => setError(failureWords(e)),
+        });
 
         function syncSource() {
             const source = backdrop.querySelector('input[name="np-source"]:checked')?.value || 'fileless';
@@ -153,9 +92,9 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
             q('[data-np-attach]').hidden = source !== 'attach';
             q('[data-np-clone]').hidden = source !== 'clone';
             q('[data-np-trust]').hidden = !(
-                (source === 'attach' && selectedDir) || source === 'clone' || source === 'genesis'
+                (source === 'attach' && browser.selected()) || source === 'clone' || source === 'genesis'
             );
-            if (source === 'attach' && !browsePath) renderDirs('');
+            if (source === 'attach' && !browser.current()) browser.open('');
         }
         backdrop.querySelectorAll('input[name="np-source"]').forEach((radio) => {
             radio.addEventListener('change', syncSource);
@@ -164,6 +103,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
         const finish = (value) => {
             if (settled) return;
             settled = true;
+            browser.dispose();
             disposeFocus();
             backdrop.remove();
             resolve(value);
@@ -176,10 +116,11 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
             const source = backdrop.querySelector('input[name="np-source"]:checked')?.value || 'fileless';
             if (!name) { setError('Give the project a name.'); return; }
             const payload = { name };
+            if (source === 'fileless') payload.no_folder = true;  // the choice the dialog shows, never a default behind it
             if (source === 'genesis') payload.with_workspace = true;
             if (source === 'attach') {
-                if (!selectedDir) { setError('Pick a folder to attach (Select this folder).'); return; }
-                payload.path = selectedDir;
+                if (!browser.selected()) { setError('Pick a folder to attach (Select this folder).'); return; }
+                payload.path = browser.selected();
                 payload.init_git = Boolean(q('[data-np-initgit]').checked);
             }
             if (source === 'clone') {
@@ -243,13 +184,19 @@ function statusLine({ view, word = '', text = '' }) {
     return line;
 }
 
-// Accessible row menu: Pin/Unpin, Rename, Delete. `project` is a sidebar read model;
+/** A row's Pin or Unpin in words, for the state it shows: this menu's item and the row's own glyph (projects_nav.js)
+ *  say it alike, and each asks for the state its words name. A pin still being saved reads as such. */
+export const pinWords = (pinned, pending = false) => (pending ? (pinned ? 'Unpinning…' : 'Pinning…')
+    : (pinned ? 'Unpin' : 'Pin'));
+
+// Accessible row menu: Pin/Unpin, Rename, Working folder, Delete. `project` is a sidebar read model;
 // callbacks refresh the authoritative registry projection. `onPin` receives the state
 // the label named; a pin still being saved reads as such and cannot be pressed again.
 // The menu opens under `anchorEl` (the row's ⋯, or the focused row) or at a pointer's `point` (a right-click or a
 // long press on the row), whose focus returns to `anchorEl`. Only `menuButton`, the ⋯ that opened it, says it has a
 // popup. `status` ({ view, word, text }) is the row's mark and its words, the menu's first line. When the anchor is
-// gone or hidden (a collapse, an Unpin, a delete), the menu closes and the keyboard goes to `fallbackFocus`.
+// gone or hidden (a delete, an archive, a find that no longer lists it), the menu closes and the keyboard goes to
+// `fallbackFocus`.
 // Returns true: the menu is open.
 export function openProjectRowMenu(project, {
     apiClient, anchorEl, point = null, menuButton = null, status = null, fallbackFocus = null,
@@ -266,8 +213,9 @@ export function openProjectRowMenu(project, {
     menu.setAttribute('aria-label', `Actions for ${name}${status?.text ? ` · ${status.text}` : ''}`);
     menu.innerHTML = `
         <button type="button" role="menuitem" data-prm="pin"${pinPending ? ' aria-disabled="true"' : ''}>${
-            pinPending ? (pinned ? 'Unpinning…' : 'Pinning…') : (pinned ? 'Unpin' : 'Pin')}</button>
+            pinWords(pinned, pinPending)}</button>
         <button type="button" role="menuitem" data-prm="rename">Rename…</button>
+        <button type="button" role="menuitem" data-prm="folder">Working folder…</button>
         <button type="button" role="menuitem" class="danger" data-prm="delete">Delete project…</button>
     `;
     if (status?.text) menu.prepend(statusLine(status));
@@ -307,6 +255,9 @@ export function openProjectRowMenu(project, {
                 }
             }
             focusBack();
+        } else if (action === 'folder') {
+            if (await openProjectFolderDialog({ apiClient, project })) onChanged?.();
+            focusBack();
         } else if (action === 'delete') {
             const ok = await openConfirmDialog({
                 title: 'Delete project',
@@ -316,7 +267,9 @@ export function openProjectRowMenu(project, {
             });
             if (ok === true) {
                 onChanged?.({ projectId: project.id, lifecycle: 'deleting', optimistic: true });
-                try { await apiClient.projectDelete(project.id); }
+                // Its answer is the registry's own word: the Project was fenced `deleting` before the reply came.
+                let fenced = false;
+                try { await apiClient.projectDelete(project.id); fenced = true; }
                 catch (e) {
                     await openConfirmDialog({
                         title: 'Delete did not finish',
@@ -324,7 +277,7 @@ export function openProjectRowMenu(project, {
                         alert: true,
                     });
                 }
-                finally { onChanged?.({ authoritative: true }); }
+                finally { onChanged?.({ authoritative: true, ...(fenced && { projectId: project.id, lifecycle: 'deleting' }) }); }
             }
             focusBack();
         }

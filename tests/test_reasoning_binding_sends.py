@@ -227,7 +227,6 @@ def test_waiting_main_retires_before_refreshing_facts_and_measuring(tmp_path, mo
     seen = {}
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *_args, **_kwargs: (None, "max"))
     monkeypatch.setattr(loop_model_call, "_fit_route_tool_ceiling", lambda _ctx: False)
-    monkeypatch.setattr(loop_model_call, "_pending_model_wait_handover", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loop_model_call, "_project_wake_input", lambda _ctx: None)
     monkeypatch.setattr(loop_messages, "append_context_facts",
                         lambda context: seen.update(facts=copy.deepcopy(context.messages)))

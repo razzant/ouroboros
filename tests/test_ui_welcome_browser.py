@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.settings_browser_helpers import open_settings
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
@@ -167,15 +168,16 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             assert page.locator(f"#project-panel {ANY_WELCOME}").count() == 0
             page.click("#project-panel-close")
 
-            # (b) The preference is hidden: Settings -> Appearance has no greeting control.
+            # (b) The preference is hidden: Settings › Appearance has no greeting control, and the home no row for one.
             page.locator('[data-nav-page="settings"]').click()
             page.wait_for_selector("#page-settings.active")
-            page.locator('[data-settings-tab="appearance"]').click()
-            page.wait_for_selector('[data-settings-panel="appearance"].active')
-            assert page.locator('[data-settings-tab="appearance"]').get_attribute("aria-selected") == "true"
+            home = page.locator("#page-settings [data-settings-home]").inner_text().lower()
+            assert "appearance" in home and "greeting" not in home and "welcome" not in home
+            level = open_settings(page, "appearance")
+            level.locator("[data-theme-control]").wait_for(state="visible")
             assert page.locator("#page-settings [data-welcome-settings], #page-settings [data-welcome-mode],"
                                 " #page-settings [data-welcome-text], #page-settings [data-welcome-save]").count() == 0
-            appearance = page.locator('[data-settings-panel="appearance"]').inner_text().lower()
+            appearance = level.inner_text().lower()
             assert "theme" in appearance
             assert "greeting" not in appearance and "welcome" not in appearance
             _shoot_both_widths(page, evidence, "settings-appearance")

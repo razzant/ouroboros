@@ -3,7 +3,7 @@ ToolContext, the real plan record and a FAKE review substrate. Pinned in both
 directions: typed $0 refusals write nothing and call nobody; a write records a
 revision and calls nobody; an ask sends exactly to the named participants with each
 participant's own delivery and continuation; replies settle into the record and the
-intention ledger record; only the raiser's withdrawal releases a Blocking hold."""
+intention ledger record; only the raiser's withdrawal closes an objection, which holds nothing."""
 from __future__ import annotations
 
 import json
@@ -103,7 +103,6 @@ def harness(tmp_path, monkeypatch):
         return ctx
 
     state = {"slots": _slots(("s1", "m/a"), ("s2", "m/b"), ("s3", "m/c"))}
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setattr(plan_ask, "plan_review_slots", lambda default_effort="": list(state["slots"]))
     monkeypatch.setattr("ouroboros.tools.plan_dialogue.session_input_limits", lambda _slots: {})
     monkeypatch.setattr("ouroboros.tools.review_checklist.REPO_ROOT", system)
@@ -242,7 +241,7 @@ def test_a_declared_new_source_file_is_a_body_plan_before_it_exists(harness):
     target = harness.system / "ouroboros" / "new" / "deep" / "module.py"
     assert not target.exists() and not target.parent.exists()
     sub = harness.install({})
-    _write(harness.make_ctx(), affected_paths=[str(target)], ask=["s1"])
+    _write(harness.make_ctx(), affected_paths=[str(target)], ask=["s1"], reason="one module")
     revision = _record(harness)["revisions"][0]
     assert revision["body"] is True and "affected_paths" in revision["body_note"] and str(target) in revision["body_note"]
     system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s1"][0]["content"])
@@ -258,7 +257,7 @@ def test_reading_a_repository_file_is_not_changing_it(harness):
     assert _record(harness)["revisions"][0]["body"] is False
     assert "## BIBLE.md (constitution" not in _user_text(sub.calls[0]["request"].slot_messages["s1"][0]["content"])
     sub = harness.install({})
-    _write(harness.make_ctx(task_id="task-2"), affected_paths=[bible], ask=["s1"])
+    _write(harness.make_ctx(task_id="task-2"), affected_paths=[bible], ask=["s1"], reason="one file")
     assert _record(harness, "task-2")["revisions"][0]["body"] is True
     assert "## BIBLE.md (constitution" in _user_text(sub.calls[0]["request"].slot_messages["s1"][0]["content"])
 
@@ -270,7 +269,7 @@ def test_ask_council_sends_each_participant_its_own_delivery_and_settles_replies
                            "s2": CLEAN, "s3": _reply("Fine.")})
     ctx = harness.make_ctx()
     text, result = _write(ctx, ask="council", message="First look, please.")
-    assert result.meta["plan_effect"] == "write+ask" and result.meta["plan_open_objections"] == 1 and result.meta["plan_holding"] == 1
+    assert result.meta["plan_effect"] == "write+ask" and result.meta["plan_open_objections"] == 1 and "plan_holding" not in result.meta
     assert len(sub.calls) == 1 and [s.slot_id for s in sub.calls[0]["slots"]] == ["s1", "s2", "s3"]
     request = sub.calls[0]["request"]
     assert request.surface == "plan_review" and request.reconciliation_identity["plan_ask_id"] == "a1"
@@ -291,8 +290,9 @@ def test_ask_council_sends_each_participant_its_own_delivery_and_settles_replies
     assert ask["participants"][0]["reply"]["objections"] == [{"id": "o1", "text": "five slides is not the bar; the owner asked for a story"}]
     assert ask["participants"][0]["delivery_ref"]["status"] == "retained" and ask["participants"][0]["reply_ref"]["status"] == "retained"
     [objection] = plan_record.open_objections(record)
-    assert objection["seat_id"] == "s1" and objection["holds"] is True
-    assert "s1 / o1" in text and "holds your final answer under Blocking" in text and "HELD" in text
+    assert objection["seat_id"] == "s1" and objection["owner_marked"] is True and "holds" not in objection
+    assert "s1 / o1" in text and "owner-marked reviewer" in text and "HELD" not in text
+    assert "Open objections are disclosed in your final answer; nothing holds it" in text
     assert any("ask a1 on revision 1 — sending to 3 participants" in line for line in harness.progress)
     assert any("m/a answered — 1 objection" in line for line in harness.progress)
     # The ask's exact texts and costs live in ONE intention ledger record.
@@ -307,7 +307,7 @@ def test_ask_council_sends_each_participant_its_own_delivery_and_settles_replies
     assert ledger["cost"]["usd"] == pytest.approx(0.03)
 
 
-def test_ask_names_exactly_its_recipients_and_an_added_critic_never_holds(harness):
+def test_ask_names_exactly_its_recipients_and_an_added_critic_is_named_as_added(harness):
     row = SimpleNamespace(slot_id="critic_x", kind="api_chat", target_id="m/critic", effort="", session_target="", profile_id="",
                           subagent_id="critic_x", use_local=False, processing_preference="", delivery="packet", access="",
                           is_session=False, native_retrieval=False)
@@ -322,28 +322,11 @@ def test_ask_names_exactly_its_recipients_and_an_added_critic_never_holds(harnes
     ask = _record(harness)["asks"][0]
     assert [(p["seat_id"], p["owner_marked"]) for p in ask["participants"]] == [("s2", True), ("critic_x", False)]
     [objection] = plan_record.open_objections(_record(harness))
-    assert objection["holds"] is False and result.meta["plan_holding"] == 0 and result.meta["plan_open_objections"] == 1
-    assert "added participant — never holds" in text and "Open objections are disclosed in your final answer; nothing holds it" in text
+    assert objection["owner_marked"] is False and result.meta["plan_open_objections"] == 1
+    assert "added participant" in text and "Open objections are disclosed in your final answer; nothing holds it" in text
 
 
-def test_a_body_plans_first_ask_includes_every_owner_marked_reviewer_and_says_so(harness):
-    sub = harness.install({})
-    ctx = harness.make_ctx(active_workspace=False)
-    text, _ = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"])
-    assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2", "s1", "s3"]
-    ask = _record(harness)["asks"][0]
-    assert ask["body_first_ask"] is True and ask["host_added"] == ["s1", "s3"]
-    assert ask["panel"]["widened_from"] == ["s2"] and ask["panel"]["strictness"] == "blocking"
-    assert "first ask on a body plan" in text and "added s1, s3" in text
-    system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s2"][0]["content"])
-    assert "## BIBLE.md (constitution" in system_prompt and "## ARCHITECTURE.md" in system_prompt
-    # The second ask is the mind's choice.
-    text, _ = _call(ctx, ask=["s2"], message="again")
-    assert [s.slot_id for s in sub.calls[1]["slots"]] == ["s2"] and _record(harness)["asks"][1]["host_added"] == []
-
-
-def test_advisory_first_body_ask_requires_reason_and_preserves_the_named_panel(harness):
-    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+def test_a_first_body_ask_requires_reason_and_preserves_the_named_panel(harness):
     sub = harness.install({})
     ctx = harness.make_ctx(active_workspace=False)
     text, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"])
@@ -352,17 +335,16 @@ def test_advisory_first_body_ask_requires_reason_and_preserves_the_named_panel(h
     _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"], reason="one area changed")
     assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2"]
     ask = _record(harness)["asks"][0]
-    assert ask["host_added"] == [] and ask["panel"]["widened_from"] == []
+    assert ask["host_added"] == [] and "widened_from" not in ask["panel"]
     assert ask["reason"] == ask["panel"]["reason"] == "one area changed"
     from ouroboros.review_ledger import load_record
     assert load_record(harness.drive, ask["record_id"])["panel"]["reason"] == "one area changed"
 
 
-def test_first_body_ask_adviser_alone_refuses_in_advisory_and_is_free_in_cyber(harness):
+def test_first_body_ask_adviser_alone_refuses_outside_cyber_and_is_free_in_cyber(harness):
     critic = _slots(("critic", "m/critic"))[0]
     harness.monkeypatch.setattr("ouroboros.reviewer_slot_config.catalog_review_row", lambda *_: critic)
     harness.monkeypatch.setattr("ouroboros.reviewer_slot_config._delivery_slot", lambda *_a, **_kw: critic)
-    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     sub = harness.install({"critic": _reply("A concern", objections=[("x", "explain this")])})
     ctx = harness.make_ctx(active_workspace=False)
     text, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["critic"], reason="optional critic")
@@ -371,7 +353,7 @@ def test_first_body_ask_adviser_alone_refuses_in_advisory_and_is_free_in_cyber(h
     harness.monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     _, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["critic"])
     assert [s.slot_id for s in sub.calls[0]["slots"]] == ["critic"]
-    assert result.meta["plan_holding"] == 0
+    assert result.meta["plan_open_objections"] == 1  # disclosed; nothing holds it
 
 
 def test_later_ask_continues_each_participant_with_delta_cross_talk_and_own_objections(harness):
@@ -391,7 +373,7 @@ def test_later_ask_continues_each_participant_with_delta_cross_talk_and_own_obje
     assert "### Ask a1" in user and "s2 (m/b) answered:" in user and "Peer says fine." in user  # cross-talk since its last answer
     assert "## YOUR OPEN OBJECTIONS" in user and "- o1 (raised in ask a1 about revision 1): the bar is low" in user
     assert "I raised the bar; is o1 answered?" in user
-    assert plan_record.open_objections(_record(harness)) == [] and result.meta["plan_holding"] == 0
+    assert plan_record.open_objections(_record(harness)) == [] and result.meta["plan_open_objections"] == 0
     assert "withdrawn: s1/o1 in ask a2" in text and "Nothing holds your final answer" in text
     ask = _record(harness)["asks"][1]
     assert ask["participants"][0]["continued"] is True
@@ -404,9 +386,9 @@ def test_omission_flags_not_adjudicated_and_another_seat_cannot_withdraw(harness
     sub.answers.update({"s1": _reply("Something else entirely."), "s2": _reply("I withdraw s1's point.", withdrawn=[("o1", "I disagree with it")])})
     text, result = _call(ctx, ask=["s1", "s2"], message="again")
     [objection] = plan_record.open_objections(_record(harness))
-    assert objection["not_adjudicated"] is True and objection["holds"] is True
+    assert objection["not_adjudicated"] is True and objection["owner_marked"] is True
     assert "NOT ADJUDICATED" in text and "ignored withdrawals of objections the seat never raised: s2/o1 in ask a2" in text
-    assert result.meta["plan_holding"] == 1
+    assert result.meta["plan_open_objections"] == 1
 
 
 def test_unreadable_reply_and_a_failed_seat_change_nothing_and_never_hold(harness):
@@ -430,7 +412,13 @@ def test_pending_seats_settle_from_the_custody_hook_and_wake_the_mailbox(harness
     record = _record(harness)
     assert [p["status"] for p in record["asks"][0]["participants"]] == ["pending", "pending", "answered"]
     assert result.meta["plan_pending_asks"] == 1 and "Still working: s1, s2" in text
-    decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False)
+    # A pending ask holds no ending; a reply after the task ends stays in its plan record and shows as late feedback
+    # only where the room is known (``late_review_marks``): neither text promises an answer "before your final".
+    for words in (text, pr._SCHEMA["description"]):
+        for fact in ("a pending ask holds no ending", "kept in its plan record", "when the room is known"):
+            assert fact in words, fact
+        assert "before your final" not in words and "before an unhurried finish" not in words
+    decision = plan_record.gate_projection(record, cyber_pro=False)
     assert decision["status"] == "awaiting" and decision["allow"] is True  # silence never holds
     from ouroboros.review_records import ReviewActorRecord
 
@@ -510,7 +498,7 @@ def test_a_structurally_dead_seat_is_not_dispatched_and_unknown_health_dispatche
     for sid, code in (("s2", "subscription_window_exhausted"), ("s3", "credential_pool_exhausted")):
         assert rows[sid]["dispatched"] is False and rows[sid]["status"] == "not_dispatched"
         assert f"health_skip[{code}]" in rows[sid]["not_dispatched_reason"]
-    assert "not sent: s2 — health_skip[subscription_window_exhausted]" in text and result.meta["plan_holding"] == 0
+    assert "not sent: s2 — health_skip[subscription_window_exhausted]" in text and "plan_holding" not in result.meta
 
     monkeypatch.setattr(runtime, "plan_panel_health_snapshot", lambda slots: None)
     sub = harness.install({})
@@ -580,7 +568,7 @@ def test_the_runtime_data_plane_is_never_attached_whatever_root_the_ask_names(ha
     assert "sk-live-x" not in packets
     read, _result = _call(ctx)
     for shown in (asked, read):
-        assert (f"  evidence omitted: live_data/settings.json (denied_path)\n  {DENIED_ATTACH_HINT}\n" in shown
+        assert (f"  evidence not attached: live_data/settings.json (denied_path)\n  {DENIED_ATTACH_HINT}\n" in shown
                 and shown.count(DENIED_ATTACH_HINT) == 1), shown
     assert "| live_data/settings.json | denied_path |" in packets and DENIED_ATTACH_HINT in packets
     assert DENIED_ATTACH_HINT.startswith("Settings and runtime files outside your own task stores cannot be attached "
@@ -908,3 +896,133 @@ def test_the_deadline_rail_states_facts_and_never_advises_a_plan_of_its_own(harn
     assert text.startswith("PLAN_TASK_SKIPPED_DEADLINE:") and "remaining time 0s" in text
     assert "This call dispatched no reviewer" in text and "The plan record keeps its state" in text
     assert "no plan review is open" not in text and "proceed with your own" not in text.lower()
+
+
+def test_an_asks_mixed_evidence_reaches_every_seat_and_every_author_view_apart(harness, monkeypatch):
+    """One ask attaching mixed evidence, through the real handler, preparation, record and readers: own
+    ``artifact_store`` and ``task_drive`` files, a helper's saved result and a workspace selection attach (the
+    artifact twice, the large drive file as its head); the settings file is refused and a link is never fetched.
+    Packet, session and native seats are prepared the same bytes and the same named absences. The author sees,
+    in the ask's result, the free read, the review history and the context index's plan-record reader, what
+    attached (whole or in part) apart from what did not, each with its reason: a cut or a repeat beside content
+    that attached is never counted as missing. A revision's ask keeps its own evidence; an ask an older writer
+    stored without these fields reads as not recorded, never as nothing attached, and one that kept what attached
+    but not why says its reasons are not recorded."""
+    from dataclasses import replace
+
+    from ouroboros import config as cfg
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY, current_plan_history, review_context_updates
+    from ouroboros.tools import control_task_results
+    from ouroboros.tools.plan_evidence import EVIDENCE_PER_ITEM_BYTES
+    from tests._store_shared import seed_result
+
+    live = harness.workspace / "live_data"
+    live.mkdir()
+    (live / "settings.json").write_text('{"OPENROUTER_API_KEY": "sk-live-x"}', encoding="utf-8")
+    monkeypatch.setattr(cfg, "DATA_DIR", live, raising=False)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", live / "settings.json", raising=False)
+    ctx = harness.make_ctx()
+    art, drv = _own_store(ctx, "artifact_store"), _own_store(ctx, "task_drive")
+    brief_bytes = b"BRIEF-4K: keep the existing Plan details.\n"
+    (art / "brief.md").write_bytes(brief_bytes)
+    big = b"".join(f"{n:06d} drive log line\n".encode() for n in range(EVIDENCE_PER_ITEM_BYTES // 20 + 400))
+    (drv / "long-log.md").write_bytes(big)
+    seed_result(harness.drive, "helper-1", {"status": "completed", "result": "HELPER-RESULT-7Z: three call sites."})
+    [api, sess, native] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"), ("nat1", "m/native"))
+    harness.state["slots"] = [api, sess, replace(native, subagent_id="native-reader", native_retrieval_override=True)]
+    sub = harness.install({})
+    brief, log = str(art / "brief.md"), str(drv / "long-log.md")
+    url = "https://example.com/spec"
+    attach = [brief, log, "task:helper-1", brief, "live_data/settings.json", url, "notes.md::lines=1-1"]
+    asked, _result = _write(ctx, ask="council", message="Mixed evidence.", attach=attach)
+
+    ask = _record(harness)["asks"][0]
+    assert ask["attach"] == attach
+    assert [row["locator"] for row in ask["attached"]] == [brief, log, "task:helper-1", "notes.md::lines=1-1"]
+    assert ask["omissions"] == [{"locator": log, "reason": f"truncated_to_{EVIDENCE_PER_ITEM_BYTES}"},
+                                {"locator": brief, "reason": "duplicate_locator"},
+                                {"locator": "live_data/settings.json", "reason": "denied_path"},
+                                {"locator": url, "reason": "url_not_fetched"}]
+    # Every seat is prepared the same evidence: the artifact once, the drive head, the helper's result, and the
+    # absences in its table; the settings bytes reach none.
+    request = sub.calls[0]["request"]
+    deliveries = {"api1": _user_text(request.slot_messages["api1"][-1]["content"]),
+                  "sess1": str(request.slot_session_tasks["sess1"]), "nat1": str(request.slot_session_tasks["nat1"])}
+    for seat, delivery in deliveries.items():
+        assert delivery.count(f"----- BEGIN {brief} -----\nBRIEF-4K") == 1, seat
+        assert big[:EVIDENCE_PER_ITEM_BYTES].decode() in delivery and "HELPER-RESULT-7Z" in delivery, seat
+        for row in ask["omissions"]:
+            assert f"| {row['locator']} | {row['reason']} |" in delivery, (seat, row)
+        assert "sk-live-x" not in delivery, seat
+    assert ask["participants"][2]["slot"]["delivery"] == "native"
+
+    whole = (f"  evidence attached (prepared for the participants): {brief} (source {len(brief_bytes)} bytes; "
+             f"duplicate_locator); {log} (in part; source {len(big)} bytes; truncated_to_{EVIDENCE_PER_ITEM_BYTES}); task:helper-1 "
+             f"(source {ask['attached'][2]['bytes']} bytes); notes.md::lines=1-1 (source 11 bytes)\n"
+             f"  evidence not attached: live_data/settings.json (denied_path); {url} (url_not_fetched)\n")
+    summary = ("Evidence prepared for the participants: 3 of 6 attached whole, 1 in part, 2 not attached; "
+               "the ask below lists each locator and every reason.")
+    assert summary in asked and whole in asked, asked
+
+    # A revision's ask carries its own evidence; the earlier ask keeps what it carried.
+    _call(ctx, plan="Outline, then the story.", ask=["api1", "sess1", "nat1"], attach=["task:helper-1", url, "absent.md"])
+    revised = sub.calls[1]["request"]
+    for seat in ("api1", "sess1", "nat1"):
+        delivery = (_user_text(revised.slot_messages[seat][-1]["content"]) if seat == "api1" else str(revised.slot_session_tasks[seat]))
+        assert "HELPER-RESULT-7Z" in delivery and f"| {url} | url_not_fetched |" in delivery and "| absent.md | missing |" in delivery
+        assert "BRIEF-4K" not in delivery.split("## YOUR PANEL SEAT")[-1], seat
+    # Asks an older writer stored: one without any evidence field, one that kept what attached but not the reasons.
+    notes = {"locator": "notes.md", "sha256": "e" * 64, "bytes": 11}
+    for row in ({"ask_id": "a3", "message": "older writer"},
+                {"ask_id": "a4", "message": "older partial writer", "attach": ["notes.md", "b.md"], "attached": [notes]}):
+        plan_record.append_ask(harness.drive, "task-1", {**row, "ts": "2026-11-07T12:00:00+00:00", "revision": 2, "participants": []})
+    read, _result = _call(ctx)
+    a1, a2, a3, a4 = (read.index(f"- ask {ask_id} on revision") for ask_id in ("a1", "a2", "a3", "a4"))
+    assert a1 < read.index(whole) < a2, read
+    second = ("\n  evidence attached (prepared for the participants): task:helper-1 "
+              f"(source {ask['attached'][2]['bytes']} bytes)\n  evidence not attached: {url} (url_not_fetched); absent.md (missing)\n")
+    assert a2 < read.index(second) < a3, read
+    assert read[a3:a4].endswith("\n  evidence: not recorded for this ask\n"), read[a3:a4]
+    assert ("\n  evidence attached (prepared for the participants): notes.md (completeness not recorded; source 11 bytes)\n  evidence not attached: b.md\n"
+            "  evidence cuts and absences: not recorded for this ask\n") in read[a4:], read[a4:]
+    assert "evidence omitted" not in read and read.count("cannot be attached directly") == 1  # the deny hint, once
+
+    # The review history and the plan family's current history carry each ask's fields as recorded; the older ask
+    # gains no empty list.
+    record = _record(harness)
+    history, _operative = current_plan_history(ctx)
+    rounds = {row["plan_ask"]: row for row in history["rounds"]}
+    assert rounds == {row["plan_ask"]: row for row in plan_record.record_history(harness.drive, "task-1", record)["rounds"]}
+    for stored in record["asks"][:2]:
+        assert {key: rounds[stored["ask_id"]][key] for key in ("attach", "attached", "omissions")} == {
+            key: stored[key] for key in ("attach", "attached", "omissions")}
+    assert not {"attach", "attached", "omissions"} & set(rounds["a3"])
+    assert (rounds["a4"]["attach"], rounds["a4"]["attached"], "omissions" in rounds["a4"]) == (["notes.md", "b.md"], [notes], False)
+    # The context index addresses the plan record for these facts; its named reader returns them exactly.
+    updates, _identities = review_context_updates(ctx, families={"plan": ""})
+    [index] = [row for row in updates if REVIEW_CONTEXT_INDEX_KEY in row]
+    current = json.loads(index["content"].split("\n", 1)[1])["current"]
+    [address] = [row for row in current["addresses"].values() if row["what"].startswith("this task's plan record")]
+    assert "each locator cut or not attached with its reason" in address["what"]
+    assert address["read"] == {"tool": "get_task_result", "arguments": {"task_id": "task-1", "include_authority": True}, "field": "plan_record"}
+    authority = json.loads(control_task_results._get_task_result(ctx, **address["read"]["arguments"]))["authority"]
+    assert authority[address["read"]["field"]]["asks"] == record["asks"]
+
+
+@pytest.mark.parametrize("fields,state", [
+    ({"attached": [], "omissions": []}, "unknown"),
+    ({"attached": [{"locator": "unresolved.md", "bytes": 9}]}, "attached_unknown"),
+])
+def test_incomplete_preparation_facts_stay_visible(harness, fields, state):
+    ctx = harness.make_ctx()
+    _write(ctx)
+    plan_record.append_ask(harness.drive, "task-1", {
+        "ask_id": "a1", "ts": "2026-11-07T12:00:00+00:00", "revision": 1,
+        "message": "incomplete record", "participants": [], "attach": ["unresolved.md"], **fields,
+    })
+    ask = _record(harness)["asks"][0]
+    evidence = plan_record.ask_evidence(ask)
+    assert len(evidence["items"]) == 1 and evidence["items"][0]["state"] == state
+    assert evidence["counts"]["whole"] == 0
+    rendered, _ = _call(ctx)
+    assert "unresolved.md" in rendered and "not recorded" in rendered

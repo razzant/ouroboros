@@ -15,7 +15,8 @@ def _pending(tmp_path):
     write_task_result(tmp_path, "root", "running", root_task_id="root")
     assert dc.record_start_requested(tmp_path, run_id="", task_id="child", root_task_id="root",
         invocation_id="inv-exact", idempotency_key="inv-exact", max_seconds=60,
-        request={"prompt": "original full request"}, project_id="", project_owned=False, route="test")
+        request={"prompt": "original full request"}, project_id="", project_owned=False, route="test",
+        daemon_store_id="fixture-store")  # receipt-bound invocation; this test varies Pause handoff
     return dc.pending_invocations(tmp_path)[0]
 
 
@@ -42,7 +43,7 @@ def test_pending_recovery_handoff_is_excluded_with_pause_and_wait_is_outside_loc
         return {}  # Unknown accepted handle stays pending, not proven no-effect.
     def recover():
         try:
-            results.append(_recover_pending_invocation(tmp_path, SimpleNamespace(start_run=start), record))
+            results.append(_recover_pending_invocation(tmp_path, SimpleNamespace(start_run=start, store_identity="fixture-store"), record))
         except BaseException as exc:
             errors.append(exc)
     thread = threading.Thread(target=recover)

@@ -59,9 +59,11 @@ def test_replay_learns_subagent_lineage_before_merging_card_rows():
     assert history.index(lineage_pass) < history.index("admitCardMetadata(msg)")
     # A page may contain a child whose parent is already represented elsewhere.
     # Keep those bindings during replay; only final instance disposal clears them.
+    disposal = src[src.index("destroy() {"):]
+    cleared = disposal[disposal.index("for (const held of ["):disposal.index("]) held.clear();")]
     for collection in ("subagentChildParents", "subagentTerminalChildren"):
-        assert f"{collection}.clear();" not in history
-        assert f"{collection}.clear();" in src[src.index("destroy() {"):]
+        assert f"{collection}.clear()" not in history and "held.clear()" not in history
+        assert f"{collection}," in cleared  # destroy's one release of the buffered collections
     fanout = src[src.index("onWs('chat'"):src.index("onWs('message_annotation'")]
     # Live lineage must be known before progress or a final can resolve a
     # child card; ephemeral registration now lives in the early reference seam.

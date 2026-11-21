@@ -139,16 +139,16 @@ def _mail_holder(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
 
 
 def _quiz_answer_frame(
-    block: Dict[str, Any], option_index: Optional[int], comment: str,
+    block: Dict[str, Any], option_index: Optional[int], comment: str, *, asker: str = "",
 ) -> str:
-    """Host-authored structural frame around the owner's VERBATIM choice.
+    """Host-authored structural frame around the owner's VERBATIM answer.
 
     Thin alias of the ONE shared builder ``owner_quiz.quiz_answer_frame``, so
     the live mailbox control here and the late-answer delivery in the drain
-    render the same words."""
+    render the same words; ``asker`` names whose text a pressed label is."""
     from ouroboros.owner_quiz import quiz_answer_frame
 
-    return quiz_answer_frame(block, option_index, comment)
+    return quiz_answer_frame(block, option_index, comment, asker=asker)
 
 
 def _send_quiz_state(quiz_id: str, task_id: str, state: str, **fields: Any) -> None:
@@ -215,12 +215,27 @@ def _record_quiz_answer_history(
     index = block.get("answered_index")
     stored = log_chat(
         "system", address.get("chat_id"), 0,
-        _quiz_answer_frame(block, index if isinstance(index, int) else None, str(block.get("comment") or "")),
+        _quiz_answer_frame(block, index if isinstance(index, int) else None, str(block.get("comment") or ""),
+                           asker=task_id),  # the room's row: every reader is told whose text the label is
         ts=str(block["answered_at"]), source="owner_quiz_answer", task_id=task_id,
         client_message_id=source_id, record_type="quiz_answer", quiz=dict(block),
         message_meta=address, drive_root=drive_root, require_write=True,
     )
     mark_quiz_history_written(drive_root, task_id, str(block["quiz_id"]), source_row=stored)
+
+
+def _answer_surface(drive_root: pathlib.Path, body: Dict[str, Any], source: str) -> Optional[Dict[str, str]]:
+    """The Telegram bot and chat an answer came from, as the bundled bridge relays it (``surface``); its late answer's
+    turn replies there (``chat_references.late_answer_surface``). None from any other source or shape."""
+    from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+
+    surface = body.get("surface")
+    if source != TELEGRAM_SOURCE or not isinstance(surface, dict) or surface.get("kind") != "telegram":
+        return None
+    bot, chat = str(surface.get("bot_id") or ""), str(surface.get("conversation_id") or "")
+    if not (bot.isdigit() and chat.lstrip("-").isdigit()) or not bundled_bridge(drive_root):
+        return None
+    return {"kind": "telegram", "conversation_id": chat, "bot_id": bot}
 
 
 def _late_answer_destination(
@@ -350,7 +365,7 @@ def deliver_as_owner_message(
             "type": "chat", "role": "user", "content": str(row.get("text") or text),
             "ts": str(row.get("ts") or ""), "source": str(source or "web"), "chat_id": chat_id,
             "sender_session_id": "", "client_message_id": client_message_id,
-            **projection_fields(row),
+            **projection_fields(row, drive_root),
         }
         if row.get("ingress_accepted") is True:
             echo["ingress_accepted"] = True  # the row's own fact: live matches history replay
@@ -509,7 +524,13 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     action = body.get("action", "answer")
     if action not in {"answer", "close", "dismiss"}:
         return _refused("action must be answer, close or dismiss", 400, reason_code="action_invalid")
-    if any(key not in {"request_id", "decision_id", "option_index", "comment", "action", "reason"} for key in body):
+    allowed = {"request_id", "decision_id", "option_index", "comment", "action", "reason"}
+    if "surface" in body:
+        from ouroboros.chat_references import TELEGRAM_SOURCE, bundled_bridge
+
+        if source == TELEGRAM_SOURCE and bundled_bridge(drive_root):
+            allowed.add("surface")
+    if body.keys() - allowed:
         return _refused(
             "decision accepts only {request_id, decision_id, option_index?, comment?, action?, reason?}",
             400, reason_code="unexpected_fields",
@@ -610,7 +631,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
             # The late answer is accepted (В17a=A); with the task alive the
             # expired state would be a contradiction, so the flag is not set.
             allow_expired=task is None,
-            answer_source=source,
+            answer_source=source, answer_surface=_answer_surface(drive_root, body, source),
         )
         block = outcome.get("block") if isinstance(outcome.get("block"), dict) else {}
         attempt_delivery = False

@@ -21,7 +21,7 @@ def test_saved_restriction_is_preserved_without_normalization(subtests):
 def test_saved_profile_selects_successor(subtests):
     for old, new in TOOL_NAME_ALIASES.items():
         with subtests.test(old=old, new=new):
-            schemas = [{"function": {"name": name}} for name in (new, "read_file")]
+            schemas = [{"function": {"name": name}} for name in (new, "web_search")]
             selected = select_tool_schemas(schemas, context_mode="nano", schema_names=[old])
             assert selected.chosen == (new,)
             assert selected.unknown == ()

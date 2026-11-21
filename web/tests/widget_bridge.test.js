@@ -61,6 +61,21 @@ test('both bootstrap templates are valid scripts and the bridge opens no transpo
     }
 });
 
+test('a board viewport reaches the size reporter with its fresh fit, and a report carries the fit back', () => {
+    const { window, posted, deliver } = bridgeHarness();
+    const heard = [];
+    window.__ouroWidgetOnViewport((viewport) => heard.push(viewport));
+    deliver({ type: 'ouro-widget-viewport', floor: 0, ceiling: 8192, frame: 320, fit: 3 });
+    deliver({ type: 'ouro-widget-viewport', floor: 0, ceiling: 400 });
+    // Not a whole positive number: no fit.
+    for (const fit of [-1, 1.5, '2', null]) deliver({ type: 'ouro-widget-viewport', floor: 0, ceiling: 400, frame: 320, fit });
+    assert.deepEqual(heard.slice(0, 2), [{ floor: 0, ceiling: 8192, frame: 320, fit: 3 }, { floor: 0, ceiling: 400, frame: 0, fit: 0 }]);
+    assert.deepEqual(heard.slice(2).map((viewport) => viewport.fit), [0, 0, 0, 0]);
+    window.__ouroWidgetReport({ type: 'ouro-widget-resize', height: 181, fit: 3 });
+    assert.deepEqual(posted.filter((message) => message.type === 'ouro-widget-resize'),
+        [{ type: 'ouro-widget-resize', height: 181, fit: 3, nonce: 'nonce-1' }]);
+});
+
 test('bridgeChunkBuffer transfers exactly the bytes a view covers', () => {
     const whole = new Uint8Array([1, 2, 3]);
     assert.equal(bridgeChunkBuffer(whole), whole.buffer);

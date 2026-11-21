@@ -145,9 +145,9 @@ amount-only admission, wave fit and pacing never read custody. The coverage owne
 run's receipt once in the SAME money read as the amounts. Own/tree/sibling scopes
 and split execution/ledger roots retain their identities. Custody roots share one
 display wait allowance; the subsequent money read has its own allowance. Contention
-reports unavailable at debug level. Pending/live/unrecorded or unreadable custody
-keeps `cost_custody` open; cleanup holds do not. Counts stay ledger-derived; later
-starts are not atomically fenced. Exact partial cash is confirmed, estimated
+reports unavailable at debug level. Pending/live/uncollected or unreadable custody
+keeps `cost_custody` open; settled without a receipt means unknown, not open.
+Cleanup holds affect neither. Counts stay ledger-derived; later starts are not atomically fenced. Exact partial cash is confirmed, estimated
 partial cash is estimated; both carry an unpriced remainder and no total bound.
 
 Custody changes owe task/root `cost_revision` in the existing `delegated_runs`
@@ -166,8 +166,16 @@ late copyback or quarantine restore projects without another receipt.
 `review_price.py` prices one review by one reviewer row from the same rows:
 `review_seat_costs` groups the review category's attempts by
 `(review_wave_id, review_slot_id)` through the `(category, ts_last)` index,
-summing every physical attempt of a seat in one wave; the median of a row's
-recent waves on its current model is shown with its count and range, no
+summing every physical attempt of a seat in one wave. Its `models` list names only
+attempts whose send was witnessed (dispatched, settled or unresolved): only a
+reservation released before its send, or proven unsent, never ran, so its model
+cannot be charged the seat's money; an abandoned or unknown outcome does not prove
+no send. A wave is measured by
+its bills, not by what the catalog knew before the send: every attempt was
+released unsent, settled with a recorded sum that is not partial, or is a
+subscription call settled without a sum (a seat and time, no API money); an
+open attempt or a paid one without a sum leaves the wave out. The median of a row's
+recent measured waves on its current model is shown with its count and range, no
 history reads `cost unknown`, and one process keeps the table for half an hour
 so `## Review` never waits on the ledger.
 
@@ -383,7 +391,10 @@ without a valid upstream figure it is unknown, never $0. Every other reply keeps
 its charge (OpenRouter repeats it in that field), and settled history is not
 rewritten. `_usage_response.provider_cost_value` validates incoming cash; malformed prices
 stay unknown despite available tariffs. The host-derived `cost_invalid` fact
-survives settlement, loop and Safety telemetry. Valid alternate evidence wins;
+survives settlement, loop and Safety telemetry. On the exact OpenCode Go Chat route only a valid `usage.cost`
+is cash (`_usage_response.normalize_go_price`, whose docstring cites Go's cost docs): `usage.opencode.estimated`
+makes it an estimate, and Go's own list price, plan allowance and billed-token split are other units, never stand-ins.
+Valid alternate evidence wins;
 absent/null prices permit nonfinal token estimates, never image text tariffs.
 Generation 404, 401, 403, 429, mismatched ID and absent/invalid money are distinct
 non-price outcomes. `Retry-After` is retained for an operator's next invocation;

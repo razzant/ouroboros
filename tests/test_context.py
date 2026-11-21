@@ -14,10 +14,11 @@ environment builder they share lives in ``tests/_context_shared.py``.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import dialogue_store
+from ouroboros import context_health, dialogue_store
 from ouroboros.context import build_health_invariants, build_runtime_section
 
 from tests import _dialogue as dialogue_test
@@ -97,6 +98,18 @@ class TestSentHistoryHealth:
             transcript_prefix.count_history_change(
                 {}, {"round": 1, "kind": "rewritten", "sanctioned_by": "compaction"}, drive_root=tmp_path, task_id="t1")
             assert "under the running code (version " in build_health_invariants(env)
+        finally:
+            transcript_prefix._running_code.cache_clear()
+
+    def test_the_running_code_is_read_once_per_process(self, monkeypatch):
+        from ouroboros import transcript_prefix, utils
+
+        reads = []
+        monkeypatch.setattr(utils, "get_git_info", lambda _root: (reads.append(1), ("branch", "shasha"))[1])
+        transcript_prefix._running_code.cache_clear()
+        try:
+            assert transcript_prefix._running_code() == transcript_prefix._running_code()
+            assert len(reads) == 1
         finally:
             transcript_prefix._running_code.cache_clear()
 
@@ -321,7 +334,7 @@ def test_health_invariants_come_first_in_dynamic_context(tmp_path):
     dynamic_text = messages[0]["content"][-1]["text"]
     # Knowledge and my rooms lead the changing block; the runtime sections follow, health first.
     assert dynamic_text.startswith("## Shared understanding")
-    assert dynamic_text.index("## This room (Main)") < dynamic_text.index("## Health Invariants")
+    assert dynamic_text.index("## This room (Main [chat_id=1])") < dynamic_text.index("## Health Invariants")
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Scratchpad")
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Drive state")
     # #1731: the root keeps its contract discipline, and no root context orders a result review
@@ -387,7 +400,7 @@ def test_health_invariants_come_first_in_a_consciousness_wake_context(tmp_path):
 
     dynamic_text = messages[0]["content"][-1]["text"]
     assert dynamic_text.startswith("## Shared understanding")
-    assert "\n## This room (Main) — head " in dynamic_text  # a wake reads Main as its room, as the Main turn does
+    assert "\n## This room (Main [chat_id=1]) — head " in dynamic_text  # a wake reads Main as its room, as the Main turn does
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Scratchpad")
     assert dynamic_text.index("## Health Invariants") < dynamic_text.index("## Drive state")
 
@@ -498,3 +511,72 @@ def test_runtime_section_carries_official_update_fact(tmp_path, monkeypatch):
     assert payload["official_update"]["status"] == "update_available"
     assert payload["official_update"]["letter"] == {"state": "ready"}
     assert payload["official_update"]["running"]["sha"] == payload["git_head"], "the fact reads THIS repo's HEAD"
+
+
+def _host_events(tmp_path, *rows):
+    (tmp_path / "logs").mkdir()
+    path = tmp_path / "logs" / "events.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return SimpleNamespace(drive_path=lambda relative: tmp_path / relative, drive_root=tmp_path, budget_drive_root=None)
+
+
+def _host_receipt(code="runningcode1234", **work):
+    return {"type": "context_memory_view", "task_id": "t", "code": code, "work": work}
+
+
+def _host_checks(env):
+    checks = []
+    context_health._collect_log_analysis_checks(env, checks)
+    return [check for check in checks if "HOST WORK" in check]
+
+
+class TestHostWorkBeyondOnePass:
+    """The health block's fact about host work past one pass: present only when a build did work again on an input it
+    already had, from the receipts. The rows a capture read are a receipt and no line."""
+
+    @pytest.fixture(autouse=True)
+    def running(self, monkeypatch):
+        from ouroboros import transcript_prefix
+
+        monkeypatch.setattr(transcript_prefix, "_running_code", lambda: "runningcode1234")
+
+    def test_a_healthy_state_adds_nothing(self, tmp_path):
+        env = _host_events(tmp_path, _host_receipt(view_renders=2, view_texts_kept=2, request_serializations=6, rows_read=31, rows_open=30, rows_new=1))
+        assert _host_checks(env) == []
+
+    def test_the_rows_a_capture_read_are_no_line(self, tmp_path):
+        """The tail is read whole on every capture, stored or live, so rows read past those open are in its receipt: a
+        line about them stood in the contexts whatever the host did. The real capture path (here the live one, before
+        a stored prefix stands) shows the receipt, and no host-work line is added."""
+        from ouroboros import chat_chain, memory_inventory
+        from ouroboros.chronicle_store import ChronicleStore
+        from ouroboros.context_timing import measured_sections, section_spans
+        from ouroboros.tools.chronicle import page_covers
+        from tests import _memory_inventory_shared as shared
+
+        shared.world(tmp_path)
+        addresses = {pos: address for address, _row, pos in chat_chain.iter_rows(tmp_path)}
+        covers = page_covers(tmp_path, "1", from_addr=addresses[10], to_addr=addresses[11])["covers"]
+        store = ChronicleStore(tmp_path)
+        assert store.publish_page(room_id="1", text="A sealed page.", covers=covers, author=shared.MIND).ok
+        assert not (store.tail_state() or {}).get("complete")
+        with measured_sections():
+            memory_inventory.open_rows_by_room(tmp_path)
+            work = section_spans()["work"]
+        assert work["rows_read"] > work["rows_open"] and "rows_new" not in work, work
+        root = tmp_path / "health"
+        root.mkdir()
+        assert _host_checks(_host_events(root, _host_receipt(**work))) == []
+
+    def test_work_done_again_is_named_with_its_verb_and_count(self, tmp_path):
+        env = _host_events(tmp_path, _host_receipt(view_pieces=9, view_pieces_again=2, rows_read=74963, rows_open=13834),
+                      _host_receipt(view_renders=2, rows_read=74963, rows_open=13834))
+        [line] = _host_checks(env)
+        assert line.startswith("INFO: HOST WORK BEYOND ONE PASS under the running code (runningcode1) — 1 of 2 recent builds")
+        assert "did work again on an input they already had (view_pieces 2)" in line and "should" not in line
+        assert "rows" not in line  # the rows read stay in the receipt
+
+    def test_an_older_code_s_receipts_and_empty_work_are_not_read(self, tmp_path):
+        env = _host_events(tmp_path, _host_receipt(code="oldcode", rows_read=99, rows_open=1, view_pieces_again=7),
+                      {"type": "context_memory_view", "code": "runningcode1234"})
+        assert _host_checks(env) == []

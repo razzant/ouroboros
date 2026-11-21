@@ -355,7 +355,7 @@ test('Run review… stands beside the campaign and opens the one reviewer picker
         answer = { confirmed: true, value: 'row-a' };
         review.click();
         await flush();
-        assert.deepEqual(sent, [{ type: 'command', cmd: '/review row-a' }]);
+        assert.deepEqual(sent, [{ type: 'command', cmd: '/review row-a', ui_control: { name: 'deep_review' } }]);
     } finally {
         dispose?.();
         globalThis.fetch = savedFetch;

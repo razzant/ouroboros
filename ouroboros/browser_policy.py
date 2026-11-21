@@ -1,6 +1,6 @@
 """Task browser targets and Ouroboros control-request policy.
 
-Playwright lifecycle and operations remain in tools.browser. This owner composes
+Playwright lifecycle and operations remain in tools.browser(_session). This owner composes
 existing resource authority, concrete origins and live service identity.
 
 Owner control is admitted from the actual HTTP requests a page makes and three-valued
@@ -193,9 +193,9 @@ def browser_request_block_reason(
     if mode_has_unrestricted_agency(runtime_mode):
         return ""
     if any(predicate(request) for predicate in (
-        _is_context_mode_owner_post, _is_effort_range_owner_post, _is_review_enforcement_post,
+        _is_context_mode_owner_post, _is_effort_range_owner_post,
         _is_safety_mode_owner_post, _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
-        _is_model_wait_owner_post,
+        _is_model_wait_owner_post, _is_model_owner_post,
     )) and runtime_service_kind(request.url, ctx):
         return "BROWSER_OWNER_CONTROL_BLOCKED: this operation belongs to the owner"
     return ""
@@ -278,6 +278,15 @@ def _readable_body(request: Any) -> Any:
 
 
 
+def _is_model_owner_post(request: Any) -> bool:
+    import urllib.parse
+
+    path = urllib.parse.unquote(urllib.parse.unquote(urlparse(str(request.url or "")).path)).rstrip("/")
+    parts = path.split("/")
+    return str(request.method or "").upper() == "POST" and (path in {"/api/owner/chat-model", "/api/owner/chat-processing"} or (
+        len(parts) == 5 and parts[1:3] == ["api", "tasks"] and bool(parts[3]) and parts[4] == "model"))
+
+
 def _is_context_mode_owner_post(request: Any) -> bool:
     try:
         parsed = urlparse(str(request.url or ""))
@@ -330,18 +339,6 @@ def _is_model_wait_owner_post(request: Any) -> bool:
         body = json.loads(text or "{}")
         return (isinstance(body, dict) and str(body.get("decision_id", "")).startswith("model_wait:")
                 and body.get("persist_role") is True)
-    except (AttributeError, TypeError, ValueError):
-        return False
-
-
-def _is_review_enforcement_post(request: Any) -> bool:
-    """The actual Settings field changes enforcement, independently of Access."""
-    import json
-    try:
-        return (str(request.method).upper() == "POST"
-                and urlparse(str(request.url)).path.rstrip("/") == "/api/settings"
-                and ((text := _readable_body(request)) is None
-                     or "OUROBOROS_REVIEW_ENFORCEMENT" in json.loads(text or "{}")))
     except (AttributeError, TypeError, ValueError):
         return False
 

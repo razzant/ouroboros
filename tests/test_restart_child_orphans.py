@@ -337,9 +337,16 @@ def test_startup_takes_the_roster_over_before_restore_reads_it():
 
     source = inspect.getsource(server._run_supervisor)
     init = source.index("workers_init(")
-    restore = source.index("restored_pending = restore_pending_from_snapshot(")
+    # The same one restore call, still bound to `restored_pending`, now timed as its own startup phase.
+    restore = source.index('restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", '
+                           "lambda: restore_pending_from_snapshot(")
     reset = source.index("kill_workers(preserve_pending=True)")
     assert init < restore < reset
+    # The three are phase bodies now, and a phase calls its body where the statement stands, so the order of
+    # these statements is still the order the roster is taken, read and the pool reset.
+    from ouroboros import server_liveness
+
+    assert "step()" in inspect.getsource(server_liveness.run_startup_phase)
 
     from supervisor import queue as queue_mod
 

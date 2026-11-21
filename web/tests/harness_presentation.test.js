@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { familyLabel } from '../modules/claudexor_status_store.js';
-import { harnessFamilyMarkup } from '../modules/harness_accounts.js';
+import { accountGroups } from '../modules/harness_accounts.js';
 import { createLoginCardController, loginCardHtml } from '../modules/harness_login_cards.js';
 import {
     GENERIC_HARNESS_MARK,
@@ -130,12 +130,10 @@ test('live daemon display names override catalog fallbacks without changing the 
 });
 
 test('Agents and login surfaces use the shared identity markup with visible labels', () => {
-    const groupHtml = harnessFamilyMarkup({
-        harness: 'codex', label: 'Codex Live', rows: [],
-        status: { tone: 'muted', label: 'No account connected' },
-    }, { daemon: {} }, { accountsRead: 'ok', quotaRead: 'ok' });
-    assert.match(groupHtml, /data-harness-identity="codex"/);
-    assert.match(groupHtml, />Codex Live<\/span>/);
+    // Settings puts the provider's identity on its list head and page title; the account card is simply Accounts.
+    const group = accountGroups({ harnesses: [{ id: 'codex', display_name: 'Codex Live' }] }, { catalogKnown: true })[0];
+    assert.equal(group.label, 'Codex Live');
+    assert.equal(harnessPresentation(group.harness).path, HARNESS_MARKS.codex.path);
 
     const loginHtml = loginCardHtml({
         harness: 'cursor', familyLabel: 'Cursor Live', profile: '',

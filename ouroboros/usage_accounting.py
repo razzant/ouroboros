@@ -23,14 +23,14 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_args
 
-from ouroboros.physical_attempt_context import PhysicalAttemptContext
+from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
     _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
-from ouroboros.transport_custody import release_pre_dispatch_attempt
+from ouroboros.transport_custody import release_pre_dispatch_attempt, report_attempt_end
 from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     QUARANTINE_REL, BillingAuthorityUnavailable, ControlAuthorityUnavailable, UsageAccountingError,
     UsageLedgerCorrupt, UsageLockUnavailable, _drive_root, _named_lock, _number, _TERMINAL,
@@ -99,14 +99,12 @@ def _stash_root_accounting(
     *,
     integrity_degraded: bool = False,
 ) -> None:
-    """Refresh the process-local root snapshot. ``spend`` is the rendered
-    bucket: its ``settled_usd`` is the known spend money readers decide on, its
-    ``accounted_usd`` the exposure including holds; a missing field stays
-    unknown (``None``), never borrowed from the other. ``reservation`` is the identity
-    of a row this call has just APPENDED (attempt id, task, category, review
-    slot): only a successful ``reserve_attempt`` passes one, so a reader that
-    finds its own identity here has observed its own reservation — a refresh,
-    a settlement or a refused reservation never leaves one."""
+    """Refresh the process-local root snapshot from the rendered ``spend`` bucket.
+    ``settled_usd`` is known spend; ``accounted_usd`` includes holds. Missing values
+    stay unknown (``None``), never borrowed from the other field. Only a successful
+    ``reserve_attempt`` supplies ``reservation``: the row it just appended (attempt
+    id, task, category, review slot). Finding that identity confirms its reservation;
+    refreshes, settlements and refused reservations add no identity."""
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id:
         return
@@ -287,6 +285,7 @@ class AttemptRequest:
     context_window_tokens_exact: Optional[int] = None
     working_reserve_tokens: Optional[int] = None
     cost_evidence: Optional[Dict[str, Any]] = None
+    opencode_go: bool = False  # the exact dispatched route, not a response-supplied billing claim
 @dataclass(frozen=True)
 class AttemptReservation:
     attempt_id: str
@@ -298,6 +297,7 @@ class AttemptReservation:
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
     scope: Optional[UsageScope] = None
+    opencode_go: bool = False
 PhysicalAttemptState = Literal["reserved", "released", "dispatched", "settled", "unresolved"]
 PHYSICAL_ATTEMPT_STATES = frozenset(get_args(PhysicalAttemptState))
 POSITIVE_PHYSICAL_ATTEMPT_STATES = frozenset({"settled", "dispatched", "unresolved"})
@@ -652,7 +652,7 @@ def _paid_at_limit(view: Any, provider: Any, bound: Any, model: Any) -> bool:
     return paid_admission(provider, bound, billed=unpriced_free and view.bucket("model", str(model or "")).cash[0] > 0)
 
 
-def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool = True) -> None:
+def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
     from ouroboros.budget_pause import budget_fence_selected, dispatch_fenced
 
     if dispatch_fenced(scope.task_id):
@@ -661,21 +661,17 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool
         raise DispatchFenced(
             f"model dispatch fenced: task {scope.task_id} is entering an exact pause",
             limit_scope="pausing", root_task_id=scope.root_task_id)
-    from ouroboros.queue_observation import dispatch_probe
-    from ouroboros._usage_wait import retry_presend
+    from ouroboros.queue_observation import dispatch_probe, valid_dispatch_facts
 
     root_task_id = str(scope.root_task_id or "").strip()
     snapshot_path = root / "state" / "queue_dispatch.json"
     if root_task_id and any((root / "state" / name).exists() for name in ("queue_dispatch.json", "queue_snapshot.json", "queue.alive")):
-        snapshot = retry_presend(lambda: dispatch_probe(root), check=False) if retry else dispatch_probe(root)
+        snapshot = dispatch_probe(root)
         if snapshot is None:
             raise ControlAuthorityUnavailable(f"root budget fence authority unavailable: {snapshot_path}", cause="dispatch_fence_unreadable")
-        rows = snapshot.get("budget_root_fences")
-        if not isinstance(rows, list):
+        if not valid_dispatch_facts(snapshot):
             raise ControlAuthorityUnavailable(f"invalid root budget fence authority: {snapshot_path}", cause="dispatch_fence_invalid")
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ControlAuthorityUnavailable(f"invalid root budget fence row: {snapshot_path}", cause="dispatch_fence_invalid")
+        for row in snapshot["budget_root_fences"]:
             if (str(row.get("root_task_id") or "") != root_task_id or row.get("cause") == "owner_pause"
                     or str(row.get("status") or "") not in {"active", "paused"}):
                 continue  # an owner Pause gates launches itself (owner_pause.py): never a money stop
@@ -697,7 +693,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
     root = _drive_root(scope.drive_root)
 
     _check_dispatch_fences(scope, root)
-    acquire = send_acquisition(lambda: _check_dispatch_fences(scope, root, retry=False))
+    acquire = send_acquisition(lambda: _check_dispatch_fences(scope, root))
     # Pricing I/O stays outside the monetary transaction.
     bound = _reservation_cost(request)
     pricing_known, attempt_id = bound is not None, uuid.uuid4().hex
@@ -706,7 +702,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         nonlocal scope
         _current_request, scope = _merge_scope(request)
         with acquire(root) as view:
-            _check_dispatch_fences(scope, root, retry=False)
+            _check_dispatch_fences(scope, root)
             global_limit = _global_limit(request)
             # Owner 2A: the reached global limit refuses paid admission only (root/group still refuse all).
             if view.exceeds_limit(global_limit) and _paid_at_limit(view, request.provider, bound, request.model):
@@ -806,7 +802,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         bucket.append(attempt_id)
     return AttemptReservation(attempt_id, root, request.model, request.provider, bound,
                               request.processing_preference, request.submitted_processing_mode,
-                              copy.deepcopy(request.processing_basis), scope=scope)
+                              copy.deepcopy(request.processing_basis), scope=scope, opencode_go=request.opencode_go)
 
 
 def record_unmetered_external_dispatch(
@@ -985,7 +981,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
     from ouroboros.usage_ledger import is_abandoned_settlement
 
     def check_fences():
-        _check_dispatch_fences(reservation.scope or current_usage_scope() or UsageScope(), reservation.drive_root, retry=False)
+        _check_dispatch_fences(reservation.scope or current_usage_scope() or UsageScope(), reservation.drive_root)
     if state == "dispatched":
         check_fences()
     acquire = transition_acquisition(state, check_fences)
@@ -1042,7 +1038,7 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                                  root_limit_revision=scope.root_limit_revision)
             scope = replace(scope, **effective)
             fields.update(effective)
-            _check_dispatch_fences(scope, reservation.drive_root, retry=False)
+            _check_dispatch_fences(scope, reservation.drive_root)
             limit_request = AttemptRequest(model=reservation.model, provider=reservation.provider,
                 global_limit_usd=(current.get("global_limit_usd") if current.get("global_limit_source")
                                   not in {"", "settings_budget_resolver"} else None))
@@ -1062,7 +1058,8 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
             raise_group_refusal(view, scope)
         replaced = {"seq", "ts", "revision", "pre_compaction_seq", "settle_reason", "reason"}
         if state == "settled":
-            replaced.update(("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_evidence"))
+            replaced.update(("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis",
+                             *(("cost_evidence",) if "cost_evidence" in fields else ())))  # A close keeps pre-send facts.
             if "effort" not in fields and isinstance(current.get("effort"), dict):  # Keep candidate facts, not older observations.
                 fields["effort"] = {**current["effort"], "reported": None, "report_source": None}
         row = {key: value for key, value in current.items() if key not in replaced}
@@ -1100,6 +1097,7 @@ def mark_dispatched(
     reservation: AttemptReservation, *,
     candidate_manifest_ref: Optional[Dict[str, Any]] = None,
     local_answer_owner_pid: int = 0,
+    task_receiver: bool = True,  # False: the sender reads its own answer (``answer_owner_fields``)
 ) -> None:
     invoke_bound_api_review_paid_stamp(fail_closed=True)
     try:
@@ -1115,11 +1113,9 @@ def mark_dispatched(
     fields = {"candidate_manifest_ref": candidate_manifest_ref} if candidate_manifest_ref else {}
     if local_answer_owner_pid:
         fields["local_answer_owner_pid"] = local_answer_owner_pid
-        from ouroboros.model_wait import current_model_wait
-        owner = current_model_wait()
-        if (owner is not None and local_answer_owner_pid == os.getpid()
-                and owner.task_id == (reservation.scope or UsageScope()).task_id):
-            fields.update(owner.bind_answer_consumer())
+        if local_answer_owner_pid == os.getpid():  # only the sender itself binds or proves anything
+            from ouroboros.model_wait import answer_owner_fields
+            fields.update(answer_owner_fields((reservation.scope or UsageScope()).task_id, task_receiver=task_receiver))
     _transition(reservation, "dispatched", launch_state="claimed", transport_outcome="unknown", **fields)
     invoke_bound_api_review_paid_stamp(fail_closed=False)
 
@@ -1159,6 +1155,7 @@ def terminalize_abandoned_attempt(
     ``expected_revision`` (or the row's ``expected_seq``) that no longer matches
     leaves a concurrent settlement authoritative. A late real receipt may
     replace this administrative settlement; unknown price stays non-final.
+    Without usage the row keeps its reserved evidence (a pinned tariff) for it.
     """
     normalized = dict(usage or {})
     measured = any(_reported_token_count(normalized, *keys) for keys in (
@@ -1361,9 +1358,9 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
     for evidence in ({"usage": stream_usage}, payload):
         if isinstance(evidence, dict):
             evidence = {key: value for key, value in evidence.items() if key != "error"}
-        usage, cost, final = usage_from_response(evidence)
-        if final and cost is not None:
-            settle_attempt(reservation, usage, cost_usd=cost, cost_final=True)
+        usage, cost, final = usage_from_response(evidence, opencode_go=reservation.opencode_go)
+        if cost is not None and (final or reservation.opencode_go):
+            settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
             return "settled"
     if provider == "openrouter":
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
@@ -1371,11 +1368,8 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if isinstance(stream_usage, dict) and stream_usage:
-        # The usage frame was read before the body was judged unusable: money is
-        # known, so settle through the success path's extractor and cost derivation
-        # from that frame alone (no assembled-body facts such as service_tier, no
-        # cache-TTL injection or token-density observation); only the answer is missing.
-        usage, cost, final = usage_from_response({"usage": stream_usage})
+        # Settle from the received usage frame, without inventing assembled-body facts or a price.
+        usage, cost, final = usage_from_response({"usage": stream_usage}, opencode_go=reservation.opencode_go)
         settle_attempt(reservation, dict(usage or {}), cost_usd=cost, cost_final=final)
         return "settled"
     else:
@@ -1428,6 +1422,9 @@ def _record_attempt_capture(
             setattr(exc, "physical_attempt_capture", capture)
         except Exception:
             pass
+    if state == "released":
+        _observe_dispatched(capture)
+    report_attempt_end(capture, exc)
     return capture
 
 
@@ -1486,6 +1483,7 @@ def execute_physical_attempt(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)  # outside the pre-dispatch guard; it never raises
     try:
         from ouroboros._usage_wait import late_settler, model_send
         response = model_send(reservation, send, settle_late=late_settler(
@@ -1508,7 +1506,8 @@ def _account_response(reservation, request, response, extractor, manifest_ref):
     payload = _retain_physical_failure(reservation, response=response)
     terminal_state = "settled"
     try:
-        usage, cost, final = extractor(response, payload=payload) if extractor is usage_from_response else extractor(response)
+        usage, cost, final = (extractor(response, payload=payload, opencode_go=reservation.opencode_go)
+                              if extractor is usage_from_response else extractor(response))
         usage = dict(usage or {})
         if request.prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = request.prompt_cache_ttl
@@ -1558,6 +1557,7 @@ async def execute_physical_attempt_async(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)
     async def complete():
         try:
             response = await send()

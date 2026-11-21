@@ -6,11 +6,11 @@ import pytest
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tools.chronicle import _memory_read
 from tests._memory_inventory_shared import MIND
-from tests.test_common_story import HELPER, KID, _block, _ctx, _journal, _page, _part, _rooms, _story
+from tests.test_common_story import HELPER, KID, _block, _ctx, _journal, _page, _part, _rooms, _snapshot, _story
 
 
 @pytest.mark.parametrize("source_kind,change_kind", [
-    ("account", "correction"), ("account", "rejection"), ("account", "acceptance"),
+    ("account", "correction"), ("account", "rejection"), ("account", "acceptance"), ("part", "correction"),
 ])
 def test_selected_account_keeps_changes_inside_its_retained_sources(tmp_path, source_kind, change_kind):
     _world, alpha, beta, page, other, draft = _rooms(tmp_path)
@@ -65,6 +65,27 @@ def test_selected_account_keeps_changes_inside_its_retained_sources(tmp_path, so
     assert _journal(tmp_path) == journal  # all interpretations and renderings are reads
     assert all(store.get(ident) == record for ident, record in original.items())
     assert marker in _memory_read(_ctx(tmp_path), node_id=target)
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    parts = ordinary_composition(_snapshot(tmp_path))["blocks"]["story"]["parts"]
+    account = next(p for p in parts if p["kind"] == "account" and p["sources"][0]["id"] == outer)
+    nested = [c for c in account.get("changes", ()) if c.get("via")]
+    assert [(c["kind"], c["id"], c["target"], c["via"]) for c in nested] == [(change_kind, event["id"], target, [inner])]
+    assert nested[0]["read"]["arguments"] == {"node_id": event["id"], "revision": event["id"]}
+    assert "TOOL_ARG_ERROR" not in _memory_read(_ctx(tmp_path), **nested[0]["read"]["arguments"])
+    if change_kind == "correction":
+        assert nested[0]["target_read"]["arguments"] == {"node_id": target, "revision": event["id"]}
+        assert marker in _memory_read(_ctx(tmp_path), **nested[0]["target_read"]["arguments"])
+    else:
+        assert nested[0]["target_navigation"]["arguments"] == {"node_id": target}
+    cited = nested[0]["cited_source"]  # the frozen revision the rendered line names, beside the change's reader
+    if source_kind == "account":
+        assert cited["read"]["arguments"] == {"node_id": target, "revision": target}
+        if change_kind == "correction":  # the cited revision, not the later change target_read opens
+            assert marker not in _memory_read(_ctx(tmp_path), **cited["read"]["arguments"])
+    else:
+        assert cited["navigation"]["arguments"] == {"node_id": target} and cited["read_gap"]
+    assert marker not in str(account)
     # Replaying the disposable index recovers the same nested facts from unchanged journal authority.
     store.index_path.unlink()
     assert _story(tmp_path) == selected and _journal(tmp_path) == journal
@@ -106,4 +127,13 @@ def test_nested_graph_uses_each_frozen_revision_and_keeps_many_to_many_and_local
         assert f"cited revision {first['id']}" in text
     assert store.get(inner)["sources"][0]["revision"] == first["id"]
     assert store.get(peer.record["id"])["sources"][0]["revision"] == page
+    from ouroboros.memory_form_facts import ordinary_composition
+
+    parts = ordinary_composition(_snapshot(tmp_path))["blocks"]["story"]["parts"]
+    mapped = next(p for p in parts if p["kind"] == "account" and p["sources"][0]["id"] == outer)
+    entry = next(c for c in mapped.get("changes", ()) if c.get("via") and c["id"] == last["id"])
+    assert entry["target_read"]["arguments"] == {"node_id": page, "revision": last["id"]}
+    assert entry["cited_source"]["read"]["arguments"] == {"node_id": page, "revision": first["id"]}
+    read = _memory_read(_ctx(tmp_path), **entry["cited_source"]["read"]["arguments"])
+    assert first["text"] in read and last["text"] not in read  # the frozen revision A, not the later change B
     assert _journal(tmp_path) == before

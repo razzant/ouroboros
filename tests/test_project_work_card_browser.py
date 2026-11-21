@@ -26,7 +26,7 @@ const ws={ws:{readyState:1},on(type,fn){const rows=handlers.get(type)||[];rows.p
 window.emit=(type,row)=>(handlers.get(type)||[]).forEach(fn=>fn(row));
 window.connection=value=>{connected=value;window.emit(value?'open':'close');};
 window.chat=createChatInstance({ws,state:{activePage:'chat',projectChatIds:new Set([7,8]),unreadCount:0},
-    updateUnreadBadge(){},openSettingsTab(){},openDashboardTab(){},chatId:1,
+    updateUnreadBadge(){},openSettings(){},openDashboardTab(){},chatId:1,
     mountEl:document.getElementById('content'),stateSnapshots:{begin:()=>({generation:1,requestedAt:Date.now()}),
     gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,
     apply(request,data){window.chat?.hydrateStateSnapshot(data);}}});
@@ -351,7 +351,10 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
     answer = page.locator('#chat-messages > .chat-bubble.assistant').first
     answer.locator('.chat-message-copy').focus()
     page.keyboard.press("Shift+F10")
-    expect(menu.locator('[role="menuitem"]')).to_have_text(["Reply", "Copy"])
+    keyboard_items = ["Reply", "Copy"]
+    if project_chat["width"] < 980:  # This fixture enables touch on its mobile page.
+        keyboard_items.append("Select text")
+    expect(menu.locator('[role="menuitem"]')).to_have_text(keyboard_items)
     page.keyboard.press("Escape")
     expect(answer.locator('.chat-message-copy')).to_be_focused()
     # Touch: a held finger (no movement) opens it; the lifting finger presses nothing.
@@ -361,7 +364,7 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
         t.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'touch', isPrimary: true, pointerId: 7,
             clientX: p.x, clientY: p.y})); }""", point)
     page.wait_for_timeout(600)
-    expect(menu.locator('[role="menuitem"]')).to_have_count(2)
+    expect(menu.locator('[role="menuitem"]')).to_have_text(["Reply", "Copy", "Select text"])
     # Where the finger lifts the menu now lies (it opened at the finger): the item under it is not pressed.
     page.evaluate("""p => { const t = document.elementFromPoint(p.x + 12, p.y + 12);
         document.querySelector('[data-task-id]')?.closest('#chat-messages')
@@ -369,8 +372,14 @@ def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(p
         t.click(); }""", point)
     expect(menu).to_have_count(1)
     assert page.evaluate("() => document.querySelectorAll('.chat-quote--composer').length") == 0, "the lift pressed no item"
-    page.keyboard.press("Escape")
+    menu.get_by_role("menuitem", name="Select text").click()
     expect(menu).to_have_count(0)
+    assert answer.locator('.message').evaluate("""body => {
+        const selection = document.getSelection();
+        return selection.toString().trim().length > 0 && body.contains(selection.anchorNode);
+    }""")
+    page.keyboard.press("Escape")
+    expect(page.get_by_role("button", name="Reply to quote")).to_have_count(0)
 
 
 def test_a_reply_sends_only_the_quoted_rows_address(project_chat, tmp_path):

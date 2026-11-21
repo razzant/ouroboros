@@ -56,6 +56,28 @@ def carried_basis(source: dict) -> dict:
     return {"_project_admission": copy.deepcopy(source["_project_admission"])} if "_project_admission" in source else {}
 
 
+def returned_basis(task: dict, stored: dict, attempt: int) -> dict:
+    """The basis a returned row lacks, carried from its own result of the same attempt (#2725); else ``{}``.
+
+    A room turn's body records the basis its carrier bound before the frame that teaches the queue row
+    (``conversation_lane.handle_direct_turn_bound``) lands; a stop between them leaves the row without it.
+    Only that gap is filled: the result is this task's, of the row's attempt (a direct first launch records
+    0 for the row's 1, as ``task_admission._working_attempt_unstarted`` reads it), for the room the row names.
+    A basis the row carries, attested absence, another room or attempt, or a result without one adds
+    nothing: restore still holds that row, and the room's current row is never read in its place."""
+    if "_project_admission" in task or task.get("_project_scope_none") is True or not isinstance(
+            stored.get("_project_admission"), dict):
+        return {}
+    pid, recorded, owner = str(task.get("project_id") or "").strip(), stored.get("task_attempt"), stored.get("execution_owner")
+    first_direct = (attempt == 1 and recorded == 0 and "admitted_dispatch_attempt" not in stored and isinstance(owner, dict)
+                    and owner.get("kind") in {"direct", "presence"} and owner.get("task_attempt") == 0)
+    if (not pid or stored.get("task_id") != task.get("id") or stored.get("project_id") != pid
+            or stored["_project_admission"].get("project_id") != pid
+            or type(recorded) is not int or recorded != attempt and not first_direct):
+        return {}
+    return carried_basis(stored)
+
+
 def admitted_folder(basis: Any, project_id: str) -> Optional[str]:
     """The room folder a carried basis recorded, ``""`` for a room with none (#2547).
 

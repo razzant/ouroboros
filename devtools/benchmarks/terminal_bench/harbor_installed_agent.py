@@ -209,7 +209,6 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         # python process per worker) is what bounds it.
         max_workers = int(kwargs.pop("max_workers", 4))  # v6.55.0: 3-4 subagent slots (root takes one); 10 would blow container memory (full python proc per worker)
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
-        review_enforcement = str(kwargs.pop("review_enforcement", "blocking"))
         # Safety mode: configurable (full|light|off). Default light keeps the v6.55.0
         # scaffold behavior (LLM safety for integration tools only); off disables the
         # LLM safety pass entirely for a fully-disposable jail. Deterministic guards
@@ -254,7 +253,6 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.openrouter_min_credit_usd = float(openrouter_min_credit_usd)
         self.max_workers = int(max_workers)
         self.runtime_mode = runtime_mode
-        self.review_enforcement = review_enforcement
         self.safety_mode = safety_mode
         self.task_review_mode = task_review_mode
         self.disable_agent_web = bool(disable_agent_web)
@@ -466,7 +464,6 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
                 "OUROBOROS_SERVER_PORT": "8765",
                 "OUROBOROS_WORKER_START_METHOD": "spawn",
                 "OUROBOROS_RUNTIME_MODE": self.runtime_mode,
-                "OUROBOROS_REVIEW_ENFORCEMENT": self.review_enforcement,
                 "OUROBOROS_TASK_REVIEW_MODE": self.task_review_mode,
                 # Pin the shared paid review-cycle ceiling off (bench methodology:
                 # historical campaigns ran unbounded acceptance panels; the shipped
@@ -1262,7 +1259,6 @@ PY
             "adapter_mode": "installed_ouroboros",
             "workspace_dir": self.workspace_dir,
             "runtime_mode": self.runtime_mode,
-            "review_enforcement": self.review_enforcement,
             "summary": self._run_summary,
         }
 

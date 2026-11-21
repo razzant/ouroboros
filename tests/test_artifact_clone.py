@@ -85,6 +85,21 @@ def test_an_unavailable_clone_falls_back_to_the_streamed_copy_with_the_same_iden
     assert list(destination.parent.iterdir()) == [destination]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="native POSIX filename bytes")
+@pytest.mark.parametrize("raw", [b"report-\xff.txt", b"r" * 239 + b"\xff.txt"], ids=["short", "long"])
+def test_atomic_temp_name_uses_the_original_basename_bytes(tmp_path, raw):
+    from ouroboros.temp_sweep import atomic_temp_path, is_atomic_temp
+
+    # Construct the name without depending on this volume accepting it for a real file.
+    sibling = atomic_temp_path(tmp_path / os.fsdecode(raw))
+    encoded = os.fsencode(sibling.name)
+    assert sibling.parent == tmp_path and is_atomic_temp(sibling.name) and len(encoded) <= 255
+    if len(raw) < 100:
+        assert encoded.startswith(b"." + raw + b".tmp.")
+    else:
+        assert b"~" + hashlib.sha256(raw).hexdigest()[:12].encode() + b".tmp." in encoded
+
+
 def test_a_cloned_temporary_of_an_old_source_is_in_flight_for_the_temp_sweep(tmp_path, monkeypatch):
     """Both directions. A clone copies the source's times, so the temporary of a copy of an old result
     looked older than the sweep's age guard while its verification read was still running, and the
@@ -395,3 +410,78 @@ def test_a_destination_acl_is_inherited_by_the_clone_as_by_copy2(tmp_path, deny)
     shutil.copy2(source, folder / "streamed")
     assert artifact_storage._may_share(folder / "cloned") is True
     assert _acl(folder / "cloned") == _acl(folder / "streamed") != []
+
+
+# ---- copy_artifact_file's clone policy and byte-only copies (#2945) ----------------------------------------------
+
+def _mode(path):
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+@pytest.mark.parametrize("clone", [True, False], ids=["clone-where-possible", "stream-forced"])
+def test_a_byte_only_copy_takes_the_given_mode_and_its_own_times_and_a_read_only_source_still_clones(
+        tmp_path, monkeypatch, clone):
+    """Automatic readonly inputs never took their source's mode or times. A Git pack is 0444: an ordinary
+    read-only source keeps its clone (the copy's mode is set on the new inode), and ``clone=False`` never asks."""
+    source = _aged_source(tmp_path / "pack-1.pack")
+    source.chmod(0o444)
+    aged = os.lstat(source).st_mtime_ns  # as stored: NTFS keeps the requested ns time in 100-ns ticks
+    assert aged // 100 == _AGED[1] // 100, "the source holds its aged time"
+    outcomes, real = [], artifacts.clone_file
+    monkeypatch.setattr(artifacts, "clone_file", lambda src, dst: outcomes.append(real(src, dst)) or outcomes[-1])
+    copied, started = tmp_path / "copy" / "pack-1.pack", time.time()
+    measured = artifacts.copy_artifact_file(source, copied, clone=clone, mode=0o640)
+    assert measured == _measured(source) == _measured(copied) and copied.read_bytes() == _BYTES
+    if os.name != "nt":  # Windows keeps only a read-only bit of a POSIX mode
+        assert (_mode(copied), _mode(source)) == (0o640, 0o444)
+    assert os.lstat(source).st_mtime_ns == aged and os.lstat(copied).st_mtime >= started - 2, "its own times"
+    if not clone:
+        assert outcomes == [], "a stream is never preceded by a clone attempt"
+    elif sys.platform == "darwin":
+        assert outcomes == [True]
+    if sys.platform == "darwin":
+        assert artifact_storage._may_share(copied) is clone and artifact_storage._may_share(source) is clone
+    assert sorted(path.name for path in copied.parent.iterdir()) == ["pack-1.pack"]
+    default = artifacts.copy_artifact_file(source, tmp_path / "default" / "pack-1.pack")  # every other caller
+    assert default == measured and os.lstat(tmp_path / "default" / "pack-1.pack").st_mtime_ns == aged
+    assert _mode(tmp_path / "default" / "pack-1.pack") == _mode(source), "copystat stays the default"
+    for path in (source, tmp_path / "default" / "pack-1.pack"):
+        path.chmod(0o644)  # a read-only file outlives its scratch on Windows
+
+
+@darwin
+@pytest.mark.parametrize("flag", [stat.UF_IMMUTABLE, stat.UF_APPEND], ids=["uchg", "uappnd"])
+def test_an_immutable_or_append_only_source_is_never_cloned_so_no_copy_outlives_its_folder(tmp_path, flag):
+    """``clonefile`` carries the flag, and such a clone refuses its times, mode, rename and its own unlink, even
+    as a temporary: the platform owner never clones it, and a byte-only copy streams to a plain removable file."""
+    source = _aged_source(tmp_path / "source")
+    os.chflags(source, flag)
+    copied = tmp_path / "copy" / "source"
+    try:
+        assert artifact_storage.clone_file(source, tmp_path / "direct") is False
+        assert not (tmp_path / "direct").exists()
+        assert artifacts.copy_artifact_file(source, copied, mode=0o644) == _measured(copied)
+        assert copied.read_bytes() == _BYTES and _mode(copied) == 0o644
+        assert os.lstat(copied).st_flags & flag == 0 and artifact_storage._may_share(source) is False
+        copied.unlink()
+        assert list(copied.parent.iterdir()) == []
+    finally:
+        os.chflags(source, 0)
+
+
+@pytest.mark.parametrize("clone", [True, False], ids=["clone-where-possible", "stream-forced"])
+def test_a_large_copy_holds_one_bounded_chunk_never_the_whole_file(tmp_path, clone):
+    import tracemalloc
+
+    source = tmp_path / "large.bin"
+    with source.open("wb") as handle:
+        for _ in range(48):
+            handle.write(os.urandom(1 << 20))
+    tracemalloc.start()
+    try:
+        artifacts.copy_artifact_file(source, tmp_path / "out" / "large.bin", clone=clone, mode=0o644)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 << 20, f"peak {peak} bytes for a 48 MiB file"
+    assert _measured(tmp_path / "out" / "large.bin") == _measured(source)

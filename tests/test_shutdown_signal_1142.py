@@ -117,6 +117,8 @@ def _check_real_shutdown(tmp_path, *, launcher_pipe):
     stuck = None
     try:
         _wait_json(f"{url}/api/state", "supervisor_ready", 90)
+        with urllib.request.urlopen(f"{url}/api/health", timeout=5) as resp:  # noqa: S310 - local test server
+            boot_steps = {row["name"]: row["state"] for row in json.loads(resp.read().decode("utf-8"))["boot"]["steps"]}
         time.sleep(1.0)  # let the loop run a few ticks against the live Manager
         from websockets.sync.client import connect
 
@@ -182,6 +184,14 @@ def _check_real_shutdown(tmp_path, *, launcher_pipe):
                if row.get("type") == "event_queue_generation_stopped"]
     assert stopped and stopped[-1]["exitcode_before_shutdown"] is None and stopped[-1]["killed"] is False, stopped
     assert not any(row.get("type") == "supervisor_generation_fault" for row in _read_rows(data_dir / "logs" / "supervisor.jsonl"))
+    # One bus for the generation (#3376): the boot's head start made it beside the extensions, the supervisor and
+    # its workers used that one, and the teardown closed that one; no unpublished attempt was ever ended.
+    rows = _read_rows(data_dir / "logs" / "supervisor.jsonl")
+    generations = [row["generation"] for row in rows if row.get("type") == "event_queue_generation_started"]
+    spawned = {row.get("event_queue_generation") for row in rows if row.get("type") == "worker_spawn_start"}
+    assert boot_steps.get("startup:event_queue") == "done", boot_steps
+    assert len(generations) == 1 and generations[0] and spawned == set(generations), (generations, spawned)
+    assert [row["generation"] for row in stopped] == generations, stopped
 
 
 _PIPE_OWNER_PROBE = r'''

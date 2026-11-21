@@ -30,7 +30,8 @@ def _api(tmp_path):
 
     class A:
         def get_state_dir(self): return str(sd)
-        def get_settings(self, k): return {}  # _Rec ignores the token value
+        # A saved token: the notifier waits without one; _Rec ignores its value.
+        def get_settings(self, k): return {"TELEGRAM_BOT_TOKEN": "1:token"} if "TELEGRAM_BOT_TOKEN" in k else {}
         def log(self, *a, **k): pass
     return A(), data
 
@@ -900,3 +901,53 @@ def test_task_notify_reads_the_cost_the_task_result_store_keeps(tmp_path, monkey
     (data / "logs" / "chat.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
     assert [text for _chat, text in _Rec.sent] == ["✅ Task cost2 done · up to $12.50"]
+
+
+def test_a_token_cleared_mid_batch_keeps_the_delivered_notice_and_waits_for_the_rest(tmp_path, monkeypatch):
+    """The first notice is delivered, then the token is cleared before the second: the batch stops quietly,
+    the delivered id is saved as seen, and after a new token only the second goes out (no duplicate)."""
+    nt = _load(); _api_unused, data = _api(tmp_path)
+    sd = data / "state" / "skills" / "telegram-bridge"
+    saved = {"TELEGRAM_BOT_TOKEN": "1:token"}
+    logs = []
+
+    class Api:
+        def get_state_dir(self): return str(sd)
+        def get_settings(self, keys): return {k: saved[k] for k in keys if saved.get(k)}
+        def log(self, level, message, *a, **k): logs.append((level, message))
+
+    api = Api()
+    binding = nt.binding_for(api)
+    sent = []
+
+    class Client(nt.TelegramClient):  # the real constructor: no token is TelegramTokenMissing
+        async def send_message(self, chat_id, text, parse_mode="HTML"):
+            sent.append(text)
+            saved["TELEGRAM_BOT_TOKEN"] = ""  # cleared right after this delivery
+            binding.read_now(api)  # as the token observer applies it
+            return 1
+
+    class Stop(Exception):
+        pass
+
+    async def sleep(seconds):
+        raise Stop(seconds)
+
+    monkeypatch.setattr(nt, "TelegramClient", Client)
+    monkeypatch.setattr(nt, "_load_settings", lambda _api: {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_NOTIFY_TASKS": "on"})
+    monkeypatch.setattr(nt.asyncio, "sleep", sleep)
+    _write_rows(data, [_root("first", "done"), _root("second", "done")])
+    nt._save_notif_state(api, {"notified_task_ids": []})
+    with pytest.raises(Stop) as stopped:
+        asyncio.run(nt._make_notifier(api)())
+    assert stopped.value.args == (nt.TELEGRAM_RETRY_INITIAL_SEC,)  # a short wait, never a degraded episode
+    assert len(sent) == 1 and "first" in sent[0]
+    assert nt._load_notif_state(api)["notified_task_ids"] == ["first"]
+    assert not [message for level, message in logs if level in ("warning", "error")]
+
+    saved["TELEGRAM_BOT_TOKEN"] = "1:token"
+    binding.read_now(api)
+    with pytest.raises(Stop):
+        asyncio.run(nt._make_notifier(api)())
+    assert len(sent) == 2 and "second" in sent[1]
+    assert nt._load_notif_state(api)["notified_task_ids"] == ["first", "second"]

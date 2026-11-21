@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import subprocess
 from typing import List, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -21,7 +20,9 @@ log = logging.getLogger(__name__)
 
 
 def _git(repo_dir: pathlib.Path, *args: str) -> Tuple[int, str]:
-    result = subprocess.run(["git", *args], cwd=repo_dir, capture_output=True, text=True, timeout=10)
+    from ouroboros.work_domain import run  # a work repository's Git runs as the work domain
+
+    result = run(["git", *args], cwd=repo_dir, capture_output=True, text=True, timeout=10)
     return result.returncode, result.stdout.strip()
 
 

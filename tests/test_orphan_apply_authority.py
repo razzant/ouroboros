@@ -17,7 +17,7 @@ from ouroboros.tools.delegate import _capture_terminal_patch
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_delegated_directory import DirectoryEngine
 from tests.test_delegated_run_isolation import _git
-from tests.test_isolated_project_copies import repo
+from tests._workspace_git import seeded_repository as repo
 
 
 @pytest.fixture

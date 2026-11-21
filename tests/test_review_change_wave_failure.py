@@ -52,7 +52,6 @@ def body(tmp_path, monkeypatch):
     shared.git(repo, "commit", "-q", "-m", "ignore caches")
     shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
     set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     sends: list = []
     monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(sends))
@@ -65,9 +64,7 @@ def _review(body) -> dict:
 
 
 def _enforce(monkeypatch, mode: str) -> None:
-    if mode == "advisory":
-        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    elif mode == "cyber_pro":
+    if mode == "cyber_pro":
         monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
 
 
@@ -175,8 +172,8 @@ def test_a_custody_refusal_before_any_send_reaches_record_tool_parent_door_and_c
     assert response.headers["x-review-source-sha256"] == ref["ref"]["sha256"]
 
 
-@pytest.mark.parametrize("mode", ["blocking", "advisory", "cyber_pro"])
-def test_an_assembly_refusal_before_any_seat_keeps_its_words_under_every_enforcement(body, monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+def test_an_assembly_refusal_before_any_seat_keeps_its_words_in_every_access(body, monkeypatch, mode):
     _enforce(monkeypatch, mode)
 
     def missing(layer: str = "body") -> str:
@@ -190,19 +187,17 @@ def test_an_assembly_refusal_before_any_seat_keeps_its_words_under_every_enforce
     assert len(notes) == 1 and notes[0]["block_reason"] == "infra_failure", notes
     cause = notes[0]["reported_cause"]
     assert "Cannot load review checklist" in cause and STAGE in cause
-    expected = {"blocking": "REVIEW_BLOCKED", "advisory": "Review enforcement=Advisory", "cyber_pro": "Cyber Pro"}[mode]
-    assert expected in cause, cause
+    expected = {"pro": "Review checklist failed to load", "cyber_pro": "Cyber Pro"}[mode]
+    assert expected in cause and "REVIEW_BLOCKED" in cause, cause  # the original signal follows the prefix
     assert result["wave_failures"] == notes
     stored, _done = _stored_projection(body)
     rows = _rows_html(_render(TASK, stored["review_projection"]))
     assert "Ouroboros could not complete this review" in rows and "No reviewer answer is saved in this record." in rows
 
 
-@pytest.mark.parametrize("mode", ["blocking", "advisory"])
-def test_a_service_error_after_reservation_keeps_its_cause_and_the_unknown_outcome(body, monkeypatch, mode):
+def test_a_service_error_after_reservation_keeps_its_cause_and_the_unknown_outcome(body, monkeypatch):
     from ouroboros.tools.preflight_review import _handle_review_status
 
-    _enforce(monkeypatch, mode)
     monkeypatch.setattr(review_mod, "_handle_multi_model_review",
                         lambda *_a, **_k: json.dumps({"error": f"review service closed the wave at {STAGE}"}))
     result = _review(body)

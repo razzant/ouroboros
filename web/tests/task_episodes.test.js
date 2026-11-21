@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { admittedSuccessor, createTaskEpisodes, episodeSpan, noteEpisodeFacts, renderEpisodes } from '../modules/task_episodes.js';
+import { renderLiveCardMeta } from '../modules/chat_activity.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 // The browser's text serializer, as utils.escapeHtmlText reads it back.
@@ -43,6 +44,8 @@ test('one attempt\'s facts: when it started, when and how it ended, its cause in
     assert.deepEqual([unknown.cause, unknown.codes], ['The recorded reason has no description yet.', ['example_new_reason']]);
     assert.equal(noteEpisodeFacts(episode, { suggested_name: 'Check totals' }).name, 'Check totals');
     assert.equal(noteEpisodeFacts({ name: 'Retained name' }, {}).name, 'Retained name');
+    assert.deepEqual(noteEpisodeFacts({}, { suggested_name: 'A subject', wake_summary: 'Sent the partial status.' }),
+        { name: 'A subject', summary: 'Sent the partial status.', started: '' }, 'the closing sentence is its own fact');
 });
 
 test('an episode\'s time reads as the chat clock does', () => {
@@ -76,6 +79,12 @@ test('one episode is not a chain; several are one meta line each, the current on
     renderEpisodes(el, [{ name: '<b>old</b>' }, { name: 'Continue: check totals' }]);
     assert.match(el.innerHTML, /&lt;b&gt;old&lt;\/b&gt;/);
     assert.match(el.innerHTML, /chat-live-episode-name">Continue: check totals/);
+    // A past episode keeps its closing sentence beside the work's stable name, once, and as authored text.
+    renderEpisodes(el, [{ name: 'A subject', summary: '<i>Sent</i> the status.' }, { name: 'Continue: A subject', summary: 'Not yet history' }]);
+    assert.match(el.innerHTML, /chat-live-episode-summary" data-i18n-authored>&lt;i&gt;Sent&lt;\/i&gt; the status\./);
+    assert.doesNotMatch(el.innerHTML, /Not yet history/, 'the current episode has no past');
+    renderEpisodes(el, [{ name: 'Same words', summary: 'Same words' }, {}]);
+    assert.doesNotMatch(el.innerHTML, /chat-live-episode-summary/, 'a sentence that is the name is not said twice');
     // An earlier episode's outcome takes the chips' tones: warnings succeed, a stop is neutral, a failure red.
     renderEpisodes(el, [{ phase: 'warn' }, { phase: 'cancelled' }, { phase: 'timeout' }, {}]);
     assert.deepEqual([...el.innerHTML.matchAll(/episode-outcome" data-tone="(\w+)">([^<]+)</g)].map((m) => `${m[2]}:${m[1]}`),
@@ -200,6 +209,50 @@ test('an unknown episode code is inside its disclosure, never in the summary, an
 });
 
 
+test('an earlier episode paints its facts again when its heading or disclosed content moved, never on a quiet sync', () => {
+    const { prior } = installDom();
+    try {
+        const first = card('t-1', 1000, 'Audit the projects');
+        const next = card('t-2', 5000, 'Continue: Audit the projects');
+        first.detailsEl = document.createElement('div');
+        next.episodeHistoryEl = document.createElement('div');
+        const records = new Map([[first.groupId, first], [next.groupId, next]]);
+        const painted = [];
+        const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null,
+            meta: (record) => painted.push({ id: record.groupId, words: record.episodeHeadingWords,
+                disclosed: record.detailsEl.parentNode === record.episodeDisclosure }) });
+        episodes.note(first, { wake_summary: 'Checked three of five.',
+            continued_by: { state: 'admitted', successor_task_id: next.groupId } });
+        assert.deepEqual(painted, [{ id: 't-1', words: ['Audit the projects', 'Checked three of five.'], disclosed: true }],
+            'its Details moved in, then its facts were painted with the heading\'s words known');
+        episodes.sync(next);
+        episodes.note(first, { wake_summary: 'Checked three of five.' });
+        assert.equal(painted.length, 1, 'the same heading and the same content paint nothing');
+        episodes.note(first, { wake_summary: 'Checked all five.' });
+        assert.equal(painted.length, 2, 'a heading that says something else paints again');
+        assert.deepEqual(painted[1].words, ['Audit the projects', 'Checked all five.']);
+    } finally { restoreDom(prior); }
+});
+
+test('Details leave out only the closing sentence the heading above them says in exactly those words', () => {
+    const { prior } = installDom();
+    try {
+        const sentence = 'Checked three of five.';
+        const painted = (episodeHeadingWords) => {
+            const facts = { dataset: { liveFacts: '' }, innerHTML: '', hidden: true };
+            renderLiveCardMeta({ groupId: 'e', items: [], finished: true, wakeSummary: sentence, initiator: 'consciousness',
+                metaEl: { isConnected: true, innerHTML: '' }, root: { children: [facts] }, episodeHeadingWords });
+            return facts.innerHTML;
+        };
+        assert.match(painted(undefined), /<dt>In its words<\/dt><dd><span data-i18n-authored>Checked three of five\.<\/span><\/dd>/,
+            'a card with no heading above it says its sentence, with the authored mark');
+        assert.match(painted(['Audit', 'Checked three of five']), /In its words/, 'a near miss is not the same words');
+        assert.match(painted([]), /In its words/);
+        assert.doesNotMatch(painted(['Audit', sentence]), /In its words/);
+        assert.doesNotMatch(painted([sentence]), /In its words/, 'the heading may carry the sentence as the name');
+    } finally { restoreDom(prior); }
+});
+
 test('the original Reviews reading door follows its host, never the old work controls', () => {
     const { prior } = installDom();
     try {
@@ -236,4 +289,46 @@ test('the original Reviews reading door follows its host, never the old work con
         assert.equal(late.parentNode, host, 'the original controller still owns late content');
         assert.equal(oldStop.parentNode, first.footEl);
     } finally { restoreDom(prior); }
+});
+
+test('a first episode named by its closing sentence yields the card title to the admitted subject', () => {
+    const sentence = 'Partial totals sent; the full check went to a successor.';
+    const card = (groupId) => ({ groupId, isSubagent: false, finished: groupId === 'origin', suggestedName: '',
+        titleEl: { textContent: '' }, root: { dataset: {}, hidden: false, isConnected: true },
+        episodesEl: { innerHTML: '', hidden: true, replaceChildren() {} } });
+    const build = () => {
+        const records = new Map([['origin', card('origin')], ['next', card('next')]]);
+        return { records, episodes: createTaskEpisodes({ records, reanchor: () => false, activity: () => null }) };
+    };
+    const name = (origin, successor) => {
+        const { records, episodes } = build();
+        records.get('origin').episode = noteEpisodeFacts({}, origin);
+        episodes.note(records.get('origin'), { continued_by: { state: 'admitted', successor_task_id: 'next' } });
+        episodes.note(records.get('next'), { suggested_name: successor });
+        episodes.sync(records.get('next'));
+        return records.get('next').titleEl.textContent;
+    };
+    assert.equal(name({ suggested_name: sentence, wake_summary: sentence }, 'Continue: Continue: Why the weekly totals differ'), 'Why the weekly totals differ');
+    assert.equal(name({ suggested_name: 'A name', wake_summary: sentence }, 'Continue: Why the weekly totals differ'), 'A name', 'a real name stays');
+    assert.equal(name({ suggested_name: sentence, wake_summary: sentence }, 'Fresh title'), sentence, 'only the host\'s own title yields a subject');
+});
+
+test('legacy Continue copies of closing sentences do not outrank a new subject or an authored first name', () => {
+    const sentence = 'Partial totals sent; the full check went to a successor.';
+    const subject = 'Why the weekly totals differ';
+    for (const originalName of [sentence, 'Authored report name']) {
+        const card = (groupId) => ({ groupId, isSubagent: false, finished: groupId !== 'new', suggestedName: '',
+            titleEl: { textContent: '' }, root: { dataset: {}, hidden: false, isConnected: true },
+            episodesEl: { innerHTML: '', hidden: true, replaceChildren() {} } });
+        const records = new Map(['origin', 'legacy', 'new'].map(id => [id, card(id)]));
+        const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null });
+        records.get('origin').episode = noteEpisodeFacts({}, { suggested_name: originalName, wake_summary: sentence });
+        episodes.note(records.get('origin'), { continued_by: { state: 'admitted', successor_task_id: 'legacy' } });
+        episodes.note(records.get('legacy'), { suggested_name: 'Continue: ' + sentence,
+            continued_by: { state: 'admitted', successor_task_id: 'new' } });
+        episodes.note(records.get('new'), { suggested_name: 'Continue: ' + subject });
+        episodes.sync(records.get('new'));
+        assert.equal(records.get('new').titleEl.textContent, originalName === sentence ? subject : originalName);
+        assert.equal(records.get('origin').episode.summary, sentence, 'the earlier closing sentence stays in history');
+    }
 });

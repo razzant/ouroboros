@@ -1395,6 +1395,29 @@ test('invalid review revisions stay opaque and do not become ordered counters', 
     assert.equal(reads, 2);
 });
 
+// `settled_card.js` resolves a read that speaks for no one (a newer attempt, or a newer read that already answered)
+// as `undefined`, and a genuinely absent record as `null`. Only the second is an answer about the card: the first
+// neither claims the detail was read nor leaves the card spinning beside a Retry a real failure earned.
+test('a read that proved nothing leaves the card\'s word alone; a proven absence still settles it', async () => {
+    const answers = [Promise.reject(new Error('detail read failed')), Promise.resolve(undefined), Promise.resolve(null)];
+    const states = [], applied = [];
+    const hydrator = createReviewHydrator({
+        fetchDetail: () => answers.shift(),
+        applyDetail: (_id, detail) => { applied.push(detail); return true; },
+        onState: (_id, status) => { states.push(status); return true; },
+    });
+    await hydrator.hydrate('root');
+    assert.deepEqual(states, ['loading', 'error'], 'a failed read says so');
+    await hydrator.hydrate('root');
+    assert.deepEqual(applied, [], 'a superseded read carries no detail');
+    assert.equal(states.at(-1), 'error', 'a read that spoke for no one neither claims success nor leaves a spinner');
+    assert.equal(hydrator.ready('root'), false, 'the card still owes its detail to a reader');
+    await hydrator.hydrate('root');
+    assert.deepEqual(applied, [], 'an absent record is not a detail to attach');
+    assert.equal(states.at(-1), 'idle', 'what the read proved settles the word');
+    assert.equal(hydrator.ready('root'), true);
+});
+
 test('a re-render that replaces a focused control hands focus to the same group toggle', () => {
     const doc = { activeElement: null };
     const buttons = new Map();

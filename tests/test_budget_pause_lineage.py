@@ -302,9 +302,16 @@ def test_a_selected_member_of_a_terminal_root_consumes_the_closed_fence_from_its
     fence = owner_pause.read_fence(tmp_path, ROOT)
     assert owner_pause.fence_closed(fence)
 
+    from supervisor import budget_resume
+
+    heard: list = []
+    custody_wait = budget_resume._resume_custody_refusal
+    monkeypatch.setattr(budget_resume, "_resume_custody_refusal",
+                        lambda *args: heard.append(args[4:]) or custody_wait(*args))
     sent = _workers(workers)
     granted = queue.resume_budget_paused_task(CHILD)
     assert granted["ok"] is True, granted
+    assert heard == [(True,)], "the custody wait hears the closed owner fence this grant verified"
     workers.assign_tasks()
     assert [task["id"] for task in sent] == [CHILD]
     handoff = sent[0]["_budget_pause_resume"]

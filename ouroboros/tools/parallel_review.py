@@ -25,7 +25,7 @@ import json
 import logging
 
 from ouroboros.utils import run_cmd, utc_now_iso
-from ouroboros.tools.review_helpers import format_review_history_entry, review_enforcement_blocks
+from ouroboros.tools.review_helpers import cyber_review_authority, format_review_history_entry
 
 log = logging.getLogger(__name__)
 
@@ -154,10 +154,13 @@ def _format_coupling_advisory_msg(outcome) -> str:
 
 
 def _commit_review_retry_key(
-    ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint="",
+    ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint="", counted=False,
 ):
     """Bind one logical review cycle to canonical staged material and intent (an author-named
-    ``since_review`` included, only when given; host observations never)."""
+    ``since_review`` included, only when given; host observations never). A panel of advisers alone (Cyber
+    Pro) is its own round, apart from the counted one (``counted=True`` names that one)."""
+    panel = {} if counted else dict(getattr(ctx, "_commit_review_panel", None) or {})
+    advisers = sorted(panel.get("additional") or []) if panel.get("seats") == 0 else []
     material = str(binding_fingerprint or "").strip()
     if not material:
         from ouroboros.tools.review_subject import staged_patch
@@ -174,7 +177,15 @@ def _commit_review_retry_key(
         "rebuttal": hashlib.sha256(str(review_rebuttal or "").encode()).hexdigest(),
         "contract": str(getattr(ctx, "_current_review_contract_fingerprint", "") or ""),
         **({"since_review": ctx._review_since} if getattr(ctx, "_review_since", "") else {}),
+        **({"advisers": advisers} if advisers else {}),
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def commit_round_keys(ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint=""):
+    """This call's round key and its intent's counted one: a call of advisers alone still names (so collects) the
+    open counted round of its intent; a counted call names that round alone."""
+    return {_commit_review_retry_key(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
+                                     binding_fingerprint=binding_fingerprint, counted=counted) for counted in (False, True)}
 
 
 def _structured_review_result(prepared, *, started_ts, retry_key, wave_refusal, exited, early, subject=None):
@@ -341,7 +352,7 @@ def run_parallel_review(
         # ---- Money admission (owner decision 2026-09-05, on the known-spend
         # rule of #1487): before ANY seat is dispatched, known spend must be
         # below every fence; otherwise every seat is a typed $0 not_dispatched
-        # record and the gate blocks naming the fence. The wave's summed seat
+        # record and the outcome names the fence. The wave's summed seat
         # bounds are disclosure, never an earlier refusal. ----
         from ouroboros.tools.review_admission import admit_commit_gate_wave, commit_gate_paid_seats
 
@@ -365,7 +376,6 @@ def run_parallel_review(
             from ouroboros.tools.review import _handle_review_block_or_warning
             from ouroboros.tools.review_admission import triad_not_dispatched_records
 
-            blocking_review = bool(prepared.get("blocking_review")) and review_enforcement_blocks("blocking")
             if not hasattr(ctx, "_review_degraded_reasons"):
                 ctx._review_degraded_reasons = []
             ctx._review_degraded_reasons.append(
@@ -380,11 +390,8 @@ def run_parallel_review(
             ctx._last_triad_raw_results = list(
                 getattr(ctx, "_triad_withheld_seat_records", []) or []
             ) + triad_not_dispatched_records(prepared.get("row_plan") or {}, wave_refusal)
-            review_err = _handle_review_block_or_warning(
-                ctx, blocking_review, wave_refusal,
-                "Review enforcement=Advisory: the commit-gate review wave was declined "
-                "before dispatch (budget fence); commit proceeding without review. ",
-            )
+            _handle_review_block_or_warning(
+                ctx, wave_refusal, "The commit-gate review wave was declined before dispatch (budget fence); nothing was reviewed. ")
         else:
             # ---- Phase 2: submit the prepared wave to the executor. ----
             try:
@@ -488,20 +495,18 @@ def aggregate_review_verdict(review_err, coupling_result, block_reason, advisory
         adv_text = "\n".join(f"  ⚠️ Advisory: {format_review_history_entry(a)}" for a in advisory)
         combined_msg += f"\n\n---\nAdvisory findings:\n{adv_text}"
 
-    from ouroboros.config import get_review_enforcement
-
-    cyber = not review_enforcement_blocks("blocking")
-    if cyber or (get_review_enforcement() == "advisory" and block_reason == "fixed_overflow"):
-        from ouroboros.tools.review import _record_advisory_override
+    cyber = cyber_review_authority()
+    if cyber or block_reason == "fixed_overflow":
+        from ouroboros.review_overrides import record_override
 
         disclosure = (
             ("Cyber Pro: independent review does not prohibit action " if cyber else
-             "Review enforcement=advisory: technical review failure permits continuing ")
+             "A technical review failure permits continuing ")
             + "on the independently bound candidate; failed or missing review is not a PASS.\n"
             + combined_msg
         )
         ctx._last_review_block_reason = block_reason
-        _record_advisory_override(ctx, disclosure)
+        record_override(ctx, disclosure)
         ctx._review_advisory.append(disclosure)
         ctx._review_degraded_reasons = list(getattr(ctx, "_review_degraded_reasons", []) or []) + [
             "review_cyber_authority" if cyber else "review_technical_failure_advisory"]

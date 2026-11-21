@@ -3,7 +3,8 @@
    Automation bridge it uses. Node has no ObjC, Carbon or CoreGraphics: nothing here can post input or read a real
    keyboard layout or clipboard. A scenario says what the stand-ins answer (the layout's characters by UCKeyTranslate
    modifier state, the right to post, an event the system cannot make, a call that throws: fail "post:1" = the
-   second CGEventPost throws; "landed" = after the event reached the system); the trace says what the program did.
+   second CGEventPost throws; "landed" = after the event reached the system; "argv" = the words osascript hands run,
+   absent for none); the trace says what the program did.
    usage: node paste_chord_inert.cjs <program.js> '<JSON list of scenarios>'  ->  a JSON list of traces on stdout */
 const fs = require("fs");
 const vm = require("vm");
@@ -97,7 +98,8 @@ function trace(program, scenario) {
     console: {log: (...parts) => { t.calls.push("console.log"); t.log.push(parts.join(" ")); }}});
   try {
     vm.runInContext(program, context, {filename: "paste_chord.js", timeout: 5000});
-    t.returned = vm.runInContext("run()", context, {timeout: 5000});
+    const argv = scenario.argv === undefined ? "" : JSON.stringify(scenario.argv); // a JSON list is a JavaScript literal
+    t.returned = vm.runInContext(`run(${argv})`, context, {timeout: 5000});
   } catch (error) {
     t.error = error && error.message !== undefined ? String(error.message) : String(error);
   }

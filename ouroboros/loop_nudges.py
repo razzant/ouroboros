@@ -7,18 +7,26 @@ Every-round facts ride the facts line (``loop_messages``)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
 import queue
 
+from itertools import groupby, takewhile
 from typing import Any, Callable, Dict, List, Optional
 from ouroboros import task_pacing
 from ouroboros.nanny_pacing import nanny_burn_fact, nanny_metered_since_delegate_activity
-from ouroboros.outcomes import extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, should_nudge_verification, turn_has_reviewable_effects
+from ouroboros._outcome_receipts import red_check_fact
+from ouroboros.outcomes import (
+    _OK_TOOL_STATUSES, _ROOT_WRITE_TOOLS, extract_final_answer, result_unexamined,
+    reviewable_effect_projection, turn_has_reviewable_effects,
+)
 # D18b: the trace-touched skill-name scan lives with the readiness predicate that
 # consumes it (upstream 0463c6bb); the historical private name stays bound here so
 # loop.py's re-export and every existing caller keep addressing one object.
 from ouroboros.skill_readiness import skill_names_touched_by_trace as _skill_names_touched_by_trace  # noqa: F401 -- historical name
+from ouroboros.tool_error_words import check_cause, red_check_phrase
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.tools.registry import ToolRegistry
 
 
@@ -84,10 +92,7 @@ def _plan_gate_decision(
     """Project plan finalization from existing review + policy SSOTs."""
     from ouroboros.owner_hurry import plan_gate_decision
 
-    return plan_gate_decision(
-        ctx, _llm_trace, hard_rail=hard_rail,
-        enforcement=_loop().get_review_enforcement(),
-    )
+    return plan_gate_decision(ctx, _llm_trace, hard_rail=hard_rail)
 
 
 def _plan_gate_reminder(decision: Dict[str, Any]) -> str:
@@ -272,9 +277,8 @@ def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
         return "\nNOTE: this task's delegated run(s) succeeded. " + nanny_burn_fact(tools_ctx) + "."
     if started > settled:
         return (
-            "\nNOTE: this task dispatched delegated run(s) that have not settled "
-            f"yet ({started - settled} of {started} pending); their results are not in "
-            "this transcript."
+            "\nNOTE: collection/accounting has not settled for "
+            f"{started - settled} of {started} delegated run(s)."
         )
     if settled:
         return (
@@ -294,103 +298,621 @@ def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
     )
 
 
-def _nanny_finalization_message(
-    tools: ToolRegistry, drive_root: pathlib.Path, task_id: str,
-    trace_attempted: bool = False,
-) -> str:
-    """The honest nanny reminder for a harness-dispatched child at finalization —
-    or '' when no reminder is deserved.
+_EFFECT_WORDS = {"commit_reviewed": "commit_reviewed call", "vcs_commit_reviewed": "vcs_commit_reviewed call",
+                 "integrate_subagent_patch": "integrated patch", "integrate_delegated_patch": "integrated patch"}
 
-    A configured actor with no durable delegated start gets its charter fact
-    (``configured_actor_finalization_message``); an unsettled start gets
-    NANNY_DELEGATED_RUN_PENDING (the custody fact a duplicate start would
-    contradict); runs that all ended without success get NANNY_DELEGATED_RUN_FAILED.
-    Each is a one-shot fact with the available verbs, not a gate. A succeeded run gets
-    nothing here: the nanny's own burn rides the facts line every round.
 
-    F4 (2026-08-10 saga): the old reminder accused children whose delegated
-    runs CRASHED of "choosing" not to delegate, and fired even with the verbs
-    policy-hidden. Two structural facts fix both: the task's own visible
-    toolset and durable custody evidence (delegate_custody.
-    task_execution_evidence) spanning the WHOLE task — per-execution llm_trace
-    resets on continuation. `trace_attempted` is the third fact: a
-    delegate_start in THIS execution's trace; it must not suppress the failure
-    message (triad, e84475f2: delegate, run dies, finish by hand, finalize —
-    one execution), only the zero-start fact when custody has no rows yet (a
-    pending/uncustodied start is an attempt, not a choice)."""
+def _changed_fact(llm_trace: Dict[str, Any]) -> str:
+    """What the result changed, counted from the one effect projection review and the record read."""
+    counts: Dict[str, int] = {}
+    for effect in reviewable_effect_projection(llm_trace):
+        tool, args = str(effect.get("tool") or ""), effect.get("args") or {}
+        label = (_EFFECT_WORDS.get(tool)
+                 or (f"written to {args.get('root') or 'active_workspace'}" if tool in _ROOT_WRITE_TOOLS else "")
+                 or f"artifact registered by {tool} outputs")
+        counts[label] = counts.get(label, 0) + 1
+    return "; ".join(f"{label} x{n}" for label, n in counts.items())
+
+
+def _named_red_check(red: Dict[str, Any]) -> str:
+    """The red check for the mind alone: the command and its cause in the words of the owner's sentence, or the
+    host's own words where it looked for the named files and ran no command."""
+    if red["kind"] == "artifact_observation":
+        return f"path observation — {red['check'] or check_cause(red)}"
+    return f"`{red['check']}` — {check_cause(red)}" if red.get("check") else check_cause(red)
+
+
+def _red_check_words(red: Dict[str, Any]) -> str:
+    """The red check as the notice says it, and whether any check passed after it (``_outcome_receipts.red_check_fact``)."""
+    if not red["passed_after"]:
+        return f"the last recorded check did not pass ({_named_red_check(red)}), and none has passed since"
+    return (f"a check did not pass ({_named_red_check(red)}); {red['passed_after']} passed after it, "
+            "none recorded as a rerun of it")
+
+
+def _recorded_fact(receipt_rows: List[Dict[str, Any]], red: Optional[Dict[str, Any]]) -> str:
+    """What this task recorded about its result, by receipt status; a red check with its own words."""
+    if not receipt_rows:
+        return "no verification receipt"
+    status = [str(row.get("status") or "") for row in receipt_rows]
+    parts = []
+    if status.count("pass"):
+        parts.append(f"{status.count('pass')} check(s) passed before the last change")
+    if status.count("observed"):
+        parts.append(f"{status.count('observed')} path set(s) confirmed to exist")
+    kinds = {str(row.get("contract_kind") or "") for row in receipt_rows if row.get("status") == "declared"}
+    if "no_visible_machine_contract" in kinds:
+        parts.append('"no machine check exists" declared')
+    if kinds - {"no_visible_machine_contract"}:
+        parts.append("a zero-run decision recorded")
+    if red:
+        parts.append(_red_check_words(red))
+    return "; ".join(parts) or "no verification receipt"
+
+
+def _reader_fact(ctx: Any) -> str:
+    from ouroboros.task_results import resolve_ctx_lineage
+
+    lineage = resolve_ctx_lineage(ctx)
+    parent = str(lineage.get("parent_task_id") or "")
+    return "your human" if lineage.get("is_root_task") or not parent else f"parent task {parent}"
+
+
+def _running_children(tools: ToolRegistry, drive_root: Any, task_id: str) -> List[str]:
+    """Direct children still running with no decision recorded: they outlive this task's end."""
+    from ouroboros.loop_forced_finalization import HANDLED_CHILD_DISPOSITIONS
+    from ouroboros.task_status import FINAL_STATUSES
+
+    metadata = getattr(tools._ctx, "task_metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    root = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
+                        or drive_root)
+    children = _loop()._load_direct_child_results(root, task_id, str(metadata.get("root_task_id") or task_id))
+    return [str(c.get("task_id") or c.get("id") or "?") for c in children
+            if str(c.get("status") or "").strip().lower() not in FINAL_STATUSES
+            and _loop()._child_disposition_state(c) not in HANDLED_CHILD_DISPOSITIONS]
+
+
+def _open_delegated_runs(ctx: Any, task_id: str) -> int:
+    """This task's own delegated runs with no recorded end (durable custody, the writers' root)."""
+    from ouroboros.delegate_custody import TERMINAL_STATES, custody_root
+    from ouroboros.delegate_custody_current import runs
+
+    return sum(1 for entry in runs(custody_root(ctx), "task_id=?", (str(task_id or ""),)).values()
+               if not entry.review_owned and not entry.settled and entry.terminal_state not in TERMINAL_STATES)
+
+
+def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
+    """A read-only actor that already made its terminal no-leaf decision no longer has the verification tool:
+    naming paths it cannot take would be false (the record still discloses the gap)."""
     try:
-        from ouroboros.tools import registry_guards
+        from ouroboros.outcomes import _terminal_zero_run_receipt_present
+        from ouroboros.tool_access import active_tool_profile
 
-        if "delegate_start" not in set(tools.available_tools()) or "delegate_start" in registry_guards._disabled_tools(
-                getattr(tools, "_ctx", None)):
-            return ""  # the verb is invisible or withheld here; "you chose not to" would be false
+        return active_tool_profile(ctx) == "local_readonly_subagent" and _terminal_zero_run_receipt_present(receipt_rows)
     except Exception:
-        log.debug("nanny nudge: toolset visibility check failed", exc_info=True)
-    evidence: Dict[str, Any] = {}
-    try:
-        from ouroboros.delegate_custody import custody_root, task_execution_evidence
+        return False
 
-        # Split-root fix (2026-08-10): custody WRITES land on the CANONICAL
-        # (budget) root, but this read used the loop's drive_root — a
-        # split-root child drive has no custody rows: nanny blind. Resolve
-        # the writers' SAME root; drive_root stays the unit-stub fallback.
+
+def _callable_tools(tools: Any) -> Optional[frozenset]:
+    """The tools this actor may call now; None when unreadable, and then the notice withholds no path."""
+    try:
+        return frozenset(tools.available_tools())
+    except Exception:
+        return None
+
+
+RED_CHECK_NOTICE = "red_check_notice"  # the hold cause of the red check stated alone; beside the other facts the hold is theirs
+
+
+def _pre_delivery_facts(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                        receipt_rows: List[Dict[str, Any]], told: bool = False, red_told: bool = False) -> tuple:
+    """The finish-door notice and the two parts it states, ``(text, facts, red)``: never a gate, typed facts only,
+    never parsed prose (P5). ``facts`` (owner 12.11: keep the pushback at the exit and make acceptance and quality
+    more precise): a result nothing examined since it last changed (``outcomes.result_unexamined``; not where
+    Required's floor reviews it at delivery), direct children still running, this task's own delegated runs with no
+    recorded end. ``red`` (owner 15.11: on a failure, a chance to correct it): the last recorded check did not pass
+    and no check has passed since (``_outcome_receipts.red_check_fact``), for every actor and review mode; a masking
+    pipe and an agent-defined criterion were said when the check ran and stay on the record. A part already told
+    (``told``, ``red_told``) is left out."""
+    from ouroboros.config import get_task_review_mode
+    from ouroboros.tools.review_result import required_root_wave
+
+    lines: List[str] = []
+    red = red_check_fact(receipt_rows)
+    red_due = bool(red) and not red["passed_after"] and not red_told
+    callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
+    can_check = callable_tools is None or "verify_and_record" in callable_tools
+    # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
+    # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
+    unexamined = (not told and result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
+                  and not _zero_run_closed(tools._ctx, receipt_rows))
+    if unexamined:
+        mode = get_task_review_mode()  # Off refuses a result review; Required reviews only a root at delivery
+        can_review = mode != "off" and (callable_tools is None or "review_change" in callable_tools)
+        paths = (["check the result against what was asked (verify_and_record runs the check and records what it "
+                  "showed)"] if can_check else [])
+        paths += (["ask for a result review (review_change with subject=\"result\" and the seats you choose; its "
+                   "verdict comes back before delivery)"] if can_review else [])
+        deliver = "deliver it as it is and say in the answer what was not checked, which the record then shows"
+        lines += [
+            "Before delivery: no recorded check (verify_and_record) or result review has examined this result since it "
+            "last changed.",
+            f"Changed: {_changed_fact(llm_trace)}.",
+            f"Recorded about it: {_recorded_fact(receipt_rows, red)}.",
+            f"This answer is read by: {_reader_fact(tools._ctx)}.",
+            "Result review: off on this install (task review mode Off)." if mode == "off" else
+            "Result review: none for this answer; this actor has no review_change." if not can_review else
+            f"Result review: none for this answer; under {mode.capitalize()} a result review "
+            f"{'of a child ' if mode == 'required' else ''}runs only when you ask for one.",
+            "Ways forward: " + "; ".join([*paths, f"or {deliver}" if paths else deliver]) + ".",
+        ]
+    elif red_due:  # beside an unexamined result the red check is said once, in "Recorded about it"
+        lines += [
+            "Before delivery: the last recorded check did not pass, and no recorded check has passed since.",
+            f"Check: {_named_red_check(red)}.",
+            f"This answer is read by: {_reader_fact(tools._ctx)}; if you finish now, a clean ending's details will say: "
+            f"\"{red_check_phrase({'verification_red': red})}\"",
+            "Ways forward: " + ("change the result or the check, or run the check again as it is (verify_and_record); or "
+                                if can_check else "change the result; or ")
+            + "deliver the answer as it is and say in it what did not pass.",
+        ]
+    count = len(lines)
+    if not told:
         try:
-            evidence_root = custody_root(tools._ctx)
+            running = _running_children(tools, drive_root, task_id)
         except Exception:
-            evidence_root = drive_root
-        evidence = task_execution_evidence(evidence_root, str(task_id or ""))
-    except Exception:
-        log.debug("nanny nudge: custody evidence read failed", exc_info=True)
-    if evidence.get("delegated_runs_succeeded"):
-        # The poltergeist children ran one $0 run, then co-built for tens of opus
-        # rounds: that burn is now on the facts line of every round
-        # (``nanny_pacing.nanny_burn_fact``), stated, not judged.
-        return ""
-    started = int(evidence.get("delegated_runs_started") or 0)
-    readable = bool(evidence) and not evidence.get("evidence_read_failed")
-    if not started and readable and (trace_attempted or evidence.get("delegate_start_attempted")):
-        # Pending, refused or uncustodied starts are still real attempts.
-        return ""
-    if not started:
-        # The charter fact of a configured actor, also over unreadable custody
-        # (a5e59bdf, as unknown); any other nanny has nothing honest to add.
-        from ouroboros.subagent_bootstrap import configured_actor_finalization_message
+            log.debug("pre-delivery notice: direct children unreadable", exc_info=True)
+            running = []
+        if running:
+            listed = ", ".join(running[:10]) + (f" (+{len(running) - 10} more)" if len(running) > 10 else "")
+            lines.append(f"Still running: direct children {listed}; after this task ends they keep running and "
+                         "spending, and it reads nothing more from them (wait for them, cancel them, or leave them).")
+        try:
+            open_runs = _open_delegated_runs(tools._ctx, task_id)
+        except Exception:
+            log.debug("pre-delivery notice: delegated custody unreadable", exc_info=True)
+            open_runs = 0
+        if open_runs:
+            lines.append(f"Open delegated execution: {open_runs} of this task's runs have no recorded end; "
+                         "ending this task now cancels those still running on the next custody pass "
+                         "(delegate_wait shows each run's state).")
+    if not lines:
+        return "", False, False
+    if not lines[0].startswith("Before delivery"):
+        lines.insert(0, "Before delivery:")
+    text = "\n".join([*lines, "Your next answer is not returned for these facts."])
+    return text, unexamined or len(lines) > count, red_due
 
-        return configured_actor_finalization_message(
-            tools._ctx, task_id=str(task_id or ""), fallback_root=drive_root) or ""
-    settled = int(evidence.get("delegated_runs_settled") or 0)
-    failure_states = [str(s) for s in (evidence.get("delegated_run_failure_states") or [])]
-    pending = max(0, started - settled)
-    if pending:
-        # PENDING ≠ FAILED (b49f8192): a STARTED row without settlement may
-        # still be executing — "failed" invites a duplicate, finalizing orphans
-        # the result; outranks the failed message even if a sibling died.
-        failed_note = (
-            f" {len(failure_states)} earlier run(s) already ended: {', '.join(failure_states)}."
-            if failure_states else ""
-        )
-        return (
-            f"⚠️ NANNY_DELEGATED_RUN_PENDING: {pending} delegated run(s) of this task have "
-            "started but not settled — they may still be executing. A final answer now "
-            "leaves their results unread (orphaned), and a new start would duplicate "
-            "them. Available: delegate_wait to check or wait, delegate_cancel to stop one."
-            + failed_note
-        )
-    states = ", ".join(failure_states) or "settled without a recorded terminal state"
-    return (
-        f"⚠️ NANNY_DELEGATED_RUN_FAILED: this task started {started} delegated run(s) "
-        f"and none succeeded; they ended: {states}. Available: delegate_start for "
-        "another run."
-    )
+
+def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                         receipt_rows: List[Dict[str, Any]]) -> str:
+    """The whole finish-door notice of this moment, nothing told yet (``_pre_delivery_facts``)."""
+    return _pre_delivery_facts(tools, drive_root, task_id, llm_trace, receipt_rows)[0]
+
+
+def _claim_pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                               receipt_rows: Optional[List[Dict[str, Any]]] = None) -> str:
+    """The notice at this door: each of its two parts returns an answer once per execution, and the door that shows a
+    part (this chain, or the handoff riding the same door) latches it, so one door is never two returns and the
+    notice returns an answer at most twice, once for each part. It names the hold's cause for the delivery owner
+    (``_completion_hold_cause``)."""
+    ctx = tools._ctx
+    told, red_told = bool(getattr(ctx, "_pre_delivery_noticed", False)), bool(getattr(ctx, "_red_check_noticed", False))
+    if drive_root is None or (told and red_told):
+        return ""
+    if receipt_rows is None:
+        from ouroboros.outcomes import read_context_verification_receipts
+
+        receipt_rows = read_context_verification_receipts(ctx, task_id, fallback_root=drive_root)
+    notice, facts, red = _pre_delivery_facts(tools, drive_root, task_id, llm_trace, receipt_rows, told, red_told)
+    if notice:
+        ctx._pre_delivery_noticed, ctx._red_check_noticed = told or facts, red_told or red
+        ctx._completion_hold_cause = "pre_delivery_notice" if facts else RED_CHECK_NOTICE
+    return notice
+
+
+def _end_authoring_handover(ctx: Any, llm_trace: Dict[str, Any], handover: Dict[str, Any], status: str,
+                            **facts: Any) -> None:
+    """Record the successor's act on its own row. Earlier switches keep their history."""
+    handover.update(status=status, **facts)
+    llm_trace.pop("authoring_handover_incomplete", None)
+    ctx._authoring_handover = None
+    usage = getattr(ctx, "_accumulated_usage", None)
+    if isinstance(usage, dict) and usage.get("reason_code") == "authoring_handover_incomplete":
+        if usage.get("execution_status") == "degraded":
+            usage.pop("execution_status")
+        usage.pop("reason_code", None)
+
+
+def _working_calls(calls: Any) -> list:
+    """The calls that show a successor working: successful, neither a completion request nor schema discovery."""
+    from ouroboros.tool_capabilities import SCHEMA_DISCOVERY_TOOLS, substantive_tool_calls
+
+    return [call for call in substantive_tool_calls(calls) if call.get("is_error") is False
+            and call.get("status") in _OK_TOOL_STATUSES and call.get("tool") not in SCHEMA_DISCOVERY_TOOLS]
+
+
+def observe_handover_work(ctx: Any, trace: dict, calls: list) -> None:
+    """The completed batch belongs to this author, even if the next round switches or ends."""
+    handover = getattr(ctx, "_authoring_handover", None)
+    if handover and _working_calls(calls):
+        _end_authoring_handover(ctx, trace, handover, "recovered", work_observed=True)
+
+
+def _worked_handover(ctx: Any, trace: dict, request: dict) -> Optional[dict]:
+    """The row this request's own response ended by its work, for the choice the same response made.
+
+    A batch ends the handover (``observe_handover_work``) before the delivery gates accept that response's
+    completion request. The request names its response by the tool count it was staged under; the row is that
+    response's only when the first successful work since the handover lies in the response's own round. A request
+    held and then selected again, a later reply, another round's work and a forced reply (which stages nothing)
+    name no such row, and an execution that holds the row only as another one's history has none to name."""
+    rows = (getattr(ctx, "_accumulated_usage", None) or {}).get("authoring_handovers")
+    routes, calls = trace.get("route_handovers"), trace.get("tool_calls") or []
+    row = rows[-1] if isinstance(rows, list) and rows and isinstance(routes, list) and routes else None
+    start = (request.get("observation") or {}).get("tool_count")
+    if (not isinstance(row, dict) or row is not routes[-1] or row.get("status") != "recovered"
+            or row.get("work_observed") is not True or type(start) is not int
+            or type(baseline := row.get("tool_calls_at_handover")) is not int
+            or not baseline <= start < len(calls) or not isinstance(calls[start], dict)):
+        return None
+    round_id = calls[start].get("round_id")
+    own = [call for call in calls[start:] if isinstance(call, dict) and call.get("round_id") == round_id]
+    return row if _working_calls(own) and not _working_calls(calls[baseline:start]) else None
+
+
+def _solve_round(call: Any, execution: str, through: int) -> int:
+    """Logical round of a usable solve, not a provider attempt or a forced reply."""
+    if not isinstance(call, dict):
+        return 0
+    number = call.get("round")
+    return number if (
+        type(number) is int and 0 < number <= through and call.get("execution_id") == execution
+        and call.get("round_id") == f"{execution}:round:{number}" and call.get("usable_solve_response") is True
+        and isinstance(call.get("llm_call_id"), str) and call["llm_call_id"]
+        and isinstance(call.get("model"), str) and call["model"].strip()
+    ) else 0
+
+
+def _runs(names: Any) -> list:
+    """The order in which the name changed: consecutive repeats are one."""
+    return [name for name, _ in groupby(names)]
+
+
+def _receipt_authorship(state: dict, calls: list, handover: dict) -> tuple:
+    """``(last usable reply, the handover's successor rounds)`` as the saved execution's own call receipts say.
+
+    One source answers at every saved boundary: each usable solve keeps its receipt (execution, logical round,
+    model) and each tool result names the round that asked for it. The rounds are the target's last series of
+    replies, entered from the row's predecessor, read round after round from the predecessor's last tool round
+    (the anchor); a round between two solves counts only when every attempt it recorded failed (a provider's
+    refusal, an exhausted reply), or when it recorded none (a view refused before sending leaves no receipt) and
+    the accepted routes, kept apart from the receipts, name the same authors in the same order. ``set()``: the
+    target has not answered yet. ``None``: the receipts cannot say: a round neither record accounts for, a solve
+    out of order, a predecessor the row does not name, or another author since. Returning to the same name
+    reopens no row: where the target answered in an earlier series too, the last series is this row's only when
+    the rows written at this same tool count name the receipts' last changes of author one for one and no
+    earlier change is the same pair (each host switch after tools writes its own row; a switch the mind made
+    writes none). Counts bound the slice, not its authorship. Old call rows stamp the execution and logical
+    round, not the task attempt (``attempt`` is the provider retry): the verified checkpoint owns the task
+    identity, so its usage's attempt must be its envelope's.
+    """
+    usage = state["usage"]
+    attempt, through = state.get("task_attempt"), state.get("round_idx")
+    execution, refs = usage.get("execution_id"), usage.get("llm_call_refs")
+    if (type(attempt) is not int or attempt < 1 or type(usage.get("_task_attempt")) is not int
+            or usage["_task_attempt"] != attempt or type(through) is not int
+            or not isinstance(refs, list) or not isinstance(execution, str) or not execution):
+        return {}, None
+    refs = [ref for ref in refs if isinstance(ref, dict)]
+    solves = [ref for ref in refs if ref.get("usable_solve_response") is True]
+    if not solves or not all(_solve_round(ref, execution, through) for ref in solves):
+        return {}, None
+    reply, baseline = solves[-1], handover.get("tool_calls_at_handover")
+    if type(baseline) is not int or not 0 < baseline <= len(calls) or not isinstance(calls[baseline - 1], dict):
+        return reply, None
+    failed: Dict[Any, bool] = {}  # a round whose every recorded attempt failed, none naming another execution
+    for ref in refs:
+        failed[ref.get("round")] = (failed.get(ref.get("round"), True) and bool(ref.get("failure_code"))
+                                    and ref.get("execution_id") in (None, execution))
+    accepted = usage.get("accepted_routes")  # written at each accepted reply whose route differs from the last one's
+    routes = [row["to_binding"][0] for row in (accepted if isinstance(accepted, list) else ())
+              if isinstance(row, dict) and isinstance(row.get("to_binding"), (list, tuple)) and row["to_binding"]]
+    unsent = _runs(routes) == _runs(ref["model"] for ref in solves)  # no reply is missing from the receipts
+    pair, anchor = (handover.get("from_model"), handover.get("to_model")), calls[baseline - 1].get("round_id")
+    span, last, previous, met, turns = set(), 0, None, False, []  # turns: each change of author from the anchor on
+    for ref in solves:
+        if not last:
+            if not anchor or ref["round_id"] != anchor:
+                continue
+        elif ref["round"] <= last or not all(failed.get(gap, unsent) for gap in range(last + 1, ref["round"])):
+            return reply, None
+        elif ref["model"] != previous:
+            turns.append((previous, ref["model"]))
+            span = set()
+        if last and ref["model"] == pair[1]:  # the anchor itself is a tool round from before the handover
+            met = True
+            span.add(ref["round_id"])
+        last, previous = ref["round"], ref["model"]
+    if not last or turns[-1:] != [pair]:
+        return reply, None if met or not last else set()
+    if sum(turn[1] == pair[1] for turn in turns) > 1:  # several series: which departure the last row names
+        rows = usage.get("authoring_handovers")
+        if not isinstance(rows, list) or not rows or rows[-1] != handover:
+            return reply, None
+        named = [(row.get("from_model"), row.get("to_model")) for row in takewhile(
+            lambda row: isinstance(row, dict) and row.get("tool_calls_at_handover") == baseline, reversed(rows))][::-1]
+        if turns[-len(named):] != named or pair in turns[:-len(named)]:
+            return reply, None
+    return reply, span
+
+
+_NO_DECLARATION = object()  # this spelling proves nothing of the call's arguments; keep its recorded copy.
+
+
+def _declared_arguments(spelling: Any) -> Any:
+    """The one object a declared ``arguments`` spelling holds, or ``_NO_DECLARATION``.
+
+    One decoder for both readers of a saved batch. Text that does not parse, a JSON value that is not an
+    object, and a save that wrote the object itself where its JSON text belongs are the same gap: they name
+    no request. Shape is checked before it is parsed because ``json.loads`` answers a spelling that is not
+    text with ``TypeError``, which a ``ValueError`` reader would not catch, and a resume is not the place to
+    learn a save's shape from an exception."""
+    if not isinstance(spelling, (str, bytes, bytearray)):
+        return _NO_DECLARATION
+    try:
+        arguments = json.loads(spelling)
+    except ValueError:
+        return _NO_DECLARATION
+    return arguments if isinstance(arguments, dict) else _NO_DECLARATION
+
+
+def _recorded_call_arguments(call: Any, messages: Any) -> Any:
+    """One recorded call's arguments as the transcript's one unambiguous naming of its ID and tool holds them.
+
+    The fallback for saves written before the executor stamped the result record. Providers reuse a call ID
+    between responses (tool_call_log), and those saves carry no axis saying which round spelled a naming: the
+    first match could hand an earlier round's complete choice to this batch, and no compatibility rule ever
+    required that pick. So a second naming of one ID, or one that cannot be decoded, ends the search with the
+    call's own recorded copy — what those restores were proven to settle on before any transcript was read
+    for it. ``_transcript_arguments`` binds the record era to the call's own batch instead. Nothing absent is
+    inferred and no disk is read; the trace's rendered ``args`` stay the last resort."""
+    call_id, tool = call.get("tool_call_id"), call.get("tool")
+    if not isinstance(call_id, str) or not call_id:
+        return call.get("args")  # a command that names no ID matches nothing anywhere in the transcript
+    found = _NO_DECLARATION
+    for message in messages if isinstance(messages, list) else ():
+        for recorded in (message.get("tool_calls") or ()) if isinstance(message, dict) else ():
+            function = recorded.get("function") if isinstance(recorded, dict) else None
+            if (isinstance(function, dict) and recorded.get("id") == call_id
+                    and function.get("name") == tool):
+                if found is not _NO_DECLARATION:
+                    return call.get("args")  # two namings: the save cannot say which round spelled them
+                spelling = _declared_arguments(function.get("arguments"))
+                if spelling is _NO_DECLARATION:
+                    return call.get("args")  # this naming cannot be resolved: it proves nothing either
+                found = spelling
+    return call.get("args") if found is _NO_DECLARATION else found
+
+
+def _batch_declaration(row: Any, tool_call_id: Any, tool: Any) -> Any:
+    """The complete arguments one assistant batch declares under one call ID: a lone naming of this tool.
+
+    Named twice in its own response, named by another command, unreadable or absent is no proof: ``_NO_DECLARATION``."""
+    found = _NO_DECLARATION
+    declarations = row.get("tool_calls") if isinstance(row, dict) else None
+    for declared in declarations if isinstance(declarations, list) else ():
+        function = declared.get("function") if isinstance(declared, dict) else None
+        if not (isinstance(declared, dict) and declared.get("id") == tool_call_id and isinstance(function, dict)):
+            continue
+        if found is not _NO_DECLARATION or function.get("name") != tool:
+            return _NO_DECLARATION
+        found = _declared_arguments(function.get("arguments"))
+        if found is _NO_DECLARATION:
+            return _NO_DECLARATION
+    return found
+
+
+def _transcript_arguments(controls: list, messages: Any) -> list:
+    """For each recorded command of one round (the caller checked their ``round_id``): the arguments as its own
+    batch declares them in the transcript, or the call's recorded copy — never another round's spelling.
+
+    The executor stamps each result row with the round it ran that call in (``tool_result_record``); the batch
+    whose result records name this round is the batch to read, so a provider ID reused in an earlier valid
+    response never lends its words. The walk starts at the transcript's end and stops once that batch closes:
+    only the needed suffix is read. A call the records do not prove — a result naming another round, a record
+    whose own invocation names another call or none (the gap ``read_tool_result_record`` reports as a
+    mismatch), a record disagreeing with its row, a doubled or unreadable declaration — keeps its recorded
+    ``args``: a broken link grants no authorship and breaks no restore. A save whose rows carry no record at
+    all (the format before the stamp) keeps the unambiguous name match above. The trace renders ``args`` with
+    truncation markers, so two spellings of one long choice can differ there; the transcript keeps the
+    complete JSON the provider sent, which is what the live staging compared."""
+    round_id = controls[0].get("round_id") if controls else None
+    if not isinstance(messages, list) or not isinstance(round_id, str) or not round_id:
+        return [_recorded_call_arguments(call, messages) for call in controls]
+    wanted: Dict[Any, list] = {}
+    for position, call in enumerate(controls):
+        call_id = call.get("tool_call_id")
+        if isinstance(call_id, str) and call_id:
+            wanted.setdefault(call_id, []).append(position)
+    decided, episode, stamped = {}, [], False
+    for index in range(len(messages) - 1, -1, -1):
+        row = messages[index]
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "").lower()
+        if role == "tool":
+            record = row.get(TOOL_RESULT_RECORD_KEY)
+            if not isinstance(record, dict):
+                continue
+            stamped = True
+            invocation = record.get("invocation")
+            call_id = row.get("tool_call_id")
+            if (isinstance(invocation, dict) and invocation.get("round_id") == round_id
+                    and invocation.get("tool_call_id") == call_id and call_id in wanted):
+                episode.append(call_id)
+            continue
+        if role == "assistant" and episode:
+            for call_id in dict.fromkeys(episode):  # one batch, however its rows repeat
+                for position in wanted[call_id]:
+                    arguments = _batch_declaration(row, call_id, controls[position].get("tool"))
+                    decided[position] = controls[position].get("args") if arguments is _NO_DECLARATION else arguments
+            break  # this was the round's own batch: whatever remains unproven keeps its copy, nobody else's.
+    if not stamped:
+        return [_recorded_call_arguments(call, messages) for call in controls]
+    return [decided[position] if position in decided else call.get("args")
+            for position, call in enumerate(controls)]
+
+
+def _restore_completion_author(ctx: Any, observation: dict, calls: list, reply: dict, messages: Any) -> None:
+    """The producer copies the round observation into a request; repair only its own completed batch's copy."""
+    from ouroboros.tools.control_runtime import staged_request_identity
+
+    index = observation.get("tool_count")
+    if type(index) is not int or not 0 <= index < len(calls):
+        return
+    batch = calls[index:]
+    if any(not isinstance(call, dict) or call.get("round_id") != reply["round_id"] for call in batch):
+        return
+    controls = [call for call in batch if call.get("completion_control") is True]
+    said = [staged_request_identity(ctx, call.get("tool"), arguments)
+            for call, arguments in zip(controls, _transcript_arguments(controls, messages))]
+    # A response may repeat its one accepted command under several call IDs: staging admits the request it already
+    # holds, however the repeat spells it. A refused or conflicting sibling, another command or another request:
+    # the batch does not say one thing.
+    if not controls or any(call.get("is_error") is not False or call.get("status") not in _OK_TOOL_STATUSES
+                           or identity != said[0] for call, identity in zip(controls, said)):
+        return
+    for key in ("_completion_request", "_completion_selected"):
+        request = getattr(ctx, key, None)
+        snapshot = request.get("observation") if isinstance(request, dict) else None
+        if (isinstance(snapshot, dict) and not snapshot.get("model") and request.get("reply_later") is False
+                and request.get("source") == controls[0].get("tool")
+                and {**snapshot, "model": None} == {**observation, "model": None}):
+            setattr(ctx, key, {**request, "observation": {**snapshot, "model": reply["model"]}})
+
+
+def restore_authoring_handover(ctx: Any, state: dict, trace: dict, usage: dict) -> None:
+    """Relink only this task's final history row and settle what its saved facts establish, once on restore.
+
+    A row this body wrote says itself that its target replied, beside the saved author. An older row says neither:
+    the execution's own receipts answer for it (``_receipt_authorship``), and what they leave open stays open.
+    Where no receipt can say anything, a saved author naming the target is still this body's record of its reply."""
+    if not state.get("task_id") or state["task_id"] != ctx.task_id:
+        return
+    routes, rows = trace.get("route_handovers"), usage.get("authoring_handovers")
+    if (not isinstance(routes, list) or not routes or not isinstance(row := routes[-1], dict)
+            or not isinstance(rows, list) or not rows or rows[-1] != row):
+        return
+    rows[-1] = row  # JSON broke the live alias; earlier rows remain history.
+    incomplete = row.get("status") == "incomplete" and trace.get("authoring_handover_incomplete") == row
+    if incomplete:
+        trace["authoring_handover_incomplete"] = row
+    if row.get("status") != "pending" and not incomplete:
+        return
+    observation = state["delivery"].get("_completion_observation") or {}
+    target, author, calls = row.get("to_model"), observation.get("model"), trace.get("tool_calls") or []
+    reply, span = {}, None
+    if row.get("reply_observed") is not True or not author:
+        reply, span = _receipt_authorship(state, calls, row)
+        if reply and not author:
+            ctx._completion_observation = {**observation, "model": (author := reply["model"])}
+    if not target or author not in (None, target) or not (
+            row.get("reply_observed") is True or span or not reply and author == target):
+        return  # A route pair alone proves no reply; its target's next one may still attach it.
+    ctx._authoring_handover = row
+    if span:
+        row["reply_observed"] = True
+        _restore_completion_author(ctx, observation, calls, reply, state.get("messages"))
+        observe_handover_work(ctx, trace, [call for call in calls[row["tool_calls_at_handover"]:]
+                                          if isinstance(call, dict) and call.get("round_id") in span])
+
+
+def accept_handover_selection(ctx: Any, trace: dict, request: dict | None = None, *, forced_model: str = "") -> None:
+    """An accepting exit records the choice of the model that made it, also on the row that the work of the same
+    response already ended (``_worked_handover``): acceptance, never staging, puts a choice on a row."""
+    if request is None:
+        request = getattr(ctx, "_completion_selected", None) or {}
+    handover = getattr(ctx, "_authoring_handover", None) or _worked_handover(ctx, trace, request)
+    author = forced_model or (request.get("observation") or {}).get("model")
+    if not handover or not author or author != handover.get("to_model"):
+        return
+    if request.get("action") == "stop":
+        kind = "stop"
+    elif request.get("wake_silent"):
+        kind = "silent"
+    elif request.get("action") == "finish" and (forced_model or handover.get("recovery_prompted")):
+        kind = "answer_sha256" if request.get("answer_sha256") else "answer"
+    else:
+        return
+    _end_authoring_handover(ctx, trace, handover, "selected", selection=kind)
+
+
+def accept_preserved_handover_stop(ctx: Any, trace: dict) -> None:
+    """A rail retaining the current candidate keeps its validated author stop, not its outcome."""
+    request = getattr(ctx, "_completion_selected", None) or {}
+    if request.get("action") == "stop":
+        accept_handover_selection(ctx, trace, request)
+
+
+def _note_incomplete_handover(ctx: Any, llm_trace: Dict[str, Any], handover: Dict[str, Any]) -> None:
+    """Text after the one reminder is no choice. The mark names no author; another failure keeps its own code."""
+    handover.update(status="incomplete", incomplete_observed=True)
+    usage = getattr(ctx, "_accumulated_usage", None)
+    if isinstance(usage, dict) and not any(usage.get(key) for key in ("execution_status", "result_status", "reason_code")):
+        usage.update(execution_status="degraded", reason_code="authoring_handover_incomplete")
+    llm_trace["authoring_handover_incomplete"] = handover
+
+
+def _authoring_handover_step(ctx: Any, llm_trace: Dict[str, Any], content: Optional[str], restored: bool) -> str:
+    """Offer one reminder before an ordinary finish. A selection can still be held downstream."""
+    handover = getattr(ctx, "_authoring_handover", None)
+    selected = getattr(ctx, "_completion_selected", None) or {}
+    if not isinstance(handover, dict):
+        # Restore links matching usage/trace rows only for this task. A pending legacy row
+        # may leave the draft's author unknown; asking for a choice names no successor act.
+        rows = (getattr(ctx, "_accumulated_usage", None) or {}).get("authoring_handovers") or []
+        routes = llm_trace.get("route_handovers") or []
+        row = rows[-1] if rows and routes and rows[-1] is routes[-1] else None
+        if selected or not isinstance(row, dict) or row.get("status") != "pending" or row.get("reply_observed") is True:
+            return ""
+        if row.get("recovery_prompted"):
+            # Asked once already, here or by the body that saved it. The row stays unbound: its author is unproven.
+            if content and str(content).strip():
+                _note_incomplete_handover(ctx, llm_trace, row)
+        elif restored:
+            row["recovery_prompted"] = True
+            return ("This answer was retained around a model handover; the saved record does not confirm its author. "
+                    "Continue the work, or explicitly select the complete answer to deliver, by text or answer_sha256.")
+        return ""
+    # Inherited quiet delivery is not a completion request. A saved choice by an unknown or
+    # different author can still deliver, but does not answer this handover's question.
+    if selected and (selected.get("wake_silent") or handover.get("recovery_prompted")
+                     or (selected.get("observation") or {}).get("model") != handover.get("to_model")):
+        return ""
+    if content and str(content).strip():
+        if not handover.get("recovery_prompted"):
+            handover["recovery_prompted"] = True
+            from_model = str(handover.get("from_model") or "the previous model")
+            to_model = str(handover.get("to_model") or "the current model")
+            return (f"A host-driven model handover occurred ({from_model} → {to_model}). The previous model's "
+                    "tool results remain in the transcript. Your response above is retained and interim prose "
+                    "stays held. Continue the work, or select the answer to deliver using its complete text "
+                    "or an answer_sha256 offered below.")
+        _note_incomplete_handover(ctx, llm_trace, handover)
+    return ""
 
 
 def _maybe_inject_finalization_nudges(
     tools: ToolRegistry, drive_root: Optional[pathlib.Path], task_id: str,
     llm_trace: Dict[str, Any], content: Optional[str], messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
+    *, restored: bool = False,
 ) -> bool:
-    """One-shot pre-finalization injections that each re-loop (return True): the skill
-    finalization reminder, then the FR3 verify-before-done nudge. Extracted from
+    """One-shot pre-finalization injections that each re-loop (return True): the authoring
+    handover fact, the skill finalization reminder, the pre-delivery notice (``_claim_pre_delivery_notice``: each
+    of its two parts once) and the adapter's answer-protocol marker. Extracted from
     run_llm_loop to keep it under the method size gate."""
     if drive_root is None:
         return False
@@ -408,7 +930,7 @@ def _maybe_inject_finalization_nudges(
 
         receipt_rows = read_verification_receipts(drive_root, task_id)
 
-    def _inject(reminder: str, note: str, cause: str) -> bool:
+    def _inject(reminder: str, note: str, cause: str, *, progress: bool = True) -> bool:
         # The one nudge protocol every advisory injection below follows: land
         # the model's pending text, append the reminder, record the note once
         # (live progress AND the durable trail), name the hold's typed cause
@@ -416,190 +938,31 @@ def _maybe_inject_finalization_nudges(
         if content and content.strip():
             messages.append({"role": "assistant", "content": content})
         _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{reminder}")
-        emit_progress(note)
+        if progress:
+            emit_progress(note)
         llm_trace["reasoning_notes"].append(note)
         tools._ctx._completion_hold_cause = cause
         return True
 
-    # A host-driven route change hands an already-active authoring turn to a
-    # new model.  The successor sees the canonical transcript, but without this
-    # typed reminder its first short status response can look like an ordinary
-    # final.  One recovery round is bounded by the existing loop/deadline/budget
-    # rails; a second tool-less response is retained with a degraded execution
-    # fact rather than silently painting a clean Done.
-    handover = (getattr(tools._ctx, "_authoring_handover", None)
-                or llm_trace.get("authoring_handover_incomplete"))
-    if isinstance(handover, dict):
-        baseline = int(handover.get("tool_calls_at_handover") or 0)
-        from ouroboros.tool_capabilities import substantive_tool_calls
-        if substantive_tool_calls((llm_trace.get("tool_calls") or [])[baseline:]):
-            handover["status"] = "recovered"
-            incomplete = llm_trace.pop("authoring_handover_incomplete", None)
-            if isinstance(incomplete, dict):
-                incomplete["status"] = "recovered"
-            tools._ctx._authoring_handover = None
-            usage = getattr(tools._ctx, "_accumulated_usage", {})
-            if usage.get("reason_code") == "authoring_handover_incomplete":
-                usage.pop("execution_status", None)
-                usage.pop("reason_code", None)
-        elif baseline > 0 and content and str(content).strip():
-            if not bool(handover.get("recovery_prompted")):
-                handover["recovery_prompted"] = True
-                from_model = str(handover.get("from_model") or "the previous model")
-                to_model = str(handover.get("to_model") or "the current model")
-                return _inject(
-                    f"A host-driven model handover occurred ({from_model} → {to_model}) "
-                    "after the previous model had already used tools on this open task; the "
-                    "plan and tool results above are that earlier work. No substantive tool "
-                    "call has run since the handover. If the turn ends without one, the host "
-                    "records this handover as incomplete (execution degraded); later tool "
-                    "work clears that record.",
-                    "Authoring handover recovery nudge injected before final response.", "authoring_handover",
-                )
-            tools._ctx._authoring_handover = None
-            handover["status"] = "incomplete"
-            handover["incomplete_observed"] = True
-            usage = getattr(tools._ctx, "_accumulated_usage", None)
-            if isinstance(usage, dict):
-                usage["execution_status"] = "degraded"
-                usage["reason_code"] = "authoring_handover_incomplete"
-            llm_trace["authoring_handover_incomplete"] = handover
-            # Existing one-shot readiness/verification nudges and acceptance
-            # can still continue the task. Later tool work heals only this
-            # warning; the history row retains the handover and its recovery.
+    reminder = _authoring_handover_step(tools._ctx, llm_trace, content, restored)
+    if reminder:
+        return _inject(reminder, "Authoring handover recovery nudge injected before final response.",
+                       "authoring_handover")
+    # The other one-shot facts below still reach a successor: settling the handover settles only its own question.
 
-    if (getattr(tools._ctx, "_nanny_route_dispatched", False)
-            and not getattr(tools._ctx, "_nanny_finalization_injected", False)):
-        # Nanny postcondition (owner 2026-08-07): a harness-dispatched child must
-        # not finalize as if that decision never existed — one structural fact,
-        # one re-loop, never a hard gate (P5); suppressions live in
-        # _nanny_finalization_message.
-        _trace_attempted = any(
-            str(c.get("tool") or "") == "delegate_start"
-            for c in (llm_trace.get("tool_calls") or [])
-            if isinstance(c, dict)
-        )
-        tools._ctx._nanny_finalization_injected = True
-        _nanny_msg = _nanny_finalization_message(
-            tools, drive_root, task_id, trace_attempted=_trace_attempted,
-        )
-        if _nanny_msg:
-            if content and content.strip():
-                messages.append({"role": "assistant", "content": content})
-            _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{_nanny_msg}")
-            # Owner decision (2026-08-15): no owner-chat progress line — the
-            # trace + typed task_checkpoint carry observability.
-            _code = _nanny_msg.split(":", 1)[0].replace("⚠️", "").strip()
-            _loop()._emit_checkpoint_event(
-                getattr(tools._ctx, "event_queue", None), task_id,
-                getattr(tools._ctx, "drive_logs", None),
-                {"checkpoint_kind": "nanny_finalization_nudge",
-                 "nanny_code": _code},
-            )
-            # B3: durable worker stamp that the nudge was really INJECTED (the
-            # ctx flag is set even on suppression); read back at completion.
-            from ouroboros.delegate_evidence import record_nanny_nudge_stamp
-
-            record_nanny_nudge_stamp(tools._ctx, task_id, _code)
-            llm_trace["reasoning_notes"].append(_nanny_msg)
-            tools._ctx._completion_hold_cause = _code  # the producer's own typed code, as its rows carry it
-            return True
     from ouroboros.tool_access import canonical_data_root
 
     finalization_msg = _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace)
     if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
         tools._ctx._skill_finalization_injected = True
         return _inject(finalization_msg, finalization_msg, "skill_not_finalized")
-    if not getattr(tools._ctx, "_verify_red_nudged", False):
-        # Red-verification one-shot nudge: the latest host-attested verify
-        # receipt is RED and unreconciled (distinct from receipt_absent below).
-        # Before FR3; binary latch; advisory; forced paths bypass; keyed on the
-        # typed receipt status, never content (P5).
-        _failed_receipt = latest_unreconciled_failed_verification(
-            drive_root, task_id, receipts=receipt_rows,
-        )
-        if _failed_receipt is not None:
-            tools._ctx._verify_red_nudged = True
-            _check = str(_failed_receipt.get("check") or "").strip()
-            _rc = _failed_receipt.get("returncode")
-            _on = f" on `{_check}`" if _check else ""
-            _exit = f" (exit {_rc})" if _rc is not None else ""
-            return _inject(
-                "Your latest host-attested verification is RED" + _on + _exit +
-                ", and no later receipt reconciles it. Available: re-check it, fix and re-run "
-                "verification, or state why this check is not the task's acceptance contract. "
-                "This notice is advisory, not a gate.",
-                "Red-verification nudge injected before final response.", "verification_red",
-            )
-    if not getattr(tools._ctx, "_verify_masked_nudged", False):
-        # Exit-masking one-shot ADVISORY nudge (v6.52.2): a passing verify can
-        # launder the exit code (`| tail`/`|| true`). After the red nudge; binary
-        # latch; forced paths bypass; typed receipt sensor, never content (P5).
-        _masked_receipt = latest_unreconciled_masked_verification(
-            drive_root, task_id, receipts=receipt_rows,
-        )
-        if _masked_receipt is not None:
-            tools._ctx._verify_masked_nudged = True
-            _mcheck = str(_masked_receipt.get("check") or "").strip()
-            _mreasons = ", ".join(str(x) for x in (_masked_receipt.get("check_exit_masking_reasons") or []))
-            _mon = f" on `{_mcheck}`" if _mcheck else ""
-            _mwhy = f" ({_mreasons})" if _mreasons else ""
-            return _inject(
-                "Your latest passing verification" + _mon + " uses a shell pipe" + _mwhy +
-                " that can hide the real command's exit code, so a failing run could read as exit 0. "
-                "Available: re-run it without the masking pipe or with the runner's own pass marker, "
-                "or state why the result is reliable. This notice is advisory, not a gate.",
-                "Masked-verification nudge injected before final response.", "verification_masked",
-            )
-    if not getattr(tools._ctx, "_criterion_source_nudged", False):
-        # Criterion-provenance one-shot ADVISORY nudge (v6.54.4): a green check on
-        # an agent-defined criterion with no basis gets one reminder; after the
-        # masked nudge, before FR3; typed receipt field, never content (P5).
-        _agent_defined = latest_agent_defined_verification(
-            drive_root, task_id, receipts=receipt_rows,
-        )
-        if _agent_defined is not None:
-            tools._ctx._criterion_source_nudged = True
-            _acheck = str(_agent_defined.get("check") or "").strip()
-            _aon = f" (`{_acheck}`)" if _acheck else ""
-            return _inject(
-                "Your latest passing verification" + _aon + " uses a success criterion you defined "
-                "(criterion_source agent_defined, no criterion_basis), not one the task states; the "
-                "receipt carries that provenance to acceptance. Available: verify_and_record with a "
-                "criterion_basis, or a check of the task's own stated criterion. This notice is advisory, not a gate.",
-                "Criterion-provenance nudge injected before final response.", "criterion_agent_defined",
-            )
-    suppress_unavailable_zero_run_verify = False
-    try:
-        from ouroboros.outcomes import _terminal_zero_run_receipt_present
-        from ouroboros.tool_access import active_tool_profile
-
-        suppress_unavailable_zero_run_verify = (
-            active_tool_profile(tools._ctx) == "local_readonly_subagent"
-            and _terminal_zero_run_receipt_present(receipt_rows)
-        )
-    except Exception:
-        pass
-    if (
-        not getattr(tools._ctx, "_verify_nudged", False)
-        and not suppress_unavailable_zero_run_verify
-        and should_nudge_verification(
-            llm_trace, drive_root, task_id, receipts=receipt_rows,
-        )
-    ):
-        # FR3 one-shot verify-before-done nudge: real effects, no
-        # host-attested grounding yet. Binary latch, BEFORE the
-        # acceptance-review gate so it reaches required and auto. Forced
-        # finalization paths return earlier and bypass it (land best_effort).
-        tools._ctx._verify_nudged = True
-        return _inject(
-            "This turn has reviewable effects and no host-attested verification receipt; a clean "
-            "finish records the receipt_absent warning (the result stays solved). Available "
-            "verify_and_record kinds: explicit_command / explicit_metric / visible_verifier (run a "
-            "check), artifact_observation (confirm an artifact exists), no_visible_machine_contract "
-            "(declare that none exists).",
-            "Verify-before-done nudge injected before final response.", "verification_absent",
-        )
+    notice = _claim_pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
+    if notice:
+        # A nanny's notice stays out of the owner chat's progress (owner 2026-08-15: nanny chat spam removed).
+        cause = getattr(tools._ctx, "_completion_hold_cause", "") or "pre_delivery_notice"
+        return _inject(notice, "A check that did not pass was shown before final response." if cause == RED_CHECK_NOTICE
+                       else "Pre-delivery facts shown before final response.", cause,
+                       progress=not getattr(tools._ctx, "_nanny_route_dispatched", False))
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
     # the model its own calls.

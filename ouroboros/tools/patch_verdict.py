@@ -1,4 +1,4 @@
-"""The one writer of patch apply/reject verdicts (artifact + custody row).
+"""The one writer of patch apply/reject verdicts (artifact + custody row), and the rule for the reason a decision must give.
 
 Extracted from ``tools/subagent_integration.py`` at its module-size ceiling:
 one coherent WRITE concern shared by both patch pipelines
@@ -62,6 +62,17 @@ def retained_verdicts(canonical_root: Any, task_id: str, child_task_id: str) -> 
                 yield verdict
 
 
+def decision_reason_refusal(reason: Any, needs: str) -> str:
+    """``""`` when REASON may carry a decision that requires one, else its argument refusal after NEEDS.
+
+    The 500-character limit counts each run of whitespace as one character; the verdict artifact
+    keeps the text as given (its custody row, the first 600 characters)."""
+    if 0 < len(" ".join(str(reason or "").split())) <= 500:
+        return ""
+    return (f"⚠️ TOOL_ARG_ERROR (integrate_subagent_patch): {needs}: non-blank, at most 500 characters once each "
+            "run of whitespace counts as one; the verdict keeps it as given.")
+
+
 def _retain_replaced(path: pathlib.Path) -> None:
     """Keep the verdict bytes a new write replaces, beside it, as publication keeps changed bytes.
 
@@ -106,11 +117,14 @@ def write_patch_verdict(
     child_result_sha256: str = "",
     observation: Dict[str, Any] | None = None,
     failures: List[str] | None = None,
+    cancelled: Dict[str, Any] | None = None,
 ) -> str:
     """``parent_task_id`` names the deciding task. An owner-Continue successor deciding
     its predecessor's child adds ``lineage``: the authority and the child's recorded parent.
     ``child_result_sha256`` identifies the consumed native result for every parent,
-    independently of Continue authority. Legacy/run-only callers may omit it.
+    independently of Continue authority. Legacy/run-only callers may omit it. A consumed
+    result that was cancelled adds ``cancelled`` as ``child_cancelled`` (artifact only): the
+    cancellation and the retained capture this decision judged, as that result recorded them.
     ``observation`` keeps what the check or apply saw beside the decision (``observed_outcome``,
     ``path_findings``, ``path_findings_note``, ``unindexed``); only ``observed_outcome`` also rides the
     custody row. An earlier verdict on the same child stays readable beside this one.
@@ -134,6 +148,7 @@ def write_patch_verdict(
         "patch_sha256": str((manifest or {}).get("sha256") or ""),
         "diffstat": str((manifest or {}).get("diffstat") or ""),
         **({"child_result_sha256": child_result_sha256} if child_result_sha256 else {}),
+        **({"child_cancelled": dict(cancelled)} if cancelled else {}),
         **(observation or {}),
         **(lineage or {}),
     }

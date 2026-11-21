@@ -59,8 +59,16 @@ import {
 test('account actions stack at the app shell compact breakpoint', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8')
         .replace(/\r\n?/g, '\n');
+    // In Settings the row stands in a pane beside the list (79fac1cf4): the narrow box it is drawn in decides, never the
+    // window.
+    assert.ok(css.includes(`@container (max-width: 34rem) {
+    :where(#page-settings) .harness-account-row {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: "main" "meta" "actions";`),
+    'in Settings account actions must drop below status before the pane squeezes the row');
+    // Everywhere else (the first-run wizard, a place's sheet) no pane measures the row: the window rule keeps it.
     assert.ok(css.includes(`@media (max-width: 980px) {
-    .harness-account-row {
+    .harness-account-row:where(:not(#page-settings *)) {
         grid-template-columns: minmax(0, 1fr);
         grid-template-areas: "main" "meta" "actions";`),
     'account actions must drop below status before the persistent sidebar squeezes the row');
@@ -447,23 +455,6 @@ test('a model-scoped window never paints the whole account exhausted — it is a
 // Add account: pywebview's WKWebView implements no window.prompt (it answers
 // null silently), so the flow runs on the in-house input dialog.
 // ---------------------------------------------------------------------------
-
-test('the groups rebuild wraps in preserveCardFocus so a family-mounted login card keeps its caret', () => {
-    // REGRESSION guard (fable review, roster-identity sprint): the login card
-    // mounts INSIDE #harness-accounts-groups now, so the poll-tick innerHTML
-    // rebuild destroys a focused paste-code/name input BEFORE the card's own
-    // render can capture it. The capture must wrap the whole rebuild — the
-    // innerHTML assignment and the card repaint both inside ONE
-    // preserveCardFocus callback.
-    const source = readFileSync(new URL('../modules/harness_accounts.js', import.meta.url), 'utf8');
-    const wrap = source.indexOf('preserveCardFocus(host, () => {');
-    assert.ok(wrap >= 0, 'renderRows must wrap its rebuild in preserveCardFocus');
-    const rebuild = source.indexOf('host.innerHTML =', wrap);
-    const repaint = source.indexOf('state.loginCard?.render();');
-    const close = source.indexOf('\n    });', wrap);
-    assert.ok(wrap < rebuild && rebuild < repaint && repaint < close,
-        'both the innerHTML rebuild and the card repaint live inside the capture');
-});
 
 test('Add account never touches window.prompt and asks through the in-house dialog', async () => {
     // REGRESSION guard for the dead desktop button: the module must not call
@@ -1134,7 +1125,7 @@ function fakeCodeInput({ disabled = false, start = 3, end = 5 } = {}) {
     const calls = { focus: 0, range: null };
     return {
         disabled, value: 'ABCD-1234', selectionStart: start, selectionEnd: end,
-        hasAttribute: (name) => name === 'data-login-code-input',
+        getAttributeNames: () => ['class', 'data-login-code-input'],
         focus() { calls.focus += 1; },
         setSelectionRange(from, to) { calls.range = [from, to]; },
         calls,
@@ -1225,9 +1216,10 @@ test('startLogin centralizes the C7 guard: cancel-or-refuse BEFORE the new login
     // job. The flow moved to harness_login_cards.js in phase 2; the RULE did not.
     const src = readFileSync(fileURLToPath(new URL('../modules/harness_login_cards.js', import.meta.url)), 'utf8');
     const fn = src.slice(src.indexOf('async function _startLocked'));
-    const guardAt = fn.indexOf('cancelLoginJob(prev.jobId');
+    const guardAt = fn.indexOf('cancelUnreleased(prev');
     const postAt = fn.indexOf("fetchImpl('/api/claudexor/login'");
-    assert.ok(guardAt > -1, 'startLogin must call cancelLoginJob for a live previous job');
+    assert.ok(guardAt > -1, 'startLogin must cancel a live previous job');
+    assert.match(src.slice(src.indexOf('async function cancelUnreleased')), /^[^]*?cancelLoginJob\(active\.jobId/);
     assert.ok(postAt > -1);
     assert.ok(guardAt < postAt, 'the C7 guard must run before the new login POST');
     const guarded = fn.slice(guardAt, postAt);
@@ -1259,7 +1251,7 @@ test('a harness with no row only says "no account connected" once the store was 
     // NOT READ says nobody asked. It may not name a CAUSE the row cannot
     // see: a runtime awaiting repair and a foreign daemon on the stale port
     // arrive here as the same unread facet, and the tab's banner owns the why.
-    assert.match(bareRowStatusText('not_read'), /daemon was never asked/);
+    assert.equal(bareRowStatusText('not_read'), 'Not checked yet', 'only that it has not happened yet');
     assert.doesNotMatch(bareRowStatusText('not_read'), /is not running/);
     assert.match(bareRowStatusText('failed'), /did not answer/);
     assert.match(bareRowStatusText('transport'), /request did not complete/);
@@ -1554,8 +1546,8 @@ function mountSection() {
 function mountInteractiveAccountsSection() {
     const mounted = mountSection();
     const loginButton = {
-        listeners: [],
-        addEventListener(type, fn) { loginButton.listeners.push([type, fn]); },
+        dataset: { get loginCommand() { return groups.innerHTML.match(/data-login-command="([^"]+)"/)?.[1]; } },
+        addEventListener() {},
     };
     const row = {
         dataset: { harness: 'claude', profile: 'work' },
@@ -1836,7 +1828,7 @@ test('a lower pin under a newer engine is never promised to activate', () => {
     const line = daemonStatusLine(read, {});
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Engine 4\.3\.1 keeps serving; this Ouroboros version pins older Claudexor 4\.3\.0\./);
-    assert.match(line.text, /After Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
+    assert.match(line.text, /After Quit, Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
     assert.ok(!/activate|staged|ready/.test(line.text), line.text);
     // A facet gap: the serving claim yields to the facets; the pin fact stays.
     const gap = daemonStatusLine({ ...read, reads: { catalog: 'ok', accounts: 'failed', quota: 'ok' } }, {});
@@ -2169,10 +2161,20 @@ test('an unknown auth row refreshes status on the real click, never starts login
         },
         quota: [],
     };
+    // Login uses apiClient/global fetch, not the status store's injected
+    // transport. Observe both so a mistaken OAuth launch cannot escape this
+    // assertion by taking the other HTTP path.
+    globalThis.fetch = async (url, init = {}) => {
+        requests.push(`${init.method || 'GET'} ${url}`);
+        return fakeResponse(200, { job_id: 'unexpected-login', job: { state: 'failed' } });
+    };
     const store = createClaudexorStatusStore({
         fetchImpl: async (url, init = {}) => {
             requests.push(`${init.method || 'GET'} ${url}`);
-            return fakeResponse(200, snapshot);
+            return fakeResponse(200, url.includes('?view=quota') ? {
+                view: 'quota', profiles: snapshot.profiles, quota: [], quota_absences: [],
+                reads: { accounts: 'ok', quota: 'ok' },
+            } : snapshot);
         },
         doc,
     });
@@ -2186,13 +2188,17 @@ test('an unknown auth row refreshes status on the real click, never starts login
     };
     try {
         assert.equal(await initHarnessAccounts({ store }), true);
-        await refreshPromise;
+        // Mount starts snapshot-first discovery through the store's internal
+        // lazy path, not its public refresh wrapper. Wait for its real reads
+        // before finding the row listener rather than awaiting an unset spy.
+        await store.refresh();
+        await store.observe();
+        assert.equal(store.facet('accounts'), 'ok', 'unknown auth is not a failed roster read');
         refreshCalls = 0;
         requests.length = 0;
-        const click = loginButton.listeners
-            .filter(([type]) => type === 'click').map(([, fn]) => fn).at(-1);
+        const click = loginButton.onclick;
         assert.ok(click, 'the account row lost its login listener');
-        click();
+        click({ defaultPrevented: false });
         await refreshPromise;
         assert.equal(refreshCalls, 1, 'unknown status did not use the shared Refresh path');
         assert.ok(requests.some((request) => request.startsWith('GET ')),

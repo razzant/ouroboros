@@ -53,13 +53,14 @@ if [ ! -f "python-standalone/bin/python3" ]; then
     exit 1
 fi
 PORTABLE_PYTHON="python-standalone/bin/python3"
+# A python-standalone left from an earlier pin would ship again; the build venv derives from it.
+"$PORTABLE_PYTHON" scripts/check_python_build.py
 
-# Bundle the official Node.js runtime so node-runtime skills work in the
-# packaged app out of the box.
-if [ ! -f "node-standalone/bin/node" ]; then
-    echo "--- Downloading bundled Node.js runtime ---"
-    bash scripts/download_node_standalone.sh
-fi
+# Bundle the official Node.js runtime the Claudexor pin names, so node-runtime skills work in the
+# packaged app out of the box; always re-verified, and the build's own Playwright CLI runs on it.
+echo "--- Verifying and staging the pinned Node.js runtime ---"
+bash scripts/download_node_standalone.sh
+export PLAYWRIGHT_NODEJS_PATH="$PWD/node-standalone/bin/node"
 
 if [ ! -f "ripgrep-standalone/bin/rg" ]; then
     echo "--- Downloading bundled ripgrep runtime ---"
@@ -130,6 +131,9 @@ mkdir -p dist/Ouroboros/bin
 cp packaging/cli/ouroboros dist/Ouroboros/bin/ouroboros
 cp packaging/cli/install-ouroboros-cli dist/Ouroboros/bin/install-ouroboros-cli
 chmod +x dist/Ouroboros/bin/ouroboros dist/Ouroboros/bin/install-ouroboros-cli
+
+echo "--- Giving every bundled Playwright driver the pinned Node ---"
+"$PORTABLE_PYTHON" scripts/download_node_standalone.py --replace-playwright dist/Ouroboros
 
 # WA6 parity: precompile bytecode instead of deleting it. Linux has no codesign
 # seal, so this is purely for start-speed + consistency with the macOS build (where

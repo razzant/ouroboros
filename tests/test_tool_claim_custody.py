@@ -218,6 +218,28 @@ def test_a_failed_retirement_is_owed_by_the_process_not_left_as_a_witness(tmp_pa
     assert _retired(tmp_path, "t1")["op-a"]["effect_outcome"] == "unknown"
 
 
+def test_an_addressed_repair_reads_only_the_members_that_hold_a_claimed_launch(tmp_path, monkeypatch):
+    """A tree's repair decodes no body of a member without a claimed launch row (each Continue, Resume and held
+    re-check of a large tree read every member's whole body for nothing); the claim's ended owner still retires."""
+    from ouroboros import task_results
+
+    _platform(monkeypatch, gone={111, 112, 222})
+    quiet = {"root", "returned", *(f"quiet-{index}" for index in range(8))}
+    for task_id in quiet - {"returned"}:
+        write_task_result(tmp_path, task_id, "completed", root_task_id="root")
+    _claim(tmp_path, "returned", "op-returned", pid=222, state="returned")
+    _claim(tmp_path, "holder", "op-dead", pid=111)
+    _claim(tmp_path, "elsewhere", "op-elsewhere", pid=112, tree="other")  # another tree's claim of a gone owner
+    reads, load = [], task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda root, task_id, **kw: reads.append(task_id) or load(
+        root, task_id, **kw))
+    retired = repair.repair_ended_local_custody(tmp_path, quiet | {" holder "}, root_task_id="root")  # as read strictly
+    assert "holder" in reads and not (quiet | {"elsewhere"}) & set(reads), "only this tree's claimed holder is read"
+    assert [row["task_id"] for row in retired] == ["holder"] and "op-dead" not in _claims(tmp_path, "holder")
+    assert "op-returned" in _claims(tmp_path, "returned"), "a returned row is not custody to retire"
+    assert "op-elsewhere" in _claims(tmp_path, "elsewhere"), "another tree's claim waits for its own action"
+
+
 # --- replicas carry results, not custody ------------------------------------------------------------------------
 
 
@@ -364,6 +386,10 @@ def test_only_a_census_of_unknown_outcomes_offers_going_on_and_every_door_carrie
     assert acceptable_unknown([unknown, receiver]) == ["op-u", "at-u"]
     assert acceptable_unknown([unknown, live]) == [] and acceptable_unknown([]) == []
     assert acceptable_unknown([unknown, {"kind": "running_member", "task_id": "c"}]) == []
+    merge = {"kind": "merge_operation", "task_id": "t", "receipt_id": "r-u", "reason": "merge_effect_unknown"}
+    assert acceptable_unknown([unknown, merge]) == ["op-u", "r-u"]
+    assert acceptable_unknown([merge, {**merge, "receipt_id": "r-q", "reason": "merge_queued"}]) == []
+    assert acceptable_unknown([{**merge, "reason": ""}]) == [], "a merge hold without its reason is never offered"
     refusal = resume_outcome({"ok": False, "error": "owner_pause_effects_unsettled", "blockers": [unknown, receiver]})
     assert refusal["acceptable_unknown"] == ["op-u", "at-u"]
     assert "unknown whether the model answer receiver of task t ended" in refusal["message"]
@@ -384,7 +410,6 @@ def test_only_a_census_of_unknown_outcomes_offers_going_on_and_every_door_carrie
         return {"ok": True}
     monkeypatch.setattr("supervisor.queue_transitions.resume_budget_paused_task", observed)
     monkeypatch.setattr("supervisor.continuation_admission.admit_continuation", observed)
-    monkeypatch.setattr("ouroboros.work_diagnostics.control_actor_reason", lambda *_a, **_k: "")
     seen.clear()
     for action in ("resume_task", "continue_task"):
         events_mind_controls._apply({"task_id": "t", "actor_task_id": "mind", "action_nonce": "n", "action": action,
@@ -512,7 +537,12 @@ def test_replacing_the_pools_last_dead_member_owes_its_exit(tmp_path, monkeypatc
     monkeypatch.setattr("supervisor.worker_process.close_worker_stop_channel", lambda _proc: None)
     monkeypatch.setattr(lifecycle.threading, "Thread", lambda **_kw: SimpleNamespace(start=lambda: None))
     _claim(tmp_path, "t1", "op-a", pid=42)
-    assert lifecycle.retire_or_replace_worker(0, dead) == "replaced"
+    # A replacement starts only on a reading that is not critical (``pool_admission``); None starts nothing.
+    from ouroboros.host_memory import MemorySnapshot
+    from supervisor import pool_admission
+
+    monkeypatch.setattr(pool_admission, "physical_memory", lambda: MemorySnapshot(64 * 2 ** 30, 48 * 2 ** 30))
+    assert lifecycle.retire_or_replace_worker(0, dead, reading=pool_admission.read()) == "replaced"
     assert custody_owed.labels() == ["exit:42"], "a replacement door owes the ended member's exit too"
     assert custody_owed.drain() == 0 and "op-a" not in _claims(tmp_path, "t1")
 

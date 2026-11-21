@@ -36,7 +36,7 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     # Unlike the fixture's Git helper, the real commit consumer uses repository identity.
     shared.git(repo, "config", "user.name", "Preflight fixture")
     shared.git(repo, "config", "user.email", "preflight@example.invalid")
-    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive", task_id="preflight-refusal")
     if prior_proof != "absent":
         # Model a context that still owns a prior attestation. The selected gate
         # below must not mistake it for an invocation that got past preflight.
@@ -74,6 +74,7 @@ def test_deterministic_refusal_reaches_every_seat_without_starting_tests(
     assert outcome["message"].startswith("Review outcome returned before commit."), outcome["message"]
     assert shared.git(repo, "rev-parse", "HEAD") == head, "no commit, tag or push before the author decides"
     reference = outcome["review_reference"]
+    assert reference["task_id"] == ctx.task_id
     assert (reference["surface"], reference["tool_name"]) == ("commit", "commit_reviewed") and reference["review_record_id"]
     assert len(checked) == 1 and not launched
     assert getattr(ctx, "_preflight_test_proof", None) is proof  # do not destroy a prior proof

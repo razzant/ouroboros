@@ -52,6 +52,8 @@ import logging
 import threading
 from typing import Any, Dict
 
+from ouroboros.utils import path_for_prose
+
 log = logging.getLogger(__name__)
 
 _STICKY_ATTR = "_owner_delivery_sticky_deferred"
@@ -83,8 +85,7 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
     attribution = row_class(row)
     private_contact = evt.get("presence_contact") or (evt.get("progress_meta") or {}).get("presence_contact")
     if (attribution["lane"] != 1 or attribution["author"]["kind"] != "ouroboros"
-            or is_a2a_chat_id(evt.get("chat_id"))
-            or (presence_caller_binding(ctx) is not None and not private_contact)):
+            or is_a2a_chat_id(evt.get("chat_id"))):
         return
     kind = evt.get("type")
     fields = {"send_message": ("text",), "send_photo": ("caption",),
@@ -93,6 +94,10 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
               "send_quiz": ("question", "options", "stake", "assumption")}.get(kind, ())
     words = {key: evt[key] for key in fields if evt.get(key) not in (None, "", [])}
     if not words:
+        return
+    # A place's local room is the Ouroboros side of the place, not my human's conversation; a frame landing in
+    # Main or a Project room is, as for any work there (``delivery_audience``). Unreadable proves neither.
+    if presence_caller_binding(ctx) is not None and not private_contact and not _lands_with_my_human(ctx, evt):
         return
     if mode == "live" and kind == "send_message":
         from ouroboros.loop_messages import owner_input_revision
@@ -261,28 +266,48 @@ def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
     return _accepted("live")
 
 
-def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:
-    """``(room, place_bound)`` for a stamped frame, by the supervisor's own rule (lineage binding, else its chat).
+def _resolved_room(ctx: Any, evt: Dict[str, Any]) -> tuple[Any, Any]:
+    """``(chat, Project name or None)`` the supervisor will pick for a stamped frame; a peer has no Project.
 
-    ``room`` is empty for an ordinary owner room. A place room shares
-    the Project id range, so the registry decides, never the number.
+    A place room shares the Project id range, so the registry decides, never the number. Unreadable sources raise.
     """
-    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID, is_a2a_chat_id
-    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
     from ouroboros.projects_registry import project_thread_name
     from ouroboros.tool_access import canonical_data_root
 
-    place_bound = presence_caller_binding(ctx) is not None
-    chat: Any = evt.get("chat_id")
+    root = canonical_data_root(ctx)
+    chat = _delivery_chat(root, evt)
+    return chat, (None if is_a2a_chat_id(chat) else project_thread_name(root, chat))
+
+
+def _lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
+    """Whether a frame lands in Main or a Project room: the rooms ``delivery_audience`` names as my human's."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
     try:
-        root = canonical_data_root(ctx)
-        chat = _delivery_chat(root, evt)
-        if is_a2a_chat_id(chat):
-            return "the peer conversation", False
-        name = project_thread_name(root, chat)
+        chat, name = _resolved_room(ctx, evt)
+    except Exception:
+        log.debug("delivery room unread for task %s", evt.get("task_id"), exc_info=True)
+        return False
+    return name is not None or chat == WEB_UI_CHAT_ID
+
+
+def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:
+    """``(room, place_bound)`` for a stamped frame, by the supervisor's own rule (``_resolved_room``).
+
+    ``room`` is empty for an ordinary owner room.
+    """
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID, is_a2a_chat_id
+    from ouroboros.dialogue_provenance import presence_caller_binding
+
+    place_bound = presence_caller_binding(ctx) is not None
+    try:
+        chat, name = _resolved_room(ctx, evt)
     except Exception:
         log.debug("delivery audience unread for task %s", evt.get("task_id"), exc_info=True)
         return "a local room (exact destination unavailable)", place_bound
+    if is_a2a_chat_id(chat):
+        return "the peer conversation", False
     if name is not None:
         return f'Project room "{_label(name)}"', place_bound
     if chat == HIDDEN_CHAT_ID:
@@ -301,8 +326,113 @@ def _label(value: Any) -> str:
     return " ".join(str(value or "").split())[:80]
 
 
-def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
-    """The frame's actual local destination and queue acceptance, never proof of display."""
+def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str, material: Any = ()) -> str:
+    """The frame's actual local destination and queue acceptance, never proof of display; a frame carrying produced
+    ``material`` (``shown_material``) adds the host's record of that show (``show_record``)."""
+    receipt = _named_receipt(ctx, evt, mode, noun)
+    try:
+        show = show_record(ctx, mode, material)
+    except Exception:
+        log.debug("Optional show record unavailable for task %s", evt.get("task_id"), exc_info=True)
+        return receipt
+    return f"{receipt}\n{show}" if show else receipt
+
+
+def shown_material(name: Any, data: Any = None, *, b64: str = "") -> Dict[str, Any]:
+    """One piece of produced material a send puts up: its name, sha256 and size, from its bytes or the base64 text
+    its frame carries; empty when that text does not decode (no digest is named for bytes nobody can read)."""
+    import base64
+    import hashlib
+
+    if data is None:
+        try:
+            data = base64.b64decode(b64)
+        except ValueError:
+            return {}
+    return {"name": str(name), "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+def show_record(ctx: Any, mode: str, material: Any) -> str:
+    """The host's line for a send of produced material: what was accepted or queued for delivery, and which reviews
+    on record name those exact bytes (``_reviews_naming``), a negative stated in the scope it was read in: this task's
+    recent records, never a helper's. A fact on the existing receipt, never a gate: nothing waits or is refused, and
+    every review mode stays as it is. No line for a frame that carries no material or did not go out, nor when task
+    review is Off (no result review runs there to name anything). A card can defer resolving its material until
+    those checks pass. Its unresolved media is separate from reviews of the bytes it could resolve."""
+    if not material or mode not in ("live", "deferred"):
+        return ""
+    from ouroboros.config import get_task_review_mode
+
+    if get_task_review_mode() == "off":
+        return ""
+    if callable(material):
+        try:
+            material = material()
+        except Exception:
+            log.debug("Card media unreadable for task %s", getattr(ctx, "task_id", ""), exc_info=True)
+            material = ({"bytes_unknown": True},)
+    pieces = [item for item in material or () if isinstance(item, dict)]
+    unresolved = any(item.get("bytes_unknown") for item in pieces)
+    items = [item for item in pieces if item.get("sha256")]
+    if not items:
+        return "Host fact: card media bytes: unknown." if unresolved else ""
+    named = [(path_for_prose(str(item.get("name") or "")), str(item["sha256"]), item.get("size")) for item in items]
+    found = _reviews_naming(ctx, {digest: name for name, digest, _size in named})
+    shown = "; ".join(f"{name}, sha256 {digest[:12]}, {size} B" for name, digest, size in named)
+    reviews = "unknown" if found is None else "; ".join(found) or "none in this task's recent records"
+    return (f"Host fact: {'accepted' if mode == 'live' else 'queued'} for delivery: {shown}. "
+            f"Reviews on record naming these bytes: {reviews}." + (" Other card media bytes: unknown." if unresolved else ""))
+
+
+# The newest result-review rows of the review ledger's hot index one receipt reads (``recent_records``).
+_REVIEW_ROWS = 50
+
+
+def _reviews_naming(ctx: Any, digests: Dict[str, str]) -> Any:
+    """Records of this task that name any of ``digests`` (sha256 -> name), read only: its result reviews among the
+    ledger's newest ``_REVIEW_ROWS`` hot rows, whose retained subject lists each produced file by sha256
+    (``result_material.answer_text``; a helper's records are its own, and archived rows are not read), and its plan
+    asks, which keep each attachment's sha256. ``None`` (unknown) when this task or any of its records could not be
+    read, and on a miss if the bounded read came back full or had a parse gap."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.plan_record import load_plan_record
+    from ouroboros.tools.review_result import _retained_subject_text
+
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if not task_id:
+        return None
+
+    def naming(label: str, hashes: list) -> str:
+        return label + (" for " + ", ".join(digests[digest] for digest in hashes) if len(digests) > 1 else "")
+
+    found = []
+    gaps: set[str] = set()
+    try:
+        rows = ledger.recent_records(ledger.ledger_root(ctx), task_id, limit=_REVIEW_ROWS, hot_only=True,
+                                     surface="result", gap_reasons=gaps)
+        for row in rows:
+            if row.get("task_id") != task_id:
+                continue  # a descendant's record: its subject is retained in that task's own store
+            text = _retained_subject_text(ctx, str((row.get("subject") or {}).get("diff_sha") or ""))
+            if not text:
+                return None
+            if hashes := [digest for digest in digests if f"sha256 {digest}" in text]:
+                aggregate = str((row.get("verdict") or {}).get("aggregate") or "")
+                state = str(row.get("state") or "unknown") + (f", {aggregate}" if row.get("state") == "settled"
+                                                               and aggregate else "")
+                found.append(naming(f"result review {row.get('record_id')} ({state})", hashes))
+        record = load_plan_record(getattr(ctx, "budget_drive_root", None) or ctx.drive_root, task_id)
+        for ask in record.get("asks") or ():
+            attached = {str(item.get("sha256") or "") for item in ask.get("attached") or () if isinstance(item, dict)}
+            if hashes := [digest for digest in digests if digest in attached]:
+                found.append(naming(f"plan ask {ask.get('ask_id')}", hashes))
+    except Exception:
+        log.debug("records naming shown bytes unreadable for task %s", task_id, exc_info=True)
+        return None
+    return found if found or (not gaps and len(rows) < _REVIEW_ROWS) else None
+
+
+def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
     if mode == UNSUPPORTED_PEER:
         return (f"⚠️ PEER_DELIVERY_UNSUPPORTED: {noun} not delivered: this peer conversation accepts text only. "
                 "Nothing was queued; any stored file or card remains available in this task.")
@@ -332,11 +462,11 @@ def named_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) 
     return f"OK: {noun} {state} {room} (Ouroboros side, not the place conversation). {path}"
 
 
-def publish_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
+def publish_delivery_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str, material: Any = ()) -> str:
     """The send family's one acceptance receipt in every room."""
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
-    text = named_delivery_receipt(ctx, evt, mode, noun)
+    text = named_delivery_receipt(ctx, evt, mode, noun, material)
     if mode in (UNDELIVERED, UNSUPPORTED_PEER):
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=text))
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))

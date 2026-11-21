@@ -547,10 +547,6 @@ def test_load_review_state_live_aggregates_soft_findings(tmp_path, monkeypatch):
     )
     save_review_state(drive_root, "x", state)
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert load_review_state(drive_root, "x", skill_type="script").status == "warnings"
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     assert load_review_state(drive_root, "x", skill_type="script").status == "warnings"
 
 
@@ -1234,34 +1230,30 @@ def test_valid_review_statuses_exported():
     assert "pending_phase4" in VALID_REVIEW_STATUSES
 
 
-def test_skill_review_gate_allows_warnings_under_blocking(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+def test_skill_review_gate_allows_warnings_and_records_one_authority(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
 
     gate = skill_review_gate("warnings", stale=False)
 
     assert gate["executable_review"] is True
     assert gate["blocking_reason"] == "warnings_do_not_block_execution"
-    assert gate["review_enforcement"] == "blocking"
+    assert gate["review_enforcement"] == "advisory"
 
 
 def test_skill_review_gate_allows_legacy_advisory_pass(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-
     gate = skill_review_gate("advisory_pass", stale=False)
 
     assert gate["executable_review"] is True
 
 
-def test_skill_review_gate_revalidates_advisory_pass_under_blocking(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-
+def test_skill_review_gate_revalidates_advisory_pass_as_warnings(monkeypatch):
     gate = skill_review_gate("advisory_pass", stale=False)
 
     assert gate["executable_review"] is True
     assert gate["blocking_reason"] == "warnings_do_not_block_execution"
 
 
-def test_warnings_available_under_blocking(tmp_path, monkeypatch):
+def test_a_legacy_advisory_pass_is_available_as_warnings(tmp_path, monkeypatch):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     repo_root = tmp_path / "skills"
@@ -1279,7 +1271,6 @@ def test_warnings_available_under_blocking(tmp_path, monkeypatch):
         "alpha",
         SkillReviewState(status="advisory_pass", content_hash=compute_content_hash(skill_dir)),
     )
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
 
     summary = summarize_skills(drive_root)
@@ -1332,6 +1323,13 @@ def test_skill_grants_are_content_and_request_bound(tmp_path):
     stale = grant_status_for_skill(drive_root, skill)
     assert stale["granted_keys"] == []
     assert stale["missing_keys"] == ["OPENROUTER_API_KEY"]
+    # The binding to bytes stays; the status now also says WHOSE bytes the saved grant covered.
+    assert stale["earlier_grant"] == {"keys": ["OPENROUTER_API_KEY"], "permissions": []}
+    # Same bytes: nothing earlier to name. A key the earlier grant never covered is not named either.
+    assert status["earlier_grant"] is None
+    skill.manifest.env_from_settings = ["GITHUB_TOKEN"]
+    assert grant_status_for_skill(drive_root, skill)["earlier_grant"] is None
+    skill.manifest.env_from_settings = ["OPENROUTER_API_KEY"]
 
     skill.content_hash = "hash-a"
     skill.source = "clawhub"
@@ -1375,6 +1373,7 @@ def test_grant_status_supports_extension_skills(tmp_path):
     assert no_grant["unsupported_for_skill_type"] is False
     assert no_grant["all_granted"] is False
     assert no_grant["missing_keys"] == ["OPENROUTER_API_KEY"]
+    assert no_grant["earlier_grant"] is None  # never granted: nothing earlier to name
 
     save_skill_grants(
         drive_root,
@@ -1534,7 +1533,6 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
 
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     drive_root = tmp_path / "drive"
     skill_dir = tmp_path / "skill"
     drive_root.mkdir()
@@ -1550,7 +1548,8 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
             env_from_settings=["OPENROUTER_API_KEY"],
         ),
         content_hash="hash-a",
-        review=SkillReviewState(status="blockers", content_hash="hash-a"),
+        # No verdict and no acceptance basis for these bytes: the gate does not permit them.
+        review=SkillReviewState(status="pending", content_hash="hash-a"),
     )
 
     outcome = auto_grant_if_enabled(drive_root, skill)
@@ -1805,3 +1804,43 @@ def test_manifest_entry_outside_skill_dir_is_rejected(tmp_path):
     # Hash is non-empty (manifest counts) but does not include
     # /etc/passwd content.
     assert loaded.content_hash
+
+
+def test_readiness_names_the_earlier_version_a_grant_belongs_to(tmp_path, monkeypatch):
+    """Audit 08.11 item 1: a grant saved for an earlier version of the skill's files is named as such in the
+    readiness line (the calendar skill edited in place on 06.11 read as "keys not provided" for 46 hours);
+    a skill never granted keeps today's wording. The word "hash" reaches neither the mind nor the owner."""
+    import ouroboros.config as config
+    from ouroboros.contracts.skill_manifest import SkillManifest
+    from ouroboros.skill_loader import LoadedSkill, SkillReviewState, save_skill_grants
+    from ouroboros.skill_readiness import grant_gap_sentence, skill_readiness_for_execution
+
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
+    drive_root = tmp_path / "drive"
+    skill_dir = tmp_path / "skill"
+    drive_root.mkdir()
+    skill_dir.mkdir()
+    manifest = SkillManifest(name="cal", description="grant fact test", version="0.1", type="extension",
+                             env_from_settings=["OPENROUTER_API_KEY"], permissions=["notify_owner"])
+    skill = LoadedSkill(name="cal", skill_dir=skill_dir, manifest=manifest, content_hash="bytes-2",
+                        review=SkillReviewState(status="pass", content_hash="bytes-2"))
+    never = skill_readiness_for_execution(drive_root, skill, require_enabled=False, skills=[skill])
+    assert never.blockers == ["missing_grants:keys=['OPENROUTER_API_KEY'],permissions=['notify_owner']"]
+    assert "earlier version" not in never.next_actions[0]["reason"]
+
+    save_skill_grants(drive_root, "cal", ["OPENROUTER_API_KEY"], content_hash="bytes-1",
+                      requested_keys=["OPENROUTER_API_KEY"], granted_permissions=["notify_owner"],
+                      requested_permissions=["notify_owner"])
+    stale = skill_readiness_for_execution(drive_root, skill, require_enabled=False, skills=[skill])
+    [blocker] = stale.blockers
+    assert blocker.startswith("missing_grants:keys=['OPENROUTER_API_KEY'],permissions=['notify_owner']; ")
+    assert "earlier version of this skill's files" in blocker and "OPENROUTER_API_KEY and notify_owner" in blocker
+    assert "hash" not in blocker.lower()
+    assert stale.owner_action_blockers == [blocker]
+    reason = stale.next_actions[0]["reason"]
+    assert "skill_owner_action grant" in reason and "skill_update" in reason
+    # The one sentence, for every producer; a status that knows nothing earlier yields nothing to append.
+    assert grant_gap_sentence(stale.grant_status) in blocker
+    assert grant_gap_sentence(never.grant_status) == "" and grant_gap_sentence({"missing_keys": ["X"]}) == ""
+    unknown_time = grant_gap_sentence({"earlier_grant": {"keys": ["ONE"], "permissions": []}, "updated_at": "not a time"})
+    assert unknown_time.startswith("ONE was granted to an earlier version") and "last updated" not in unknown_time

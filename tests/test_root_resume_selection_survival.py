@@ -317,6 +317,35 @@ def test_legacy_choice_is_matching_or_explicitly_reselectable(tmp_path, monkeypa
     assert eb.budget_hold_fact(_row(q, OTHER))
 
 
+@pytest.mark.parametrize('park', ['sleep', 'money'])
+def test_a_roots_cold_sleep_supersedes_no_choice_a_money_pause_does(tmp_path, monkeypatch, park):
+    """The root's own cold sleep is its wait: a child it selected stays dispatchable while it sleeps
+    (``events_budget.budget_resume_dispatch_allowed``); the same park on a money rail holds the child."""
+    from ouroboros import model_sleep
+
+    q, workers, sent = _world(tmp_path, monkeypatch, 'exact')
+    child = _select(tmp_path, monkeypatch, q)
+    ctx, limit = _loop_ctx(tmp_path, ROOT, attempt=workers.RUNNING[ROOT]['attempt'])
+    _fast_hold(monkeypatch, bp)
+    _mock_pause_observation(monkeypatch, bp, [])
+    monkeypatch.setattr(model_sleep, 'cold_blockers', lambda *_a, **_k: [])  # the census: test_sleep_tree_lease
+    ctx._model_sleep = {'sleep_id': 's1', 'mode': 'cold', **model_sleep.selectors(ctx, wake_after_sec=3600)}
+    with pytest.raises(bp.BudgetPauseRequested) as paused:
+        if park == 'sleep':
+            bp.enter_cold_sleep(limit)
+        else:
+            bp.request_pause(limit, rail=bp.RAIL_GLOBAL_EXHAUSTED, scope='global', reason_text='money')
+    bp.end_dispatch_fence(ROOT)
+    sup = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING, WORKERS=workers.WORKERS,
+                          sort_pending=q.sort_pending, persist_queue_snapshot=q.persist_queue_snapshot, bridge=None)
+    eb.install_exact_budget_pause(sup, ROOT, bp.exact_pause_marker(paused.value.pause)['checkpoint'])
+    assert _row(q, ROOT)['_budget_pause']['reason'] == ('sleep' if park == 'sleep' else 'budget')
+    assert eb.budget_resume_dispatch_allowed(q, child) is (park == 'sleep')
+    workers.assign_tasks()
+    assert ([row['id'] for row in sent].count(CHILD) == 1) is (park == 'sleep')
+    assert (eb.budget_hold_fact(child) is None) is (park == 'sleep'), 'only the money pause holds it again'
+
+
 def test_owner_unbound_choice_is_rebound_and_survives_root_completion(tmp_path, monkeypatch):
     q, workers, _ = _saved_tree(tmp_path, monkeypatch)
     assert q.resume_budget_paused_task(CHILD)['ok']

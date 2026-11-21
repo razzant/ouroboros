@@ -69,11 +69,11 @@ def test_an_inflight_quiet_refresh_cannot_recertify_after_a_failed_barrier(publi
     reached, proceed = threading.Event(), threading.Event()
     due = queue_publication._alive_due
 
-    def paused_due(heartbeats):
+    def paused_due(*facts):
         if threading.current_thread().name == "quiet-tick":
             reached.set()
             assert proceed.wait(5)
-        return due(heartbeats)
+        return due(*facts)
 
     monkeypatch.setattr(queue_publication, "_alive_due", paused_due)
     answers, errors = [], []
@@ -154,7 +154,7 @@ def test_a_kept_saved_queue_costs_no_capture_per_tick(published, monkeypatch):
     captures, censuses = [], []
     capture, census = queue_publication._capture, queue_publication._census
     monkeypatch.setattr(queue_publication, "_capture", lambda *a, **k: captures.append(1) or capture(*a, **k))
-    monkeypatch.setattr(queue_publication, "_census", lambda: censuses.append(1) or census())
+    monkeypatch.setattr(queue_publication, "_census", lambda *a: censuses.append(1) or census(*a))
     for _ in range(3):
         assert queue_publication.publish_queue_changes() is None
     assert captures == [] and censuses == [], "a kept saved queue is known from the memo, before any copy or census"

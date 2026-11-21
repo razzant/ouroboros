@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ouroboros.docker_process_observer import proc_observer_function as _docker_proc_observer_function
+from ouroboros.execution_domain import managed_executor_ref
 from ouroboros.observability import redact_projection
 from ouroboros.platform_layer import (
     IS_WINDOWS,
@@ -97,8 +98,9 @@ _PROCESS_RECORD_OWNER = "ouroboros_workspace_executor"
 _PROCESS_RECORD_SCHEMA_VERSION = 1
 
 def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
-    """Return a normalized executor ref from ToolContext/task metadata."""
-
+    """A managed deployment's pinned executor (``execution_domain``), else the ToolContext/task metadata's ref."""
+    if (pinned := managed_executor_ref()) is not None:
+        return pinned
     accessor = getattr(ctx, "workspace_executor_ref", None)
     if callable(accessor):
         raw = accessor()
@@ -113,7 +115,6 @@ def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
     return normalize_executor_ref(raw)
 
 
-
 def execute(
     ctx: Any,
     cmd: list[str],
@@ -123,7 +124,7 @@ def execute(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     executor: ExecutorRef | None = None,
-    stop: Any = None,
+    stop: Any = None, memory: bool = False,
 ) -> ExecutorResult:
     """Run in the configured backend. Host/interpreter ``env_overlay`` applies
     only locally: host paths/PATH must not leak into Docker. Explicit target_env
@@ -131,6 +132,7 @@ def execute(
     In a body candidate or system copy, Docker must map the source copy and its sibling ``.env`` directory (else refused).
     ``stop`` is an in-process turn's Stop-now reader (``shell_process.communicate_or_stop``): each backend ends
     through its own timeout kill, the container command through its owned pidfile, never the container."""
+    started = time.monotonic() if memory else None
     executor = executor or executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
@@ -143,8 +145,8 @@ def execute(
     if executor.kind == "local":
         return _execute_local(
             executor, cmd, cwd_path, timeout_sec,
-            drive_root=drive_root, local_env=candidate_env, stop=stop,
-            env_overlay=env_overlay, **({"target_env": target_env} if target_env else {}),
+            drive_root=drive_root, local_env=candidate_env, stop=stop, memory=memory,
+            env_overlay=env_overlay, started=started, **({"target_env": target_env} if target_env else {}),
         )
     return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=drive_root, stop=stop,
                            **({"target_env": overlay_env(candidate_env or {}, target_env), "replace_env": True}
@@ -180,8 +182,9 @@ def overlay_env(base: "dict[str, str]", env_overlay: "dict[str, str] | None") ->
     return env
 
 
-def _handed_off_popen(kind: str, cmd: list[str], **kwargs: Any) -> "tuple[subprocess.Popen, Any]":
-    """Start ``cmd`` under the Pause gate after its external duty is retained (``tool_custody``).
+def _handed_off_popen(kind: str, cmd: list[str], *, admit: Any = None, **kwargs: Any) -> "tuple[subprocess.Popen, Any]":
+    """Start ``cmd`` under the Pause gate after its external duty is retained (``tool_custody``); ``admit()``, when
+    given, is the caller's last word inside that gate, just before the Popen (a command's absolute deadline).
 
     Returns ``(proc, confirmed)``: only the caller's later receipt discharges the duty. A start
     that returned no process discharges it at once; an OS refusal is ``process_not_started``."""
@@ -192,6 +195,7 @@ def _handed_off_popen(kind: str, cmd: list[str], **kwargs: Any) -> "tuple[subpro
     proc = None
     try:
         with operation_start():
+            admit is not None and admit()
             try:
                 proc = subprocess.Popen(cmd, **kwargs)
             except (OSError, ValueError) as exc:
@@ -214,54 +218,41 @@ def _execute_local(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     local_env: "dict[str, str] | None" = None,
-    stop: Any = None,
+    stop: Any = None, memory: bool = False, started: float | None = None,
 ) -> ExecutorResult:
-    from ouroboros.tools.shell_process import communicate_or_stop
+    from ouroboros.tools.shell_process import communicate_or_stop, execute_local_gated
 
     drive_root = _custody_drive_root(drive_root)
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
-    started = time.monotonic()
+    started = time.monotonic() if started is None else started
     from ouroboros.settings_integrity import runtime_environ
 
-    from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
+    from ouroboros.process_scope import scoped_child_env, task_launch_target
 
     base_env = local_env if local_env is not None else scrub_repo_from_pythonpath(runtime_environ(), _system_repo_dir())
+    if local_env is None:
+        from ouroboros.node_runtime import forward_playwright_node
+
+        forward_playwright_node(base_env)  # Playwright's driver in a child runs on the pinned Node
     process_env = overlay_env(overlay_env(base_env, target_env), env_overlay)
     target = task_launch_target(invocation_binding())
     if target is not None:  # after every overlay: the task marker is the last word on a task launch
         process_env = scoped_child_env(process_env, target)
+    deadline = None if timeout_sec is None or not memory else started + timeout_sec  # one absolute bound from entry
+    if memory and (gated := execute_local_gated(executor, cmd, cwd, deadline, env=process_env, target=target, drive_root=drive_root, stop=stop, started=started)) is not None:
+        return gated  # the memory leaf's gate (command_memory); None: no support here, the old start follows
+    from ouroboros.command_memory import check_deadline
+
     proc, confirmed = _handed_off_popen(
         "workspace_process",
-        [str(part) for part in cmd],
+        [str(part) for part in cmd], admit=(lambda: check_deadline(deadline)) if memory else None,
         cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        errors="replace",
-        env=process_env,
-        **subprocess_new_group_kwargs(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, errors="replace",
+        env=process_env, **subprocess_new_group_kwargs(),
     )
-    _FOREGROUND[proc] = (None, executor.kind)
-    if _panic_requested:
-        request_process_tree_kill(proc)
-    if target is not None:
-        record_task_group(*target, proc.pid)
-    record_path = _register_process(
-        drive_root,
-        {
-            "record_type": "foreground",
-            "executor_type": executor.kind,
-            "executor_id": executor.executor_id,
-            "host_pid": proc.pid,
-            "cwd": str(cwd),
-            "cmd": _redacted_cmd(cmd),
-        },
-    )
-    if record_path is not None:
-        confirmed()
-    _FOREGROUND[proc] = (record_path, executor.kind)
+    record_path = _hold_foreground(proc, executor, confirmed, drive_root, {"cwd": str(cwd), "cmd": _redacted_cmd(cmd)}, target)
+    timeout_sec = timeout_sec if deadline is None else max(0.0, deadline - time.monotonic())  # what registration left
     try:
         stdout, stderr = communicate_or_stop(proc, timeout_sec, stop, lambda: kill_process_tree(proc))
         return ExecutorResult(
@@ -280,6 +271,24 @@ def _execute_local(
         _FOREGROUND.pop(proc, None)
         if proc.poll() is not None:
             _forget_process(record_path)  # Exceptions cannot discard a live child.
+
+
+def _hold_foreground(proc: subprocess.Popen, executor: ExecutorRef, confirmed: Any, drive_root: pathlib.Path | None,
+                     extra: dict[str, Any], target: Any = None) -> pathlib.Path | None:
+    """Name a just-started foreground child to Stop (Panic's request reaches it at once), then write its durable record."""
+    _FOREGROUND[proc] = (None, executor.kind)
+    if _panic_requested:
+        request_process_tree_kill(proc)
+    if target is not None:
+        from ouroboros.process_scope import record_task_group
+
+        record_task_group(*target, proc.pid)
+    record_path = _register_process(drive_root, {"record_type": "foreground", "executor_type": executor.kind,
+                                                 "executor_id": executor.executor_id, "host_pid": proc.pid, **extra})
+    if record_path is not None:
+        confirmed()
+    _FOREGROUND[proc] = (record_path, executor.kind)
+    return record_path
 
 
 def _execute_docker(
@@ -304,22 +313,7 @@ def _execute_docker(
     prefix = f"OUROBOROS_PROCESS_ENV_{uuid.uuid4().hex}_"
     aliases = {key: f"{prefix}{index}" for index, key in enumerate(target_env or {})}
     command = _docker_env_command(shlex.join(str(part) for part in cmd), aliases, replace_env=replace_env)
-    exec_payload = shlex.quote(f"exec {command}")
-    quoted_pidfile = shlex.quote(pidfile)
-    wrapper = (
-        f"rm -f {quoted_pidfile}; "
-        "if command -v setsid >/dev/null 2>&1; then "
-        f"setsid sh -c {exec_payload} & "
-        "else "
-        f"sh -c {exec_payload} & "
-        "fi; "
-        f"pid=$!; echo $pid > {quoted_pidfile}; "
-        "wait $pid; rc=$?; "
-        # The same owned pidfile retains the wrapper's positive wait evidence.
-        # Absence (including a CLI that died before launch) proves nothing.
-        f"echo completed > {quoted_pidfile}; "
-        "exit $rc"
-    )
+    wrapper = _docker_exec_wrapper(command, pidfile)
     docker_cmd = [
         "docker",
         "exec",
@@ -343,25 +337,8 @@ def _execute_docker(
         **({"env": {**os.environ, **{aliases[key]: value for key, value in target_env.items()}}} if target_env else {}),
         **subprocess_new_group_kwargs(),
     )
-    _FOREGROUND[proc] = (None, executor.kind)
-    if _panic_requested:
-        request_process_tree_kill(proc)
-    record_path = _register_process(
-        drive_root,
-        {
-            "record_type": "foreground",
-            "executor_type": executor.kind,
-            "executor_id": executor.executor_id,
-            "host_pid": proc.pid,
-            "container_name": executor.container_name,
-            "backend_pidfile": pidfile,
-            "backend_cwd": backend_cwd,
-            "cmd": _redacted_cmd(cmd),
-        },
-    )
-    if record_path is not None:
-        confirmed()
-    _FOREGROUND[proc] = (record_path, executor.kind)
+    record_path = _hold_foreground(proc, executor, confirmed, drive_root, {
+        "container_name": executor.container_name, "backend_pidfile": pidfile, "backend_cwd": backend_cwd, "cmd": _redacted_cmd(cmd)})
     cleanup_confirmed = False
 
     def stop_backend() -> bool:  # Stop now: the timeout's own pidfile stop, then the host CLI
@@ -390,17 +367,10 @@ def _execute_docker(
 
 
 def _docker_exec_completed(container_name: str, pidfile: str) -> bool:
-    """Read the backend wrapper's wait fact, never infer it from CLI exit."""
-    quoted = shlex.quote(pidfile)
-    try:
-        proc = subprocess.run(
-            ["docker", "exec", container_name, "sh", "-lc",
-             f'[ "$(cat {quoted})" = completed ] && printf completed'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
-        )
-        return proc.returncode == 0 and proc.stdout == "completed"
-    except Exception:
-        return False
+    """The backend wrapper's wait fact, never the CLI's exit: ``completed:<pid>`` (the leader ended) settles its group
+    as an attached launch's does (observed, else stopped and confirmed quiescent); a leader still running stays."""
+    guard = f'case "$(cat {shlex.quote(pidfile)} 2>/dev/null)" in completed|completed:*) ;; *) exit 1;; esac; '
+    return _cleanup_docker_exec_timeout(container_name, pidfile, guard=guard)
 
 
 def _retire_docker_completion(record_path: pathlib.Path | None) -> bool:
@@ -432,8 +402,8 @@ def _retire_docker_completion(record_path: pathlib.Path | None) -> bool:
         return False
 
 
-def _cleanup_docker_exec_timeout(container_name: str, pidfile: str) -> bool:
-    shell = _docker_exec_pidfile_stop_shell(pidfile)
+def _cleanup_docker_exec_timeout(container_name: str, pidfile: str, *, guard: str = "") -> bool:
+    shell = guard + _docker_exec_pidfile_stop_shell(pidfile)
     try:
         bootstrap_process_path()
         proc = subprocess.run(
@@ -449,12 +419,14 @@ def _cleanup_docker_exec_timeout(container_name: str, pidfile: str) -> bool:
         return False
 
 def _docker_exec_pidfile_stop_shell(pidfile: str) -> str:
+    """``completed:<pid>``: an attached leader ended; its group is observed first, else stopped like a running pid."""
     quoted_pidfile = shlex.quote(pidfile)
     return (
-        f"pid=$(cat {quoted_pidfile} 2>/dev/null || true); "
-        'case "$pid" in completed) printf completed; exit $?;; '
-        "''|0|*[!0-9]*) exit 1;; esac; "
-        + _docker_stop_group_shell() + "; "
+        f"{_docker_proc_observer_function()}; pid=$(cat {quoted_pidfile} 2>/dev/null || true); "
+        'case "$pid" in completed) printf completed; exit $?;; completed:*) pid=${pid#completed:}; '
+        'if [ "$(_ouroboros_proc_observe "$pid" group 2>/dev/null)" = exited ]; then '
+        f"printf completed > {quoted_pidfile} && printf completed; exit $?; fi;; esac; "
+        'case "$pid" in \'\'|0|*[!0-9]*) exit 1;; esac; ' + _docker_stop_group_shell() + "; "
         f"printf completed > {quoted_pidfile} && printf completed"
     )
 
@@ -520,16 +492,26 @@ def _services_snapshot() -> list[_ExecutorService]:
         return list(_SERVICES.values())
 
 
-def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) -> pathlib.Path | None:
+def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any], *, already_started: bool = True) -> pathlib.Path | None:
+    """Write a process's durable record and publish it to the ownership index; the path only once both exist.
+    ``already_started=False`` is a gated command whose argv is still held: a failure leaves no unindexed record,
+    latches no ``host_unconfirmed`` itself and returns None; the gate then latches the ordinary ``host_unconfirmed``
+    fact and releases the placed command (it may run), so ``rm`` and ``du`` still work on a full disk."""
     from ouroboros.tool_custody import retain_unconfirmed_host_operation
+
+    def failed(reason: str, path: pathlib.Path | None = None) -> pathlib.Path | None:
+        if already_started:
+            retain_unconfirmed_host_operation(reason)
+            return path
+        if path is not None:
+            _forget_process(path)
+        return None
 
     binding = invocation_binding()
     payload = {**{key: value for key, value in binding.items() if key != "drive_root"}, **payload}
     state_dir = _state_dir(drive_root)
     if state_dir is None:
-        if binding.get("task_id"):
-            retain_unconfirmed_host_operation("executor_custody_unavailable")
-        return None
+        return failed("executor_custody_unavailable") if binding.get("task_id") else None
     record_id = _safe_record_id(str(payload.get("record_type") or "process"))
     host_command_sha256 = ""
     try:
@@ -551,12 +533,11 @@ def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) 
     try:
         atomic_write_json(path, record, trailing_newline=True)
     except Exception:
-        retain_unconfirmed_host_operation("executor_custody_write_failed")
-        return None
+        return failed("executor_custody_write_failed")
     from ouroboros.owned_shutdown import record_executor_process
 
     if not record_executor_process(path, record):  # the exit reads the ownership set, never a walk
-        retain_unconfirmed_host_operation("executor_custody_write_failed")
+        return failed("executor_custody_write_failed", path)
     return path
 
 
@@ -625,6 +606,10 @@ def _host_pid_matches_record(record: dict[str, Any]) -> bool:
         return False
     if host_pid <= 0:
         return False
+    if _recorded_launch(record) and record.get("host_birth"):  # services too; a gated command exec'd past its hash
+        from ouroboros.process_custody import record_birth_matches
+
+        return record_birth_matches(record)
     expected = str(record.get("host_command_sha256") or "").strip()
     if not expected:
         # Windows has no POSIX command capture; macOS ps can also miss a spawn.
@@ -730,7 +715,7 @@ def _kill_host_pid(host_pid: Any) -> None:
 
 
 def _recorded_launch(record: dict[str, Any]) -> bool:
-    """A local service record that kept its launch marker (POSIX); ``host_birth`` only when it could be read."""
+    """A local service or memory-gated foreground record that kept its launch marker (POSIX); ``host_birth`` only when it could be read."""
     from ouroboros.process_census import is_launch_marker
 
     return (not IS_WINDOWS and record.get("executor_type") == "local"
@@ -741,8 +726,10 @@ def _launch_row(record: dict[str, Any]) -> dict[str, Any]:
     """The row of this record's launch as the record itself names it, for when the ledger no longer holds one; custody
     is the launch's (``process_custody.latest_launch_row``). No birth is no refutation: a command-only difference after
     an ``exec`` cannot prove the leader ended (``process_custody._launch_target``)."""
+    from ouroboros.process_custody import record_launch_purpose
+
     return {"pid": int(record.get("host_pid") or 0), "scope_marker": str(record.get("scope_marker") or ""),
-            "scope_birth": str(record.get("host_birth") or ""), "purpose": f"workspace_service:{record.get('name')}",
+            "scope_birth": str(record.get("host_birth") or ""), "purpose": record_launch_purpose(record),
             "scope": "session" if record.get("keep_alive") else "task", "owner_task": str(record.get("task_id") or "")}
 
 
@@ -798,8 +785,9 @@ def kill_all_foreground(drive_root: pathlib.Path | None = None, *, wait: bool = 
                 requested.append({"requested": False, "scope": "backend",
                                   "error": "container process requires executor settlement"})
         return requested
-    return [_settle_durable_record(path, record, wait=wait)
-            for path, record in _owned_process_records(drive_root, "foreground")]
+    from ouroboros.process_custody import settle_foreground_records
+
+    return settle_foreground_records(drive_root, wait=wait)
 
 
 def _assert_docker_network_none(container_name: str) -> None:
@@ -1318,8 +1306,10 @@ def service_env() -> dict[str, str]:
             continue
         env[key] = str(value)
     from ouroboros.process_scope import installation_scope_entries
+    from ouroboros.node_runtime import forward_playwright_node
 
     env.update(installation_scope_entries(os.environ))  # a service stays in the installation's scope
+    forward_playwright_node(env)  # both local service doors use this baseline; caller overrides still win
     return env
 
 
@@ -1340,6 +1330,23 @@ def _docker_env_command(command: str, aliases: dict[str, str] | None, *, replace
     return f"env {unset} -- {assignments} {command}"
 
 
+def _docker_group_requirement(pidfile: str = "") -> str:
+    # No inherited-group fallback: cleanup owns only a group whose id is the recorded leader. The empty launch
+    # may be settled positively, but a missing/unreadable receipt after a launch never proves absence.
+    empty = f"printf completed > {shlex.quote(pidfile)}; " if pidfile else ""
+    return ("command -v setsid >/dev/null 2>&1 || { " + empty +
+            "printf 'Container requires setsid for process isolation; command not started.\\n' >&2; exit 127; }; ")
+
+
+def _docker_exec_wrapper(command: str, pidfile: str) -> str:
+    """One group and wait receipt for foreground/attached calls. Save stdin before POSIX backgrounding replaces
+    it with /dev/null; a completed leader still names its group until bounded settlement confirms it ended."""
+    quoted = shlex.quote(pidfile)
+    return (f"rm -f {quoted}; " + _docker_group_requirement(pidfile) + "exec 3<&0; " +
+            f"setsid sh -c {shlex.quote('exec ' + command)} <&3 3<&- & pid=$!; exec 3<&-; "
+            f"echo $pid > {quoted}; wait $pid; rc=$?; echo completed:$pid > {quoted}; exit $rc")
+
+
 def _docker_service_start_shell(record: _ExecutorService, log_path: str, aliases: dict[str, str] | None = None,
                                 *, replace_env: bool = False) -> str:
     command = _docker_env_command(shlex.join(record.cmd), aliases, replace_env=replace_env)
@@ -1347,12 +1354,8 @@ def _docker_service_start_shell(record: _ExecutorService, log_path: str, aliases
     quoted_cwd = shlex.quote(record.backend_cwd)
     quoted_log = shlex.quote(log_path)
     return (
-        f"cd {quoted_cwd} && "
-        "if command -v setsid >/dev/null 2>&1; then "
-        f"nohup setsid sh -c {exec_payload} > {quoted_log} 2>&1 & echo $!; "
-        "else "
-        f"nohup sh -c {exec_payload} > {quoted_log} 2>&1 & echo $!; "
-        "fi"
+        _docker_group_requirement() + f"cd {quoted_cwd} || exit $?; "
+        f"nohup setsid sh -c {exec_payload} > {quoted_log} 2>&1 & echo $!"
     )
 
 

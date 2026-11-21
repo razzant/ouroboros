@@ -66,9 +66,24 @@ class TestProducer:
         q = queue.Queue()
         # A wake or scheduled root runs in Main with no owner-door stamp.
         bare = _ctx(tmp_path, 1, event_queue=q)
-        assert _send_user_message(bare, "An owner notice", destination="main").startswith("⚠️ MAIN_NOTICE_BLOCKED:")
+        refused = _send_user_message(bare, "An owner notice", destination="main")
+        assert refused.startswith("⚠️ MAIN_NOTICE_BLOCKED:")
+        # The refusal names the room the caller is already in (06.11: a scheduled Main root was told it was
+        # "neither bound to a Project nor started by the owner" and its finding never reached the owner).
+        assert "already runs in Main" in refused and "destination='current'" in refused
         assert q.empty() and not bare.pending_events
         assert not (tmp_path / "logs" / "events.jsonl").exists()
+        # A root in a foreign numeric room gets the plain refusal: it is not in Main, so the text must not say so.
+        elsewhere = _send_user_message(_ctx(tmp_path, 5_000_000_001, event_queue=q), "An owner notice", destination="main")
+        assert elsewhere.startswith("⚠️ MAIN_NOTICE_BLOCKED:") and "already runs in Main" not in elsewhere
+        assert "neither bound to a registered Project nor started by the owner" in elsewhere
+        assert "destination='current' still writes this work's own room" in elsewhere
+        assert q.empty()
+        # The relay return path shares the rule, not the sentence: a Main-room caller that did not ask for
+        # 'main' gets the plain reason, so the Main clause never describes a destination nobody chose.
+        from ouroboros.tools.control_runtime import _main_notice_refusal
+        assert "already runs in Main" not in _main_notice_refusal(bare, 1)
+        assert "already runs in Main" in _main_notice_refusal(bare, 1, asked_main=True)
         owner = _ctx(tmp_path, 1, event_queue=q, meta={"origin_message_ref": {"chat_id": 1, "client_message_id": "m1"}})
         assert _send_user_message(owner, "An owner notice", destination="main") == "OK: notice accepted for delivery to the main chat."
         frame = q.get_nowait()

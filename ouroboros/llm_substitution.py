@@ -92,6 +92,63 @@ def take_failed_account_preference(target: dict, parameters: dict) -> str:
     return profile
 
 
+_IDENTITY = ("source", "model", "credentialProfileId", "accountFingerprint")
+
+
+def _identity(route: Any) -> dict:
+    """The exact account a receipt-shaped route names, or ``{}``: a profile name without its fingerprint names none."""
+    route = route if isinstance(route, dict) else {}
+    return {key: str(route[key]) for key in _IDENTITY} if all(route.get(key) for key in _IDENTITY) else {}
+
+
+def plan_account(plan: Any, target: dict, role: str) -> dict:
+    """The account an Auto plan of this route and role rests on: its exact account-bound record of the same source
+    and model with a known, fresh window. A pool bound, an unknown window and a profile without its fingerprint
+    qualify nothing (``{}``)."""
+    route = _identity(getattr(plan, "model_route", None))
+    if (not route or getattr(plan, "provider", "") != "claudexor" or getattr(plan, "account_pin", "")
+            or str(getattr(plan, "model_role", "") or "") != str(role or "")
+            or not getattr(plan, "window_witness_bound", False) or getattr(plan, "stale", True)
+            or getattr(plan, "status", "") != "confirmed"
+            or (route["source"], route["model"]) != (target["source"], target["resolved_model"])):
+        return {}
+    return route
+
+
+def send_account(target: dict, messages: list, parameters: dict, *, plan: Any = None,
+                 consume: bool = False) -> tuple[dict, dict]:
+    """``(account, identity)`` of the next send of ``target``: what the engine is asked for, and the exact account its
+    evidence binds (``{}``: none). The send and every rebind ask this one question.
+
+    A pin stays a pin. On Auto the order is the last answer of this model in ``messages`` (the conversation's
+    account), else the account ``plan`` was built on (``plan_account``), else none; it is named as
+    ``preferredProfileId``, a preference the engine may overrule, never a pin. The account that just failed is
+    preferred by nothing (read here; ``consume`` spends it, which only a dispatch does), nor after a redo or re-ask
+    (``_no_account_preference``); a correlated retry is built without this function and names no account.
+    A preferred profile without a fingerprint stays advice; only a complete route is an identity.
+    """
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+
+    override = parameters.get("model_account_override")
+    if override is not None and not isinstance(override, str):
+        raise ValueError("model_account_override must be a profile name, empty Auto, or None")
+    role = parameters.get("model_role", "")
+    pin = override.strip() if override is not None else model_role_option(MODEL_ACCOUNTS_KEY, role)
+    failed = (take_failed_account_preference if consume else failed_account_preference)(target, parameters)
+    answered = next((route for route in (((message.get("nativeContinuation") or {}).get("route") or {})
+                                         for message in reversed(messages) if isinstance(message, dict))
+                     if route.get("source") == target["source"] and route.get("model") == target["resolved_model"]), None)
+    if pin:
+        held = answered if answered is not None else getattr(plan, "model_route", None)
+        return {"mode": "pin", "profileId": pin}, (_identity(held) if (held or {}).get("credentialProfileId") == pin else {})
+    route = {} if parameters.get("_no_account_preference") else (
+        answered if answered is not None else plan_account(plan, target, role))
+    profile = str(route.get("credentialProfileId") or "")
+    if not profile or profile == failed:
+        return {"mode": "auto"}, {}
+    return {"mode": "auto", "preferredProfileId": profile}, _identity(route)
+
+
 def says_nothing_about_the_account(error: Any) -> bool:
     """A typed context-length refusal with no account evidence: the next dispatch keeps the
     conversation's soft preference, so its shrunk retry stays where its prefix is cached (C2 S5,

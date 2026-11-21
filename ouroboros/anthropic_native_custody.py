@@ -1,10 +1,13 @@
-"""Exact direct-Anthropic assistant-content custody.
+"""Exact direct-Anthropic assistant-content custody, and the projections every native receipt shares.
 
 The canonical transcript stays provider neutral for execution, but a direct
 Anthropic tool turn also carries one private receipt containing the complete
 native assistant ``content`` list.  Only the same provider/endpoint/API/model
 route may replay it.  Public projections drop the receipt; checkpoints retain
-it so a crash cannot destroy an unfinished assistant/tool-result unit.
+it so a crash cannot destroy an unfinished assistant/tool-result unit. The
+private-key test, the scrub for other routes and the public, observability,
+context and physical projections here also cover the direct OpenAI Responses
+receipt (``openai_responses_custody``), which owns its own replay.
 """
 
 from __future__ import annotations
@@ -17,6 +20,13 @@ import hashlib
 import json
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from ouroboros.openai_responses_custody import (
+    RESPONSES_CUSTODY_PROJECTION_KEY,
+    RESPONSES_PRIVATE_KEYS,
+    RESPONSES_RECEIPT_KEY,
+    receipt_projection,
+    receipt_size_bytes,
+)
 from ouroboros.request_wire_contract import canonical_sha256, normalize_endpoint
 
 ANTHROPIC_NATIVE_RECEIPT_KEY = "_anthropic_native_content"
@@ -242,12 +252,12 @@ def mark_replayed_receipts_consumed(message: Mapping[str, Any]) -> Dict[str, Any
 
 
 def scrub_native_custody(messages: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Remove direct-route custody before another provider/API/model dispatch."""
+    """Remove direct-route custody (Anthropic and Responses receipts) before another provider/API/model dispatch."""
     cleaned = copy.deepcopy(list(messages))
     for message in cleaned:
         if isinstance(message, dict):
-            message.pop(ANTHROPIC_NATIVE_RECEIPT_KEY, None)
-            message.pop(ANTHROPIC_CONSUMED_RECEIPTS_KEY, None)
+            for key in (ANTHROPIC_NATIVE_RECEIPT_KEY, ANTHROPIC_CONSUMED_RECEIPTS_KEY, *RESPONSES_PRIVATE_KEYS):
+                message.pop(key, None)
     return cleaned
 
 
@@ -257,6 +267,7 @@ def custody_private_key(value: Any) -> bool:
         ANTHROPIC_NATIVE_RECEIPT_KEY,
         ANTHROPIC_CONSUMED_RECEIPTS_KEY,
         "nativeContinuation",
+        *RESPONSES_PRIVATE_KEYS,
     }
 
 
@@ -300,7 +311,9 @@ def observability_custody_projection(value: Any) -> Any:
         for key, item in value.items():
             if str(key) == ANTHROPIC_NATIVE_RECEIPT_KEY:
                 projected[ANTHROPIC_CUSTODY_PROJECTION_KEY] = _receipt_projection(item)
-            elif str(key) != ANTHROPIC_CONSUMED_RECEIPTS_KEY:
+            elif str(key) == RESPONSES_RECEIPT_KEY:
+                projected[RESPONSES_CUSTODY_PROJECTION_KEY] = receipt_projection(item)
+            elif str(key) != ANTHROPIC_CONSUMED_RECEIPTS_KEY and str(key) not in RESPONSES_PRIVATE_KEYS:
                 projected[str(key)] = observability_custody_projection(item)
         return projected
     if isinstance(value, (list, tuple)):
@@ -358,6 +371,7 @@ def _physical_native_block_projection(block: Any) -> Any:
     safe = {
         "text": frozenset({"type", "text", "cache_control"}),
         "tool_use": frozenset({"type", "id", "name", "input"}),
+        "reasoning": frozenset({"type", "id", "status"}),  # a Responses reasoning input item
     }.get(block_type, frozenset({"type"}))
     out = {
         str(field): public_custody_projection(value)
@@ -371,8 +385,12 @@ def _physical_native_block_projection(block: Any) -> Any:
 
 
 def physical_custody_projection(value: Mapping[str, Any]) -> Dict[str, Any]:
-    """Project direct-Anthropic physical replay without exposing opaque values."""
+    """Project direct-Anthropic and Responses physical replay without exposing opaque values."""
     projected = public_custody_projection(value)
+    items = projected.get("input") if isinstance(projected, dict) else None
+    if isinstance(items, list):  # Responses: replayed reasoning items keep type, id and status only
+        projected["input"] = [_physical_native_block_projection(item)
+                              if isinstance(item, Mapping) and item.get("type") == "reasoning" else item for item in items]
     messages = projected.get("messages") if isinstance(projected, dict) else None
     if not isinstance(messages, list):
         return projected
@@ -397,6 +415,8 @@ def context_custody_proxy(value: Mapping[str, Any]) -> Dict[str, Any]:
     encoded = receipt.get("content_json") if isinstance(receipt, Mapping) else None
     if isinstance(encoded, str):
         projected["_anthropic_native_opaque_bytes"] = "#" * len(encoded.encode("utf-8"))
+    if responses_bytes := receipt_size_bytes(value):  # the exact items a same-route request would replay
+        projected["_openai_responses_opaque_bytes"] = "#" * responses_bytes
     return projected
 
 

@@ -151,7 +151,7 @@ def test_history_names_entries_as_given_while_status_and_diff_take_worktree_spel
 def test_docker_backend_paths_map_to_the_workspace_for_every_action(world):
     registry, ctx, _, project = world
     (project / "note.txt").write_text("changed\n")
-    assert registry.execute_result("vcs_read", {"action": "status", "path": "/app/note.txt"}).code == "GIT_ERROR"
+    assert registry.execute_result("vcs_read", {"action": "status", "path": "/app/note.txt"}).code == "TOOL_ARG_ERROR"
     ctx.task_metadata = {"executor_ref": {"type": "docker_exec", "container_name": "probe",
                                           "workspace_host_path": str(project), "workspace_backend_path": "/app"}}
     registry.set_context(ctx)
@@ -166,7 +166,7 @@ def test_a_root_refusal_names_vcs_reads_own_roots_and_the_readers_of_a_delegated
     delegated run's private copy; the readers now ride the refusal, never a working read."""
     registry, _ctx, _, project = world
     refused = registry.execute_result("vcs_read", {"action": "status", "repository": str(project.parent / "dlg_copy")})
-    assert refused.code == "GIT_ERROR" and "outside selected root" in refused.text, refused.text
+    assert (refused.status, refused.code) == ("error", "TOOL_ARG_ERROR") and "outside selected root" in refused.text, refused.text
     assert "root='active_workspace' or 'system_repo' only" in refused.text and "patch_read/manifest_read" in refused.text
     (project / "note.txt").write_text("changed\n")
     working = registry.execute_result("vcs_read", {"action": "status"})
@@ -228,6 +228,72 @@ def test_history_capture_is_physically_bounded_and_discloses_narrowing(world, mo
     assert "max_count (log), ref, or path" in result.text
 
 
+@pytest.mark.parametrize("size,eol", [(40, b"\n"), (64, b"\r\n")], ids=["lf", "crlf"])
+def test_exact_object_capture_accepts_one_git_record(tmp_path, monkeypatch, size, eol):
+    from ouroboros.tools import vcs_read
+
+    oid = b"a" * size
+    name, seen = oid.decode(), []
+    done = subprocess.CompletedProcess([], 0, oid + eol, "warning: legacy option — use the new one".encode() + eol)
+    typed = subprocess.CompletedProcess([], 0, oid + eol, b"")  # the lookup that names only the full id
+    monkeypatch.setattr(vcs_read, "_capture_read_git",
+                        lambda _repo, args: seen.append(args) or (typed if args[-1].startswith(name) else done))
+    assert vcs_read._object(tmp_path, "HEAD~1", "commit", reject_warnings=True) == name
+    # The revision is observed once as written, with Git's ambiguity warning on; only its full id is typed.
+    assert [args[-1] for args in seen] == ["HEAD~1", f"{name}^{{commit}}"] and "core.warnAmbiguousRefs=true" in seen[0]
+    done.stderr = b"warning: refname 'sample' is ambiguous." + eol
+    with pytest.raises(RuntimeError, match="refname 'sample' is ambiguous"):
+        vcs_read._object(tmp_path, "sample", "commit", reject_warnings=True)
+    assert vcs_read._object(tmp_path, "sample", "commit") == name
+
+    # A Unicode line separator is text inside one Git record, never the end of it: a name that holds one
+    # is still the ambiguous refname, and a notice that merely continues past one is not a warning record.
+    for separator in ("\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}", "\x85"):
+        mark = separator.encode()
+        done.stderr = b"warning: refname 'sa" + mark + b"mple' is ambiguous." + eol
+        with pytest.raises(RuntimeError, match="is ambiguous"):
+            vcs_read._object(tmp_path, "sample", "commit", reject_warnings=True)
+        done.stderr = b"note: unrelated" + mark + b"warning: refname 'sample' is ambiguous." + eol
+        assert vcs_read._object(tmp_path, "sample", "commit", reject_warnings=True) == name
+
+    done.stderr = b""
+    for malformed in (oid, oid + eol + oid + eol, oid + b" " + eol, oid + "\N{LINE SEPARATOR}".encode() + eol):
+        for record in (done, typed):  # the typing of the id reads the same exact bytes as the lookup
+            record.stdout = malformed
+            with pytest.raises(ValueError, match="one exact object"):
+                vcs_read._object(tmp_path, "sample", "commit", reject_warnings=True)
+            record.stdout = oid + eol
+
+
+@pytest.mark.parametrize("work", [False, True], ids=["local-pipes", "work-domain-spool"])
+def test_exact_object_capture_refuses_truncated_diagnostics(tmp_path, monkeypatch, work):
+    from io import BytesIO
+    from unittest.mock import MagicMock
+    from ouroboros import work_domain
+    from ouroboros.tools import vcs_read
+
+    oid, notes = b"a" * 40 + b"\n", b"note: ordinary diagnostic\n"
+    monkeypatch.setattr(work_domain, "is_work", lambda _: work)
+    if work:
+        def run(cmd, *, stdout, stderr, **_):
+            stdout.write(oid)
+            stderr.write(notes)
+            return subprocess.CompletedProcess(cmd, 0)
+        monkeypatch.setattr(work_domain, "run", run)
+    else:
+        def popen(*_, **_kw):
+            process = MagicMock(returncode=0, stdout=BytesIO(oid), stderr=BytesIO(notes))
+            process.__enter__.return_value = process
+            return process
+        monkeypatch.setattr(vcs_read.subprocess, "Popen", popen)
+
+    monkeypatch.setattr(vcs_read, "_CAPTURE_STDERR_BYTES", len(notes))
+    assert vcs_read._object(tmp_path, "sample", "commit", reject_warnings=True) == oid.strip().decode()
+    monkeypatch.setattr(vcs_read, "_CAPTURE_STDERR_BYTES", len(notes) - 1)
+    with pytest.raises(RuntimeError, match="diagnostics were truncated"):
+        vcs_read._object(tmp_path, "sample", "commit", reject_warnings=True)
+
+
 def test_history_timeout_reaps_child_and_closes_pipe_readers(tmp_path, monkeypatch):
     import subprocess
     import sys
@@ -256,3 +322,19 @@ def test_history_timeout_reaps_child_and_closes_pipe_readers(tmp_path, monkeypat
             if process.poll() is None:
                 process.kill()
                 process.wait()
+
+
+def test_a_binding_argument_fault_is_typed_as_one_while_a_binding_failure_stays_a_git_terminal():
+    """11 root/path refusals of 05–08.11 were recorded as successful calls: the call's own argument fault
+    (a ValueError of the binding) is an argument error with the roots hint; the machinery's own failure
+    keeps the Git terminal, so the pinned RuntimeError rows of test_registry_core stay as they are."""
+    from ouroboros.tools import tool_resolution
+
+    fault = tool_resolution._binding_error_text(
+        "vcs_read", "system_repo", ValueError("absolute path '/x' is outside selected root=system_repo"))
+    assert (fault.status, fault.code) == ("error", "TOOL_ARG_ERROR")
+    assert fault.text.startswith("⚠️ TOOL_ARG_ERROR (vcs_read): absolute path '/x' is outside selected root=system_repo")
+    assert "root='active_workspace' or 'system_repo' only" in fault.text
+    failure = tool_resolution._binding_error_text("vcs_read", "system_repo", RuntimeError("binding failed"))
+    assert (failure.status, failure.code) == ("ok", "GIT_ERROR")
+    assert failure.text.startswith("⚠️ GIT_ERROR: RuntimeError: binding failed")

@@ -74,7 +74,7 @@ def test_pending_mail_returns_immediately_without_delivering_or_acknowledging(tm
         "requested_sec": 600, "window_sec": 600, "window_bound": "requested",
         "slot": "held", "note": out["note"],
     }
-    assert "next round top" in out["note"] and "holds the worker slot" in out["note"]
+    assert "next round top" in out["note"] and "keeps the process and call stack while yielding acting capacity" in out["note"]
     assert clock.sleeps == []
     # Nothing delivered, nothing acknowledged, the loop's seen-set untouched.
     assert acknowledged_task_message_ids(tmp_path, "waiter", attempt_key=1) == set()
@@ -398,8 +398,8 @@ def test_registered_on_every_contract_surface_and_takes_no_lease_of_its_own():
 
     entry = next(e for e in control.get_tools() if e.name == "await_messages")
     assert entry.handler is control_mod._await_messages
-    # Owner Batch4 6B: the same tool also carries the model's own warm/cold sleep;
-    # ``timeout_sec`` still drives the default in-slot wait (nothing is required).
+    # Omitted mode sleeps; timeout_sec sets its wake time (nothing is required).
+    # Explicit in_slot keeps this call and process while yielding acting capacity.
     assert "required" not in entry.schema["parameters"]
     assert set(entry.schema["parameters"]["properties"]) == {
         "timeout_sec", "mode", "senders", "tasks", "runs", "services", "wake_at", "wake_after_sec"}
@@ -411,12 +411,12 @@ def test_registered_on_every_contract_surface_and_takes_no_lease_of_its_own():
         assert "await_messages" in surface
     assert TOOL_POLICY["await_messages"] == POLICY_SKIP
     assert "await_messages" not in _PER_CALL_TIMEOUT_TOOLS  # its own window bounds it, not a per-call override
-    # No lease and no slot lending of its own: the body names no lease and emits no
-    # supervisor event — the executor's per-call tool lease is the one that spares it.
+    # The adapter owns the acting-capacity lease; this entry emits no supervisor event.
+    # The executor's per-call tool lease handles silence attention.
     body = inspect.getsource(control_mod._await_messages).split('"""', 2)[2]  # past the docstring
     assert "lease" not in body and "emit" not in body and "event_queue" not in body
     description = entry.schema["description"]
-    assert "holds your worker slot" in description and "delivers nothing" in description
+    assert "keeps your process but yields acting capacity" in description and "delivers nothing" in description
     assert "never reaped" not in description and "in-flight tool lease" in description
 
 

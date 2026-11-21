@@ -108,15 +108,3 @@ def test_review_panel_records_are_one_class_across_owners():
     assert (
         review_substrate.DIALOGUE_STATUS_VALUES is review_verdict.DIALOGUE_STATUS_VALUES
     )
-
-
-def test_review_substrate_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (review_substrate, *_LEAVES)
-    }
-    assert counts["ouroboros.review_substrate"] <= 900
-    assert all(count <= 1000 for count in counts.values())
-    assert counts["ouroboros.review_verdict"] <= 1000

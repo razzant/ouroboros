@@ -8,10 +8,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { readExtensionFormValues, renderExtensionSettingsSections } from '../modules/settings.js';
+import { readExtensionFormValues, renderExtensionSettingsSections } from '../modules/settings_extension_forms.js';
+import { settingsPageFor } from '../modules/settings_pages.js';
 
 const UNREADABLE_NOTE = 'Current values could not be read; Save is disabled so it does not overwrite them. '
-    + 'Use Reload to retry.';
+    + 'Open this page again to retry.';
 const UNAVAILABLE_NOTE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 
 const FORM = {
@@ -133,9 +134,44 @@ test('(c) an unreadable read disables Save and says why, in the shared warn tone
         assert.match(html, /type="submit" disabled>Save<\/button>/, label);
         assert.match(html, /data-extension-settings-status data-tone="warn">/, label);
         assert.ok(html.includes(UNREADABLE_NOTE), label);
-        // The form still renders; only Save is withheld, and nothing offers a way around it.
+        // The form still renders, but defaults cannot start a draft before a successful read.
         assert.match(html, /<option value="safe" selected>Safe<\/option>/, label);
+        assert.match(html, /<select class="ui-control" name="mode"[^>]* disabled>/, label);
+        assert.match(html, /name="chat_id"[^>]* value="" disabled>/, label);
+        assert.match(html, /name="token"[^>]* value="" disabled/, label);
         assert.doesNotMatch(html, /Edit anyway|data-extension-settings-read/, label);
+    }
+});
+
+test('the page retries a failed first field read when shown again', async () => {
+    const { host, root } = fakeHost();
+    host.contains = () => false;
+    const container = { ...root, replaceChildren(node) { node.parentElement = this; } };
+    host.remove = () => { host.parentElement = null; };
+    const path = 'skill/demo', win = new EventTarget();
+    const prior = { window: globalThis.window, document: globalThis.document };
+    Object.assign(globalThis, { window: win, document: { createElement: () => host, activeElement: null } });
+    let reads = 0, page;
+    const fetcher = stubFetch((url, init) => {
+        assert.notEqual(init?.method, 'POST');
+        if (url === '/api/extensions') return jsonResponse({ live: { settings_sections: sections() } });
+        assert.equal(url, '/api/extensions/demo/save');
+        return ++reads === 1 ? jsonResponse({}, 500) : jsonResponse({ mode: 'fast', chat_id: 'stored' });
+    });
+    try {
+        page = await settingsPageFor(path).mount(container, { path, ctx: { onScreen: () => true } });
+        assert.match(host.innerHTML, /type="submit" disabled>Save/);
+        assert.equal(page.unsaved(), false);
+        win.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place: 'skills' } }));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(reads, 2);
+        assert.match(host.innerHTML, /name="chat_id"[^>]* value="stored"/);
+        assert.match(host.innerHTML, /type="submit">Save/);
+        assert.doesNotMatch(host.innerHTML, /data-extension-settings-blocked| value="stored" disabled/);
+    } finally {
+        page?.unmount();
+        fetcher.restore();
+        Object.assign(globalThis, prior);
     }
 });
 
@@ -178,7 +214,7 @@ function formDouble(fieldNames) {
         disabled: true, dataset: {}, textContent: '', listeners: {},
         addEventListener(type, fn) { this.listeners[type] = fn; }, ...extra,
     });
-    const inputs = Object.fromEntries(fieldNames.map((name) => [name, control({ value: `typed ${name}` })]));
+    const inputs = Object.fromEntries(fieldNames.map((name) => [name, control({ name, value: `typed ${name}` })]));
     const parts = {
         '[data-extension-settings-edit-anyway]': control({ disabled: false }),
         'button[type="submit"]': control(),
@@ -225,5 +261,168 @@ test('Edit anyway is the owner\'s explicit choice: it unlocks the form, and only
         assert.equal(parts['[data-extension-settings-status]'].textContent, 'Saved.');
     } finally {
         fetcher.restore();
+    }
+});
+
+test('a form of read-only fields is a status: its check refreshes those fields in place and saves nothing', async () => {
+    const component = {
+        type: 'form', id: 'connection', route: 'connection', method: 'POST', submit_label: 'Refresh status',
+        fields: ['token_status', 'bridge_status', 'miniapp_status'].map((name) => ({ name, label: name, type: 'text', disabled: true })),
+    };
+    const reads = [
+        { token_status: 'Not set (Settings → Secrets)', bridge_status: 'Waiting for a bot token', miniapp_status: 'Waiting for a bot token' },
+        { token_status: 'Saved', bridge_status: 'Connected', miniapp_status: 'Ready' },
+        { token_status: "Can't read saved settings now; the current token stays in use", bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
+    ];
+    const { html } = await render(() => jsonResponse(reads[0]), { component });
+    assert.match(html, /class="btn btn-default" type="submit">Refresh status<\/button>/, 'a neutral check, not the green Save');
+    assert.match(html, /name="bridge_status"[^>]* value="Waiting for a bot token"[^>]* disabled/);
+
+    const { form, inputs, parts } = formDouble(['token_status', 'bridge_status', 'miniapp_status']);
+    form.dataset = { extensionSettingsKey: 'demo:config:connection', skill: 'demo', route: 'connection' };
+    const host = { innerHTML: '', querySelectorAll: (selector) => (selector === '[data-extension-settings-form]' ? [form] : []) };
+    const root = { querySelector: (selector) => (selector === '#extension-settings-sections' ? host : null) };
+    const events = [];
+    const priorWindow = globalThis.window;
+    globalThis.window = { dispatchEvent: (event) => events.push(event.type) };
+    let answer = 0;
+    const busy = [];
+    const fetcher = stubFetch((url, init) => {
+        if (init?.method !== 'POST') return jsonResponse(reads[0]);
+        busy.push([parts['button[type="submit"]'].textContent, parts['[data-extension-settings-status]'].textContent]);
+        answer += 1;
+        return jsonResponse(reads[answer]);
+    });
+    try {
+        await renderExtensionSettingsSections(root, sections(component));
+        for (const expected of [reads[1], reads[2]]) {
+            await form.listeners.submit({ preventDefault() {} });
+            for (const name of ['token_status', 'bridge_status', 'miniapp_status']) assert.equal(inputs[name].value, expected[name]);
+            assert.equal(parts['[data-extension-settings-status]'].textContent, 'Status checked.');
+            assert.equal(parts['button[type="submit"]'].textContent, 'Refresh status');
+        }
+        assert.deepEqual(busy, [['Checking…', 'Checking…'], ['Checking…', 'Checking…']], 'never “Saving…”');
+        assert.deepEqual(events.filter((type) => type === 'ouro:settings-updated'), [], 'a check announces no save');
+    } finally {
+        fetcher.restore();
+        globalThis.window = priorWindow;
+    }
+});
+
+test('an editable form still saves, keeps what the owner typed and announces the save', async () => {
+    const { form, inputs } = formDouble(['mode', 'chat_id', 'token']);
+    form.dataset = { extensionSettingsKey: 'demo:config:settings-form', skill: 'demo', route: 'save' };
+    const host = { innerHTML: '', querySelectorAll: (selector) => (selector === '[data-extension-settings-form]' ? [form] : []) };
+    const root = { querySelector: (selector) => (selector === '#extension-settings-sections' ? host : null) };
+    const events = [];
+    const priorWindow = globalThis.window;
+    globalThis.window = { dispatchEvent: (event) => events.push(event.type) };
+    const fetcher = stubFetch((url, init) => jsonResponse(init?.method === 'POST' ? { message: 'Saved.', chat_id: 'server' } : {}));
+    try {
+        await renderExtensionSettingsSections(root, sections());
+        await form.listeners.submit({ preventDefault() {} });
+        assert.equal(inputs.chat_id.value, 'typed chat_id', 'an editable field is never overwritten by the answer');
+        assert.ok(events.includes('ouro:settings-updated'));
+    } finally {
+        fetcher.restore();
+        globalThis.window = priorWindow;
+    }
+});
+
+test('only a submitted field can dirty the form or replace its Save result', async () => {
+    const { form, inputs, parts } = formDouble(['mode', 'chat_id', 'token', 'local_only']);
+    delete form.dataset.extensionSettingsBlocked;
+    Object.values(inputs).forEach(input => { input.disabled = false; });
+    inputs.token.matches = () => true; // a text-like input reports its edit before blur
+    const host = { innerHTML: '', querySelectorAll: () => [form] };
+    const root = { querySelector: () => host };
+    const status = parts['[data-extension-settings-status]'];
+    const edits = new Map();
+    let reply, posted;
+    const fetcher = stubFetch((url, init) => {
+        if (init?.method !== 'POST') return jsonResponse({});
+        posted = JSON.parse(init.body);
+        return new Promise(resolve => { reply = resolve; });
+    });
+    const edit = (type, target) => form.listeners[type]({ type, target });
+    const submit = () => form.listeners.submit({ preventDefault() {} });
+    try {
+        await renderExtensionSettingsSections(root, sections(), { edits });
+        edit('input', inputs.token);
+        const sent = edits.get(form);
+        assert.ok(sent, 'a real password edit is retained');
+        const saving = submit();
+        const device = { name: '', dataset: { callDevice: 'mic' } };
+        edit('input', device);
+        edit('change', device);
+        edit('change', inputs.local_only);
+        assert.equal(edits.get(form), sent);
+        assert.equal(status.textContent, 'Saving…');
+        assert.equal('local_only' in posted, false);
+        reply(jsonResponse({ message: 'Saved.' }));
+        await saving;
+        assert.equal(edits.size, 0);
+        edit('change', inputs.token);
+        assert.equal(edits.size, 0, 'text blur is not a new edit');
+        assert.equal(status.textContent, 'Saved.');
+
+        const earlier = submit();
+        inputs.token.value = 'next synthetic value';
+        edit('input', inputs.token);
+        reply(jsonResponse({ message: 'Saved.' }));
+        await earlier;
+        assert.ok(edits.has(form), 'the earlier Save cannot acknowledge the newer draft');
+        assert.match(status.textContent, /Your latest edits are unsaved/);
+    } finally { fetcher.restore(); }
+});
+
+test('Telegram\'s Connection shows each long production sentence whole, posts what it shows and refreshes in place', async () => {
+    const long = "Restoring the previous owner's menu button: Telegram did not confirm the restored menu button.";
+    const names = ['token_status', 'bridge_status', 'miniapp_status'];
+    // The schema skills/telegram/lib/telegram_connection.py registers: read-only multiline values.
+    const component = {
+        type: 'form', id: 'connection', route: 'connection', method: 'POST', submit_label: 'Refresh status', busy_label: 'Checking…',
+        fields: [['token_status', 'Bot token'], ['bridge_status', 'Text bridge'], ['miniapp_status', 'Mini App']]
+            .map(([name, label]) => ({ name, label, type: 'textarea', disabled: true })),
+    };
+    const reads = [
+        { token_status: "Can't read saved settings now; the current token stays in use",
+          bridge_status: 'Stopped: Telegram refused this token; save a new one in Secrets', miniapp_status: long },
+        { token_status: 'Saved', bridge_status: 'Connecting with the saved token…',
+          miniapp_status: 'Applying the token once the old Mini App has stopped', message: 'Status checked.' },
+    ];
+    const { html } = await render(() => jsonResponse(reads[0]), { component });
+    for (const name of names) {
+        const label = component.fields.find((field) => field.name === name).label;
+        const whole = reads[0][name].replace(/'/g, '&#39;');
+        assert.ok(html.includes(`<output class="ui-control ui-control-readonly" name="${name}" aria-label="${label}" tabindex="0">${whole}</output>`), name);
+    }
+    assert.doesNotMatch(html, /<textarea|resize|rows=/);
+
+    const { form, inputs, parts } = formDouble(names);
+    for (const name of names) Object.assign(inputs[name], { type: 'output', value: reads[0][name] });
+    form.dataset = { extensionSettingsKey: 'demo:config:connection', skill: 'demo', route: 'connection' };
+    const host = { innerHTML: '', querySelectorAll: (selector) => (selector === '[data-extension-settings-form]' ? [form] : []) };
+    const root = { querySelector: (selector) => (selector === '#extension-settings-sections' ? host : null) };
+    const events = [];
+    const posts = [];
+    const priorWindow = globalThis.window;
+    globalThis.window = { dispatchEvent: (event) => events.push(event.type) };
+    const fetcher = stubFetch((url, init) => {
+        if (init?.method !== 'POST') return jsonResponse(reads[0]);
+        posts.push(JSON.parse(init.body));
+        return jsonResponse(reads[1]);
+    });
+    try {
+        await renderExtensionSettingsSections(root, sections(component));
+        await form.listeners.submit({ preventDefault() {} });
+        assert.deepEqual(posts, [{ token_status: reads[0].token_status, bridge_status: reads[0].bridge_status, miniapp_status: long }],
+            'the check posts exactly the status it showed, as the textareas did');
+        for (const name of names) assert.equal(inputs[name].value, reads[1][name], `${name} refreshed in place`);
+        assert.equal(parts['[data-extension-settings-status]'].textContent, 'Status checked.');
+        assert.deepEqual(events.filter((type) => type === 'ouro:settings-updated'), [], 'a check announces no save');
+    } finally {
+        fetcher.restore();
+        globalThis.window = priorWindow;
     }
 });

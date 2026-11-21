@@ -6,6 +6,7 @@
 // claim.
 
 import { accountRows, familyLabel, nextUpAccount } from './claudexor_status_store.js';
+import { translateString } from './i18n.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
     describeExecutionEvidence,
@@ -18,7 +19,10 @@ import {
     accountScopedModelCatalog,
     sessionModelMatches,
     CLAUDE_BASE_QUALIFIER,
+    PRICE_UNKNOWN,
+    modelPriceWords,
     routeSupportsAccount,
+    tierPriced,
 } from './route_editor_primitives.js';
 
 /**
@@ -158,8 +162,15 @@ function sessionRouteAvailability(row, state, nowMs) {
         return verdict(NOT_CHECKED, 'Agent session · live availability not checked');
     }
     const pin = routePin(row?.route);
-    const harnessEntry = accountScopedModelCatalog(harnessMap(state.snapshot)[harness], pin);
+    const harnessEntry = accountScopedModelCatalog(state.sessionCatalog ? state.sessionCatalog(row) : harnessMap(state.snapshot)[harness], pin);
     if (!harnessEntry) return verdict(UNAVAILABLE, `${harness} · currently unavailable`);
+    const rows = accountRows(state.snapshot).filter((account) => account.harness === harness);
+    if (pin) {
+        const account = rows.find((candidate) => String(candidate.profile_id || '') === pin);
+        if (!account || account.enabled === false || String(account?.status?.verification || '') !== 'passed') {
+            return verdict(UNAVAILABLE, `${harness} · pinned account ${pin} currently unavailable`, { specific: true });
+        }
+    }
     if (!harnessModelsKnown(harnessEntry, state.catalogKnown)) {
         return verdict(NOT_CHECKED, `${harness} · model availability not checked`);
     }
@@ -168,13 +179,7 @@ function sessionRouteAvailability(row, state, nowMs) {
         return verdict(UNAVAILABLE, `${harness} · selected model ${model} currently unavailable`, { specific: true });
     }
 
-    const rows = accountRows(state.snapshot).filter((account) => account.harness === harness);
     if (pin) {
-        const account = rows.find((candidate) => String(candidate.profile_id || '') === pin);
-        if (!account || account.enabled === false
-            || String(account?.status?.verification || '') !== 'passed') {
-            return verdict(UNAVAILABLE, `${harness} · pinned account ${pin} currently unavailable`, { specific: true });
-        }
         if (!state.quotaKnown) return verdict(NOT_CHECKED, `${harness} · pinned account ready; quota not checked`);
         const quota = routeQuotaFact(state.snapshot, harness, model, pin, nowMs);
         if (quota.exhausted) return verdict(LIMIT, `${harness} · pinned account ${pin} limit reached`, { specific: true });
@@ -222,7 +227,7 @@ function sessionCatalogQualifier(row, state) {
     if (!state?.catalogKnown || !state?.accountsKnown) return '';
     const { harness, model } = splitSessionTarget(row?.route?.target_id);
     const pin = routePin(row?.route);
-    const catalog = accountScopedModelCatalog(harnessMap(state.snapshot)[harness], pin);
+    const catalog = accountScopedModelCatalog(state.sessionCatalog ? state.sessionCatalog(row) : harnessMap(state.snapshot)[harness], pin);
     if (!catalog || !harnessModelsKnown(catalog, state.catalogKnown)) return '';
     const matches = sessionModelMatches(catalog, model, { snapshot: state.snapshot, pin });
     return matches.length && matches.every((match) => match.basis === 'claude_1m_base') ? CLAUDE_BASE_QUALIFIER : '';
@@ -269,11 +274,11 @@ export function rowStatusReason(status) {
 
 const ROUTE_HINT = 'Choose how this subagent runs: an API model or an agent session.';
 
-// Two rows on one engine are a repeated review when both are marked, or a review
-// row minted beside the owner's own delegation row; any other twin is a copy slip.
+// Match configured_subagents.validate_unique_engines: both Reviewer marks or
+// either runtime birth marker allow twins, including two migrated rows.
 export function reviewTwinAllowed(first, second) {
     return (first?.review_eligible === true && second?.review_eligible === true)
-        || Boolean(first?.minted_from) !== Boolean(second?.minted_from);
+        || Boolean(first?.minted_from || second?.minted_from);
 }
 
 function executionFor(snapshot, subagentId) {
@@ -333,20 +338,47 @@ export function rowTaskRun(row, state) {
     return [qualifier, evidence].filter(Boolean).join(' · ');
 }
 
+/** The published tariff of an API row's model, in a role line's words (USD per 1M tokens: a rate, never an estimate
+ * of one review; or the condition its entry prices it under, `modelPriceWords`): `Price unknown` where its source
+ * listed the model, or the whole catalog was read, and no price is stated; '' for a session or subscription row, a
+ * local model, a Fast or Economy row (its calls pay another rate) and for a model no read listed while the catalog
+ * is not read whole (the section says that once). The words are
+ * composed through the translation seam. `catalog` is the editor's merged catalog. */
+export function modelTariffText(row, catalog = {}, processingPreference = '') {
+    const target = String(row?.route?.target_id || '').trim();
+    const item = (Array.isArray(catalog.items) ? catalog.items : []).find((entry) => entry.value === target);
+    if (!target || routeSupportsAccount(row.route) || item?.use_local || / \(local\)$/.test(target)
+        || tierPriced(row.processing_preference || processingPreference)) return '';
+    // A row its own source listed is known even when another source of the read failed (a partial catalog).
+    return modelPriceWords(item, { unit: true }) || (item || catalog.read_state === 'ok' ? translateString(PRICE_UNKNOWN) : '');
+}
+
+/** The one money line beside a marked API row's delivery: what one review cost once reviews were measured (or its
+ * non-money equivalent); until then the model's published tariff; with neither, that its cost is unknown, and
+ * for a row not saved yet that its price is. */
+export function reviewMoneyLine(row, cost, tariff) {
+    const measured = reviewCostText(row, cost);
+    if (cost && cost.basis !== 'unknown') return measured;
+    return tariff && tariff !== translateString(PRICE_UNKNOWN) ? tariff : measured || tariff;
+}
+
 /** What one review by this row actually cost — the median of its measured reviews with their count
- * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero. */
+ * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero, and a row
+ * whose cost was not read (a draft not saved yet) says nothing. */
 export function reviewCostText(row, cost = null) {
     if (routeSupportsAccount(row?.route || {})) return 'uses a session seat and time';
-    if (!cost) return 'price appears after saving';
+    if (!cost) return '';
     if (cost.basis === 'local_route') return 'no API cost per review';
     const usd = cost.usd_per_review;
     if (cost.basis !== 'observed_reviews' || typeof usd !== 'number' || !Number.isFinite(usd)) return 'cost unknown';
     const high = Number(cost.high);
     if (usd === 0 && !(high > 0)) return 'no API cost per review';
-    const money = (value) => `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
+    // A charge below the printed precision is never a proven zero.
+    const money = (value) => (value > 0 && value < 0.00005 ? '<$0.0001' : `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`);
+    const about = usd > 0 && usd < 0.00005 ? '' : '≈';
     const reviews = Number(cost.reviews) || 0;
-    return reviews < 2 ? `≈${money(usd)} per review (1 measured)`
-        : `≈${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
+    return reviews < 2 ? `${about}${money(usd)} per review (1 measured)`
+        : `${about}${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
 }
 
 /** What actually ran the last time this row reviewed, with its review record (the card's "Last review"). */

@@ -25,7 +25,8 @@ exact commit on ``request_restart``; this module carries that one transition.
 * ``settle_on_boot`` gives every outcome to the task that authorized it: its task
   result keeps ``body_adoptions`` and its card gets the row in the task's own room
   (a room it cannot name gets none); only a handoff that names no task stays an
-  owner-wide runtime notice.
+  owner-wide runtime notice. The outcome names the adopted range's commits that landed over a review
+  FAIL or no verdict, "running" only when ``adopted`` (``review_overrides.landed_line``).
 """
 
 from __future__ import annotations
@@ -205,6 +206,8 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     from ouroboros import body_candidate
     from ouroboros.tools.release_sync import is_development_marker
 
+    if refusal := _body_refusal():  # a managed deployment's serving program is its administrator's
+        raise AdoptionRefused("managed_by_deployment", refusal)
     serving, candidate = pathlib.Path(str(row["repo_dir"])), pathlib.Path(str(row["path"]))
     resolved = _git(candidate, "rev-parse", "--verify", f"{str(commit).strip()}^{{commit}}", check=False)
     if resolved.returncode != 0 or not str(commit).strip():
@@ -235,7 +238,7 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     if unreviewed and runtime_mode != "cyber_pro":
         raise AdoptionRefused(
             "ADOPTION_UNREVIEWED",
-            "these commits did not come through commit_reviewed under the configured enforcement: "
+            "these commits did not come through commit_reviewed: "
             + ", ".join(sha[:12] for sha in unreviewed))
     rows = _switch_rows(serving, old, cand)
     paths = [item["path"] for item in rows]
@@ -522,6 +525,18 @@ def arm(data_dir: Any, *, worker_exits: Any, live_children: Any, owned_stop: Any
         return ""
 
 
+def _body_refusal() -> str:
+    from ouroboros.deployment_policy import body_replacement_refusal
+
+    return body_replacement_refusal()
+
+
+def _body_status() -> str:
+    from ouroboros.deployment_policy import BODY_STATUS
+
+    return BODY_STATUS
+
+
 def _arm_locked(data_dir: Any, *, worker_exits: Any, live_children: Any,
                 owned_stop: Any, owner_restart: bool) -> str:
     """Publish an adoption pointer while the bootstrap transition lock is held."""
@@ -537,6 +552,7 @@ def _arm_locked(data_dir: Any, *, worker_exits: Any, live_children: Any,
         ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
         ("panic_stop", body_switch.installation_panic(data_dir)),
         ("managed_update_active", _managed_update_active(data_dir)),
+        ("managed_by_deployment", bool(_body_refusal())),  # a handoff authorized before this deployment was managed
     ) if blocked]
     directory = str(helper_dir(data_dir))
     if blockers:
@@ -682,6 +698,9 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
         interpreter = (" Installed dependencies may already have changed; the boot re-synced them for the "
                        "serving tree." if handoff.get("interpreter_state") else "")
         _archive(data_dir, handoff, f"abandoned:{last}")
+        if last == "managed_by_deployment":  # armed before this deployment was managed (body_switch.managed_entry)
+            return _settled(handoff, "not_applied", f"Adoption of {cand} was not applied: {_body_status()} The "
+                                                    "serving body is unchanged; the candidate is retained.")
         return _settled(handoff, "not_applied", f"Adoption of {cand} was abandoned before completion ({last}). "
                                                 f"The serving body is at its previous commit.{interpreter}")
     if phase != "switched":
@@ -808,6 +827,14 @@ def settle_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool) -> D
     def published(sentence: str) -> None:
         lines.append(sentence)
         result["note"] += f" {sentence}"
+
+    if result.get("note") and result.get("outcome") in ("adopted", "unconfirmed"):  # the adoption record: running
+        from ouroboros.review_overrides import landed_line
+
+        gate = landed_line(repo_dir, data_dir, base=str(result.get("previous") or ""), target=result["candidate"],
+                           running=result["outcome"] == "adopted")
+        if gate:
+            published(gate)
 
     def record_and_push() -> None:
         from supervisor.git_ops import push_to_remote

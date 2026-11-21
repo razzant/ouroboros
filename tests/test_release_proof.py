@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
+import runpy
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import pytest
 import yaml
@@ -406,13 +413,133 @@ def test_verify_uploaded_requires_exact_names_sizes_and_digests(tmp_path: Path):
 
 
 def test_linux_package_smoke_pins_third_party_vendor_images_by_digest():
-    script = (REPO / "scripts" / "smoke_linux_packages.sh").read_text(encoding="utf-8")
-    for repository in (
-        "registry.red-soft.ru/ubi8/ubi",
-        "registry.astralinux.ru/library/astra/ubi18",
-    ):
-        assert f"{repository}@sha256:" in script
-        assert f"{repository}:" not in script
+    script = (REPO / "scripts/smoke_linux_packages.sh").read_text(encoding="utf-8")
+    assert re.search(r'^ASTRA_IMAGE="registry\.astralinux\.ru/library/astra/ubi18@sha256:[0-9a-f]{64}"$',
+                     script, re.MULTILINE)
+    assert (REPO / "scripts/redos-ubi8.pin").read_text(encoding="ascii").split() == [
+        "registry.red-soft.ru/ubi8/ubi@sha256:7ab4f904e704cc3538f384897f91a69cf0c8980ba1c3476357d33c3799062384",
+        "sha256:a3493f3c4808a1d7872ba7865bee2bee12caecd0ba5a1a0f58e7d368a24257fe",
+    ]
+
+
+@pytest.mark.skipif(os.name != "posix" or not shutil.which("bash"), reason="POSIX packaging script")
+@pytest.mark.parametrize("lane,cache,platform,digests,deb_rc,rpm_rc,expected,rc", [
+    ("vendor", "miss", "linux/amd64", "match", 0, 0, ["apt-get", "dnf"], 0),
+    ("vendor", "repo", "linux/amd64", "match", 0, 0, ["apt-get", "dnf"], 0),
+    ("vendor", "config", "linux/amd64", "match", 0, 0, ["apt-get", "dnf"], 0),
+    ("vendor", "repo", "linux/arm64", "match", 0, 0, [], 1),
+    ("vendor", "repo", "linux/amd64", "none", 0, 0, [], 1),
+    ("vendor", "repo", "linux/amd64", "match", 23, 0, ["apt-get"], 23),
+    ("vendor", "repo", "linux/amd64", "match", 0, 29, ["apt-get", "dnf"], 29),
+    ("redos-ci", "miss", "linux/amd64", "match", 0, 0, ["dnf"], 0),
+    ("redos-ci", "config", "linux/amd64", "match", 0, 0, ["dnf"], 0),
+])
+def test_vendor_package_command_checks_identity_and_propagates_failure(
+    tmp_path, lane, cache, platform, digests, deb_rc, rpm_rc, expected, rc
+):
+    for name in ("dirname", "grep"):
+        (tmp_path / name).symlink_to(shutil.which(name))
+    red_ref, red_id = (REPO / "scripts/redos-ubi8.pin").read_text(encoding="ascii").split()
+    astra_ref = re.search(r'^ASTRA_IMAGE="([^"]+)"', (REPO / "scripts/smoke_linux_packages.sh").read_text(encoding="utf-8"), re.M)[1]
+    docker = tmp_path / "docker"
+    docker.write_text(r'''#!/bin/sh
+set -eu
+case "$1:$2" in
+    image:inspect)
+        if [ "$#" -eq 3 ]; then
+            case "$CACHE:$3" in
+                repo:registry.*|config:registry.astralinux.ru/*|config:sha256:*) exit 0 ;;
+                *) exit 1 ;;
+            esac
+        fi
+        case "$4" in
+            '{{range .RepoDigests}}{{println .}}{{end}}') if [ "$DIGESTS" = match ]; then echo "$5"; fi ;;
+            '{{.Os}}/{{.Architecture}} {{.Id}}')
+                case "$5" in
+                    registry.astralinux.ru/*) id=$ASTRA_ID ;;
+                    localhost/redos-smoke:*) [ -f "$TRACE/loaded" ] || exit 32; id=$LOADED_ID ;;
+                    *) id=$RED_ID ;;
+                esac
+                echo "$PLATFORM $id" ;;
+            *) exit 32 ;;
+        esac ;;
+    pull:*) echo "$2" >> "$TRACE/pulls" ;;
+    image:load) IFS= read -r archive && [ "$archive" = fixture ] && : > "$TRACE/loaded" ;;
+    run:--rm)
+        [ "$3" = --pull=never ] && [ "$4" = --mount ] && [ "$6" = --volume ] && [ "$9" = sh ] || exit 33
+        echo "$5" >> "$TRACE/mounts"
+        echo "$8" >> "$TRACE/images"
+        shift 9
+        status=0
+        /bin/sh "$@" || status=$?
+        # A stub exits 80 after recording a successful install. Nothing later in the container runs.
+        if [ "$status" -eq 80 ]; then exit 0; fi
+        exit "$status" ;;
+    *) exit 34 ;;
+esac
+''', encoding="utf-8")
+    docker.chmod(0o755)
+    writer = tmp_path / "python3"
+    writer.write_text('#!/bin/sh\n[ "$1" = -I ] && [ "${2##*/}" = ci_redos_image.py ] && echo fixture\n')
+    writer.chmod(0o755)
+    install = tmp_path / "apt-get"
+    install.write_text(r'''#!/bin/sh
+set -eu
+if [ "$1" = update ]; then exit 0; fi
+name=${0##*/}
+printf '%s\n' "$@" > "$TRACE/$name.args"
+case "$name" in apt-get) status=$DEB_RC ;; dnf) status=$RPM_RC ;; *) exit 35 ;; esac
+if [ "$status" -eq 0 ]; then exit 80; fi
+exit "$status"
+''', encoding="utf-8")
+    install.chmod(0o755)
+    (tmp_path / "dnf").symlink_to(install)
+    packages = tmp_path / 'built packages, "release"'
+    packages.mkdir()
+    deb, rpm = packages / "example package.deb", packages / "example package.rpm"
+    deb.touch()
+    rpm.touch()
+    astra_id = "sha256:" + "1" * 64
+    loaded_id = "sha256:" + "2" * 64
+    args = [str(deb), "unused.rpm", str(rpm)] if lane == "vendor" else [str(rpm)]
+    result = subprocess.run([shutil.which("bash"), str(REPO / "scripts/smoke_linux_packages.sh"), lane, *args],
+                            cwd=tmp_path, timeout=10,
+                            capture_output=True, text=True, env={
+                                "PATH": str(tmp_path), "TRACE": str(tmp_path), "PLATFORM": platform,
+                                "CACHE": cache, "DIGESTS": digests, "DEB_RC": str(deb_rc), "RPM_RC": str(rpm_rc),
+                                "ASTRA_ID": astra_id, "RED_ID": red_id, "LOADED_ID": loaded_id,
+                            })
+
+    def recorded(name):
+        path = tmp_path / name
+        return path.read_text().splitlines() if path.exists() else []
+
+    assert result.returncode == rc, result.stderr
+    imported = lane == "redos-ci" and cache == "miss"
+    assert (tmp_path / "loaded").exists() == imported
+    assert recorded("pulls") == ([astra_ref, red_ref] if lane == "vendor" and cache == "miss" else [])
+    ids = {"apt-get": astra_id, "dnf": loaded_id if imported else red_id}
+    paths = {"apt-get": deb, "dnf": rpm}
+    assert recorded("images") == [ids[name] for name in expected]
+    assert list(csv.reader(recorded("mounts"))) == [
+        ["type=bind", f"source={paths[name].resolve()}", f"target=/tmp/{paths[name].name}", "readonly"]
+        for name in expected
+    ]
+    assert recorded("apt-get.args") == (["install", "-y", "-qq", "/tmp/example package.deb"] if "apt-get" in expected else [])
+    assert recorded("dnf.args") == (["install", "-y", "-q", "/tmp/example package.rpm"] if "dnf" in expected else [])
+
+
+@pytest.mark.skipif(os.name != "posix" or not shutil.which("bash"), reason="POSIX packaging script")
+@pytest.mark.parametrize("path", ["missing/package.rpm", "absent.rpm", "."])
+def test_vendor_package_requires_a_real_file_before_docker(tmp_path, path):
+    (tmp_path / "dirname").symlink_to(shutil.which("dirname"))
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\n: > docker-called\nexit 90\n")
+    docker.chmod(0o755)
+    result = subprocess.run([shutil.which("bash"), str(REPO / "scripts/smoke_linux_packages.sh"), "redos", path],
+                            cwd=tmp_path, env={"PATH": str(tmp_path)}, capture_output=True, timeout=10)
+    assert result.returncode != 0
+    assert not (tmp_path / "docker-called").exists()
 
 
 def test_linux_packages_declare_and_resolve_the_git_runtime_dependency():
@@ -508,7 +635,8 @@ def test_linux_packages_ship_the_systemd_user_unit():
     assert "test -s /usr/lib/systemd/user/ouroboros.service" in smoke
     assert "grep -Fqx 'ExecStart=/opt/ouroboros/Ouroboros --launch-intent automatic'" in smoke
     assert "grep -Fqx 'KillMode=control-group'" in smoke
-    assert "! grep -q '^Restart='" in smoke
+    assert "grep -q '^Restart=' /usr/lib/systemd/user/ouroboros.service" in smoke
+    assert r'test \"\$restart_rc\" -eq 1' in smoke
 
     for proof_id in (
         "linux-deb-amd64",
@@ -542,19 +670,39 @@ def test_linux_package_smoke_starts_the_desktop_launcher_on_ubuntu_22_04():
 
 def test_vendor_distro_smoke_is_informational_and_never_gates_a_release():
     workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    vendor_job = workflow[
-        workflow.index("\n  vendor-package-smoke:\n") : workflow.index("\n  release:\n")
-    ]
-    assert "continue-on-error: true" in vendor_job
-    assert "smoke_linux_packages.sh vendor" in vendor_job
+    jobs = yaml.safe_load(workflow)["jobs"]
+    vendor = jobs["vendor-package-smoke"]
+    # Each vendor OS is a leg of its own, so one registry's outage never hides the other.
+    assert vendor["continue-on-error"] is True and vendor["strategy"]["fail-fast"] is False
+    assert vendor["strategy"]["matrix"] == {"include": [
+        {"leg": "astra", "os": "Astra Linux 1.8",
+         "package": release_proof.RELEASE_ASSET_TEMPLATES["linux-deb-amd64"]},
+        {"leg": "redos", "os": "RED OS 8",
+         "package": release_proof.RELEASE_ASSET_TEMPLATES["linux-rpm-red80-x86_64"]},
+    ]}
+    smoke = next(step for step in vendor["steps"] if step.get("id") == "vendor_smoke")
+    assert smoke["env"] == {"LEG": "${{ matrix.leg }}", "PACKAGE": "${{ matrix.package }}"}
+    assert 'bash scripts/smoke_linux_packages.sh "$LEG" "linux-artifacts/$package"' in smoke["run"]
+    report = next(step for step in vendor["steps"] if step.get("name") == "Report vendor smoke outcome")
+    assert report["if"] == "always()" and "steps.vendor_smoke.outcome" in report["run"]
+    [download] = [step["with"] for step in vendor["steps"] if "download-artifact@" in step.get("uses", "")]
+    assert download == {"name": "ouroboros-package-${{ matrix.leg }}", "path": "linux-artifacts/"}
+    uploads = {step["with"]["name"]: step["with"]["path"] for step in jobs["build"]["steps"]
+               if "upload-artifact@" in step.get("uses", "")}
+    assert uploads["ouroboros-package-astra"] == "${{ steps.linux_packages.outputs.deb }}"
+    assert uploads["ouroboros-package-redos"] == "${{ steps.linux_packages.outputs.rpm_red80 }}"
+    common = uploads["ouroboros-${{ matrix.os }}"].splitlines()
+    assert "dist/ouroboros_*_amd64.deb" not in common and "dist/ouroboros-*-1.red80.x86_64.rpm" not in common
+    assert "dist/ouroboros-*-1.x86_64.rpm" in common
+    assert any(step.get("with", {}).get("pattern") == "ouroboros-*" and step["with"].get("merge-multiple") is True
+               for step in jobs["release"]["steps"])
 
     # The gating lane runs every package through Docker Hub images only, so a
     # vendor registry outage cannot stop a tagged release.
     build_job = workflow[
         workflow.index("\n  build:\n") : workflow.index("\n  vendor-package-smoke:\n")
     ]
-    assert "smoke_linux_packages.sh official" in build_job
-    assert "smoke_linux_packages.sh vendor" not in build_job
+    assert re.findall(r"smoke_linux_packages\.sh (\S+)", build_job) == ["official"]
 
     release_needs = next(
         line
@@ -562,6 +710,97 @@ def test_vendor_distro_smoke_is_informational_and_never_gates_a_release():
         if line.strip().startswith("needs:")
     )
     assert "vendor-package-smoke" not in release_needs
+
+
+def test_only_hosted_red_os_ci_selects_the_registry_ca(monkeypatch):
+    jobs = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    [(name, smoke)] = [(name, step) for name, job in jobs.items() for step in job.get("steps", [])
+                       if "redos-ci" in step.get("run", "")]
+    assert name == "vendor-package-smoke" and jobs[name]["runs-on"] == "ubuntu-latest"
+    assert 'if [[ "$LEG" == redos ]]; then LEG=redos-ci; fi' in smoke["run"]
+    assert smoke["id"] == "vendor_smoke"
+    commands = "\n".join(step.get("run", "") for job in jobs.values() for step in job.get("steps", []))
+    assert "certs.d/registry.red-soft.ru" not in commands and ".github/certs/registry.red-soft.ru" not in commands
+
+    helper = runpy.run_path(str(REPO / "scripts/ci_redos_image.py"))
+    connect = Mock()
+    monkeypatch.setattr(helper["http"].client, "HTTPSConnection", connect)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "self-hosted")
+    with pytest.raises(ValueError, match="GitHub-hosted"):
+        helper["registry_connection"]()
+    connect.assert_not_called()
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    helper["registry_connection"]()
+    [(args, kwargs)] = connect.call_args_list
+    assert args == ("registry.red-soft.ru", 443)
+    context = kwargs["context"]
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    ca = REPO / ".github/certs/registry.red-soft.ru-2024.crt"
+    assert _digest(ca) == "6f9d829c8e6712444fce3624658d8788672849c5d5b7b53fd9cf7e83eac4193e"
+    assert context.get_ca_certs(binary_form=True) == [ssl.PEM_cert_to_DER_cert(ca.read_text(encoding="ascii"))]
+
+
+@pytest.mark.parametrize("changed_config", [False, True], ids=["matching", "changed-bytes"])
+def test_red_os_pinned_archive_retains_original_config_and_layer(tmp_path, changed_config):
+    # Inert data on a request recorder. No sockets, engine, credentials or installation.
+    helper = runpy.run_path(str(REPO / "scripts/ci_redos_image.py"))
+
+    def descriptor(data):
+        return {"size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+
+    layer = io.BytesIO()
+    with tarfile.open(fileobj=layer, mode="w"):
+        pass
+    content = layer.getvalue()
+    compressed = gzip.compress(content)
+    config = json.dumps({"os": "linux", "architecture": "amd64",
+                         "rootfs": {"type": "layers", "diff_ids": [descriptor(content)["digest"]]}}).encode()
+    manifest = json.dumps({"schemaVersion": 2, "mediaType": helper["MANIFEST_TYPE"],
+                           "config": descriptor(config), "layers": [descriptor(compressed)]}).encode()
+    served = config.replace(b'"layers"', b'"LAYERS"') if changed_config else config
+    responses = [io.BytesIO(data) for data in (b'{"token":"fixture"}', manifest, served, compressed)]
+    for response in responses:
+        response.status = 200
+    connection = Mock()
+    connection.getresponse.side_effect = responses
+    config_id = descriptor(config)["digest"]
+    manifest_id = descriptor(manifest)["digest"]
+    out = io.BytesIO()
+    if changed_config:
+        assert served != config and len(served) == len(config)
+        with pytest.raises(ValueError, match=f"content mismatch for {config_id}"):
+            helper["write_image"](connection, tmp_path, manifest_id, config_id, out)
+        assert not out.getvalue()
+        return
+    helper["write_image"](connection, tmp_path, manifest_id, config_id, out)
+    auth = {"Authorization": "Bearer fixture"}
+    prefix = "/v2/ubi8/ubi"
+    assert connection.request.call_args_list == [
+        call("GET", "/service/token?service=harbor-registry&scope=repository:ubi8/ubi:pull", headers={}),
+        call("GET", f"{prefix}/manifests/{manifest_id}", headers={**auth, "Accept": helper["MANIFEST_TYPE"]}),
+        call("GET", f"{prefix}/blobs/{config_id}", headers=auth),
+        call("GET", f"{prefix}/blobs/{descriptor(compressed)['digest']}", headers=auth),
+    ]
+    out.seek(0)
+    with tarfile.open(fileobj=out) as archive:
+        [item] = json.load(archive.extractfile("manifest.json"))
+        [layer_path] = item["Layers"]
+        assert archive.extractfile(item["Config"]).read() == config
+        assert archive.extractfile(layer_path).read() == content
+        assert item["RepoTags"] == ["localhost/redos-smoke:" + config_id.split(":")[1]]
+        assert set(archive.getnames()) == {"manifest.json", item["Config"], layer_path}
+
+
+@pytest.mark.parametrize("status", [302, 307, 401])
+def test_red_os_registry_requires_a_direct_success(status):
+    helper = runpy.run_path(str(REPO / "scripts/ci_redos_image.py"))
+    connection = Mock()
+    connection.getresponse.return_value.status = status
+    with pytest.raises(ValueError, match=f"HTTP {status}"):
+        helper["get"](connection, "/v2/", {})
+    connection.request.assert_called_once_with("GET", "/v2/", headers={})
 
 
 def test_macos_final_dmg_checks_its_own_desktop_imports_without_user_site():
@@ -746,7 +985,8 @@ def test_configured_signing_publishes_the_verified_signer(tmp_path: Path):
     }
     assert f"from **Example Publisher** (certificate SHA-1 `{SIGNER}`)" in notes
     assert "`Ouroboros.exe` and the bundled interpreter's `python.exe` and `pythonw.exe`" in notes
-    assert "(CPython 3.10.22 from python-build-standalone 20261009)" in notes
+    upstream = CATALOG["pythonUpstream"]
+    assert f"(CPython {upstream['pythonVersion']} from python-build-standalone {upstream['release']})" in notes
     assert "timestamped Authenticode signatures" in notes and "before and after signing" in notes
     # The scope boundary: nothing else in the ZIP, no later environment or Git update.
     assert "signs no other file in the ZIP" in notes and "later created from that interpreter" in notes

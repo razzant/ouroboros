@@ -300,7 +300,7 @@ root, repo, place = base / "data", base / "repo", base / "place"
 folder = place / "report"
 root.mkdir(exist_ok=True); repo.mkdir(exist_ok=True)
 state.init(root)
-workers.init(place if stage == "restart" and control == "protected_now" else repo, root, 1)
+workers.init(place if stage == "restart" and control == "protected_now" else repo, root)
 config.get_bg_wakeup_min_sec = lambda: 0
 now = datetime.datetime.now(datetime.timezone.utc)
 if stage == "admit":

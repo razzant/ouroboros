@@ -54,11 +54,10 @@ CONTEXT_ONLY_TASK_PROVENANCES = frozenset({
     "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
 })
 KIND_FINALIZE_NOW = "finalize_now"
-# Owner "hurry" control (HQ1, 2026-08-15): a task-local typed acceleration
-# directive — NEVER owner dialogue and NEVER revoked after drain (restart
-# re-drain must restore the attempt latch; only terminal cleanup removes it).
-# Its ``text`` is the parser-required internal reason ("owner_hurry"), not prose.
+# Hurry's internal reason is not dialogue; retained until terminal cleanup so a
+# restart's drain restores its attempt latch. Model mail only wakes a durable read.
 KIND_HURRY = "hurry"
+KIND_OWNER_MODEL = "owner_model"
 # Owner's verbatim quiz answer (#Q-2b): a typed control whose ``text`` is the
 # chosen option label (plus an optional owner comment) — delivered inside a
 # structural frame, never as forged free-form owner dialogue.
@@ -158,6 +157,12 @@ def place_arrival_wake(entry: Any) -> Optional[bool]:
     arrival = entry.get("place_arrival")
     wake = arrival.get("wake") if isinstance(arrival, dict) else None
     return wake if isinstance(wake, bool) else None
+
+
+def tier_only(entry: Any) -> bool:
+    """An owner tier act's mail (``owner_processing:<id>``): the round's drain applies it; alone it wakes nothing."""
+    return (isinstance(entry, dict) and entry.get("kind") == KIND_OWNER_MODEL
+            and str(entry.get("msg_id") or "").startswith("owner_processing:"))
 
 
 def acknowledged_task_message_ids(
@@ -808,7 +813,7 @@ class OwnerMailboxPeek:
     """One wait's proven-empty mailbox snapshot; never delivery or ACK authority.
 
     ``waking_only`` (an ordinary wait's peek) does not count a ``False`` place arrival
-    (``place_arrival_wake``): it stays unread for the next drain."""
+    (``place_arrival_wake``): it stays unread for the next drain. No peek counts a ``tier_only`` act."""
 
     def __init__(self, *, waking_only: bool = False) -> None:
         self._empty_key: Any = None
@@ -835,9 +840,8 @@ class OwnerMailboxPeek:
         self._empty_key = None
         status: Dict[str, bool] = {}
         # Drain changes only this private set; normal loop delivery owns the real one.
-        entries = drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
-        if self._waking_only:
-            entries = [entry for entry in entries if place_arrival_wake(entry) is not False]
+        entries = [row for row in drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
+                   if not tier_only(row) and not (self._waking_only and place_arrival_wake(row) is False)]
         if not entries and before is not None and status.get("complete"):
             try:
                 if before == self._fingerprint(root, task_id, attempt, seen):

@@ -124,14 +124,17 @@ def test_child_set_is_shared_within_pass_and_refreshed_afterwards(tmp_path, monk
         assert [row["task_id"] for row in direct] == ["child"]
         direct[0]["status"] = "mutated"
         with finalization_child_scope():
+            again = find_child_tasks(tmp_path, **query, scope="direct")
             subtree = find_child_tasks(tmp_path, **query, exclude_task_id="grandchild")
-            assert len(subtree) == 1 and subtree[0]["status"] == "completed"
-        assert select.call_count == 1
+            assert again[0]["status"] == "completed" and [row["task_id"] for row in subtree] == ["child"]
+        # A direct reader never pays for, nor sees, a subtree: each scope is its own projection.
+        assert [call.kwargs["direct_only"] for call in select.call_args_list] == [True, False]
         task_results.write_task_result(tmp_path, "later", "completed", delegation_role="subagent",
                                        parent_task_id="parent", root_task_id="parent")
         assert len(find_child_tasks(tmp_path, **query)) == 2
+        assert len(find_child_tasks(tmp_path, **query, scope="direct")) == 1
     assert len(find_child_tasks(tmp_path, **query)) == 3
-    assert select.call_count == 2
+    assert select.call_count == 3
 
 
 def test_child_cache_isolates_query_roots_modes_and_failed_passes(tmp_path, monkeypatch):

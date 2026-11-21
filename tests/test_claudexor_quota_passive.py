@@ -18,6 +18,7 @@ from starlette.testclient import TestClient
 
 from ouroboros import claudexor_daemon as owned
 from ouroboros import claudexor_runtime as runtime
+from ouroboros.gateway import claudexor_passive
 from ouroboros.gateway.claudexor_accounts import api_claudexor_status
 from ouroboros.gateways import claudexor as wire
 
@@ -55,6 +56,12 @@ ENGINE_FRESHNESS_QUOTA = {
 def passive_engine(monkeypatch, tmp_path):
     """Real descriptor discovery and gateway transport, no operator daemon."""
     config_dir = tmp_path / "claudexor"
+    from ouroboros.gateway import claudexor_accounts
+
+    monkeypatch.setattr(claudexor_accounts, "_STATUS_IN_FLIGHT", {})
+    monkeypatch.setattr(claudexor_accounts, "_FACET_MEMORY", {})
+    monkeypatch.setattr(claudexor_accounts, "_ACCOUNTS_REVISION", 0)
+    monkeypatch.setattr(claudexor_passive, "_last_sample", None, raising=False)
     monkeypatch.setattr(owned, "owned_config_dir", lambda: config_dir)
     calls = []
     clients = []
@@ -99,6 +106,15 @@ def passive_engine(monkeypatch, tmp_path):
                 "protocolMajor": wire.CLAUDEXOR_PROTOCOL_MAJOR,
                 "engine": {"version": wire.CLAUDEXOR_MIN_VERSION},
             })
+        if path == "/v2/credential-profiles/claude/work-research" and state.get("account_mutations"):
+            roster = deepcopy(state["responses"]["/v2/credential-profiles"])
+            if request.method == "DELETE":
+                roster["profiles"] = []
+            else:
+                assert request.method == "PATCH"
+                roster["profiles"][0]["profile"]["enabled"] = json.loads(request.content)["enabled"]
+            state["responses"]["/v2/credential-profiles"] = roster
+            return httpx.Response(200, json={"ok": True})
         assert request.method == "GET", "passive consumer sent a mutation or handshake"
         assert path in state["responses"], "passive consumer requested a diagnostic dependency"
         return httpx.Response(200, json=deepcopy(state["responses"][path]))
@@ -166,7 +182,7 @@ def test_quota_view_preserves_roster_and_one_quota_epoch_without_diagnostics(pas
                         "enabled": False, "kind": "native_session"},
             "status": {"verification": "passed", "verification_source": "local_store"},
             "identity": {"email": "quota-test@example.invalid", "plan": "pro"},
-        }],
+        }, {"profile": {"profile_id": "api-key", "harness_id": "openrouter", "kind": "api_key"}}],
         "harnessAccounts": [{"harness_id": "claude", "native_login_detected": True,
                              "identity": {"plan": "max"}}],
         "accountPools": [{"harness_id": "codex", "members": ["account-a"]}],
@@ -329,6 +345,37 @@ def test_quota_view_errors_are_bounded_and_preserve_successful_sibling(
     assert len(records) == 1
     assert records[0].args == (payload["reads"], payload["read_errors"], payload["timings_ms"])
     assert all(client.is_closed for client in engine.clients)
+
+
+def test_the_passive_record_is_a_dated_sample_on_change_or_once_a_minute_not_one_per_poll(passive_engine, caplog):
+    """The visible views poll every 5 s; engine_facts reads the newest INFO record. Between a change of
+    verdict or error and the next minute the same format logs at DEBUG, which server.log does not keep."""
+    engine = passive_engine
+    engine.provision()
+    caplog.set_level(logging.DEBUG, logger="ouroboros.gateway.claudexor_passive")
+
+    def levels():
+        found = [record.levelno for record in caplog.records if record.name == "ouroboros.gateway.claudexor_passive"]
+        caplog.clear()
+        return found
+
+    with TestClient(_app()) as client:
+        payloads = [_read(client) for _ in range(3)]
+        assert levels() == [logging.INFO, logging.DEBUG, logging.DEBUG]
+        # A minute later the steady state is sampled again.
+        sampled_at, verdict = claudexor_passive._last_sample
+        claudexor_passive._last_sample = (sampled_at - 61, verdict)
+        _read(client)
+        _read(client)
+        assert levels() == [logging.INFO, logging.DEBUG]
+        # A changed verdict or error code is news at once, in both directions.
+        engine.state["errors"]["/v2/quota"] = (503, {"code": "daemon_recovery_only", "message": "busy"})
+        failed = _read(client)
+        _read(client)
+        del engine.state["errors"]["/v2/quota"]
+        _read(client)
+        assert levels() == [logging.INFO, logging.DEBUG, logging.INFO]
+    assert failed["reads"]["quota"] == "failed" and payloads[0]["reads"]["quota"] == "ok"
 
 
 def test_quota_consumer_returns_while_full_status_catalog_is_still_blocked(passive_engine, monkeypatch):
@@ -566,6 +613,58 @@ def _full_status_engine(engine, monkeypatch, *, operations=None):
                         lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
 
 
+@pytest.mark.parametrize("view", ["", "?view=quota"])
+@pytest.mark.parametrize("method", ["PATCH", "DELETE"])
+def test_confirmed_account_write_fences_another_clients_earlier_read(passive_engine, monkeypatch, view, method):
+    from ouroboros.gateway.claudexor_accounts import api_claudexor_credential_profile
+
+    engine = passive_engine
+    _full_status_engine(engine, monkeypatch)
+    engine.state["responses"]["/v2/credential-profiles"] = {
+        "profiles": [deepcopy(_NAMED)], "accountPools": [_POOL]}
+    engine.state["account_mutations"] = True
+    roster_read, sibling_entered, release = Event(), Event(), Event()
+    original = wire.ClaudexorGateway.credential_profiles
+
+    def read_roster(gateway, **kwargs):
+        result = original(gateway, **kwargs)
+        roster_read.set()
+        return result
+
+    def hold_sibling(_request):
+        sibling_entered.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(wire.ClaudexorGateway, "credential_profiles", read_roster)
+    delayed_path = "/v2/quota" if view else "/v2/agent-capabilities"
+    engine.state["hooks"][delayed_path] = hold_sibling
+    engine.provision()
+    app = Starlette(routes=[
+        Route("/api/claudexor/status", api_claudexor_status),
+        Route("/api/claudexor/credential-profiles/{harness}/{profile_id}",
+              api_claudexor_credential_profile, methods=["PATCH", "DELETE"]),
+    ])
+    with TestClient(app) as reader, TestClient(app) as writer, ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(reader.get, "/api/claudexor/status" + view)
+        try:
+            assert roster_read.wait(5) and sibling_entered.wait(5)
+            arguments = {"json": {"enabled": False}} if method == "PATCH" else {}
+            confirmed = writer.request(method,
+                "/api/claudexor/credential-profiles/claude/work-research", **arguments)
+            assert confirmed.status_code == 200
+        finally:
+            release.set()
+        late = pending.result(5).json()
+        current = reader.get("/api/claudexor/status" + view).json()
+    assert late["reads"]["accounts"] == "not_read" and late["unified_accounts"] is False
+    assert not any(row["profile"]["enabled"] for row in late["profiles"].get("profiles", []))
+    assert late["reads"]["quota"] == "ok", "account ordering never discards an independent quota read"
+    assert current["reads"]["accounts"] == "ok" and current["unified_accounts"] is True
+    assert current["profiles"]["profiles"] == ([] if method == "DELETE" else [
+        {**_NAMED, "profile": {**_NAMED["profile"], "enabled": False}}])
+    assert "account_revision" not in late and "accountRevision" not in late
+
+
 @pytest.mark.parametrize("body,state,code,unified", [
     ({"profiles": [_NAMED], "harnessAccounts": [], "accountPools": [_POOL]}, "ok", None, True),
     ({"profiles": [_NAMED], "accountPools": [_POOL]}, "ok", None, True),
@@ -622,3 +721,23 @@ def test_a_unified_roster_is_not_downgraded_by_the_operations_catalog(passive_en
     # The catalog keeps its own job: resource capabilities say what happened to THAT read.
     expected_capabilities = "ok" if isinstance(operations, list) else "failed"
     assert full["resource_capabilities_read"] == expected_capabilities
+
+
+def test_the_passive_reader_does_not_load_the_http_accounts_module(tmp_path):
+    """The HTTP handler fences each passive answer; the reader (also the agent worker's) stays independent."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import pathlib, sys\n"
+        "from ouroboros import claudexor_daemon\n"
+        "from ouroboros.gateway import claudexor_passive\n"
+        "claudexor_daemon.owned_config_dir = lambda: pathlib.Path(sys.argv[1])\n"
+        "payload = claudexor_passive._quota_payload()\n"
+        "assert payload['read_errors'].get('discovery'), payload\n"
+        "print('ouroboros.gateway.claudexor_accounts' in sys.modules)\n")
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path / "no-daemon")], capture_output=True,
+                            text=True, cwd=Path(__file__).resolve().parents[1], timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "False"

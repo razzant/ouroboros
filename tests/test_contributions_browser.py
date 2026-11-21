@@ -121,11 +121,12 @@ def test_a_saved_reply_offers_the_skill_action_and_a_failing_page_module_costs_o
     answer = page.locator(".chat-bubble.assistant").first
     action = answer.locator(".chat-message-actions > [data-message-action='contribution:lists:save']")
     action.wait_for()
-    # The host's Read aloud (the voice module registered a device engine) comes first, the skill's action after it.
+    # The host's own actions (Read aloud: the voice module registered a device engine; Share) come first, the skill's
+    # action after them.
     answer.locator("[data-message-action='read-aloud']").wait_for()
     controls = answer.locator(".chat-message-actions > *").evaluate_all(
         "nodes => nodes.map(node => node.dataset.messageAction || node.className.split(' ')[0])")
-    assert controls == ["chat-message-reply", "read-aloud", "contribution:lists:save", "chat-message-copy"], controls
+    assert controls == ["chat-message-reply", "read-aloud", "share", "contribution:lists:save", "chat-message-copy"], controls
     targets = answer.locator(".chat-message-actions > *").evaluate_all(
         "nodes => nodes.every(node => node.classList.contains('ui-hit-area'))")
     assert targets, "under a finger every control of the row has the same hit area"
@@ -176,10 +177,19 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     menu.wait_for()
     items = menu.locator("[role=menuitem]").all_inner_texts()
     assert [text.strip() for text in items] == [
-        "Attach file", "Explain simpler", "Add to list", "Add dictation…", "Make a button…"], items
+        "Attach file", "Search this chat", "Explain simpler", "Add to list", "Add dictation…", "Make a button…"], items
     assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Add to composer"], \
         "each skill under its label, the host's own items last under what they do"
     assert menu.locator("[data-plus-item='templates:simpler'] svg").count() == 1, "a skill's glyph from the host set"
+    glyphs = page.evaluate("""async () => {
+        const { fluentIcon, controlIcon } = await import('/static/modules/page_icons.js');
+        const drawn = (svg) => { const box = document.createElement('span'); box.innerHTML = svg; return box.innerHTML; };
+        const item = (key) => document.querySelector(
+            `.chat-plus-menu:not([data-leaving]) [data-plus-item='${key}'] .chat-plus-icon`)?.innerHTML;
+        return { search: item('search'), magnifier: drawn(fluentIcon('search', 16, 'regular')),
+            cap: drawn(controlIcon('skills', 16)) };
+    }""")
+    assert glyphs["search"] == glyphs["magnifier"] != glyphs["cap"], "Search this chat wears the magnifier, not Skills' cap"
     box = menu.bounding_box()
     assert box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5, box
     assert page.evaluate("document.activeElement.id") == "chat-input", "a pointer leaves the field its focus"
@@ -194,6 +204,8 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     page.keyboard.press("Enter")
     menu.wait_for()
     assert page.evaluate("document.activeElement.dataset.plusItem") == "attach"
+    page.keyboard.press("ArrowDown")
+    assert page.evaluate("document.activeElement.dataset.plusItem") == "search", "the host's room actions first"
     page.keyboard.press("ArrowDown")
     page.keyboard.press("ArrowDown")
     assert page.evaluate("document.activeElement.dataset.plusItem") == "lists:add"
@@ -221,7 +233,10 @@ ROW = """() => {
             left: rect(slot).left, clientWidth: slot.clientWidth, scrollWidth: slot.scrollWidth, folded: slot.dataset.folded || '' },
         children: [...row.children].map((node) => [node.className, rect(node).left, rect(node).right]),
         moreWidth: more && !more.hidden ? rect(more).width : null,
-        lines: new Set([...row.children].filter((node) => rect(node).width > 0).map((node) => Math.round(rect(node).top))).size,
+        // Latest is absolute, above the phone's line (the approved shell's composer end): it adds no line of capsules
+        // or chips.
+        lines: new Set([...row.children].filter((node) => rect(node).width > 0 && !node.matches('.chat-scroll-bottom-btn'))
+            .map((node) => Math.round(rect(node).top))).size,
         rowHeight: rect(row).height, rowRight: rect(row).right, compact: row.dataset.ownerCompact || '',
         hosts: [...row.children].filter((node) => node !== slot && rect(node).width > 0)
             .map((node) => [node.className, Math.round(rect(node).width * 2) / 2]),
@@ -238,8 +253,10 @@ ROW = """() => {
 
 
 def _record(evidence):
+    # The folder is the run's (a retry's or a local run's may not exist yet): a missing one is made, never a red.
     root = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
     if root:
+        Path(root).mkdir(parents=True, exist_ok=True)
         (Path(root) / "chips-rows.json").write_text(json.dumps(evidence, indent=1), encoding="utf-8")
 
 
@@ -323,7 +340,7 @@ def test_hold_all_starts_without_page_code_and_start_it_mounts_it_in_place(subsc
     page, loaded, _posted = open_app(subscription_ui, "/?hold=all#chat")
     notice = toast(page, "did not start: this page was opened with everything held.")
     notice.wait_for()
-    page.locator(".chat-bubble.assistant .chat-message-action").wait_for()
+    page.locator(".chat-bubble.assistant .chat-message-action[data-message-action^='contribution:']").wait_for()
     assert loaded == [], "no page module is even fetched"
     assert page.evaluate("window.voiceContext") is None
     assert urlparse(page.url).query == "", "the flag leaves the address once read: a reload starts as usual"

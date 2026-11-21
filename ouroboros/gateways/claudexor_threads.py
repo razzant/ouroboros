@@ -1,4 +1,4 @@
-"""Claudexor v3 conversation threads: create, append, read, export and conditional retirement.
+"""Claudexor v3 conversation threads: create, append, turn lookup, read, export and conditional retirement.
 
 Transport only, beside ``gateways/claudexor.py`` (docs/DEVELOPMENT.md "Gateway Boundary
 Pattern"): the engine owns continuity, export inventories and the retirement decision; this
@@ -17,6 +17,7 @@ import hashlib
 from typing import Any, Dict
 from urllib.parse import quote, urlencode
 
+from ouroboros.gateways.claudexor_metadata import STORE_IDENTITY
 from ouroboros.runtime_limits import CLAUDEXOR_WHOLE_BYTES_READ_SEC
 
 THREAD_RETIRE_OPERATION = ("POST", "/v2/threads/:id/retire")
@@ -53,14 +54,20 @@ class ClaudexorThreadGateway:
         return body
 
     def start_thread_turn(self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
-        """Append one turn through the public v3 thread pipeline."""
+        """Append one turn through the public v3 thread pipeline; its receipt names the admitting store."""
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
         body = self._request("POST", _thread_path(thread_id, "turns"), json_body=dict(request),
-                             headers={"Idempotency-Key": str(idempotency_key)})
+                             headers={"Idempotency-Key": str(idempotency_key), **STORE_IDENTITY})
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "thread turn returned no handle")
         return body
+
+    def lookup_thread_turn(self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
+        """``POST /v2/threads/:id/turns/lookup``: the turn a recorded append holds, read with that append's own
+        body and key; nothing is appended or enqueued. The engine's answer is returned unprojected."""
+        return _object(self._request("POST", _thread_path(thread_id, "turns", "lookup"), json_body=dict(request),
+                                     headers={"Idempotency-Key": str(idempotency_key)}), "thread turn lookup")
 
     def get_thread(self, thread_id: str) -> Dict[str, Any]:
         """Read turns, native-session bindings, and continuity receipts."""

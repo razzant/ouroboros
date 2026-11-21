@@ -216,7 +216,6 @@ def test_review_lifecycle_installs_deps_after_warnings(tmp_path, monkeypatch):
 
 
 def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     long_reason = "x" * 400
     outcome = SkillReviewOutcome(
         skill_name="alpha",
@@ -229,14 +228,56 @@ def test_review_result_message_prefers_non_pass_findings_and_marks_omissions(mon
 
     message = _review_result_message(outcome)
 
-    assert message.startswith("Review blocked: blocker findings (blockers): FAIL extension_namespace_discipline")
+    # Outside Cyber Pro blockers do not stop the skill: the outcome names its findings.
+    assert message.startswith("Review executable with findings (blockers): FAIL extension_namespace_discipline")
     assert "manifest_schema" not in message
     assert "[omitted " in message
     assert "full findings in Skills page" in message
 
 
+@pytest.mark.parametrize("facts, executable", [
+    ({}, True), ({"strict_review": True}, False), ({"strict_review": True, "owner_edit_digest": "CURRENT"}, True),
+], ids=["any_source", "source_that_reviews_each_skill", "owner_edit_of_these_bytes"])
+def test_the_review_payload_and_its_line_say_what_the_persisted_gate_says_of_blockers(tmp_path, monkeypatch, facts,
+                                                                                      executable):
+    """Blockers keep a skill off only when its source reviews each skill and no basis admits these bytes (an owner
+    edit of them does): the review's payload and its result line say what the persisted gate decided (REV8 F4,
+    REV8D N1)."""
+    _reset_queue()
+    sent = []
+    drive_root, repo_dir, skills_root = tmp_path / "drive", tmp_path / "repo", tmp_path / "skills"
+    for path in (drive_root, repo_dir, skills_root):
+        path.mkdir()
+    skill_dir = _build_extension(skills_root, "alpha")
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
+    findings = [{"item": "bug_hunting", "verdict": "FAIL", "severity": "critical", "reason": "unsafe path"}]
+
+    def fake_review(_ctx, skill_name):
+        save_review_state(drive_root, skill_name,
+                          SkillReviewState(status="blockers", content_hash=content_hash, findings=findings))
+        return SkillReviewOutcome(skill_name=skill_name, status="blockers", content_hash=content_hash,
+                                  reviewer_models=["fake/reviewer"], findings=findings, error="")
+
+    acceptance = {key: content_hash if value == "CURRENT" else value for key, value in facts.items()}
+    monkeypatch.setattr("ouroboros.skill_acceptance.load_acceptance_facts", lambda *_a, **_k: dict(acceptance))
+    # This fixture extension is not admitted by PluginAPI; admission is not what this test is about.
+    monkeypatch.setattr("ouroboros.skill_acceptance.admitted_acceptance", lambda facts, _manifest: facts)
+    monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: sent.append((a, kw)))
+    monkeypatch.setattr("ouroboros.skill_dependencies.ensure_skill_dependencies", lambda *_a, **_k: ("installed", ""))
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_extension_payload",
+                        lambda *_a, **_k: reconcile_receipt())
+
+    payload = run_skill_review_lifecycle_blocking(ctx, "alpha", source="test", review_impl=fake_review,
+                                                  repo_path=str(skills_root))
+
+    assert payload["status"] == "blockers" and payload["executable_review"] is executable, payload["review_gate"]
+    line = ("Review executable with findings (blockers)" if executable else "Review blocked: blocker findings (blockers)")
+    completed = [str(args[1]) for args, kwargs in sent if kwargs.get("is_progress") and "completed" in str(args[1])]
+    assert any(line in text for text in completed), completed
+
+
 def test_review_result_message_allows_warnings_status(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
         status="warnings",
@@ -252,7 +293,6 @@ def test_review_result_message_allows_warnings_status(monkeypatch):
 @pytest.mark.parametrize("status", ["pending", "blockers"])
 def test_review_result_message_keeps_cyber_permission_apart_from_the_critic_outcome(monkeypatch, access, status):
     """The chat summary never calls a pending or blocked review "executable" because Cyber Pro may run it."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(skill_name="alpha", status=status,
                                  findings=[{"item": "bug_hunting", "verdict": "FAIL", "reason": "unsafe path"}])
     message = _review_result_message(outcome)
@@ -261,12 +301,11 @@ def test_review_result_message_keeps_cyber_permission_apart_from_the_critic_outc
         assert message.startswith(expected) and "Review executable" not in message
         assert message.endswith(" | Cyber Pro: execution is Ouroboros's decision, not a review result")
     else:
-        assert message.startswith({"pending": "Review pending", "blockers": "Review blocked: blocker findings"}[status])
+        assert message.startswith({"pending": "Review pending", "blockers": "Review executable with findings (blockers)"}[status])
         assert "Cyber Pro" not in message
 
 
 def test_review_result_message_includes_auto_granted_keys(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
         status="pass",
@@ -280,7 +319,6 @@ def test_review_result_message_includes_auto_granted_keys(monkeypatch):
 
 
 def test_review_result_message_includes_auto_granted_permissions(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     outcome = SkillReviewOutcome(
         skill_name="alpha",
         status="pass",
@@ -1125,9 +1163,8 @@ def access(request):
 
 
 @pytest.mark.parametrize("access", ["advanced", "cyber_pro"], indirect=True)
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
 @pytest.mark.parametrize("prior", ["missing", "clean", "author", "stale"])
-def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, monkeypatch, access, enforcement, prior):
+def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, monkeypatch, access, prior):
     """A second request for the same skill and bytes answers with the live job.
 
     It is a pointer, not an attempt: the job file still belongs to the live
@@ -1146,7 +1183,6 @@ def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, 
     from ouroboros.skill_loader import SkillReviewState, save_review_state
     from ouroboros.review_records import build_author_disposition
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     current_hash = outcome("alpha").content_hash
     if prior != "missing":
         author = build_author_disposition(
@@ -1192,9 +1228,9 @@ def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, 
     assert "error" not in first and first["payload"]["status"] == "clean"
     assert live["status"] == "running"
     assert duplicate["status"] == "pending"
-    executable = access == "cyber_pro" or prior == "clean" or (prior == "author" and enforcement == "advisory")
+    executable = access == "cyber_pro" or prior in {"clean", "author"}
     assert duplicate["executable_review"] is duplicate["review_gate"]["executable_review"] is executable
-    if access != "cyber_pro" and prior == "author" and enforcement == "advisory":
+    if access != "cyber_pro" and prior == "author":
         assert duplicate["review_gate"]["blocking_reason"] == "author_accepted_advisory"
     assert duplicate["job_id"] == live["job_id"]
     assert duplicate["job_status"] == "running"

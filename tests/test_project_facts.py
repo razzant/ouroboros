@@ -167,15 +167,18 @@ def test_generic_tools_deny_project_store_live(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(("path", "hint", "wrong"), [
     ("projects/proj_x/workpad.md", "workpad_read(project_id='proj_x') reads it and "
-     "workpad_write(project_id='proj_x', content=...) replaces it", "knowledge_read"),
+     "workpad_write(project_id='proj_x', mode=..., expected_revision=...) writes it (edit changes parts", "knowledge_read"),
+    ("projects/proj_x/workpad_history.jsonl", "memory_read(source='workpad:proj_x') reads it and each workpad_write "
+     "appends its row", "knowledge_read"),
     ("projects/proj_x/journal.jsonl", "journal_read(project_id='proj_x') reads it and "
      "journal_write(project_id='proj_x', kind=..., text=...) appends to it", "knowledge_read"),
     ("projects/proj_x/logs/task_reflections.jsonl",
      "journal_read(project_id='proj_x', source='reflections') reads it", "it writes it"),
     ("projects/proj_x/knowledge/notes/arch.md",
      "knowledge_read(topic='notes/arch', scope='project:proj_x') reads it and "
-     "knowledge_write(topic='notes/arch', scope='project:proj_x', content=..., expected_revision=...) writes it; "
-     "expected_revision is the revision knowledge_read returned", "root task"),
+     "knowledge_write(topic='notes/arch', scope='project:proj_x', mode=..., content=..., expected_revision=...) writes "
+     "it (edit changes exact text, append adds at the end, overwrite replaces it); expected_revision is the revision "
+     "knowledge_read returned", "root task"),
     ("projects/proj_x/knowledge/patterns.md", "Topic 'patterns' is global-only", "topic='patterns', scope="),
     ("projects/proj_x/knowledge/overview.md", "never this project copy; knowledge_list(scope='project:proj_x') may "
      "still list it", "topic='overview', scope="),
@@ -243,11 +246,15 @@ def test_project_knowledge_hints_match_what_the_knowledge_tools_address(tmp_path
     (cfg.DATA_DIR / "memory" / "knowledge" / "patterns.md").write_text("GLOBAL PATTERNS\n", encoding="utf-8")
     ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
 
-    assert "expected_revision=" in project_store_access_block("projects/proj_x/knowledge/arch.md")
-    assert "revision_required" in _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x")
+    hint = project_store_access_block("projects/proj_x/knowledge/arch.md")
+    assert "mode=..." in hint and "expected_revision=" in hint  # the call the hint names chooses its operation
+    assert _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x").startswith("⚠️ TOOL_ARG_ERROR: mode is missing")
+    assert "revision_required" in _knowledge_write(ctx, "arch", "NEW\n", mode="overwrite", scope="project:proj_x")
+    assert (shelf / "arch.md").read_text(encoding="utf-8") == "PROJECT NOTE\n"
     read = _knowledge_read(ctx, "arch", scope="project:proj_x")
     revision = json.loads(read.split("\n", 1)[0].removeprefix("[Knowledge source] "))["revision"]
-    assert _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x", expected_revision=revision).startswith("✅")
+    assert _knowledge_write(ctx, "arch", "NEW\n", mode="overwrite", scope="project:proj_x",
+                            expected_revision=revision).startswith("✅")
     assert (shelf / "arch.md").read_text(encoding="utf-8") == "NEW\n"
 
     assert "global-only" in project_store_access_block("projects/proj_x/knowledge/patterns.md")
@@ -264,23 +271,26 @@ def test_project_store_write_refusal_names_the_writer_and_its_current_project_li
     ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
     refusal = core._data_write(ctx, "projects/proj_x/workpad.md", "OVERWRITE")
     assert "ACCESS_DENIED" in refusal and "knowledge_write" not in refusal
-    assert "workpad_write(project_id='proj_x', content=...) replaces it" in refusal
+    assert "workpad_write(project_id='proj_x', mode=..., expected_revision=...) writes it" in refusal
     assert "it writes it only as a root task placed in no project (such as Main)" in refusal
     assert not (cfg.DATA_DIR / "projects" / "proj_x" / "workpad.md").exists()
     # The named writer behaves as announced: its own project and an unplaced root write it;
     # a root placed in another project and a restricted child never do.
     own = types.SimpleNamespace(task_id="t", drive_root=cfg.DATA_DIR, project_id="proj_x", task_metadata={})
-    assert _workpad_write(own, "PLAN").startswith("OK:") and _workpad_read(own) == "PLAN"
+    page = cfg.DATA_DIR / "projects" / "proj_x" / "workpad.md"
+    assert _workpad_write(own, "PLAN").startswith("OK:") and page.read_bytes() == b"PLAN"
+    assert _workpad_read(own).endswith("\n\nPLAN")
     main = types.SimpleNamespace(task_id="main", drive_root=cfg.DATA_DIR, project_id="",
                                  task_metadata={"root_task_id": "main"})
-    assert _workpad_write(main, "MAIN PLAN", "proj_x").startswith("OK:") and _workpad_read(own) == "MAIN PLAN"
+    main_write = _workpad_write(main, "MAIN PLAN", "proj_x")  # another task's page replaced blind: it lands, warned
+    assert main_write.startswith("⚠️ BLIND_OVERWRITE") and page.read_bytes() == b"MAIN PLAN", main_write
     placed = types.SimpleNamespace(task_id="root", drive_root=cfg.DATA_DIR, project_id="mine",
                                    task_metadata={"root_task_id": "root"})
     child = types.SimpleNamespace(task_id="child", drive_root=cfg.DATA_DIR, project_id="",
                                   task_metadata={"delegation_role": "subagent"})
     assert _workpad_write(placed, "FOREIGN", "proj_x").startswith("⚠️ TOOL_FORBIDDEN")
     assert _workpad_write(child, "FOREIGN", "proj_x").startswith("⚠️ TOOL_FORBIDDEN")
-    assert _workpad_read(own) == "MAIN PLAN"
+    assert page.read_bytes() == b"MAIN PLAN"
 
 
 def test_explicit_project_id_strict_validation():

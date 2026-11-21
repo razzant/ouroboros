@@ -7,7 +7,7 @@ import pytest
 from ouroboros import consciousness_view, dialogue_store, usage_accounting
 from ouroboros.gateway.history import _assemble_history_response, _copy_task_summary_metadata
 from ouroboros.projects_registry import bind_task_to_project, create_project
-from ouroboros.task_results import write_task_result
+from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_store import delete_document
 from ouroboros.terminal_projection import _project_row
 from tests._store_shared import seed_result
@@ -143,3 +143,54 @@ def test_a_page_without_the_terminal_row_still_carries_the_runs_sentence_and_ori
     assert settled and all(row["suggested_name"] == "Daily check" for row in settled)
     assert any(row.get("wake_summary") == "The run found no faults." and row.get("schedule_name") == "Daily check" for row in settled)
     assert "PRIVATE NOTE" not in json.dumps(response, ensure_ascii=False)
+
+
+def test_terminal_row_keeps_the_custody_fact_its_phase_uses(tmp_path):
+    """The phase and its browser twin must receive the same current debt, including a known empty list."""
+    for debt in (["run-x"], []):
+        row = {"task_id": "debt-task", "status": "completed", "reason_code": "final_message",
+               "delegated_runs_unreconciled": debt, "outcome_axes": {
+                   "execution": {"status": "ok"}, "review": {"status": "pass"},
+                   "objective": {"status": "pass", "source": "result_review"}}}
+        projected = _project_row("debt-task", row, {}, {"chat_id": 1})
+        assert projected["outcome_phase"] == ("warn" if debt else "done")
+        assert projected.get("delegated_runs_unreconciled") == debt
+
+
+@pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
+def test_a_late_pass_gives_the_ending_row_the_current_outcome_beside_its_recorded_phase(tmp_path, monkeypatch, verdict):
+    """The ending row stays the observation it recorded (Done with warnings: Ouroboros finished before its reviewers
+    answered). When the late review then PASSes exactly the delivered answer, the same history read also carries the
+    task's current outcome (``late_review_marks.late_current_outcome``, the one the live event carries), so a reload
+    reads what the open card shows; a late FAIL adds nothing."""
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import _objective_axis
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rec-1", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    stored = write_task_result(tmp_path, "late-task", "completed", chat_id=1, root_task_id="late-task",
+                               delegation_role="root", result="The answer.", terminal_origin="model_final",
+                               reason_code="final_message", outcome_axes={
+                                   "execution": {"status": "ok"}, "review": review, "objective": _objective_axis(review)})
+    ending = _project_row("late-task", stored, {}, {"chat_id": 1})
+    dialogue_store.append(tmp_path, "progress", {"task_id": "late-task", "chat_id": 1, "content": "Checking",
+                                                 "ts": ending["ts"], "narration": True})
+    dialogue_store.append(tmp_path, "chat", ending)
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": verdict}})
+    assert resolve_pending_result_review(tmp_path, "late-task", "rec-1") is (verdict == "PASS")
+    response = json.loads(_assemble_history_response(tmp_path, 1, 50, 200))
+    [evidence] = [row for row in response["messages"] if row.get("task_id") == "late-task" and row.get("historical_terminal")]
+    assert evidence["historical_terminal"]["phase"] == "warn", "the ending row stays as it was recorded"
+    if verdict == "PASS":
+        current, row = evidence["current_outcome"], load_task_result(tmp_path, "late-task")
+        assert current["outcome_phase"] == "done" and current["_result_text_present"] is True
+        assert current["outcome_axes"]["review"] == {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}
+        assert {key: value for key, value in row["outcome_axes"]["review"].items()
+                if key not in {"pending_finish_resolved", "late_verdict"}} == current["outcome_axes"]["review"]
+        assert "The answer." not in json.dumps(current), "the card's facts, never the answer"
+    else:
+        assert "current_outcome" not in evidence

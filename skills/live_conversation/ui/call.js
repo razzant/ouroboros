@@ -137,7 +137,7 @@ export class CallSession {
             const resume = context.resume();
             resume.catch(() => {});
             this.resuming = resume;
-            // This client's chosen microphone and cleaning (Settings → Live calls), else the system's own.
+            // This client's chosen microphone and cleaning (Settings → Voice and calls), else the system's own.
             const prefs = loadDevicePrefs(this.env);
             const pending = acquire({ owner: this, label: 'Live Conversation', keepWhenHidden: true,
                 constraints: microphoneConstraints(prefs).audio });
@@ -462,11 +462,7 @@ export function mountCall({ page, chatId, env = globalThis, ws = null, label = (
         if (action.kind === 'reveal') return [...rooms].find(room => room.session.active && room !== entry)?.reveal();
         if (action.kind === 'settings') {
             session.dismiss();
-            await openSettings(action.tab);
-            const target = action.focus ? doc.getElementById(action.focus) : null;
-            target?.closest('details')?.setAttribute('open', '');
-            target?.scrollIntoView?.({ block: 'center' });
-            target?.focus?.({ preventScroll: true });
+            await openSettings(action.path, { row: action.row });
             return undefined;
         }
         if (action.kind === 'open_browser' || action.kind === 'get_app') {

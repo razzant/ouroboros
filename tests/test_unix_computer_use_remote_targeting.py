@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 
-from tests.test_unix_computer_use_targeting import API, KEYNOTE, SAFARI, load_plugin, receipt
+from tests._unix_computer_use import API, CONTINUE, KEYNOTE, SAFARI, STOPPED, StopAPI, load_plugin, receipt
 
 # --- remote targets: OSWorld guest and a Mac over SSH ------------------------------------------
 
@@ -168,6 +168,56 @@ def test_osworld_guest_precheck_withholds_an_input_when_the_target_left_the_fron
     assert out["front"]["pid"] == 4242 and "nothing more was sent" in out["error"]
 
 
+def test_osworld_a_stop_between_chords_withholds_the_next_remote_input(tmp_path, monkeypatch):
+    """The host's Stop of the call is read last before each chord's remote call; a refusal never reaches the guest."""
+    def answer(code, index):
+        if "wmctrl -lpxG" in code:
+            return 0, listing(KEYNOTE_FRONT)
+        return 0, f"__FRONT_BEFORE__{KEYNOTE_FRONT}\n__FRONT_AFTER__{KEYNOTE_FRONT}\n"
+    module, _plain, guest = osworld(tmp_path, monkeypatch, answer)
+    reads: list = []
+    api = StopAPI(tmp_path / "state", reads, [CONTINUE, STOPPED])
+    module.register(api)
+    out = receipt(api.tools["key"](keys="down return", app="Keynote"))
+    assert out.get("status") == out["reason"] == "stopped" and "ok" not in out and "error" not in out, out
+    assert out["dispatched"] is False
+    assert out["steps_done"] == 1 and out["observed_effect"] is True and "cancelled" in out["note"]
+    actions = [command for command in guest.commands if "pyautogui" in command[-1]]
+    assert len(actions) == 1 and "pyautogui.press('down')" in actions[0][-1], "the second chord never reached the guest"
+    assert reads == [["get_stop_state"], ["get_stop_state"]]
+
+
+def test_osworld_a_stop_before_the_first_chord_sends_nothing_and_the_switch_keeps_its_mark(tmp_path, monkeypatch):
+    """The first chord asks too, after the guest switch: no input reaches the guest, the observed switch keeps its
+    mark, and an untargeted refusal makes no guest call at all."""
+    def answer(code, index):
+        if "wmctrl -lpxG" in code:
+            return 0, listing(FIREFOX_FRONT)
+        if "wmctrl -i -a" in code:
+            return 0, "__FRONT_AFTER__" + KEYNOTE_FRONT + "\n"
+        return 0, f"__FRONT_BEFORE__{KEYNOTE_FRONT}\n__FRONT_AFTER__{KEYNOTE_FRONT}\n"
+    module, _plain, guest = osworld(tmp_path, monkeypatch, answer)
+    reads: list = []
+    api = StopAPI(tmp_path / "state", reads, [STOPPED, CONTINUE, STOPPED, STOPPED])
+    module.register(api)
+    early = receipt(api.tools["key"](keys="right", app="Keynote"))
+    assert early["status"] == "stopped" and early["dispatched"] is False
+    assert early["backend"] == "osworld_http" and early["front"]["pid"] == 4242
+    assert "observed_effect" not in early and "activation_done" not in early
+    assert len(guest.commands) == 1 and "wmctrl -lpxG" in guest.commands[0][-1]
+    out = receipt(api.tools["key"](keys="right", app="Keynote"))
+    assert out.get("status") == out["reason"] == "stopped" and "ok" not in out and "error" not in out, out
+    assert out["dispatched"] is False
+    assert out["backend"] == "osworld_http" and out["observed_effect"] is True and out["activation_done"] is True
+    assert "the switch to Keynote ran before it" in out["note"] and "cancelled" in out["note"]
+    assert len(guest.commands) == 3 and not any("pyautogui" in command[-1] for command in guest.commands)
+    plain = receipt(api.tools["key"](keys="return"))
+    assert plain.get("status") == plain["reason"] == "stopped" and "ok" not in plain and "error" not in plain, plain
+    assert "observed_effect" not in plain
+    assert plain["note"].startswith("the input was not sent; ") and len(guest.commands) == 3
+    assert len(reads) == 4
+
+
 def test_osworld_window_list_failure_is_not_an_empty_desktop(tmp_path, monkeypatch):
     module, api, guest = osworld(tmp_path, monkeypatch, lambda code, index: (127, "\n__ACTIVE__\n"))
     rows = receipt(api.tools["window_list"]())
@@ -225,6 +275,34 @@ def mac_over_ssh(front, after=None, input_stderr=""):
             return 0, f"__FRONT_BEFORE__{info_line(now)}\n{stage}__FRONT_AFTER__{info_line(now)}\n", input_stderr
         return 0, ""
     return script
+
+
+def test_ssh_a_stop_between_chords_keeps_a_non_error_partial_receipt(tmp_path, monkeypatch):
+    module, _plain, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(KEYNOTE))
+    reads: list = []
+    api = StopAPI(tmp_path / "state", reads, [CONTINUE, STOPPED])
+    module.register(api)
+    out = receipt(api.tools["key"](keys="down return", app="Keynote"))
+    assert out.get("status") == out["reason"] == "stopped" and "ok" not in out and "error" not in out, out
+    assert out["steps_done"] == 1 and out["steps_total"] == 2 and out["dispatched"] is False
+    assert out["observed_effect"] is True and "cancelled" in out["note"]
+    assert len([argv for argv in calls if is_input(argv[-1])]) == 1
+    assert reads == [["get_stop_state"], ["get_stop_state"]]
+
+
+@pytest.mark.parametrize("after_switch", [False, True])
+def test_ssh_key_checks_after_inventory_and_again_before_input(tmp_path, monkeypatch, after_switch):
+    module, _, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, KEYNOTE))
+    api = StopAPI(tmp_path / "state", [], [CONTINUE, STOPPED] if after_switch else [STOPPED])
+    module.register(api)
+    out = receipt(api.tools["key"](keys="right", app=KEYNOTE[0]))
+    assert out["status"] == "stopped" and out["dispatched"] is False
+    assert out["target"]["activated"] is after_switch
+    assert out.get("observed_effect", False) is after_switch and out.get("activation_done", False) is after_switch
+    assert "lsappinfo list" in calls[0][-1] and len(calls) == (2 if after_switch else 1)
+    assert not any(is_input(argv[-1]) for argv in calls)
+    if after_switch:
+        assert "unix id is 200" in calls[1][-1]
 
 
 def test_ssh_targeted_input_resolves_from_lsappinfo_and_activates_by_pid(tmp_path, monkeypatch):

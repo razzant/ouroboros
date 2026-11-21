@@ -1,6 +1,6 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
-import { compareHistoryPosition } from './chat_history_replay.js';
+import { compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
 import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
@@ -69,16 +69,20 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
         // Only an EMPTY feed (or a failure already on screen) gets the loading
         // state: an ordinary refresh never puts chrome over a painted transcript.
         // Returns whether there is a state to draw, so a painted feed costs nothing.
+        // A migrating store read again is still `waiting` for its publication.
         beginRecent() {
-            if (recent?.error || feedIsEmpty(messagesDiv)) recent = { loading: true };
+            if (recent?.error || feedIsEmpty(messagesDiv)) {
+                recent = { loading: true, waiting: recent?.waiting || isStoreMigrating(recent?.error) };
+            }
             return Boolean(recent);
         },
         // A failure is shown where the loading state was; elsewhere the reader
-        // keeps the transcript they have and the next sync reconciles it.
-        endRecent(error = null) { recent = error ? { error } : null; },
-        recentFailed: () => Boolean(recent?.error),
+        // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
+        endRecent(error = null, partial = false) { recent = error ? { error, partial } : null; },
+        recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
             const error = recent?.error || snapshot.error;
+            const retry = recent?.error && !recent.partial || snapshot.error;
             const migrating = isStoreMigrating(error);
             const hydrating = Boolean(recent?.loading);
             const loading = hydrating || Boolean(snapshot.loading);
@@ -103,11 +107,11 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
                 && !(hydrating && feedIsEmpty(messagesDiv));
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
-            const buttonHidden = migrating || (!error && !snapshot.canOlder
+            const buttonHidden = migrating || (!retry && !snapshot.canOlder
                 && !(coverage.horizonGap && !snapshot.away) && !hydrating);
             const fields = [
                 [button, { textContent: hydrating ? 'Loading saved history…' : loading ? 'Loading…'
-                    : changedView ? 'Refresh history' : error ? 'Retry loading messages' : 'Load more history',
+                    : changedView ? 'Refresh history' : retry ? 'Retry loading messages' : 'Load more history',
                     disabled: loading, hidden: buttonHidden }],
                 [note, { textContent: noteText, hidden: !noteText }],
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
@@ -119,8 +123,13 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (hydrating) root.setAttribute('aria-busy', 'true'); else root.removeAttribute('aria-busy');
             if ((snapshot.initialized || error || hydrating) && !root.isConnected) messagesDiv.prepend(root);
             root.classList.toggle('has-gaps', !migrating && (incomplete || Boolean(error)));
-            return { ...coverage, complete: Boolean(coverage.complete && !error),
-                error: Boolean(error), note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
+            // For ↓, each read of the present by its own error, whichever note heads the edge: `failed`, one it retries where
+            // the reader is (the room's newest, or the pager's `latest`); else `waiting`, one the migrating store refused.
+            const latest = snapshot.retryDirection === 'latest', latestWaits = latest && isStoreMigrating(snapshot.error);
+            const failed = Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)) || latest && !latestWaits;
+            const waiting = !failed && (isStoreMigrating(recent?.error) || Boolean(recent?.waiting) || latestWaits);
+            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), failed, waiting,
+                note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
         },
     };
 }
@@ -158,8 +167,6 @@ export function createLiveCardBound(cap) {
     let raisedInFlight = false;
     return {
         isArmed: () => armed,
-        /** The offline bootstrap painted sessionStorage: the next sync must rebuild. */
-        arm() { armed = true; },
         observe(size) { if (size > floor + cap) armed = true; },
         begin() {
             inherited = armed;
@@ -506,8 +513,13 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (!node || !patchNode(current, node)) return false;
         return Boolean(record.timelineEl.isConnected);
     };
+    // A room away draws nothing (room_retire.js): a timeline that a late read changed meanwhile is owed, and drawn once
+    // on the room's return from what that read kept.
+    const owedAway = new Set();
     return {
         renderLiveCardTimeline: render,
+        oweTimeline: (record) => { owedAway.add(record); },
+        drawOwedTimelines: () => { const owed = [...owedAway]; owedAway.clear(); owed.forEach((record) => render(record)); },
         appendTimelineItem: append,
         patchLastTimelineItem: (item, record) => replace(
             item, record, record.timelineEl.lastElementChild,
@@ -568,6 +580,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
                 && !node.classList.contains('chat-load-older')
         );
         const messagesRect = messagesDiv.getBoundingClientRect();
+        // The phone drawer scales the room card. Anchors are in scroll pixels, not transformed screen pixels.
+        const scale = messagesRect.height / messagesDiv.offsetHeight || 1;
         let topNode = nodes.find((item) => {
             const rect = item.getBoundingClientRect();
             return rect.bottom > messagesRect.top && rect.top < messagesRect.bottom;
@@ -580,9 +594,9 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         // merely the root card whose own top may be far above the viewport.
         let node = topNode;
         if (!topNode.dataset?.historyId && !topNode.classList.contains('chat-live-card')) {
-            // Media owns a layout wrapper around keyed bubbles. Save the
-            // physical child being read, not an unidentifiable wrapper.
-            node = [...topNode.querySelectorAll('[data-history-id]')]
+            // Media owns a layout wrapper around keyed bubbles, the saved preview (chat_preview.js) its rows.
+            // Save the physical child being read, not an unidentifiable wrapper.
+            node = [...topNode.querySelectorAll('[data-history-id], [data-preview-history-id]')]
                 .find(child => child.getBoundingClientRect().bottom > messagesRect.top) || topNode;
         }
         if (topNode.classList.contains('chat-live-card')) {
@@ -685,7 +699,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             cardChain.push({
                 node: card,
                 taskId: card.dataset?.taskId || '',
-                offset: card.getBoundingClientRect().top - messagesRect.top,
+                offset: (card.getBoundingClientRect().top - messagesRect.top) / scale,
             });
             card = card.parentElement?.closest?.('.chat-live-card') || null;
         }
@@ -702,7 +716,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             // lifecycle key below selects the line inside that page's mixed card.
             historyId: lineItem?.historyId || lineItem?.sourceHistoryId
                 || node.closest?.('[data-history-id]')?.dataset?.historyId
-                || topNode.dataset?.historyId || '',
+                || node.dataset?.previewHistoryId || topNode.dataset?.historyId || '',
             reviewKey: ['reviewAttemptDetail', 'reviewAttempt', 'reviewGroup', 'reviewSection']
                 .find(key => node.dataset?.[key]) || '',
             reviewValue: node.dataset?.reviewAttemptDetail || node.dataset?.reviewAttempt
@@ -720,8 +734,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             clientMessageId: topNode.dataset?.clientMessageId || '',
             ts,
             ordinal: ts ? nodes.filter((item) => item.dataset?.ts === ts).indexOf(topNode) : -1,
-            offset: node.getBoundingClientRect().top - messagesRect.top,
-            topOffset: topNode.getBoundingClientRect().top - messagesRect.top,
+            offset: (node.getBoundingClientRect().top - messagesRect.top) / scale,
+            topOffset: (topNode.getBoundingClientRect().top - messagesRect.top) / scale,
         };
     }
 
@@ -734,11 +748,12 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         };
         const restoreNode = (node, offset) => {
             if (!isRendered(node)) return false;
-            const currentOffset = node.getBoundingClientRect().top
-                - messagesDiv.getBoundingClientRect().top;
+            const rect = messagesDiv.getBoundingClientRect(), scale = rect.height / messagesDiv.offsetHeight || 1;
+            const currentOffset = (node.getBoundingClientRect().top - rect.top) / scale;
             // A node still in place leaves the feed alone: even a write of the
             // same scrollTop stops a scroll the engine animates (WebKit's End).
-            if (currentOffset !== offset) messagesDiv.scrollTop += currentOffset - offset;
+            // Subpixel transform noise rounds down in WebKit's scrollTop setter; writing it every frame drifts.
+            if (Math.abs(currentOffset - offset) > 0.5) messagesDiv.scrollTop += currentOffset - offset;
             return true;
         };
 
@@ -888,8 +903,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
             body: summary.body || '',
             fullBody: summary.fullBody || summary.body || it.fullBody || '',
-            fullRef: summary.fullRef || it.fullRef || '',
-            truncated: summary.truncated || it.truncated || false,
+            ...timelineReadFields(summary, it),
             evidenceRef: summary.evidenceRef || it.evidenceRef || null,
             // A call's failure frame replaces its receipt start: the row is
             // content again once it reports an error.
@@ -914,8 +928,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             ts: ts || it.ts,
             fullHeadline: summary.fullHeadline || it.fullHeadline || it.headline,
             fullBody: summary.fullBody || it.fullBody || it.body,
-            fullRef: summary.fullRef || it.fullRef || '',
-            truncated: summary.truncated || it.truncated || false,
+            ...timelineReadFields(summary, it),
         };
         if (Object.entries(patch).every(([key, value]) => it[key] === value)) {
             timelineUpdate = 'duplicate-skip';
@@ -938,8 +951,7 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
             fullHeadline: summary.fullHeadline || headline || 'Update',
             body: summary.body || '',
             fullBody: summary.fullBody || summary.body || '',
-            fullRef: summary.fullRef || '',
-            truncated: summary.truncated || false,
+            ...timelineReadFields(summary),
             // A late-review row's exact record link (#1369); null on every other row.
             evidenceRef: summary.evidenceRef || null,
             receipt: Boolean(summary.receipt),

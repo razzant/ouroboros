@@ -1,5 +1,6 @@
-"""Owner decisions 1A/2A (#1407/#1409): configured routes before any wait, one recovery for
-direct and queued turns, typed unknown eligibility, and model-owned return to the primary.
+"""Owner decisions 1A/2A (#1407/#1409), 1A as amended on 2026-11-11: an acting primary's lost
+answer gets its own observed continuation first, then the configured routes and the wait; one
+recovery for direct and queued turns, typed unknown eligibility, and model-owned return to the primary.
 
 Real round loop, round dispatcher and physical-attempt ledger; only each model's socket is
 scripted, so the ledger proves which physical attempts existed and under which identity.
@@ -87,11 +88,26 @@ def data_root(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_mod, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
     from ouroboros import fallback_cooldown
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: False)
+    # A lost answer opens the round's wait. Its entry step returns at once here and the upstream is
+    # not observed unless a test says so, so the round goes on to its configured routes.
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_a: False)
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: {})
     (root / "state").mkdir(parents=True)
     return root
 
 
-def _run(tmp_path, llm, *, direct=False, notes=None):
+REACHED = {"kind": "upstream_http", "status_code": 200}
+
+
+def _observe(monkeypatch, fact):
+    """The wait's steps and upstream observations of one run, the observations answering ``fact``."""
+    probes, sleeps = [], []
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **kw: probes.append(kw) or fact)
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda seconds, _wake: sleeps.append(seconds) or False)
+    return probes, sleeps
+
+
+def _run(tmp_path, llm, *, direct=False, notes=None, event_queue=None):
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.is_direct_chat = direct
     notes = [] if notes is None else notes
@@ -99,7 +115,7 @@ def _run(tmp_path, llm, *, direct=False, notes=None):
         text, usage, trace = run_llm_loop(
             messages=[{"role": "user", "content": "go"}], tools=registry, llm=llm, drive_logs=tmp_path,
             emit_progress=lambda text, *, incident=None, **_kw: notes.append(text), incoming_messages=__import__("queue").Queue(),
-            task_id="t-1a", drive_root=tmp_path)
+            task_id="t-1a", drive_root=tmp_path, event_queue=event_queue)
     return text, usage, trace, registry
 
 
@@ -107,33 +123,53 @@ def _notices(messages):
     return [row["content"] for row in messages if "[Transport recovery]" in str(row.get("content"))]
 
 
-# -- 1A: a configured route answers first, for direct and queued turns alike --------------------
+# -- 1A as amended: the acting primary is asked once more, then the configured route -------------
 
 
 @pytest.mark.parametrize("direct", [False, True])
-def test_unknown_outcome_tries_the_configured_route_first_with_a_new_identity(data_root, tmp_path, monkeypatch, direct):
-    """No legacy paid primary repeat runs ahead of the fallback (the direct turn's former rail),
-    no upstream probe or wait precedes it, and the old attempt keeps its own row and cost."""
+@pytest.mark.parametrize("then", ["answers", "is_lost_again", "fails_otherwise", "is_not_observed"])
+def test_a_lost_answer_asks_the_acting_primary_once_before_the_configured_route(data_root, tmp_path, monkeypatch,
+                                                                                direct, then):
+    """One lost answer is evidence about an attempt, not its route. After the wait's entry step and one
+    upstream observation the primary gets ONE new attempt under a new identity. A missed observation, another
+    lost answer or a refusal walks the configured route on the same pass (a cut reply keeps its own ladder): no
+    second wait step stands in front of it, and the lost attempt keeps its own row and cost throughout."""
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
-    monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
-                        lambda *_a, **_kw: pytest.fail("a configured route answers before any wait"))
-    llm = _RouteLLM(data_root, **{PRIMARY: [_death]})
-    text, usage, _trace, _registry = _run(tmp_path, llm, direct=direct)
+    probes, sleeps = _observe(monkeypatch, {} if then == "is_not_observed" else REACHED)
+    script = {"answers": [_death], "is_lost_again": [_death, _death], "is_not_observed": [_death],
+              "fails_otherwise": [_death, lambda: RuntimeError("HTTP 400 bad request")]}[then]
+    llm, notes = _RouteLLM(data_root, **{PRIMARY: script}), []
+    text, usage, _trace, _registry = _run(tmp_path, llm, direct=direct, notes=notes)
 
-    assert text == "answer from fb/one"
-    assert [model for model, _messages in llm.sent] == [PRIMARY, "fb/one"]
+    spare = [] if then == "answers" else ["fb/one"]
+    assert [model for model, _messages in llm.sent] == [PRIMARY] * (len(script) + (not spare)) + spare
+    assert text == f"answer from {(spare or [PRIMARY])[0]}"
+    assert len(probes) == len(sleeps) == 1, "one entry step and one observation; the walk waits for nothing more"
     rows = _ledger(data_root)
-    assert [(row["state"], row["revision"]) for row in rows] == [("unresolved", 4), ("settled", 3)]
-    assert rows[0]["physical_failure"]
-    old, new = rows[0]["attempt_id"], rows[1]["attempt_id"]
-    assert old != new
-    assert ua.usage_projection(data_root)["unresolved_upper_bound_usd"] == 1.0
+    assert (rows[0]["state"], rows[0]["revision"]) == ("unresolved", 4) and rows[0]["physical_failure"]
+    assert len({row["attempt_id"] for row in rows}) == len(rows) == len(llm.sent)
+    old = rows[0]["attempt_id"]
+    # In this harness a raised send leaves its row unresolved too: the lost attempt's dollar is never released.
+    assert ua.usage_projection(data_root)["unresolved_upper_bound_usd"] == float(len(script))
     notices = _notices(llm.sent[-1][1])
-    assert len(notices) == 1 and old in notices[0]
-    assert "the host is trying a configured alternative." in notices[0] and "fb/one" not in notices[0], \
-        "a try, naming no route the send might not use"
-    assert usage["transport_recovery"]["previous_attempt"]["physical_attempt_id"] == old
-    assert _events(tmp_path, "network_wait") == []
+    granted, walked = "Upstream connectivity is available again.", "the host is trying a configured alternative."
+    assert old in notices[0] and (walked if then == "is_not_observed" else granted) in notices[0]
+    if then == "is_lost_again":  # each new generation names the attempt it follows
+        assert len(notices) == 2 and rows[1]["attempt_id"] in notices[1] and walked in notices[1]
+    else:
+        assert len(notices) == 1 and "fb/one" not in notices[0], "a try, naming no route the send might not use"
+    assert usage["transport_recovery"]["previous_attempt"]["physical_attempt_id"] == rows[
+        1 if then == "is_lost_again" else 0]["attempt_id"]
+    grant, spare_answered = ("recovered", "new_attempt_after_unknown_outcome"), ("ended", "configured_route_answered")
+    assert [(row["phase"], row.get("detail", "")) for row in _events(tmp_path, "network_wait")] == [
+        ("entered", ""), ("waiting", ""), *{
+            "answers": [grant],
+            "is_lost_again": [grant, ("continued", "continuation_outcome_unknown"), spare_answered],
+            "fails_otherwise": [grant],
+            "is_not_observed": [("continued", "upstream_not_observed"), spare_answered]}[then]]
+    # Only an observed upstream is announced as restored: the spare's answer says nothing about the primary.
+    assert sum("Connection restored" in note for note in notes) == (then != "is_not_observed")
+    assert not any("connection restored after" in note for note in notes)
 
 
 def test_repeated_unknowns_move_on_through_the_configured_routes(data_root, tmp_path, monkeypatch):
@@ -149,21 +185,28 @@ def test_repeated_unknowns_move_on_through_the_configured_routes(data_root, tmp_
     assert len(notices) == 2 and first in notices[0] and second in notices[1]
 
 
-def test_fallback_can_recover_during_an_existing_primary_outage(data_root, tmp_path, monkeypatch):
+@pytest.mark.parametrize("second_observation", ["missed", "reached"])
+def test_recovery_continues_during_an_existing_primary_outage(data_root, tmp_path, monkeypatch, second_observation):
+    """The primary's own step misses and its configured route loses an answer too: the same episode paces what
+    follows, the route again or the primary's new attempt, and each lost attempt is named once."""
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
-    probes, sleeps = [], []
+    probes, sleeps, facts = [], [], iter([{}, REACHED if second_observation == "reached" else {}])
     monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
-                        lambda *_a, **kw: probes.append(kw) or {})
+                        lambda *_a, **kw: probes.append(kw) or next(facts))
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep",
                         lambda seconds, _wake: sleeps.append(seconds) or False)
     llm = _RouteLLM(data_root, **{PRIMARY: [_death], "fb/one": [_death]})
     text, usage, _trace, _ctx = _run(tmp_path, llm, direct=True)
-    assert text == "answer from fb/one"
-    assert [model for model, _ in llm.sent] == [PRIMARY, "fb/one", "fb/one"]
-    assert len(probes) == len(sleeps) == 1  # the existing episode paces recovery
-    assert probes[0]["expected_route"] is None  # the old failed fallback is not the primary probe's identity
+    answered = PRIMARY if second_observation == "reached" else "fb/one"
+    assert text == f"answer from {answered}"
+    assert [model for model, _ in llm.sent] == [PRIMARY, "fb/one", answered]
+    assert len(probes) == len(sleeps) == 2  # the primary's own step, then the same episode paces recovery
+    assert [probe["expected_route"] for probe in probes] == [{}, {}]  # the primary's own lost attempt, never the fallback's
     assert usage["transport_recovery"]["old_outcome"] == "unknown"
-    assert [row["state"] for row in _ledger(data_root)].count("unresolved") == 2
+    rows = _ledger(data_root)
+    assert [row["state"] for row in rows].count("unresolved") == 2
+    notices = _notices(llm.sent[-1][1])
+    assert len(notices) == 2 and rows[0]["attempt_id"] in notices[0] and rows[1]["attempt_id"] in notices[1]
 
 
 @pytest.mark.parametrize("primary,ceiling_route_answers", [
@@ -250,28 +293,38 @@ def test_direct_stop_during_the_unknown_wait_sends_nothing_further(data_root, tm
     assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
 
 
-def test_an_unreadable_accepted_operation_is_never_regenerated(data_root, tmp_path, monkeypatch):
+@pytest.mark.parametrize("left_by", ["the_primary", "a_configured_route"])
+def test_an_unreadable_accepted_operation_is_never_regenerated(data_root, tmp_path, monkeypatch, left_by):
     """Disallowed counterpart: the same operation may still finish, so neither a configured
-    route nor a continuation runs; the turn ends on the honest no-resend terminal."""
+    route nor a continuation runs; the turn ends on the honest no-resend terminal. A configured
+    route that leaves one inside the primary's open wait retires that wait: a later observation grants nothing."""
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
-    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: pytest.fail("no continuation"))
-    llm = _RouteLLM(data_root, **{PRIMARY: [_unreadable]})
+    walked = left_by == "a_configured_route"
+    facts = iter([{}, REACHED])  # the primary's own step misses; nothing may ask a second time
+    probes, _sleeps = _observe(monkeypatch, {})
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
+                        lambda *_a, **kw: probes.append(kw) or (next(facts) if walked else pytest.fail("no continuation")))
+    llm = _RouteLLM(data_root, **({PRIMARY: [_death], "fb/one": [_unreadable]} if walked else {PRIMARY: [_unreadable]}))
     _text, usage, trace, _registry = _run(tmp_path, llm, direct=True)
 
-    assert [model for model, _messages in llm.sent] == [PRIMARY]
+    assert [model for model, _messages in llm.sent] == [PRIMARY, "fb/one"][:1 + walked] and len(probes) == walked
     assert usage["_pending_transport_outcome"]["same_operation_recoverable"] is True
     assert trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
-    assert _events(tmp_path, "network_wait") == []
+    assert [row["phase"] for row in _events(tmp_path, "network_wait")] == ["entered", "waiting", "continued"][:3 * walked]
 
 
-def test_an_adopted_fallback_that_fails_retains_the_primary_as_a_route(data_root, tmp_path, monkeypatch):
-    """Nothing in Settings repeats Main, yet the primary binding is tried when the acting fallback fails."""
+@pytest.mark.parametrize("failure", ["refuses", "loses_its_answer"])
+def test_an_adopted_fallback_that_fails_retains_the_primary_as_a_route(data_root, tmp_path, monkeypatch, failure):
+    """Nothing in Settings repeats Main, yet the primary binding is tried when the acting fallback fails.
+    Another acting route keeps its order: its lost answer walks at once, primary first, with no wait step."""
     from tests.test_completion_selection import finish
 
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
+    probes, sleeps = _observe(monkeypatch, {})
+    failed = _death if failure == "loses_its_answer" else (lambda: RuntimeError("HTTP 400 bad request"))
     tool_call = {"id": "call-1", "type": "function", "function": {"name": "chat_history", "arguments": "{}"}}
     replies = iter([({"role": "assistant", "content": "", "tool_calls": [tool_call]}, {"prompt_tokens": 1, "completion_tokens": 1})])
-    llm = _RouteLLM(data_root, **{PRIMARY: [_death], "fb/one": [None, lambda: RuntimeError("HTTP 400 bad request")]})
+    llm = _RouteLLM(data_root, **{PRIMARY: [_death], "fb/one": [None, failed]})
     original = llm.chat
     selections = []
 
@@ -301,12 +354,52 @@ def test_an_adopted_fallback_that_fails_retains_the_primary_as_a_route(data_root
     assert sent[:4] == [PRIMARY, "fb/one", "fb/one", PRIMARY] and set(sent[4:]) <= {PRIMARY}
     assert selections == [PRIMARY] and len(sent) == 5
     assert text == f"answer from {PRIMARY}"
+    assert len(probes) == len(sleeps) == 1, "only the primary's own lost answer took the entry step"
     facts = [row["content"] for row in llm.sent[2][1] if "[ROUTE FACTS]" in str(row.get("content"))]
-    assert len(facts) == 1 and PRIMARY in facts[0] and 'switch_model(primary="wait")' in facts[0]
+    assert len(facts) == 1 and PRIMARY in facts[0] and 'No timer returns this task' in facts[0]
+    assert 'switch_model(primary="return")' in facts[0] and 'switch_model(primary="wait")' in facts[0]
     assert registry._ctx.primary_route == {"model": PRIMARY, "use_local": False, "role": "main"}
 
 
 # -- binding identity -----------------------------------------------------------------------------
+
+
+def test_each_candidate_reads_its_own_predecessors_refusal_before_its_send(data_root, tmp_path, monkeypatch):
+    """A refusal the host does not recognise goes to the route that continues, with the facts in that request
+    before it is measured and sent: who refused and when, each party's own sentence and codes, what the host did.
+    The second candidate reads the first candidate's failure, never the primary's again, and a failed candidate's
+    row does not stay in the transcript it shared (the first spare is of the primary's family, so it reads the
+    canonical transcript itself). The owner's row names who said the sentence."""
+    spare = "primary/spare"
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", f"{spare},fb/two")
+
+    def refused(body):
+        error = RuntimeError(f"Error code: 400 - {body!r}")
+        error.status_code, error.body = 400, body
+        return error
+
+    raw = ('data: {"error":{"code":"invalid_parameter_error","param":null,"message":"Range of input length should be '
+           '[1, 983616]","type":"invalid_request_error"},"id":"chatcmpl-x"}\n\n')
+    alibaba = {"code": 400, "message": "Provider returned error", "metadata": {"provider_name": "Alibaba", "raw": raw}}
+    llm, notes = _RouteLLM(data_root, **{
+        PRIMARY: [lambda: refused(alibaba)],
+        spare: [lambda: refused({"code": 400, "message": "Unsupported parameter: reasoning"})]}), []
+    text, _usage, _trace, _registry = _run(tmp_path, llm, notes=notes)
+
+    assert [model for model, _ in llm.sent] == [PRIMARY, spare, "fb/two"] and text == "answer from fb/two"
+    rows = [[str(row["content"]) for row in sent if "[ATTEMPT FACTS]" in str(row.get("content"))] for _model, sent in llm.sent]
+    assert rows[0] == [] and len(rows[1]) == len(rows[2]) == 1
+    assert rows[1][0].startswith(f"[ATTEMPT FACTS] The attempt before this request, on {PRIMARY}, ended without a usable answer at ")
+    assert (' with HTTP 400: the provider said "Provider returned error" (code 400); Alibaba said "Range of input length '
+            'should be [1, 983616]" (code invalid_parameter_error, invalid_request_error). The host filed it as a rejected '
+            f"request, established no size cause and changed nothing in the request for it. The host now asks {spare} with "
+            "this view as it stands. Facts, not an instruction.") in rows[1][0]
+    assert "chatcmpl" not in rows[1][0] and "Error code" not in rows[1][0]  # no id, no printed exception
+    assert f"on {spare}, ended without" in rows[2][0] and 'the provider said "Unsupported parameter: reasoning"' in rows[2][0]
+    assert "Alibaba" not in rows[2][0] and rows[2][0].endswith("The host now asks fb/two with this view as it stands. "
+                                                               "Facts, not an instruction.")
+    assert (f'⚡ Fallback: trying {spare} after a rejected request on {PRIMARY}. Alibaba said: "Range of input length '
+            'should be [1, 983616]"') in notes
 
 
 def test_route_candidates_compare_complete_bindings_not_model_strings(monkeypatch, tmp_path):
@@ -357,8 +450,57 @@ def test_a_declared_wait_keeps_refusals_and_outages_on_the_primary():
                         ("provider_outcome_unknown", {})):
         assert loop_transport.fallback_chain_allowed(ctx, kind, None, usage) is False
     assert loop_transport.fallback_chain_allowed(ctx, "bad_request", None, {}) is True  # ordinary recovery stays
+    # Owner choice A (12.11): the wait holds after a content refusal too, which has nothing to wait for: no episode.
+    assert loop_transport.fallback_chain_allowed(ctx, "content_filter", None, {}) is False
+    assert "content_filter" not in loop_transport.PRIMARY_REFUSAL_KINDS
+    assert loop_transport.primary_refusal_wait(ctx, "content_filter") is False
     ctx.route_wait_on_primary = False
     assert loop_transport.fallback_chain_allowed(ctx, "subscription_window_exhausted", None, refusal) is True
+    assert loop_transport.fallback_chain_allowed(ctx, "content_filter", None, {}) is True  # the walk as before
+
+
+class _RepliesLLM(_RouteLLM):
+    """``_RouteLLM`` whose ``(message, usage)`` steps are replies as written; an empty one is a provider's refusal."""
+
+    def chat(self, **kwargs):
+        steps = self.scripts.get(kwargs["model"]) or []
+        if steps and isinstance(steps[0], tuple):
+            self.sent.append((kwargs["model"], [dict(row) for row in kwargs["messages"]]))
+            return tuple(json.loads(json.dumps(steps.pop(0))))  # each reply its own copy
+        return super().chat(**kwargs)
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_a_declared_wait_ends_a_content_refused_round_and_without_one_the_spare_is_asked(
+        data_root, tmp_path, monkeypatch, declared):
+    """After the primary's content refusal a declared wait asks no configured route: the round ends through the
+    forced final, its prompt naming the refusal (never an outage), with the refusal's one feed row. Without a
+    declared wait the walk asks the spare as before and its answer continues the work."""
+    from tests.test_completion_selection import finish
+
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
+    tool = {"name": "switch_model", "arguments": json.dumps({"primary": "wait"})} if declared else {
+        "name": "chat_history", "arguments": "{}"}
+    first = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": tool}]}
+    refusal = ({"role": "assistant", "content": "", "refusal": "Blocked here."}, {"response_finish_reason": "content_filter"})
+    tokens = {"prompt_tokens": 1, "completion_tokens": 1}
+    tools = {"role": "assistant", "content": "", "tool_calls": [{"id": "c2", "type": "function", "function": {
+        "name": "chat_history", "arguments": "{}"}}]}
+    llm, notes = _RepliesLLM(data_root, **{PRIMARY: [(first, tokens), refusal, (finish("summary"), tokens)],
+                                           "fb/one": [(tools, tokens), (finish("answer from fb/one"), tokens)]}), []
+    text, _usage, _trace, _registry = _run(tmp_path, llm, notes=notes)
+
+    words = loop_transport._FAILURE_KIND_WORDS["content_filter"]
+    told = [note for note in notes if note.startswith("⚠️ No usable reply")]
+    if declared:
+        assert [model for model, _ in llm.sent] == [PRIMARY] * 3 and text == "summary"
+        prompt = str(llm.sent[-1][1][-1].get("content"))
+        assert f"This round's failed asks: {words} on {PRIMARY} once." in prompt and "outage" not in prompt
+        assert told == [f'⚠️ No usable reply after {words} on {PRIMARY}. The provider said: "Blocked here."']
+        assert not any("Fallback" in note or "trying" in note for note in notes)
+    else:
+        assert [model for model, _ in llm.sent] == [PRIMARY, PRIMARY, "fb/one", "fb/one"] and text == "answer from fb/one"
+        assert told == [] and any(note.startswith("⚡ Fallback: trying fb/one") and "Blocked here." in note for note in notes)
 
 
 def test_primary_return_rebinds_role_and_leaves_auto_unpinned(monkeypatch):
@@ -388,7 +530,7 @@ def test_initial_route_records_a_role_slot_primary(tmp_path):
     assert ctx.primary_route == {"model": "consc/model", "use_local": False, "role": "consciousness"}
 
 
-def test_route_facts_name_both_bindings_the_dated_failure_and_the_choices():
+def test_route_facts_name_both_bindings_and_the_dated_failure_with_return_affordances():
     ctx = SimpleNamespace(primary_route={"model": "claudexor::codex=gpt-test", "use_local": False, "role": "main"})
     text = route_facts_text(ctx, model="fb/one", use_local=False, role="fallback:0",
                             failed_model="claudexor::codex=gpt-test",
@@ -397,7 +539,8 @@ def test_route_facts_name_both_bindings_the_dated_failure_and_the_choices():
     assert text.startswith("[ROUTE FACTS]") and "(role main; account Auto)" in text and "(role fallback:0)" in text
     assert "subscription_window_exhausted at 2026-09-30T12:00:00Z" in text and "2026-09-30T18:00:00Z" in text
     # A primary observation may have just reported catalog or quota metadata: the facts no longer deny one.
-    assert 'switch_model(primary="return")' in text and "No catalog check" not in text
+    assert 'switch_model(primary="return")' in text and 'switch_model(primary="wait")' in text
+    assert "Facts, not an instruction:" in text and "No catalog check" not in text
     assert "No timer returns this task" in text and "never proves that the primary generates" in text
     assert route_facts_text(SimpleNamespace(), model="m", use_local=False, role="r", failed_model="p",
                             failure={}, waiter=None) == ""
@@ -502,6 +645,10 @@ def test_a_readable_unknown_after_a_granted_continuation_ends_the_episode(tmp_pa
     readable = SimpleNamespace(task_id="t", _accumulated_usage={"_pending_transport_outcome": {
         "physical_attempt_id": "new", "outcome": "unknown", "same_operation_recoverable": True}})
     assert loop_transport.reconcile_transport_wait(granted(), readable, **kwargs) is None
+    waiting = granted()  # the same holds before any grant: a configured route may leave such an operation
+    waiting.continuation_granted = False
+    assert loop_transport.reconcile_transport_wait(waiting, eligible, **kwargs) is waiting
+    assert loop_transport.reconcile_transport_wait(waiting, readable, **kwargs) is None
 
 
 @pytest.mark.parametrize("kind", ["provider_transient", "rate_limit"])

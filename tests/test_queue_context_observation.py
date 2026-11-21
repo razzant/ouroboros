@@ -98,24 +98,24 @@ def test_a_recorded_null_is_unknown_never_a_legacy_spare(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.config.get_max_workers", lambda: 40)
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
     assert (fact["free_worker_slots"], fact["free_worker_slots_basis"]) == (None, "unknown")
-    assert fact["project_demand"] == {"status": "not_recorded"}
+    assert fact["acting_worker_count"] is None
     line = engine_pool_line(tmp_path)
-    assert "assignable idle not observed" in line and "admissible pending not observed" in line
+    assert "assignable idle not observed" in line and "acting not observed" in line
 
 
 def test_a_model_wait_is_not_worker_saturation(tmp_path):
     """A running task waiting for its model keeps its slot; the pool still says what is idle and assignable."""
     snapshot = {**_snapshot(), "max_workers": 40, "worker_total": 2, "active_worker_count": 2, "busy_worker_count": 1,
+                "acting_worker_count": 1, "parked_worker_count": 0,
                 "assignable_idle_workers": 1, "pending_count": 0, "pool_observation_status": "observed",
-                "project_demand": {"status": "computed", "admissible_pending": 0, "ceiling": 40, "at_ceiling": False,
-                                   "observed_since": "2026-11-06T00:00:00+00:00", "scope": "last_assignment_pass"},
                 "running": [{"id": "child", "model_waits": {"w": {"state": "waiting", "task_attempt": 1}},
                              "task": {"delegation_role": "subagent", "root_task_id": "root"}}]}
     _write(tmp_path, snapshot)
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
-    assert (fact["running_count"], fact["free_worker_slots"], fact["project_demand"]["admissible_pending"]) == (1, 1, 0)
+    assert (fact["running_count"], fact["free_worker_slots"], fact["acting_worker_count"]) == (1, 1, 1)
     line = engine_pool_line(tmp_path)
-    assert "with a task 1, booting not observed, reaping (incl. booting) 1, assignable idle 1, admissible pending 0" in line
+    assert ("with a task 1, acting 1, waiting on their process 0, booting not observed, reaping (incl. booting) 1, "
+            "assignable idle 1, pending rows 0;") in line
     assert "model" not in line.split("project worker pool", 1)[1].split(";", 1)[0]
 
 

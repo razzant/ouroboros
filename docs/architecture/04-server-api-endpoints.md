@@ -4,7 +4,7 @@ Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this ta
 
 `NetworkAuthGate` runs `browser_boundary.py` first on every request and handshake, loopback included: another site's or an opaque page gets 403 (WebSocket 4403); passive files pass (limits: DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback access with an expiring HMAC session cookie; a refused socket closes pre-accept (4401). Public routes (the widget bridge too), proxies, the cookie, sign-in and 401 handling: CLIENT_CONTRACT §3; DEPLOYMENT. Without a password, remote access stays open by operator choice. Widget lease reads take only their lease (§3) and authenticate nothing else.
 
-`server_web.ServedUI` applies `OUROBOROS_UI_DIR` (§7) once per generation for `/`, `/static/*` and optional directory pages `onboarding.html` and `auth/index.html`. The same record reaches the outer auth gate, the builtin index's response-only owner marker and `StateResponse.served_ui` (source, not asset digest). Builtin `/onboarding/static/*` and the author kit remain independent. Selection and fallback, whole pages, `?builtin=1` recovery, the `/auth/*` bundle, topology and client-owned releases: CLIENT_CONTRACT §2–4.
+`server_web.ServedUI` applies `OUROBOROS_UI_DIR` (§7) per generation to `/`, `/static/*`, `onboarding.html`, `auth/index.html`; one record feeds the auth gate, the builtin index's response-only owner marker, `StateResponse.served_ui` (source, not digest). Builtin `/onboarding/static/*` and the author kit stay independent; builtin files revalidate as `private` (ETag); a Telegram phone keeps only GET `/static/*`. `GzipText` gzips GET 200 text from 1 KiB (declared length, else first chunk; weak ETag), not event streams, downloads, stored files outside these trees. Selection, fallback, whole pages, `?builtin=1`, `/auth/*`, topology, releases: CLIENT_CONTRACT §2–4.
 
 Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11). `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, not a public owner API (§12).
 
@@ -37,6 +37,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/skills/{skill}/review-history/{job_id}` | the skill's ledger record, else a legacy `review_history.jsonl` tail |
 | POST | `/api/owner/skills/{skill}/attest-review` | owner-only skip of the LLM review; deterministic preflight still runs |
 | POST | `/api/skills/{skill}/grants` | |
+| GET | `/api/skills/{skill}/mcp-connect` | |
+| POST | `/api/skills/{skill}/mcp-connect` | |
 | POST | `/api/skills/{skill}/reconcile` | |
 | GET | `/api/marketplace/clawhub/search` | |
 | GET | `/api/marketplace/clawhub/installed` | |
@@ -76,19 +78,20 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/onboarding/complete` | |
 | GET | `/api/onboarding/complete` | |
 | POST | `/api/onboarding/subagents/preview` | |
-| GET | `/api/settings` | |
-| POST | `/api/settings` | origin, change record (§7) |
+| POST | `/api/onboarding/model-catalog` | draft's access, nothing saved |
+| GET | `/api/settings` | effects, tokens (§7) |
+| POST | `/api/settings` | origin, conditions, receipt (§7) |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
 | GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); never wakes |
-| POST | `/api/claudexor/quota/refresh` | full or exact account (§3) |
+| POST | `/api/claudexor/quota/refresh` | full/exact; joins identical attempt in flight (§3) |
 | POST | `/api/claudexor/account-resets` | exact request (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |
 | POST | `/api/claudexor/wake` | |
 | GET | `/api/claudexor/restart` | passive preview of what ends (§3) |
 | POST | `/api/claudexor/restart` | preview `{token}`: stop, then the ordinary start |
-| GET | `/api/claudexor/maintenance/harnesses` | passive inspection |
-| POST | `/api/claudexor/maintenance/operations` | 202 handle; Node/npm preparation: 409 `maintenance_restart_required`, 409/503 `maintenance_preparation_failed`; `not_submitted` covers this attempt only (§6) |
+| GET | `/api/claudexor/maintenance/harnesses` | selection/newest/actions/receipt; `checkLatest` reads vendor HTTPS |
+| POST | `/api/claudexor/maintenance/operations` | 202 latest/exact handle; same-key rejoin; refusal covers this attempt (§6) |
 | GET | `/api/claudexor/maintenance/operations/{operation_id}` | retained engine facts |
 | POST | `/api/claudexor/maintenance/operations/{operation_id}/cancel` | acknowledgement does not prove termination |
 | POST | `/api/claudexor/login` | |
@@ -103,14 +106,19 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/context-mode` | |
 | POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/subagents-mode` | `{mode, project_id?}` → `{ok, project_id, subagents_mode, cognition}` (§7) |
+| POST | `/api/owner/chat-model` | |
+| POST | `/api/owner/chat-processing` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |
-| GET | `/api/places` | place records and installed connector declarations |
+| GET | `/api/places` | place records, circles and installed connector declarations (`ouroboros/gateway/places_api.py`) |
 | POST | `/api/places` | connect a place |
 | POST | `/api/places/{place_id}` | atomic owner-authored choices |
 | GET | `/api/places/{place_id}/rooms` | captured canonical conversation rooms (§12) |
 | DELETE | `/api/places/{place_id}` | disconnect, retaining room history |
+| POST | `/api/circles` | |
+| POST | `/api/circles/{circle_id}` | |
+| DELETE | `/api/circles/{circle_id}` | |
 | POST | `/api/owner/capability-ack` | |
 | GET | `/api/ui/contributions` | live skill controls, speech providers, offers |
 | GET | `/api/ui/preferences` | |
@@ -126,7 +134,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/desktop/autostart` | host-OS state, `owner_audit`, no settings mirror |
 | GET | `/api/desktop/background` | |
 | POST | `/api/desktop/background` | persists `OUROBOROS_DESKTOP_KEEP_RUNNING`; `owner_audit` |
-| GET | `/api/model-catalog` | |
+| GET | `/api/model-catalog` | scopes and full batch: CLIENT_CONTRACT §14 |
 | POST | `/api/openai-compatible/models` | |
 | POST | `/api/providers/test` | |
 | POST | `/api/tasks` | |
@@ -140,6 +148,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/tasks/{task_id}/artifacts/{name}` | own stores: POSIX no-follow/Windows NT relative handles; admission before child-store metadata; SVG `sandbox` CSP + `nosniff` (`gateway/task_archive.py`) |
 | POST | `/api/tasks/{task_id}/cancel` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
+| POST | `/api/tasks/{task_id}/model` | `ouroboros/gateway/task_model.py`: durable root primary; set/follow/return/wait/keep |
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
 | POST | `/api/tasks/{task_id}/owner-keep` | `OwnerKeepRequest`; keep or release exactly this task's materials |
 | POST | `/api/tasks/{task_id}/continue` | (§6 Continue after interruption or an unfinished author stop) |
@@ -172,16 +181,22 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/storage/free/preview` | pure preview; 202, start/join |
 | POST | `/api/storage/free` | `StorageFreeRequest`: exact pool `items`, `groups`, or `manual` ids of `view=manual` with `accept_loss: true`; 202, `started`/`reason` |
 | GET | `/api/storage/free/items` | `StorageFreeItemsResponse`: one `view=` page: `pool`, `excluded`, `manual` or `outcomes` |
+| GET | `/api/services/kept` | `KeptServicesResponse` (§9) |
+| POST | `/api/services/kept/{launch_id}/stop` | `reason`; one launch, fresh outcome |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
-| GET | `/api/projects` | 200 rows; `all=1` all; `id` (active/deleting) or `chat_id` (active): one room (missing → none; unreadable → error) |
+| GET | `/api/projects` | |
 | POST | `/api/projects` | |
 | POST | `/api/projects/from-task` | |
 | POST | `/api/projects/{project_id}/update` | |
 | POST | `/api/projects/{project_id}/delete` | |
+| GET | `/api/projects/{project_id}/folder` | |
+| POST | `/api/projects/{project_id}/folder` | |
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
+| GET | `/api/chat/search` | |
 | GET | `/api/logs/{name}` | |
+| GET | `/api/logs/{name}/raw` | |
 | POST | `/api/chat/upload` | |
 | DELETE | `/api/chat/upload` | pending uploads only, else 409 |
 | POST | `/api/local-model/start` | |
@@ -225,17 +240,17 @@ Update-status, log-tail and schedule-list reads run off the event loop.
 
 ### WebSocket protocol
 
-`/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds through REST and history. `gateway/ws.py` admits JSON objects, owned extension namespaces, `command` text, `chat` text/attachments. Chat acceptance (row → queue → echo) runs off the ASGI loop through `gateway._helpers.run_sync_to_completion`. Each socket chains its chats in receive order without awaiting them, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake and commands); disconnect waits for received chats to settle (`settle_to_completion`). Authentication above governs admission; public sockets never carry Host Service or owned-daemon tokens.
+`/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds from REST and history. `gateway/ws.py` admits JSON objects, owned extension namespaces, `command` text, `chat` text/attachments. Chat acceptance (row → queue → echo) runs off-loop (`gateway._helpers.run_sync_to_completion`). Each socket chains its chats in receive order, unawaited, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake); disconnect waits for received chats to settle (`settle_to_completion`). Public sockets never carry Host Service or owned-daemon tokens.
 
-Feature modules subscribe, and the complete Project chat-id set is fetched, before the first open, so an early Project frame cannot pass for Main traffic. Every decoded frame reaches the generic `message` event and then its type-specific event, so Widgets consume reviewed namespaced events.
+Feature modules subscribe and the full Project chat-id set loads before the first open, so an early Project frame cannot pass for Main traffic. Every decoded frame reaches the generic `message` event, then its type-specific one, so Widgets consume reviewed namespaced events.
 
 #### WebSocket chat
 
-A browser `chat` frame carries owner text and/or uploaded attachment references, optionally with `sender_session_id`, `client_message_id`, `chat_id`, `project_id` and `client_surface`: raw sending-surface facts measured at send (the pywebview bridge appears asynchronously after load). The gateway normalizes surface facts (`client_surface.normalize_client_surface`), stamps host `received_at` at receipt, and every transport passes one common enqueue (`LocalChatBridge.enqueue_local_message`). The surface fact is per-message provenance, distinct from the chat-scoped `transport` reply route, assembled at its producer, never inferred at render, carried from the originating owner turn by promotion or steering (`client_surface.py`).
+A browser `chat` frame carries owner text and/or uploads, optional `sender_session_id`, `client_message_id`, `chat_id`, `project_id` and `client_surface` measured at send (the native bridge loads asynchronously). The host resolves `reply_to`; optional `reply_excerpt` records the sender’s selection. The gateway normalizes the surface with `client_surface.normalize_client_surface`, stamps `received_at` and shares `LocalChatBridge.enqueue_local_message` with other transports. Promotion and steering carry the originating message’s surface; the chat’s `transport` selects the reply route.
 
-Acceptance is idempotent on `client_message_id`: a same-id frame rejoins the accepted row if words and ordered attachment content match, else is refused; the `ingress_accepted` echo and history carry the row's durable dispatch fact (`ingress_pending`: owed, performed once by a retry or the next bus init; `ingress_dispatched`: entered here); row and uploads are kept (`supervisor/message_ingress.py`). Unreadable chat history is unknown: the frame is refused with the `initialization_notice` before anything is claimed or written.
+Same `client_message_id` retries rejoin only identical words, ordered attachments and Reply (address and excerpt). Echo (`ingress_accepted`) and history show dispatch: retry/bus init dispatches `ingress_pending` once; `ingress_dispatched` has entered. On unreadable history nothing is claimed or written (`supervisor/message_ingress.py`). `initialization_notice` correlates refusals; it also explains an unusable source or conflicting id without reporting a boot failure.
 
-Frames sent while disconnected wait in a bounded process-local queue (oldest dropped), flushed after reconnect and lost on reload: no second durable outbox. Attachment messages set `queue:false` (uploads happen just before the send; a retained frame would leave unowned temporaries); on socket loss Chat refuses the message, cleans those and keeps the staged files for an explicit retry. Once the socket took a frame — every owner message, a bare slash command excepted; a queued one once written — `chat_attachments.createUnconfirmedSends` keeps it (with its `reply_to`) by id in tab sessionStorage across reloads until that id's echo or history row settles it; an unsettled frame offers "Send again" (same frame and id, never automatic) and "Discard".
+Offline frames queue in memory; overflow drops the oldest, reload clears it. Uploads use `queue:false`; a failed write releases new uploads. A taken send, selected reply included, frees the field; a file it uploaded and a newer draft still stages keeps its ref. `createUnconfirmedSends` keeps non-command frames by ID with citation and upload refs (no file bytes). Echo/history settles that ID; “Send again” reuses its frame, “Discard” drops it, a selected reply's “Send as new” returns its words and quote to an empty composer.
 
 Off-loop acceptance confines attachment specs to upload-root basenames bound to measured `size`/`sha256`, so bytes swapped under the path afterwards are rejected rather than staged; model pixels come only from staged files. The web owner identity is fixed: `chat_id` selects a thread and cannot mint an external owner identity.
 
@@ -243,7 +258,7 @@ A `command` frame routes through the bridge without rebroadcast; authorization, 
 
 #### Frame addressing
 
-Outbound envelope types are the members of `gateway.contracts.WS_MESSAGE_TYPES` other than the inbound `command`. `update_progress_changed` invalidates the update observation, never proving boot completion. Chat progress carries additive presentation facts (`ChatOutbound` in `GET /api/contract`); consumers must not infer a missing receipt, cost or result from an absent optional field.
+Outbound envelope types: `gateway.contracts.WS_MESSAGE_TYPES` minus the inbound `command`. `update_progress_changed` invalidates the update observation, never proving boot completion. Chat progress carries additive presentation facts (`ChatOutbound` in `GET /api/contract`); an absent optional field never means no receipt, cost or result.
 
 Project chat, typing, media and log frames carry `chat_id`; each Project panel consumes its own thread and frames naming it in `also_rooms`, Main only what §3 shows there. `projects_changed` carries the new chat id so every tab extends its fan-out before fetching the registry; if that still loses the race, the server-stamped `project_thread` marker keeps Main from adopting the frame (`chat_activity.mainThreadAccepts`). The message-bus broadcast choke sets that marker once from the registry (a membership lens, not a numeric range), so external transport ids such as Telegram stay unstamped. Task-scoped log events get their audience at supervisor ingress: `supervisor/log_addressing.py::address_task_event` stamps host-attested truth (explicit chat_id 0 is `HIDDEN_CHAT_ID`, never missing), and conversation turns carry their chat by value: their row ends with the turn while queued events drain later. `message_annotation` updates one canonical owner message without a second bubble; `task_named` updates a card only where that task exists.
 
@@ -253,6 +268,6 @@ Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open
 
 #### Reconnect and recovery
 
-The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open connection. One served-page decision (`ws.js decideServedPage`) governs the post-open state read and the socket-down probe, so a transient drop cannot destroy in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA (a restarted server must not keep old JS/CSS alive in PyWebView), and an unchanged one keeps the page and its queued frames (an unversioned `/api/state` with no remembered SHA keeps it too, accepting possibly stale assets); the marked page reloads once after a restart applied a directory or `none`, and an unmarked page owns its refresh and only reconnects. A failed/non-OK state read never reloads (a seconds-old server can answer 500); `ws.js` forces at most one reload per disconnect episode.
+The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open socket. One served-page decision (`ws.js decideServedPage`) governs the post-open read and the socket-down probe, so a transient drop keeps in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA and keeps the page and its queued frames on an unchanged one or an unversioned `/api/state` with no remembered SHA (possibly stale assets); the marked page reloads once after a restart applied a directory or `none`; an unmarked page owns its refresh and only reconnects. A failed/non-OK read never reloads (a seconds-old server can answer 500). Four healthy probes reload only a page that connected, once per disconnect episode; an attempt failing after one is `serverAnswersWhileDown`: an observation, not a cause.
 
 Each Chat instance handles `open` by resynchronizing durable history (a reconnect adds no feed row) and `close` by withdrawing online and accounting presentation; deduplication covers the overlap between live frames and REST replay, and large history parsing runs off the server event loop. Not every transient frame is persisted: durable chat rows, task results, queue snapshots, Project revisions, review/cost ledgers and lifecycle state remain the recovery authorities.

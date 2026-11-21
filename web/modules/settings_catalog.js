@@ -1,5 +1,5 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
-import { apiFetch } from './api_client.js';
+import { apiFetch, fetchJson } from './api_client.js';
 import { setResult } from './ui_primitives.js';
 import { parseModelSource } from './route_editor_primitives.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
@@ -27,9 +27,10 @@ export function accountCatalogRefreshKey(view) {
 }
 
 /** Own the Accounts subscription beside catalog refresh; never reload Settings. */
-export function watchAccountModelCatalog() {
+export function watchAccountModelCatalog(refresh = refreshModelCatalog) {
     let ready = false;
     let lastKey = null;
+    let confirmed = false;
     const dispose = claudexorStatus.subscribe((view) => {
         const next = accountCatalogRefreshKey(view);
         if (!ready || next === null) {
@@ -40,11 +41,14 @@ export function watchAccountModelCatalog() {
         }
         if (next === lastKey) return;
         lastKey = next;
-        void refreshModelCatalog();
+        const firstConfirmation = !confirmed;
+        confirmed = true;
+        void refresh({ firstConfirmation });
     });
     return {
         arm() {
             lastKey = accountCatalogRefreshKey(claudexorStatus);
+            confirmed ||= lastKey !== null;
             ready = true;
         },
         dispose,
@@ -91,13 +95,95 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
     };
 }
 
-/** Overlay successful connection-local lists on a general catalog, preserving its read provenance.
+/** Address one model inventory. Subscription ids and API connections are distinct namespaces. */
+export function modelSlotCatalogQuery(source, profile = '') {
+    if (!source || source === 'inherit') return '';
+    const subscription = source.startsWith('subscription:');
+    const query = new URLSearchParams(subscription ? { source_id: source.slice(13) } : { provider_id: source });
+    if (subscription && profile) query.set('credential_profile_id', profile);
+    return query.toString();
+}
+
+/** The catalogs read by one editor. Only an answer for the same source/account can replace its evidence.
+ * A superseding refresh or a discarded draft retires its in-flight reads. Nothing here publishes a whole catalog. */
+export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = () => {},
+    supportsScopes = () => true, legacyCatalog = () => null } = {}) {
+    const snapshots = new Map();
+    const requests = new Map();
+    // Older cores ignore unfamiliar query parameters. Only use their already read full catalog;
+    // a form selecting one provider never turns its lookup into a request to every configured key.
+    function fetchScope(key, signal) {
+        const params = new URLSearchParams(key);
+        if (supportsScopes() || params.has('source_id')) {
+            return fetchCatalog(`/api/model-catalog?${key}`, { cache: 'no-store', signal });
+        }
+        const previous = legacyCatalog();
+        if (!previous) return { items: [], model_sources: [], read_state: 'not_read', errors: [{
+            code: 'scoped_catalog_unsupported', error: 'This core lists all models together. Read the full model catalog.' }] };
+        if (params.has('view')) return { ...previous, items: [] };
+        const provider = params.get('provider_id');
+        return { ...previous, items: (previous.items || []).filter(item => provider === 'local' ? item.use_local
+            : !item.use_local && parseModelSource(item.value || item.id).source === provider) };
+    }
+    function reset() {
+        for (const { controller } of requests.values()) controller.abort();
+        requests.clear();
+        snapshots.clear();
+    }
+    return {
+        get(query) { return snapshots.get(String(query)); },
+        read(query, { force = false, joinPending = false } = {}) {
+            const key = String(query);
+            const pending = requests.get(key);
+            if (pending && (!force || joinPending)) return pending.promise;
+            if (!force && snapshots.has(key)) return Promise.resolve(snapshots.get(key));
+            pending?.controller.abort();
+            const controller = new AbortController();
+            const promise = Promise.resolve().then(() => fetchScope(key, controller.signal)).then(data => {
+                const field = key === 'view=sources' ? 'model_sources' : 'items';
+                if (!Array.isArray(data?.[field])) throw new Error(data?.error || 'Model catalog response is unreadable.');
+                return data;
+            }).catch(error => ({ read_state: 'transport', errors: [{ error: error.message || String(error) }] }))
+                .then(data => {
+                    if (controller.signal.aborted) return;
+                    requests.delete(key);
+                    const merged = mergeModelCatalog(snapshots.get(key), data);
+                    snapshots.set(key, merged);
+                    onUpdate(key, merged);
+                    return merged;
+                });
+            requests.set(key, { controller, promise });
+            return promise;
+        },
+        reset,
+        dispose: reset,
+    };
+}
+
+/** Overlay successful connection-local lists on a general catalog, preserving its read provenance: a general
+ * catalog nobody read yet stays unread (the overlay's own item list is no read of it).
  * An empty list replaces that source too; identical model names in other sources are unrelated. */
 export function withConnectionCatalogs(catalog = {}, connectionCatalogs = {}) {
-    return { ...catalog, items: [
+    return { ...catalog, read_state: catalogReadState(catalog), items: [
         ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, parseModelSource(item.value || item.id).source)),
         ...Object.values(connectionCatalogs).flat(),
     ] };
+}
+
+/** One read of the catalog an unsaved setup draft's access gives (POST /api/onboarding/model-catalog; the server
+ * knows a typed key only from the draft), bounded like every catalog read: `{ promise, abort }`. The promise answers
+ * a catalog to merge; a transport failure or a timeout is one too (`read_state: 'transport'`), never a rejection. */
+export function readDraftCatalog(draft) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
+    const promise = fetchJson('/api/onboarding/model-catalog', { method: 'POST', cache: 'no-store', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft) }).then((catalog) => {
+        if (!catalog || typeof catalog !== 'object') throw new Error('Model catalog response is unreadable.');
+        return catalog;
+    }).catch((error) => ({ read_state: 'transport',
+        errors: [{ error: error.name === 'AbortError' ? 'Model catalog request timed out.' : error.message }] }))
+        .finally(() => clearTimeout(timer));
+    return { promise, abort: () => controller.abort() };
 }
 
 /** Keep last-known native choices only for account reads that did not succeed. */
@@ -172,7 +258,7 @@ export function catalogReadNote(data = {}, { compact = false } = {}) {
         : errors.length ? `Model catalog could not be read: ${clauses}.`
             : state === 'stale' ? 'Model catalog is last known.' : state === 'partial' ? 'Some account model lists could not be read.'
                 : ['failed', 'transport'].includes(state) ? 'Model catalog could not be read.' : 'Model catalog has not been read yet.';
-    return `${reason} Existing suggestions and your selection are kept. Refresh model catalog in Models to retry.`;
+    return `${reason} Existing suggestions and your selection are kept. To retry, press Read again in Models.`;
 }
 
 // The catalog's result beside its Refresh button (ui.css .ui-action-row): a count ends by itself, a gap stays.
@@ -261,4 +347,28 @@ export async function refreshModelCatalog({ button } = {}) {
             button.removeAttribute('aria-busy');
         }
     }
+}
+
+const settledPrograms = new Map(), programReads = new Map();
+export function refreshMaintenanceCatalogs(harness, evidence) {
+    const operation = evidence.id && `${evidence.id}:${evidence.finishedAt || ''}`;
+    if (operation && settledPrograms.get(harness) === operation) return;
+    let read = programReads.get(harness);
+    if (!read) {
+        document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
+        let timeout;
+        const expired = new Promise(resolve => { timeout = setTimeout(() => resolve(false), MODEL_CATALOG_TIMEOUT_MS); });
+        read = Promise.race([expired, Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()])
+            .then(([native, raw]) => {
+                const row = native.value?.harnesses?.find((item) => item.id === harness);
+                return native.status === 'fulfilled' && !claudexorStatus.error && row?.model_catalog
+                    && !row.models_error && !row.model_catalog.partial
+                    && raw.status === 'fulfilled' && catalogReadState(raw.value) === 'ok';
+            })]).finally(() => { clearTimeout(timeout); programReads.delete(harness); });
+        programReads.set(harness, read);
+    }
+    return read.then((succeeded) => {
+        if (succeeded && operation) settledPrograms.set(harness, operation);
+        return succeeded;
+    });
 }

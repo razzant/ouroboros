@@ -102,6 +102,16 @@ def world(key: str, build: Callable[[pathlib.Path], None]) -> pathlib.Path:
     return template
 
 
+def _folder_times(template: pathlib.Path, destination: pathlib.Path) -> None:
+    """Each copied folder gets its own time back (the evidence packer's stamp reads it). ``clonefile`` stamps the
+    folders it makes with the time of the call; ``shutil.copytree`` gives a folder the time its parent's listing holds,
+    which on Windows can still be the time from before a file in it was deleted, until the folder itself is opened.
+    CPython 3.10's stat by name opened it; 3.12's opens it only when its by-name fast path is unavailable (#3633)."""
+    for directory, _folders, _files in os.walk(template):
+        seen = os.stat(directory)
+        os.utime(destination / pathlib.Path(directory).relative_to(template), ns=(seen.st_atime_ns, seen.st_mtime_ns))
+
+
 def _copy_on_write(template: pathlib.Path, destination: pathlib.Path) -> bool:
     """False leaves the copy to the caller. ``clonefile`` is what ``cp -c`` calls per file; given the
     folder it clones the whole tree in one call (1,046 files: 0.02 s against 0.36 s, and no child),
@@ -109,9 +119,7 @@ def _copy_on_write(template: pathlib.Path, destination: pathlib.Path) -> bool:
     if sys.platform == "darwin":
         if ctypes.CDLL(None).clonefile(os.fsencode(template), os.fsencode(destination), 0) != 0:
             return False
-        for directory, _folders, _files in os.walk(template):
-            seen = os.stat(directory)
-            os.utime(destination / pathlib.Path(directory).relative_to(template), ns=(seen.st_atime_ns, seen.st_mtime_ns))
+        _folder_times(template, destination)
         return True
     if sys.platform.startswith("linux"):
         try:
@@ -131,6 +139,7 @@ def clone(template: pathlib.Path, destination: pathlib.Path) -> pathlib.Path:
     if not _copy_on_write(template, destination):
         shutil.rmtree(destination, ignore_errors=True)  # a copy that stopped half way
         shutil.copytree(template, destination, symlinks=True)
+        _folder_times(template, destination)
     return destination
 
 

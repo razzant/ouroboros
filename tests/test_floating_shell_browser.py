@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
+from tests.test_design_system_gate_browser import open_nav
 from tests.test_room_work_browser import PROJECT, Transport, activity, progress, reading
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 from tests.test_window_chrome_browser import record
@@ -61,33 +62,40 @@ def _gap_heads_history(page, host):
     }""", host)
 
 
-def test_hidden_main_defers_gap_notice_until_shown_without_reading_again(shell_ui):
+def test_hidden_main_reads_no_history_until_shown_and_tells_its_gap_at_its_head(shell_ui):
     page = shell_ui["page"]
     page.add_init_script(_ROOM_NOTICES)
     transport = Transport(page, history={1: reading(14)})
     reads = _gap_history(page, transport)
     page.goto(shell_ui["url"] + "/#settings")
     page.wait_for_selector("#page-settings.active")
-    page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
+    # A room behind another page neither draws nor reads (5e72b85224, "a page change ... stops drawing and reading
+    # there"): Main opened behind Settings has read nothing and raised nothing.
+    page.wait_for_timeout(1500)
     hidden_notices = page.locator(".toast-stack--room .toast").count()
-    before = len(reads)
+    hidden_reads = list(reads)
     page.locator('[data-nav-page="chat"]').first.click()
     page.wait_for_selector("#page-chat.active")
     page.wait_for_selector("#page-chat .chat-load-older-note")
     shown = _room_notices(page)
     edge = _gap_heads_history(page, "#page-chat")
+    first_show = len(reads)
     capture(page, f"hidden-main-shown-{shell_ui['engine']}")
     record(f"hidden-main-{shell_ui['engine']}", {"hidden_notices": hidden_notices, "shown_notices": shown,
-                                               "reads_before": before, "reads_after": len(reads), **edge})
+                                               "hidden_reads": hidden_reads, "reads_after": len(reads), **edge})
     assert hidden_notices == 0, "a hidden room raises no notice"
+    assert hidden_reads == [], "a room behind another page reads no history"
     assert shown == [], "a shown room tells its gap at the head of its history, never as a notice over its newest rows"
     assert edge["heads"] and "gaps" in edge["note"], edge
-    assert len(reads) == before, "showing the room must not request history"
+    assert reads == [1], "showing the room reads its history once"
     page.locator('[data-nav-page="settings"]').first.click()
+    page.wait_for_selector("#page-settings.active")
     page.locator('[data-nav-page="chat"]').first.click()
     page.wait_for_selector("#page-chat.active")
     assert _room_notices(page) == []
     assert "gaps" in page.locator("#page-chat .chat-load-older-note").inner_text()
+    assert _gap_heads_history(page, "#page-chat")["heads"], "the returned room keeps its gap at the head of its history"
+    assert len(reads) - first_show <= 1, ("a returned room catches up with at most one read", reads)
 
 
 @pytest.mark.parametrize("chat_id", [1, 42])
@@ -183,18 +191,56 @@ def test_hidden_main_does_not_take_visible_projects_notice(shell_ui):
     page = shell_ui["new_page"](viewport={"width": 390, "height": 844}, has_touch=True)
     page.add_init_script(_ROOM_NOTICES)
     transport = Transport(page, projects=[PROJECT], history={1: reading(14), 42: reading(14, room="Project")})
-    _gap_history(page, transport)
+    reads = _gap_history(page, transport)
     page.goto(shell_ui["url"] + "/#settings")
-    page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
+    page.wait_for_selector("#page-settings.active")
     page.evaluate("p => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project: p}}))", PROJECT)
     page.wait_for_selector("#project-panel.open .chat-load-older-note")
     edge = _gap_heads_history(page, "#project-panel")
     assert _room_notices(page) == [], "neither the hidden Main nor the shown Project raises a notice of its own"
     assert edge["heads"] and "gaps" in edge["note"], edge
+    # On a phone the Project covers Main whole, so Main still reads nothing (5e72b85224) and has no gap to tell yet.
+    assert 1 not in reads, reads
+    # The reference was a jump from Settings (DESIGN "Layers and dismissal"): the room's × returns there; Main is
+    # then chosen in the drawer.
     page.click("#project-panel-close")
     page.wait_for_function("!document.body.classList.contains('project-panel-open')")
-    assert _room_notices(page) == []
-    assert "gaps" in _gap_heads_history(page, "#page-chat")["note"]
+    page.wait_for_selector("#page-settings.active")
+    open_nav(page, "chat")
+    page.wait_for_function("document.querySelector('#page-chat .chat-load-older-note')?.textContent.includes('gaps')")
+    assert _room_notices(page) == [], "Main shown after the Project tells its gap at its head, never as a notice"
+    assert _gap_heads_history(page, "#page-chat")["heads"]
+
+
+def test_a_jumped_project_returns_to_its_reference_with_the_ring_of_the_close(shell_ui):
+    """A reference opens its Project as a jump (DESIGN "Layers and dismissal"): Escape closes the room to the reference
+    with the keyboard's ring, as a Settings return does; ×, a pointer's close, returns there with none."""
+    page = shell_ui["new_page"](viewport={"width": 1087, "height": 744})
+    Transport(page, projects=[PROJECT], history={1: reading(14), 42: reading(14, room="Project")})
+    page.goto(shell_ui["url"])
+    page.wait_for_selector("#chat-input")
+    page.evaluate("""async (project) => {
+        const { projectReference } = await import('/static/modules/project_reference.js');
+        const button = projectReference(project);
+        button.id = 'jump-reference';
+        document.querySelector('#page-chat').append(button);
+    }""", {"id": PROJECT["id"], "name": PROJECT["name"]})
+    returned = """() => { const el = document.getElementById('jump-reference');
+        return {focused: el === document.activeElement, input: el.dataset.returnFocus || '',
+                ring: getComputedStyle(el).outlineStyle, layers: window.__ouroLayers.ids()}; }"""
+    for close, expected in (("Escape", {"focused": True, "input": "keyboard", "ring": "solid", "layers": []}),
+                            ("×", {"focused": True, "input": "pointer", "ring": "none", "layers": []})):
+        page.locator("#jump-reference").focus()
+        page.keyboard.press("Enter")
+        page.wait_for_function("() => /^page-return-\\d+,project$/.test(window.__ouroLayers.ids().join())")
+        page.wait_for_selector("#project-panel.open .chat-input")
+        if close == "Escape":
+            page.keyboard.press("Escape")
+        else:
+            page.locator("#project-panel-close").click()
+        page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
+        page.wait_for_function("() => document.activeElement?.id === 'jump-reference'")
+        assert page.evaluate(returned) == expected, close
 
 
 @pytest.mark.parametrize("chat_id,keyboard", [(1, False), (1, True), (42, False), (42, True)])
@@ -305,10 +351,12 @@ def test_floating_headers_gap_notice_and_immediate_selection(shell_ui, tmp_path,
             const header = document.querySelector('#page-chat .chat-page-header');
             return {header: rect('#page-chat .chat-page-header'), toast: rect('.toast-stack--room .toast'),
                 composer: rect('#page-chat #chat-input-area'), background: getComputedStyle(header).backgroundColor,
-                before: getComputedStyle(header, '::before').content};
+                edge: getComputedStyle(header, '::before').backgroundImage,
+                edgeEvents: getComputedStyle(header, '::before').pointerEvents};
         }""")
+        # The bar paints nothing of its own; under its capsules lies the room's edge (DESIGN "A room's edges"), no press.
         assert facts["background"] == "rgba(0, 0, 0, 0)"
-        assert facts["before"] in ("none", "normal")
+        assert "linear-gradient" in facts["edge"] and facts["edgeEvents"] == "none", facts
         assert facts["toast"]["top"] > facts["header"]["bottom"]
         assert facts["toast"]["bottom"] <= facts["composer"]["top"]
         assert not page.locator("#page-chat .chat-page-note").is_visible()
@@ -403,6 +451,9 @@ def test_status_fitting_skips_unchanged_paints_and_tracks_capsule_width(shell_ui
     transport = Transport(page, activities=[activity("main-work", "thinking")], history={1: reading(14)})
     page.goto(shell_ui["url"])
     page.wait_for_selector("#page-chat .rw-trigger:not(:disabled)")
+    # Count from the census word on the capsule: its first paint replaces the markup's Connecting…, a new word that is
+    # measured once, and Chromium may draw it seconds after the trigger enables.
+    page.wait_for_function("document.querySelector('#page-chat .rw-trigger').title === 'Thinking'")
     page.wait_for_timeout(400)
     page.evaluate("""() => {
         const badge = document.querySelector('#page-chat .rw-trigger .status-badge');
@@ -424,10 +475,11 @@ def test_status_fitting_skips_unchanged_paints_and_tracks_capsule_width(shell_ui
     title.evaluate("el => { el.textContent = 'Main'; }")
     page.wait_for_function("document.querySelector('#page-chat .rw-trigger').dataset.word !== 'off'")
     capsule = page.locator("#page-chat .app-page-title-row")
-    rest = capsule.evaluate("el => getComputedStyle(el).backgroundImage")
+    paint = "el => { const s = getComputedStyle(el); return s.backgroundImage + ' ' + s.backgroundColor; }"
+    rest = capsule.evaluate(paint)
     title.hover()
     page.wait_for_timeout(160)
-    hover = capsule.evaluate("el => getComputedStyle(el).backgroundImage")
+    hover = capsule.evaluate(paint)
     assert hover != rest, "hovering the title answers across the whole capsule"
     title.click()
     page.wait_for_selector("#page-chat .rw-shade:not([hidden])")

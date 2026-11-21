@@ -155,6 +155,38 @@ def test_without_a_provider_sentence_the_host_classifies_and_points_at_logs(tmp_
     assert "AuthenticationError" not in hint and "stale sentence" not in hint
 
 
+def test_a_terminal_names_every_failure_of_a_round_that_met_a_content_refusal():
+    """From the ending round's own record (its ``llm_call_refs`` rows, its kept refusals): each failure by its kind
+    with its routes and how often, a refusal in its own words and never as an outage, an outage that did happen in its
+    own; another round's rows stay out, a later round's end never reads an earlier round's record as its own, a round
+    whose kept refusals a restore dropped still names them from its restored rows (the told row still needs them), and
+    a round with no refusal reads exactly as before."""
+    from ouroboros.loop_transport import _FAILURE_KIND_WORDS
+    from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, refusal_facts
+
+    rows = [{"llm_call_id": call_id, "round": 4, "model": model, "use_local": False, "failure_code": code}
+            for call_id, model, code in (("a", "primary/model", "transport_unavailable"), ("b", "spare/opus", "content_filter"),
+                                         ("c", "spare/fable", "quota_exhausted"), ("d", "spare/opus", "content_filter"))]
+    usage = {"llm_call_refs": [{"llm_call_id": "z", "round": 3, "model": "primary/model", "failure_code": "quota_exhausted"},
+                               *rows], ROUND_REFUSALS_KEY: [{"llm_call_id": "b", "round": 4}, {"llm_call_id": "d", "round": 4}],
+             "_last_llm_error_kind": "content_filter", "_last_llm_error": "x"}
+    flags = dict(is_context_overflow=False, waited_sec=300.0, interactive=True, is_deadline_exhausted=False)
+    met = (" This round's failed asks: a request that never reached the provider on primary/model once; "
+           f"{_FAILURE_KIND_WORDS['content_filter']} on spare/opus 2 times; a quota or billing refusal on spare/fable once.")
+    outage = provider_terminal_fallback_text(usage, round_idx=4, is_transport_wait=True, wait_cause="transport_unavailable", **flags)
+    assert outage.endswith(met) and "ended as an outage" in outage
+    generic = provider_terminal_fallback_text(usage, round_idx=4, is_transport_wait=False, **flags)
+    assert generic.endswith(met) and "outage" not in generic
+    later = provider_terminal_fallback_text(usage, round_idx=5, is_transport_wait=False, **flags)  # round 4's record kept
+    assert later == generic[:-len(met)]
+    restored = {key: value for key, value in usage.items() if key != ROUND_REFUSALS_KEY}  # as a restore rebinds the usage
+    assert provider_terminal_fallback_text(restored, round_idx=4, is_transport_wait=False, **flags) == generic  # before: no words
+    assert provider_terminal_fallback_text(restored, round_idx=3, is_transport_wait=False, **flags) == generic[:-len(met)]
+    answered = [*rows, {"llm_call_id": "e", "round": 4, "model": "spare/fable", "use_local": False}]
+    assert refusal_facts({**usage, "llm_call_refs": answered}, 5).startswith("This round's asks")
+    assert refusal_facts({**restored, "llm_call_refs": answered}, 5) == ""  # the provider's words and money are the record's
+
+
 def test_a_body_error_inside_an_empty_response_carries_the_providers_sentence(tmp_path):
     class _Empty:
         calls = 0
@@ -174,9 +206,9 @@ def test_a_body_error_inside_an_empty_response_carries_the_providers_sentence(tm
 
 
 def test_a_body_error_sentence_its_producer_cut_is_quoted_as_shortened(tmp_path):
-    """The HTTP-200 body-error producer keeps a bounded ``message`` and says when it
-    cut it; the owner's row then never closes that prefix as the provider's whole
-    sentence. Classification and retry read code/type/kind and do not change."""
+    """The HTTP-200 body-error producer keeps a bounded ``message`` for Logs and says when it
+    cut it; the owner's row never closes that prefix as the provider's whole sentence: it quotes
+    the sentence the producer read from the whole body. Retry reads code/type/kind and does not change."""
     from ouroboros.llm import LLMClient
 
     client = LLMClient()
@@ -203,9 +235,8 @@ def test_a_body_error_sentence_its_producer_cut_is_quoted_as_shortened(tmp_path)
     llm, usage = _Empty(), {}
     msg, _cost = _call(tmp_path, llm, usage)
     assert msg is None and llm.calls == 1 and usage["_last_llm_error_kind"] == "provider_body_error"
-    assert usage["_last_llm_provider_message_cut"] is True
-    assert provider_failure_hint(usage) == (f' The provider said: "{" ".join(sentence[:300].split())}…" (shortened). '
-                                            "The task's Logs keep the host's record of this failure.")
+    assert "_last_llm_provider_message_cut" not in usage  # before: the 300-character prefix, marked as cut
+    assert provider_failure_hint(usage) == f' The provider said: "{" ".join(sentence.split())}"'
 
 
 def test_a_usable_response_clears_the_stale_provider_sentence(tmp_path):
@@ -295,13 +326,14 @@ def test_owner_provider_message_reads_body_and_stream_shapes_never_engine_displa
     assert owner_provider_fields(ClaudexorModelError(problem, unknown=True)) == {}, "an unknown outcome exposes none"
     assert owner_provider_fields(_BodyError("x", status_code=400, body={"message": "m"})) == {}
     assert owner_provider_message(_BodyError("x", status_code=400, body={"message": "  Flat  body  message. "})) == "Flat body message."
-    stream = RuntimeError("stream died")
-    stream.provider_message = "Upstream closed the stream."
+    from ouroboros.llm_stream import ProviderStreamError
+
+    stream = ProviderStreamError({"error": {"message": "Upstream closed the stream."}})
     assert owner_provider_message(stream) == "Upstream closed the stream."
     assert owner_provider_message(RuntimeError(REPR)) == "", "a bare exception has no provider sentence"
     # An empty response's body-error dict: its own message, or nothing.
     assert owner_provider_message({"code": "401", "message": "  Incorrect  API key. "}) == "Incorrect API key."
-    assert owner_provider_message({"code": "401", "message": {"nested": "not a sentence"}}) == ""
+    assert owner_provider_message({"code": "401", "message": {"id": "req_1f429ab0"}}) == "", "an id is no sentence"
 
 
 @pytest.mark.parametrize("unknown", [False, True])
@@ -331,7 +363,7 @@ def test_a_claudexor_refusal_never_reads_as_the_providers_sentence(tmp_path, mon
     else:
         assert usage["_last_llm_provider_fields"] == {"code": "string_above_max_length", "parameter": "instructions"}
         assert hint == (' The provider reported error code "string_above_max_length" and parameter "instructions" '
-                        "but no sentence the host can quote; the host classified the failure as a rejected request. "
+                        "but no sentence the host can quote; the host classified the failure as a context overflow. "
                         "The task's Logs keep the host's record of this failure.")
     rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert all(row["error"] == error.display_message for row in rows if row["type"] == "llm_api_error"), \

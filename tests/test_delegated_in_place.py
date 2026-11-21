@@ -23,6 +23,7 @@ from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transpo
     _owned_gateway_uses_each_test_transport,
 )
 from tests.test_delegate_continuation import _settle, _start
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- this run's own scratch
 
 IN_PLACE = {"workspace_kind": "git", "strategy": "in_place"}
 REFUSED = "workspace_in_place_unavailable"
@@ -81,6 +82,42 @@ def test_one_predicate_reads_custody_requests_and_invocations():
     for other in ({}, {"resource_ref": {"workspace_kind": "directory", "strategy": "direct"}},
                   {"resource_ref": {"workspace_kind": "git", "strategy": "copy"}}, {"resource_ref": "in_place"}):
         assert not is_in_place_run(other)
+
+
+SOURCED = {"observation_seq": 1, "source_ref": {"sha256": "a" * 64}}
+
+
+@pytest.mark.parametrize("ending, live", [
+    ((), True),
+    ((custody.TERMINAL_OBSERVED, {**SOURCED, "state": "stopping"}), True),  # no terminal state: the reducer drops it
+    ((custody.TERMINAL_OBSERVED, {"observation_seq": 1, "source_ref": {}, "state": "cancelled"}), True),  # unsourced
+    ((custody.TERMINAL_OBSERVED, {**SOURCED, "state": "cancelled"}), False),
+    ((custody.SETTLED, {"state": "succeeded"}), False),  # written only after the engine reported a terminal state
+    ((custody.CLOSED_ABSENT, {"reason": "absent from its owning store"}), False),
+], ids=["started", "unknown_state", "unsourced", "terminal", "settled", "closed_absent"])
+def test_a_direct_writer_stays_live_until_custody_proves_its_end(tmp_path, ending, live):
+    """The real custody rows a cancelled child's shared folder waits on: an unproven end keeps the writer live, a proven
+    absence ends it. A pending start, a copy run and a writer of another folder or task answer as such."""
+    from ouroboros.delegate_directory import live_direct_writers
+
+    folder, elsewhere = tmp_path / "shared", tmp_path / "elsewhere"
+
+    def started(run_id, where, ref, task_id="child"):
+        assert custody.record_started(tmp_path, custody.RunCustody(
+            run_id=run_id, task_id=task_id, route_id="fake", invocation_id=f"{run_id}-start", execution_root=str(where),
+            target_root=str(where), resource_ref=ref))
+
+    started("leaf", folder, dict(IN_PLACE))
+    if ending:
+        assert custody.emit(tmp_path, ending[0], {"run_id": "leaf", "task_id": "child", **ending[1]})
+    started("copy", folder, {"workspace_kind": "git", "strategy": "copy"})
+    started("other-folder", elsewhere, {"workspace_kind": "directory", "strategy": "direct"})
+    started("other-task", folder, dict(IN_PLACE), task_id="sibling")
+    assert live_direct_writers(tmp_path, "child", folder) == (["run leaf"] if live else [])
+    assert custody.emit(tmp_path, custody.START_REQUESTED, {
+        "task_id": "child", "invocation_id": "folder-start", "request": {"prompt": "work"}, "target_root": str(folder),
+        "execution_root": str(folder), "resource_ref": {"workspace_kind": "directory", "strategy": "direct"}})
+    assert live_direct_writers(tmp_path, "child", folder) == (["run leaf"] if live else []) + ["start folder-start"]
 
 
 # --------------------------------------------------------------------------- the start
@@ -193,7 +230,7 @@ def test_a_full_access_in_place_run_is_named_its_own_disposable_scratch_and_gran
     held = custody.replay(tmp_path)["run-1"]
     [record] = _in_place_owners(ctx).glob("*/scratch.json")
     assert record.parent.name == f"in-place-{held.invocation_id}"
-    scratch = pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+    scratch = pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"]) / "w"
     assert scratch.is_dir() and not any(scratch.iterdir()) and _target(ctx) not in scratch.parents
     binding = request["instructions"].split("\n\nDELEGATED IN-PLACE BINDING", 1)[1]
     assert f"outside every Git working tree, in {scratch}, this run's disposable scratch, {DISPOSABLE_SCRATCH}." in binding

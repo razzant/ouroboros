@@ -256,8 +256,10 @@ def test_pending_children_hold_until_an_explicit_unfinished_stop(turn, tmp_path,
     arguments = json.loads(stop["tool_calls"][0]["function"]["arguments"])
     arguments.update(action="stop", rationale="Child1 is still running and remains unfinished.")
     stop["tool_calls"][0]["function"]["arguments"] = json.dumps(arguments)
-    text, usage, trace = run([_call("silent", "Premature"), _call("silent", "Still premature"), stop])
-    assert len(calls) == 3 and trace["task_completion"]["action"] == "stop"
+    # The running child is handed off once, at the first finish (audit 11.11, item 18: one return, no standing
+    # hold); the explicit unfinished stop then delivers and leaves the child running.
+    text, usage, trace = run([_call("silent", "Premature"), stop])
+    assert len(calls) == 2 and trace["task_completion"]["action"] == "stop"
     assert usage.get("reason_code") != "children_unabsorbed"
     assert trace["child_result_dispositions"]["current"] == []
     saved = read_result(tmp_path, "child1")

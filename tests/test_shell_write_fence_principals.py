@@ -56,7 +56,6 @@ def _acting(ctx: ToolContext, workspace: pathlib.Path) -> None:
 
 def _mode(monkeypatch, name):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", name)
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: name)
 
 
 def _word_commands(scratch: pathlib.Path) -> dict:

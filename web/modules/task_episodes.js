@@ -1,7 +1,7 @@
 /**
  * Continue episodes of one work (owner QB = A, FINAL_DESIGN D10): a Continue is the next episode of
  * the SAME card. The current episode owns the status chip; every episode is one meta line under the
- * title — with its own name, time and past outcome —
+ * title — with its own name, time, past outcome and closing sentence —
  * never a column of chips.
  *
  * The chain is the host's explicit fact only: a settled task's `continued_by` or `continuation_offer`
@@ -20,10 +20,20 @@ export function admittedSuccessor(row) {
 }
 
 /** Fold one row's facts into a task's episode: when its attempt started, when and how it ended. */
+// The subject inside the host's own "Continue: <subject>" title; "" for any other name.
+function continuedSubject(name) {
+    const text = String(name || '');
+    const subject = text.replace(/^(?:Continue: *)+/, '').trim();
+    return subject !== text.trim() ? subject : '';
+}
+
 export function noteEpisodeFacts(previous = {}, row = {}) {
     const next = { ...previous };
     const name = String(row.suggested_name || row.task_name || row.title || '').trim();
     if (name) next.name = name;
+    // The closing sentence is its own fact: renaming the work must not take it from this episode's history.
+    const summary = String(row.wake_summary || '').trim();
+    if (summary) next.summary = summary;
     const time = row?.terminal_time && typeof row.terminal_time === 'object' ? row.terminal_time : null;
     next.started ||= String(time?.attempt?.started_at || row?.started_at || '');
     const terminal = row?.outcome_final === true || row?.system_type === 'task_summary' || taskDoneIsTerminal(row);
@@ -82,6 +92,9 @@ export function renderEpisodes(el, episodes = []) {
             parts.push(`<span class="chat-live-episode-outcome" data-tone="${escapeHtmlAttr(tone)}">${escapeHtml(outcome)}</span>`
                 + (cause ? `<span class="chat-live-episode-cause">: ${escapeHtml(cause)}</span>` : ''));
         }
+        if (!current && episode.summary && episode.summary !== episode.name) {
+            parts.push(`<span class="chat-live-episode-summary" data-i18n-authored>${escapeHtml(episode.summary)}</span>`);
+        }
         return `<div class="chat-live-episode" data-episode="${index + 1}"${current ? ' data-current="1"' : ''}>${parts.join(' · ')}</div>`;
     }) : [];
     const html = lines.join('');
@@ -100,8 +113,10 @@ export function renderEpisodes(el, episodes = []) {
  * this chat sees none of its frames (a Main
  * portal's room): `follow(successorId, predecessor)` may mint its card from the facts it holds.
  * `renamed(record)` hears each name this module sets: the card's one headline owner paints the line under it, and a portal's Project reference names itself again.
+ * `meta(record)` paints an earlier episode's facts again once its heading or disclosed content moved: the heading's own words
+ * (`episodeHeadingWords`) are not said a second time in the Details beneath it.
  */
-export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {} }) {
+export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {}, meta = () => {} }) {
     const predecessors = new Map();  // successor task id -> predecessor task id
 
     function chainOf(taskId) {
@@ -139,16 +154,20 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             const facts = previous.episode || {};
             const label = [fmt('Episode {n}', { n: index + 1 }), facts.name,
                 episodeSpan(facts.started, facts.ended), facts.phase && taskPresentation(facts.phase).headline,
-                facts.cause].filter(Boolean).join(' · ');
-            if (disclosure.firstElementChild.textContent !== label) disclosure.firstElementChild.textContent = label;
+                facts.cause, facts.summary !== facts.name && facts.summary].filter(Boolean).join(' · ');
+            let changed = disclosure.firstElementChild.textContent !== label;
+            if (changed) disclosure.firstElementChild.textContent = label;
+            previous.episodeHeadingWords = [facts.name, facts.summary].filter(Boolean);  // the authored words this heading carries
             const codes = disclosure.querySelector('.chat-episode-codes');
             codes.textContent = reasonCodesNote(facts.codes);
             codes.hidden = !codes.textContent;
-            for (const content of [previous.timelineEl, previous.reviewSummaryEl, previous.reviewsHostEl, previous.subagentsEl]) {
-                if (content && content.parentNode !== disclosure) disclosure.appendChild(content);
+            for (const content of [previous.detailsEl, previous.timelineEl, previous.reviewSummaryEl,
+                previous.reviewsHostEl, previous.subagentsEl]) {
+                if (content && content.parentNode !== disclosure) { disclosure.appendChild(content); changed = true; }
             }
             const position = host.children[index] || null;
             if (position !== disclosure) host.insertBefore(disclosure, position);
+            if (changed) meta(previous);
         }
         host.hidden = false;
     }
@@ -165,8 +184,14 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
         const chain = chainOf(record.groupId).map((id) => records.get(id)).filter(Boolean);
         if (!chain.length) return false;
         let changed = false;
-        // The work keeps its first name (a successor's own "Continue: …" title is the mechanism's).
-        const name = chain[0].episode?.name || chain[0].suggestedName || chain[0].titleEl?.textContent || '';
+        // The work keeps its first name (a successor's own "Continue: …" title is the mechanism's); a closing
+        // sentence standing in for one gives way to the subject the host admitted its successor under.
+        const first = chain[0].episode || {};
+        const summaries = new Set(chain.map(r => r.episode?.summary).filter(Boolean));
+        const subject = first.name && first.name === first.summary
+            ? [...chain.slice(1), record].map((r) => continuedSubject(r.episode?.name))
+                .find(value => value && !summaries.has(value)) : '';
+        const name = subject || first.name || chain[0].suggestedName || chain[0].titleEl?.textContent || '';
         if (name && record.episodeName !== name) {
             record.episodeName = name;
             record.suggestedName = name;

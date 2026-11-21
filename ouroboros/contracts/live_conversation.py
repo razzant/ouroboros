@@ -279,7 +279,9 @@ class LiveHost(Protocol):
         Return None for older hosts, or a lease with async run(consume)/close()
         and caught_up=False until adoption delivers new canonical rows. run owns
         adoption and releases the consumer result before retired close accounting;
-        the host joins that cleanup at call end. No media goes to it before run.
+        the host joins that cleanup at call end. No media goes to it before run;
+        from run, as in session, the hub keeps capture until the feature declares
+        the connection's rates at its Ready (hub.set_engine_rates).
         """
         return None
 

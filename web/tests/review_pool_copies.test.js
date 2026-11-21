@@ -88,7 +88,7 @@ test('Keep one per model removes the copies from the draft only, and the offer f
     assert.deepEqual(editor.setting.items.map((row) => [row.subagent_id, row.review_eligible === true]), [['helper', false], ['review-1', true]]);
     assert.equal(editor.dirty, true, 'an unsaved draft: the owner sees it and saves it');
     assert.deepEqual(changes.at(-1).items.map((row) => row.subagent_id), ['helper', 'review-1']);
-    assert.deepEqual(editor.collect().OUROBOROS_SUBAGENTS.items.map((row) => row.subagent_id), ['helper', 'review-1']);
+    assert.deepEqual(editor.setting.items.map((row) => row.subagent_id), ['helper', 'review-1']);
     assert.deepEqual(editor.validate(), []);
     assert.equal(dom.pool.copies.hidden, true, 'nothing is a copy any more');
 

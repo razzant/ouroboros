@@ -24,6 +24,7 @@ def _pending(root, task_id=TASK, invocation_id=INVOCATION, **extra):
     assert dc.record_start_requested(
         root, run_id="", task_id=task_id, root_task_id=task_id, invocation_id=invocation_id,
         idempotency_key=invocation_id, route="r", project_id="p", project_owned=False,
+        daemon_store_id="fixture-store",  # this suite tests admission/Stop, on a receipt-bound store
         request={"prompt": "stored request", "primaryHarness": "r", "model": "m"}, **extra)
     dc._CUSTODY.clear()
     return dc
@@ -42,6 +43,8 @@ def _held(root, run_id="run-held", task_id=TASK):
 
 class _Recorder(_LiveRunStub):
     """A serving daemon that records every start it is asked for."""
+
+    store_identity = "fixture-store"
 
     def __init__(self, run_id="run-recovered", state="running"):
         super().__init__(run_id=run_id, state=state)
@@ -147,10 +150,10 @@ def test_replay_admission_is_rechecked_before_each_re_post(tmp_path):
     dc = _pending(tmp_path, invocation_id="inv-first")
     _pending(tmp_path, task_id="t-other", invocation_id="inv-second")
     ensured = _Recorder()
-    answers = iter([True, True, False])  # the gate, the first dispatch, a stop before the second
-
+    # Admitted until the first re-POST lands (its gate, dispatch and submission each ask);
+    # a stop then arrives before the second.
     outcomes = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: ensured,
-                                          replay_pending=lambda: next(answers))
+                                          replay_pending=lambda: not ensured.started)
 
     assert [key for _request, key in ensured.started] == ["inv-first"]
     retained = [row for row in outcomes if row["action"] == "invocation_retained"]

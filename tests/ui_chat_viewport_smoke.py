@@ -161,6 +161,12 @@ def run_chat_viewport_smoke(
 
     def emit_frame(page, frame):
         evidence.checkpoint("emit_ws_frame", frame=frame)
+        if page.evaluate("() => document.hidden"):
+            # A hidden room pauses its socket view. Its return reads the server's durable row, as a real arrival does.
+            from ouroboros import dialogue_store
+            dialogue_store.append(data_dir, "progress", {
+                **frame, "type": "send_message", "direction": "out",
+            })
         _emit_ws_frame(page, frame)
 
     def card_top(page, task_id):
@@ -618,6 +624,7 @@ def run_chat_viewport_smoke(
                         document.dispatchEvent(new Event('visibilitychange'));
                     }"""
                 )
+                page.locator('.chat-live-card[data-task-id="vp-hidden-pinned"]').wait_for(state="attached")
                 page.evaluate(_SETTLE_RESTORE_FRAMES)
                 state = jump_state(page)
                 assert state["remaining"] <= 6 and state["dotHidden"], state
@@ -670,6 +677,7 @@ def run_chat_viewport_smoke(
                         document.dispatchEvent(new Event('visibilitychange'));
                     }"""
                 )
+                page.locator('.chat-live-card[data-task-id="vp-hidden-reader"]').wait_for(state="attached")
                 page.evaluate(_SETTLE_RESTORE_FRAMES)
                 restored_top = page.locator("#chat-messages").evaluate("node => node.scrollTop")
                 assert abs(restored_top - hidden_top) <= 2
@@ -1215,7 +1223,7 @@ def run_chat_viewport_smoke(
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
                 page.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport") / f"live-card-viewport-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport", publish=True) / f"live-card-viewport-{browser_engine}.png"),
                     full_page=True,
                 )
 

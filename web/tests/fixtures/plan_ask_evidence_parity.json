@@ -1,0 +1,50 @@
+{
+  "purpose": "One evidence classification across the host and the browser: every case is one plan ask's recorded attach/attached/omissions read by ouroboros.plan_record.ask_evidence (tests/test_plan_record.py) and by plan_record_presentation.js askEvidence (web/tests/review_plan_record.test.js). A change to either twin changes this table in the same commit.",
+  "cases": [
+    {
+      "name": "every declared locator attached whole",
+      "ask": {"attach": ["README.md", "task:abc"], "attached": [{"locator": "README.md", "sha256": "aa", "bytes": 120}, {"locator": "task:abc", "sha256": "bb", "bytes": 900}], "omissions": []},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": true}, "counts": {"whole": 2, "part": 0, "attached_unknown": 0, "not_attached": 0, "unknown": 0}, "items": [["README.md", "whole", []], ["task:abc", "whole", []]]}
+    },
+    {
+      "name": "a head cut and a history gap attach in part; a repeat and an unretained source are notes beside whole content",
+      "ask": {"attach": ["docs/big.md", "chat:7", "notes.md", "notes.md", "task:old"], "attached": [{"locator": "docs/big.md", "bytes": 50000}, {"locator": "chat:7", "bytes": 3000}, {"locator": "notes.md", "bytes": 10}, {"locator": "task:old", "bytes": 400}], "omissions": [{"locator": "docs/big.md", "reason": "truncated_to_40000"}, {"locator": "chat:7", "reason": "chat_history_gap:rows 4-9"}, {"locator": "notes.md", "reason": "duplicate_locator"}, {"locator": "task:old", "reason": "source_unretained:result"}]},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": true}, "counts": {"whole": 2, "part": 2, "attached_unknown": 0, "not_attached": 0, "unknown": 0}, "items": [["docs/big.md", "part", ["truncated_to_40000"]], ["chat:7", "part", ["chat_history_gap:rows 4-9"]], ["notes.md", "whole", ["duplicate_locator"]], ["task:old", "whole", ["source_unretained:result"]]]}
+    },
+    {
+      "name": "what did not attach keeps every reason recorded for it",
+      "ask": {"attach": ["missing.md", "https://example.com/spec", "secret.env"], "attached": [], "omissions": [{"locator": "missing.md", "reason": "missing"}, {"locator": "https://example.com/spec", "reason": "url_not_fetched"}, {"locator": "secret.env", "reason": "sensitive"}, {"locator": "secret.env", "reason": "budget_exhausted"}]},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": true}, "counts": {"whole": 0, "part": 0, "attached_unknown": 0, "not_attached": 3, "unknown": 0}, "items": [["missing.md", "not_attached", ["missing"]], ["https://example.com/spec", "not_attached", ["url_not_fetched"]], ["secret.env", "not_attached", ["sensitive", "budget_exhausted"]]]}
+    },
+    {
+      "name": "a declared locator that neither row names stays unknown",
+      "ask": {"attach": ["a.md", "b.md"], "attached": [{"locator": "a.md", "bytes": 5}], "omissions": []},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": true}, "counts": {"whole": 1, "part": 0, "attached_unknown": 0, "not_attached": 0, "unknown": 1}, "items": [["a.md", "whole", []], ["b.md", "unknown", []]]}
+    },
+    {
+      "name": "an older ask without attached knows of nothing that attached",
+      "ask": {"attach": ["a.md", "b.md"], "omissions": [{"locator": "a.md", "reason": "missing"}]},
+      "expected": {"recorded": {"attach": true, "attached": false, "omissions": true}, "counts": {"whole": 0, "part": 0, "attached_unknown": 0, "not_attached": 0, "unknown": 2}, "items": [["a.md", "unknown", ["missing"]], ["b.md", "unknown", []]]}
+    },
+    {
+      "name": "an older ask without omissions leaves an attached item's completeness unknown and the rest not attached",
+      "ask": {"attach": ["a.md", "b.md"], "attached": [{"locator": "a.md", "bytes": 5}]},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": false}, "counts": {"whole": 0, "part": 0, "attached_unknown": 1, "not_attached": 1, "unknown": 0}, "items": [["a.md", "attached_unknown", []], ["b.md", "not_attached", []]]}
+    },
+    {
+      "name": "an ask that recorded none of the fields lists nothing and says so",
+      "ask": {"ask_id": "a1"},
+      "expected": {"recorded": {"attach": false, "attached": false, "omissions": false}, "counts": {"whole": 0, "part": 0, "attached_unknown": 0, "not_attached": 0, "unknown": 0}, "items": []}
+    },
+    {
+      "name": "a complete ask that declared nothing lists nothing",
+      "ask": {"attach": [], "attached": [], "omissions": []},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": true}, "counts": {"whole": 0, "part": 0, "attached_unknown": 0, "not_attached": 0, "unknown": 0}, "items": []}
+    },
+    {
+      "name": "blank and malformed entries are skipped; rows beyond the declared list follow it in order",
+      "ask": {"attach": ["  a.md  ", "", null], "attached": ["not a row", {"locator": "a.md", "bytes": 3}, {"locator": "extra.md", "bytes": 4}], "omissions": [null, {"locator": "gone.md", "reason": "missing"}]},
+      "expected": {"recorded": {"attach": true, "attached": true, "omissions": true}, "counts": {"whole": 2, "part": 0, "attached_unknown": 0, "not_attached": 1, "unknown": 0}, "items": [["a.md", "whole", []], ["extra.md", "whole", []], ["gone.md", "not_attached", ["missing"]]]}
+    }
+  ]
+}

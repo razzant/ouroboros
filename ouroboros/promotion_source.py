@@ -106,8 +106,8 @@ def resolve_promote_source(
         # The guarded create returns the full row: repeated attachment keeps its
         # original provenance/trust fact, without rereading a different basis.
         if chosen.get("working_dir") != folder or str(chosen.get("provenance") or "").strip() in ("", "none"):
-            chosen = update_project(
-                drive_root, pid, admission_basis=basis, working_dir=folder,
+            chosen = update_project(  # ``source=`` chooses the Project's folder, so it ends a recorded No folder
+                drive_root, pid, admission_basis=basis, working_dir=folder, no_folder=None,
                 provenance=provenance, clone_url=clone_url, trusted_at=utc_now_iso(),
             )
     except Exception as exc:

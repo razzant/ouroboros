@@ -138,12 +138,14 @@ def test_spawn_installs_every_slot_booting_and_hands_the_set_to_the_readiness_se
         lambda slots, cursor, *rest: handed.append((dict(slots), cursor, rest)),
     )
 
-    monkeypatch.setattr(workers, "MAX_WORKERS", cap)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(cap))
     launch = getattr(workers, start)
     launch() if count is None else launch(count)
 
     assert sorted(workers.WORKERS) == list(range(count or 1))
-    assert workers.MAX_WORKERS == cap
+    from ouroboros.runtime_limits import get_max_workers
+
+    assert get_max_workers() == cap  # the owner's cap is read live, never bound at the start
     assert all(slot.reaping for slot in workers.WORKERS.values()), "a fresh slot must not be assignable"
     assert _wait_for(lambda: bool(handed))
     slots, cursor, rest = handed[0]
@@ -174,6 +176,8 @@ def test_respawn_installs_the_fresh_slot_booting_through_the_same_seam_with_its_
     assert _wait_for(lambda: len(handed) == 1)
     assert handed[0][0] == {3: fresh} and handed[0][2][0] == 1 and 0 < handed[0][2][1] <= time.time()
 
+    assert workers.respawn_worker(3, ready_attempt=2) is False  # a live replacement is not ours to evict
+    fresh.proc._alive = False
     assert workers.respawn_worker(3, ready_attempt=2) is True
     assert fresh.proc._ouroboros_stop_socket.fileno() == -1  # old Process is still retained here
     assert _wait_for(lambda: len(handed) == 2)
@@ -202,7 +206,10 @@ def seam(pool, monkeypatch, request):
             if slot.proc.pid == pid:
                 slot.proc._alive = False
     monkeypatch.setattr(platform_layer, "kill_pid_tree", kill)
-    monkeypatch.setattr(lifecycle, "respawn_worker", lambda wid, **kw: respawned.append((wid, kw)))
+    def respawn(wid, *, expected_worker, **kw):
+        assert pool.workers.WORKERS[wid] is expected_worker
+        respawned.append((wid, kw))
+    monkeypatch.setattr(lifecycle, "respawn_worker", respawn)
     monkeypatch.setattr(pool.workers, "send_with_budget", lambda chat_id, text, **_k: sent.append((chat_id, text)))
     events = pool.root / "logs" / "events.jsonl"
     if getattr(request, "param", "seeded") != "missing":
@@ -504,7 +511,8 @@ def test_the_window_and_the_reported_wait_count_from_the_spawn_instant(pool, sea
     assert row["waited_sec"] >= 10.0 and seam.killed == [5040]
 
 
-def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, monkeypatch):
+@pytest.mark.parametrize("lane", ["project", "conversation"])
+def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, monkeypatch, lane):
     disabled = []
     monkeypatch.setattr(pool.workers, "disable_exhausted_worker_pool", lambda: disabled.append(True))
     monkeypatch.setattr(pool.lifecycle, "WORKER_READY_MAX_ATTEMPTS", 2)
@@ -524,6 +532,19 @@ def test_the_replacement_loop_is_bounded_then_parked_and_reported(pool, seam, mo
     assert [row["action"] for row in rows] == ["respawn", "parked"]
     assert rows[1]["attempt"] == 2 and rows[1]["max_attempts"] == 2
     assert seam.sent and seam.sent[0][0] == 7 and "slot 1" in seam.sent[0][1] and "parked" in seam.sent[0][1]
+    for wid in (2, 3):
+        if wid == 3:
+            fresh = _booting_slot(pool, 0, 5000)
+            fresh.lane = "conversation"
+            assert pool.lifecycle._open_ready_slot(0, fresh, {"pid": 5000}, "", 0, time.time(), 1)
+        failed = _booting_slot(pool, wid, 5012 + wid)
+        failed.lane = lane
+        pool.lifecycle._replace_unready_slot(wid, failed, 7, time.time(), 2)
+        assert failed.readiness_exhausted and failed.reaping and not failed.booting
+        assert len(seam.sent) == wid - 1, "only the first park since a successful ready tells the owner"
+    assert "slot 3" in seam.sent[-1][1] and "Use /restart" in seam.sent[-1][1]
+    assert [row["action"] for row in _rows(seam.supervisor, "worker_ready_timeout")] == ["respawn"] + ["parked"] * 3
+    assert disabled == [True] * (3 if lane == "project" else 1)
 
 
 def test_a_child_that_died_during_boot_is_released_to_the_crash_detector(pool, seam):

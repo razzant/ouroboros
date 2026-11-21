@@ -261,7 +261,15 @@ def test_foreign_and_unknown_runs_are_refused_without_a_wire_call(tmp_path, monk
     assert foreign["status"] == "refused" and foreign["reason"] == "run_not_owned"
     assert foreign["owner_task_id"] == "t-other"
     unknown = json.loads(_delegate_message(ctx, "run-nobody", "steer").text)
-    assert unknown["reason"] == "run_ownership_unknown"
+    assert unknown["reason"] == "run_ownership_unknown" and "hint" not in unknown
+    # A task id given as a run id: the same refusal names the read that answers it.
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _status_root
+
+    write_task_result(_status_root(ctx), "kidtask11", "completed", result="done")
+    task = json.loads(_delegate_message(ctx, "kidtask11", "steer").text)
+    assert task["reason"] == "run_ownership_unknown" and task["hint"] == (
+        "That id names a task, not a delegated run: get_task_result(task_id='kidtask11') reads it.")
     assert stub.posts == [] and stub.reads == []
 
 
@@ -1189,7 +1197,7 @@ def test_registered_message_handler_observes_current_questions_over_real_gateway
 
 def test_message_question_observation_does_not_consume_the_next_real_wait(tmp_path, monkeypatch):
     from ouroboros import delegate_interactions as interactions
-    from ouroboros.tools.delegate import _delegate_wait
+    from ouroboros.tools.delegate import _read_run
 
     ctx = _ctx(tmp_path)
     _own_run()
@@ -1201,7 +1209,7 @@ def test_message_question_observation_does_not_consume_the_next_real_wait(tmp_pa
     }))
     refused = json.loads(interactions._delegate_message(ctx, "run-1", "steer").text)
     assert refused["interaction_observation"]["status"] == "observed" and not memo
-    waited = json.loads(_delegate_wait(ctx, "run-1", wait_sec=1, since_seq=5))
+    waited = json.loads(_read_run(ctx, "run-1", 5))
     assert waited["status"] == "waiting_on_user"
     assert waited["pending_interactions"][0]["interaction_id"] == "int-current"
     assert waited["pending_interactions"][0]["questions"][0]["question_id"] == "q-port"

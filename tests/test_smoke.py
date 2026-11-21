@@ -123,7 +123,7 @@ EXPECTED_TOOLS = [
     "apply_patch", "edit_batch",
     "send_photo", "send_video", "send_file", "send_links", "show_card", "search_code", "query_code", "query_data", "escalate",
         "forward_to_worker",
-    "generate_image", "list_image_models", "recover_image", "generate_evolution_stats",
+    "generate_image", "list_image_models", "recover_image",
     "commit_reviewed", "vcs_read",
     "vcs_pull_ff", "vcs_restore", "vcs_revert",
     "fetch_pr_ref", "create_integration_branch", "cherry_pick_pr_commits",
@@ -133,7 +133,7 @@ EXPECTED_TOOLS = [
     "chronicle_write", "memory_read", "memory_mark",
     "journal_read", "journal_write", "workpad_read", "workpad_write",
     "start_task", "list_projects", "tell_task",
-    "move_to_project", "close_project", "schedule_followup",
+    "move_to_project", "close_project", "manage_project_folder", "schedule_followup",
     "memory_map", "memory_update_registry",
     "plan_task", "recent_tasks", "live_roots", "update_focus",
     "search_ui_translations", "pin_ui_translation", "record_update_description", "remote_mcp_sign_in",
@@ -145,7 +145,7 @@ EXPECTED_TOOLS = [
     "skill_sources", "skill_search", "skill_install", "skill_update",
     "list_available_tools", "enable_tools", "call_mcp_tool",
     "analyze_screenshot", "vlm_query", "view_image",
-    "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
 ]
 
 

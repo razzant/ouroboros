@@ -547,7 +547,11 @@ def test_backlog_manager_summary_offline(install_skill, tmp_path):
 # from the official catalog; no remaining official skill requests a protected
 # token, so that tier is unexercised here.
 REVIEW_SKILLS = ("a2a", "duckduckgo", "perplexity")
-_REVIEW_MODEL = "deepseek/deepseek-v4.1-flash"
+# A cheap reviewer that answers. DeepSeek V4.1 Flash, the seat before it, returned an empty or degenerate answer
+# in most paid cycles on a2a's long review (#3616). The review step reads the CI's shared OpenRouter key, which
+# Google, Anthropic and OpenAI models refuse (tests/provider_contract_ci.py), so the seat stays off those vendors
+# (tests/test_skill_smoke_review_ownership.py); GLM-5.3 answered on that key.
+_REVIEW_MODEL = "z-ai/glm-5.3"
 # Shipped reviewer transport window; the ordinary task covers two windows
 # plus author reasoning. Infrastructure errors stay RED without a new task.
 _REVIEW_WINDOW_SEC = float(SETTINGS_DEFAULTS["OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC"])
@@ -629,7 +633,7 @@ def test_review_grants_and_enable(slug, review_secret, install_skill, tmp_path):
     # source row's install basis now, so an explicit review is an ordinary one.
     assert review.get("review_profile") in (None, ""), review.get("review_profile")
 
-    # Auto-grant ran inside review_skill (blocking enforcement ⇒ only on
+    # Auto-grant ran inside review_skill (the lane admits only
     # clean/warnings). Grants are request-keyed: a requested key grants with an
     # empty settings value.
     grants = grant_status_for_skill(data, loaded)

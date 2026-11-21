@@ -255,10 +255,13 @@ def _start_task(
     source: str = "",
     context_requires_self_body_docs: bool = False,
     reasoning_effort: Any = None,
+    model: str = "",
+    model_as_typed: bool = False,
     context_requires_development: Optional[bool] = None,
     destination: str = "",
     owner_quote: str = "",
     owner_words: str = "",
+    review_answer: bool = False,
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
     from ouroboros.owner_words import cited_owner_basis
@@ -269,7 +272,10 @@ def _start_task(
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
-    owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
+    model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
+    owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
+    if cite_error and model:
+        cite_error = "The model needs verified owner_words. Cite your human's exact words or the complete label they pressed."
     if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))
@@ -317,6 +323,12 @@ def _start_task(
         # Without an explicit owner project, ordinary owner work starts in Main;
         # a selected project is still honored above.
         pid = ""
+    from ouroboros.tools.control_models import start_choice, refuse
+
+    try:
+        model_metadata, model_note = start_choice(ctx, model, model_basis, pid, model_as_typed=model_as_typed)
+    except ValueError as exc:
+        return refuse(ctx, str(exc))
     try:
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
@@ -374,6 +386,7 @@ def _start_task(
         "task_id": tid,
         "routing_token": routing_token,
         "objective": goal,
+        **({"metadata": model_metadata} if model_metadata else {}),
         "expected_output": str(expected_output or "").strip(),
         "project_id": pid,
         "project_name": display_name,
@@ -389,6 +402,7 @@ def _start_task(
         # Absent is not false: only an explicit answer overrides the subject-of-work rule (BIBLE P1).
         **({"context_requires_development": bool(context_requires_development)}
            if isinstance(context_requires_development, bool) else {}),
+        **({"review_answer": True} if review_answer is True else {}),  # task_contract.review_answer
         **effort_fields,
         "chat_id": current_chat_id,
         **({"resource_intent": {"kind": "system_repo"}} if intent_system_repo else {}),
@@ -437,12 +451,22 @@ def _start_task(
                                                  started_root=True, owner_basis=owner_basis))
         _attach_origin_from_metadata(ctx, evt)
         _attach_client_surface(ctx, evt)
+        if pid and not presence_carrier and not is_focus_wake(metadata) and getattr(ctx, "is_direct_chat", False):
+            from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+            if transported := reply_transport_from_metadata(canonical_data_root(ctx), metadata):
+                evt[TURN_ADDRESS] = transported
     _attach_drafted_objective(ctx, evt)
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
-        evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
-    kind_note = ""
+        if owner_basis["source"] in ("owner_press", "owner_quiz_answer") or (owner_basis.get("reply_to") or {}).get("card_id"):
+            from ouroboros.owner_words import merged_corpus
+            evt["owner_corpus"] = merged_corpus(evt.get("owner_corpus"), [owner_basis])
+        else:
+            evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
+    kind_note = " " + model_note if model_note else ""
     if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
-        kind_note = (" Started as your human's work on their cited words." if owner_basis else
+        kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
+                      else " Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
@@ -504,7 +528,7 @@ def _start_task(
                     + admission_observation(root, observed_at=utc_now_iso()))
     response = (
         f"Not confirmed yet: separate task {tid} is waiting to start. Its complete intent is durable; "
-        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed} "
+        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed}{' ' + model_note if model_note else ''} "
         "A [ROUTING_RECEIPTS] row reports its recorded outcome. "
         f"Use get_task_result({tid}) to reconcile it before an explicit retry."
     )
@@ -536,9 +560,9 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
         pid = str(p.get("id") or "")
         name = str(p.get("name") or pid)
         last = str(p.get("last_active_at") or p.get("created_at") or "")
-        active = " · running" if p.get("has_thread_activity") else ""
         closure = json.dumps(p.get("closed", False), ensure_ascii=False)
-        lines.append(f"- {pid} — {name}{active} · last_active_at={last} · closed={closure}")
+        # No liveness word: the registry's activity flag records that a room ever held work, not that work runs now.
+        lines.append(f"- {pid} — {name} · last_active_at={last} · closed={closure}")
     if len(rows) > limit:
         args = [f"start={start + limit}", f"limit={limit}", f"oldest_first={oldest_first!r}"]
         if closed is not None:
@@ -621,6 +645,55 @@ def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: st
     if not result.ok:
         return f" Its page was not written ({result.reason}); the closure stands."
     return f" The closing note is its room's page {result.record['id']}, sealing {covers['count']} open rows."
+
+
+def _manage_project_folder(ctx: ToolContext, project_id: str, action: str = "view", path: str = "",
+                           expected: str = "", reason: str = "") -> str:
+    """The mind's hand on a Project's working folder: the view and the one change the owner's menu calls
+    (``project_folder``), on the canonical data root. A change is recorded with this work as its actor."""
+    from ouroboros import project_folder
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.project_facts import explicit_project_id_ok
+
+    meta = getattr(ctx, "task_metadata", {}) or {}
+    lineage = (getattr(ctx, "task_contract", {}) or {}).get("lineage") or {}
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    changing = action in (project_folder.CLEAR, project_folder.CHOOSE)
+    if changing and str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
+        return "⚠️ TOOL_ERROR (manage_project_folder): subagents inherit the parent's project scope; they may view."
+    if not explicit_project_id_ok(project_id) or not (changing or action == "view"):
+        return "⚠️ TOOL_ARG_ERROR (manage_project_folder): supply a filesystem-clean project_id and action view, clear or choose."
+    if changing and not (task_id and isinstance(reason, str) and reason.strip() and isinstance(expected, str) and expected):
+        return ("⚠️ TOOL_ARG_ERROR (manage_project_folder): a change needs the view's expected and a reason; "
+                "read the folder first with action='view'.")
+    root, repo = canonical_data_root(ctx), serving_repo_dir_for(ctx)
+    try:
+        if not changing:
+            outcome = project_folder.view_outcome(root, project_id, repo_dir=repo)
+        else:
+            from ouroboros.tools.project_journal import _project_scope, _scope_authority
+
+            # A place's work changes only its own room's folder, as it writes only that room's journal; it may view any.
+            refusal = _project_scope(ctx, project_id, write=True)[1] if _scope_authority(ctx)[0] == "presence" else ""
+            if refusal:
+                return f"{refusal} (manage_project_folder)"
+            outcome = project_folder.change_folder(root, project_id, action=action, expected=expected, repo_dir=repo,
+                                                   actor=f"ouroboros:{task_id}", path=str(path or ""), note=reason.strip())
+    except Exception as exc:
+        return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
+    view = outcome.get("view") or {}
+    if outcome["status"] == "changed":
+        folder = view.get("folder") or outcome["receipt"]["new"]["working_dir"]  # the receipt's, when no view was read
+        outcome["effects"] = project_folder.effects(view, action, folder)
+        outcome["note"] = ("Recorded as project_folder_changed with you as the actor. The host tells nobody: "
+                           "say what you changed and why where your human reads.") + (
+            " The change stands, but the folder could not be read after it (view_error): do not repeat it; read it "
+            "again with action='view'." if outcome.get("view_error") else "")
+    elif view:
+        outcome["effects"] = {offered: project_folder.effects(view, offered, str(path or "")) for offered in view["actions"]}
+        outcome["note"] = ("Nothing changed. A change sends view.expected back with a reason." if view["actions"]
+                           else "Nothing changed. This folder is in place; it is not moved from here.")
+    return json.dumps({"ok": outcome["status"] in ("changed", "view"), **outcome}, ensure_ascii=False, default=str)
 
 
 def _cause_words(code: str) -> str:

@@ -1,13 +1,16 @@
 """Passive reads of the private-copy records, for what must write nothing (the Free preview, the keep's
-inventory, a registration question): no legacy import, no event row, no rename. What a record is stays the
-owner's (``subagent_worktrees._parse_record``, ``_legacy_entries``); a retirer keeps the writing owner's
-``_records``, which also imports and reports."""
+inventory, a registration question, whether a folder physically is a copy): no event row, no rename.
+What a record is stays the owner's (``subagent_worktrees._parse_record``); a retirer keeps the writing
+owner's ``_records``, which also reports. The legacy whole-file registry is the startup import's alone
+(``import_legacy_registry``): this reader never parses it and only says that one still awaits that
+import (``import_pending``)."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Literal, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Optional, Tuple
 
 from ouroboros import subagent_worktrees as sw
 
@@ -17,29 +20,18 @@ class RecordsRead:
     rows: Tuple[Dict[str, Any], ...] = ()
     unreadable: FrozenSet[str] = frozenset()  # record file names that exist and could not be read
     unlistable: bool = False  # the records folder could not be listed: any folder may have a record
-    legacy_unreadable: bool = False  # the documented escape: a malformed legacy file names no folder
-
-
-def _legacy_rows(data_dir: Optional[Any]) -> Tuple[List[Dict[str, Any]], bool]:
-    """The rows a still-present legacy registry would import, read in memory, and whether it is malformed."""
-    try:
-        entries = sw._legacy_entries(sw._legacy_registry_path(data_dir).read_bytes())
-    except FileNotFoundError:
-        return [], False
-    except (OSError, ValueError):
-        return [], True
-    return [row for row in entries if sw._names_copy(row)], False
+    import_pending: bool = False  # the legacy registry awaits the startup import: it may name a folder no record does
 
 
 def read_records(data_dir: Optional[Any] = None) -> RecordsRead:
     """Every copy record as it stands, the unreadable ones named, without one write."""
-    directory = sw._records_dir(data_dir)
+    directory, pending = sw._records_dir(data_dir), sw._legacy_registry_path(data_dir).is_file()
     try:
         names = os.listdir(directory)
     except FileNotFoundError:
         names = []
     except OSError:
-        return RecordsRead(unlistable=True)
+        return RecordsRead(unlistable=True, import_pending=pending)
     rows, unreadable = [], set()
     for name in sorted(names):
         if name.endswith(".json") and not name.startswith("."):
@@ -50,10 +42,49 @@ def read_records(data_dir: Optional[Any] = None) -> RecordsRead:
                 continue
             if row is not None:
                 rows.append(row)
-    legacy, malformed = _legacy_rows(data_dir)
-    known = {sw._record_file(row["path"], data_dir).name for row in rows} | unreadable
-    rows += [row for row in legacy if sw._record_file(row["path"], data_dir).name not in known]
-    return RecordsRead(tuple(rows), frozenset(unreadable), False, malformed)
+    return RecordsRead(tuple(rows), frozenset(unreadable), False, pending)
+
+
+def records_naming(folders: Iterable[Any], data_dir: Optional[Any] = None) -> RecordsRead:
+    """The current records whose copy IS one of ``folders``, whatever spelling either was written in (case,
+    Unicode form, an earlier root's alias). One listing; a file is read only when its stem is a folder's own
+    name (``sw._safe_name``, case-folded: a filter, never identity), and its row stays only when
+    ``os.path.samefile`` proves that folder is the copy. ``unreadable`` names the files the filter let through
+    whose record or copy could not be read: their copy is unknown and tied to no folder."""
+    directory, pending = sw._records_dir(data_dir), sw._legacy_registry_path(data_dir).is_file()
+    by_stem: Dict[str, List[str]] = {}
+    for folder in map(str, folders):
+        if Path(folder).name:
+            by_stem.setdefault(sw._safe_name(Path(folder).name).casefold(), []).append(folder)
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        return RecordsRead(unlistable=True, import_pending=pending)
+    rows, unreadable = [], set()
+    for name in sorted(name for name in names if _stem(name) in by_stem):
+        try:
+            row = sw._parse_record(directory / name)
+            if row is not None and any(_same(row["path"], folder) for folder in by_stem[_stem(name)]):
+                rows.append(row)
+        except (OSError, ValueError):
+            unreadable.add(name)
+    return RecordsRead(tuple(rows), frozenset(unreadable), False, pending)
+
+
+def _stem(name: str) -> str:
+    """A record file's case-folded folder-name stem (``<stem>-<sha12>.json``), else ""."""
+    stem, dash, digest = name[:-5].rpartition("-")
+    return stem.casefold() if name.endswith(".json") and not name.startswith(".") and dash and len(digest) == 12 else ""
+
+
+def _same(copy: Any, folder: str) -> bool:
+    """Whether the recorded ``copy`` is ``folder`` on disk; a path that names nothing is not it, other errors raise."""
+    try:
+        return os.path.samefile(str(copy), folder)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
 
 
 def _copy_owner(name: str) -> str:
@@ -65,18 +96,14 @@ def _copy_owner(name: str) -> str:
 
 
 def record_at(path: Any, data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
-    """The record of the copy at ``path`` as it stands: its own file, else a still-present legacy row, else
-    ``None``. An unreadable own file raises ``ValueError`` or ``OSError``; a malformed legacy file names nothing."""
-    file = sw._record_file(path, data_dir)
-    row = sw._parse_record(file)
-    if row is not None:
-        return row
-    return next((row for row in _legacy_rows(data_dir)[0] if sw._record_file(row["path"], data_dir).name == file.name), None)
+    """The record of the copy at ``path`` as it stands: its own file, else ``None``. An unreadable own file
+    raises ``ValueError`` or ``OSError``."""
+    return sw._parse_record(sw._record_file(path, data_dir))
 
 
 def checkout_registration(path: Any, data_dir: Optional[Any] = None) -> Literal["registered", "absent", "unknown"]:
     """Whether the copy at ``path`` has a record, by its own record file: ``unknown`` when that file
-    exists but cannot be read, never ``absent``. A malformed legacy file stays the documented escape."""
+    exists but cannot be read, never ``absent``."""
     if not str(path or "").strip():
         return "absent"
     try:

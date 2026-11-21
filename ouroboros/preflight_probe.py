@@ -131,30 +131,44 @@ def recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
 
 
 def install_worker_probe(temp_root: pathlib.Path, admitted=None) -> str:
-    """Write the worker-count plugin and return the nonce module name to load.
+    """Write the worker-count plugin and the admission it checks against; return the nonce module name to load.
 
-    The nonce is what makes the probe candidate-independent: see the note on
-    ``WORKER_PROBE_MODULE``. Callers must pass the RETURNED name to `-p`.
     ``admitted`` is the admission the caller reserved (the gate's, with its ledger row); without one the
     probe admits here.
     """
+    module = write_worker_probe(temp_root)
+    record_admission(temp_root, _preflight_admission() if admitted is None else admitted)
+    return module
+
+
+def write_worker_probe(temp_root: pathlib.Path) -> str:
+    """Write the worker-count plugin and return the nonce module name to load; ``record_admission`` records the
+    admission it is checked against. The nonce is what makes the probe candidate-independent: see the note on
+    ``WORKER_PROBE_MODULE``. Callers must pass the RETURNED name to `-p`."""
     module = f"{WORKER_PROBE_MODULE}_{uuid.uuid4().hex}"
     probe = probe_dir(temp_root)
     probe.mkdir(parents=True, exist_ok=True)
-    admitted = _preflight_admission() if admitted is None else admitted
-    (probe / "admitted-workers").write_text(str(admitted.workers), encoding="utf-8")
-    # The admission's facts for the run's evidence: what the host's other runs held when the gate admitted.
-    (probe / "admission.json").write_text(json.dumps({
-        "workers": admitted.workers, "held_by_other_runs": admitted.host.slots,
-        "leases": [list(lease) for lease in admitted.host.leases],
-        "unleased_roots": [list(root) for root in admitted.host.strangers], "note": admitted.host.note,
-    }), encoding="utf-8")
     # One pass fills the template's own fields: a root that spells one (a caller's `--evidence-dir`) is not read as one.
     fields = {"__WORKER_LOG__": repr(str(_worker_log_dir(temp_root))),
               "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root)))}
     (probe / f"{module}.py").write_text(
         re.sub("|".join(fields), lambda match: fields[match[0]], WORKER_PROBE_SOURCE), encoding="utf-8")
     return module
+
+
+def record_admission(temp_root: pathlib.Path, admitted) -> None:
+    """The admission a probed pass runs on: its worker count, and its facts for the run's evidence."""
+    probe = probe_dir(temp_root)
+    probe.mkdir(parents=True, exist_ok=True)
+    (probe / "admitted-workers").write_text(str(admitted.workers), encoding="utf-8")
+    # The admission's facts for the run's evidence: what the host's other runs held when the gate admitted, and
+    # the critical-pressure wait before it (first critical reading, the reading that ended it, how), if any.
+    (probe / "admission.json").write_text(json.dumps({
+        "workers": admitted.workers, "held_by_other_runs": admitted.host.slots,
+        "leases": [list(lease) for lease in admitted.host.leases],
+        "unleased_roots": [list(root) for root in admitted.host.strangers], "note": admitted.host.note,
+        "memory_wait": list(admitted.waited) or None,
+    }), encoding="utf-8")
 
 
 def recorded_admission(temp_root: pathlib.Path) -> Optional[dict]:

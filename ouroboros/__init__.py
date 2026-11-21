@@ -23,7 +23,9 @@ def _body_adoption_hook() -> None:
     ``body_adoption.arm`` published in this checkout's Git dir exists, the switch
     helper CAPTURED outside the tree at authorize time runs — never the tree's own
     copy, which may be mid-switch. A pending transition whose helper is unreadable
-    stops the boot: a possibly mixed tree is not imported. This text must stay
+    stops the boot: a possibly mixed tree is not imported. Under a deployment policy
+    no captured helper runs: the tree's own copy, read as a file, takes its managed
+    entry (``body_switch.managed_entry``). This text must stay
     compatible across versions; ``body_adoption`` refuses a body without it.
     """
     import os
@@ -42,6 +44,14 @@ def _body_adoption_hook() -> None:
             helper = os.path.join(fh.read().strip(), "switch.py")
     except OSError:
         return
+    managed = {}
+    if os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip():
+        # A managed deployment's program is its administrator's (deployment_policy.body_replacement_refusal): no
+        # captured helper runs. This tree's own switch module, read as a file and never imported, takes the record
+        # (body_switch.managed_entry): an armed adoption closes untouched and the start goes on; a possibly mixed
+        # tree stops it. A copy without that entry finds no record beside itself and stops the boot too.
+        managed = {"MANAGED_HELPER_DIR": os.path.dirname(helper)}
+        helper = os.path.join(root, "ouroboros", "body_switch.py")
     try:
         with open(helper, "rb") as fh:
             code = compile(fh.read(), helper, "exec")
@@ -49,7 +59,7 @@ def _body_adoption_hook() -> None:
         sys.stderr.write("[ouroboros] a body adoption is pending in %s but its helper %s is unusable (%s); "
                          "refusing to import a possibly mixed tree.\n" % (git_dir, helper, exc))
         sys.exit(3)
-    exec(code, {"__name__": "__ouroboros_body_switch__", "__file__": helper, "SERVING_ROOT": root})
+    exec(code, {"__name__": "__ouroboros_body_switch__", "__file__": helper, "SERVING_ROOT": root, **managed})
 
 
 _body_adoption_hook()

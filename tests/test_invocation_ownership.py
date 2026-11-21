@@ -1,6 +1,6 @@
 """Actual invocation ownership, final admission and lazy custody ordering."""
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import datetime
 import json
 import os
@@ -383,45 +383,106 @@ def test_cancelled_before_entry_has_one_host_settlement(tmp_path, monkeypatch):
     assert not claims(tmp_path)
 
 
-def test_real_sql_reader_wait_releases_control_locks_and_keeps_one_tail(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode,statement", [("PERSIST", "COMMIT"), ("WAL", "BEGIN IMMEDIATE")])
+def test_real_sql_reader_wait_releases_control_locks_and_keeps_one_tail(tmp_path, monkeypatch, mode, statement):
+    from ouroboros import loop_tool_execution, store
+    from tests._store_journal_shared import write_hold
+
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     registry, queue, _ = _registry(tmp_path, monkeypatch)
-    from ouroboros import loop_tool_execution
-    from tests.test_admission_contention import database_reader
-    entered, finish, publishing = threading.Event(), threading.Event(), threading.Event()
+    entered, finish = threading.Event(), threading.Event()
+    held, attempting = threading.Event(), threading.Event()
     calls = []
+
     def body(*_a, **_kw):
         calls.append(True)
         entered.set()
-        assert finish.wait(5)
+        finish.wait()
         return "done once"
+
     registry.override_handler("knowledge_read", body)
+
     def timeout(*_args):
-        assert entered.wait(3)
+        held.wait()
         raise TimeoutError()
+
     monkeypatch.setattr(loop_tool_execution, "future_result", timeout)
-    retain = tool_custody.retain_invocation
-    def publishing_tail(outcome, update=None):
-        publishing.set()
-        return retain(outcome, update)
-    monkeypatch.setattr(tool_custody, "retain_invocation", publishing_tail)
+    writing = threading.local()
+    patch = task_store.patch_handoff
+    drive = os.path.realpath(tmp_path)
+    database = store.store_path(tmp_path)
+    attempted_ids = set()
+
+    def publish(root, task_id, kind, op_id, mutator):
+        target = task_id == "root" and kind == "launch_handoffs" and os.path.realpath(root) == drive
+        writing.tail = op_id if target else None
+        try:
+            return patch(root, task_id, kind, op_id, mutator)
+        finally:
+            writing.tail = None
+
+    monkeypatch.setattr(task_store, "patch_handoff", publish)
+    lease = store.connection
+
+    def trace(sql):
+        if held.is_set() and sql == statement:
+            attempted_ids.add(writing.tail)
+            attempting.set()
+
+    @contextmanager
+    def observe_connection(path, *args, **kwargs):
+        with lease(path, *args, **kwargs) as conn:
+            if path != database or not getattr(writing, "tail", None):
+                yield conn
+                return
+            # SQLite reports the real handoff statement while the other thread
+            # owns its conflicting transaction. The store keeps its own busy handler.
+            conn.set_trace_callback(trace)
+            try:
+                yield conn
+            finally:
+                conn.set_trace_callback(None)
+
+    monkeypatch.setattr(store, "connection", observe_connection)
+
     def call():
         with owner(registry):
             return run(registry)
+
     with ThreadPoolExecutor(1) as executor:
+        future = executor.submit(call)
         try:
-            with database_reader(tmp_path) as release_reader:
-                future = executor.submit(call)
-                assert publishing.wait(3) and not future.done()
-                with queue._queue_lock, owner_pause.launch_lock(tmp_path, "root", wait=False):
-                    pass
+            assert entered.wait(3)
+            with closing(write_hold(database)) as blocker:
+                assert blocker.execute("PRAGMA journal_mode").fetchone()[0].upper() == mode
+                assert blocker.in_transaction
+                held.set()
+                assert attempting.wait(3) and not future.done()
+                assert queue._queue_lock.acquire(blocking=False)
+                try:
+                    with owner_pause.launch_lock(tmp_path, "root", wait=False):
+                        pass
+                finally:
+                    queue._queue_lock.release()
                 assert not budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=0)["drained"]
-                release_reader()
-                assert future.result(timeout=3)["is_error"]
-                assert len(claims(tmp_path)) == 1 and calls == [True]
+            timed_out = future.result(timeout=3)
+            assert timed_out["is_error"] and timed_out["tool_result"].code == "TOOL_TIMEOUT"
+            invocation_id = timed_out["invocation_id"]
+            active = claims(tmp_path)
+            assert set(active) == attempted_ids == {invocation_id}
+            assert (active[invocation_id]["state"], active[invocation_id]["tool"]) == ("claimed", "knowledge_read")
+            assert calls == [True]
         finally:
+            held.set()
             finish.set()
     assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=3)["drained"]
     assert not claims(tmp_path)
+    rows = [json.loads(line) for line in (tmp_path / "logs/tools.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["type"] for row in rows] == ["tool_call_started", "tool_call_timeout", "tool_call"]
+    assert {row["invocation_id"] for row in rows} == {invocation_id}
+    settled = rows[-1]
+    assert settled["is_error"] is False and (settled["status"], settled["tool_result_code"]) == ("ok", "OK")
+    assert settled["result_preview"] == "done once"
 
 
 def test_model_wait_close_prunes_its_frozen_scope_under_another_current_attempt(tmp_path):

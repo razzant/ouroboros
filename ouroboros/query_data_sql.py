@@ -25,6 +25,11 @@ from ouroboros import store
 MAX_BYTES = 8 * 1024 * 1024
 HEAP_BYTES = 134217728
 PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"}
+# db=current READ admits rows of these tables (plus the table-valued forms of the PRAGMAS below); the
+# authorizer and the failed-statement hint share the one list (task bodies and cards: op=json kind=task_result).
+CURRENT_TABLES = ("tasks", "sqlite_master", "sqlite_schema")
+# pragma_table_info('t') and its siblings read exactly what the admitted PRAGMAs read.
+_PRAGMA_TABLES = frozenset("pragma_" + name for name in PRAGMAS)
 # Executor lifecycle allowances, never SQL phase budgets. After the operation deadline the parent
 # waits FINISH_SEC while the child may still hold its source, so a stuck reader is reaped promptly;
 # once the child has released it, RESPONSE_SEC lets a contended host deliver the typed answer.
@@ -80,6 +85,15 @@ def database_path(root: Path, db: str) -> Path:
             "packs": evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME}[db]
 
 
+def schema_hint(db: str) -> str:
+    """How a failed statement's author learns the real schema, with reads the authorizer already admits
+    (a fact of the whole class "this SQL failed", never read from SQLite's message)."""
+    if db == "current":
+        return (f"db=current SQL reads rows of {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks) "
+                "or SELECT * FROM pragma_table_info('tasks'); task bodies and cards: op=json kind=task_result")
+    return "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
+
+
 @contextlib.contextmanager
 def _source(root, db, budget):
     if db == "current":
@@ -102,10 +116,15 @@ def _source(root, db, budget):
             raise
     else:
         from ouroboros import evidence_packs
-        # The owner rebuilds the cache and holds its one lock through the SQL read.
+        # The cache's one lock is held through the SQL read; one awaiting the packing pass's rebuild is
+        # refused (``EvidenceUnavailable``), never rebuilt here.
         with evidence_packs.open_index(root, wait_sec=budget.remaining()):
             budget.remaining()
-            yield evidence_packs.index_tier(root)
+            try:
+                yield evidence_packs.index_tier(root)
+            except ValueError as exc:  # the SQL's error (``_connection``): SQLite's verdict on the file still marks it
+                evidence_packs.mark_if_damaged(root, exc.__cause__)
+                raise
     budget.remaining()
 
 
@@ -146,7 +165,7 @@ def _authorizer(db):
     def authorize(action, first, second, database, origin):
         allowed = action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE}
         if action == sqlite3.SQLITE_READ:
-            allowed = db != "current" or first in {"tasks", "sqlite_master", "sqlite_schema"}
+            allowed = db != "current" or first in CURRENT_TABLES or str(first).lower() in _PRAGMA_TABLES
         elif action == sqlite3.SQLITE_FUNCTION:
             allowed = str(second).lower() != "load_extension"
         elif action == sqlite3.SQLITE_PRAGMA:
@@ -157,6 +176,17 @@ def _authorizer(db):
 
 def _fetch(conn, request):
     conn.execute("PRAGMA query_only=ON").close()
+    # Older SQLite (3.37.0 and 3.40.1 seen; 3.51.0 no longer) authorizes a connection's first use of a
+    # pragma table as an UPDATE of sqlite_master, which the authorizer refuses. Declaring the admitted
+    # ones first lets their table-valued forms read on every SQLite. Only a pragma table this SQLite
+    # lacks is passed over (the query then gets SQLite's own answer); a busy store or the deadline's
+    # interrupt stops the read here as it would stop the query.
+    for name in sorted(_PRAGMA_TABLES):
+        try:
+            conn.execute(f"SELECT * FROM {name} LIMIT 0").close()
+        except sqlite3.OperationalError as exc:
+            if not str(exc).startswith("no such table"):
+                raise
     conn.set_authorizer(_authorizer(request["db"]))
     cursor = conn.cursor()
     try:
@@ -311,11 +341,16 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
 
 
 def _result(request):
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     try:
         return {"status": "ok", "data": _execute(request)}
     except QueryDeadline as exc:
         return {"status": "error", "code": "deadline", "phase": exc.phase,
                 "timeout_sec": exc.timeout_sec, "elapsed_sec": exc.elapsed_sec}
+    except EvidenceUnavailable as exc:  # db=packs whose cache awaits the maintenance pass's rebuild
+        return {"status": "unavailable", "code": "evidence_unavailable", "reason": exc.reason,
+                "message": str(exc), "phase": getattr(exc, "phase", "acquire")}
     except MemoryError as exc:
         return {"status": "error", "code": "memory_limit", "exception_class": "MemoryError", "phase": getattr(exc, "phase", "acquire")}
     except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:

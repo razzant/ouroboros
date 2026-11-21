@@ -180,8 +180,9 @@ def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional
     (``report["partial"]``) records what it released and its errors under the row's holds as they stand
     (a job's first pass has no row to keep, so the holds it judged stand until a whole pass).
     A written pass clears ``last_error``. ``event`` names the events.jsonl row written beside the job row,
-    with the same facts (the custody sweep's evidence of what moved and what holds); the retirer's whole
-    report rides along whenever an event is emitted."""
+    with the same facts (the custody sweep's evidence of what moved and what holds) and the report as the
+    retirer passes it. The drive settlement passes its layouts' reports with their young drives counted, not
+    named (``server_maintenance._young_counted``): which drives were young on a pass is logged nowhere."""
     if report.get("rested"):
         return None
     current = job(root, name) or {}

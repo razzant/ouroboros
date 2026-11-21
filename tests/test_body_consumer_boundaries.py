@@ -128,13 +128,13 @@ def test_explicit_serving_child_source_is_copied_from_candidate(body, monkeypatc
     assert (pathlib.Path(child) / "parent-wip.txt").read_text() == "unfinished"
     assert constraint["write_root"] == child and not (serving / "parent-wip.txt").exists()
     # Drive the return consumer as well: the source binding is the apply target.
-    from tests.test_isolated_project_copies import capture
+    from tests._workspace_git import publish_capture
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
     (pathlib.Path(child) / "ouroboros/mod_b.py").write_text("GEN = 'CHILD'\n")
     task = {"id": "child", "parent_task_id": "parent", "workspace_root": child,
             "workspace_mode": "self_worktree", "task_constraint": constraint,
             "workspace_copy": copy, "metadata": {"workspace_copy": copy}}
-    capture((serving, candidate, data, candidate.parent), pathlib.Path(child), task)
+    publish_capture(data, task)
     applied = _integrate_subagent_patch(ctx, task_id="child")
     assert "✅ Integrated" in applied, applied
     assert (candidate / "ouroboros/mod_b.py").read_text() == "GEN = 'CHILD'\n"

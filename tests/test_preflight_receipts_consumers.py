@@ -822,12 +822,12 @@ def test_a_preparation_finding_reaches_the_seats_whole_as_quoted_data_with_crede
     assert f"    | {decisive}" in quoted and "\n## Answer format" not in section and "hunter2secret" not in section
 
 
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+@pytest.mark.parametrize("mode,continued_under", [("pro", "the author's decision"), ("cyber_pro", "Cyber Pro")])
 def test_a_preparation_finding_the_wave_continued_past_reaches_every_seat(staged_body, tmp_path, monkeypatch,
-                                                                         enforcement):
+                                                                         mode, continued_under):
     """Review preparation's deterministic checks find a new body module without its
-    Architecture book source. Advisory continues the wave and every seat reads that
-    finding, never a claim that later checks passed; Blocking stops before any seat."""
+    Architecture book source. The wave continues in every Access and every seat reads that
+    finding, never a claim that later checks passed; the finding names what it continued under."""
     import ouroboros.review_substrate as substrate
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.review_change import run_review_change
@@ -835,7 +835,7 @@ def test_a_preparation_finding_the_wave_continued_past_reaches_every_seat(staged
     repo = pathlib.Path(staged_body["repo"])
     (repo / "ouroboros" / "fresh_module.py").write_text("FRESH = 1\n", encoding="utf-8")
     shared.git(repo, "add", "ouroboros/fresh_module.py")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     briefs: list = []
     monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(briefs))
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "operation-drive")
@@ -843,13 +843,10 @@ def test_a_preparation_finding_the_wave_continued_past_reaches_every_seat(staged
     result = run_review_change(ctx, root="system_repo", subject="index", goal="Add the fresh module",
                                scope="ouroboros/fresh_module.py")
 
-    if enforcement == "blocking":
-        assert briefs == [] and result["aggregate"] != "PASS", result
-        return
     exhibit = review_ledger.load_record(ctx.drive_root, result["record_id"])["preflight_execution"]
     [finding] = exhibit["observed"]
     assert (exhibit["status"], finding["source"], finding["continued_under"]) == (
-        "unobserved", "review_preparation", "Advisory enforcement")
+        "unobserved", "review_preparation", continued_under)
     assert "fresh_module.py" in finding["message"] and finding["stops_at_first_finding"] is True
     section = receipts.execution_section(exhibit)
     assert section.startswith(SECTION + "\nNo test execution was supplied for this subject.")

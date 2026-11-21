@@ -53,6 +53,12 @@ export function renderSafeField(field = {}, savedValues = {}, options = {}) {
     const span = Math.max(1, Math.min(maxSpan, Number(field.span) || 1));
     const spanClass = options.spanClassPrefix ? ` ${escapeHtmlAttr(options.spanClassPrefix)}${span}` : '';
     const help = field.help ? `<small class="${helpClass}">${escapeHtmlAttr(field.help)}</small>` : '';
+    if (type === 'textarea' && field.disabled) {
+        // A multiline value the schema declares read-only (a status) is text, never an inert control: whole at any width,
+        // selectable and reachable by keyboard, in the value's ink. `<output>` keeps its name in form.elements and its
+        // text as `.value`, so collecting the form and refreshing the field in place work as for the control.
+        return `<label class="${fieldClass}${spanClass}"><span>${label}</span><output class="ui-control ui-control-readonly" name="${name}"${accessible} tabindex="0">${value}</output>${help}</label>`;
+    }
     if (type === 'textarea') {
         return `<label class="${fieldClass}${spanClass}"><span>${label}</span><textarea class="ui-control" name="${name}"${accessible}${placeholder}${required}${disabled}>${value}</textarea>${help}</label>`;
     }
@@ -160,6 +166,13 @@ export function setResult(node, { text = '', tone = 'muted', details = '', ends 
         }, SAVE_ACK_MS);
         RESULT_TIMERS.set(node, timer);
     }
+}
+
+/** A Settings row's meta words (`part`, inside its `.ui-row-meta`): every writer comes here, so the row says when its
+ *  line has none (`data-no-meta`, settings.css): WebKit does not re-match `:empty` inside `:has()` when words come later. */
+export function setRowMeta(part, text) {
+    if (part && part.textContent !== text) part.textContent = text;
+    part?.closest?.('.settings-row')?.toggleAttribute('data-no-meta', !part.closest('.ui-row-meta')?.textContent);
 }
 
 /** An edit in the same subject (the form or section the action belongs to) clears its result; returns the disposer. */

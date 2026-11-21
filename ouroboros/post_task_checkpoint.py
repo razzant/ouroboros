@@ -28,6 +28,7 @@ from ouroboros.cost_projection import (
     with_cost_aliases,
 )
 from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.install_identity import TASK_ROOT_FIELDS
 from ouroboros.task_results import (
     TASK_COST_META_FIELDS,
     STATUS_COMPLETED,
@@ -245,10 +246,23 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
     return counts
 
 
-# Local custody rows are written only by their owners and the retirement writers on the canonical
-# result (``tool_custody``, ``local_custody_repair``); a child's replica carries results, not custody.
+# A replica carries results, not canonical drive placement, copy-back provenance or local custody.
 CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers",
-                          "native_capture_pending", "received_file_outputs")
+                            "native_capture_pending", "received_file_outputs", *TASK_ROOT_FIELDS)
+
+
+def canonical_name_fields(canonical_fields: Dict[str, Any]) -> tuple:
+    """The name slots a titled canonical record owns over any replica of it (#3047).
+
+    A ``title`` is authorship, and every write that names a titled run lands on the canonical record: admission,
+    a Continue author's adopted subject (``adopt_continued_work_name``) with its successor's ``Continue:`` claim
+    (``update_focus``), and a direct turn's namer. The execution-side namers (the closing sentence, a wake's cause)
+    name only untitled runs, so a replica of a titled run holds a copy that may predate the canonical name. An
+    untitled record keeps taking its execution's name; a slot the canonical record lacks still takes the replica's.
+    """
+    if not str(canonical_fields.get("title") or "").strip():
+        return ()
+    return tuple(field for field in ("title", "suggested_name") if field in canonical_fields)
 
 
 def project_replica_task_result_fields(
@@ -260,7 +274,8 @@ def project_replica_task_result_fields(
     A terminal canonical post-task checkpoint owns its synthesis fields and
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
-    rules below. The replica continues to own result and trace fields;
+    rules below, and a titled record's name (``canonical_name_fields``). The
+    replica continues to own result and trace fields;
     review snapshots retain the newest host publication of each panel, and a
     verification ledger stays canonical while the replica carries the same capture.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
@@ -277,6 +292,18 @@ def project_replica_task_result_fields(
     overlay.pop("canonical_terminal_projection_origin", None)
     overlay.pop("pause_notices", None)  # confirmed host transitions alone own pending chat disclosure
     for field in CANONICAL_CUSTODY_FIELDS:  # a replica never revives a retired claim nor erases a live one
+        overlay.pop(field, None)
+    if "metadata" in overlay:
+        # Legacy placement readers consult metadata too. Keep CURRENT's placement (including absence)
+        # without dropping other replica metadata, such as the execution's outcome references.
+        canonical_meta = canonical_fields.get("metadata")
+        replica_meta = overlay["metadata"]
+        roots = {k: canonical_meta[k] for k in TASK_ROOT_FIELDS if k in canonical_meta} if isinstance(canonical_meta, dict) else {}
+        if isinstance(replica_meta, dict):
+            overlay["metadata"] = {**{k: v for k, v in replica_meta.items() if k not in TASK_ROOT_FIELDS}, **roots}
+        elif roots:
+            overlay.pop("metadata")
+    for field in canonical_name_fields(canonical_fields):
         overlay.pop(field, None)
     # Unread-mail custody is a union: a stale replica never drops a canonical row.
     from ouroboros.task_custody import merge_unread_mail

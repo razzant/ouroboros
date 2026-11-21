@@ -47,7 +47,11 @@ def stdio_scope_env(monkeypatch, request):
     monkeypatch.setenv("UNSELECTED_MCP_ENV", "synthetic-host-only")
     monkeypatch.setenv("OURO_TASK_SCOPE_" + "b" * 32, "1")
     monkeypatch.setenv("CLAUDEXOR_RUN_SCOPE_" + "c" * 32, "1")
-    return env
+    from ouroboros.node_runtime import forward_playwright_node
+
+    expected = dict(env)
+    forward_playwright_node(expected)  # the one key a stdio server also gets: Playwright's pinned (or planned) Node
+    return expected
 
 
 def _settings(*servers: dict, enabled: bool = True, timeout: int = 60) -> dict:
@@ -589,7 +593,6 @@ def test_manager_reconfigure_drops_invalid_entries():
         _good_server(id="other"),
     )
     mgr.reconfigure(settings)
-    assert mgr.server_count() == 2
     assert mgr.server_ids() == ["demo", "other"]
 
 

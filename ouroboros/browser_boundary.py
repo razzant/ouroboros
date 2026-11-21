@@ -11,7 +11,9 @@ loopback too.
 A limit, not a guarantee: browsers send Fetch Metadata only to potentially trustworthy origins
 (HTTPS, ``localhost``, loopback addresses) and omit ``Origin`` on simple GET/HEAD loads. When the
 core is reached through an ordinary plain-HTTP hostname, another site's GET/HEAD therefore looks
-like a native client's and runs its handler (its answer stays unreadable to that page).
+like a native client's and runs its handler (its answer stays unreadable to that page). Chromium
+sends no Fetch Metadata with a WebSocket handshake at all, so behind a proxy the core's own socket
+passes only when the browser's Host and HTTPS scheme reach this server (DEPLOYMENT).
 
 Only passive files stay reachable from any page: the interface and setup pages, their static
 files, the login form, the widget frame bridge script, and the reviewed module and declared files of
@@ -26,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -34,13 +37,14 @@ Scope = dict[str, Any]
 CROSS_ORIGIN_CODE = "cross_origin_request"
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
 _ORIGIN = re.compile(r"(https?)://([^/?#@\s]+)")
+_PRINTABLE = re.compile(r"[\x21-\x7e]{1,300}")  # a logged value: visible ASCII, bounded
 _PASSIVE_EXACT = frozenset({"/", "/onboarding", "/auth/login", "/api/widget-bridge.js"})
 _PASSIVE_PREFIXES = ("/static/", "/onboarding/static/", "/auth/", "/api/widget-assets/")
 # Exactly the two static extension-file routes (gateway/router.py): module/{entry:path} and
 # ui/{revision}/{path:path}. A shorter shape such as ui/action is a registered dynamic route, not a
 # file, so it must stay behind the boundary; only these two reach a passive file handler.
 _EXTENSION_FILES = re.compile(r"/api/extensions/[^/]+/(?:module/|ui/[^/]+/)")
-_refused_seen: set[tuple[str, str, str]] = set()
+_refused_seen: set[tuple[str, str, str, str]] = set()
 
 
 def _header(scope: Scope, name: bytes) -> str | None:
@@ -73,9 +77,10 @@ def same_origin_browser(scope: Scope) -> bool:
 
     The browser's ``Sec-Fetch-Site`` decides when present (``same-origin``, or ``none`` for a
     navigation the owner typed), even behind a proxy that rewrites Host or terminates TLS.
-    Without it ``Origin`` must name the URL this server sees. ``Origin: null`` (an opaque
-    frame or a sandboxed page) and a malformed Origin never pass; a request with neither
-    header is taken for a native client's (see the module note on plain-HTTP hostnames)."""
+    Without it (a Chromium WebSocket handshake included) ``Origin`` must name the URL this
+    server sees. ``Origin: null`` (an opaque frame or a sandboxed page) and a malformed Origin
+    never pass; a request with neither header is taken for a native client's (see the module
+    note on plain-HTTP hostnames)."""
     origin = _header(scope, b"origin")
     site = _header(scope, b"sec-fetch-site")
     match = _ORIGIN.fullmatch(origin.lower()) if origin is not None else None
@@ -99,13 +104,32 @@ def passive_file(scope: Scope) -> bool:
     return path in _PASSIVE_EXACT or path.startswith(_PASSIVE_PREFIXES) or bool(_EXTENSION_FILES.match(path))
 
 
+def _logged_origin(origin: str | None) -> str:
+    """An origin as compared, for the log: ``scheme://host[:port]``, ``null`` or ``-``; anything else
+    (credentials, a path or query, odd bytes, an overlong name) is ``malformed``, never its raw text."""
+    if origin is None:
+        return "-"
+    match = _ORIGIN.fullmatch(origin.lower())
+    if match is None:
+        return "null" if origin.lower() == "null" else "malformed"
+    shown = f"{match.group(1)}://{_host_port(match.group(1), match.group(2))}"
+    return shown if _PRINTABLE.fullmatch(shown) else "malformed"
+
+
 def browser_request_refused(scope: Scope) -> bool:
-    """Whether the boundary refuses this HTTP request or WebSocket handshake (logged once per origin and path)."""
+    """Whether the boundary refuses this HTTP request or WebSocket handshake.
+
+    Logged once per received origin, the origin this server sees (``expected``, so a corrected Host or
+    scheme shows), Fetch Metadata site and path: sanitized and bounded, never a raw header."""
     if passive_file(scope) or same_origin_browser(scope):
         return False
-    key = (_header(scope, b"origin") or "", _header(scope, b"sec-fetch-site") or "", scope.get("path") or "")
+    site = (_header(scope, b"sec-fetch-site") or "-").lower()
+    path = quote(scope.get("path") or "/", safe="/:@!$&'()*+,;=-._~")
+    key = (_logged_origin(_header(scope, b"origin")), _logged_origin(_own_origin(scope)),
+           site if _PRINTABLE.fullmatch(site) and len(site) <= 32 else "malformed",
+           path if len(path) <= 200 else f"{path[:200]}…")
     if key not in _refused_seen and len(_refused_seen) < 256:
         _refused_seen.add(key)
-        log.warning("browser_boundary refused %s %s origin=%s sec-fetch-site=%s",
-                    scope.get("method") or "WEBSOCKET", key[2], key[0] or "-", key[1] or "-")
+        log.warning("browser_boundary refused %s %s origin=%s expected=%s sec-fetch-site=%s",
+                    scope.get("method") or "WEBSOCKET", key[3], key[0], key[1], key[2])
     return True

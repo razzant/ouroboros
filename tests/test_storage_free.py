@@ -511,6 +511,42 @@ def _windows_listing_of(monkeypatch, folder):
                         and Path(path) == folder else _REAL_SCANDIR(path))
 
 
+def _unreadable_trash_identity(monkeypatch, entry):
+    """This pass cannot read ENTRY's identity (a denied or transient ``lstat``); the name is still there."""
+    real_lstat, real_path_lstat = os.lstat, Path.lstat
+
+    def unread(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)) and Path(path) == entry:
+            raise PermissionError(13, "the entry's identity is unreadable", str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", unread)
+    # Path.lstat calls stat(follow_symlinks=False) on supported interpreters, not os.lstat.
+    monkeypatch.setattr(Path, "lstat", lambda path: unread(path) if path == entry else real_path_lstat(path))
+
+
+def test_a_trash_listing_that_cannot_read_an_entry_is_not_a_confirmed_absence(tmp_path, monkeypatch):
+    """The name is listed and its identity is not read: an unread identity, never a removal.
+    Charging it as absence spawns the child on every tick for a retirement wake that was never lost;
+    the entry's own retry look still reaches it, so the job rests here."""
+    from ouroboros import maintenance, maintenance_jobs
+
+    root, owner, _released = _stuck_trash_entry(tmp_path, monkeypatch)
+    [entry] = list((root / "state" / "custody_trash").iterdir())
+    row = maintenance_jobs.job(root, "custody_trash")
+    assert entry.name in (row.get("stuck") or {}) or entry.name in (row.get("held") or {}), "the pass recorded it"
+
+    _unreadable_trash_identity(monkeypatch, entry)
+    assert "custody_trash" not in maintenance.due(root), "an unread name is no reason to spawn the child"
+    assert maintenance_jobs.job(root, "custody_trash").get("stuck") == row.get("stuck"), "the recorded entry stands"
+    assert task_custody.custody_trash_entries(root) == [], "the name is there; only its identity is unread"
+    assert task_custody.custody_trash_scan(root) == ([(entry.name, None)], True)
+    view = owner.projection(root)["run"]
+    assert (view["removed"], view["deleting"], view["stuck"], view["not_started"]) == (0, 1, 0, 0)
+    assert view["removed_bytes"] == 0
+
+
+
 def _stuck_trash_entry(tmp_path, monkeypatch):
     """A freed drive whose trash entry the maintenance child could not remove (a file in it is held
     open): the job records the entry's identity as it saw it, and both the job's due check and the
@@ -560,6 +596,49 @@ def test_a_stuck_trash_entry_is_retried_whenever_the_child_runs(tmp_path, monkey
     view = owner.projection(root)
     assert (view["run"]["removed"], view["run"]["deleting"], view["run"]["stuck"]) == (1, 0, 0)
     assert maintenance.run_job(root, "custody_trash") is None, "an empty trash rests"
+
+
+def test_a_stuck_entry_removed_just_before_storebusy_still_gets_its_retirement_scheduled(tmp_path, monkeypatch):
+    """An unchanged stuck entry leaves no ``retire_owed`` bit, so the pass that finally removes it
+    and then loses its retirement wake to StoreBusy leaves no trace in the row: the next pass must
+    read the recorded entry's absence from a complete listing, even beside an unreadable identity."""
+    import pytest
+    from ouroboros import maintenance, maintenance_jobs, maintenance_retirement, session_scratch, store
+
+    root, _owner, released = _stuck_trash_entry(tmp_path, monkeypatch)
+    assert maintenance.run_job(root, "custody_trash") == {"state": "failed", "items": 0}  # recorded stuck
+    row = maintenance_jobs.job(root, "custody_trash")
+    assert row["stuck"]
+    monkeypatch.setattr(task_custody, "_remove_entry", released)  # this attempt removes the entry
+    schedule = maintenance_retirement.schedule_in
+
+    def refused(*_args, **_kwargs):
+        raise store.StoreBusy("the store did not answer")
+
+    monkeypatch.setattr(maintenance_retirement, "schedule_in", refused)
+    with pytest.raises(store.StoreBusy):  # the removal lands; the wake that books retirement does not
+        maintenance.run_job(root, "custody_trash")
+    row = maintenance_jobs.job(root, "custody_trash")
+    assert row["stuck"] and "retire_owed" not in row  # the row still records an entry that is gone
+    gone = next(iter(row["stuck"]))
+    assert not (root / "state" / "custody_trash" / gone).exists()
+    sibling = root / "state" / "custody_trash" / "unread-0123456789ab"
+    sibling.mkdir()
+    # Its producer holds it. The name still enumerates; only its identity observation fails.
+    monkeypatch.setattr(session_scratch, "release_trash_entry", lambda _root, _entry, owed=None: (True, []))
+    _unreadable_trash_identity(monkeypatch, sibling)
+    monkeypatch.setattr(maintenance_retirement, "schedule_in", schedule)
+    assert task_custody.custody_trash_scan(root) == ([(sibling.name, None)], True)
+    assert "custody_trash" in maintenance.due(root, lane="trash"), "an unreadable sibling conceals no absence"
+    assert maintenance.run_job(root, "custody_trash") == {"state": "failed", "items": 0}
+    settled = maintenance_jobs.job(root, "custody_trash")
+    assert set(settled["stuck"]) == {sibling.name} and "retire_owed" not in settled
+    assert sibling.is_dir()
+    wake = maintenance_jobs.job(root, maintenance_retirement.JOB)
+    assert wake["next_due"] is not None
+    assert "custody_trash" not in maintenance.due(root, lane="trash")
+    maintenance.run_job(root, "custody_trash")
+    assert maintenance_jobs.job(root, maintenance_retirement.JOB) == wake
 
 
 def test_a_trash_entry_the_child_could_not_delete_is_stuck_until_it_changes(tmp_path, monkeypatch):
@@ -887,7 +966,7 @@ def test_pseudo_owner_seat_homes_use_their_own_proof_in_free(tmp_path, monkeypat
     else:
         snapshot = {"runs": {"run": SimpleNamespace(
             execution_root=str(area), terminal_state="succeeded" if state == "done" else "",
-            started_ts=marker["created_at"], max_seconds=0)}, "pending": []}
+            started_ts=marker["created_at"], window_origin=marker["created_at"], max_seconds=0)}, "pending": []}
     monkeypatch.setattr(current, "task_snapshot", lambda _root, _task_id: snapshot)
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("review_evidence",))
@@ -918,7 +997,8 @@ def test_each_pseudo_owner_seat_home_is_judged_on_its_own_runs_whatever_the_orde
         (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
         (home / "area").rmdir()
         runs[home.name] = SimpleNamespace(execution_root=str(home / "area"), terminal_state=state,
-                                          started_ts=marker["created_at"], max_seconds=0)
+                                          started_ts=marker["created_at"], window_origin=marker["created_at"],
+                                          max_seconds=0)
     reads = []
     monkeypatch.setattr(current, "task_snapshot", lambda _root, task_id: reads.append(task_id) or {"runs": runs, "pending": []})
     _fake_sizer(monkeypatch)
@@ -986,8 +1066,9 @@ def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_
     sw.capture_result_commit("snap-w", patch, data_dir=root)
     assert sw.release_snapshot_checkout("snap-w", worktree_root=wtroot, data_dir=root)
     seed_result(root, "writer", document("writer", "completed"))
-    custody.record_started(root, custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id="snap-w",
-                                                    execution_root=handle.path))
+    entry = custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id=handle.snapshot_id,
+                               execution_root=handle.path, baseline_sha=handle.baseline_sha)
+    assert custody.record_started(root, entry)
     _fake_sizer(monkeypatch)
     owner = _owner({})
     view = _preview(owner, root, tmp_path)
@@ -1002,9 +1083,9 @@ def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_
     record = sw.find_execution_snapshot("snap-w", root)
     assert record["pins_released"] and not {"baseline_ref", "result_ref", "result_sha"} & set(record)
     assert "changed by the writer" in patch.read_text(encoding="utf-8")
-    entry = SimpleNamespace(snapshot_id="snap-w", patch_disposed=False, execution_root=handle.path, baseline_sha="b",
-                            run_id="run-w")
-    assert _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))[0] is None
+    snapshot, refusal, detail = _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))
+    assert snapshot is None and refusal == "continuation_snapshot_missing"
+    assert "integrate_delegated_patch" in detail
     assert _group(_preview(owner, root, tmp_path), "result_pins")["count"] == 0, "nothing left to offer"
 
 

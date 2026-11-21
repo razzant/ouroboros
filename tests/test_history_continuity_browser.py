@@ -47,10 +47,13 @@ _FAULT = """() => {
 
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, browser_engine, tmp_path):
-    """Read pages back, a Project closed and opened again is at its newest message whether its read is
-    fast, slow or failed and retried, and no older page is read again; a switch away while that read is
-    slow paints nothing into the other room. In the room a live answer stays below the passage being
-    read, and a narrower window keeps that passage (owner decisions 2026-07-10, 2026-10-05)."""
+    """Read pages back, a Project opened cold (its first opening in a page session) is at its newest message
+    whether its read is fast, slow or failed and retried, and no older page is read; a switch away while that
+    read is slow paints nothing into the other room. In the room a live answer stays below the passage being
+    read, and a narrower window keeps that passage (owner decisions 2026-07-10, 2026-10-05). A return within the
+    page session finds a room as left (owner 2026-11-03, DESIGN "History edges"; tests/test_room_suspension_browser.py
+    and the retained-room cases of tests/test_history_rebase_browser.py prove it), so the cold opening here follows
+    a reload: only the page's end lets a visited room go (web/modules/room_retire.js)."""
     from ouroboros.projects_registry import create_project
     from playwright.sync_api import sync_playwright
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
@@ -75,6 +78,12 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             feed = _open_project(page, project)
             target = page.locator(f'{feed} [data-client-message-id="continuity-650"]')
 
+            def leave_for_a_cold_open():
+                page.locator('#project-panel-close').click()
+                page.reload(wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)")
+                _idle(page, MAIN)
+
             def read_back():
                 for _ in range(3):
                     _step(page, feed, automatic=True)
@@ -90,8 +99,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             for mode in ("fast", "delayed", "recent", "saved"):
                 read_back()
                 _screenshot(page, tmp_path, f"continuity-before-{mode}-{browser_engine}")
-                page.locator('#project-panel-close').click()
-                page.locator(feed).wait_for(state='detached')  # the exit ends before this cold reopen
+                leave_for_a_cold_open()
                 page.evaluate("fault => { window.__continuityFault = fault; }", {
                     "chatId": project["chat_id"], "delay": 800 if mode == "delayed" else 0,
                     "fail": mode if mode in {"recent", "saved"} else None,
@@ -101,7 +109,9 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
                 if mode == "recent":
                     retry = page.locator(f'{feed} .chat-load-older button')
                     page.wait_for_function("feed => document.querySelector(`${feed} .chat-load-older button`)?.textContent === 'Retry loading messages'", arg=feed)
-                    assert 'could not be loaded' in page.locator(feed).locator('..').locator('.chat-load-older-note').inner_text()
+                    # After a reload the room may also show its saved preview's own note (DESIGN "History edges").
+                    assert page.locator(feed).locator('..').locator('.chat-load-older-note').filter(
+                        has_text='could not be loaded').count() == 1
                     # The failed read leaves the CSS-visible feed off screen until the panel's entrance.
                     page.wait_for_function("""() => {
                         const panel = document.getElementById('project-panel');
@@ -123,8 +133,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             # Switching away while the reopen read is slow paints nothing into the
             # other room; opened again, the room is at its newest message.
             read_back()
-            page.locator('#project-panel-close').click()
-            page.locator(feed).wait_for(state='detached')
+            leave_for_a_cold_open()
             page.evaluate("fault => { window.__continuityFault = fault; }", {
                 "chatId": project["chat_id"], "delay": 800})
             _click_project(page, project)
@@ -320,7 +329,7 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
             }""")
             page.evaluate(_FRAMES)
             page.locator('#project-panel-close').click()
-            page.locator(feed).wait_for(state='detached')  # reopening mid-exit would keep its loaded pages
+            page.locator(feed).wait_for(state='hidden')  # the room is kept away, whole (room_retire.js)
             page.evaluate("""project => {
                 window.__holdQuestion = true;
                 window.dispatchEvent(new CustomEvent('ouro:open-project', {
@@ -328,7 +337,9 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
             }""", project)
             page.wait_for_function('() => Boolean(window.__releaseQuestion)')
             _idle(page, feed)
-            assert target.count() == 0, 'the passage read before closing is not restored'
+            # A return finds the room as left (owner 2026-11-03, DESIGN "History edges"): while the reveal is held
+            # the kept room still holds the passage read before closing; only the reveal's own landing replaces it.
+            assert target.count() == 1, 'the kept room shows the passage it was left on while the reveal is held'
             # Scroll up by a user gesture so the visible button can be activated.
             page.locator(feed).evaluate("n => { n.dispatchEvent(new WheelEvent('wheel', {deltaY:-1})); n.scrollTop -= 350; }")
             page.evaluate(_FRAMES)

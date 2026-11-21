@@ -21,7 +21,9 @@ by their files. ``memory_read`` and this reader share one composition of a recor
   the revision the range belongs to, so a text of any size is read whole and from one revision. A
   record reads as of any of its revisions; a note, file, field or journal entry is refused
   ``revision_mismatch`` once its text changed. A ``field`` of a stored record, journal entry or note
-  front matter reads that value: a string as text, anything else as its JSON.
+  front matter reads that value: a string as text, anything else as its JSON. A knowledge or workpad history
+  row that stores a change reads its ``old_content``/``new_content`` as that version's whole text, verified
+  (``knowledge_rows``), and its listing entry names those addresses; ``field: []`` is every line as stored.
 - ``changes`` returns the chronicle records after a position; the position it returns is the last
   record returned, never a newer head. Knowledge and plain files have no change feed: compare
   their ``revision`` on a later read.
@@ -69,6 +71,8 @@ _FILES = {"identity": ("memory/identity.md", "Identity", "identity", "markdown")
 _JOURNALS = {"identity": "memory/identity_journal.jsonl", "world": "memory/world_journal.jsonl",
              "scratchpad": "memory/scratchpad_journal.jsonl", "knowledge:global": "memory/knowledge_history.jsonl"}
 _ZERO = {"sequence": 0, "record_id": None}
+# Journals whose rows may store a version by change (``knowledge_rows``): a note shelf's and a Project workpad's.
+_CHANGE_JOURNALS = ("knowledge:", "workpad:")
 
 
 def read_memory(data_root: Any, operation: str, parameters: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
@@ -205,7 +209,7 @@ def _file_path(root: pathlib.Path, source: str) -> Tuple[pathlib.Path, str, Opti
         return _inside(root, relative), title, journal, form
     if source.startswith("workpad:"):
         project = _project_id(source[len("workpad:"):])
-        return _inside(root, f"projects/{project}/workpad.md"), f"Project {project} workpad", None, "markdown"
+        return _inside(root, f"projects/{project}/workpad.md"), f"Project {project} workpad", source, "markdown"
     raise MemoryReadError("invalid_parameter", "source is identity, world, scratchpad or workpad:<project id>")
 
 
@@ -216,7 +220,10 @@ def _journal_path(root: pathlib.Path, journal: str) -> pathlib.Path:
         return _inside(root, f"projects/{_project_id(journal[len('knowledge:project:'):])}/knowledge_history.jsonl")
     if journal.startswith("project:"):
         return _inside(root, f"projects/{_project_id(journal[len('project:'):])}/journal.jsonl")
-    raise MemoryReadError("invalid_parameter", "journal is identity, world, scratchpad, knowledge:<scope> or project:<project id>")
+    if journal.startswith("workpad:"):  # the page's history, beside it (memory_texts)
+        return _inside(root, f"projects/{_project_id(journal[len('workpad:'):])}/workpad_history.jsonl")
+    raise MemoryReadError("invalid_parameter", "journal is identity, world, scratchpad, knowledge:<scope>, "
+                                               "project:<project id> or workpad:<project id>")
 
 
 def _note_address(root: pathlib.Path, scope: Any, topic: Any = "overview"):
@@ -311,11 +318,28 @@ def _field_text(value: Any) -> Tuple[str, str]:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str), "json"
 
 
-def _dated(store: ChronicleStore, record: Mapping[str, Any]) -> Dict[str, Any]:
+def _period_projection(span: Any, address: Mapping[str, Any], budget: List[int], *, stated: bool = False) -> Any:
+    """Stored stated dates have a field address; computed spans only have their record as a source.
+
+    A derived span that does not fit is a JSON preview, not a ref to a nonexistent field. The source record
+    exposes its members/sources for complete reading, as for other compositions (``_derived_text``).
+    """
+    if span is None:
+        return None
+    if stated:
+        return _project(span, address, ["metadata", "stated_period"], budget)
+    text = _field_text(span)[0]
+    available = max(0, min(PREVIEW_CHARS, budget[0] - 8))
+    budget[0] -= 8 + min(len(text), available)
+    return span if len(text) <= available else {
+        "preview": text[:available], "chars": len(text), "derived_from": dict(address)}
+
+
+def _dated(store: ChronicleStore, record: Mapping[str, Any], budget: List[int]) -> Dict[str, Any]:
     """A page's, part's, account's or retold record's period keyed as its story entry is: ``source_period`` and
     ``period_basis`` from ``memory_inventory.record_period``, ``period`` as the view prints it; ``{}`` for any other
-    kind. No legacy unit is computed, so a retold record is dated by its block's recorded period (``block``), never by
-    reading the legacy history; a part reads its members and an account its sources, recursively, one ``get`` each."""
+    kind. No legacy unit is computed: a retold record uses its block's recorded period (``block``), a transfer its
+    source's stated period (``stated``); a part reads its members and an account its sources, one ``get`` each."""
     if record.get("kind") not in ("page", "part", "account", "legacy", "gap"):
         return {}
     from ouroboros.memory_inventory import record_period
@@ -323,30 +347,42 @@ def _dated(store: ChronicleStore, record: Mapping[str, Any]) -> Dict[str, Any]:
 
     period = record_period(store, record, {})
     metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
-    text = (_legacy_period({"covers": record.get("covers"), "range_text": metadata.get("legacy_range_text")})
+    text = (_legacy_period(period, metadata.get("legacy_range_text"))
             if record.get("kind") in ("legacy", "gap") else _period(period.span, period.note()))
-    return {"period": _derived_text(text, _record_address(record["id"])), "source_period": period.span,
-            "period_basis": period.source}
+    address = _record_address(record["id"])
+    stated = record.get("kind") in ("legacy", "gap") and bool(metadata.get("transfer")) and period.source == "stated"
+    return {"period": _derived_text(text, address),
+            "source_period": _period_projection(period.span, address, budget, stated=stated),
+            "period_basis": period.source, "period_bases": list(period.bases or (period.source,))}
 
 
 def _record_entry(record: Mapping[str, Any], budget: Optional[List[int]] = None,
                   store: Optional[ChronicleStore] = None) -> Dict[str, Any]:
     """One chronicle record as a list shows it: its own words previewed, its acting state, its stored facts
     projected (``_project``) and a count where history grows; never a list of its history. With ``store``, a
-    record the story dates carries its period (``_dated``)."""
+    record the story dates carries its period (``_dated``). ``byline`` is who wrote it (``record_byline``); a
+    transfer (``chronicle_import``) adds ``transfer``, ``written_at`` and ``stated_period``, ``ts`` staying the
+    local publication."""
+    from ouroboros.memory_inventory import TRANSFER_FACTS, record_byline
+
     budget, address = [ENTRY_BUDGET] if budget is None else budget, _record_address(record["id"])
     author = record.get("author") if isinstance(record.get("author"), Mapping) else {}
     entry = {"address": address, "id": record["id"], "kind": record.get("kind"), "room_id": record.get("room_id"),
              "sequence": record.get("sequence"), "ts": record.get("ts"), "author": _project(author, address, ["author"], budget),
+             "byline": _derived_text(record_byline(record), {**address, "field": ["author"]}),
              "signer": draft_signer(author) if author.get("kind") in ("mind", "helper") else None,
              "status": record.get("status"), "folded_into": record.get("folded_into"), "revision": record.get("revision"),
              "corrections": len(record.get("corrections") or ()), "target_id": record.get("target_id") or None,
              **_preview(_words(record, own=True))}
     if store is not None:
-        entry.update(_dated(store, record))
+        entry.update(_dated(store, record, budget))
     for key in ("covers", "task_id", "accepted", "shown", "replaces", "visibility", "scope", "quote", "target_ref", "anchor"):
         if key in record:
             entry[key] = _project(record[key], address, [key], budget)
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    for key, name in TRANSFER_FACTS if metadata.get("transfer") else ():
+        if metadata.get(name) is not None:
+            entry[key] = _project(metadata[name], address, ["metadata", name], budget)
     if record.get("kind") == "account":
         selection = record.get("selection")
         entry["sources"] = len(record.get("sources") or ())
@@ -428,13 +464,29 @@ def _records(root: pathlib.Path, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _story_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
-    """One story entry as the memory view composed it, its words and lists bounded: the record reads them whole."""
+    """One captured story entry: author and transfer fields share one projection budget and name their stored
+    addresses. No record is read here; ``document`` reads each field whole."""
+    from ouroboros.memory_inventory import TRANSFER_FACTS
+
     out: Dict[str, Any] = {key: entry.get(key) for key in (
-        "kind", "id", "room_id", "period", "source_period", "period_basis", "status", "signer", "told_by", "block",
-        "rows", "chars", "messages", "written", "selection", "selection_sequence", "sequence") if key in entry}
-    record = _record_address(entry["id"])
+        "kind", "id", "room_id", "period", "source_period", "period_basis", "period_bases", "status", "signer", "told_by",
+        "block", "rows", "chars", "messages", "written", "selection", "selection_sequence", "sequence") if key in entry}
+    record, budget = _record_address(entry["id"]), [ENTRY_BUDGET]
+    if "author" in entry:
+        out["author"] = _project(entry["author"], record, ["author"], budget)
+    for key, name in TRANSFER_FACTS:
+        if key in entry:
+            out[key] = _project(entry[key], record, ["metadata", name], budget)
+    if entry.get("transfer") and entry.get("period_basis") == "stated" and entry.get("source_period"):
+        out["source_period"] = out["stated_period"]  # the same stored dates, with the same bounded projection
+    elif "source_period" in entry:
+        out["source_period"] = _period_projection(entry["source_period"], record, budget)
+    if "period" in entry:
+        out["period"] = _derived_text(str(entry["period"]), record)
     out.update(address=record, told_by=entry.get("told_by"), label=_derived_text(str(entry.get("label") or ""), record),
                **_preview(str(entry.get("text") or "")))
+    if entry.get("byline"):
+        out["byline"] = _derived_text(str(entry["byline"]), {**record, "field": ["author"]})
     # The view's own compositions: a stamp summary of the stored host_stamp, a legacy unit's [start, end] minutes,
     # a gap's stored source_gap (or the view's short default). None is a stored field of that name.
     if entry.get("stamp"):
@@ -572,7 +624,9 @@ def _journal_page(root: pathlib.Path, journal: str, params: Mapping[str, Any],
     A line that would cross the window starts the next page; a page's first line is read whole however long
     (one record-sized read), so every line is reached and none is cut. The offset advances only over
     complete lines: an unterminated last line (an append in progress) stays for a later read. An
-    unparseable line is an entry marked ``unreadable``, never skipped. Each row is projected (``_project``).
+    unparseable line is an entry marked ``unreadable``, never skipped. Each row is projected (``_project``); a
+    knowledge or workpad history row that carries a change also names, by reference only, the address of each text it
+    does not store whole (``old_content``/``new_content``, read through ``_version_text``): no text is rebuilt for a page.
     """
     path, offset, limit = _journal_path(root, journal), _number_cursor(params, "o"), _limit(params)
     if not path.is_file():
@@ -607,7 +661,11 @@ def _journal_page(root: pathlib.Path, journal: str, params: Mapping[str, Any],
             if not isinstance(row, dict):
                 entries.append({"offset": start, "unreadable": True, "bytes": len(raw), "address": {**at, "field": []}})
             elif match is None or match(row):
-                entries.append({"offset": start, "address": {**at, "field": []}, "fields": _project(row, at, [], [ENTRY_BUDGET])})
+                fields = _project(row, at, [], [ENTRY_BUDGET])
+                if journal.startswith(_CHANGE_JOURNALS) and "change" in row and len(row) <= KEYS_MAX:
+                    fields.update({key: {"ref": "text", "address": {**at, "field": [key]}}
+                                   for key in ("old_content", "new_content") if key not in row})
+                entries.append({"offset": start, "address": {**at, "field": []}, "fields": fields})
     complete = position + tail >= size
     return {"journal": journal, "exists": True, "position": f"o{position}", "unterminated_tail_bytes": tail,
             "entries": entries, "next": None if complete else f"o{position}", "complete": complete}
@@ -785,7 +843,7 @@ def _record_document(root: pathlib.Path, address: Mapping[str, Any], revision: O
             "corrections_shown": entry["corrections"], "current_revision": later[-1] if later else read["revision"],
             "later_corrections": _later_corrections(store, record["id"], read["revision"], later),
             "room_label": room_labeler(root)(record["room_id"]) if record.get("room_id") else None,
-            "told_by": told_by(store, [record["id"]])[record["id"]], **_dated(store, record)}
+            "told_by": told_by(store, [record["id"]])[record["id"]], **_dated(store, record, budget)}
     return _words(read), {**meta, "revision": read["revision"]}
 
 
@@ -812,8 +870,31 @@ def _text_document(root: pathlib.Path, address: Mapping[str, Any], revision: Opt
                                  "journal": {"kind": "journal", "journal": journal} if journal else None}
 
 
+def _version_text(root: pathlib.Path, path: pathlib.Path, journal: str, offset: int, row: Dict[str, Any], side: str) -> str:
+    """The ``old``/``new`` text of a knowledge or workpad history row that stores a change, rebuilt and verified by
+    ``knowledge_rows`` (the note's or the page's current text closes its newest segment), or ``not_found`` naming
+    the break."""
+    from ouroboros import knowledge_rows
+
+    try:
+        if journal.startswith("workpad:"):
+            live = _file_path(root, journal)[0].read_bytes().decode("utf-8")
+        else:
+            live = _read_note(_note_address(root, journal[len("knowledge:"):], row.get("topic"))).text
+    except (MemoryReadError, OSError, UnicodeDecodeError):
+        live = None
+    texts = knowledge_rows.Texts(path, live)
+    texts.rows[offset] = row
+    try:
+        return texts.text(offset, side)
+    except knowledge_rows.TextUnavailable as exc:
+        raise MemoryReadError("not_found", f"no verified text of this row's {side} version: {exc}") from None
+
+
 def _entry_document(root: pathlib.Path, address: Mapping[str, Any], revision: Optional[str]) -> Tuple[str, Dict[str, Any]]:
-    """One journal line (``field`` ``[]``: as stored) or one value of it; reading the line is record-sized."""
+    """One journal line (``field`` ``[]``: as stored) or one value of it; reading the line is record-sized, and a
+    knowledge or workpad history row's ``old_content``/``new_content`` beside a ``change`` is that version's text
+    (``_version_text``): the stored row and the rebuilt version stay distinct reads."""
     journal, offset, field = str(address.get("journal")), address.get("offset"), address.get("field")
     if type(offset) is not int or offset < 0 or not isinstance(field, list):
         raise MemoryReadError("invalid_parameter", "an entry is {journal, offset, field: [keys]}")
@@ -835,7 +916,11 @@ def _entry_document(root: pathlib.Path, address: Mapping[str, Any], revision: Op
         except ValueError:
             raise MemoryReadError("not_found", "the line is not a JSON row; read field [] for it as stored") from None
         at = {"kind": "entry", **context}
-        return _field_document(row, field, revision, {**context, "entry": _project(row, at, [], [ENTRY_BUDGET])})
+        entry = _project(row, at, [], [ENTRY_BUDGET])
+        if journal.startswith(_CHANGE_JOURNALS) and isinstance(row, dict) and "change" in row and field in (
+                ["old_content"], ["new_content"]):
+            row = {field[0]: _version_text(root, path, journal, offset, row, field[0][:3])}
+        return _field_document(row, field, revision, {**context, "entry": entry})
     text = raw[:-1].decode("utf-8", errors="replace")  # the line as stored; undecodable bytes are replaced
     current = hashlib.sha256(text.encode("utf-8")).hexdigest()
     _bound(revision, current)

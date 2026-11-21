@@ -101,7 +101,7 @@ _ISO_SETTINGS_ALLOW_EXACT = frozenset({
     # Review policy knobs (non-secret): must propagate so settings.json's result-review
     # config is honored by isolated benchmark servers (else it silently
     # falls back to the "auto" default and the end-of-task review never runs).
-    "OUROBOROS_TASK_REVIEW_MODE", "OUROBOROS_REVIEW_ENFORCEMENT",
+    "OUROBOROS_TASK_REVIEW_MODE",
     # Shared paid review-cycle ceiling (non-secret): bench templates pin it to
     # "unlimited" for methodology comparability; a live-settings pin must forward
     # into isolated bench servers the same way the other review knobs do.
@@ -620,6 +620,12 @@ class IsolatedServer:
         for key in list(env):
             if _is_secret_env_key(key):
                 env.pop(key, None)
+        # Playwright's driver Node: this process's automatic selection is not the server's (it selects anew at boot;
+        # a clone from before the marker would read an inherited value as an operator's), in either settings mode.
+        # The shared reader owns the marker's spelling and case; a literal stays byte-exact.
+        from ouroboros.node_runtime import without_selected_driver_node
+
+        without_selected_driver_node(env)
         if self.settings_authoritative_env:
             # The applied settings file is the source of truth for this adapter.  Do
             # not merely clear today's known slots: remove the complete Ouroboros

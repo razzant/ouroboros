@@ -29,7 +29,7 @@ def _assignment_case(tmp_path, monkeypatch, task_id="assign-evo"):
     pending, running = [], {}
     monkeypatch.setattr(workers, "PENDING", pending)
     monkeypatch.setattr(workers, "RUNNING", running)
-    workers.init(tmp_path, tmp_path, 1)
+    workers.init(tmp_path, tmp_path)
     campaign = evolution_lifecycle.start_evolution_campaign("Improve", source="test")
     state.update_state(lambda live: live.update(
         evolution_mode_enabled=True,

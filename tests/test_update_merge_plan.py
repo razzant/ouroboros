@@ -40,7 +40,7 @@ def _point_at(monkeypatch, repo):
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", repo.parent / "data")
     current = _git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
     monkeypatch.setattr(git_ops, "BRANCH_DEV", current)
-    monkeypatch.setattr(git_ops, "_managed_update_target", lambda: ("", "ouroboros", "remote-sim"))
+    monkeypatch.setattr(git_ops, "_managed_update_target", lambda _channel: ("", "ouroboros", "remote-sim"))
     monkeypatch.setattr(
         git_ops,
         "_resolve_managed_update_target",

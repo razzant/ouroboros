@@ -64,6 +64,127 @@ def test_candidate_is_leasable_matrix():
     assert candidate_is_leasable(_task("alpha", role="subagent"), leased) is True
 
 
+def test_the_lane_is_its_trees_while_a_sleeping_root_waits_on_live_members():
+    """A sleep is its actor's wait: its tree keeps the lane its live children write under (``lane_holders``)."""
+    from ouroboros.project_lease import lane_holders
+
+    sleep = {"reason": "sleep", "sleep": {}}
+    root = {**_task("alpha", tid="root"), "root_task_id": "root", "_budget_pause": sleep}
+    kid = {**_task("alpha", role="subagent", tid="kid"), "root_task_id": "root"}
+    foreign = {**_task("alpha", tid="foreign"), "root_task_id": "foreign"}
+    foreign_kid = {**_task("alpha", role="subagent", tid="f-kid"), "root_task_id": "foreign"}
+    holders = lane_holders([_meta(kid)], [root, foreign, foreign_kid])
+    assert holders == {"alpha": {"root"}}, "a running child keeps its sleeping root's lane"
+    assert candidate_is_leasable(kid, set(), holders=holders), "its own tree's lane admits it"
+    assert not candidate_is_leasable(foreign, set(), holders=holders)
+    assert not candidate_is_leasable(foreign_kid, set(), holders=holders), "another tree's child waits too"
+    woken = {**{k: v for k, v in root.items() if k != "_budget_pause"}, "_budget_pause_resume": {"pause": sleep}}
+    assert lane_holders([], [woken, kid]) == {"alpha": {"root"}}, "woken, not yet started: a queued child keeps it"
+    assert lane_holders([], [root, foreign]) == {}, "nothing of its tree alive: the sleep alone keeps nothing"
+    assert candidate_is_leasable(foreign, set(), holders={}) and candidate_is_leasable(foreign_kid, set(), holders={})
+    assert lane_holders([_meta(kid)], [{**root, "_budget_pause": {"reason": "owner"}}]) == {}, "a Pause keeps its rule"
+    assert lane_holders([_meta(foreign)], []) == {"alpha": {"foreign"}}
+    assert lane_holders([{**_meta(foreign), "lane": "conversation"}], []) == {}
+    # A released tree takes its lane back only once it is free, never beside another tree: no two trees wait
+    # on each other. Of two sleeping trees whose members are all queued, the first queued keeps it.
+    taken = lane_holders([_meta(foreign)], [root, kid])
+    assert taken == {"alpha": {"foreign"}} and not candidate_is_leasable(kid, set(), holders=taken)
+    other = {**_task("alpha", tid="other"), "root_task_id": "other", "_budget_pause": sleep}
+    other_kid = {**_task("alpha", role="subagent", tid="o-kid"), "root_task_id": "other"}
+    first = lane_holders([], [root, kid, other, other_kid])
+    assert first == {"alpha": {"root"}} and candidate_is_leasable(kid, set(), holders=first)
+    assert not candidate_is_leasable(other_kid, set(), holders=first)
+
+
+def _in(project, tid, folder="", *, role="", root="", **fields):
+    """A queue row of ``project`` working in the recorded external ``folder``."""
+    task = {**_task(project, role=role, tid=tid), "root_task_id": root or tid, **fields}
+    if folder:
+        task.update(workspace_root=folder, workspace_mode="external")
+    return task
+
+
+def test_one_recorded_folder_is_one_lane_whichever_room_starts_work_in_it():
+    """Owner 15.11.2026: independent pooled work in one external folder waits its turn across rooms."""
+    from ouroboros.project_lease import lane_holders, note_folder_wait
+
+    shared = "/work/shared"
+    writer = _in("p", "p1", shared)
+    newcomer, elsewhere = _in("q", "q1", shared), _in("q", "q2", "/work/other")
+    running = [_meta(writer)]
+    holders, leased = lane_holders(running, [newcomer, elsewhere]), running_project_ids(running)
+    assert holders == {"p": {"p1"}, ("folder", shared): {"p1"}, ("folder", shared, "acting"): {"p1"}}
+    assert not candidate_is_leasable(newcomer, leased, holders=holders), "another room's work in the folder waits"
+    assert candidate_is_leasable(elsewhere, leased, holders=holders), "another folder runs beside it"
+    # The previous exclusions stay: a helper, unscoped work and a room's conversation turn neither hold nor wait.
+    assert candidate_is_leasable(_in("q", "kid", shared, role="subagent", root="q9"), leased, holders=holders)
+    assert candidate_is_leasable(_in("", "plain", shared), leased, holders=holders)
+    assert lane_holders([{**_meta(_in("p", "turn", shared)), "lane": "conversation"}], []) == {}
+    # The chooser's next pick sees the first one at once: a selected row joins what holds lanes.
+    picked = [{"task": newcomer}]
+    assert not candidate_is_leasable(_in("r", "r1", shared), running_project_ids(picked),
+                                     holders=lane_holders(picked, [])), "the first selected row holds the folder"
+    # A pending move counts the folder its readmission selects, never the one it still records.
+    moving = _in("r", "r2", "/work/old", _placement_folder=shared)
+    assert not candidate_is_leasable(moving, leased, holders=holders)
+    assert candidate_is_leasable({**moving, "_placement_folder": ""}, leased, holders=holders)
+    # The mind's roster names the holder and its room; a free folder clears it.
+    assert note_folder_wait(newcomer, running, [newcomer], holders)
+    assert newcomer["_folder_wait"] == {"task_id": "p1", "project_id": "p", "folder": shared}
+    assert not note_folder_wait(newcomer, running, [newcomer], holders), "unchanged: nothing to publish"
+    assert note_folder_wait(newcomer, [], [newcomer], lane_holders([], [newcomer])) and "_folder_wait" not in newcomer
+
+
+def test_earlier_holders_of_one_folder_never_lock_each_other_and_a_newcomer_waits_for_all():
+    """Two trees that already held one folder (cold: asleep beside a live helper) take turns; a new one waits."""
+    from ouroboros.project_lease import lane_holders
+
+    shared, sleep = "/work/shared", {"reason": "sleep", "sleep": {}}
+
+    def woken(row):
+        return {**{k: v for k, v in row.items() if k != "_budget_pause"}, "_budget_pause_resume": {"pause": sleep}}
+
+    first, second = _in("p", "t1", shared, _budget_pause=sleep), _in("q", "t2", shared, _budget_pause=sleep)
+    helpers = [_meta(_in("p", "t1-kid", role="subagent", root="t1")), _meta(_in("q", "t2-kid", role="subagent", root="t2"))]
+    newcomer = _in("r", "t3", shared)
+    holders = lane_holders(helpers, [first, second, newcomer])
+    assert holders[("folder", shared)] == {"t1", "t2"} and ("folder", shared, "acting") not in holders
+    assert not candidate_is_leasable(newcomer, set(), holders=holders), "a newcomer waits for every holder"
+    back = woken(first)
+    holders = lane_holders(helpers, [back, second, newcomer])
+    assert candidate_is_leasable(back, set(), holders=holders), "a returning holder never waits for one only cold"
+    acting = helpers + [_meta(back)]
+    holders = lane_holders(acting, [woken(second), newcomer])
+    assert not candidate_is_leasable(woken(second), running_project_ids(acting), holders=holders), \
+        "the other holder's return waits while the first acts in the folder"
+    assert not candidate_is_leasable(newcomer, running_project_ids(acting), holders=holders)
+
+
+def test_a_tree_with_only_queued_members_takes_its_lanes_back_together_or_not_at_all(monkeypatch):
+    """A sleeping root whose members are only queued keeps its Project's and its folder's lanes together: never a free
+    folder while another tree holds its Project, which would stop another room's work it cannot start itself.
+    Accepted cold custody keeps every lane it held, as before."""
+    from ouroboros import sleep_custody
+    from ouroboros.project_lease import lane_holders
+
+    shared, sleep = "/work/shared", {"reason": "sleep", "sleep": {}}
+    asleep = _in("p", "t1", shared, _budget_pause=sleep)
+    its_kid = _in("p", "t1-kid", role="subagent", root="t1")
+    project_writer, newcomer = _meta(_in("p", "x1")), _in("r", "n1", shared)
+    held = lane_holders([project_writer], [asleep, its_kid, newcomer])
+    assert held == {"p": {"x1"}}, "its Project is another tree's: it keeps no lane at all"
+    assert candidate_is_leasable(newcomer, {"p"}, holders=held), "the free folder starts another room's work"
+    assert not candidate_is_leasable(its_kid, {"p"}, holders=held), "its own queued member still waits for the Project"
+    free = lane_holders([], [asleep, its_kid, newcomer])
+    assert free == {"p": {"t1"}, ("folder", shared): {"t1"}}, "with both free it takes both back"
+    assert not candidate_is_leasable(newcomer, set(), holders=free) and candidate_is_leasable(its_kid, set(), holders=free)
+    real = sleep_custody.carrier_receipt
+    monkeypatch.setattr(sleep_custody, "carrier_receipt", lambda task: {"retains_project_lane": True}
+                        if task.get("id") == "t1" else real(task))
+    kept = lane_holders([project_writer], [asleep, newcomer])
+    assert kept["p"] == {"x1", "t1"} and kept[("folder", shared)] == {"t1"}, "accepted custody keeps what it held"
+
+
 def test_project_chat_id_policy():
     assert is_project_chat_id(WEB_UI_CHAT_ID) is False
     assert is_project_chat_id(-5) is False
@@ -424,7 +545,8 @@ def test_journal_and_workpad_roundtrip(tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", ["torn_temp_write", "failed_replace"])
 def test_a_failed_workpad_replacement_keeps_the_whole_previous_page(tmp_path, monkeypatch, failure):
     """#1854: a replacement that dies mid-write or at the swap leaves the complete
-    previous page and says so; it never exposes an empty or torn page or a stray temp."""
+    previous page and says so; it never exposes an empty or torn page or a stray temp.
+    Beside the page only its lock and its history journal (whose row names the version that did not land)."""
     import errno
     import os
     import types
@@ -451,13 +573,15 @@ def test_a_failed_workpad_replacement_keeps_the_whole_previous_page(tmp_path, mo
         else:
             patched.setattr(os, "replace", failed_replace)
         failed = pj._workpad_write(ctx, "## new plan\n- engine\n")
-    assert failed.startswith("⚠️ TOOL_ERROR (workpad_write)")
-    assert pj._workpad_read(ctx) == "## old plan\n- wheels\n"
-    assert [p.name for p in project_workpad_path("racer").parent.iterdir()] == ["workpad.md"]
+    assert failed.startswith("⚠️ TOOL_ERROR: replace_failed") and "keeps its previous bytes" in failed, failed
+    assert project_workpad_path("racer").read_bytes() == b"## old plan\n- wheels\n"
+    assert pj._workpad_read(ctx).endswith("\n\n## old plan\n- wheels\n")
+    beside = ["workpad.md", "workpad.md.lock", "workpad_history.jsonl"]
+    assert sorted(p.name for p in project_workpad_path("racer").parent.iterdir()) == beside
 
     assert pj._workpad_write(ctx, "## new plan\n- engine\n").startswith("OK:")
-    assert pj._workpad_read(ctx) == "## new plan\n- engine\n"
-    assert [p.name for p in project_workpad_path("racer").parent.iterdir()] == ["workpad.md"]
+    assert project_workpad_path("racer").read_bytes() == b"## new plan\n- engine\n"
+    assert sorted(p.name for p in project_workpad_path("racer").parent.iterdir()) == beside
 
 
 def test_stale_tombstone_marker_is_swept_by_the_next_reconcile_tick(tmp_path, monkeypatch):

@@ -30,6 +30,7 @@ from ouroboros.skill_loader import (
     requested_skill_permissions, save_enabled, save_skill_grants, skill_conflict_status,
     skill_state_dir, skill_state_dir_path,
 )
+from ouroboros.skill_readiness import grant_gap_sentence
 from ouroboros.tool_access import active_tool_profile, canonical_data_root
 from ouroboros.utils import append_jsonl, read_json_dict, utc_now_iso
 
@@ -57,6 +58,9 @@ def _strict_review(skill: Any) -> bool:
     return bool((getattr(skill.review, "acceptance", None) or {}).get("strict_review"))
 
 
+_OWNER_ACTIONS = frozenset({"grant", "attest", "delete", "connect_mcp"})
+
+
 def _caller_action_error(ctx: Any, action: str, owner_actor: str, owner_source: Any) -> tuple[str, dict]:
     if owner_actor:
         return ("", {}) if owner_actor in {"owner_ui", "owner_cli"} else ("unknown host owner actor", {})
@@ -73,7 +77,7 @@ def _caller_action_error(ctx: Any, action: str, owner_actor: str, owner_source: 
     # A selected payload or a copied owner reference cannot widen Presence.
     if presence_ceiling_from_context(ctx) is not None:
         return "a Presence task cannot issue owner-only skill authority", {}
-    needs_owner = action in {"grant", "attest", "delete"} or (
+    needs_owner = action in _OWNER_ACTIONS or (
         action == "enable" and constraint is not None
         and (constraint.has_selected_skill or not constraint.allow_enable)
     )
@@ -87,6 +91,11 @@ def _caller_action_error(ctx: Any, action: str, owner_actor: str, owner_source: 
         origin = (task or {}).get("origin_message_ref")
         if not origin and isinstance(metadata, dict):
             origin = metadata.get("origin_message_ref")
+        press = metadata.get("ui_control") if isinstance(metadata, dict) and isinstance(metadata.get("ui_control"), dict) else {}
+        if not origin and press.get("name") == "skill_repair" and constraint.has_selected_skill and press.get("pressed_at"):
+            # My human pressed Repair for this selected skill ("turns it on when it is ready"): the press is the
+            # request, held by the host at the door; its words were the host's, so nothing is quoted as theirs.
+            return "", {"kind": "control", "control": "skill_repair", "ts": str(press["pressed_at"]), "text": ""}
         owner_source = {"kind": "chat", "ref": origin}
     resolved = resolve_skill_owner_source(ctx, owner_source)
     if not resolved:
@@ -110,12 +119,24 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
             progress: Any = None) -> dict:
     """Enable or disable one skill. Enabling establishes the declared packages itself (the
     seam is idempotent, so Enable on an enabled skill repairs it and Enable again retries a
-    failure); ``progress`` receives the job's message while packages install."""
+    failure); ``progress`` receives the job's message while packages install. A first Enable is
+    atomic: a failed load saves Off again. Enable on a skill whose saved switch was already On
+    is a repair: its failure is answered and the owner's choice stays On. ``enabled`` answers
+    the saved switch either way. A repair the live publication could not finish (a companion still failed,
+    another awaiting exit, a reload deferred) answers ``ok`` with the reconcile's typed reason, its
+    ``load_error`` words and ``retained_companions``, as the reconcile receipt does."""
     facts = _review_facts(skill, drive_root)
     collision = skill.load_error.lower().startswith("skill name collision:")
+    from ouroboros.deployment_extensions import TRUST_SENTENCES, change_refusal, trust_gap
+
+    if not enabled and (managed := change_refusal(skill.name, "disable")):  # before the collision unload or a write
+        return _refusal("Your organization requires it.", 403, code="managed_by_deployment", detail=managed, **facts)
     if enabled:
         if skill.load_error:
             return _refusal("Its files could not be loaded.", 400, code="load_error", detail=skill.load_error, **facts)
+        if skill.manifest.is_extension() and (gap := trust_gap(skill.name, skill.skill_dir, skill.content_hash)):
+            return _refusal("Only extension skills your organization delivers run here.", 403, code="managed_by_deployment",
+                            detail=TRUST_SENTENCES[gap], **facts)
         conflict = skill_conflict_status(skill, discover_skills(drive_root, repo_path=repo_path))
         if conflict:
             return _refusal("Another skill that is on uses the same tool names; turn it off first.",
@@ -124,7 +145,8 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
             need = executable_review_requirement(facts["review_gate"], strict_review=_strict_review(skill))
             return _refusal("It turns on after a review passes.", code="acceptance", detail=need, **facts)
         if not facts["grants"].get("all_granted", True):
-            return _refusal("Grant it the keys and permissions it asks for first.", code="grants", **facts)
+            return _refusal("Grant it the keys and permissions it asks for first.", code="grants",
+                            detail=grant_gap_sentence(facts["grants"]), **facts)
         from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_dependencies
 
         deps_status, detail = ensure_skill_dependencies(drive_root, skill, progress=progress)
@@ -138,15 +160,23 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         extension_loader.unload_extension(skill.name)
         return _refusal("cannot persist disable while the skill identity collides; rename one directory first", 400,
                         extension_action="extension_unloaded", extension_reason="name_collision", **facts)
-    save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
+    from ouroboros.extension_registry_state import _lifecycle_lock_for
+    from ouroboros.skill_loader import load_enabled
+
+    # Under the lock a companion refresh holds from its final admission through its spawn (never its stop):
+    # the refresh reads this choice, or the reconcile below finds its new process and stops it.
+    with _lifecycle_lock_for(skill.name):
+        was_on = load_enabled(drive_root, skill.name)  # the saved intent before this attempt, not what is live
+        save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
     skill.enabled = enabled
-    state = _reconcile(skill, drive_root, repo_path, enabling=enabled)
+    state = _reconcile(skill, drive_root, repo_path, enabling=enabled and not was_on)
     failed = enabled and state.get("action") == "extension_load_error"
     return {
-        "ok": not failed, **facts, "enabled": enabled and not failed,
+        "ok": not failed, **facts, "enabled": enabled and not state.get("reverted_enabled"),
         "extension_action": state.get("action"), "extension_reason": state.get("reason"),
         "process": str(state.get("process") or ""), "server_reconcile": str(state.get("server_reconcile") or ""),
         "load_error": state.get("load_error"),
+        **({"retained_companions": state["retained_companions"]} if state.get("retained_companions") else {}),
         **({"error": "It could not start.", "code": "load_error", "status_code": 409,
             "detail": str(state.get("load_error") or "extension failed to load")} if failed else {}),
     }
@@ -238,6 +268,20 @@ def prepare_skill_grant(skill: Any, drive_root: Path, items: list[str]) -> dict:
             "allowed_keys": allowed_keys, "allowed_permissions": allowed_permissions}
 
 
+def _saved_switch(drive_root: Path, name: str) -> bool | None:
+    """The saved switch, read strictly from ``enabled.json``: False if never saved (Off), None while it cannot be read
+    or holds no boolean (``load_enabled`` reads both as Off). Never the effective switch: a package a deployment
+    requires reads On over a saved Off."""
+    from ouroboros.utils import json_snapshot
+
+    try:
+        saved = json_snapshot(skill_state_dir_path(drive_root, name) / "enabled.json", strict=True)
+    except (OSError, ValueError):
+        return None
+    value = False if saved is None else saved.get("enabled")
+    return value if isinstance(value, bool) else None
+
+
 def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, progress: Any = None,
            enable_after_grant: bool = False) -> dict:
     request = prepare_skill_grant(skill, drive_root, items)
@@ -253,6 +297,15 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
             state = _toggle(skill, drive_root, repo_path, True, "owner_ui", "enable with confirmed grants", progress=progress)
         except Exception as exc:
             state = {"error": f"Setup failed: {type(exc).__name__}: {exc}"}
+        if "enabled" not in state:
+            # No answer of the toggle's own: a precheck refused before any write or reconcile, or the attempt failed.
+            # The saved switch as it reads now (unknown, not Off, while its file cannot be read) and this folder's own
+            # pending exits (server memory only) still stand.
+            from ouroboros.extension_liveness import retained_companions_for_directory
+
+            retained = retained_companions_for_directory(skill.name, str(skill.skill_dir.resolve()))
+            state = {**state, "enabled": _saved_switch(drive_root, skill.name),
+                     **({"retained_companions": retained, "process": "server"} if retained else {})}
         turn_on = {"action": "enabled" if state.get("ok") else "not_ready",
                    "enabled": bool(state.get("enabled")), "error": str(state.get("error") or "")}
     else:
@@ -263,7 +316,7 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
         turn_on = reconcile_turn_on_when_ready(drive_root, skill.name, repo_path=repo_path, reason="grants approved", progress=progress)
     return {
         "turn_on_when_ready": turn_on["action"],
-        **({"enabled": turn_on["enabled"]} if enable_after_grant else {}),
+        **({"enabled": turn_on["enabled"]} if enable_after_grant and state.get("enabled", False) is not None else {}),
         **({"setup_error": turn_on["error"]} if turn_on.get("error") else {}),
         "ok": True, "skill": skill.name, "content_hash": skill.content_hash,
         "granted_keys": keys, "granted_permissions": granted_permissions,
@@ -272,7 +325,16 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
         "load_error": state.get("load_error"), "grants": grant_status_for_skill(drive_root, skill),
         "process": str(state.get("process") or ""), "server_reconcile": str(state.get("server_reconcile") or ""),
         "live_loaded": state.get("live_loaded"),
+        **({"retained_companions": state["retained_companions"]} if state.get("retained_companions") else {}),
     }
+
+
+def preview_connect_mcp(ctx: Any, skill_name: str, owner_source: Any = None, *, _owner_actor: str = "") -> dict[str, Any]:
+    """The passive Connect tools preview behind the same caller gates as its confirm (``skill_mcp``)."""
+    from ouroboros.skill_mcp import preview_connect
+
+    error, _source = _caller_action_error(ctx, "connect_mcp", _owner_actor, owner_source)
+    return _refusal(error, 403) if error else preview_connect(canonical_data_root(ctx), skill_name)
 
 
 def run_skill_action(
@@ -280,23 +342,25 @@ def run_skill_action(
     items: list[str] | None = None, owner_source: Any = None, payload_root: str = "",
     repo_path: str | None = None, _owner_actor: str = "",
     _progress: Any = None, _enable_after_grant: bool = False, _reconcile_grant: Any = None,
+    settings_digest: str = "", confirm_other_servers: bool = False,
 ) -> dict[str, Any]:
     """Apply one selected action through the existing lifecycle lane; ``_progress`` is the
     caller's job handle (one job binds one progress target), relayed into the job.
+    ``connect_mcp`` writes the previewed MCP rows (``skill_mcp.connect``) against ``settings_digest``.
     The legacy keyword only diagnoses a source launcher straddling an update; it runs no callback."""
     if _owner_actor == "owner_launcher":
         return _refusal("Restart Ouroboros, then grant access again.", 409, code="launcher_restart_required")
     from ouroboros.config import get_skills_repo_path
     from ouroboros.tool_access import build_resolved_resource_binding
 
-    if action not in {"grant", "enable", "disable", "attest", "delete"}:
+    if action not in {"grant", "enable", "disable", "attest", "delete", "connect_mcp"}:
         return _refusal("unknown skill action", 400)
     if items is not None and (not isinstance(items, list) or any(not isinstance(item, str) for item in items)):
         return _refusal("grant items must be a list of strings", 400)
     error, source = _caller_action_error(ctx, action, _owner_actor, owner_source)
     if error:
         return _refusal(error, 403)
-    if not _owner_actor and action in {"grant", "attest", "delete"} and not expected_content_hash:
+    if not _owner_actor and action in _OWNER_ACTIONS and not expected_content_hash:
         return _refusal("the selected content hash is required for this owner action", 400)
     drive = canonical_data_root(ctx)
     repo_path = get_skills_repo_path() if repo_path is None else repo_path
@@ -345,6 +409,8 @@ def run_skill_action(
                 "actor": actor, "task_id": task_id, "skill": skill_name,
                 "client_host": str(getattr(ctx, "_skill_owner_client_host", "") or ""),
                 "content_hash": result.get("content_hash") or expected_content_hash,
+                "review_status": result.get("review_status"), "review_stale": result.get("review_stale"),
+                "review_gate_reason": (result.get("review_gate") or {}).get("blocking_reason"),
                 "requested_items": list(items or []), "ok": bool(result.get("ok")),
                 "enable_after_grant": _enable_after_grant,
                 "granted_key_count": len(result.get("granted_keys") or []),
@@ -352,6 +418,10 @@ def run_skill_action(
                 "extension_action": result.get("extension_action"),
                 "extension_reason": result.get("extension_reason"),
                 "source_ref": {key: value for key, value in source.items() if key != "text"},
+                **({"mcp_servers": [{key: item.get(key) for key in ("id", "change")} for item in result.get("servers") or []],
+                    "other_servers": [item.get("id") for item in result.get("other_servers") or []],
+                    "confirm_other_servers": confirm_other_servers, "saved": result.get("saved")}
+                   if action == "connect_mcp" else {}),
             })
         except Exception:
             log.warning("skill action audit failed", exc_info=True)
@@ -383,6 +453,11 @@ def run_skill_action(
         if action == "grant":
             return _grant(loaded, drive, repo_path, list(items or []), progress=_progress.set if _progress is not None else None,
                           enable_after_grant=_enable_after_grant)
+        if action == "connect_mcp":
+            from ouroboros.skill_mcp import connect
+
+            return connect(drive, loaded.name, expected_content_hash=loaded.content_hash, settings_digest=settings_digest,
+                           confirm_other_servers=confirm_other_servers)
         if action == "delete":
             from ouroboros.skill_uninstall_state import delete_local_skill
 
@@ -398,4 +473,16 @@ def run_skill_action(
                                     result_message=(lambda value: "Access granted; " + value["setup_error"] if value.get("setup_error") else "") if action == "grant" else None,
                                     progress_target=_progress),
     )
+    if not _owner_actor and result.get("ok"):  # the mind's own action left the skill on: the work's card says over what
+        from ouroboros.review_overrides import note_skill_over_review
+
+        if action == "enable" and result.get("enabled"):
+            note_skill_over_review(ctx, skill_name, result.get("review_gate"), "turned_on")
+        elif action == "grant" and result.get("turn_on_when_ready") == "enabled":  # the grant let a waiting turn-on through
+            try:
+                granted = find_skill(drive, skill_name, repo_path=repo_path)
+                if granted is not None and granted.enabled:
+                    note_skill_over_review(ctx, skill_name, granted.review.gate_for(granted.content_hash), "turned_on")
+            except Exception:  # the grant stands and its audit row follows; only the card's note is lost
+                log.warning("A skill turned on by a grant was not named on its work's card", exc_info=True)
     return audit(result)

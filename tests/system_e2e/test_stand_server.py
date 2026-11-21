@@ -3,7 +3,8 @@
 The root is the production shape's standing set (tests/_stand.py ``build_root``: restored paused trees and pending rows, held runs, schedules,
 markers, rooms and a story, a wake soon due), with the fake engine answering for the owned daemon. Two servers per shape and journal record what
 happened (``_Run``), and each law then reads its own part of the record, so a law that fails names itself. ``load``: an owner turn alone; real
-tasks, concurrent owner turns and a Presence burst at once, held at the model; the door, the controls and one more turn answered under them; the
+tasks, concurrent owner turns (each in a conversation of its own, as in tests/_stand.py) and a Presence burst at once, held at the model; the
+door, the controls and one more turn answered under them; the
 browser's Panic frame ending all of it. ``recovery``, on a fresh root (Panic ended the first): every project worker killed, then a hello; no
 process able to start, then a hello; an update's conflict markers in the tree, then a hello; Stop of a held turn. The reduced shape runs in the keyless mock lane; the full one (50 real workers, tens of
 GiB) is its own lane, ``OUROBOROS_E2E_DEEP=stand_full``. Linux's forkserver is the mock lane's own start method (``supervisor.workers``), so E10's second half
@@ -33,7 +34,7 @@ from typing import Any, Callable, Dict, List
 
 import pytest
 
-from tests._stand import SHAPES
+from tests._stand import OTHER_CHAT, SHAPES
 from tests._store_shared import as_install
 from tests.system_e2e.harness import (
     LANE_MOCK,
@@ -217,9 +218,9 @@ class _Run:
         self.oracle = ArtifactOracle(self.data_root)
 
     # ---- the owner's chat --------------------------------------------------------------------------------------------------
-    def send(self, text: str) -> str:
+    def send(self, text: str, chat_id: int = 1) -> str:
         message_id = "stand-" + uuid.uuid4().hex
-        self.ws.send(json.dumps({"type": "chat", "content": text, "client_message_id": message_id, "chat_id": 1}))
+        self.ws.send(json.dumps({"type": "chat", "content": text, "client_message_id": message_id, "chat_id": chat_id}))
         return message_id
 
     def turn_of(self, message_id: str) -> Dict[str, Any]:
@@ -240,10 +241,10 @@ class _Run:
         rows = wait_until(lambda: [row for row in self.oracle.supervisor_rows("direct_turn") if row.get("task_id") == task_id], READ_WINDOW_SEC)
         return rows[-1] if rows else {}
 
-    def held_turn(self, text: str) -> Dict[str, Any]:
+    def held_turn(self, text: str, chat_id: int = 1) -> Dict[str, Any]:
         """One owner turn held at the model, with the process that carries it (0: no custodied process does)."""
         before = self.turns.arrived
-        task = self.turn_of(self.send(f"{TURN_MARKER} {text}"))
+        task = self.turn_of(self.send(f"{TURN_MARKER} {text}", chat_id))
         wait_until(lambda: self.turns.arrived > before, SETTLE_SEC)
         task_id = task.get("id", "")
         return {"task_id": task_id, "carrier": _carrier_pid(self.oracle, self.data_root, task_id)}
@@ -279,7 +280,8 @@ class _Run:
 
     def under_load(self) -> None:
         tasks = self.at_work(self.shape.real_tasks)
-        held = [self.held_turn(f"a held owner turn {index}: answer in one line.") for index in range(self.shape.turns)]
+        # Two owner messages in one chat are one turn while it reads: the held turns are other chats', the measured ones Main's.
+        held = [self.held_turn(f"a held owner turn {index}: answer in one line.", OTHER_CHAT + index) for index in range(self.shape.turns)]
         snapshot = self.oracle.queue_snapshot()
         self.facts["held_tasks"], self.facts["held_turns"] = tasks, held
         self.facts["arrivals"] = {"tasks": self.holds.arrived, "turns": self.turns.arrived, "pending": snapshot.get("pending_count")}

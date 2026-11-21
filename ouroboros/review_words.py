@@ -473,7 +473,9 @@ def _postimage(before: str, patch: str) -> str:
 
 
 def words_for_diff(repo_dir, diff: str) -> ReviewWords:
-    """Read the diff's blob identities, never HEAD or a possibly changed checkout."""
+    """Read the diff's blob identities, never HEAD or a possibly changed checkout (a work folder's by its own Git)."""
+    from ouroboros import work_domain
+
     sources, gaps = [], []
     for block in re.split(r"(?m)(?=^diff --git )", diff):
         path_match = re.search(r"(?m)^\+\+\+ (.+)$", block)
@@ -505,10 +507,52 @@ def words_for_diff(repo_dir, diff: str) -> ReviewWords:
             if set(index[1]) == {"0"}:
                 before = ""
             else:
-                before = subprocess.run(["git", "cat-file", "blob", index[1]], cwd=repo_dir, check=True,
-                                        capture_output=True, timeout=10).stdout.decode("utf-8")
+                before = work_domain.run(["git", "cat-file", "blob", index[1]], cwd=repo_dir, check=True,
+                                         capture_output=True, timeout=10).stdout.decode("utf-8")
             sources.append((path, before, _postimage(before, block)))
         except (SyntaxError, ValueError, OSError, subprocess.SubprocessError) as exc:
             gaps.append(f"{path} ({type(exc).__name__})")
     result = compare_sources(sources)
     return ReviewWords(result.changes, (*result.gaps, *gaps))
+
+
+# The glossary (docs/DESIGN.md principle 7): an accepted term → the withdrawn phrasings that replaced it in owner
+# words. Only phrasings with no other ordinary sense here; "window", "work" or "pictures" stay the reviewer's call.
+GLOSSARY = {
+    "subagent(s)": (r"\bhelpers?\b",),
+    "MCP server(s)": (r"\btool servers?\b",),
+    "worktree(s)": (r"\bworking cop(?:y|ies)\b",),
+    "Pre-review": (r"\bearly look\b",),
+    "Model": (r"^\s*(?:the supervisor )?thinks with\b",),
+    "Max output tokens": (r"\bmaximum response\b",),
+    "Workspace write": (r"^working files$",),
+    "vision": (r"\bmodels? that (?:can|cannot) see\b",),
+}
+
+
+def glossary_violations(repo_dir=".", sources=None) -> list[tuple[Literal, str]]:
+    """Owner-shown literals of ``web/modules/*.js`` that use a withdrawn phrasing, with the term that replaces it.
+
+    ``sources`` is ``(path, text)`` rows (a test's fixture); by default the tree's modules. An ``aliases``
+    array keeps old names on purpose so Settings search still finds them, so its literals are not owner words.
+    """
+    from pathlib import Path
+
+    if sources is None:
+        root = Path(repo_dir)
+        sources = [(path.relative_to(root).as_posix(), path.read_text(encoding="utf-8"))
+                   for path in sorted((root / "web" / "modules").glob("*.js")) if has_words(path.name)]
+    found = []
+    for path, text in sources:
+        try:
+            literals = source_literals(path, text)
+        except ValueError:  # a grammar it cannot parse (a page's script in a string): its lines, comments aside
+            literals = [Literal(path, "module", number, line) for number, line in enumerate(text.splitlines(), 1)
+                        if not re.match(r"\s*(?://|/?\*|import\b)", line)]
+        for literal in literals:
+            if "aliases" in literal.place.split("."):
+                continue
+            for term, phrasings in GLOSSARY.items():
+                if any(re.search(pattern, literal.text, re.IGNORECASE) for pattern in phrasings):
+                    found.append((literal, term))
+    return found

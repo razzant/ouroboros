@@ -686,6 +686,38 @@ def _load_cases() -> List[Dict[str, Any]]:
 _CASES = _load_cases()
 
 
+_CARRIER_ENDPOINT = "http://127.0.0.1:19876/carrier-only-sentinel"
+_WIRE_CASES = [case for case in _CASES if case['id'] in {
+    'openrouter.dispatch.happy_path', 'openai.dispatch.happy_path',
+    'compatible.dispatch.happy_path', 'cloudru.dispatch.happy_path',
+    'minimax.dispatch.happy_path', 'anthropic.dispatch.happy_path',
+    'gigachat.dispatch.happy_path', 'gigachat.dispatch.async_thread_offload',
+    'anthropic.payload.async_thread_offload', 'fallback.async.preserves_tools',
+    'fallback.async.no_proxy_client',
+}]
+
+
+@pytest.mark.parametrize('case', _WIRE_CASES, ids=lambda case: case['id'])
+def test_capability_carrier_never_enters_provider_wire_or_attempt_ledger(monkeypatch, case):
+    from ouroboros import llm_routing
+    resolve = llm_routing.resolve_target
+    seen = []
+
+    def with_metadata(*args, **kwargs):
+        target = resolve(*args, **kwargs)
+        target['capability_route']['dispatch_base_url'] = _CARRIER_ENDPOINT
+        seen.append(target)
+        return target
+
+    monkeypatch.setattr(llm_routing, 'resolve_target', with_metadata)
+    observed = _observe(case['spec'])
+    assert seen, 'the real dispatch must receive a target carrying the snapshot'
+    assert observed == case['expected']
+    serialized = json.dumps(observed)
+    assert 'capability_route' not in serialized
+    assert _CARRIER_ENDPOINT not in serialized
+
+
 def test_golden_fixture_ids_are_unique_and_documented():
     ids = [case["id"] for case in _CASES]
     assert len(ids) == len(set(ids)), "duplicate golden case id"
@@ -777,3 +809,58 @@ if __name__ == "__main__":
     if "--write" not in sys.argv[1:]:
         raise SystemExit("usage: python tests/test_llm_provider_golden.py --write")
     _write_golden()
+
+
+# Host-only fields never reach a provider (review 8, Fable): each key in ``HOST_ONLY_MESSAGE_KEYS`` is placed where the
+# host carries it, on a message row or inside a content block, and every send path's wire is read for it.
+_HOST_ROW_KEYS = frozenset({
+    "_host_context_kind", "_host_text_sha256", "_tool_result_record", "_review_history_source", "_review_context_index",
+    "_stable_prefix_blocks", "_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
+    "_review_image_id", "_display", "cache_control",
+})
+from ouroboros.llm_messages import HOST_ONLY_MESSAGE_KEYS  # noqa: E402  (beside the test it parametrizes)
+
+_SEND_PATH_CASES = [case for case in _CASES if case["id"] in {
+    "openrouter.dispatch.happy_path", "openai.dispatch.happy_path", "compatible.dispatch.happy_path",
+    "local.dispatch.tool_call_from_text", "anthropic.dispatch.happy_path", "gigachat.dispatch.happy_path",
+}]
+
+
+def _carrying(key: str, base: list) -> list:
+    marker = {"text": "HOST-ONLY-MARK"}
+    if key in _HOST_ROW_KEYS:
+        return [*base, {"role": "assistant", "content": "An earlier answer.", key: marker},
+                {"role": "user", "content": "Go on."}]
+    return [*base, {"role": "user", "content": [{"type": "text", "text": "An earlier block.", key: marker}]}]
+
+
+@pytest.mark.parametrize("key", sorted(HOST_ONLY_MESSAGE_KEYS))
+def test_no_send_path_carries_a_host_only_field(key, monkeypatch):
+    from ouroboros import llm_claudexor
+    from tests.test_openai_responses import MODEL, _body, _install, _message
+
+    assert len(_SEND_PATH_CASES) == 6
+    ordinary = json.dumps({"nested": [{key: "USER-DATA-MARK"}]})
+    user_data = [{"role": "user", "content": ordinary}]
+    wires = {}
+    for case in _SEND_PATH_CASES:
+        spec = copy.deepcopy(case["spec"])
+        spec["call"]["kwargs"]["messages"] = _carrying(key, spec["call"]["kwargs"]["messages"] + user_data)
+        observed = _observe(spec)
+        assert observed.get("sends") and "raised" not in observed, case["id"]
+        wires[case["id"]] = json.dumps(observed["sends"], ensure_ascii=False)
+    claudexor = _carrying(key, [{"role": "user", "content": "Hi."}] + user_data)
+    wires["claudexor"] = json.dumps(llm_claudexor._request(
+        {"source": "codex", "resolved_model": "fixture"}, claudexor, None, {}))
+    client = LLMClient(api_key="openai-fixture-key")
+    sent = _install(monkeypatch, client, [_body(_message("Done.", "final_answer"))])
+    messages = _carrying(key, user_data)
+    original = copy.deepcopy(messages)
+    client.chat(messages=messages, model=MODEL, tools=[])
+    assert len(sent) == 1 and sent[0]["input"]  # the actual responses.create input, past the shared dispatch
+    assert messages == original
+    wires["openai.responses"] = json.dumps(sent[0]["input"], ensure_ascii=False)
+    for path, wire in wires.items():
+        assert "HOST-ONLY-MARK" not in wire, (key, path)
+        assert key == "cache_control" or f'"{key}"' not in wire, (key, path)  # a cache mark is translated, not carried
+        assert json.dumps(ordinary)[1:-1] in wire, (key, path)  # same names in opaque user JSON stay byte-identical

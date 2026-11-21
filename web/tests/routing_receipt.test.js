@@ -3,7 +3,7 @@
 // target works by title, CONTRACTS K4) — and the line steps aside only for the act its portal already shows.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { renderRoutingAnnotation } from '../modules/routing_receipt.js';
+import { renderRoutingAnnotation, routingAnnotationText } from '../modules/routing_receipt.js';
 import { reconcilePortalNotes } from '../modules/work_portal.js';
 import { installDomDouble } from './dom_double.js';
 
@@ -127,5 +127,33 @@ test('the portal stands for the act that moved its work; words passed on later k
         portal.remove();
         reconcilePortalNotes(feed);
         assert.equal(moved.hidden, false, 'the receipt returns when its portal leaves the feed');
+    } finally { env.restore(); }
+});
+
+test('words saved for Main\'s turn say saved and never its name; a Project room\'s own receipt keeps it', () => {
+    const env = installDomDouble();
+    try {
+        const saved = { action: 'mailbox_delivery', status: 'delivered', target: 't-main' };
+        const bubble = owner(env);
+        renderRoutingAnnotation(bubble, saved, 1);
+        assert.equal(note(bubble).textContent, 'Message saved for task', 'an unnamed turn: saved, nothing more');
+        assert.equal(note(bubble).classList.contains('has-reference'), false, 'Main is no other room');
+        // The turn's name tells its first request (here an old card's question), never the words that joined it: a
+        // stored row from before this rule (live or replayed) says saved and nothing more in Main.
+        const joined = { ...saved, project_name: 'Main', target_label: 'Two new blockers from the report…',
+            target_titles: ['Two new blockers from the report…'] };
+        renderRoutingAnnotation(bubble, joined, 1);
+        assert.equal(note(bubble).textContent, 'Message saved for task');
+        // A Project room's own receipt from before rows carried their Project address names that room's work.
+        const own = owner(env);
+        renderRoutingAnnotation(own, { ...saved, target_label: 'Audit room › Audit' }, 7);
+        assert.equal(note(own).textContent, 'Message saved for task · Audit room › Audit');
+        assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1', target_label: 'Ship' }, 1),
+            'Steered task · Ship', 'a steer in Main names the work it chose');
+        assert.equal(routingAnnotationText({ action: 'steer_task', status: 'delivered', target: 't-1' }), 'Steered task · Task',
+            'other acts keep their generic name');
+        const room = owner(env);
+        renderRoutingAnnotation(room, { ...saved, project_id: 'p-1', project_chat_id: 7, target_titles: ['Audit'] }, 1);
+        assert.equal(note(room).children[0].textContent, 'Passed on to «Audit» in', 'another Project keeps its reference');
     } finally { env.restore(); }
 });

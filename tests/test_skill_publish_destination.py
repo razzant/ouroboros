@@ -2,22 +2,39 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import shutil
 import types
+import urllib.parse
 
 import pytest
 
+from ouroboros.artifacts import task_artifact_dir_path
+from ouroboros.config import SKILL_SOURCE_OUROBOROSHUB
 from ouroboros.skill_install_record import write_install_record
+from ouroboros.skill_loader import SkillReviewState, load_skill
+from ouroboros.skill_publish_client import GitHubError
 from ouroboros.skill_publish_destination import (
     PublishListingError,
     captured_release_digest,
+    entry_bytes,
+    git_blob_oid,
     hub_entry_listing,
     resolve_publish_destination,
     task_destination,
 )
 from ouroboros.skill_publish_result import SkillPublishDestinationError
 from ouroboros.tools import skill_publish
-from tests.test_skill_publish_transaction import BASE_SHA, COMMIT_SHA, _install_transaction_fakes, _snapshot, _submit
+from tests.test_skill_publish_transaction import (
+    BASE_SHA,
+    COMMIT_SHA,
+    _install_transaction_fakes,
+    _installed_from_destination,
+    _snapshot,
+    _submit,
+)
 
 ROWS = [
     {"id": "builtin", "name": "Built in", "kind": "builtin", "trust": "trusted", "confirmed": True},
@@ -148,7 +165,8 @@ def test_a_v2_hub_receives_one_entry_and_its_files_without_the_generated_catalog
     upstream = {"hub.json": b'{"schema_version": 2}', "categories.json": _CATEGORIES}
     monkeypatch.setattr(skill_publish, "fetch_upstream_file", lambda _c, _o, _r, sha, path: (
         upstream.get(path) if sha == BASE_SHA else None))
-    monkeypatch.setattr(skill_publish, "fetch_tree_paths", lambda *_a: ["SKILL.md", "old.py"])
+    monkeypatch.setattr(skill_publish, "fetch_tree_blobs", lambda *_a, **_k: {"SKILL.md": "a" * 40, "old.py": "b" * 40})
+    _installed_from_destination(tmp_path)
     monkeypatch.setattr(skill_publish, "fetch_upstream_catalog",
                         lambda *_a: pytest.fail("a v2 hub regenerates its own v1 catalog"))
     _destination(monkeypatch, PublishDestination("hub", "hub", "project", "main", "skills", "ouroboros", "Ouroboros"))
@@ -160,6 +178,9 @@ def test_a_v2_hub_receives_one_entry_and_its_files_without_the_generated_catalog
     assert (result["files_published"], result["listed"]) == ("pull_request", "when_merged")
     assert result["release_digest"] == captured_release_digest(_snapshot())
     assert result["destination_kind"] == "hub"
+    assert result["destination_comparison"]["state"] == "clear"
+    assert {(row["path"], row["upstream"]) for row in result["destination_comparison"]["paths"]} >= {
+        ("skills/demo/SKILL.md", "unchanged_since_base"), ("skills/demo/old.py", "unchanged_since_base")}
 
 
 @pytest.mark.parametrize("can_push", [False, True])
@@ -172,7 +193,8 @@ def test_a_git_destination_merges_at_once_only_when_this_account_may_push(monkey
     branches = []
     monkeypatch.setattr(skill_publish, "fetch_branch_head",
                         lambda _c, _o, _r, branch: branches.append(branch) or (BASE_SHA, branch))
-    monkeypatch.setattr(skill_publish, "fetch_tree_paths", lambda *_a: ["SKILL.md", "stale.txt"])
+    monkeypatch.setattr(skill_publish, "fetch_tree_blobs", lambda *_a, **_k: {"SKILL.md": "a" * 40, "stale.txt": "b" * 40})
+    _installed_from_destination(tmp_path, folder="packs/demo")
     merges = []
     monkeypatch.setattr(skill_publish, "merge_pull_request",
                         lambda _c, owner, repo, number, sha: merges.append((owner, repo, number, sha)) or {
@@ -211,10 +233,11 @@ def test_a_pointer_origin_publishes_files_and_names_the_entry_update(monkeypatch
     ctx, _events, captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot())
     _destination(monkeypatch, PublishDestination("git", "hub", "project", "", "", "ouroboros-community",
                                                  "hub/project", pointer=True, skill_path=""))
-    monkeypatch.setattr(skill_publish, "fetch_tree_paths", lambda *_a: pytest.fail("a root folder never deletes"))
+    monkeypatch.setattr(skill_publish, "fetch_tree_blobs", lambda *_a, **_k: {"README.md": "a" * 40, "src/x.py": "b" * 40})
     result = _submit(ctx)
     assert result["ok"] is True
     assert {row["path"] for row in captured["additions"]} == {"skill.json", "SKILL.md"} and captured["deletions"] == []
+    assert {row["path"] for row in result["destination_comparison"]["paths"]} == {"skill.json", "SKILL.md"}
     assert result["listed"] == "needs_entry_update" and result["entry_repo"] == "https://github.com/hub/project"
 
 
@@ -452,3 +475,525 @@ def test_a_refusal_that_names_its_cause_reaches_the_preflight_and_the_tool(monke
     result = _submit(ctx, destination="team-hub")
     assert (result["ok"], result["reason_code"]) == (False, "hub_folder_unsupported")
     assert "inside a repository folder (catalog)" in result["repair_hint"]
+
+
+# --- before any effect: the destination's copy of this skill against the release the local copy came from --
+
+_HUB_ROW = {"id": "hub-main", "name": "Hub", "kind": "hub", "url": "https://github.com/hub/project", "ref": "main",
+            "part": "official", "trust": "trusted", "confirmed": True}
+_REAL_TRANSPORT = ("github_login", "fetch_repository", "fetch_branch_head", "fetch_tree_blobs", "fetch_upstream_file",
+                   "fetch_upstream_catalog", "fetch_blob", "prepare_publish_repository", "ensure_branch",
+                   "commit_payload", "create_pr_receipt", "merge_pull_request")
+
+
+def _manifest(version: str, description: str = "Keeps a store.") -> bytes:
+    return (f"---\nname: demo\ndescription: {description}\nversion: {version}\ntype: instruction\n"
+            "when_to_use: Use for a test.\n---\nUse the store.\n").encode()
+
+
+_RELEASE = {"SKILL.md": _manifest("1.0.0"), "lib/store.py": b"def store():\n    return 1\n",
+            "tests/test_store.py": b"def test_store():\n    assert True\n"}
+
+
+def _entry(version: str, **changes) -> dict:
+    return {"schema_version": 2, "name": "demo", "description": "Keeps a store.", "category": ["writing"],
+            "owner": "alice", "version": version, "source": {"kind": "hosted", "path": "skills/demo"},
+            "digest": hashlib.sha256(version.encode()).hexdigest(), "withdrawn": None, "type": "instruction",
+            "when_to_use": "Use for a test.", **changes}
+
+
+def _hub(skill=_RELEASE, entry=None) -> dict:
+    """A v2 hub with this skill (``skill`` None: not yet), a neighbouring skill and the hub's own files."""
+    files = {"hub.json": b'{"schema_version": 2}', "categories.json": _CATEGORIES, "README.md": b"# Hub\n",
+             "skills/other/SKILL.md": b"---\nname: other\nversion: 3.0.0\n---\n",
+             "entries/other.json": entry_bytes({**_entry("3.0.0"), "name": "other"})}
+    if skill is not None:
+        files.update({f"skills/demo/{path}": data for path, data in skill.items()})
+        files["entries/demo.json"] = entry_bytes(entry or _entry("1.0.0"))
+    return files
+
+
+class _GitHub:
+    """One synthetic destination repository ``hub/project`` (branch ``main``) and the account ``alice``,
+    answering the publisher's real HTTPS transport with Git's own blob ids; writes are recorded, never real."""
+
+    def __init__(self, files, *, can_push=False):
+        self.blobs, self.commits, self.writes, self.head, self.can_push = {}, {}, [], "", can_push
+        self.push(files)
+
+    def push(self, files):
+        tree = {}
+        for path, data in files.items():
+            tree[path] = git_blob_oid(data)
+            self.blobs[tree[path]] = data
+        self.head = hashlib.sha1(json.dumps([self.head, sorted(tree.items())]).encode()).hexdigest()
+        self.commits[self.head] = tree
+        return self.head
+
+    def files(self):
+        return {path: self.blobs[oid] for path, oid in self.commits[self.head].items()}
+
+    def request(self, method, path, *, body=None, timeout=30):
+        repo = "/repos/hub/project"
+        if method != "GET":
+            self.writes.append((method, path, body))
+        if (method, path) == ("GET", "/user"):
+            return {"login": "alice"}
+        if (method, path) == ("GET", repo):
+            return {"default_branch": "main", "permissions": {"push": self.can_push}}
+        if (method, path) == ("GET", f"{repo}/git/refs/heads/main"):
+            return {"object": {"sha": self.head}}
+        if method == "GET" and path.startswith(f"{repo}/git/trees/"):
+            commit = path.rsplit("/", 1)[1].partition("?")[0]
+            if commit not in self.commits:
+                raise GitHubError("No commit found for SHA", http_status=422)
+            return {"sha": commit, "truncated": False, "tree": [
+                {"path": name, "mode": "100644", "type": "blob", "sha": oid}
+                for name, oid in sorted(self.commits[commit].items())]}
+        if method == "GET" and path.startswith(f"{repo}/git/blobs/"):
+            return {"encoding": "base64", "content": base64.encodebytes(self.blobs[path.rsplit("/", 1)[1]]).decode()}
+        if method == "GET" and path.startswith(f"{repo}/contents/"):
+            name, _, commit = path[len(f"{repo}/contents/"):].partition("?ref=")
+            oid = self.commits.get(commit, {}).get(urllib.parse.unquote(name))
+            if oid is None:
+                raise GitHubError("Not Found", http_status=404)
+            return {"content": base64.b64encode(self.blobs[oid]).decode()}
+        if (method, path) == ("GET", "/repos/alice/project"):
+            return {"name": "project"}
+        if method == "GET" and "/git/ref/heads/" in path:
+            raise GitHubError("Not Found", http_status=404)
+        if (method, path) == ("POST", "/repos/alice/project/git/refs"):
+            return {"object": {"sha": body["sha"]}}
+        if (method, path) == ("POST", "/graphql"):
+            return {"data": {"createCommitOnBranch": {"commit": {
+                "oid": COMMIT_SHA, "url": "https://github.com/alice/project/commit/" + COMMIT_SHA}}}}
+        if (method, path) == ("POST", f"{repo}/pulls"):
+            return {"html_url": "https://github.com/hub/project/pull/7", "number": 7}
+        if (method, path) == ("PUT", f"{repo}/pulls/7/merge"):
+            return {"merged": True, "sha": "9" * 40}
+        raise AssertionError(f"unexpected GitHub request {method} {path}")
+
+
+def _local(tmp_path, files):
+    """The installed payload with exactly ``files``, freshly reviewed clean."""
+    payload = tmp_path / "skills" / "ouroboroshub" / "demo"
+    shutil.rmtree(payload, ignore_errors=True)
+    for path, data in files.items():
+        (payload / path).parent.mkdir(parents=True, exist_ok=True)
+        (payload / path).write_bytes(data)
+    loaded = load_skill(payload, tmp_path)
+    loaded.source = SKILL_SOURCE_OUROBOROSHUB
+    loaded.review = SkillReviewState(status="clean", content_hash=loaded.content_hash)
+    return loaded
+
+
+def _installed_at(tmp_path, commit, **release):
+    write_install_record(tmp_path, "demo", {
+        "source": {"id": "hub-main", "kind": "hub", "name": "Hub", "url": _HUB_ROW["url"], "ref": "main",
+                   "commit": "", "path": ""},
+        "release": {"version": "1.0.0", "digest": "0" * 64, "commit": commit, "path": "skills/demo", **release},
+        "basis": "trusted"})
+
+
+def _publishing(monkeypatch, tmp_path, github, loaded):
+    """The real publisher over ``github``: capture, destination resolution, comparison, transport and receipt
+    are the product's; only the scanner and the optional PR prose model stay the transaction fakes."""
+    from ouroboros import skill_publish_github
+    from ouroboros.skill_publish_snapshot import capture_skill_publish_snapshot
+
+    ctx, _events, captured = _install_transaction_fakes(monkeypatch, tmp_path, snapshot=_snapshot())
+    for name in _REAL_TRANSPORT:
+        monkeypatch.setattr(skill_publish, name, getattr(skill_publish_github, name))
+    monkeypatch.setattr(skill_publish_github, "request", github.request)
+    monkeypatch.setattr(skill_publish, "capture_skill_publish_snapshot", capture_skill_publish_snapshot)
+    monkeypatch.setattr(skill_publish, "_validate_local_skill", lambda *_a: ("demo", loaded))
+    monkeypatch.setattr(skill_publish, "resolve_publish_destination", lambda drive, skill, requested: (
+        resolve_publish_destination(drive, skill, requested, rows=[_HUB_ROW])))
+    return ctx, captured
+
+
+def _written(github):
+    """``(files added, paths deleted, PR body, the commit the branch was built on)`` of the one publication."""
+    branch = next(body for _method, path, body in github.writes if path.endswith("/git/refs"))
+    change = next(body for _method, path, body in github.writes if path == "/graphql")["variables"]["input"]
+    pull = next(body for _method, path, body in github.writes if path.endswith("/pulls"))
+    files = change["fileChanges"]
+    return ({row["path"]: base64.b64decode(row["contents"]) for row in files["additions"]},
+            [row["path"] for row in files.get("deletions", [])], pull["body"], branch["sha"])
+
+
+def _rows(comparison, kind="paths"):
+    name, change = ("path", "effect") if kind == "paths" else ("field", "change")
+    return {(row[name], row[change], row["upstream"]) for row in comparison[kind]}
+
+
+@pytest.mark.parametrize("format", ["v1", "v2"])
+def test_removed_listing_needs_a_decision_before_republication(monkeypatch, tmp_path, format):
+    files = _hub()
+    if format == "v1":
+        files.pop("hub.json")
+        files.pop("entries/demo.json")
+        files["catalog.json"] = json.dumps({"skills": [{"slug": "demo", "name": "demo", "version": "1.0.0",
+            "description": "Keeps a store.", "type": "instruction", "when_to_use": "Use for a test.",
+            "files": [{"path": p, "sha256": hashlib.sha256(b).hexdigest(), "size": len(b)}
+                      for p, b in _RELEASE.items()]}]}).encode()
+    github = _GitHub(files)
+    base = github.head
+    if format == "v1":
+        files["catalog.json"] = b'{"skills": []}'
+    else:
+        files.pop("entries/demo.json")
+    github.push(files)
+    loaded = _local(tmp_path, {**_RELEASE, "SKILL.md": _manifest("1.1.0")})
+    _installed_at(tmp_path, base)
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx, category=["writing"])
+    assert not github.writes and result["reason_code"] == "destination_decision_required"
+    comparison = result["destination_comparison"]
+    assert any(r["upstream"] == "changed_since_base" for r in comparison["fields"])
+    result = _submit(ctx, category=["writing"], expected_destination_state=comparison["destination_state"],
+                     replacement_rationale="Restore this listing as part of the authorized publication.")
+    assert result["ok"] is True and result["destination_comparison"]["state"] == "decided"
+
+
+def test_a_destination_unchanged_since_the_install_takes_local_edits_and_deletions_at_once(monkeypatch, tmp_path):
+    """Ordinary publication stays autonomous: the hub's own files and a neighbouring skill moved since the install,
+    this skill's files and entry did not, so every change in its footprint is the local copy's own."""
+    github = _GitHub(_hub())
+    base = github.head
+    github.push({**github.files(), "README.md": b"# Hub, newer\n", "skills/other/SKILL.md": b"changed neighbour\n",
+                 "entries/other.json": entry_bytes({**_entry("3.1.0"), "name": "other"})})
+    loaded = _local(tmp_path, {"SKILL.md": _manifest("1.1.0"), "lib/store.py": b"def store():\n    return 2\n",
+                               "lib/feature.py": b"FEATURE = True\n"})
+    _installed_at(tmp_path, base)
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx)
+    assert result["ok"] is True, result
+    comparison = result["destination_comparison"]
+    assert (comparison["state"], comparison["base_commit"], comparison["head_commit"]) == ("clear", base, github.head)
+    assert _rows(comparison) == {("skills/demo/SKILL.md", "replaced", "unchanged_since_base"),
+                                 ("skills/demo/lib/store.py", "replaced", "unchanged_since_base"),
+                                 ("skills/demo/lib/feature.py", "added", "unchanged_since_base"),
+                                 ("skills/demo/tests/test_store.py", "deleted", "unchanged_since_base")}
+    assert _rows(comparison, "fields") == {("version", "replaced", "unchanged_since_base"),
+                                           ("digest", "replaced", "unchanged_since_base")}
+    added, deleted, body, built_on = _written(github)
+    assert deleted == ["skills/demo/tests/test_store.py"] and built_on == github.head
+    assert set(added) == {"skills/demo/SKILL.md", "skills/demo/lib/store.py", "skills/demo/lib/feature.py",
+                          "entries/demo.json"}
+    assert "Replaced destination content" not in body and "replacement_rationale" not in result
+    assert not list(task_artifact_dir_path(tmp_path, "task-1").glob("skill-publish-comparison-*"))
+
+
+def test_newer_destination_work_is_never_replaced_without_a_decision_bound_to_it(monkeypatch, tmp_path):
+    """The incident's shape: the hub fixed the skill after the install; the local copy keeps the old file, lacks the
+    new one and the newer entry text. Nothing is written until the mind decides on exactly that comparison."""
+    from ouroboros.skill_install_record import install_record_path
+
+    github = _GitHub(_hub())
+    base = github.head
+    github.push({**github.files(), "skills/demo/lib/store.py": b"def store():\n    return 1  # fixed upstream\n",
+                 "skills/demo/CHANGELOG.md": b"## 1.0.1\n- fixed the store upstream\n",
+                 "entries/demo.json": entry_bytes(_entry("1.0.1", description="Keeps a store, fixed."))})
+    local = {**_RELEASE, "SKILL.md": _manifest("1.1.0"), "lib/feature.py": b"FEATURE = True\n"}
+    loaded = _local(tmp_path, local)
+    _installed_at(tmp_path, base)
+    payload = tmp_path / "skills" / "ouroboroshub" / "demo"
+    inputs = {path: path.read_bytes() for path in [*payload.rglob("*"), install_record_path(tmp_path, "demo")]
+              if path.is_file()}
+    ctx, captured = _publishing(monkeypatch, tmp_path, github, loaded)
+
+    refused = _submit(ctx)
+    assert (refused["ok"], refused["status"], refused["reason_code"], refused["completed_stage"]) == (
+        False, "blocked", "destination_decision_required", "upstream_read")
+    assert github.writes == [] and captured["llm_calls"] == 0 and "receipt" not in refused
+    comparison = refused["destination_comparison"]
+    assert (comparison["state"], comparison["base_commit"], comparison["base_version"]) == (
+        "decision_required", base, "1.0.0")
+    assert _rows(comparison) == {("skills/demo/lib/store.py", "replaced", "changed_since_base"),  # reverts the fix
+                                 ("skills/demo/CHANGELOG.md", "deleted", "changed_since_base"),  # drops newer file
+                                 ("skills/demo/SKILL.md", "replaced", "unchanged_since_base"),
+                                 ("skills/demo/lib/feature.py", "added", "unchanged_since_base")}
+    assert {("description", "replaced", "changed_since_base"),
+            ("version", "replaced", "changed_since_base")} <= _rows(comparison, "fields")
+    report = (task_artifact_dir_path(tmp_path, "task-1") / comparison["artifact"]["path"]).read_text(encoding="utf-8")
+    assert comparison["destination_state"] in report and "fixed the store upstream" in report
+    assert "+    return 1  # fixed upstream" in report and "-    return 1  # fixed upstream" in report
+    assert {path: path.read_bytes() for path in inputs} == inputs  # payload and install record untouched
+    assert not (tmp_path / "state" / "skills" / "demo" / "ouroboroshub.json").exists()
+
+    # This skill's copy at the destination moved: the earlier decision no longer describes it.
+    github.push({**github.files(), "skills/demo/CHANGELOG.md": b"## 1.0.2\n- another upstream fix\n"})
+    stale = _submit(ctx, expected_destination_state=comparison["destination_state"], replacement_rationale="Ship it.")
+    assert stale["reason_code"] == "destination_state_changed" and github.writes == []
+    state = stale["destination_comparison"]["destination_state"]
+    assert state != comparison["destination_state"]
+    unexplained = _submit(ctx, expected_destination_state=state)
+    assert unexplained["reason_code"] == "replacement_rationale_required" and github.writes == []
+    # So did the local snapshot (re-reviewed after an edit).
+    edited = _local(tmp_path, {**local, "lib/feature.py": b"FEATURE = 2\n"})
+    monkeypatch.setattr(skill_publish, "_validate_local_skill", lambda *_a: ("demo", edited))
+    moved = _submit(ctx, expected_destination_state=state, replacement_rationale="Ship it.")
+    assert moved["reason_code"] == "destination_state_changed" and github.writes == []
+    state = moved["destination_comparison"]["destination_state"]
+    # A commit outside this skill's footprint leaves the decision valid.
+    github.push({**github.files(), "README.md": b"# Hub, again\n", "skills/other/SKILL.md": b"neighbour again\n"})
+    rationale = "Ship the local feature; it supersedes the upstream store fix and its changelog."
+    published = _submit(ctx, expected_destination_state=state, replacement_rationale=rationale)
+    assert published["ok"] is True, published
+    assert (published["destination_comparison"]["state"], published["replacement_rationale"]) == ("decided", rationale)
+    added, deleted, body, built_on = _written(github)
+    assert deleted == ["skills/demo/CHANGELOG.md"] and built_on == github.head
+    assert added["skills/demo/lib/store.py"] == _RELEASE["lib/store.py"]
+    assert "## Replaced destination content" in body and "- `skills/demo/lib/store.py` (replaced)" in body
+    assert "- `entries/demo.json` field `description` (replaced)" in body and f"Author rationale: {rationale}" in body
+    assert published["receipt"]["number"] == 7
+
+
+def test_a_requested_merge_and_an_earlier_publication_never_stand_in_for_the_base(monkeypatch, tmp_path):
+    """``merge`` is written when a merge is asked for, before any edit; a publication receipt survives reinstalls.
+    Neither shows that the local copy holds the destination's newer content."""
+    from ouroboros.marketplace.provenance import write_publication_record
+    from ouroboros.skill_install_record import update_install_record
+
+    github = _GitHub(_hub())
+    base = github.head
+    newer = _entry("1.0.1", description="Keeps a store, fixed.")
+    github.push({**github.files(), "skills/demo/lib/store.py": b"def store():\n    return 3\n",
+                 "entries/demo.json": entry_bytes(newer)})
+    loaded = _local(tmp_path, {**_RELEASE, "SKILL.md": _manifest("1.1.0")})
+    _installed_at(tmp_path, base)
+    update_install_record(tmp_path, "demo", skipped_release_digest=newer["digest"], merge={
+        "digest": newer["digest"], "version": "1.0.1", "requested_at": "2026-11-05T20:00:00+00:00",
+        "requested_by": "ouroboros"})
+    write_publication_record(tmp_path, "demo", {
+        "slug": "demo", "version": "1.0.1", "content_hash": "c" * 64, "repository": "hub/project", "pr_number": 5,
+        "pr_url": "https://github.com/hub/project/pull/5", "published_at": "2026-11-05T20:02:00+00:00"})
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx)
+    assert (result["reason_code"], result["destination_comparison"]["base_commit"]) == (
+        "destination_decision_required", base)
+    assert ("skills/demo/lib/store.py", "replaced", "changed_since_base") in _rows(result["destination_comparison"])
+    assert github.writes == []
+
+
+def test_a_new_skill_publishes_without_a_decision(monkeypatch, tmp_path):
+    github = _GitHub(_hub(skill=None))
+    loaded = _local(tmp_path, _RELEASE)
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx, category=["writing"])
+    assert result["ok"] is True, result
+    comparison = result["destination_comparison"]
+    assert (comparison["state"], comparison["base_reason"], comparison["fields"]) == ("clear", "no_install_record", [])
+    assert {row["effect"] for row in comparison["paths"]} == {"added"}
+
+
+@pytest.mark.parametrize(("record", "reason"), [("none", "no_install_record"), ("legacy", "base_unknown"),
+                                                ("gone", "base_unreadable"), ("elsewhere", "installed_elsewhere")])
+def test_a_copy_without_a_usable_base_replaces_destination_content_only_on_a_decision(monkeypatch, tmp_path,
+                                                                                     record, reason):
+    """Self-authored, sidecar-era, rewritten-history or other-origin copies keep a working path: the same
+    comparison and an explicit decision, never a silent overwrite and never a permanent refusal."""
+    local = {**_RELEASE, "SKILL.md": _manifest("2.0.0")}
+    del local["tests/test_store.py"]
+    loaded = _local(tmp_path, local)
+    if record == "legacy":  # an OuroborosHub sidecar names its release digest, never a commit
+        write_install_record(tmp_path, "demo", {
+            "source": {"id": "ouroboroshub-legacy", "kind": "hub", "name": "Hub", "url": _HUB_ROW["url"]},
+            "release": {"version": "1.0.0", "digest": "0" * 64}, "basis": "review",
+            "converted_from": ".ouroboroshub.json"})
+    elif record == "gone":
+        _installed_at(tmp_path, "f" * 40)
+    elif record == "elsewhere":
+        write_install_record(tmp_path, "demo", {
+            "source": {"id": "fork", "kind": "hub", "name": "Fork", "url": "https://github.com/someone/fork",
+                       "ref": "main", "commit": "", "path": ""},
+            "release": {"version": "1.0.0", "digest": "0" * 64, "commit": "e" * 40, "path": "skills/demo"},
+            "basis": "review"})
+    github = _GitHub(_hub())
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    refused = _submit(ctx)
+    comparison = refused["destination_comparison"]
+    assert (refused["reason_code"], comparison["base_commit"], comparison["base_reason"]) == (
+        "destination_decision_required", "", reason)
+    assert _rows(comparison) == {("skills/demo/SKILL.md", "replaced", "unknown"),
+                                 ("skills/demo/tests/test_store.py", "deleted", "unknown")}
+    assert github.writes == []
+    published = _submit(ctx, expected_destination_state=comparison["destination_state"],
+                        replacement_rationale="Release 2.0.0 of this skill replaces the published 1.0.0.")
+    assert published["ok"] is True, published
+    _added, deleted, body, _built_on = _written(github)
+    assert deleted == ["skills/demo/tests/test_store.py"]
+    assert "with no recorded common base with the local copy" in body
+
+
+@pytest.mark.parametrize(("change", "replaced"), [
+    ({"category": ["city"]}, ""), ({"owner": "bob"}, ""),
+    ({"withdrawn": {"reason": "Withdrawn by the hub."}}, "withdrawn"), ({"description": "Better words."}, "description"),
+])
+def test_entry_fields_the_destination_changed_need_a_decision_only_when_this_publication_replaces_them(
+        monkeypatch, tmp_path, change, replaced):
+    github = _GitHub(_hub())
+    base = github.head
+    github.push({**github.files(), "entries/demo.json": entry_bytes(_entry("1.0.0", **change))})
+    loaded = _local(tmp_path, {**_RELEASE, "SKILL.md": _manifest("1.1.0")})
+    _installed_at(tmp_path, base)
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx)
+    changed = [row["field"] for row in result["destination_comparison"]["fields"]
+               if row["upstream"] == "changed_since_base"]
+    if replaced:
+        assert result["reason_code"] == "destination_decision_required" and changed == [replaced]
+        assert {row["upstream"] for row in result["destination_comparison"]["paths"]} == {"unchanged_since_base"}
+        assert github.writes == []
+    else:  # the publication keeps the hub's own choice, so nothing of it is replaced
+        assert result["ok"] is True and changed == [], result
+        written = json.loads(_written(github)[0]["entries/demo.json"])
+        assert {key: written[key] for key in change} == change
+
+
+def test_an_older_hub_compares_this_skills_catalog_row_not_the_whole_catalog(monkeypatch, tmp_path):
+    def row(version, **extra):
+        return {"slug": "demo", "name": "demo", "description": "Keeps a store.", "version": version,
+                "type": "instruction", "when_to_use": "Use for a test.", **extra,
+                "files": [{"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                          for path, data in sorted(_RELEASE.items())]}
+
+    def catalog(own, other):
+        return json.dumps({"skills": [own, {"slug": "other", "version": other, "files": []}]}).encode()
+
+    github = _GitHub({"catalog.json": catalog(row("1.0.0"), "3.0.0"),
+                      **{f"skills/demo/{path}": data for path, data in _RELEASE.items()}})
+    base = github.head
+    github.push({**github.files(), "catalog.json": catalog(row("1.0.0"), "3.1.0")})  # only a neighbour's row moved
+    loaded = _local(tmp_path, {**_RELEASE, "SKILL.md": _manifest("1.1.0")})
+    _installed_at(tmp_path, base)
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx)
+    assert result["ok"] is True, result
+    assert (result["destination_comparison"]["state"], result["destination_comparison"]["metadata_path"]) == (
+        "clear", "catalog.json")
+    written = json.loads(_written(github)[0]["catalog.json"])
+    assert {item["slug"]: item["version"] for item in written["skills"]} == {"demo": "1.1.0", "other": "3.1.0"}
+    github.writes.clear()
+    github.push({**github.files(), "catalog.json": catalog(row("1.0.0", description="Hub wording."), "3.1.0")})
+    refused = _submit(ctx)
+    assert refused["reason_code"] == "destination_decision_required" and github.writes == []
+    assert ("description", "replaced", "changed_since_base") in _rows(refused["destination_comparison"], "fields")
+
+
+def test_a_repository_root_destination_compares_and_writes_only_the_files_it_sends(monkeypatch, tmp_path):
+    """A hub entry pointing at an author's repository root: the repository's own files are never deleted or
+    compared; only what the publication sends is."""
+    github = _GitHub({"README.md": b"# The author's repository\n", "LICENSE": b"MIT\n", **_RELEASE}, can_push=True)
+    base = github.head
+    github.push({**github.files(), "README.md": b"# The author's repository, newer\n", "docs/guide.md": b"Guide\n"})
+    local = {**_RELEASE, "SKILL.md": _manifest("1.1.0")}
+    del local["tests/test_store.py"]
+    loaded = _local(tmp_path, local)
+    _installed_at(tmp_path, base, repo=_HUB_ROW["url"], path="")
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    result = _submit(ctx)
+    assert result["ok"] is True, result
+    comparison = result["destination_comparison"]
+    assert (comparison["state"], comparison["metadata_path"]) == ("clear", "")
+    assert _rows(comparison) == {("SKILL.md", "replaced", "unchanged_since_base")}
+    added, deleted, _body, _built_on = _written(github)
+    assert deleted == [] and set(added) == {"SKILL.md", "lib/store.py"}
+    assert (result["files_published"], result["listed"]) == ("merged", "needs_entry_update")
+    github.writes.clear()
+    github.push({**github.files(), "lib/store.py": b"def store():\n    return 4\n"})
+    refused = _submit(ctx)
+    assert refused["reason_code"] == "destination_decision_required" and github.writes == []
+    assert ("lib/store.py", "replaced", "changed_since_base") in _rows(refused["destination_comparison"])
+
+
+@pytest.mark.parametrize("update_at", ["capture", "scan"])
+def test_publication_keeps_the_origin_of_its_snapshot_during_a_real_update(monkeypatch, tmp_path, update_at):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    from ouroboros import skill_lifecycle_queue as lane, skill_source_install as installer
+    from ouroboros.skill_install_record import read_install_record
+    from ouroboros.skill_source_catalog import tree_release_digest
+
+    github = _GitHub(_hub())
+    base = github.head
+    newer = {**_RELEASE, "SKILL.md": _manifest("1.0.1"), "lib/store.py": b"def store():\n    return 9\n"}
+    github.push(_hub(newer, _entry("1.0.1")))
+    loaded = _local(tmp_path, {**_RELEASE, "SKILL.md": _manifest("1.1.0")})
+    _installed_at(tmp_path, base)
+    ctx, _captured = _publishing(monkeypatch, tmp_path, github, loaded)
+    folder = tmp_path / "offered"
+    for path, data in newer.items():
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_bytes(data)
+    item = {"id": "hub-main/demo", "name": "demo", "version": "1.0.1", "digest": tree_release_digest(folder)}
+    row = {**_HUB_ROW, "trust": "review"}  # no model or dependency installation during this test
+    offer = {"commit": github.head, "entries": [{"name": "demo", "source": {"kind": "hosted", "path": "skills/demo"}}]}
+    monkeypatch.setattr(installer, "find_item", lambda *_a, **_k: (row, item, offer))
+    monkeypatch.setattr(installer, "entry_payload_dir", lambda *_a, **_k: folder)
+    monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
+    queued = threading.Event()
+    monkeypatch.setattr(lane, "_notify_chat_progress", lambda job, phase: (
+        queued.set() if job.kind == "update" and phase == "queued" else None))
+    capture, scan = skill_publish.capture_skill_publish_snapshot, skill_publish.scan_named_bytes
+    pending = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def start_update():
+            pending.append(pool.submit(installer.run_in_lane, tmp_path, "update", "demo", lambda:
+                installer.update_installed(tmp_path, "demo", mode="replace", digest=item["digest"],
+                                           local_digest=loaded.content_hash, rows=[row])))
+            assert queued.wait(10), "Update must enter the real lifecycle queue"
+
+        def capture_and_queue(current):
+            frozen = capture(current)
+            if update_at == "capture":
+                start_update()
+                assert not pending[0].done(), "Update must wait until local capture and provenance are together"
+            return frozen
+
+        def scan_after_update(named_bytes, **kwargs):
+            assert lane._LANE_HANDLE.get() is None, "scanning must not retain the lifecycle lane"
+            if not pending:
+                start_update()
+            assert pending[0].result(timeout=10)["needs_review"]
+            return scan(named_bytes, **kwargs)
+
+        monkeypatch.setattr(skill_publish, "capture_skill_publish_snapshot", capture_and_queue)
+        monkeypatch.setattr(skill_publish, "scan_named_bytes", scan_after_update)
+        result = _submit(ctx)
+    assert read_install_record(tmp_path, "demo")["release"]["commit"] == github.head
+    assert (loaded.skill_dir / "lib/store.py").read_bytes() == newer["lib/store.py"]
+    assert result["reason_code"] == "destination_decision_required", result
+    assert result["destination_comparison"]["base_commit"] == base
+    assert ("skills/demo/lib/store.py", "replaced", "changed_since_base") in _rows(result["destination_comparison"])
+    assert github.writes == []
+
+
+def test_a_decision_reaches_the_publisher_through_the_tool_registry(monkeypatch, tmp_path):
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.tool_result import _HOST_NOTE_SEPARATOR
+
+    github = _GitHub(_hub())
+    base = github.head
+    github.push({**github.files(), "skills/demo/CHANGELOG.md": b"## 1.0.1\n"})
+    loaded = _local(tmp_path, {**_RELEASE, "SKILL.md": _manifest("1.1.0")})
+    _installed_at(tmp_path, base)
+    _publishing(monkeypatch, tmp_path, github, loaded)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_SYNTHETIC1234567890")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "task-1"
+
+    def call(**arguments):
+        text = registry.execute("submit_skill_to_hub", {"skill": "demo", "confirm_public_submission": True,
+                                                        **arguments})
+        return json.loads(text.partition(_HOST_NOTE_SEPARATOR)[0])
+
+    refused = call()
+    assert refused["reason_code"] == "destination_decision_required", refused
+    published = call(expected_destination_state=refused["destination_comparison"]["destination_state"],
+                     replacement_rationale="The changelog belongs to the superseded release line.")
+    assert published["ok"] is True and published["destination_comparison"]["state"] == "decided", published
+    assert _written(github)[1] == ["skills/demo/CHANGELOG.md"]

@@ -180,6 +180,14 @@ PASTE_CHORD_ARGV = ("osascript", "-l", "JavaScript", str(_PASTE_CHORD_JS))
 PBCOPY_LOCALE = "en_US.UTF-8"
 
 
+def command_chord_argv(char: str, *, remote: bool = False) -> list[str]:
+    """key() of Command and one character on a Mac: the same program posts Command + the key that gives ``char`` under
+    Command in the active layout. The character is the program's own argument after it (locally the file, over SSH
+    its source through ``-e``, shell-quoted word by word with the rest of the argv), never written into the source."""
+    program = ["-e", _PASTE_CHORD_JS.read_text(encoding="utf-8")] if remote else [str(_PASTE_CHORD_JS)]
+    return ["osascript", "-l", "JavaScript", *program, char]
+
+
 def ssh_paste_command(text: str) -> str:
     """SSH paste: the clipboard write and the paste chord are two stages of one remote call, and the receipt says which
     ones ran (the marker between them). The text arrives as UTF-8 bytes, so pbcopy is told so: it decodes with the
@@ -355,10 +363,12 @@ class RemoteBackends:
 
     def _remote_input(self, conn: dict[str, Any], code: str, *, note: dict[str, Any] | None = None, timeout: int = 30,
                       input_effect: bool = True, target: str = "", ctx: dict[str, Any] | None = None,
-                      ssh_command: str = "", later: bool = False, raise_policy: str = "allow") -> dict[str, Any]:
+                      ssh_command: str = "", later: bool = False, ask_stop: bool = False,
+                      raise_policy: str = "allow") -> dict[str, Any]:
         """One remote input (or read, ``input_effect=False``). With ``target`` the application is resolved and brought
         forward first (``_begin``); with ``ctx`` (a later step of one call) the earlier switch is reused and the guest
-        pre-check withholds the input when that application is no longer in front."""
+        pre-check withholds the input when that application is no longer in front. An ``ask_stop`` input (a key chord,
+        the first included) asks the host's Stop of the call last (``_stop_refusal``); nothing is sent when it is refused."""
         if conn.get("disabled"):
             return json.loads(self._disabled_connection_error("remote", conn))
         backend = str(conn.get("backend") or "").lower()
@@ -376,6 +386,8 @@ class RemoteBackends:
         ctx = dict(shared)
         expect = ((ctx.get("target") or {}).get("resolved") or {}) if input_effect else {}
         activated = bool((ctx.get("target") or {}).get("activated"))
+        if ask_stop and input_effect and (stopped := self._stop_refusal(ctx, first=not later, after=None)):
+            return {**stopped, "backend": backend}  # the host's Stop, read last before the remote input; the guest's front unread
         try:
             if backend == "osworld_http":
                 if input_effect:
@@ -536,7 +548,8 @@ class RemoteBackends:
             return None
         return None
 
-    def _remote_activate_dict(self, conn: dict[str, Any], app: str, wait_ms: int, *, raise_policy: str = "allow") -> dict[str, Any]:
+    def _remote_activate_dict(self, conn: dict[str, Any], app: str, wait_ms: int, *, raise_policy: str = "allow",
+                              ask_stop: bool = False) -> dict[str, Any]:
         """Resolve ``app`` from the remote's own inventory, bring it forward by id/pid (never by name, never a
         launch) and read who is in front afterwards. Same result shape as the local helper's ``activate``."""
         backend = str(conn.get("backend") or "").lower()
@@ -562,6 +575,8 @@ class RemoteBackends:
             script = (f"export DISPLAY=:0; wmctrl -i -a {shlex.quote(str(target['window_id']))} 2>/dev/null; RC=$?; i=0; "
                       f"while [ $i -lt {polls} ]; do W=$(xdotool getactivewindow 2>/dev/null); [ \"$W\" = \"{wid}\" ] && break; "
                       f"sleep 0.1; i=$((i+1)); done; echo; printf '__FRONT_AFTER__'; {_X11_FRONT_SH}; echo; exit $RC")
+            if ask_stop and (stopped := self._stop_before_activation(app, before, target)):
+                return {**stopped, "backend": backend}
             t0 = time.monotonic()
             try:
                 out = self._osworld_execute(conn, ["bash", "-lc", script], timeout=max(20, wait_ms // 1000 + 15))
@@ -599,6 +614,8 @@ class RemoteBackends:
                         "activated": False, "verified": False, "reason": "target_lost" if before else "front_unread",
                         "resolved": target}
             script = _SSH_ACTIVATE.format(read=_SSH_FRONT_READ, pid=int(target["pid"]), polls=polls)
+            if ask_stop and (stopped := self._stop_before_activation(app, before, target)):
+                return {**stopped, "backend": backend}
             t0 = time.monotonic()
             rc, out, err = self._ssh_run(conn, script, timeout=max(20, wait_ms // 1000 + 15))
             waited = int((time.monotonic() - t0) * 1000)

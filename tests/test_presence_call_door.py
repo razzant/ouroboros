@@ -8,6 +8,8 @@ import pytest
 
 from ouroboros import places as p
 from ouroboros import presence_call as door
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
+from tests.test_place_focus import focus as focus  # noqa: F401  (fixture)
 
 
 def _event(**extra):
@@ -131,7 +133,7 @@ def test_only_the_places_own_connector_opens_and_calls_must_be_on(tmp_path, plac
 def test_event_facts_must_be_declared_wake_facts(tmp_path, place, opened):
     with pytest.raises(door.PresenceCallRefused) as refused:
         _open(tmp_path, event=_event(facts=["shouting"]))
-    assert refused.value.code == "presence_event_invalid"
+    assert refused.value.code == "presence_payload_invalid"
 
 
 ME = {"sends_as": {"id": "me", "label": "ouroboros-agent", "kind": "user"}}
@@ -229,3 +231,294 @@ def test_the_skill_door_answers_reactions_and_identities_as_the_turn_door_does(t
     malformed = client.post("/call/open", json={"role": "meeting",
                                                 "event": _event(source_event_id="e5", identity=[], facts=["mention"])})
     assert (malformed.status_code, malformed.json()["code"]) == (400, "presence_identity_invalid")
+
+
+# One event parser for both connector doors (#2867): the same wire event through ``/presence/turn`` and
+# ``/call/open`` of one Host Service app. Real: routing, admission, places.json, capture, attention, the
+# own-account and owner rules, the text door's carrier re-admission and ``focus_metadata``. Doubles: skill-token
+# authentication, the call's Live Conversation feature/hub/thread (``opened``), the model and the live projection.
+SIGNAL, OWNER = "signal.words", "owner-account"
+
+
+def _wire(source_event_id, **over):
+    return {"source_event_id": source_event_id, "provider": "chat", "account_id": "a", "conversation_id": "r",
+            "thread_id": "", "conversation_key": "ignored-by-both-doors",
+            "actor": {"platform_actor_id": "person", "display_name": "Person"},
+            "conversation": {}, "message": {}, "text": "hello", "facts": ["mention"], **over}
+
+
+@pytest.fixture
+def doors(focus, opened, monkeypatch, lone_host_world):  # its Host serves alone over the focus root
+    from starlette.testclient import TestClient
+
+    import ouroboros.presence_events as presence_events
+    from ouroboros.extension_contributions import project_contributions
+    from ouroboros.extension_ui_validation import validate_contributions
+    from ouroboros.gateway import host_call, host_service
+    from ouroboros.presence_runner import run_presence_turn
+    from ouroboros.task_results import write_task_result
+    from tests.test_extension_icons import PLACE
+    from tests.test_skill_contributions import manifest
+
+    root, place, _admission, _event = focus
+
+    async def authenticated(*_args):
+        return "bridge", {}
+    monkeypatch.setattr(host_service, "_authenticated", authenticated)
+    monkeypatch.setattr(host_call, "_authenticated", authenticated)
+    monkeypatch.setattr(host_service.HostServiceContext, "require_permission", lambda *_args: None)
+    monkeypatch.setattr("ouroboros.config.get_consciousness_autonomy", lambda: "act")
+    clean, errors = validate_contributions(manifest([{
+        **PLACE, "label": "Chat", "destination": "vendor:Chat", "wakes": [],
+        "facts": ["mention", "any_message", "from_bot", {"id": SIGNAL, "label": "Words you chose appear"}],
+        "settings": "connection"}], kind="extension", permissions=["presence"]))
+    assert not errors
+    rows = project_contributions("bridge", clean, "reviewed")
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: rows)
+    place = p.edit_place(root, place.place_id, "add_wake", author="owner", fact=SIGNAL)
+    place = p.edit_place(root, place.place_id, "confirm_owner_account", author="owner", platform_actor_id=OWNER)
+    assert place.state == "active"
+
+    class Hub:
+        def __init__(self, spec):
+            self.spec, self.closed = spec, False
+
+        def grant_peer(self, *_args, **_kwargs):
+            return None
+    monkeypatch.setattr(host_call, "get_hub",
+                        lambda call_id: next((Hub(s) for s in opened["hubs"] if s.call_id == call_id), None))
+    captured, reparses, real_capture, real_parse = {}, [], door.capture_presence_event, presence_events.presence_turn_event
+
+    def capture(admission, event, **kwargs):
+        captured[event.source_event_id] = real_capture(admission, event, **kwargs)
+        return captured[event.source_event_id]
+
+    def reparse(payload, admission, **kwargs):  # the carrier imports the parser when it runs; the call door did at load
+        event = real_parse(payload, admission, **kwargs)
+        reparses.append((event.source_event_id, list(kwargs.get("vouched_facts") or ())))
+        return event
+    monkeypatch.setattr(door, "capture_presence_event", capture)
+    monkeypatch.setattr(presence_events, "presence_turn_event", reparse)
+
+    class Model:
+        def handle_task(self, task):
+            write_task_result(root, task["id"], "completed", metadata={
+                **task["metadata"], "presence_outcome": "silent", "presence_result_text": ""},
+                terminal_origin="model_final", result="")
+            return [{"type": "presence_result", "outcome": "silent", "text": ""}]
+
+    with TestClient(host_service.create_host_service_app(root)) as client:
+        client.app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
+            repo_dir=root, drive_root=root, agent_factory=lambda **_kw: Model(), **kw)
+        yield SimpleNamespace(root=root, place=place, client=client, captured=captured, reparses=reparses)
+
+
+FOCUS, OPENED = (200, "focus"), (200, "opened")  # the text door's turn ran its carrier; the call door opened the call
+INVALID_ACTOR, INVALID_PAYLOAD = (400, "presence_actor_invalid"), (400, "presence_payload_invalid")
+# name, event overrides, /presence/turn answer, /call/open answer. An own-account event is heard by both doors and
+# answered as each door answers a heard event: silence for a turn, a refused call; that difference is the doors'.
+DOOR_CASES = [
+    ("plain", {}, FOCUS, OPENED),
+    ("authenticated_true", {"actor": {"platform_actor_id": "person", "authenticated": True}}, FOCUS, OPENED),
+    ("authenticated_false", {"actor": {"platform_actor_id": "person", "authenticated": False}}, FOCUS, OPENED),
+    ("authenticated_string", {"actor": {"platform_actor_id": "person", "authenticated": "false"}},
+     INVALID_ACTOR, INVALID_ACTOR),
+    ("authenticated_int", {"actor": {"platform_actor_id": "person", "authenticated": 0}}, INVALID_ACTOR, INVALID_ACTOR),
+    ("actor_not_object", {"actor": "person"}, INVALID_ACTOR, INVALID_ACTOR),
+    ("actor_empty", {"actor": {}}, (400, "presence_identity_missing"), (400, "presence_identity_missing")),
+    ("owner", {"actor": {"platform_actor_id": OWNER}}, FOCUS, OPENED),
+    ("owner_unverified", {"actor": {"platform_actor_id": OWNER, "authenticated": False}}, FOCUS, OPENED),
+    ("owner_authenticated_string", {"actor": {"platform_actor_id": OWNER, "authenticated": "false"}},
+     INVALID_ACTOR, INVALID_ACTOR),
+    ("declared_signal", {"facts": [SIGNAL]}, FOCUS, OPENED),
+    ("declared_signal_with_core", {"facts": ["mention", SIGNAL]}, FOCUS, OPENED),
+    ("undeclared_signal", {"facts": ["signal.other"]}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("undeclared_word", {"facts": ["shouting"]}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("nonstring_fact", {"facts": [1]}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("unhashable_fact", {"facts": [["mention"]]}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("facts_not_list", {"facts": "mention"}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("source_order_valid", {"message": {"source_order": 7}}, FOCUS, OPENED),
+    ("source_order_negative", {"message": {"source_order": -1}}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("source_order_string", {"message": {"source_order": "7"}}, INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("transport_queue_malformed", {"conversation": {"transport_queue": {"schema_version": 2}}},
+     INVALID_PAYLOAD, INVALID_PAYLOAD),
+    ("identity_malformed", {"identity": []}, (400, "presence_identity_invalid"), (400, "presence_identity_invalid")),
+    ("identity_other_actor", {"identity": ME}, FOCUS, OPENED),
+    ("own_account", {"actor": {"platform_actor_id": "me"}, "identity": ME}, (200, "heard"), (403, "place_own_account")),
+    # A change no one is named for (my own edit reads the same): heard by both doors, whatever was selected.
+    ("unattributed_change", {"actor": {"attribution": "unknown"},
+                             "message": {"non_text": [{"kind": "state_change", "description": "Edited"}]}},
+     (200, "heard"), (403, "place_change_actor_unknown")),
+    ("unnamed_new_words", {"actor": {"attribution": "unknown"}}, FOCUS, OPENED),  # new words keep the ordinary path
+    ("own_account_unverified", {"actor": {"platform_actor_id": "me", "authenticated": False}, "identity": ME},
+     FOCUS, OPENED),
+    ("own_account_authenticated_string", {"actor": {"platform_actor_id": "me", "authenticated": "false"},
+                                          "identity": ME}, INVALID_ACTOR, INVALID_ACTOR),
+    ("extra_event_key", {"surprise": 1}, (400, "presence_event_invalid"), (400, "presence_event_invalid")),
+]
+
+
+def _rooms_heard(root, source_event_id):
+    from ouroboros import dialogue_store
+
+    return len([row for row in dialogue_store.rows_by_client_id(root, source_event_id) if row.row.get("direction") == "in"])
+
+
+def test_both_connector_doors_parse_one_event_with_one_set_of_answers(doors, opened):
+    observed, expected = {}, {}
+    for name, over, text_answer, call_answer in DOOR_CASES:
+        hubs, carried = len(opened["hubs"]), len(doors.reparses)
+        text = doors.client.post("/presence/turn", json={"event": _wire(f"t-{name}", **over), "staged_files": [],
+                                                         "continuation_version": 1, "delivery_reporting_version": 1})
+        ran = any(sid == f"t-{name}" for sid, _facts in doors.reparses[carried:])
+        call = doors.client.post("/call/open", json={"role": "meeting", "event": _wire(f"c-{name}", **over)})
+        text_body, call_body = text.json(), call.json()
+        observed[name] = {
+            "text": (text.status_code, ("focus" if ran else "heard") if text.status_code == 200 else text_body["code"]),
+            "call": (call.status_code, "opened" if call.status_code == 200 else call_body["code"]),
+            "heard": (_rooms_heard(doors.root, f"t-{name}"), _rooms_heard(doors.root, f"c-{name}")),
+            "hub": len(opened["hubs"]) - hubs,
+        }
+        refused = text_answer[0] == 400
+        expected[name] = {"text": text_answer, "call": call_answer, "heard": (0, 0) if refused else (1, 1),
+                          "hub": int(call_answer == OPENED)}
+        if refused:  # the text door keeps its refusal envelope
+            assert text_body["disposition"] == "rejected", name
+    assert observed == expected
+    assert doors.client.post("/presence/turn", json={"event": _wire("words", facts=["shouting"])}).json()["error"] \
+        == "event.facts must be a list of declared wake facts"
+    # The call door hears the connector's declared signal; the carrier re-admits the Host's facts by value.
+    assert ("t-declared_signal", [SIGNAL]) in doors.reparses
+    assert ("t-declared_signal_with_core", ["mention", SIGNAL]) in doors.reparses
+    # Owner provenance follows the boolean alone: an unverified owner address never confirms the owner.
+    owner = doors.captured["c-owner"]["metadata"]["focus"]["actor"]
+    unverified = doors.captured["c-owner_unverified"]["metadata"]["focus"]["actor"]
+    assert owner["owner_confirmed"] is True and "owner_address_unverified" not in owner
+    assert unverified["owner_confirmed"] is False and unverified["owner_address_unverified"] is True
+
+
+def test_a_long_calls_heard_utterances_keep_the_account_its_place_sends_as(doors):
+    """``recent_identity`` reads the place's newest 50 arrivals; a call's heard utterances are arrivals, so they carry
+    the identity its focus admitted (``focus.identity``) instead of pushing the declaration out of that window."""
+    import json
+
+    from ouroboros import dialogue_store, place_arrivals, place_guard
+
+    root, place = doors.root, doors.place
+    sends = {"sends_as": {"id": OWNER, "label": "Owner account", "kind": "user"}}
+    assert doors.client.post("/call/open", json={"role": "meeting", "event": _wire("call", identity=sends)}).status_code == 200
+    task = json.loads(json.dumps(doors.captured["call"]))  # the call's own task, as capture built it (``_build_task``)
+    task["metadata"]["execution_transport"] = {"kind": "live_conversation"}  # as run_presence_turn marks it
+    assert task["metadata"]["focus"]["identity"] == sends
+    for number in range(60):
+        assert door.record_call_utterance(root, task, direction="in", text=f"utterance {number}",
+                                          speaker_label="Ann", utterance_id=f"item-{number}")
+    assert door.record_call_utterance(root, task, direction="out", text="spoken answer", utterance_id="say-1")
+    assert place_arrivals.recent_identity(root, place.place_id) == sends
+    # Safety's facts for a reply from work outside this focus read that window.
+    facts = place_guard.call_place_facts(SimpleNamespace(drive_root=root, task_metadata={}), "place_reply", {
+        "place_id": place.place_id, "destination": {"account_id": "a", "conversation_id": "r", "thread_id": ""}})
+    row, = facts["places"]
+    assert row["sends_as"] == sends["sends_as"] and row["sends_as_owner"] is True
+    heard, = dialogue_store.rows_by_client_id(root, "call:heard:item-0")
+    assert heard.row["transport"]["identity"] == sends
+    assert heard.row["presence_event_identity"] == task["metadata"]["presence_event_identity"]
+
+
+def _captured(monkeypatch):
+    """The tasks the door's real capture builds, by source event id (the call's own task, as ``_build_task`` made it)."""
+    tasks, real = {}, door.capture_presence_event
+    monkeypatch.setattr(door, "capture_presence_event",
+                        lambda admission, event, **kw: tasks.setdefault(event.source_event_id, real(admission, event, **kw)))
+    return tasks
+
+
+def test_what_is_said_in_a_call_never_takes_its_openings_facts_as_its_own(tmp_path, place, opened, monkeypatch):
+    """A call opened by a change its author is named for keeps the change, its send time and the focus it started on
+    the opening's row, in history and in the words the model reads. What is said after it is speech with none of
+    them, keeping who spoke and the account the place sends as; a row written before heard utterances stopped carrying
+    the opening's message is told apart by the name the call gave it, never by its words."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros import dialogue_store
+    from ouroboros.dialogue_provenance import dialogue_text
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.presence_runner import _log_dialogue
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_status import execution_owner_record
+
+    tasks, sent = _captured(monkeypatch), (datetime.now(timezone.utc) - timedelta(minutes=5)).replace(microsecond=0)
+    change = {"non_text": [{"kind": "state_change", "description": "Ann renamed the room to Launch review"}],
+              "sent_at": sent.isoformat(), "source_order": 7}
+    sends = {"sends_as": {"id": "me", "label": "Meeting account", "kind": "user"}}
+    _open(tmp_path, event=_event(facts=["mention"], message=change, identity=sends))
+    task = json.loads(json.dumps(tasks["e1"]))
+    task["metadata"]["execution_transport"] = {"kind": "live_conversation"}  # as run_presence_turn marks it
+    write_task_result(tmp_path, task["id"], "running", metadata=task["metadata"], chat_id=task["chat_id"],
+                      execution_owner=execution_owner_record(tmp_path, task, "presence"))  # its focus runs
+    said = "Shall we start with the agenda?"
+    assert door.record_call_utterance(tmp_path, task, direction="in", text=said, speaker_label="Noor", utterance_id="item-1")
+    assert door.record_call_utterance(tmp_path, task, direction="out", text="Yes, the agenda first.", utterance_id="say-1")
+    # A heard row as the writer stored it before this change: the call's name and its opening's whole message.
+    _log_dialogue(tmp_path, direction="in", chat_id=task["chat_id"], user_id=1, text="An earlier caption", task=task,
+                  event=door._event_from_task(task), task_id=task["id"], client_message_id="e1:heard:legacy-1",
+                  speaker={"display_name": "Noor", "platform_actor_id": "meeting-audio:Noor"})
+    with TestClient(Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(tmp_path))])) as history:
+        page = history.get("/api/chat/history", params={"chat_id": task["chat_id"]}).json()["messages"]
+    rows = {row["text"]: row for row in page if "place_history" in row}
+    opening = rows["joined the call"]["place_history"]
+    assert opening["non_text"] == change["non_text"] and opening["attention"] == {"decision": "focus_started"}
+    assert datetime.fromisoformat(opening["sent_at"]) == sent and opening["identity"] == sends, opening
+    for words in (said, "An earlier caption"):  # neither shows the opening's send time as its own (``sent_at``)
+        facts = rows[words]["place_history"]
+        assert rows[words]["sender_label"] == "Noor" and facts["identity"] == sends, facts
+        assert not {"non_text", "attention", "reaction", "sent_at"} & set(facts), (words, facts)
+    assert rows["Yes, the agenda first."]["place_history"] == {"kind": "message", "delivery_state": "authored"}
+    stored = {entry.row["text"]: entry.row for entry in dialogue_store.iter_rows(tmp_path, "chat")}
+    # The old row is never rewritten: its stored order is the opening's, so a room read by time still reads it there.
+    assert stored["An earlier caption"]["source_order"] == stored["joined the call"]["source_order"]
+    assert "Ann renamed the room to Launch review" in dialogue_text(stored["joined the call"])
+    assert [dialogue_text(stored[words]) for words in (said, "An earlier caption")] == [said, "An earlier caption"]
+    assert door.call_utterance(stored[said]) and not door.call_utterance(stored["joined the call"])
+
+
+def test_a_call_freezes_what_its_connector_calls_each_matched_kind(tmp_path, place, opened, monkeypatch):
+    """A focus keeps the words its connector's live declaration gives the kinds its event matched, as its door read them
+    onto the admission (``focus.matched_labels``); its work's ``place_origin`` carries them for every card. A kind its
+    connector gives no words of its own adds none (a text turn's carrier: ``test_conversation_lane_presence``)."""
+    from ouroboros.subagent_messages import place_origin
+
+    declared = [{"provides": "place", "skill": "meet_bridge", "facts": [
+        "mention", {"id": "signal.new_discussion", "label": "New discussion"},
+        {"id": "direct_message", "label": "Mail addressed to you"}]}]
+    monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: declared)
+    p.edit_place(tmp_path, place.place_id, "add_wake", author="owner", fact="signal.new_discussion")
+    tasks, words = _captured(monkeypatch), {"signal.new_discussion": "New discussion"}
+    _open(tmp_path, event=_event(facts=["mention", "signal.new_discussion"]))
+    call = tasks["e1"]["metadata"]
+    assert call["focus"]["matched_labels"] == words, call["focus"]
+    origin = place_origin(call)
+    assert origin["wakes"] == ["mention", "signal.new_discussion"] and origin["labels"] == words, origin
+    _open(tmp_path, event=_event(source_event_id="e2", facts=["mention"]))
+    plain = tasks["e2"]["metadata"]
+    assert "matched_labels" not in plain["focus"] and "labels" not in place_origin(plain), plain["focus"]
+
+
+def test_a_text_turn_freezes_what_its_connector_calls_each_matched_kind(doors):
+    """The text door reads its connector's declared words onto the admission, and the turn's carrier takes them with
+    the seed: the focus it ran under keeps the words of its matched kinds, and its work's ``place_origin`` carries them."""
+    from ouroboros.subagent_messages import place_origin
+    from ouroboros.task_results import load_task_result
+
+    answer = doors.client.post("/presence/turn", json={"event": _wire("t-words", facts=["mention", SIGNAL]),
+                                                       "staged_files": [], "continuation_version": 1,
+                                                       "delivery_reporting_version": 1})
+    assert answer.status_code == 200, answer.json()
+    ran = load_task_result(doors.root, answer.json()["turn_ref"])["metadata"]  # the turn's own record
+    assert ran["focus"]["matched_labels"] == {SIGNAL: "Words you chose appear"}, ran["focus"]
+    assert place_origin(ran)["labels"] == {SIGNAL: "Words you chose appear"}

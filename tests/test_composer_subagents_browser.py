@@ -17,6 +17,7 @@ import re
 
 import pytest
 
+from tests.settings_browser_helpers import settings_page
 from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
@@ -172,7 +173,7 @@ def test_subagents_opens_in_the_row_with_the_hint_above_it(
                 page.wait_for_timeout(300)
                 assert page.locator(SUBAGENTS).get_attribute("data-mode") == "off"
             press(f"{SUBAGENTS} .ui-hint-action")
-            page.wait_for_selector('.settings-panel.active[data-settings-panel="agents"]', state="visible",
+            settings_page(page, "agents").wait_for(state="visible",
                                    timeout=20_000)
             assert page.locator(SUBAGENTS).get_attribute("data-open") == "false"
         finally:
@@ -322,7 +323,7 @@ def test_the_keyboard_walks_subagents_on_a_320px_phone(direct_server_with_data, 
             _shot(page, tmp_path, f"subagents-keyboard-settings-{engine}-320")
             assert seen["locked-tab"] == "settings", ("Tab goes from the strip to Open Settings", seen)
             page.keyboard.press("Enter")
-            page.wait_for_selector('.settings-panel.active[data-settings-panel="agents"]', state="visible",
+            settings_page(page, "agents").wait_for(state="visible",
                                    timeout=20_000)
         finally:
             (_evidence_dir(tmp_path) / f"subagents-keyboard-{engine}-320.json").write_text(

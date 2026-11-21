@@ -24,7 +24,7 @@ def paused_inventory(root, kind):
     if kind == "empty":
         rows = {}
     path.write_text(json.dumps({"schema_version": 1, "revision": 4, "places": rows}), encoding="utf-8")
-    return "Places still paused: Research room, b." if rows else ""
+    return "Paused places (no writing there; tasks are not affected): Research room, b." if rows else ""
 
 
 @pytest.mark.parametrize("kind", ["paused", "empty", "unreadable"])
@@ -117,7 +117,8 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
                               PresenceEndpoint("slack", "team", "elsewhere"), enabled)
     save_presence_binding(root, binding)
     source = (root / "state" / "presence_bindings.json").read_bytes()
-    assert p.paused_places_sentence(root) == ("" if enabled else "Places still paused: slack.")
+    assert p.paused_places_sentence(root) == (
+        "" if enabled else "Paused places (no writing there; tasks are not affected): slack.")
     assert not p.places_path(root).exists()
     assert (root / "state" / "presence_bindings.json").read_bytes() == source
     place, = p.load_places(root)
@@ -277,3 +278,346 @@ def test_invalid_signal_never_enters_storage(tmp_path, fact):
     with pytest.raises(p.PlaceError, match="place_wake_invalid"):
         p.edit_place(tmp_path, place.place_id, "add_wake", author="owner", fact=fact)
     assert p.load_places(tmp_path) == [place]
+
+
+# ---- circles: sibling metadata in the same document, one locked writer -------------------------------------------
+def document(root):
+    return json.loads(p.places_path(root).read_text(encoding="utf-8"))
+
+
+def base_reader(value):
+    """The place reader of a body predating circles (3e05 ``_document``/``_decode``): strict ``Place(**row)``, the
+    connection witness, no knowledge of ``circles`` or ``place_choices``."""
+    assert value["schema_version"] == 1 and isinstance(value["places"], dict)
+    out = {}
+    for key, row in value["places"].items():
+        data = dict(row)
+        connection = value.get("connections", {}).get(key)
+        data["connected_revision"] = (connection["connected_revision"] if isinstance(connection, dict)
+                                      and connection.get("written_revision") == data.get("revision", 0) else data.get("revision", 0))
+        for name, cls in (("wakes", p.WakeItem), ("notes", p.NoteEntry), ("owner_accounts", p.OwnerAccount)):
+            data[name] = tuple(cls(**item) for item in data.get(name, ()))
+        for name in ("context_topics", "legacy_binding_ids"):
+            data[name] = tuple(data.get(name, ()))
+        out[key] = p.Place(**data)
+    return out
+
+
+def test_a_choice_moves_the_place_revision_once_and_an_unchanged_choice_writes_nothing(tmp_path):
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Team", text="Help by the facts.", author=p.AUTHOR_OWNER)
+    with pytest.raises(p.PlaceError, match="Current revision"):  # a stale sheet meets a conflict
+        p.edit_place(tmp_path, place.place_id, "set_description", author="owner", description="x",
+                     expected_revision=place.revision + 7)
+    saved = p.edit_place(tmp_path, place.place_id, "update", author="owner", expected_revision=place.revision,
+                         changes=[("set_circle", {"circle_id": circle["circle_id"]}),
+                                  ("set_description", {"description": "  Where   the team\nasks  "})])
+    assert saved.revision > place.revision and saved.notes == place.notes  # the row itself is unchanged
+    records = p.place_records(tmp_path)
+    assert records.description(place.place_id)["text"] == "Where the team asks"
+    assert document(tmp_path)["connections"][place.place_id] == {
+        "connected_revision": place.connected_revision, "written_revision": saved.revision}
+    before = p.places_path(tmp_path).read_bytes()
+    again = p.edit_place(tmp_path, place.place_id, "set_description", author="owner", description="Where the team asks")
+    assert again == saved and p.places_path(tmp_path).read_bytes() == before  # the no-op path writes nothing
+    with pytest.raises(p.PlaceError, match="place_description_invalid"):
+        p.edit_place(tmp_path, place.place_id, "set_description", author="owner", description="x" * (p.DESCRIPTION_MAX + 1))
+    with pytest.raises(p.PlaceError, match="circle_not_found"):
+        p.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id="missing")
+    assert p.places_path(tmp_path).read_bytes() == before
+    cleared = p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("set_circle", {"circle_id": ""}), ("set_description", {"description": ""})])
+    assert cleared.revision > saved.revision and "place_choices" not in document(tmp_path)
+
+
+def test_placement_and_words_keep_both_origins_and_only_my_humans_save_makes_them_theirs(tmp_path):
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Work", text="Owner words for work.", author=p.AUTHOR_OWNER)
+    p.edit_place(tmp_path, place.place_id, "set_circle", author=p.AUTHOR_OUROBOROS, circle_id=circle["circle_id"])
+    context = p.place_records(tmp_path).circle_context(place.place_id)
+    assert (context["text_author"], context["placed_by"], context["standing_delegation"]) == ("owner", "ouroboros", False)
+    assert context["text"] == "Owner words for work." and context["name"] == "Work"  # shown intact, both origins
+    owned = p.edit_place(tmp_path, place.place_id, "set_circle", author=p.AUTHOR_OWNER, circle_id=circle["circle_id"])
+    context = p.place_records(tmp_path).circle_context(place.place_id)
+    assert context["placed_by"] == "owner" and context["standing_delegation"] is True
+    # Ouroboros saving the same circle again never makes my human's placement its own (no write at all).
+    assert p.edit_place(tmp_path, place.place_id, "set_circle", author=p.AUTHOR_OUROBOROS,
+                        circle_id=circle["circle_id"]) == owned
+    reworded = p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OUROBOROS, text="Mind's words",
+                             by={"owner_turn": True})  # my human's turn orders it; the words I compose are mine
+    assert reworded["text_author"] == "ouroboros" and reworded["revision"] > circle["revision"]
+    assert p.place_records(tmp_path).circle_context(place.place_id)["standing_delegation"] is False
+    renamed = p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OWNER, name="Work room")
+    assert renamed["text_author"] == "ouroboros" and renamed["text"] == "Mind's words"  # a rename keeps authorship
+    with pytest.raises(p.PlaceError, match="Current revision") as stale:
+        p.edit_circle(tmp_path, circle["circle_id"], author="owner", text="late", expected_revision=reworded["revision"])
+    assert stale.value.code == "circle_revision_conflict"
+    with pytest.raises(p.PlaceError, match="circle_name_taken"):
+        p.create_circle(tmp_path, name="work ROOM", author="owner")
+    mine = p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OWNER, text="Mind's words")
+    assert mine["text_author"] == "owner"  # my human's deliberate save of the same words makes them theirs
+    assert p.edit_circle(tmp_path, circle["circle_id"], author=p.AUTHOR_OUROBOROS, text="Mind's words") == mine
+
+
+def test_a_choice_belongs_to_one_connection_and_a_reconnected_place_starts_outside_every_circle(tmp_path):
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Team", author="owner")
+    p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("set_circle", {"circle_id": circle["circle_id"]}), ("set_description", {"description": "Team room"})])
+    p.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
+    assert "place_choices" not in document(tmp_path)
+    again = connect(tmp_path)
+    records = p.place_records(tmp_path)
+    assert again.place_id == place.place_id and records.circle_context(again.place_id) is None
+    assert records.description(again.place_id) is None and records.members(circle["circle_id"]) == []
+
+
+def test_an_older_body_reads_every_place_and_its_stale_choice_never_returns(tmp_path):
+    place = connect(tmp_path, wakes=[p.FACT_MENTION])
+    circle = p.create_circle(tmp_path, name="Team", text="Words", author="owner")
+    p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("add_note", {"text": "Own note"}), ("set_circle", {"circle_id": circle["circle_id"]}),
+        ("set_description", {"description": "Team room"})])
+    value = document(tmp_path)
+    assert set(value) >= {"circles", "place_choices"} and value["schema_version"] == 1
+    old = base_reader(value)  # rollback keeps every place readable; it ignores the circle words
+    assert old[place.place_id].notes == p.get_place(tmp_path, place.place_id).notes
+    # The older writer disconnects and connects the same id again, keeping the document's unknown keys.
+    del value["places"][place.place_id], value["connections"][place.place_id]
+    value["revision"] += 1
+    row = p.place_summary(replace(place, revision=value["revision"]))
+    value["places"][place.place_id] = row
+    p.places_path(tmp_path).write_text(json.dumps(value), encoding="utf-8")
+    records = p.place_records(tmp_path)
+    assert place.place_id in value["place_choices"] and records.circle_context(place.place_id) is None
+    assert records.description(place.place_id) is None and records.circle(circle["circle_id"])["text"] == "Words"
+
+
+def test_deleting_a_circle_detaches_its_places_atomically_and_keeps_their_own_words(tmp_path):
+    first, second = connect(tmp_path, conversation_id="one"), connect(tmp_path, conversation_id="two")
+    circle = p.create_circle(tmp_path, name="Team", text="Shared words", author="owner")
+    other = p.create_circle(tmp_path, name="Other", author="owner")
+    for place, state in ((first, "silent"), (second, "paused")):
+        p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+            ("set_state", {"state": state}), ("add_note", {"text": f"{place.conversation_id} note"}),
+            ("set_circle", {"circle_id": circle["circle_id"]}), ("set_description", {"description": "kept"})])
+    before = p.place_records(tmp_path)
+    with pytest.raises(p.PlaceError, match="Current revision") as stale:
+        p.delete_circle(tmp_path, circle["circle_id"], author="owner", expected_revision=circle["revision"] + 99)
+    assert stale.value.code == "circle_revision_conflict" and p.place_records(tmp_path) == before
+    removed = p.delete_circle(tmp_path, circle["circle_id"], author="owner", expected_revision=circle["revision"])
+    assert removed["circle"]["text"] == "Shared words"
+    assert sorted(row["place_id"] for row in removed["detached"]) == sorted([first.place_id, second.place_id])
+    after = p.place_records(tmp_path)
+    assert [row["circle_id"] for row in after.circles] == [other["circle_id"]]
+    for place in (first, second):
+        old, new = before.places[place.place_id], after.places[place.place_id]
+        assert (new.notes, new.state, new.connected_revision) == (old.notes, old.state, old.connected_revision)
+        assert new.revision > old.revision and after.circle_context(place.place_id) is None
+        assert after.description(place.place_id)["text"] == "kept"
+        assert document(tmp_path)["connections"][place.place_id]["written_revision"] == new.revision
+    with pytest.raises(p.PlaceError, match="circle_not_found"):
+        p.delete_circle(tmp_path, circle["circle_id"], author="owner")
+
+
+def test_an_adds_first_words_land_once_with_the_new_place_in_one_transaction(tmp_path):
+    circle = p.create_circle(tmp_path, name="Team", author="owner")
+    first = {"note": "What this room is for", "circle_id": circle["circle_id"], "description": "Team room"}
+    place = connect(tmp_path, first=first)
+    records = p.place_records(tmp_path)
+    assert [(n.text, n.author) for n in place.notes] == [("What this room is for", "owner")]
+    assert records.circle_context(place.place_id)["placed_by"] == "owner"
+    assert records.description(place.place_id)["text"] == "Team room"
+    before = p.places_path(tmp_path).read_bytes()
+    with pytest.raises(p.PlaceError, match="place_exists") as refused:
+        connect(tmp_path, first={**first, "note": "Other words"})
+    assert refused.value.place_id == place.place_id and p.places_path(tmp_path).read_bytes() == before
+    assert connect(tmp_path) == p.get_place(tmp_path, place.place_id)  # a plain repeat stays idempotent
+    with pytest.raises(p.PlaceError, match="circle_not_found"):  # nothing is connected when the circle is gone
+        connect(tmp_path, conversation_id="new", first={"note": "x", "circle_id": "gone"})
+    assert [row.conversation_id for row in p.load_places(tmp_path)] == [""]
+
+
+def test_malformed_circle_metadata_is_a_repair_error_never_an_empty_store(tmp_path):
+    connect(tmp_path)
+    value = document(tmp_path)
+    value["circles"] = [{"circle_id": "c", "name": "", "text": "", "text_author": "", "text_at": "", "revision": 1}]
+    p.places_path(tmp_path).write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(p.PlaceError, match="need repair") as unreadable:
+        p.place_records(tmp_path)
+    assert unreadable.value.code == "places_unreadable"
+
+
+def test_circle_model_is_revisioned_without_changing_words_or_place_rows(tmp_path):
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Team", text="Shared words", model="  future/route  ", author="owner")
+    place = p.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    before = document(tmp_path)
+    assert before["circles"][0]["model"] == "future/route"
+    assert p.place_records(tmp_path).circle_context(place.place_id)["model"] == "future/route"
+    changed = p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", model=" another/route ",
+                            expected_revision=circle["revision"])
+    assert changed["model"] == "another/route" and changed["revision"] > circle["revision"]
+    assert {key: changed[key] for key in ("text", "text_author", "text_at")} == {
+        key: circle[key] for key in ("text", "text_author", "text_at")}
+    assert set(changed) == {"circle_id", "name", "text", "text_author", "text_at", "revision", "model"}
+    assert document(tmp_path)["places"] == before["places"]  # frozen Place rows and their revisions stay intact
+    saved = p.places_path(tmp_path).read_bytes()
+    with pytest.raises(p.PlaceError, match="Current revision") as stale:
+        p.edit_circle(tmp_path, circle["circle_id"], author="owner", model="stale", expected_revision=circle["revision"])
+    assert stale.value.code == "circle_revision_conflict" and p.places_path(tmp_path).read_bytes() == saved
+    assert p.edit_circle(tmp_path, circle["circle_id"], author="owner", model="another/route",
+                          expected_revision=changed["revision"]) == changed
+    assert p.places_path(tmp_path).read_bytes() == saved
+    cleared = p.edit_circle(tmp_path, circle["circle_id"], author="owner", model="  ", expected_revision=changed["revision"])
+    assert cleared["model"] == "" and cleared["revision"] > changed["revision"]
+    assert p.place_records(tmp_path).circle_context(place.place_id)["model"] == ""
+
+
+def test_old_circle_without_model_inherits_without_rewriting_the_store(tmp_path):
+    from ouroboros.place_projection import circle_summary
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Old circle", author="owner")
+    p.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    value = document(tmp_path)
+    del value["circles"][0]["model"]
+    path = p.places_path(tmp_path)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    before = path.read_bytes()
+    records = p.place_records(tmp_path)
+    assert circle_summary(records.circle(circle["circle_id"]))["model"] == ""
+    assert records.circle_context(place.place_id)["model"] == ""
+    assert path.read_bytes() == before
+    assert base_reader(value)[place.place_id] == records.places[place.place_id]
+
+
+@pytest.mark.parametrize("model", [7, False, [], {}])
+def test_circle_model_requires_a_string_in_writers_and_stored_rows(tmp_path, model):
+    circle = p.create_circle(tmp_path, name="Team", model="unlisted/model", author="owner")
+    path = p.places_path(tmp_path)
+    before = path.read_bytes()
+    for write in (lambda: p.create_circle(tmp_path, name="Other", model=model, author="owner"),
+                  lambda: p.edit_circle(tmp_path, circle["circle_id"], model=model, author="owner")):
+        with pytest.raises(p.PlaceError) as error:
+            write()
+        assert error.value.code == "place_invalid_string" and error.value.field == "model"
+        assert path.read_bytes() == before
+    value = document(tmp_path)
+    value["circles"][0]["model"] = model
+    path.write_text(json.dumps(value), encoding="utf-8")
+    malformed = path.read_bytes()
+    with pytest.raises(p.PlaceError, match="need repair"):
+        p.place_records(tmp_path)
+    assert path.read_bytes() == malformed
+
+
+# ---- my human's words leave only by their act; every word that leaves is kept ---------------------------------------
+def journal(root):
+    from ouroboros.place_words_history import journal_path
+    return journal_path(root)
+
+
+def test_my_humans_place_words_leave_only_by_their_act_and_mine_stay_mine(tmp_path):
+    """14.11: a wake at Full removed my human's note of 11.11 from two places. Their note, a place's description and a
+    circle's words leave only by their own act: their app, their turn ordering words I compose, or their words waking
+    the focus of a place those words stand in. A wake, or my human speaking elsewhere, is refused and nothing changes;
+    a stale edit still meets its revision first. My own words, and a circle's name and model, stay mine to change;
+    disconnecting is an act on the place, never refused for its words."""
+    place, other = connect(tmp_path, conversation_id="one"), connect(tmp_path, conversation_id="two")
+    circle = p.create_circle(tmp_path, name="Team", text="Owner words for the team.", author="owner")
+    p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("add_note", {"text": "Owner's standing note."}), ("set_circle", {"circle_id": circle["circle_id"]}),
+        ("set_description", {"description": "Owner's line"})])
+    owners, mine = (note.note_id for note in p.edit_place(
+        tmp_path, place.place_id, "add_note", author="ouroboros", text="My own note.").notes)
+    p.edit_place(tmp_path, other.place_id, "add_note", author="owner", text="Owner's note elsewhere.")
+    before = p.places_path(tmp_path).read_bytes()
+    for by in (None, {"owner_speaks_in": other.place_id}):  # a wake; my human speaking outside this place and circle
+        for write in (
+                lambda: p.edit_place(tmp_path, place.place_id, "remove_note", author="ouroboros", by=by, note_id=owners),
+                lambda: p.edit_place(tmp_path, place.place_id, "set_description", author="ouroboros", by=by,
+                                     description=""),
+                lambda: p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", by=by, text="Mine"),
+                lambda: p.delete_circle(tmp_path, circle["circle_id"], author="ouroboros", by=by)):
+            with pytest.raises(p.PlaceError) as refused:
+                write()
+            assert refused.value.code == "place_owner_words_owner_only"
+    with pytest.raises(p.PlaceError) as stale:
+        p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", text="Mine", expected_revision=0)
+    assert stale.value.code == "circle_revision_conflict"
+    assert p.places_path(tmp_path).read_bytes() == before and not journal(tmp_path).exists()
+    kept = p.edit_place(tmp_path, place.place_id, "remove_note", author="ouroboros", note_id=mine)
+    assert [note.text for note in kept.notes] == ["Owner's standing note."]
+    renamed = p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", name="Team room", model="circle/next")
+    assert (renamed["text"], renamed["text_author"]) == ("Owner words for the team.", "owner")
+    here = {"owner_speaks_in": place.place_id}  # my human's own words woke this place's focus now
+    assert p.edit_place(tmp_path, place.place_id, "remove_note", author="ouroboros", by=here, note_id=owners).notes == ()
+    assert p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", by=here, text="Mine")["text_author"] == (
+        "ouroboros")
+    p.edit_place(tmp_path, place.place_id, "set_description", author="ouroboros", by={"owner_turn": True},
+                 description="")
+    assert p.place_records(tmp_path).description(place.place_id) is None
+    theirs = p.create_circle(tmp_path, name="Friends", text="Owner words for friends.", author="owner")
+    assert p.delete_circle(tmp_path, theirs["circle_id"], author="owner")["circle"]["text"] == "Owner words for friends."
+    assert p.edit_place(tmp_path, other.place_id, "disconnect", author="ouroboros") is None
+
+
+def test_every_word_a_change_removes_or_replaces_is_kept_exactly_and_read_newest_first(tmp_path):
+    """Before a change lands, each note, description and circle's words it removes or replaces is appended exactly:
+    text, author and time, where it stood, the act, who made the change and the focus that wrote it. A place's earlier
+    words read newest first, its circle's included. Words that stay, and a change that removes nothing, leave no row."""
+    from ouroboros.place_words_history import earlier
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Team", text="Circle words.", author="owner")
+    p.edit_place(tmp_path, place.place_id, "update", author="owner", changes=[
+        ("add_note", {"text": "First\n  note, verbatim. "}), ("add_note", {"text": "Second note."}),
+        ("set_circle", {"circle_id": circle["circle_id"]}), ("set_description", {"description": "Owner's line"})])
+    p.edit_place(tmp_path, place.place_id, "set_state", author="owner", state="silent")
+    p.edit_circle(tmp_path, circle["circle_id"], author="owner", text="Circle words.")  # saved again: unchanged
+    assert not journal(tmp_path).exists()
+    first, second = p.get_place(tmp_path, place.place_id).notes
+    line = p.place_records(tmp_path).description(place.place_id)
+    writer = {"kind": "mind", "focus": {"role": "main", "task_id": "task-1"}}
+    p.edit_place(tmp_path, place.place_id, "remove_note", author="owner", note_id=first.note_id)
+    p.edit_place(tmp_path, place.place_id, "set_description", author="ouroboros", description="My line",
+                 by={"owner_turn": True, "writer": writer})
+    p.edit_circle(tmp_path, circle["circle_id"], author="owner", text="Circle words, reworded.")
+    reworded = p.place_records(tmp_path).circle(circle["circle_id"])
+    p.delete_circle(tmp_path, circle["circle_id"], author="owner")
+    shown = earlier(tmp_path, place.place_id)
+    assert [(word["action"], word["kind"], word["text"], word["author"], word["changed_by"]) for word in shown] == [
+        ("delete_circle", "circle_words", "Circle words, reworded.", "owner", "owner"),
+        ("edit_circle", "circle_words", "Circle words.", "owner", "owner"),
+        ("set_description", "description", "Owner's line", "owner", "owner"),
+        ("remove_note", "note", "First\n  note, verbatim. ", "owner", "owner")]
+    assert (shown[0]["at"], shown[0]["circle_id"], shown[0]["circle_name"]) == (
+        reworded["text_at"], circle["circle_id"], "Team")
+    assert shown[1]["at"] == circle["text_at"] and shown[2]["at"] == line["at"] and shown[2]["writer"] == writer
+    assert (shown[3]["note_id"], shown[3]["at"], shown[3]["place_id"]) == (first.note_id, first.at, place.place_id)
+    rows = [json.loads(row) for row in journal(tmp_path).read_text(encoding="utf-8").splitlines()]
+    assert [row["document_revision"] for row in rows] == sorted({row["document_revision"] for row in rows})
+    assert rows[2]["words"][0]["places"] == [place.place_id] and "writer" not in rows[0]
+    p.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
+    assert [(word["action"], word["kind"], word["text"]) for word in earlier(tmp_path, place.place_id)[:2]] == [
+        ("disconnect", "note", second.text), ("disconnect", "description", "My line")]
+    assert earlier(tmp_path, "another-place") == []
+
+
+def test_a_history_that_cannot_be_written_changes_nothing(tmp_path):
+    """The history row comes first: when the journal cannot take it, a change that removes words is refused
+    (``place_history_unavailable``) and the place document keeps every byte, and a journal that cannot be read is
+    an error, never "no earlier words". A change that removes nothing needs no row and still lands."""
+    from ouroboros.place_words_history import earlier
+    place = p.edit_place(tmp_path, connect(tmp_path).place_id, "add_note", author="owner", text="Keep me.")
+    journal(tmp_path).mkdir()  # something in the journal's way: no row can be appended or read
+    before = p.places_path(tmp_path).read_bytes()
+    for action, values in (("remove_note", {"note_id": place.notes[0].note_id}), ("disconnect", {})):
+        with pytest.raises(p.PlaceError) as unavailable:
+            p.edit_place(tmp_path, place.place_id, action, author="owner", **values)
+        assert unavailable.value.code == "place_history_unavailable"
+    assert p.places_path(tmp_path).read_bytes() == before
+    with pytest.raises(p.PlaceError) as unreadable:
+        earlier(tmp_path, place.place_id)
+    assert unreadable.value.code == "place_history_unreadable"
+    added = p.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="And me.")
+    assert [note.text for note in added.notes] == ["Keep me.", "And me."]

@@ -251,9 +251,11 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         patch["trigger"] = {"type": "cron", "expr": patch.pop("cron")}
     assignment = bool(patch.keys() & {"objective", "context"})
     if assignment or owner_basis:  # a new assignment keeps the words that changed it; a verified cite is stored either way
-        from ouroboros.owner_words import carried_owner_corpus
+        from ouroboros.owner_words import SCHEDULE_TEXT, carried_owner_corpus
 
-        if words := [*(carried_owner_corpus(ctx) if assignment else []), *([owner_basis] if owner_basis else [])]:
+        # The schedule text this run holds is replaced by the edit itself: only words join the row.
+        carried = [row for row in carried_owner_corpus(ctx) if row.get("source") != SCHEDULE_TEXT] if assignment else []
+        if words := [*carried, *([owner_basis] if owner_basis else [])]:
             patch["owner_corpus"] = words
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
@@ -746,6 +748,7 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
                 # TZ-2 B3: the same author stamp a promote carries — the successor's
                 # first turn is this task's note, framed as such, never an owner directive.
                 "objective_author": {"kind": "task", "task_id": task_id},
+                **({"context_author": {"kind": "task", "task_id": task_id}} if context else {}),
             },
             **({"chat_id": source_chat_id} if source_chat_id not in (None, "") else {}),
         },

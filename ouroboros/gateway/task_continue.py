@@ -19,12 +19,26 @@ from starlette.responses import JSONResponse
 
 from ouroboros.gateway._helpers import json_error, json_exception, request_json_or, run_sync_to_completion
 from ouroboros.task_results import validate_task_id
+from ouroboros.utils import utc_now_iso
 
 _NOT_FOUND = frozenset({"predecessor_missing"})
 _UNAVAILABLE = frozenset({"predecessor_record_unreadable", "successor_record_unreadable",
                           "continuation_claim_unwritable", "queue_snapshot_persist_failed",
                           "continuation_unconfirmed", "task_id_lookup_failed", "queue_not_restored",
                           "continuation_drive_unavailable"})
+
+
+def _declared_press(request: Request) -> dict:
+    """Who the caller says pressed, read as a settings write declares it (``declared_settings_origin``): a recorded
+    declaration that grants nothing and proves nobody. A request that declares no one stays ``{}``: unknown."""
+    from ouroboros.control_actor import PAUSE_AUTHORS
+    from ouroboros.gateway.owner_settings import declared_settings_origin
+
+    origin = declared_settings_origin(request)
+    if origin["actor"] not in PAUSE_AUTHORS:
+        return {}
+    return {"actor": origin["actor"], "declared": True, "surface": origin["surface"], "at": utc_now_iso(),
+            **({"task_id": origin["actor_task_id"]} if origin.get("actor_task_id") else {})}
 
 
 async def api_task_continue(request: Request) -> JSONResponse:
@@ -39,7 +53,7 @@ async def api_task_continue(request: Request) -> JSONResponse:
     try:
         from supervisor.continuation_admission import admit_continuation
 
-        result = await run_sync_to_completion(admit_continuation, task_id,
+        result = await run_sync_to_completion(admit_continuation, task_id, declared_by=_declared_press(request),
                                               action_nonce=str(body.get("action_nonce") or ""))
     except ValueError as exc:
         return json_error(str(exc), 400, task_id=task_id, reason_code="invalid_action_nonce")

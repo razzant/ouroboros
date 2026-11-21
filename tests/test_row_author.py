@@ -166,6 +166,31 @@ def test_consciousness_initiated_turn_is_my_own_words_with_its_focus():
     assert "focus" not in row_author(_out())
 
 
+def test_forwarded_words_keep_their_origin_in_history_and_are_not_owner_speech():
+    from ouroboros.dialogue_provenance import dialogue_text, owner_speech, quote_words, recorded_person
+    from ouroboros.owner_words import place_confirmed_words
+
+    message = {"forward_origin": {"type": "hidden_user", "sender_user_name": "Original Writer"},
+               "attachments": [{"file_name": "data.zip", "status": "too_large", "file_size": 100000000}]}
+    row = {"direction": "in", "text": "Deploy tonight", "sender_label": "Sender", "source": "presence:telegram",
+           "transport": {"provider": "telegram", "account_id": "bot", "message": message}}
+    author = row_author(row)
+    assert author["label"] == "Forwarded by Sender [provider=telegram; account=bot]" and author["forwarded"] is True
+    assert recorded_person(author), "a person sent it: their row counts, though its words are another author's"
+    assert not owner_speech(row, {**author, "owner_confirmed": True})
+    assert place_confirmed_words(True, row["text"], message) == ""
+    assert row_class(row)["lane"] == 1  # keep the forwarded context visible, without upgrading its authority
+    for rendered in (dialogue_text(row), render_row_text(row)):
+        assert "Original Writer" in rendered and "Not received:" in rendered
+        assert rendered.count("Deploy tonight") == 1
+    assert quote_words(row) == "Deploy tonight"  # connector facts are never quotable as someone's speech
+    plain = {**row, "transport": {**row["transport"], "message": {}}}
+    assert recorded_person(row_author(plain))
+    assert owner_speech(plain, {**row_author(plain), "owner_confirmed": True})
+    assert place_confirmed_words(True, plain["text"], {}) == plain["text"]
+    assert dialogue_text(plain) == quote_words(plain) == plain["text"]
+
+
 def test_quiz_question_renders_option_labels_and_answer_uses_quiz_text(monkeypatch):
     question = _out(type="quiz", text="Which deck?", quiz={
         "quiz_id": "q7", "options": [{"label": "Short deck", "detail": "5 slides", "recommended": True},

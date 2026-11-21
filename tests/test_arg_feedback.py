@@ -116,3 +116,33 @@ def test_a_blocked_link_stays_a_policy_denial_and_a_malformed_one_an_argument_fa
     malformed = registry.execute_result("send_links", {"links": "nope"})
     assert malformed.status == "error" and malformed.text.startswith("⚠️ SEND_LINKS_")
 
+
+
+def test_a_refusal_names_a_repair_call_only_where_the_caller_may_make_it(tmp_path):
+    """Both directions, one helper for every refusal that names a working call: an ordinary root may name a
+    core tool; a contract's disabled_tools, a subagent profile without it, a Presence ceiling without it and a
+    Presence grant with host-bound arguments each make the host unable to show the named call works."""
+    from ouroboros.presence_authority import (
+        PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload,
+    )
+    from ouroboros.presence_capabilities import PresenceArgumentBinding
+    from ouroboros.tools.arg_feedback import repair_call_available
+
+    def ceiling(*grants):
+        return {"capability_ceiling": presence_ceiling_payload(PresenceCapabilityCeiling(
+            skill_name="helper", skill_content_hash="a" * 64, profile_fingerprint="b" * 64,
+            state_fingerprint="c" * 64, selection_fingerprint="d" * 64, model_slot="main", inline_max_rounds=10,
+            tool_grants=grants, resource_grants=(), digest="e" * 64))}
+
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root-task")
+    assert repair_call_available(ctx, "get_task_result")
+    ctx.task_metadata = {"disabled_tools": ["get_task_result"]}
+    assert not repair_call_available(ctx, "get_task_result")
+    ctx.task_metadata = {"tool_profile": "local_readonly_subagent"}
+    assert repair_call_available(ctx, "get_task_result") and not repair_call_available(ctx, "continue_task")
+    ctx.task_metadata = {}
+    ctx.task_contract = ceiling(PresenceToolGrant("get_task_result"))
+    assert repair_call_available(ctx, "get_task_result") and not repair_call_available(ctx, "wait_tasks")
+    bound = PresenceArgumentBinding(("mode",), "static", static_value="warm")
+    ctx.task_contract = ceiling(PresenceToolGrant("await_messages", (bound,)))
+    assert not repair_call_available(ctx, "await_messages")

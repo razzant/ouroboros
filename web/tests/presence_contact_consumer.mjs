@@ -16,7 +16,8 @@ function checkReask({ first, ended, fresh, history }) {
         assert.equal(card.dataset.state, 'open');
         assert.equal(Boolean(card.querySelector('.chat-quiz-wait')), waiting);
         assert.equal(Boolean(card.querySelector('.chat-quiz-wait-ended')), !waiting);
-        assert.deepEqual(markOf(card), ['dot', waiting ? 'owner' : 'neutral', false]);
+        // Open either way, so Main's pill counts it: the owner's amber dot; the wait's line tells them apart.
+        assert.deepEqual(markOf(card), ['dot', 'owner', false]);
         assert.equal(card.querySelector('.chat-quiz-comment').disabled, false);
     };
     const live = fixture({ isMain: true });

@@ -630,6 +630,15 @@ def test_explicit_targets_keep_their_contract_from_any_project(two_hosts, monkey
     monkeypatch.setenv("GH_HOST", ENTERPRISE)
     two_hosts.call("github_read", method="get", kind="issue", target=7, repo="corp/secret")
     assert two_hosts.hosts() == {ENTERPRISE}
+    # #3613: the checkout moved away. The installed gh reads a named repository from the task's own task_drive, which
+    # is no Git checkout; the count read GitHub's PR URL names keeps the host and its credential too.
+    two_hosts.seen.clear()
+    two_hosts.cwd.rename(two_hosts.cwd.with_name("moved"))
+    listed = two_hosts.call("github_read", method="list", kind="pr", repo=f"{ENTERPRISE}/corp/secret")
+    assert not listed.startswith("⚠️"), listed
+    assert [item["commits"] for item in json.loads(listed.partition("\n")[2])["items"]] == [1]
+    assert [seen.path for seen in two_hosts.seen] == ["/api/v3/repos/corp/secret/pulls", "/api/graphql"]
+    _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
 
 
 def test_a_public_project_stays_public(two_hosts, monkeypatch):

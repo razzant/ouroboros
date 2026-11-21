@@ -34,7 +34,7 @@ Lifecycle belongs to the installation, not the process that first needed it:
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
   killed). A runtime pin is never hot-swapped: the live engine keeps serving
   until a restart onto another pin, not a lower release, ends it
-  (``server_restart._stop_owned_daemon_for_new_pin``), Panic or the owner's
+  (``server_restart._stop_owned_daemon_for_new_pin``), Quit, Panic or the owner's
   Restart Claudexor stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
@@ -312,6 +312,10 @@ def resolve_attach_login_argv(engine: Any) -> list[str]:
             role=_SETUP_ATTACH_ROLE,
         )
     except ClaudexorRuntimeError as exc:
+        if exc.code == "runtime_node_unavailable":  # the pin's Node is not prepared: this login asks; a retry finds it
+            from ouroboros.server_boot import request_pinned_node
+
+            request_pinned_node()
         if exc.code == "runtime_role_unavailable":
             code = "terminal_transport_unsupported"
             status_code = 409
@@ -320,6 +324,7 @@ def resolve_attach_login_argv(engine: Any) -> list[str]:
             "runtime_probe_failed",
             "runtime_probe_identity_mismatch",
             "runtime_node_version_mismatch",
+            "runtime_node_unavailable",
         }:
             code = "terminal_transport_probe_failed"
             status_code = 503
@@ -1261,7 +1266,10 @@ def read_owned_gateway(*, timeout_sec: Optional[float] = None) -> Any:
     endpoint = attached_endpoint(home) if home is not None else discover_daemon_at(owned_config_dir())
     gateway = ClaudexorGateway(endpoint)
     try:
-        gateway.handshake(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        body = gateway.handshake(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        if _handshake_serving_mode(body) != "recovery_only":
+            from ouroboros.harness_program_facts import engine_ready
+            engine_ready(gateway)
         if home is None:
             get_owned_daemon()._remember_stop_targets(endpoint)
     except Exception:
@@ -1395,6 +1403,8 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None,
     except Exception:
         gateway.close()
         raise
+    from ouroboros.harness_program_facts import engine_ready
+    engine_ready(gateway)
     if home is not None:  # the proven version feeds request-shape floors; host engine settings stay untouched
         daemon._proven_engine_version = str(gateway.engine_version or "")
         return gateway

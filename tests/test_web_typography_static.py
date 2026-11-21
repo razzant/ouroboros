@@ -270,6 +270,18 @@ FOCUS_FILES = ROOT_CONSUMERS
 FOCUS_TOKENS = ("var(--focus-accent-border)", "var(--focus-accent-ring)")
 
 
+# A selector that only REACTS to another element's keyboard focus paints no focus of its own: the ring is on the
+# focused element's own selector, named here beside it. The Pin of a Project row hides the row's time while it has
+# keyboard focus, so the time never shows through the Pin that stands in its place, and the row's mark, so the Pin's
+# ring never lies on it.
+FOCUS_REACTIONS = {
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time":
+        "web/style.css: .nav-project-pin:focus-visible",
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot":
+        "web/style.css: .nav-project-pin:focus-visible",
+}
+
+
 def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     """Keyboard focus has ONE appearance (docs/DESIGN.md 'Focus'): the
     `--focus-accent-border` outline (or the field idiom's
@@ -280,8 +292,10 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     The unit is the SELECTOR, not the block: the sanctioned hybrid pattern
     keeps shared hover/focus paint in one rule (no ring) and puts the ring in a
     dedicated `:focus-visible` rule beside it, so a selector passes when ANY of
-    its blocks names a focus token. The exception allowlist is empty — a
-    legitimate exception must be added here with its justification."""
+    its blocks names a focus token. The one kind of exception is a selector that
+    reacts to another element's focus (`FOCUS_REACTIONS`): it passes only while
+    the focused element's own selector is ringed, and an entry no sheet holds
+    any more fails."""
     per_selector: dict[str, list[bool]] = {}
     for rel in FOCUS_FILES:
         source = _decommented(_read(rel))
@@ -293,8 +307,17 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
                     continue
                 per_selector.setdefault(f"{rel}: {selector}", []).append(has_token)
     assert per_selector, "no :focus-visible rules found; is the parse broken?"
+    stale = sorted(set(FOCUS_REACTIONS) - set(per_selector))
+    assert not stale, f"FOCUS_REACTIONS names selectors no sheet holds: {stale}"
+    for reaction in FOCUS_REACTIONS:
+        rel, selector = reaction.split(": ", 1)
+        paint = _declarations(_decommented(_read(rel)), selector)
+        assert paint == {"visibility": "hidden"}, f"a focus reaction must only hide the overlapping content: {reaction}: {paint}"
+    unfocused = sorted(s for s, ringed in FOCUS_REACTIONS.items() if not any(per_selector.get(ringed, [])))
+    assert not unfocused, f"the element these selectors react to has no ring of its own: {unfocused}"
     unringed = sorted(
-        selector for selector, hits in per_selector.items() if not any(hits)
+        selector for selector, hits in per_selector.items()
+        if not any(hits) and selector not in FOCUS_REACTIONS
     )
     assert not unringed, (
         "these :focus-visible selectors never name var(--focus-accent-border) "
@@ -302,6 +325,116 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
         "focus there is either invisible or a second colour vocabulary "
         "(docs/DESIGN.md 'Focus'):\n" + "\n".join(f"  {s}" for s in unringed)
     )
+
+
+# The chosen sidebar row is the solid crimson, where the room's focus ring and unread crimson vanish; it restates both
+# tokens as the fill's ink (one vocabulary: the ring still reads --focus-accent-border, the mark --mark-unread).
+CHOSEN_ROW_INKS = {"--focus-accent-border": "var(--tone-crimson-ink)", "--mark-unread": "var(--tone-crimson-ink)"}
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    ids = len(re.findall(r"#[\w-]+", selector))
+    classes = len(re.findall(r"\.[\w-]+|\[[^\]]*\]", selector))
+    pseudo = len(re.findall(r"(?<!:):(?!:|not\(|is\(|where\(|has\()[\w-]+", selector))
+    return ids, classes + pseudo, 0
+
+
+def test_the_chosen_sidebar_row_rings_and_marks_in_its_fills_ink() -> None:
+    """On `.nav-row.active` (solid `--tone-crimson`) the focus ring and an unread mark take `--tone-crimson-ink`, and
+    no rule restates them so for a row that is not chosen. The restatement outranks the card's dark-voice one (it
+    restates the same two tokens for `.nav-ouro`), so the chosen card reads the fill's ink too."""
+    source = _decommented(_read("web/style.css"))
+    chosen: list[tuple[int, str]] = []
+    unchosen: list[str] = []
+    card_voice: list[tuple[int, str]] = []
+    for match in RULE.finditer(source):
+        selector_list, body = match.group(1), match.group(2)
+        decls = {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body)}
+        inks = any(decls.get(name) == value for name, value in CHOSEN_ROW_INKS.items())
+        for selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            if selector.endswith(".nav-ouro") and decls.get("--focus-accent-border"):
+                card_voice.append((match.start(), selector))
+            if not inks or not re.search(r"\.nav-(row|ouro|project)", selector):
+                continue
+            if selector.endswith(".nav-row.active") and all(
+                    decls.get(name) == value for name, value in CHOSEN_ROW_INKS.items()):
+                chosen.append((match.start(), selector))
+            elif ".active" not in selector:
+                unchosen.append(selector)
+    assert chosen, "no rule restates the chosen sidebar row's focus ring and unread mark as --tone-crimson-ink"
+    assert not unchosen, f"a row that is not chosen takes the chosen fill's ink for its ring and mark: {unchosen}"
+    assert card_voice, "the card's dark voice no longer restates the focus token; re-read this witness"
+    position, selector = chosen[-1]
+    for card_position, card_selector in card_voice:
+        assert (_specificity(selector), position) > (_specificity(card_selector), card_position), (
+            f"{selector!r} does not outrank {card_selector!r}, so the chosen card keeps the voice's ring")
+
+
+# The chosen Project row's Pin and ⋯ stand on its fill as the row's siblings (the Pin before it, the ⋯ after it), so the
+# row's own restatement does not reach them: each selector names the control as its subject beside the chosen row.
+CHOSEN_ROW_CONTROLS = {
+    ".nav-project-pin": r"\.nav-project-pin:has\(\+ \.nav-project-row\.active\)$",
+    ".nav-project-kebab": r"\.nav-project-row\.active ~ \.nav-project-kebab$",
+}
+
+
+def _subject(selector: str) -> str:
+    """A selector's last compound, the arguments of its :has()/:is()/:not() left out."""
+    flat = re.sub(r"\((?:[^()]|\([^()]*\))*\)", "()", selector)
+    return re.split(r"\s*[\s>+~]\s*", flat.strip())[-1]
+
+
+def test_the_chosen_rows_pin_and_menu_ring_in_its_fills_ink() -> None:
+    """The Pin and the ⋯ of the chosen Project row lie on its solid crimson outside `.nav-row.active`, where the room's
+    ring reads 1.14:1 in the light theme and 2.02:1 in the dark one: they restate `--focus-accent-border` as
+    `--tone-crimson-ink`, as the chosen row does for its own ring, and the Pin and the ⋯ of a row that is not chosen
+    keep the room's ring."""
+    source = _decommented(_read("web/style.css"))
+    ringed: dict[str, list[str]] = {control: [] for control in CHOSEN_ROW_CONTROLS}
+    unchosen: list[str] = []
+    for selector_list, body in RULE.findall(source):
+        decls = {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body)}
+        if decls.get("--focus-accent-border") != CHOSEN_ROW_INKS["--focus-accent-border"]:
+            continue
+        for selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            for control, chosen in CHOSEN_ROW_CONTROLS.items():
+                if control in _subject(selector):
+                    (ringed[control] if re.search(chosen, selector) else unchosen).append(selector)
+    missing = sorted(control for control, selectors in ringed.items() if not selectors)
+    assert not missing, f"the chosen row's {missing} keep the room's ring on its crimson fill"
+    assert not unchosen, f"a Pin or a ⋯ that is not the chosen row's takes the fill's ink for its ring: {unchosen}"
+
+
+def _declarations(source: str, selector: str) -> dict[str, str]:
+    """Every declaration a sheet gives this exact selector, a later rule over an earlier one."""
+    found: dict[str, str] = {}
+    for selector_list, body in RULE.findall(source):
+        if selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            found.update((name, value.strip()) for name, value in re.findall(r"([\w-]+)\s*:\s*([^;]+)", body))
+    return found
+
+
+def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
+    """Main Chat moves below the name in a narrow card; a wide card keeps the existing single row."""
+    source = _decommented(_read("web/style.css"))
+    narrow = re.search(r"@container ourocard \(max-width: 200px\)\s*\{(.*?)\n\}", source, re.S)
+    assert narrow, "the card needs its own container rule at the narrow sidebar widths"
+    assert _declarations(source, ".nav-ouro-text").get("container") == "ourocard / inline-size"
+    wide = source[:narrow.start()] + source[narrow.end():]
+    label = _declarations(wide, ".nav-ouro-line1 > .nav-row-label")
+    assert label.get("white-space") == "normal" and label.get("overflow") == "visible", label
+    assert "height" not in label and "--label-line" not in label, "no one-line clipping trap"
+    assert not _declarations(source, ".nav-ouro-line1 > .nav-row-label::before"), "no spacer that hides the room name"
+    assert "order" not in label and "flex-basis" not in label, "wide cards keep the label beside the name"
+    small = narrow.group(1)
+    assert _declarations(small, ".nav-ouro-line1").get("flex-wrap") == "wrap"
+    name = _declarations(small, ".nav-ouro-name")
+    assert name.get("flex") == "1 1 0" and name.get("min-width") == "0", "a wide name yields to the count and mark"
+    assert {key: name.get(key) for key in ("overflow", "white-space", "text-overflow")} == {
+        "overflow": "hidden", "white-space": "nowrap", "text-overflow": "ellipsis"}, name
+    assert _declarations(source, ".nav-ouro-line1 > .nav-mark-slot").get("flex") == "0 0 18px"
+    label = _declarations(small, ".nav-ouro-line1 > .nav-row-label")
+    assert label == {"order": "4", "flex-basis": "100%"}, label
 
 
 # ---------------------------------------------------------------------------

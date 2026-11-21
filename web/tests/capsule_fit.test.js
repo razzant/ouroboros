@@ -8,7 +8,7 @@ const box = (width, extra = {}) => ({ getBoundingClientRect: () => ({ width }), 
 
 // Head 109 px with its name (6 + ring 22 + 4, name 60 with 4 a side, divider 4 + 1 + 4), two peers of 120 px with an
 // 8 px gap, and Off · Auto · Swarm words of 19, 20 and 26 px.
-function openStrip({ rowWidth, segMin }) {
+function openStrip({ rowWidth, segMin, latest = false }) {
     const parts = {
         '.chat-capsule-head': box(0), '.chat-capsule-glyph': box(22), '.chat-capsule-name': box(60),
         '.chat-capsule-value': box(30), '.chat-capsule-body': box(0),
@@ -16,9 +16,11 @@ function openStrip({ rowWidth, segMin }) {
     const segs = [19, 20, 26].map((word) => box(word, { firstElementChild: box(word) }));
     const el = box(200, { querySelector: (selector) => parts[selector] || null });
     const strip = box(0);
-    const row = box(rowWidth, { children: [el, box(120), box(120)] });
+    const endPad = latest ? 38 : 0;
+    const row = box(rowWidth + endPad, { children: [el, box(120), box(120)] });
+    if (latest) row.children.push(box(30, { classList: { contains: name => name === 'chat-scroll-bottom-btn' } }));
     const styles = new Map([
-        [row, { paddingLeft: '0px', paddingRight: '0px', columnGap: '8px' }],
+        [row, { paddingLeft: '0px', paddingRight: `${endPad}px`, columnGap: '8px' }],
         [parts['.chat-capsule-head'], { paddingLeft: '6px', paddingRight: '4px' }],
         [parts['.chat-capsule-name'], { marginLeft: '4px', marginRight: '4px' }],
         ...segs.map((seg) => [seg, { minWidth: `${segMin}px` }]),
@@ -40,4 +42,5 @@ test('a strip whose minimum widths do not fit beside the other capsules stands a
 
 test('a strip whose minimum widths fit stays in the row', () => {
     assert.equal(openStrip({ rowWidth: 486, segMin: 36 }), 'inline');
+    assert.equal(openStrip({ rowWidth: 486, segMin: 36, latest: true }), 'inline', 'latest is already allowed for in the end pad');
 });

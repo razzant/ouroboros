@@ -437,20 +437,25 @@ class FreeSpace:
         return {"error": "view_changed"} if version and str(version) != answer["version"] else answer
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
-        """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
-        stuck once the ``custody_trash`` job recorded that this very entry survived its removal, or stayed held
-        because its producer marked it again (a moved drive or seat home is named by its task, a discarded scratch
-        handoff by its own entry)."""
-        from ouroboros.task_custody import custody_trash_entries
+        """Credit removal only after a whole enumeration proves absence. A moved entry still listed
+        without a readable identity, or unseen in an incomplete listing, remains deleting. A matching
+        recorded hold or failed removal counts as stuck. Drives and seat homes are named by task;
+        a discarded scratch handoff keeps its own name."""
+        from ouroboros.task_custody import custody_trash_scan
         from ouroboros.workspace_preflight import _RELEASE_MARK
 
-        entries = custody_trash_entries(root) if run["moved"] else []
+        try:
+            entries, complete = custody_trash_scan(root) if run["moved"] else ([], True)
+        except OSError:
+            entries, complete = [], False
         survived = self._survived_trash(root) if entries else {}
         named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
-        waiting = {named[name] for name, identity in entries if survived.get(name) != identity}
-        blocked = {named[name] for name, identity in entries if survived.get(name) == identity}
+        waiting = {named[name] for name, identity in entries if identity is None or survived.get(name) != identity}
+        blocked = {named[name] for name, identity in entries if identity is not None and survived.get(name) == identity}
         deleting = [key for key in run["moved"] if key.split(":", 1)[-1] in waiting]
         stuck = [key for key in run["moved"] if key not in deleting and key.split(":", 1)[-1] in blocked]
+        if not complete:
+            return list(run["removed"]), [key for key in run["moved"] if key not in stuck], stuck
         removed = [key for key in run["moved"] if key not in deleting and key not in stuck] + run["removed"]
         return removed, deleting, stuck
 
@@ -700,7 +705,9 @@ class FreeSpace:
         )
         from ouroboros.task_status import FINAL_STATUSES
         from ouroboros.test_environment import SCRATCH_MARKER
+        from ouroboros.tools.kept_service_outputs import owed_declarations, owed_output_hold
 
+        owed = owed_declarations(root)  # one read of the kept-output debts for this whole preview
         live = self._probe()
         days = get_gc_retention_days()
         cutoff = age_cutoff(days)
@@ -753,13 +760,14 @@ class FreeSpace:
                     item.eligible_after = _eligible_after(float(row.get("created_at") or 0), 0)
                     kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not "in use"
                     _sorted_into(root, group, "in_use" if kept else "unreadable" if open_ids is None else "offer"
-                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "in_use", item,
+                                 if snapshot_released(row, open_ids, data_dir=root, live=live, owed=owed) else "in_use", item,
                                  owner_keep.OWNER_KEEP if kept else "")
                     continue
                 item = _Candidate(GROUP_WORKING_COPIES, f"{kind or 'plain'}:{_record_name(path)}", path, kind or "plain",
                                   task=task_id, row=row)
                 item.eligible_after = _eligible_after(max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), days)
-                over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(root, task_id)
+                over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(
+                    root, task_id) and not body_candidate._capture_owed(row, root, owed)
                 reason = ""
                 if over and kind == "body_candidate":
                     # The retirer's own order (``retention_verdict``), its scratch witness left unwritten.
@@ -814,7 +822,7 @@ class FreeSpace:
                     continue
                 owner = _copy_owner(entry.name)
                 item = _Candidate(GROUP_LOST_COPIES, f"lost:{_record_name(entry)}", entry, "lost", owner=owner)
-                if read.unlistable or _record_file(entry, root).name in read.unreadable:
+                if read.unlistable or read.import_pending or _record_file(entry, root).name in read.unreadable:
                     named_unreadable.add(_record_file(entry, root).name)
                     _sorted_into(root, group, "unreadable", item)  # a record may name it: unread is not unregistered
                     continue
@@ -857,7 +865,7 @@ class FreeSpace:
                 if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
                     continue
                 hold = retention_hold(pathlib.Path(str(row["path"])))
-                if hold is not None and hold["class"] == PRODUCER_RETAINED:
+                if hold is not None and hold["class"] == PRODUCER_RETAINED and not owed_output_hold(root, row["path"], owed=owed):
                     producer_entries.setdefault(entry, []).append({**row, "example": hold["example"]})
             for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
                 examples = [str(row.get("example") or "producer-retained session scratch") for row in held]

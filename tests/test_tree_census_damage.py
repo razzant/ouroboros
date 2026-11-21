@@ -509,6 +509,13 @@ def _dispatched_model_request(root, task_id, root_task_id):
     ua.mark_dispatched(_reserve_model_request(root, task_id, root_task_id))
 
 
+def _project_sleeper(ctx):
+    """A top-level project sleeper: its cold sleep is the one that releases its tree's project lane, so its tree's
+    census, damaged members included, holds it (``model_sleep.cold_blockers``)."""
+    ctx.task_metadata["project_id"] = "room"
+    return ctx
+
+
 def _cold_tie(root, tie):
     """``kid`` with a torn legacy body, tied to ``sleeper``'s tree by TIE (or by nothing). Its model
     request was sent while its record could still be read; only then was the record damaged."""
@@ -524,7 +531,7 @@ def test_a_cold_sleep_is_refused_only_by_its_own_damaged_member(tmp_path, tie):
 
     _result(tmp_path, "sleeper")
     _cold_tie(tmp_path, tie)
-    ctx = _ctx(tmp_path)
+    ctx = _project_sleeper(_ctx(tmp_path))
     chosen = model_sleep.selectors(ctx, wake_after_sec=60)
     if tie in ("child", "model_request"):  # a sent model request of the root ties it as a typed parent does
         with pytest.raises(model_sleep.ColdSleepBlocked, match="member_record_unreadable kid"):
@@ -544,7 +551,7 @@ def test_an_unreadable_model_request_set_holds_a_cold_sleep_beside_damage_it_cou
 
     _result(tmp_path, "sleeper")
     _cold_tie(tmp_path, "model_request")
-    ctx = _ctx(tmp_path)
+    ctx = _project_sleeper(_ctx(tmp_path))
     chosen = model_sleep.selectors(ctx, wake_after_sec=60)
 
     def unreadable(*_a, **_k):
@@ -601,6 +608,7 @@ def test_the_round_boundary_refuses_a_cold_sleep_its_tree_now_ties(tmp_path, mon
     _result(tmp_path, "sleeper")
     _cold_tie(tmp_path, tie)
     ctx, limit_ctx = _loop_ctx(tmp_path, "sleeper")
+    _project_sleeper(ctx)
     _fast_hold(monkeypatch, budget_pause)
     _quiet_external(monkeypatch, budget_pause)
     ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, wake_after_sec=60)}
@@ -625,6 +633,7 @@ def test_the_final_checkpoint_holds_on_a_tie_sent_after_the_round_boundary_until
 
     _result(tmp_path, "sleeper")
     ctx, limit_ctx = _loop_ctx(tmp_path, "sleeper")
+    _project_sleeper(ctx)
     _quiet_external(monkeypatch, budget_pause)
     ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, wake_after_sec=60)}
     original, census, holds, sent = model_sleep.cold_blockers, [], [], []

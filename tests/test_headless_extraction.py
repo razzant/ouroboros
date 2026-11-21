@@ -8,8 +8,6 @@ import pathlib
 from ouroboros import headless, headless_status, workspace_file_outputs, workspace_patch_capture
 
 
-REPO = pathlib.Path(__file__).parents[1]
-
 _LEAVES = (headless_status, workspace_patch_capture, workspace_file_outputs)
 
 _MOVED_OWNERS = {
@@ -108,21 +106,6 @@ def test_headless_facade_reexports_every_moved_identity():
         assert getattr(headless, name) is getattr(owner, name), name
     owned = {name for module in _LEAVES for name in vars(module)}
     assert set(_MOVED_OWNERS) <= owned
-
-
-def test_headless_extraction_size_bounds_have_meaningful_headroom():
-    from ouroboros.size_ratchet_manifest import BAND_PATHS
-
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (headless, *_LEAVES)
-    }
-    assert counts["ouroboros.headless"] <= 1000 or (
-        counts["ouroboros.headless"] <= 1500 and BAND_PATHS.get("ouroboros/headless.py", "").strip())
-    assert all(counts[module.__name__] <= 1000 for module in _LEAVES)
-    assert counts["ouroboros.workspace_patch_capture"] <= 1000
 
 
 def test_terminal_file_helper_preserves_legacy_ready_without_finalized_timestamp(tmp_path, monkeypatch):

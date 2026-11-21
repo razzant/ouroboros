@@ -10,13 +10,20 @@ server is required.
 from __future__ import annotations
 
 
+import json
+import pathlib
+
 import pytest
 
-from ouroboros import mcp_client
+from ouroboros import mcp_client, tool_effects
 from ouroboros.contracts.task_contract import build_task_contract
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tool_policy import list_non_core_tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._safety_fixtures import supervisor as supervisor_fixture
+
+supervisor = supervisor_fixture
+REAL_EFFECT_OF = tool_effects.effect_of  # bound before the Supervisor fixture stubs it
 
 
 @pytest.fixture(autouse=True)
@@ -332,6 +339,54 @@ def test_execute_blocks_mcp_when_safety_fails(registry, monkeypatch):
     out = registry.execute("mcp_svc__echo", {"hello": "world"})
     assert out == "blocked"
     assert fake.call_calls == []
+
+
+@pytest.mark.parametrize("tool", ["upload_file", "drop_files"])
+def test_a_dangerous_reading_of_a_browser_upload_never_reaches_the_server_or_its_file_intake(
+        registry, monkeypatch, supervisor, tool):
+    """A page upload or drop is an ordinary MCP call: the dispatcher asks Safety first and the server, which would
+    ask the session guard's ``file_intake`` for the bytes, runs only on an allowed call. The Safety answer is a
+    fixture standing in for the checker model (what a real model would judge, e.g. from the page's address, which its
+    packet does not carry, is not tested); a SAFE reading is the positive control that the same call does reach the
+    server and the intake, a DANGEROUS one leaves both untouched."""
+    from ouroboros import mcp_browser_guard
+
+    monkeypatch.setattr(tool_effects, "effect_of", REAL_EFFECT_OF)  # the ordinary MCP effect, not the fixture's stub
+    monkeypatch.setattr(tool_effects, "_MCP_ANNOTATIONS", {})
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_metadata = "t-upload", {"work_kind": "owner"}
+    (pathlib.Path(ctx.repo_dir) / "report.txt").write_bytes(b"private report\n")
+    intakes = []
+    guard = mcp_browser_guard.BrowserGuard(ctx)
+    real_intake = guard._file_intake
+    monkeypatch.setattr(guard, "_file_intake", lambda files: intakes.append(files) or real_intake(files))
+
+    class UploadingServer(_FakeTransport):  # the browser server: an upload asks the guard for the selected bytes
+        async def call_tool(self, cfg, name, arguments, timeout):
+            self.call_calls.append((cfg.id, name, dict(arguments or {}), timeout))
+            from ouroboros.tools.tool_result import ToolResult
+
+            block, retained = guard._file_intake(arguments["files"])
+            return ToolResult(status="ok", code="OK", text=f"{name}: {block or len(retained)}")
+
+    server = UploadingServer([{"name": tool, "description": "Set a page's file input",
+                               "input_schema": {"type": "object", "properties": {"files": {"type": "array"}}}}])
+    _wire_singleton(server)
+    mcp_client.reconfigure_from_settings(_settings(_good_server(id="chrome")))
+    mcp_client.get_manager().refresh_server("chrome")
+    call = {"selector": "input[type=file]", "files": [{"path": "report.txt"}]}
+    try:
+        supervisor.replies.append({"status": "SAFE", "reason": "the task asked to attach this report"})
+        assert registry.execute(f"mcp_chrome__{tool}", call).endswith(f"\n{tool}: 1")  # positive control: one file
+        assert len(server.call_calls) == len(intakes) == 1 and len(supervisor.calls) == 1
+        supervisor.later()
+        supervisor.replies.append({"status": "DANGEROUS", "reason": "a private report to an unknown recipient"})
+        refused = registry.execute(f"mcp_chrome__{tool}", call)
+    finally:
+        guard.close()
+    assert "waits for your human" in refused and "a private report to an unknown recipient" in refused, refused
+    assert len(supervisor.calls) == 2 and "report.txt" in json.dumps(supervisor.calls[1], default=str)
+    assert len(server.call_calls) == len(intakes) == 1  # effects=0: neither the server nor the intake ran again
 
 
 def test_execute_preserves_mcp_in_ordinary_skill_development(registry, monkeypatch):

@@ -174,6 +174,34 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
     assert.equal(controls.beginRecent(), false, 'a painted transcript gets no loading chrome');
 });
 
+test('a migrating store is waiting for ↓, never a failed read, also while its automatic retry is out', () => {
+    const doc = { byId: new Map(), createElement: (tag) => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const controls = createHistoryControls(messages);
+    const migrating = Object.assign(new Error('importing'), { status: 503, body: { reason_code: 'migrating' } });
+    const snapshot = { initialized: true, canOlder: true };
+    const facts = (state = snapshot) => { const { waiting, failed } = controls.render(state); return { waiting, failed }; };
+    controls.endRecent(migrating);
+    assert.equal(controls.recentFailed(), false);
+    assert.deepEqual(facts(), { waiting: true, failed: false });
+    assert.equal(controls.beginRecent(), true);
+    assert.deepEqual(facts(), { waiting: true, failed: false }, 'the read that asks again still waits');
+    controls.endRecent(new Error('offline'));
+    assert.equal(controls.recentFailed(), true);
+    assert.deepEqual(facts(), { waiting: false, failed: true }, 'an ordinary failure is one');
+    controls.endRecent();
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits too');
+    assert.deepEqual(facts({ ...snapshot, error: new Error('offline'), retryDirection: 'latest' }), { waiting: false, failed: true });
+    controls.endRecent(new Error('cut short'), true);  // a partial read's note heads the edge
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits, whichever note heads the edge');
+    controls.endRecent(new Error('offline'));
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: false, failed: true },
+        'an earlier refusal never hides the room\'s later ordinary failure');
+});
+
 // ─────────────── sticky hydration / replay contracts ──────────────────────
 
 test('sticky single-flight never swallows the post-completion resync', () => {
@@ -189,8 +217,8 @@ test('sticky single-flight never swallows the post-completion resync', () => {
     assert.match(fn, /run: \(\) => historyPager\.read\(\)/);
     assert.doesNotMatch(fn, /awaitInitialHydration/);
     // The reconnect branch of the open handler reads the newest page whole (frames sent while away are lost),
-    // through the read that folds every reconnect arriving meanwhile into one more.
-    assert.match(chatSource, /\? syncHistory\(\{ fromReconnect: true \}\)/);
+    // through the pager. chat_history_integration.test.js exercises queued reconnects and the actual re-fetch.
+    assert.match(chatSource, /isReconnect \? historyPager\.read\(\{ fromReconnect: true, whole: true,/);
     // Every failed sync resets the sticky promise.
     assert.ok((chatSource.match(/initialHydrationPromise = null;/g) || []).length >= 3);
 });
@@ -386,7 +414,7 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
     assert.match(
         chatSource,
-        /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
+        /if \(!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
     );
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
@@ -592,6 +620,29 @@ test('a restore that finds its node in place writes nothing to the feed', () => 
     bubble.bounds = { top: 70, width: 600, height: 80 }; // a card above grew 30 px
     assert.equal(restoreVisibleTimelineAnchor({ node: bubble, offset: 40 }), true);
     assert.deepEqual({ writes, scrollTop }, { writes: 1, scrollTop: 530 }, 'a moved node is put back');
+});
+
+test('scaled drawer restoration uses scroll pixels and ignores subpixel rounding noise', () => {
+    let scale = .96, top = 3458, writes = 0;
+    const feed = layoutNode({ height: 780, scroll: 6000 });
+    feed.offsetHeight = 780;
+    const row = layoutNode({ classes: ['chat-bubble'], data: {'data-history-id':'row'}, y:3401, height:150, parent:feed });
+    // Model WebKit's integer scroll offset while CSS scales its entire room.
+    const box = (y,h) => ({top:y*scale,bottom:(y+h)*scale,height:h*scale,width:390*scale});
+    feed.getBoundingClientRect = () => box(0,780);
+    row.getBoundingClientRect = () => box(3401-top,150);
+    const messages = Object.create(feed);
+    Object.defineProperty(messages,'scrollTop',{get:()=>top,set:v=>{writes++;top=Math.floor(v);}});
+    messages.contains = n => n === row;
+    const anchors=createTimelineAnchors({messagesDiv:messages,liveCardRecords:new Map()});
+    const saved=anchors.captureVisibleTimelineAnchor();
+    assert.ok(Math.abs(saved.offset+57)<.001);
+    top=0;
+    anchors.restoreVisibleTimelineAnchor(saved);
+    assert.equal(top,3458);
+    for (let i=0;i<30;i++) {scale=.96+i*.04/29; anchors.restoreVisibleTimelineAnchor(saved);}
+    assert.equal(top,3458);
+    assert.equal(writes,1);
 });
 
 // A small layout model: a child's top follows its parent's top, the parent's own
