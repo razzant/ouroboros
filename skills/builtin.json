@@ -1,16 +1,27 @@
 {
   "schema_version": 1,
   "skills": [
-    {"name": "telegram", "category": ["messaging"], "recommended": true},
-    {"name": "unix_computer_use", "category": ["computer"], "recommended": true, "default_on": true},
-    {"name": "windows_computer_use", "category": ["computer"], "recommended": true, "default_on": true},
-    {"name": "ui_design", "category": ["design"], "recommended": true, "default_on": true},
-    {"name": "templates", "category": ["writing"], "recommended": true, "default_on": true},
-    {"name": "device_voice", "category": ["media"], "recommended": true, "default_on": true},
-    {"name": "browser_speech", "category": ["media"]},
-    {"name": "live_conversation", "category": ["media"], "recommended": true, "default_on": true},
-    {"name": "gemini_live", "category": ["media"], "recommended": true, "default_on": true},
-    {"name": "grok_realtime", "category": ["media"], "recommended": true, "default_on": true},
-    {"name": "openai_realtime", "category": ["media"], "recommended": true, "default_on": true}
+    {"name": "telegram", "category": ["messaging"], "recommended": true,
+     "title": "Telegram", "pitch": "Chat with Ouroboros from your phone in Telegram", "needs": "Needs a Telegram bot token"},
+    {"name": "unix_computer_use", "category": ["computer"], "recommended": true, "default_on": true,
+     "title": "Computer control", "pitch": "Look at your screen and click, type and drag in apps"},
+    {"name": "windows_computer_use", "category": ["computer"], "recommended": true, "default_on": true,
+     "title": "Computer control", "pitch": "Read Windows apps and press their buttons by name"},
+    {"name": "ui_design", "category": ["design"], "recommended": true, "default_on": true,
+     "title": "Design help", "pitch": "Layouts, mockups, charts and icons checked by eye"},
+    {"name": "templates", "category": ["writing"], "recommended": true, "default_on": true,
+     "title": "Composer buttons", "pitch": "Ready-made buttons in the message box, and make your own"},
+    {"name": "device_voice", "category": ["media"], "recommended": true, "default_on": true,
+     "title": "Read aloud", "pitch": "Have replies read aloud with your device's voices"},
+    {"name": "browser_speech", "category": ["media"],
+     "title": "Dictation", "pitch": "Dictate messages with your browser's speech recognition"},
+    {"name": "live_conversation", "category": ["media"], "recommended": true, "default_on": true,
+     "title": "Voice calls", "pitch": "Talk with Ouroboros out loud (beta, pick a voice engine)"},
+    {"name": "gemini_live", "category": ["media"], "recommended": true, "default_on": true,
+     "title": "Gemini voice", "pitch": "Gemini as the voice engine for calls", "needs": "Needs a Gemini API key"},
+    {"name": "grok_realtime", "category": ["media"], "recommended": true, "default_on": true,
+     "title": "Grok voice", "pitch": "Grok as the voice engine for calls", "needs": "Needs an xAI API key"},
+    {"name": "openai_realtime", "category": ["media"], "recommended": true, "default_on": true,
+     "title": "OpenAI voice", "pitch": "OpenAI as the voice engine for calls", "needs": "Needs an OpenAI API key"}
   ]
 }

@@ -148,6 +148,7 @@ _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
     ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
     ("consciousness", "Consciousness", "When it acts", "", ""),
+    ("skills", "Skills", "What it can do", "Ouroboros starts with the ticked skills; clear any you do not want.", "Add or remove skills any time on the Skills page."),
     ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
@@ -567,18 +568,21 @@ def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None, first
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
                           consciousness_enabled: Optional[bool] = None, consciousness_first_state: bool = True,
-                          document: Optional[dict] = None) -> dict:
+                          document: Optional[dict] = None, starter_choice: bool = True) -> dict:
+    """The wizard's bootstrap. ``starter_choice``: completion honors the starter ticks here
+    (``skill_starter.starter_choice_open``); without it the Skills step is absent, as Consciousness is without its offer."""
     from ouroboros.deployment_policy import policy_state
 
     normalized_host = "web" if host_mode == "web" else "desktop"
     offer = consciousness_offer(settings, enabled=consciousness_enabled, first_state=consciousness_first_state)
+    optional = {"consciousness": offer["offered"], "skills": starter_choice}
     return {
         "hostMode": normalized_host,
         # Display provenance only; completion re-proves install eligibility.
         # Unknown/legacy callers preserve existing model choices conservatively.
         "freshInstall": fresh_install,
         "supportsLocalRuntimeControls": normalized_host == "web",
-        "stepOrder": [step for step in _STEP_ORDER if step != "consciousness" or offer["offered"]],
+        "stepOrder": [step for step in _STEP_ORDER if optional.get(step, True)],
         "modelDefaults": {key: dict(value) for key, value in _MODEL_DEFAULTS.items()},
         "localPresets": {key: dict(value) for key, value in _LOCAL_PRESETS.items()},
         "modelSuggestions": list(_MODEL_SUGGESTIONS),

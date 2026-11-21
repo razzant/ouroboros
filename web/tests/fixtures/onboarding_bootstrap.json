@@ -429,6 +429,13 @@
         "title": "Consciousness"
       },
       {
+        "copy": "Ouroboros starts with the ticked skills; clear any you do not want.",
+        "footer": "Add or remove skills any time on the Skills page.",
+        "id": "skills",
+        "railCopy": "What it can do",
+        "title": "Skills"
+      },
+      {
         "copy": "Review subscription quotas and optional API spending limits.",
         "footer": "",
         "id": "budget",
@@ -677,6 +684,7 @@
     "models",
     "review_mode",
     "consciousness",
+    "skills",
     "budget",
     "summary"
   ],

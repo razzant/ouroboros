@@ -62,7 +62,8 @@ def test_offered_exactly_while_a_first_state_is_to_come_and_setup_has_never_comp
     for enabled in (False, True, None):
         assert consciousness_offer({}, enabled=enabled, first_state=False)["offered"] is False
     assert consciousness_offer({}, enabled=False, first_state=False)["enabled"] is False  # shown, never offered
-    assert build_setup_bootstrap({}, "web")["stepOrder"] == ["accounts", "models", "review_mode", "consciousness", "budget", "summary"]
+    assert build_setup_bootstrap({}, "web")["stepOrder"] == [
+        "accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
     assert "consciousness" not in build_setup_bootstrap({}, "web", consciousness_first_state=False)["stepOrder"]
     assert "consciousness" not in build_setup_bootstrap({ONBOARDING_COMPLETED_KEY: "t"}, "web")["stepOrder"]
 

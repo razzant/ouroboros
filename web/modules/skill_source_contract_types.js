@@ -120,7 +120,10 @@
  * @property {string} source_name
  * @property {string=} trust
  * @property {string} name
+ * @property {string=} title  // the catalog's human name; "" when it has none (show `name`)
  * @property {string=} description
+ * @property {string=} pitch  // the catalog's one line for people; "" when it has none
+ * @property {?string=} needs  // the prerequisite in words; "" none, null when the catalog says nothing
  * @property {string[]=} category
  * @property {string=} version
  * @property {string=} digest
@@ -238,7 +241,25 @@
  */
 
 /**
- * `GET /api/onboarding/starter-skills`.
+ * One skill the setup's Skills step offers; `title` and `pitch` are the catalog's optional words ("" when it has
+ * none: show `name` and `description`), `needs` its prerequisite in words ("" none, null when the catalog says
+ * nothing); `recommended` means ticked by the starter list.
+ * @typedef {Object} StarterSkillItem
+ * @property {string} id
+ * @property {string} name
+ * @property {string=} title
+ * @property {string=} pitch
+ * @property {?string=} needs
+ * @property {string=} description
+ * @property {Object=} icon  // the catalog's icon spec, {} for none
+ * @property {boolean=} official
+ * @property {boolean=} builtin
+ * @property {boolean=} recommended
+ * @property {string[]=} needs_keys
+ */
+
+/**
+ * `GET /api/onboarding/starter-skills`: groups are `{category, label, items: StarterSkillItem[]}`.
  * @typedef {Object} StarterSkillsResponse
  * @property {Object[]} groups
  * @property {Object[]} hub_rows

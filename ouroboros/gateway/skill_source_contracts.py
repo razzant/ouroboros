@@ -151,7 +151,10 @@ class SkillCatalogItem(TypedDict, total=False):
     source_name: Required[str]
     trust: str
     name: Required[str]
+    title: str  # the catalog's human name ("" when it has none: show ``name``)
     description: str
+    pitch: str  # the catalog's one line for people ("" when it has none)
+    needs: Optional[str]  # the prerequisite in words ("Needs a Telegram bot token"); "" none, null the catalog says nothing
     category: List[str]
     version: str
     digest: str
@@ -284,11 +287,30 @@ class SkillUninstallResponse(TypedDict, total=False):
     error: str
 
 
+class StarterSkillItem(TypedDict, total=False):
+    """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
+    ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
+    when the catalog says nothing); ``recommended`` means ticked by the starter list; ``needs_keys`` names every
+    setting the skill reads, required or optional."""
+
+    id: Required[str]
+    name: Required[str]
+    title: str
+    pitch: str
+    needs: Optional[str]
+    description: str
+    icon: Dict[str, Any]  # the catalog's icon spec, {} for none
+    official: bool
+    builtin: bool
+    recommended: bool
+    needs_keys: List[str]
+
+
 class StarterSkillsResponse(TypedDict):
     """``GET /api/onboarding/starter-skills``: built-in and Official skills grouped by category (the ticked
     ones are the starter list), the two hub rows whose trust the owner confirms, and source states."""
 
-    groups: List[Dict[str, Any]]  # [{category, label, items: [{id, name, description, official, builtin, recommended, needs_keys}]}]
+    groups: List[Dict[str, Any]]  # [{category, label, items: [StarterSkillItem]}]
     hub_rows: List[Dict[str, str]]  # [{id, name, trust, part}]
     sources: List[SkillSourceRow]
 
@@ -301,5 +323,5 @@ __all__ = [
     "SkillSourceChangeResponse", "SkillSourceProbeRequest", "SkillSourceProbeResponse", "SkillSourceRow",
     "SkillSourceSuggestion", "SkillSourcesResponse", "SkillUninstallResponse", "SkillUpdateRequest",
     "SkillUpdateResponse",
-    "StarterSkillsResponse",
+    "StarterSkillItem", "StarterSkillsResponse",
 ]

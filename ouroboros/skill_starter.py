@@ -29,6 +29,8 @@ log = logging.getLogger(__name__)
 STARTER_SETTING = "OUROBOROS_STARTER_SKILLS"
 MARKER_FILENAME = "skill_starter.json"
 _RETRY_CODES = frozenset({"fetch_failed", "source_unread"})
+# A marker in one of these states has its starter list behind it: a completed setup's ticks change nothing there.
+_LIST_RAN = frozenset({"done", "running", "pending", "upgrade"})
 _LOCK = threading.Lock()
 _THREADS_LOCK = threading.Lock()
 _THREADS: set[threading.Thread] = set()
@@ -120,7 +122,8 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
     for item in _offer(drive_root, rows, repo_dir, ticked):
         category = (item.get("category") or ["other"])[0]
         groups.setdefault(category, []).append({
-            "id": item["id"], "name": item["name"], "description": item.get("description", ""),
+            "id": item["id"], "name": item["name"], "title": item.get("title", ""), "pitch": item.get("pitch", ""),
+            "needs": item.get("needs"), "description": item.get("description", ""), "icon": item.get("icon") or {},
             "official": bool(item.get("official")), "builtin": item["source_id"] == "builtin",
             "recommended": item["id"] in ticked, "needs_keys": list(item.get("needs_keys") or []),
         })
@@ -323,11 +326,24 @@ def skills_startup(drive_root: pathlib.Path, settings: Dict[str, Any], *, provid
     return at_startup(drive_root, settings, provider_ready=provider_ready)
 
 
+def starter_choice_open(drive_root: pathlib.Path, settings: Dict[str, Any]) -> bool:
+    """Whether a completed setup's starter ticks are honored here (``after_onboarding``): this data root's starter
+    list never ran. Before startup classifies the root, the evidence ``classify_first_start`` reads decides. The
+    setup's Skills step is offered only then (``settings_setup_contract.build_setup_bootstrap``). Never raises: a
+    root whose evidence cannot be read offers no choice."""
+    try:
+        state = str(read_marker(drive_root).get("state") or "")
+        return state not in _LIST_RAN if state else not _existing_install(drive_root, settings)
+    except Exception:
+        log.warning("Starter skill choice could not be judged", exc_info=True)
+        return False
+
+
 def after_onboarding(drive_root: pathlib.Path, ids: Optional[List[str]], *,
                      repo_dir: Optional[pathlib.Path] = None) -> str:
     """Run the installer for the owner's ticks once onboarding completed (``None`` = the default list)."""
     state = str(read_marker(drive_root).get("state") or "")
-    if state in {"done", "running", "pending", "upgrade"}:
+    if state in _LIST_RAN:
         return state
     if ids is not None and not ids:
         _write_marker(drive_root, state="done", origin="onboarding", requested=[], results={})
@@ -363,5 +379,5 @@ def onboarding_skill_choices(body: Dict[str, Any], settings: Dict[str, Any]) -> 
 __all__ = [
     "MARKER_FILENAME", "STARTER_SETTING", "after_onboarding", "at_startup", "classify_first_start", "default_starter_ids",
     "join_starters", "onboarding_skill_choices", "read_marker",
-    "run_starter", "schedule_starter", "skills_startup", "starter_groups", "starter_ids",
+    "run_starter", "schedule_starter", "skills_startup", "starter_choice_open", "starter_groups", "starter_ids",
 ]
