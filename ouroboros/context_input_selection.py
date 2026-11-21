@@ -343,8 +343,8 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
 
 def _wake_forms(wake: Dict[str, Any]) -> List[str]:
     """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
-    human's card answers whole beside the exact pointer), an older wake's middle step when it bound one, then the
-    bare pointer when bound apart. The choice among them is only ever their actual fit."""
+    human's card answers and the standing sections whole beside the exact pointer), an older wake's middle step when
+    it bound one, then the bare pointer when bound apart. The choice among them is only ever their actual fit."""
     keys = ("projection_text", "owner_projection_text", "pointer_text")
     return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
 
@@ -359,14 +359,14 @@ def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str
 
 def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
     """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
-    ``form`` is ``whole``, ``projection`` (my human's card answers inline) or ``pointer`` (the bare pointer,
-    nothing inline)."""
+    ``form`` is ``whole``, ``projection`` (my human's card answers or the standing sections inline) or ``pointer``
+    (the bare pointer, nothing inline)."""
     forms = _wake_forms(wake)
     if content is None:
         form = "whole"
-    elif content in forms[:-1]:  # any bound form before the last carries my human's words inline
+    elif content in forms[:-1]:  # any bound form before the last carries my human's words or standing facts inline
         form = "projection"
-    else:  # the last bound form, or a projection with no words of mine: the bare pointer
+    else:  # the last bound form, or a projection with nothing inline: the bare pointer
         form = "pointer"
     return {"checkpoint_kind": "wake_input_inline" if form == "whole" else "wake_input_by_source", "round": round_idx,
             "after_overflow": after_overflow, "form": form, "composition": wake.get("composition"),

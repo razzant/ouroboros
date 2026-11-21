@@ -159,7 +159,8 @@ def ended_without_success(row: Any) -> bool:
     root's retained budget cause can answer ``hard_limit_reached`` before the offer reads the stop) nor wrapped up at
     their word (``owner_requested_finalization``); not cancelled by a focus's tool; not a wake (work a wake started
     is not one); no successor: a Continue past ``bound``, a supersession or a retry under another id. A Continue
-    bound and not yet admitted keeps it (its line names the successor)."""
+    bound and not yet admitted keeps it (its line names the successor). Presence's own rows are not judged here:
+    ``fallen_works`` skips them by their typed columns."""
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION, recorded_cause
     from ouroboros.owner_continue import OWNER_STOP_SOURCES
 
