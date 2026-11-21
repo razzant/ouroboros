@@ -1228,25 +1228,20 @@ export function reconcileHydratedDirectActivities(
 }
 
 /**
- * Card-set durable-truth reconcile (stuck "Working..." card class). A card
- * minted by a replayed frame whose own terminal row never reached this client
- * (lost task_done, lineage-only subagent final re-minting a finished parent)
- * kept its chip on "Working..." forever: every existing terminal path keys on
- * the card's OWN id reaching a snapshot or frame first, and such a card never
- * sets the room's status (the server's work projection does). This selector
- * closes the gap from the card side: given the
- * compact card projection `{id, finished, isSubagent, connected}` and the set
- * of ids the GLOBAL /api/state snapshot confirms live, it returns the mounted
- * unfinished foreground card ids the snapshot does NOT vouch for. Each one is
- * handed to observeMissingManagedTask, whose durable task-detail read finishes
- * the card ONLY on a proven terminal status (`log_events.js::isTerminalTaskDetail`); a 404 or
- * nonterminal detail keeps the id and retries on the next snapshot (owner
- * Q3=A: no timers, no id-shape heuristics, no fabricated terminal).
+ * Card-set durable-truth reconcile (stuck "Working..." card class). A card minted by a replayed frame whose own
+ * terminal row never reached this client (lost task_done, lineage-only subagent final re-minting a finished parent)
+ * kept its chip on "Working..." forever: every existing terminal path keys on the card's OWN id reaching a snapshot
+ * or frame first, and such a card never sets the room's status (the server's work projection does). This selector
+ * closes the gap from the card side: given the compact card projection `{id, finished, isSubagent, connected}` and
+ * the set of ids the GLOBAL /api/state snapshot confirms live, it returns the mounted unfinished foreground card
+ * ids the snapshot does NOT vouch for. Each one is handed to observeMissingManagedTask, whose durable task-detail
+ * read finishes the card ONLY on a proven terminal status (`log_events.js::isTerminalTaskDetail`); a 404 or
+ * nonterminal detail keeps the id and retries on the next snapshot (owner Q3=A: no timers, no id-shape heuristics,
+ * no fabricated terminal).
  *
- * Skipped here: finished cards, detached roots (not part of the reducer's
- * scan), subagent cards (their parent owns the lineage; observe filters them
- * too), reusable slots ('active' — many cycles per id, no single durable
- * result) and the 'chat' fallback group id. Pure for node tests.
+ * Skipped here: finished cards, detached roots (not part of the reducer's scan), subagent cards (their parent owns
+ * the lineage; observe filters them too), reusable slots ('active' — many cycles per id, no single durable result)
+ * and the 'chat' fallback group id. Pure for node tests.
  */
 export function unconfirmedForegroundCardIds(cards, activeIds) {
     const out = [];
@@ -1268,7 +1263,9 @@ export function markIngressSaved(root, row) {
     if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
     const bubble = [...root.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
         .find((node) => node.dataset.clientMessageId === cmid), prior = bubble?.querySelector('[data-ingress-saved]');
-    if (!bubble || (prior && (prior.dataset.ingressSaved !== 'pending' || prior.dataset.ingressSaved === state))) return false;  // `Input saved` and a kept send's delivery doubt are final
+    const level = prior?.dataset.ingressSaved;  // `Input saved` and a kept send's delivery doubt are final: only a running host's own fact (dispatched, pending) ends that doubt
+    const ended = level === 'unconfirmed' && (row.ingress_dispatched === true || state === 'pending');
+    if (!bubble || (prior && !ended && (level !== 'pending' || level === state))) return false;
     const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: 'Input saved' });
     note.dataset.ingressSaved = state;
     for (const doubt of [prior, bubble.querySelector('[data-ingress-unconfirmed]')]) doubt?.remove();  // the saved row settles a "Send again" doubt

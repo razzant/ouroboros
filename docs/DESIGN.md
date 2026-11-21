@@ -450,7 +450,7 @@ a route change clears it. Web search is its own Source and Model:
 Auto lists the routes it may use, a chosen source is strict, and skills, MCP
 and browser tools stay independent.
 
-Tabs are views of one page (Skills: Installed, Browse, Sources), never a section's pages, which are its list
+Tabs are views of one page, never a section's pages, which are its list
 (§10 "A section with pages"); they expose one selected view and one keyboard entry point. Arrow keys and
 Home/End move through available tabs; a tab strip is a strip, so it wraps and never scrolls, and a restored
 tab is already in view. Menus and
@@ -1864,7 +1864,7 @@ value is set (hidden)` (`· could not be read` when its read failed: an earlier 
 granted in Skills`; an enabled reader missing its grant explains that it cannot run after saving until the keys
 are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
 the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
-re-enabled. Skills › Installed shows an enabled skill's unset (or unreadable) declared secret as one
+re-enabled. Extensions › Skills shows an enabled skill's unset (or unreadable) declared secret as one
 neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
 refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
 the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
@@ -2003,7 +2003,8 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   echo, the bubble says "Not confirmed as saved" with "Send again", which
   resends the same frame and id (the host rejoins it if it was saved after all,
   never a second message), and "Discard", which forgets this tab's copy (never
-  an upload). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
+  an upload); a selected reply, which left the composer when sent, adds "Send as
+  new" (below). Nothing resends by itself. In dark, queued bubbles retain opaque readable ink; the queued
   words carry the state. Light retains its existing opacity. The frame is kept, with no count bound,
   until that id's saved echo or history row settles it (a row the running host
   has not yet dispatched keeps it until the host says which): a bubble the feed
@@ -2018,8 +2019,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   running host) says "Saved, not delivered." and keeps Send again: the host
   hands that row over once. A kept message whose saved row a host process before
   a restart took says "Saved; delivery not confirmed." with Send as new, which
-  only puts the words back in the composer as a new message: nothing is
-  replayed. Rows nobody kept stay plain history ("Input saved"). That plain
+  only puts the words back in the composer, after words already typed, as a
+  new message: nothing is replayed. While Send is busy or the composer holds
+  a staged reply or file it asks to finish or clear that draft first; a
+  selected reply returns with its quote, and only into an empty composer.
+  Rows nobody kept stay plain history ("Input saved"). That plain
   saved fact is one quiet tick before the message's time, its words its
   accessible text and a pointer's title: saved, never read or started, so no
   second tick, and a row the host never said is saved shows none; a doubt, an
@@ -2027,25 +2031,26 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
-Reply addresses a row for Ouroboros to interpret, never routes. A Main reply to a Project message also
-appears there at its time as the same Main message (owner 28.10, A), without telling, waking or resuming
-anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row menus; work cards in
-menus only, never hover-only. Reply stages the composer's first-line strip (`Replying to`, quoted author,
-one line, ×; Esc cancels). Send carries the address; the host builds the snippet. Questions use their own field.
+A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
+(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+menu, questions their own field. Select words in one message for **Reply to quote** beside them or
+in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
+Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes
+the words, reply and files before waiting. A send refused before the socket or its queue took it keeps the draft; once taken, it frees the
+field for the next message, a passage like any other, and a later draft stays. Its bubble keeps the unconfirmed row: Send again reuses
+the message ID, and a passage's Send as new puts its words and quote back into an empty composer.
 
-One quote component serves bubbles, strips and relays: above the text, a 2 px
-bar and tint in the quoted author's ink (the tint lies on the quote glass, so inside a
-dark voice it reads as a shade of graphite cooled or warmed by the quoted author, not as
-a second bubble; inside the dark Ouroboros voice a quote of Ouroboros lies on that voice's
-capsule step, its author in the voice's readable word), one line cut on a word; a photo leads
-with its thumbnail. Pressing a reply quote reveals the exact row, loading its
-bounded page in this room when present, otherwise its available home. Containing
-timelines open and scroll; the line is focused and highlighted below the header.
-A card, portal or retained copy cannot substitute. Refusal/failure preserves the view and newest-following intent; a toast explains why, offering Try again
-only if a retry can differ. New gestures/navigation cancel the read. Only the quoted stream is positioned:
-the other (narration beside owner speech or vice versa) stays unloaded down that chain until `Scroll to
-latest message`. Old sources read no newer messages. Ouroboros quotes its addressee only when not directly
-above; its own card does not count.
+Bubbles, strips and relays share quote glass with a 2 px bar and the quoted author’s tint over the
+bubble’s graphite in dark mode. Ouroboros quoting Ouroboros uses its capsule step and readable
+author ink. Whole-row replies show the host preview. Passages label the sender’s selection and name
+the source author, including for screen readers. Show all expands the text. Photos lead with a thumbnail. Pressing a quote loads the exact row’s
+bounded page here if present, otherwise in its home. Timelines open and scroll to the focused row
+below the header. A passage also highlights its saved range; if it changed, a notice explains why
+only the row is marked. Cards, portals and retained copies cannot substitute. A failed jump keeps
+the view and newest-following intent; its toast offers Try again only for retryable failures.
+New gestures or navigation cancel the read. Only the quoted stream loads: its sibling stays
+unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
+messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):
@@ -3332,7 +3337,7 @@ while Main or a Project in the list waits for the owner, the card's words for re
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
 with + (New project) at the end of its row; then the Projects, the column's only scroller; then the six sidebar
-sections, Circles, Files, Skills, Widgets, Dashboard and Settings, at the bottom edge, as many to a line as hold
+sections, Circles, Files, Extensions, Widgets, Dashboard and Settings, at the bottom edge, as many to a line as hold
 their names whole (three in a wide sidebar, two at its default width and in the drawer, one where two do not fit),
 each its glyph and its word, the one where you are the strong crimson capsule; and under them the
 foot, the version and the update, above the safe area. The Projects take all the free room between the field and
@@ -3373,13 +3378,13 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 
 ### A section with pages
 
-Settings and Dashboard hold a list beside the open page: from 40rem
-of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it. The band holds the list's
-controls (Settings' search; on a phone, in the list) and the page's controls. Its chosen row names the page; the heading stays for readers,
-and a deeper Settings level keeps its name. A page is always open: the section's first page the first time
-(Settings: Models), later the last one opened on the device. Narrower, one column shows the list, under the
-section's name led by Ouroboros's picture, or the page, under Back and its name. Choosing a row keeps the list
-where it was and the page arrives on `--motion-fade`. A section's pages are never tabs (§3).
+Settings, Dashboard and Extensions share a list and page layout. From a 40rem section box, the list is a rail
+(`--section-rail-w`) beside its page. The band holds list controls (Settings' search; on phones, in the list) and
+page controls. The chosen row names its page; the heading stays for readers, deeper levels keep their names.
+A page is always open: initially Models in Settings, Skills in Extensions; later the device's last choice.
+Extensions holds Skills, MCP servers, Browse and Sources. Editors open over their lists; Sources’ Publish one jumps to Skills with Back.
+Narrower, the list stands under the section name and Ouroboros's picture, or the page under Back and its name.
+Choosing a row keeps the list's position; the page arrives on `--motion-fade`. Section pages are never tabs (§3).
 
 ### The drawer
 
@@ -3493,8 +3498,8 @@ glyphs (`web/modules/page_icons.js`).
 ### Page header
 
 The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
-Back with the arrow, its destination in its name: the top layer's, peeled one at a time (“Back to
-Settings › Tools”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
+Back with the arrow, its destination in its name: the top layer's, peeled one by one (“Back to
+Extensions › Skills”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
 18px below a browser's top. Rails use the shared fade;
@@ -3515,7 +3520,7 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Skills keeps its Back, tabs and short actions in one row; below 33rem with a return, 30rem without, tabs sit below. On phones Update stays beside the tabs; Refresh ends the title row.
+In Extensions, Back names the return. Each page owns its actions: Skills keeps Refresh and Update all in the header; MCP controls stay with the server.
 Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
 scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`

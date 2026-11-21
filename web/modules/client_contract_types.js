@@ -12,7 +12,13 @@
  * @property {string=} post_commit_failed
  */
 /**
+ * @typedef {Object} ReplyExcerpt
+ * @property {string} text
+ * @property {number} start_utf16
+ */
+/**
  * @typedef {Object} ChatInbound
+ * @property {ReplyExcerpt=} reply_excerpt
  * @property {string=} reply_to
  * @property {"chat"} type
  * @property {string} content
@@ -421,6 +427,8 @@
 /**
  * A `reply_to` reference as the host resolved it; an unresolved one is `{address, unresolved: true}`.
  * @typedef {Object} ChatReplyReference
+ * @property {string=} row_sha256  // full digest of the resolved source row
+ * @property {ReplyExcerpt=} excerpt
  * @property {string=} address
  * @property {number=} chat_id
  * @property {'user'|'assistant'|'system'=} role
@@ -443,6 +451,8 @@
  * @property {PresenceContact=} presence_contact
  * @property {string=} wait_ended_at
  * @property {string=} row_address
+ * @property {boolean=} reply_excerpt_disabled  // a mixed or wordless card display, not one authored passage
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay
@@ -1152,6 +1162,7 @@
  * @typedef {Object} CardOutbound
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label
  * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay

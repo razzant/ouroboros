@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
+from ouroboros.gateway.reference_contracts import ChatReferenceFields, ReplyExcerpt, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
@@ -86,6 +86,7 @@ class ChatInbound(TypedDict):
     # Multi-project chat routing: the owner stays user_id 1; chat_id selects the thread, project_id scopes memory.
     chat_id: NotRequired[int]
     project_id: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
     reply_to: NotRequired[str]  # Host resolves the selected row/card at acceptance.
     client_surface: NotRequired[dict]
 
@@ -147,6 +148,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     ingress_pending: NotRequired[bool]  # This live host process accepted the row and has entered or refused neither yet.
     attachments: NotRequired[List[ChatAttachmentView]]  # owner message's attachments (same views as history)
     text_placeholder: NotRequired[bool]  # owner row whose text the host wrote (no words were sent); shown as no caption
+    reply_excerpt_disabled: NotRequired[bool]  # a wordless or mixed card display; whole-row Reply still works
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]

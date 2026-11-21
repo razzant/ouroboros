@@ -6950,7 +6950,8 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
     .dashboard-shell[data-section-view="auto"] > .dashboard-panels { display: flex; }
     /* The chosen list row names its pane; the heading remains available to readers. */
     .section-lead-page > [data-dashboard-lead-name],
-    #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name] {
+    #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name],
+    #page-skills[data-extensions-depth="1"] .section-lead-page > [data-extensions-lead-name] {
         position: absolute;
         width: 1px;
         height: 1px;
@@ -7008,6 +7009,54 @@ html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
+
+/* Extensions is a place with pages (extensions.js), drawn as the Dashboard is: the section list (Skills, MCP servers,
+   then the skill catalog's Browse and Sources) beside the open page from a 40rem box, the list or the page alone below
+   it. MCP servers, a server's page and a skill's own form are pages of the page registry (settings.css); the three
+   skill views are one block in the page's column, each view's search row over their one scroller. The band ends with
+   the open skill view's actions (Update all, Refresh); a page without them hides that end. */
+.extensions-mark[hidden] { display: none; }
+.extensions-toolbar { margin-inline-start: auto; }
+.extensions-toolbar[hidden] { display: none; }
+html[data-layout="stack"] #page-skills > .app-page-header .app-page-title-block { display: contents; }
+html[data-layout="stack"] #page-skills > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
+/* A return lives in the page column even when the list still fits beside it. */
+html[data-layout="stack"] #page-skills > .app-page-header[data-return] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    html[data-layout="stack"] #page-skills[data-section-view="home"] > .app-page-header:not([data-return]) .app-page-lead { display: none; }
+    #page-skills[data-section-view="home"] > .app-page-header[data-return] .section-lead-page { display: flex; }
+    #page-skills[data-section-view="home"] > .app-page-header[data-return] .section-lead-rail { display: none; }
+    html[data-layout="stack"] #page-skills > .app-page-header[data-return] .app-page-title-row,
+    html[data-layout="stack"] #page-skills[data-section-view="page"] > .app-page-header > .app-page-leading,
+    html[data-layout="stack"] #page-skills[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
+    html[data-layout="stack"] #page-skills[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+}
+.extensions-shell > .settings-levels > .extensions-views {
+    grid-area: 1 / 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+.extensions-shell > .settings-levels > .extensions-views[hidden] { display: none; }
+.extensions-views:focus { outline: none; }
+.extensions-views > .skills-search-chrome { margin-top: var(--space-2); }
+@container sectionplace (min-width: 40rem) {
+    /* With Places hidden, the lead spans the whole header and accounts for the full rail. */
+    html[data-layout="stack"] #page-skills > .app-page-header[data-return] .section-lead {
+        grid-template-columns: calc(var(--section-rail-w) - var(--page-header-padding-x) - var(--section-rail-end)) minmax(0, 1fr);
+    }
+    .extensions-shell[data-section-view="page"] .extensions-views > :is(.skills-search-chrome, .skills-scroll) { padding-inline-start: var(--space-4); }
+}
+/* A view arrives as a registry page does (settings.css): opacity and 8 px on --motion-fade. */
+.extensions-views[data-settings-arrive="wait"] { opacity: 0; }
+.extensions-views[data-settings-arrive="in"] { animation: settings-page-in var(--motion-fade) var(--ease-sheet); }
+@media (prefers-reduced-motion: reduce) {
+    .extensions-views[data-settings-arrive="in"] { animation-name: settings-page-fade; }
+}
+/* The Sources page is named by the band over it; its card keeps its status and Add source, its heading for readers. */
+.extensions-views .skills-sources-id > h3 { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 .dashboard-panels,
 .dashboard-panel {
@@ -7266,7 +7315,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     overflow: hidden;
 }
 
-/* Skills page. */
+/* Extensions (the skill views' place) and Widgets. */
 #page-skills,
 #page-widgets {
     flex-direction: column;
@@ -7285,42 +7334,11 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     padding: var(--space-4) var(--space-5) var(--space-5);
 }
 
-/* Skills keeps Back and the tabs next to it, 8px apart, independent of its trailing actions. A narrow page column
-   gives the tabs the one line below the header; the list starts at the strip's edge. */
-#page-skills { container: skillspage / inline-size; }
+/* Extensions keeps the sectionplace container; its skill views own only their search and scrolling content.
+   The chrome row keeps the page's inline inset as the scroller does, so on a phone the filter strip's
+   edge-to-edge bleed cancels exactly that inset: it runs to the page's edges without leaving the pane. */
 #page-skills .skills-scroll { padding-top: 0; }
-#page-skills .skills-scroll { padding-inline: var(--page-header-padding-x); }
-#page-skills > .app-page-tabs { padding-bottom: var(--space-2); }
-#page-skills > .app-page-tabs:not([hidden]) { display: flex; align-items: flex-start; gap: var(--space-2); }
-/* Update stands level with the tabs: the strip lends its tabs' shadows room above them too. */
-#page-skills > .app-page-tabs > .btn { margin-top: var(--space-2); }
-#page-skills > .app-page-tabs > .app-tab-strip {
-    flex: 1;
-    padding-inline: 0;
-    padding-bottom: var(--space-4);
-    margin-bottom: calc(-1 * var(--space-4));
-}
-html[data-layout="docked"] #page-skills > .app-page-header[data-lead] {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas: "back tabs toolbar";
-    gap: 0 var(--space-2);
-    overflow: visible;
-    mask-image: none;
-    -webkit-mask-image: none;
-}
-html[data-layout="docked"] #page-skills > .app-page-header[data-lead]:not([data-return]) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tabs toolbar"; }
-html[data-layout="docked"] #page-skills .app-page-title-block,
-html[data-layout="docked"] #page-skills .app-page-lead { display: contents; }
-html[data-layout="docked"] #page-skills .app-page-title-row { display: none; }
-html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
-html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: var(--page-header-row-h); }
-html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
-@container skillspage (max-width: calc(33rem - 0.02px)) {
-    html[data-layout="docked"] #page-skills > .app-page-header[data-lead][data-return] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
-}
-@container skillspage (max-width: calc(30rem - 0.02px)) {
-    html[data-layout="docked"] #page-skills > .app-page-header[data-lead] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
-}
+#page-skills :is(.skills-scroll, .skills-search-chrome) { padding-inline: var(--page-header-padding-x); }
 
 .skills-search-chrome {
     flex: 0 0 auto;
@@ -7771,6 +7789,9 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
 .skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
 .skills-card-action-row { margin-top: auto; padding-top: var(--space-1); }
 .skills-card-actions-end { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+/* The row's sentence is sized by its own words, so a row too narrow for both wraps the action under it and
+   the sentence keeps the row's whole line (DESIGN "a row too narrow for both gives it its own line"). */
+.settings-action-row.skills-card-action-row > :first-child { flex-basis: max-content; }
 
 /* Sources: rows on the Accounts anatomy (DESIGN §6); the trust value is a setting, the health a status sentence. */
 .skills-sources-card { gap: var(--space-3); }
@@ -10801,6 +10822,8 @@ html[data-layout="stack"] .project-panel {
 /* A button that carries a paragraph is a card (DESIGN.md principle 4): its own height and inset, the inner radius, the
    bubble's text size — chosen through the control tokens, never by writing the box. */
 .chat-file-card { --control-h: auto; --control-pad-y: 9px; --control-pad-x: 9px; --control-radius: var(--radius-inner); --button-font-size: 1em; font-weight: inherit; }
+/* Its wrapper wears the same radius, so the quote-target ring and the keyboard outline (both drawn on the wrapper) follow the card. */
+.chat-file-item { border-radius: var(--radius-inner); }
 
 .chat-file-thumb,
 .chat-file-glyph {
@@ -11899,12 +11922,12 @@ html[data-layout="stack"] .project-panel {
     from { box-shadow: 0 0 0 3px var(--accent-25); }
     to { box-shadow: 0 0 0 3px transparent; }
 }
-:is(.chat-bubble, .chat-live-card, .chat-live-line).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: chat-quote-target 1.4s ease-out; }
 /* A row that takes focus only to be returned to (a quote's target, a closed row menu) shows the one keyboard ring. */
-:is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus { outline: none; }
-:is(.chat-bubble, .chat-live-card, .chat-live-line)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item)[tabindex="-1"]:focus { outline: none; }
+:is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item)[tabindex="-1"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-    :is(.chat-bubble, .chat-live-card, .chat-live-line).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
+    :is(.chat-bubble, .chat-live-card, .chat-live-line, .chat-gallery-item, .chat-file-item).is-quote-target { animation: none; box-shadow: 0 0 0 3px var(--accent-25); }
 }
 
 /* === The quote panel (docs/DESIGN.md "Replies"): one component (chat_reply_quote.js) inside a bubble and
@@ -11947,6 +11970,28 @@ html[data-layout="stack"] .project-panel {
     font: inherit;
     text-align: start;
     cursor: pointer;
+}
+.chat-reply-selection-action {
+    position: fixed;
+    z-index: var(--z-popover);
+    top: var(--quote-top);
+    left: var(--quote-left);
+}
+.chat-bubble[data-select-text] :is([data-reply-body], [data-reply-caption]) {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+::highlight(reply-excerpt) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
+.chat-quote[data-excerpt] { display: flex; align-items: center; gap: var(--space-2); padding-inline-end: var(--space-2); }
+.chat-quote[data-excerpt] .chat-quote-main { flex: 1; }
+.chat-quote[data-excerpt] .chat-quote-head { flex-wrap: wrap; row-gap: 0; }
+.chat-quote[data-excerpt] .chat-quote-text { display: block; white-space: pre; }
+.chat-quote[data-excerpt] .chat-quote-text[data-expanded="1"] {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-block-size: 32vh;
+    overflow-y: auto;
 }
 .chat-quote-main:hover { background: var(--menu-item-hover); }
 /* A quoted photo leads the panel with its thumbnail (the head and the line stand to its right). */

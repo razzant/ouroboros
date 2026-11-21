@@ -11,8 +11,9 @@ function fixture(getUserMedia) {
         if (!nodes.has(selector)) nodes.set(selector, {dataset:{},textContent:'',replaceChildren(...children) {this.children = children;}});
         return nodes.get(selector);
     };
-    const root = Object.assign(new EventTarget(), {querySelector:node});
-    const env = Object.assign(new EventTarget(), { document:{createElement:() => ({})}, CustomEvent,
+    const root = Object.assign(new EventTarget(), {querySelector:node,isConnected:true,rects:[{}],getClientRects() {return this.rects;}});
+    const doc = Object.assign(new EventTarget(), {createElement:() => ({}),hidden:false});
+    const env = Object.assign(new EventTarget(), { document:doc, CustomEvent,
         navigator:{mediaDevices:{getUserMedia,enumerateDevices:async () => [{kind:'audioinput',deviceId:'mic',label:'Fixture mic'}]}},
         localStorage:{getItem:() => null,setItem() {}}, AudioContext:class {},
         setTimeout:() => 1,clearTimeout() {},cancelAnimationFrame() {} });
@@ -42,6 +43,34 @@ test('closing device settings releases pending permission and stops its late str
         resolve({getTracks:() => [{stop() {stopped++;}}]});
         await settle();
         assert.equal(stopped,1);
+    } finally { f.restore(); }
+});
+
+test('leaving a retained form stops its test but keeps the controls bound for return', async () => {
+    let resolve, stopped = 0;
+    const f = fixture(() => new Promise(done => { resolve = done; }));
+    const track = () => Object.assign(new EventTarget(), { stop() { stopped++; } });
+    const levelShown = path => f.env.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place:'skills' } }));
+    try {
+        f.click('mic');
+        levelShown('skill/live_conversation');
+        assert.equal(currentHolder().owner, f.root, 'an announcement while still visible is not dismissal');
+        f.root.isConnected = false;          // local Back retains the level but detaches its nodes
+        levelShown('installed');
+        assert.equal(currentHolder(), null, 'leave invalidates even a pending permission request');
+        resolve({getTracks:() => [track()]});
+        await settle();
+        assert.equal(stopped, 1);
+
+        f.root.isConnected = true;
+        f.click('mic');
+        assert.equal(currentHolder().owner, f.root, 'same form can start a test after returning');
+        f.root.rects = [];                    // while the section is put away, the level can stay connected
+        f.env.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+        assert.equal(currentHolder(), null);
+        resolve({getTracks:() => [track()]});
+        await settle();
+        assert.equal(stopped, 2);
     } finally { f.restore(); }
 });
 

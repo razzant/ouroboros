@@ -284,10 +284,10 @@ def _run_custody_tick(monkeypatch, *, failing_step=None):
     sm._periodic_supervisor_maintenance([0.0], [time.time()])
     for thread in threads:
         thread.join(5)
-    # A process's first pass also reserves its one maintenance child, whose thread may spawn
-    # a due job's process; a slow runner is still inside it at teardown. Join it here, as its owner.
-    if maintenance_child._thread is not None:
-        maintenance_child._thread.join(60)
+    # A process's first pass reserves each owed lane. Join both lane threads at teardown.
+    for lane in maintenance_child._lanes:
+        if lane._thread is not None:
+            lane._thread.join(60)
     assert all(not thread.is_alive() for thread in threads)
 
 

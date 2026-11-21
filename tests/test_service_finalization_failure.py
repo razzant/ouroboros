@@ -238,7 +238,12 @@ def _assert_retained_tails_by_ref(read, rows, size):
     oversized, failed = shown["parent1:oversized"]["log_finalization"], shown["parent1:failed"]["log_finalization"]
     assert "OVERSIZED-LAST" in oversized["tail"] and "blob cap" in oversized["full_log_omitted"]
     assert oversized["retained_live_log_path"] and not oversized["full_log_ref"] and "source_ref" not in oversized
-    assert "FAILED-LAST" in failed["tail"] and "blob store full" in failed["errors"][0] and "source_ref" not in failed
+    assert (
+        "FAILED-LAST" in failed["tail"]
+        and failed["errors"] == ["capture: OSError"]
+        and "blob store full" not in json.dumps(failed)
+        and "source_ref" not in failed
+    )
     assert "log_finalization" not in shown["parent1:docker"]  # an in-container path is no retained source
     assert "ouroboros-service-docker.log" not in json.dumps(rows)
     assert size < 40_000  # twelve 80k tails would be 960k

@@ -806,11 +806,12 @@
  */
 
 /**
- * One configured MCP server (a configuration error row carries only id, enabled, tool_count, last_error, code).
+ * One server identity, including rejected configurations.
  * @typedef {Object} McpServerStatus
  * @property {string} id
  * @property {string=} name
  * @property {boolean} enabled
+ * @property {number=} configured_count Entries grouped under an ambiguous identity.
  * @property {string=} transport
  * @property {string=} url
  * @property {*=} auth_header
@@ -995,6 +996,8 @@
 
 /**
  * @typedef {Object} CommandRequest
+ * @property {string=} reply_to
+ * @property {import('./client_contract_types.js').ReplyExcerpt=} reply_excerpt
  * @property {string} cmd
  * @property {string=} if_boot // optional boot.since precondition; Panic ignores it
  * @property {Object=} client_surface

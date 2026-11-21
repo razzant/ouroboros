@@ -7,9 +7,10 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# Where a page's section is mounted and where its header is rendered.
+# Where a page's section is mounted and where its header is rendered (Extensions, the place `skills`, draws its section
+# in extensions.js; skills.js, whose initSkills app.js calls, mounts the skill views inside it).
 MODULES = {"chat": ("chat.js", "chat.js"), "circles": ("circles.js", "circles.js"), "files": ("files.js", "files.js"),
-           "skills": ("skills.js", "skills.js"), "widgets": ("widgets.js", "widgets.js"),
+           "skills": ("extensions.js", "extensions.js"), "widgets": ("widgets.js", "widgets.js"),
            "dashboard": ("dashboard.js", "dashboard.js"), "settings": ("settings.js", "settings.js")}
 
 

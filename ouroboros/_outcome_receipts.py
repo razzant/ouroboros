@@ -680,6 +680,9 @@ def verification_receipt_ledger_row(receipt: Dict[str, Any]) -> Dict[str, Any]:
         **({"duration_ms": receipt.get("duration_ms")} if receipt.get("duration_ms") is not None else {}),
         **({"signal": str(receipt.get("signal") or "")} if receipt.get("signal") else {}),
         **({"resolved_runtime": truncate_review_artifact(receipt.get("resolved_runtime"), limit=300)} if receipt.get("resolved_runtime") else {}),
+        # `memory_oom`: the kernel's OOM counts for the check's memory group (typed booleans/integers from
+        # `command_memory.outcome`), carried as recorded; absent = nothing happened or no memory group.
+        **({"memory_oom": receipt.get("memory_oom")} if isinstance(receipt.get("memory_oom"), dict) else {}),
         "summary": truncate_review_artifact(receipt.get("summary"), limit=300),
         # C: after-only artifact-lifecycle flag (a check that built then deleted a
         # declared deliverable). Bounded through the SHARED disclosed-list projection —

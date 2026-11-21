@@ -111,7 +111,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |
-| GET | `/api/places` | place records, circles and installed connector declarations |
+| GET | `/api/places` | place records, circles and installed connector declarations (`ouroboros/gateway/places_api.py`) |
 | POST | `/api/places` | connect a place |
 | POST | `/api/places/{place_id}` | atomic owner-authored choices |
 | GET | `/api/places/{place_id}/rooms` | captured canonical conversation rooms (§12) |
@@ -246,11 +246,11 @@ Feature modules subscribe and the full Project chat-id set loads before the firs
 
 #### WebSocket chat
 
-A browser `chat` frame carries owner text and/or uploaded attachment references, optionally with `sender_session_id`, `client_message_id`, `chat_id`, `project_id` and `client_surface`: raw sending-surface facts measured at send (the pywebview bridge appears asynchronously after load). The gateway normalizes surface facts (`client_surface.normalize_client_surface`), stamps host `received_at` at receipt, and every transport passes one common enqueue (`LocalChatBridge.enqueue_local_message`). The surface fact is per-message provenance, distinct from the chat-scoped `transport` reply route, assembled at its producer, never inferred at render, carried from the originating owner turn by promotion or steering (`client_surface.py`).
+A browser `chat` frame carries owner text and/or uploads, optional `sender_session_id`, `client_message_id`, `chat_id`, `project_id` and `client_surface` measured at send (the native bridge loads asynchronously). The host resolves `reply_to`; optional `reply_excerpt` records the sender’s selection. The gateway normalizes the surface with `client_surface.normalize_client_surface`, stamps `received_at` and shares `LocalChatBridge.enqueue_local_message` with other transports. Promotion and steering carry the originating message’s surface; the chat’s `transport` selects the reply route.
 
-Acceptance is idempotent on `client_message_id`: a same-id frame rejoins the accepted row if words and ordered attachment content match, else is refused; the `ingress_accepted` echo and history carry the row's durable dispatch fact (`ingress_pending`: owed, performed once by a retry or the next bus init; `ingress_dispatched`: entered here); row and uploads are kept (`supervisor/message_ingress.py`). Unreadable chat history is unknown: the frame is refused with the `initialization_notice` before anything is claimed or written.
+Same `client_message_id` retries rejoin only identical words, ordered attachments and Reply (address and excerpt). Echo (`ingress_accepted`) and history show dispatch: retry/bus init dispatches `ingress_pending` once; `ingress_dispatched` has entered. On unreadable history nothing is claimed or written (`supervisor/message_ingress.py`). `initialization_notice` correlates refusals; it also explains an unusable source or conflicting id without reporting a boot failure.
 
-Frames sent while disconnected wait in a bounded process-local queue (oldest dropped), flushed after reconnect and lost on reload: no second durable outbox. Attachment messages set `queue:false` (uploads happen just before the send; a retained frame would leave unowned temporaries); on socket loss Chat refuses the message, cleans those and keeps the staged files for an explicit retry. Once the socket took a frame — every owner message, a bare slash command excepted; a queued one once written — `chat_attachments.createUnconfirmedSends` keeps it (with its `reply_to`) by id in tab sessionStorage across reloads until that id's echo or history row settles it; an unsettled frame offers "Send again" (same frame and id, never automatic) and "Discard".
+Offline frames queue in memory; overflow drops the oldest, reload clears it. Uploads use `queue:false`; a failed write releases new uploads. A taken send, selected reply included, frees the field; a file it uploaded and a newer draft still stages keeps its ref. `createUnconfirmedSends` keeps non-command frames by ID with citation and upload refs (no file bytes). Echo/history settles that ID; “Send again” reuses its frame, “Discard” drops it, a selected reply's “Send as new” returns its words and quote to an empty composer.
 
 Off-loop acceptance confines attachment specs to upload-root basenames bound to measured `size`/`sha256`, so bytes swapped under the path afterwards are rejected rather than staged; model pixels come only from staged files. The web owner identity is fixed: `chat_id` selects a thread and cannot mint an external owner identity.
 

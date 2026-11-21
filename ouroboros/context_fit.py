@@ -554,7 +554,7 @@ def estimate_context_prompt_tokens(
         context_custody_proxy,
         custody_private_key,
     )
-    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
 
     def project(value: Any) -> Any:
         if isinstance(value, dict):
@@ -586,7 +586,7 @@ def estimate_context_prompt_tokens(
     # These top-level host receipts remain canonical but are absent from sends (the leading system message's stable
     # block count included: every send copy pops it, so the density witness never counted it).
     # Do not strip same-named keys inside native payloads or user/tool arguments.
-    hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
+    hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
               TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY, DISPLAY_KEY}
     messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
     messages = [{**message, "content": [

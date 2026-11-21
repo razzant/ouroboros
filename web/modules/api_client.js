@@ -644,6 +644,11 @@ export const apiClient = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(payload),
+    }, { requireBody: true, rejectOkFalse: true }).then(data => {
+        if (data?.saved === false) throw Object.assign(new Error(data.error || 'Settings were not saved.'), { body: data });
+        if (data?.status === 'saved' || data?.ok === true || data?.no_changes === true || data?.receipt === 'unavailable'
+                || (data?.changes && typeof data.changes === 'object' && !Array.isArray(data.changes))) return data;
+        throw new Error('Unrecognized settings save reply.');
     }),
     /**
      * Finish first-run onboarding in ONE atomic owner-scoped save (D-8):

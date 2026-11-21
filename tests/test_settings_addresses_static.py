@@ -6,7 +6,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 LIVING = (
     "Models", "Agents", "Your rules", "Permissions and checks", "Accounts and keys",
-    "Tools", "Appearance", "Notifications", "Voice and calls", "This computer",
+    "Extensions", "Appearance", "Notifications", "Voice and calls", "This computer",
 )
 PENDING = {}
 # A release's row of README's Version History says what that release called a page; history is not rewritten, and
@@ -46,9 +46,10 @@ def dead_addresses(text):
 
 
 def test_written_settings_addresses_name_living_pages():
-    broken = "Settings→Behavior; Settings › Advanced; Settings > Secrets; Settings->Providers; Settings → Accounts; Settings › Review; Settings > Runtime Limits"
-    living = "Settings→Models; Settings › Agents; Settings > Your rules; Settings->Permissions and checks; Settings → Accounts and keys; Settings › Tools; Settings > Appearance; Settings->Notifications; Settings → Voice and calls; Settings › This computer › Advanced; System Settings → Privacy & Security"
-    assert len(list(dead_addresses(broken))) == 7
+    # MCP servers are in Extensions. The old Tools route still opens them, but no Settings row bears that name.
+    broken = "Settings→Behavior; Settings › Advanced; Settings > Secrets; Settings->Providers; Settings → Accounts; Settings › Review; Settings > Runtime Limits; Settings → Tools"
+    living = "Settings→Models; Settings › Agents; Settings > Your rules; Settings->Permissions and checks; Settings → Accounts and keys; Settings › Extensions; Settings > Appearance; Settings->Notifications; Settings → Voice and calls; Settings › This computer › Advanced; System Settings → Privacy & Security"
+    assert len(list(dead_addresses(broken))) == 8
     assert list(dead_addresses(living)) == []
     assert RELEASE_ROW.match("| 7.9.0 | 2026-10-28 | **feat: Settings → Accounts holds several API keys.**")
     assert not RELEASE_ROW.match("Add the key in Settings → Secrets.")
