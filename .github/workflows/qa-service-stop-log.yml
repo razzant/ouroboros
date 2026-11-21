@@ -23,7 +23,7 @@ jobs:
       STOP_HOME_TESTS: tests/test_launch_stop_finalization.py tests/test_service_finalization_failure.py tests/test_workspace_executor_services.py::test_automatic_local_executor_stop_finalizes_declared_outputs
       NEW_FUNCTIONAL_TEST: tests/test_services_tool_v2.py::test_confirmed_stop_survives_log_capture_failure_without_leaking_or_repeating_stop
       EXISTING_CONSUMER: tests/test_services_tool_v2.py::test_stop_task_services_preserves_output_finalization_failure
-      OURO_SIZE_RATCHET_BASE_REF: 82fa6e154fcd16ed5daefa99bde3ac100756484a
+      OURO_SIZE_RATCHET_BASE_REF: 1b67be30c583e8ffdfc6bd9e2ca6ed5e23256c67
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -42,4 +42,6 @@ jobs:
       - name: Size lane against the exact base
         timeout-minutes: 15
         if: ${{ !cancelled() }}
-        run: python -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- python -m pytest -o addopts="" tests/test_smoke.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py -m size_ratchet -q --tb=short
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" -c 'import os, sys, pytest; os.environ["OURO_SIZE_RATCHET_BASE_REF"] = sys.argv[1]; sys.exit(pytest.main(sys.argv[2:]))' "$OURO_SIZE_RATCHET_BASE_REF" -o addopts="" tests/test_smoke.py tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py -m size_ratchet -q -rs --tb=short

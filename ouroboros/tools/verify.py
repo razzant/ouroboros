@@ -40,15 +40,12 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tools.process_facts import (
-    active_resolved_runtime, process_environment_tool, publish_process_facts, redact_process_data,
-    record_runtime_selection, selected_process_environment,
+    active_resolved_runtime, check_output_views, masked_process_or_withheld, process_environment_tool, publish_process_facts,
+    receipt_line_safe, redact_process_data, record_runtime_selection, selected_process_environment,
 )
 from ouroboros.tools.shell_process import CommandStopped, command_start_refusal, command_timeout_for_call, turn_stop_reader
 from ouroboros.utils import utc_now_iso
 
-# Durable receipt evidence is bounded but the truncation is DISCLOSED (BIBLE P1, never
-# silent); the tool-result preview is bounded separately for transport.
-_RECEIPT_OUTPUT_CAP = 20000
 # The typed process facts a run-kind receipt DISCLOSES (D6/R4). `duration_ms` —
 # always, for every run-kind check: a 9ms SIGKILL and a 5-minute honest red are
 # different facts. `signal` — the POSIX name of the signal that killed the check
@@ -62,7 +59,6 @@ _RECEIPT_OUTPUT_CAP = 20000
 # exactly the three keys it has always carried, copied from the one publication
 # instead of derived a second time.
 _RECEIPT_PROCESS_KEYS = ("duration_ms", "signal", "resolved_runtime", "runtime_provenance")
-_TOOL_OUTPUT_CAP = 4000
 # The `no_visible_machine_contract` receipt carries the agent's OWN stated proxy and
 # residual risk — decision-shaping cognitive evidence a reviewer reads, so it goes
 # through the same disclosed bound as every other durable receipt field.
@@ -81,12 +77,19 @@ def _bounded(text: Any, cap: int) -> str:
 def _interrupted_check(ended: BaseException, timeout: Any, *, started_ts: float, resolved_runtime: str) -> tuple:
     """``(why, output, facts)`` of a check that never returned: its timeout, or Stop now of an in-process turn
     (``CommandStopped``), whose host kill is claimed only once its exit was observed. A stopped check's output is
-    the whole text it wrote; the receipt and the reply keep their bounded, masked views of it (``_bounded``), as
-    of a completed run's. The process facts are published once, as for a completed run."""
+    the text captured at Stop (an observed exit does not prove it is all the process wrote); a timeout's is what its
+    wait handed back with it (``TimeoutExpired.stdout/.stderr``, decoded). A wait that returned neither stream (the
+    Stop-aware wait, Windows) gives ``None``: whether the check wrote anything is unknown, never "no output".
+    The receipt and the reply show the captured text masked and bounded (``check_output_views``). The process facts
+    are published once, as for a completed run."""
     stopped = isinstance(ended, CommandStopped)
     why = (f"check ended by Stop now; its exit was {'observed' if ended.exit_observed else 'NOT observed'}"
            if stopped else f"check timed out after {timeout}s")
-    output = (ended.output + (("\n" + ended.stderr) if ended.stderr else "")) if stopped else ""
+    streams = ((ended.output, ended.stderr) if stopped else
+               [b.decode("utf-8", errors="replace") if isinstance(b, (bytes, bytearray)) else b
+                for b in (getattr(ended, "stdout", None), getattr(ended, "stderr", None))])
+    out, err = (str(s or "") for s in streams)
+    output = None if not stopped and streams == [None, None] else out + (("\n" + err) if err else "")
     facts = publish_process_facts(started_ts=started_ts, resolved_runtime=resolved_runtime,
                                   timed_out=not stopped, killed_by_host=not stopped or ended.exit_observed)
     return why, output, facts
@@ -394,7 +397,8 @@ def _compare_files_bytes_equal(
             rc = int(rc_raw)
         except (TypeError, ValueError):
             return None, f"bytes_equal: executor cmp returned no exit status for {a_raw} vs {b_raw}"
-        out = redact_process_data((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
+        # only this diagnostic note can be lost to a mask that cannot complete; the cmp exit and verdict below cannot
+        out = masked_process_or_withheld((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
         if rc == 0:
             return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
         if rc != 1:
@@ -830,17 +834,16 @@ def _verify_and_record(
                                                   resolved_runtime=_resolved_runtime)
             # Same renderer as the completed-run receipt below, so it carries the same
             # stamp: a timeout red must be reconcilable by the later green of that argv.
+            shown_summary, shown, retention = check_output_views(ctx, out, captured=True)
             receipt.update({"status": "fail", "returncode": None, "matched": None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN,
-                            "summary": why + (f"\n{_bounded(out, _RECEIPT_OUTPUT_CAP)}" if out else "")})
+                            "summary": f"{why}\n{shown_summary}", **retention})
             receipt.update({k: v for k, v in _facts.items() if k in _RECEIPT_PROCESS_KEYS})
             if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
-                return _receipt_custody_failure(
-                    kind, why,
-                )
+                return _receipt_custody_failure(kind, why) + f"\n\n{shown}"  # the source may already be durable: keep its address
             return _publish_verification(ctx, (
                 f"verify_and_record [{kind}] FAIL: {why}. "
                 f"root={binding.root}, cwd={binding.target_path}. Receipt recorded."
-            ) + (f"\n\n{_bounded(out, _TOOL_OUTPUT_CAP)}" if out else ""), receipt, compared=False, detail=receipt["summary"])
+            ) + f"\n\n{shown}", receipt, compared=False, detail=receipt["summary"])
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
@@ -858,10 +861,14 @@ def _verify_and_record(
             matched, _cmp_detail = _compare_files_bytes_equal(
                 ctx, _paths2, pathlib.Path(work_dir), use_executor=use_executor
             )
-            out = (out + "\n\n[bytes_equal] " + _cmp_detail).strip()
+            _cmp_detail = masked_process_or_withheld(_cmp_detail)  # one masked text for the metadata detail and the shown note
         else:
             matched = (not expected_s) or _expected_matches(out, expected_s, match_mode)
         passed = (rc == 0) and matched
+        shown_summary, shown, retention = check_output_views(ctx, out)  # the process output only: summary, reply, retained source
+        if match_mode == "bytes_equal":  # the comparison message is shown and recorded beside it, in neither the summary nor the source
+            receipt["comparison_detail"] = _cmp_note = _bounded(receipt_line_safe(_cmp_detail), 1000)
+            shown = "\n\n".join(part for part in (shown, "[bytes_equal] " + _cmp_note) if part)
         compared = matched is not None if match_mode == "bytes_equal" else bool(expected_s)
         # `shlex.join`, never `" ".join` (v6.78.0): this text is the verification's
         # IDENTITY downstream (`_outcome_receipts.receipt_canonical_identity`), and a
@@ -871,7 +878,7 @@ def _verify_and_record(
         # (`shell_parse.shell_tokens`), so the stored text round-trips back to this argv.
         # The rendering stamp makes old/new spellings incomparable: changing only
         # the renderer reopens the collision across versions.
-        receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched) if compared else None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
+        receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched) if compared else None, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": shown_summary, **retention})
         # D6/D7 disclosure keys (node-runtime sprint stream B), now copied from
         # the one publication above — see _RECEIPT_PROCESS_KEYS for which keys
         # and why. Disclosure-only: receipt IDENTITY (`check` text) and
@@ -897,14 +904,14 @@ def _verify_and_record(
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(
                 kind, f"verdict={'PASS' if passed else 'FAIL'}, exit={rc}",
-            ) + f"\n\n{_bounded(out, _TOOL_OUTPUT_CAP)}"
+            ) + f"\n\n{shown}"
         verdict = "PASS" if passed else "FAIL"
         exp_note = f" expected={expected_s!r}" if expected_s else ""
         mask_note = f"\n\n{exit_masking_note(_mask_reasons)}" if _masked and rc == 0 else ""
         return _publish_verification(ctx, (
             f"verify_and_record [{kind}] {verdict}: exit={rc}{exp_note}; "
             f"root={binding.root}, cwd={binding.target_path}. Host-attested receipt recorded.\n\n"
-            f"{_bounded(out, _TOOL_OUTPUT_CAP)}{mask_note}"
+            f"{shown}{mask_note}"
         ), receipt, compared=compared, detail=_cmp_detail if match_mode == "bytes_equal" else "")
 
     if kind == "artifact_observation":
