@@ -414,6 +414,45 @@ def capture(page, name):
 
 
 # ------------------------------------------------------------------------------------------------
+# A queued row says behind which work it stands (owner 21.11.2026, «5A»), at the owner's widths.
+
+_ROW_OVERFLOW = """(id) => {
+    const row = document.querySelector(`#page-chat .rw-row[data-id="${id}"]`);
+    const line = row.querySelector('.rw-secondary'), state = row.querySelector('.rw-state');
+    const right = (el) => el.getBoundingClientRect().right;
+    return { row: row.scrollWidth - row.clientWidth, state: state.scrollWidth - state.clientWidth,
+             past: Math.max(right(line), right(state)) - right(row),
+             page: document.documentElement.scrollWidth - window.innerWidth };
+}"""
+
+
+@pytest.mark.parametrize("width", [581, 282])
+def test_a_queued_row_says_behind_which_work_it_stands_and_never_overflows(room_ui, width):
+    holder = "Довести M3 PR #3761 до состояния, принимаемого ревью, и сверить все замечания"
+    transport = Transport(room_ui["page"], activities=[
+        activity("rw-holder", suggested_name=holder),
+        activity("rw-behind", "queued", suggested_name="Измерить старт чата и проверить ускорение на старых цитатах")])
+    transport.raw["rw-holder"] = {"running": True, "suggested_name": holder}
+    transport.raw["rw-behind"] = {"suggested_name": "Измерить старт чата и проверить ускорение на старых цитатах",
+                                  "_lane_wait": {"lane": "project", "task_id": "rw-holder", "project_id": "nano"}}
+    page = open_app(room_ui, transport, viewport={"width": width, "height": 844})
+    trigger(page).click()
+    opened = wait_facts(page, "main", lambda f: row(f, "rw-behind") and row(f, "rw-behind")["secondary"],
+                        "the queued row's line")
+    queued = row(opened, "rw-behind")
+    assert (queued["word"], queued["secondary"]) == ("Queued", f"behind \u201c{holder}\u201d"), queued
+    assert "rw-holder" not in queued["state"], "the line names the work, never its id"
+    overflow = page.evaluate(_ROW_OVERFLOW, "rw-behind")
+    assert overflow["row"] <= 1 and overflow["state"] <= 1 and overflow["past"] <= 1 and overflow["page"] <= 0, overflow
+    capture(page, f"queued-behind-{width}")
+    row_main(page, "rw-behind").click()
+    detail = wait_facts(page, "main", lambda f: "Behind" in row(f, "rw-behind")["detail"], "the queued row's details")
+    assert "Behindrw-holder keeps its Project" in row(detail, "rw-behind")["detail"], row(detail, "rw-behind")
+    assert page.evaluate(_ROW_OVERFLOW, "rw-behind")["page"] <= 0
+    capture(page, f"queued-behind-{width}-details")
+
+
+# ------------------------------------------------------------------------------------------------
 # Main: each census state in its own words, tone and controls.
 
 def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui):
