@@ -438,7 +438,8 @@ export function servedUiStatus(servedUi) {
         : { text: `Serving now: ${label}.`, tone: 'muted' };
 }
 
-// The cap on acting tasks is optional: the server keeps "no cap" as a blank, which the row shows and sends as No limit.
+// An owner's number (acting tasks, one task's subagents) is optional: the server keeps "no number" as a blank, which
+// the row shows and sends as No limit. Settings loads this module before every page, the Agents page included.
 CODECS.ownerCap = {
     read: (settings, row) => (!settings ? undefined : String(settings[row.keys[0]] ?? '').trim() === '' ? 'unlimited' : settings[row.keys[0]]),
     body: (value, row) => ({ [row.keys[0]]: String(value ?? '').trim().toLowerCase() === 'unlimited' ? '' : value }),

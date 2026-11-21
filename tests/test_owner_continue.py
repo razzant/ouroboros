@@ -237,6 +237,104 @@ def test_a_finished_answer_and_a_live_task_refuse_while_a_technical_limit_admits
     assert admit_continuation("limit-1", action_nonce=NONCE)["ok"] is True
 
 
+def test_a_deep_self_review_refuses_continue_by_type_and_writes_nothing_while_an_ordinary_root_admits(
+        tmp_path, monkeypatch):
+    """A deep self-review keeps no saved midpoint: its Continue would start an ordinary task under its name. The
+    refusal is typed and early: no claim, no successor row, no offer on the card; the same record of an ordinary
+    root admits."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway.task_continue import api_task_continue
+    from ouroboros.owner_continue import continuation_offer
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    for task_id, task_type in (("review-1", "deep_self_review"), ("ordinary-1", "task")):
+        _interrupted(tmp_path, task_id, task_contract={"task_type": task_type})
+    refused = {"eligible": False, "cause": "deep_self_review", "refusal": "deep_review_restart_required"}
+    assert continuation_offer(load_task_result(tmp_path, "review-1"), "review-1") == refused
+    assert admit_continuation("review-1", action_nonce=NONCE) == {
+        "ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
+    client = TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/continue", api_task_continue,
+                                                methods=["POST"])]))
+    answer = client.post("/api/tasks/review-1/continue", json={"action_nonce": NONCE})
+    assert answer.status_code == 409 and answer.json()["reason_code"] == "deep_review_restart_required"
+    stored = load_task_result(tmp_path, "review-1")
+    assert not {"continued_by", "superseded_by", "retry_task_id"} & set(stored) and workers.PENDING == []
+    assert continuation_offer(load_task_result(tmp_path, "ordinary-1"), "ordinary-1")["eligible"] is True
+    assert admit_continuation("ordinary-1", action_nonce=NONCE)["ok"] is True
+    # A finished review and an owner-stopped one keep their own refusals (no "start it again" note on a success).
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(tmp_path, "review-done", "completed", chat_id=7, root_task_id="review-done",
+                      task_contract={"task_type": "deep_self_review"}, result="report")
+    assert continuation_offer(load_task_result(tmp_path, "review-done"), "review-done")["refusal"] == "author_finished"
+    _interrupted(tmp_path, "review-stopped", origin={"source": "http_single", "reason": "Stop now"},
+                 task_contract={"task_type": "deep_self_review"})
+    assert continuation_offer(load_task_result(tmp_path, "review-stopped"), "review-stopped")["refusal"] == (
+        "stopped_by_owner")
+
+
+def test_an_older_bound_claim_on_a_deep_self_review_creates_no_successor_while_an_admitted_one_answers(
+        tmp_path, monkeypatch):
+    """A claim bound before this refusal, with no successor row yet, must not create an ordinary task on replay; a
+    successor that was really admitted is still answered with its receipt; an ordinary root's bound claim completes."""
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    real_persist = queue.persist_queue_snapshot
+    for task_id in ("bound-review", "bound-task"):
+        _interrupted(tmp_path, task_id, task_contract={"task_type": "task"})
+        monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": False)
+        assert admit_continuation(task_id, action_nonce=NONCE)["error"] == "queue_snapshot_persist_failed"
+        monkeypatch.setattr(queue, "persist_queue_snapshot", real_persist)
+        assert load_task_result(tmp_path, task_id)["continued_by"]["state"] == "bound"
+    # The first record names a deep self-review (an older admission, before the kind refusal).
+    seed_result(tmp_path, "bound-review", {**load_task_result(tmp_path, "bound-review"),
+                                            "task_contract": {"task_type": "deep_self_review"}})
+    assert admit_continuation("bound-review", action_nonce=NONCE) == {
+        "ok": False, "error": "deep_review_restart_required", "cause": "deep_self_review"}
+    assert workers.PENDING == []
+    assert admit_continuation("bound-task", action_nonce=NONCE)["ok"] is True  # the ordinary kind completes
+    _interrupted(tmp_path, "admitted-review", task_contract={"task_type": "task"})
+    admitted = admit_continuation("admitted-review", action_nonce=NONCE)
+    assert admitted["ok"] is True
+    seed_result(tmp_path, "admitted-review", {**load_task_result(tmp_path, "admitted-review"),
+                                               "task_contract": {"task_type": "deep_self_review"}})
+    again = admit_continuation("admitted-review", action_nonce=NONCE)
+    assert again["ok"] is True and again["successor_task_id"] == admitted["successor_task_id"]
+
+
+def test_a_deep_self_review_queued_through_the_real_admission_is_recognised_before_it_starts(tmp_path, monkeypatch):
+    """The kind is recorded at admission: the scheduled receipt carries the contract (in its metadata), so a review
+    interrupted before its first run is refused too."""
+    from ouroboros.owner_continue import continuation_eligibility, recorded_task_type
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import queue as q
+
+    from tests.test_owner_wait_pool import InputQueue, Process
+    from tests.worker_pool_support import affirm_ready
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    slot = workers.Worker(0, Process(42), InputQueue())  # a started pool: the review needs one
+    affirm_ready(slot)
+    workers.WORKERS[0] = slot
+    said = []
+    monkeypatch.setattr(q, "send_with_budget", lambda *a, **k: said.append(a), raising=False)
+    monkeypatch.setattr(q, "load_state", lambda: {"owner_chat_id": 7}, raising=False)
+    tid = q.queue_deep_self_review_task(reason="owner:/review", force=True, chat_id=7)
+    assert tid, said
+    stored = load_task_result(tmp_path, tid)
+    assert stored["status"] == "scheduled" and recorded_task_type(stored) == "deep_self_review"
+    write_task_result(tmp_path, tid, "cancelled", result="interrupted",
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    assert continuation_eligibility(load_task_result(tmp_path, tid), tid)["refusal"] == "deep_review_restart_required"
+
+
 def test_the_continues_barriers_run_outside_q_and_its_record_is_written_with_the_row_still_queued(tmp_path, monkeypatch):
     """Q spans memory only: the successor is enqueued under Q, its snapshot published outside it, its result row
     written under Q again (the row revalidated still queued), its final publication outside Q once more."""

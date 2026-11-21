@@ -969,3 +969,50 @@ def test_a_finalizing_split_root_says_its_effective_outcome_not_its_hot_row(tmp_
     work = next(w for w in wp.works_snapshot(data, [row], {"fr": {"running": True}})["works"] if w["work_id"] == "fr")
     assert work["transition"] == "finalizing"
     assert work.get("outcome") == expected
+
+
+# ---- the text surfaces (Telegram) say the works as the window does -------------------------------------
+
+def test_text_surfaces_say_the_works_with_the_cards_words_and_an_unread_projection_is_unknown():
+    import pathlib
+    import re
+
+    assert ws.said_works({}) is None and ws.said_works(None) is None  # an unread body: unknown, never empty
+    assert ws.said_works({"works": [{"name": "a", "activity": "working"}], "works_complete": False}) is None
+    assert ws.said_works({"works": [], "works_complete": True}) == []  # a read, complete, empty projection
+    said = ws.said_works({"works_complete": True, "works": [
+        {"name": "a", "activity": "working", "transition": "pausing"},
+        {"name": "b", "activity": "waiting", "turn": [{"kind": "question"}], "because": [{"text": "Waiting for your answer"}]},
+        {"name": "c", "activity": "waiting", "turn": [{"kind": "open_question"}]},
+        {"name": "d", "activity": "paused", "because": [{"text": ""}, ws.reason("paused_by_owner")]},
+        {"name": "e", "activity": "unheard-of"}]})
+    assert [(w["state"], w["word"], w["reason"]) for w in said] == [
+        ("pausing", "Pausing…", ""), ("question", "Waiting for your answer", ""),
+        ("waiting", "Waiting", ""), ("paused", "Paused", "You paused it"), ("unknown", "Activity unconfirmed", "")]
+    # A correspondent's Presence turn is marked by its recorded fact, an owner's work is not.
+    marked = ws.said_works({"works_complete": True, "works": [{"name": "p", "activity": "working", "place_turn": True},
+                                                              {"name": "o", "activity": "working"}]})
+    assert [(w["name"], w["place_turn"]) for w in marked] == [("p", True), ("o", False)]
+    # The words are the cards' chip words (web/modules/task_phase_chip.js CHIP), not a second vocabulary.
+    chip = (pathlib.Path(__file__).resolve().parents[1] / "web/modules/task_phase_chip.js").read_text(encoding="utf-8")
+    chip_words = dict(re.findall(r"tr\('(task\.chip\.[a-z_]+)', '([^']+)'\)", chip))
+    assert {state: chip_words.get(key) for state, key in ws.ACTIVITY_CHIP_KEYS.items()} == ws.ACTIVITY_WORDS
+    assert all(w["chip_key"] == ws.ACTIVITY_CHIP_KEYS[w["state"]] for w in said)
+    # The reason's code rides only when its text is that code's own sentence (the window's ``work.because.<code>``).
+    assert [w["reason_code"] for w in said] == ["", "", "", "paused_by_owner", ""]  # b names no code
+    counted = ws.said_works({"works_complete": True, "works": [
+        {"name": "f", "activity": "waiting", "because": [ws.reason("helpers_running", count=2)]},
+        {"name": "h", "activity": "waiting", "because": [ws.reason("helpers_running", count=1)]},
+        {"name": "g", "activity": "paused", "because": [{"code": "paused_by_owner", "text": "Paused for the night"}]}]})
+    assert [(w["reason"], w["reason_code"]) for w in counted] == [
+        ("2 subagents still working", ""), ("1 subagent still working", "helpers_running"), ("Paused for the night", "")]
+
+
+@pytest.mark.parametrize("kind,raw,marked", [("presence", {}, True), ("managed_task", {"_presence_turn": True}, True),
+                                             ("managed_task", {}, False), ("direct_chat", {}, False)])
+def test_a_correspondents_presence_turn_is_marked_on_its_work(tmp_path, kind, raw, marked):
+    """``place_turn`` comes from the row's recorded facts (the census kind, the ``_presence_turn`` flag), as its
+    controls read them; an owner's work never carries it."""
+    work = next(w for w in wp.works_snapshot(tmp_path, [row("t", kind=kind)], {"t": {"running": True, **raw}})["works"]
+                if w["work_id"] == "t")
+    assert work.get("place_turn", False) is marked

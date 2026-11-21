@@ -89,3 +89,26 @@ def argument_refusal(
     if effect:
         text += f" {effect}"
     return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
+
+
+def repair_call_available(ctx: Any, tool: str) -> bool:
+    """Whether a refusal may name ``tool`` as the call that works for this caller: not withheld by the task
+    contract's ``disabled_tools`` (dispatch refuses it even where a consciousness schema still shows it), in a
+    subagent profile's set, and granted by a Presence ceiling with no host-bound arguments (a bound call is not
+    the call the text would name). For a caller outside those profiles it answers True for any tool that is not
+    withheld, which is true only of core tools (``tool_capabilities.CORE_TOOL_NAMES``): name only those."""
+    from ouroboros.contracts.task_contract import canonical_tool_name
+    from ouroboros.presence_authority import presence_ceiling_from_context
+    from ouroboros.tool_access_roots import active_tool_profile
+    from ouroboros.tool_capabilities import ACTING_SUBAGENT_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES
+    from ouroboros.tools.registry_guards import _disabled_tools
+
+    try:
+        profile = {"local_readonly_subagent": LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
+                   "acting_subagent": ACTING_SUBAGENT_TOOL_NAMES}.get(active_tool_profile(ctx))
+        ceiling = presence_ceiling_from_context(ctx)
+        grants = [] if ceiling is None else [grant for grant in ceiling.tool_grants if canonical_tool_name(grant.name) == tool]
+        return (tool not in _disabled_tools(ctx) and (profile is None or tool in profile)
+                and (ceiling is None or len(grants) == 1 and not grants[0].bindings))
+    except ValueError:  # an unreadable carrier proves nothing
+        return False
