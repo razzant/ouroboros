@@ -8,9 +8,9 @@ name lookup yields (``MCPNameResolution``) and its refusal text live here.
 Beside the listing's ``latest_attempt`` the envelope keeps ``latest_call``: whether
 the server answered its latest observed tool call (an answer with ``isError`` is an
 answer), written by any process only when that changes, under the file's name lock,
-so a listing publication never drops it. A failed listing or call keeps the start
-of its open failing series (``since``) on repeats; a record without one has an
-unknown start.
+so a listing publication never drops it. A failed listing keeps the start of its open
+failing series (``listing_failing_since``) and a failed call its own (``latest_call.since``)
+on repeats; a record without one has an unknown start.
 """
 from __future__ import annotations
 
@@ -91,11 +91,13 @@ def attempt_envelope(cfg: Any, previous: dict | None, *, at: str, error: str = "
     if items is not None and (complete or not envelope["complete"]):
         envelope.update(items=items, complete=complete, listed_at=at, instructions=instructions)
         envelope["schema_omissions"] = list(schema_omissions or [])
-    prior = envelope.get("latest_attempt") or {}
+    failing = (envelope.get("latest_attempt") or {}).get("ok") is False
     envelope["latest_attempt"] = {"at": at, "ok": items is not None, "error": error,
                                   "partial": items is not None and not complete}
     if items is None:  # the failing series' start survives a repeat; an older record's start stays unknown
-        envelope["latest_attempt"]["since"] = prior.get("since") if prior.get("ok") is False else at
+        envelope["listing_failing_since"] = envelope.get("listing_failing_since") if failing else at
+    else:
+        envelope.pop("listing_failing_since", None)
     return envelope
 
 

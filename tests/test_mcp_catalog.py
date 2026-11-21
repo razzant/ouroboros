@@ -687,22 +687,24 @@ def call_with(manager, outcome):
 
 def test_a_failing_listing_keeps_its_series_start_and_a_listing_closes_it():
     manager = publisher()
-    assert manager.refresh_server("demo")["published"] and "since" not in envelope_now()["latest_attempt"]
+    assert manager.refresh_server("demo")["published"] and "listing_failing_since" not in envelope_now()
     fail(manager)
-    first = envelope_now()["latest_attempt"]
-    assert first["ok"] is False and first["since"] == first["at"]
+    first = envelope_now()
+    assert first["latest_attempt"]["ok"] is False and first["listing_failing_since"] == first["latest_attempt"]["at"]
+    assert set(first["latest_attempt"]) == {"at", "ok", "error", "partial"}  # the published attempt keeps its shape
     fail(manager)
-    again = envelope_now()["latest_attempt"]
-    assert again["since"] == first["since"] and again["at"] >= first["at"]
+    again = envelope_now()
+    assert again["listing_failing_since"] == first["listing_failing_since"]
+    assert again["latest_attempt"]["at"] >= first["latest_attempt"]["at"]
     manager._async_list_tools = publisher()._async_list_tools
-    assert manager.refresh_server("demo")["ok"] and "since" not in envelope_now()["latest_attempt"]
+    assert manager.refresh_server("demo")["ok"] and "listing_failing_since" not in envelope_now()
     # A failing record written before starts were kept: its start stays unknown, never "now".
     path = mcp_catalog.catalog_path("demo")
     old = envelope_now()
     old["latest_attempt"] = {"at": "2026-11-19T23:43:00+00:00", "ok": False, "error": "offline", "partial": False}
     path.write_text(json.dumps(old), encoding="utf-8")
     fail(manager)
-    assert envelope_now()["latest_attempt"]["since"] is None
+    assert envelope_now()["listing_failing_since"] is None
 
 
 def test_a_call_failure_opens_a_dated_series_a_repeat_keeps_it_and_an_answer_closes_it():
