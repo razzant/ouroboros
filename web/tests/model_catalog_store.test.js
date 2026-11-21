@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { describeRoute } from '../modules/chat_model_routes.js';
-import { createModelCatalogStore } from '../modules/model_catalog_store.js';
+import { apiConnectionOf, createModelCatalogStore, dropTransport, revisionIn } from '../modules/model_catalog_store.js';
 
 const item = (id) => ({ provider_id: 'openrouter', provider: 'OpenRouter', id, name: id, value: id });
 const route = (model, local = false) => ({ model, use_local: local });
@@ -367,4 +367,329 @@ test('a first catalog read that began before any settings document says the figu
     assert.equal(describeRoute(store.index(), { model: 'a/one' }).cacheWrite, 'Cache write: $8 per 1M tokens.');
     await store.read();
     assert.equal(reads, 1, 'and the catalog is fresh: no second read');
+});
+
+/* A key model's own endpoints (`?processing_model=<exact routed value>`): what its tiers are told by. */
+const endpoints = (value, modes, extra = {}) => ({ value, processing: { modes, complete: true, endpoints: [
+    { tag: 'a/standard', service_tier: null, mode: 'standard', price: { input: 4, output: 20 } },
+    { tag: 'a/fast', service_tier: 'priority', mode: 'fast', price: { input: 8, output: 40, tiers: [{ min_prompt_tokens: 200000, input: 16, output: 60 }] } },
+    { tag: 'b/unclassified', service_tier: 'turbo' }], ...extra } });
+
+test('a key model\'s endpoints are read once for the route asked, kept under its own value, and never asked for another kind of route', async () => {
+    let clock = 1000;
+    const asked = [];
+    const store = createModelCatalogStore({ now: () => clock, readProcessing: async (value) => { asked.push(value); return endpoints(value, ['standard', 'fast']); } });
+    let heard = 0;
+    store.subscribe(() => { heard += 1; });
+    assert.equal(store.detail(route('z-ai/glm-5.3')), null, 'never asked: nothing is told');
+    const reading = store.readDetail(route('z-ai/glm-5.3'));
+    assert.deepEqual([store.detail(route('z-ai/glm-5.3')).state, heard], ['reading', 1]);
+    assert.equal(store.readDetail(route('z-ai/glm-5.3')), reading, 'one read at a time for a model');
+    await reading;
+    const said = store.detail(route('z-ai/glm-5.3'));
+    assert.deepEqual([said.state, [...said.modes], said.complete, heard], ['ok', ['standard', 'fast'], true, 2]);
+    assert.deepEqual(said.endpoints, [{ mode: 'standard', tag: 'a/standard', price: { input: 4, output: 20 } },
+        { mode: 'fast', tag: 'a/fast', price: { input: 8, output: 40, tiers: [{ min_prompt_tokens: 200000, input: 16, output: 60 }] } }],
+    'an endpoint no tier was read for is none of a tier\'s');
+    await store.readDetail(route('z-ai/glm-5.3'));
+    assert.deepEqual(asked, ['z-ai/glm-5.3'], 'a fresh answer is not asked again');
+    // Another model, a key added under Accounts: its own exact value, its own answer.
+    await store.readDetail(route('openrouter@work::z-ai/glm-5.3'));
+    assert.deepEqual(asked, ['z-ai/glm-5.3', 'openrouter@work::z-ai/glm-5.3']);
+    assert.equal(store.detail(route('moonshotai/kimi-k3')), null, 'a model nobody opened was never asked');
+    // A subscription's tiers are its accounts' lists, another provider's key has no such read, a local model none.
+    for (const other of [route('claudexor::codex=gpt-6-astra'), route('openai::gpt-6'), route('qwen3.gguf', true), null, { model: '' }]) {
+        await store.readDetail(other);
+        assert.equal(store.detail(other), null);
+    }
+    assert.equal(asked.length, 2);
+    clock += 5 * 60 * 1000 + 1;
+    const again = store.readDetail(route('z-ai/glm-5.3'));
+    assert.equal(store.detail(route('z-ai/glm-5.3')).state, 'reading', 'a stale answer is not this moment\'s: nothing is told while it is read again');
+    await again;
+    assert.deepEqual([asked.length, store.detail(route('z-ai/glm-5.3')).state], [3, 'ok']);
+});
+
+test('a late answer never stands under another model; a failed, foreign or tierless one tells nothing, never Standard only', async () => {
+    const waiting = new Map();
+    const store = createModelCatalogStore({ readProcessing: (value) => new Promise((resolve, reject) => { waiting.set(value, { resolve, reject }); }) });
+    const state = (model) => store.detail(route(model))?.state || null;
+    const firstRead = store.readDetail(route('a/selector-witness'));
+    await Promise.resolve();
+    waiting.get('a/selector-witness').resolve(endpoints('a/selector-witness', ['standard']));
+    await firstRead;
+    const [first, second] = [store.readDetail(route('a/one')), store.readDetail(route('a/two'))];
+    await Promise.resolve();
+    waiting.get('a/two').resolve(endpoints('a/two', ['standard', 'fast', 'ultrafast']));
+    await second;
+    assert.deepEqual([state('a/one'), state('a/two')], ['reading', 'ok'], 'the route chosen later answered first');
+    waiting.get('a/one').resolve(endpoints('a/one', ['standard']));   // the earlier model's answer arrives late
+    await first;
+    assert.deepEqual([[...store.detail(route('a/one')).modes], [...store.detail(route('a/two')).modes]], [['standard'], ['standard', 'fast', 'ultrafast']],
+        'each under its own value');
+    // An answer for another value than the one asked, one that names no tier, and a refused read: none is a model's tiers.
+    for (const [model, answer] of [['a/foreign', endpoints('a/other', ['standard', 'fast'])], ['a/empty', endpoints('a/empty', [])],
+        ['a/shape', { value: 'a/shape', processing: { complete: true } }], ['a/refused', new Error('HTTP 502')]]) {
+        const reading = store.readDetail(route(model));
+        await Promise.resolve();
+        if (answer instanceof Error) waiting.get(model).reject(answer); else waiting.get(model).resolve(answer);
+        await reading;
+        const said = store.detail(route(model));
+        assert.deepEqual([said.state, [...said.modes], said.complete, said.endpoints], ['failed', [], false, []], model);
+    }
+    // A failed read is asked again by the next call (an opened sheet), not kept for the catalog's lifetime.
+    const retry = store.readDetail(route('a/refused'));
+    await Promise.resolve();
+    waiting.get('a/refused').resolve(endpoints('a/refused', ['standard', 'economy']));
+    await retry;
+    assert.deepEqual([...store.detail(route('a/refused')).modes], ['standard', 'economy']);
+});
+
+test('a core that ignores the detail selector leaves modes unknown without repeatedly fetching its catalog', async () => {
+    let reads = 0;
+    const store = createModelCatalogStore({ readProcessing: async () => { reads += 1; return { items: [] }; } });
+    const target = route('a/one');
+    await store.readDetail(target);
+    await store.readDetail(target);
+    await store.readDetail(route('a/two'));
+    const said = store.detail(target);
+    assert.deepEqual([reads, said.complete, [...said.modes]], [1, false, []]);
+});
+
+test('concurrent cold detail reads share the legacy selector discovery', async () => {
+    const reads = [];
+    let respond;
+    const catalog = new Promise((resolve) => { respond = resolve; });
+    const store = createModelCatalogStore({ readProcessing: (value) => { reads.push(value); return catalog; } });
+    const first = store.readDetail(route('a/one'));
+    const second = store.readDetail(route('a/two'));
+    respond({ items: [] });
+    await Promise.all([first, second]);
+    assert.deepEqual(reads, ['a/one']);
+    for (const model of ['a/one', 'a/two']) assert.notEqual(store.detail(route(model))?.complete, true);
+    await store.readDetail(route('a/two'));
+    assert.equal(reads.length, 1);
+});
+
+test('the account Main is pinned to is the settings document\'s word, or a write\'s own answer; unknown before either', () => {
+    const store = createModelCatalogStore();
+    let heard = 0;
+    store.subscribe(() => { heard += 1; });
+    assert.equal(store.mainAccount(), null, 'not read: what follows Main is read as Auto, and the settings may still say');
+    store.adoptSettings({ OUROBOROS_MODEL_ACCOUNTS: { main: 'work', light: 'home' } });
+    assert.equal(store.mainAccount(), 'work');
+    store.adoptSettings({ OUROBOROS_MODEL_ACCOUNTS: '{"main":"home"}' });
+    assert.equal(store.mainAccount(), 'home', 'the stored spelling of the map is read too');
+    store.adoptSettings({ OUROBOROS_MODEL_ACCOUNTS: '{not json' });
+    assert.equal(store.mainAccount(), '', 'a map that cannot be read pins nothing');
+    store.adoptSettings({});
+    assert.equal(store.mainAccount(), '', 'no pin is Auto');
+    const before = heard;
+    store.adoptMainAccount('work');
+    assert.deepEqual([store.mainAccount(), heard], ['work', before + 1], 'Main\'s own write says its account at once');
+    store.adoptMainAccount('');
+    assert.equal(store.mainAccount(), '');
+});
+
+test('another connection under the same routed value drops what its endpoints and transport said; a late answer of the earlier one is not kept', async () => {
+    const waiting = [];
+    let catalogReads = 0;
+    const store = createModelCatalogStore({ readProcessing: (value) => new Promise((resolve) => { waiting.push({ value, resolve }); }),
+        readCatalog: async () => { catalogReads += 1; return { items: [{ ...item('z-ai/glm-5.3'), processing_transport: ['standard', 'fast', 'ultrafast'] },
+            { ...item('openai::gpt-6'), provider_id: 'openai', processing_transport: ['standard', 'fast'] }] }; } });
+    const settings = (revision, light = 'light-1') => ({ OUROBOROS_CONNECTIONS: [], OPENROUTER_API_KEY: 'sk-or-v1...', OUROBOROS_MODEL_LIGHT: 'x',
+        _meta: { tokens: { OUROBOROS_CONNECTIONS: 'rows-1', OUROBOROS_MODEL_LIGHT: light },
+            connections: [{ id: 'openrouter', revision }, { id: 'openai', revision: 'openai#same' }] } });
+    store.adoptSettings(settings('openrouter#r1'));
+    await store.read();
+    assert.equal(store.revisionOf(route('z-ai/glm-5.3')), 'openrouter#r1');
+    assert.equal(store.revisionOf(route('claudexor::codex=gpt-6-astra')), '', 'a subscription has no API connection');
+    const glm = route('z-ai/glm-5.3');
+    const first = store.readDetail(glm);
+    await Promise.resolve();
+    waiting.shift().resolve(endpoints('z-ai/glm-5.3', ['standard', 'fast']));
+    await first;
+    assert.equal(store.detail(glm).state, 'ok');
+    // An unrelated setting keeps the answer and the catalog.
+    store.adoptSettings(settings('openrouter#r1', 'light-2'));
+    assert.deepEqual([store.detail(glm).state, catalogReads], ['ok', 1], 'an unrelated edit is not another source');
+    // The connection's revision moved (a rotated key shows the same masked prefix): nothing of the earlier one is told.
+    const epoch = store.detailEpoch();
+    store.adoptSettings(settings('openrouter#r2'));
+    assert.deepEqual([store.detail(glm), store.detailEpoch(), store.revisionOf(glm)], [null, epoch + 1, 'openrouter#r2']);
+    const rows = store.catalog().items;
+    assert.ok(!('processing_transport' in rows.find((row) => row.value === 'z-ai/glm-5.3')), 'the changed source\'s transport is no limit now');
+    assert.deepEqual(rows.find((row) => row.value === 'openai::gpt-6').processing_transport, ['standard', 'fast'], 'another source keeps its own');
+    await flush();
+    assert.equal(catalogReads, 2, 'and the catalog is read again');
+    // A read out when the connection changes answers for the earlier one: not kept; the next call asks again.
+    const late = store.readDetail(glm);
+    await Promise.resolve();
+    store.adoptSettings(settings('openrouter#r3'));
+    waiting.shift().resolve(endpoints('z-ai/glm-5.3', ['standard', 'fast', 'ultrafast']));
+    await late;
+    assert.equal(store.detail(glm), null, 'a late answer of the earlier connection stands nowhere');
+    const again = store.readDetail(glm);
+    await Promise.resolve();
+    assert.equal(waiting.length, 1, 'asked again under the connection now');
+    waiting.shift().resolve(endpoints('z-ai/glm-5.3', ['standard']));
+    await again;
+    assert.deepEqual([...store.detail(glm).modes], ['standard']);
+});
+
+test('Main\'s binding read: the four tokens and the document whose connections say which source a route is shown on', async () => {
+    const tokens = { OUROBOROS_MODEL: 'm', USE_LOCAL_MAIN: 'l', OUROBOROS_MODEL_ACCOUNTS: 'a', OUROBOROS_MODEL_PROCESSING_PREFERENCES: 'p' };
+    const doc = { OUROBOROS_MODEL: 'openai@work::gpt-6', USE_LOCAL_MAIN: 'false', OUROBOROS_MODEL_ACCOUNTS: '{}',
+        OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}', _meta: { tokens, connections: [{ id: 'openai@work', revision: 'openai@work#w1' }] } };
+    let answer = doc;
+    const store = createModelCatalogStore({ readSettings: async () => answer });
+    const read = await store.readMainTierSettings();
+    assert.deepEqual([read.route, read.tier, read.binding], [route('openai@work::gpt-6'), 'fast', tokens]);
+    assert.deepEqual([revisionIn(read.settings, read.route), revisionIn(read.settings, route('openai::gpt-6')), revisionIn(read.settings, route('qwen3', true))],
+        ['openai@work#w1', null, ''], 'the named key\'s own revision; another key the read does not name; the local model none');
+    assert.deepEqual([apiConnectionOf(route('z-ai/glm-5.3')), apiConnectionOf(route('claudexor::codex=gpt-6-astra'))], ['openrouter', '']);
+    answer = { ...doc, _meta: { tokens: { OUROBOROS_MODEL: 'm' } } };
+    await assert.rejects(store.readMainTierSettings(), /Could not verify Main/);
+    const catalog = { items: [{ value: 'openai@work::gpt-6', processing_transport: ['standard'] }, { value: 'qwen3', use_local: true, processing_transport: ['standard'] }] };
+    assert.deepEqual(dropTransport(catalog, new Set(['openai@work'])).items.map((row) => 'processing_transport' in row), [false, true],
+        'the local adapter is no API connection that changed');
+});
+
+test('a catalog read out when a key rotates never revives the earlier source\'s transport; a read of the new one follows, others keep theirs', async () => {
+    const answers = [];
+    const store = createModelCatalogStore({ readCatalog: () => new Promise((resolve) => { answers.push(resolve); }) });
+    const rows = (glm, gpt) => ({ items: [{ ...item('z-ai/glm-5.3'), processing_transport: glm },
+        { ...item('openai::gpt-6'), provider_id: 'openai', processing_transport: gpt }] });
+    const settings = (revision) => ({ _meta: { tokens: {}, connections: [{ id: 'openrouter', revision }, { id: 'openai', revision: 'openai#same' }] } });
+    const transport = (value) => store.catalog()?.items.find((row) => row.value === value)?.processing_transport;
+    // What the tier strip and Settings actually consume: the index's word on the route (its raw `current` answer).
+    const ceiling = (value) => store.index().tiers(route(value))?.ceiling ?? null;
+    store.adoptSettings(settings('openrouter#r1'));
+    const first = store.read();
+    answers.shift()(rows(['standard', 'fast', 'ultrafast'], ['standard', 'fast']));
+    await first;
+    assert.deepEqual([ceiling('z-ai/glm-5.3'), ceiling('openai::gpt-6')], [['standard', 'fast', 'ultrafast'], ['standard', 'fast']]);
+    // A refresh goes out under r1 and is held; the key rotates to r2 while it is out.
+    const held = store.read({ force: true });
+    store.adoptSettings(settings('openrouter#r2'));
+    let refreshed = false;
+    const next = store.read({ force: true }).then(() => { refreshed = true; });
+    assert.equal(transport('z-ai/glm-5.3'), undefined, 'nothing of the earlier source is told at once');
+    assert.deepEqual([ceiling('z-ai/glm-5.3'), ceiling('openai::gpt-6')], [null, ['standard', 'fast']],
+        'the index too: the changed key\'s ceiling is unknown (never Standard-only), the unchanged one keeps its own');
+    answers.shift()(rows(['standard', 'fast', 'ultrafast'], ['standard', 'fast']));  // the held answer: still r1's
+    await held;
+    assert.equal(transport('z-ai/glm-5.3'), undefined, 'the held answer does not bring the earlier transport back');
+    assert.deepEqual(transport('openai::gpt-6'), ['standard', 'fast'], 'a source that did not change keeps its own');
+    assert.deepEqual([ceiling('z-ai/glm-5.3'), ceiling('openai::gpt-6')], [null, ['standard', 'fast']], 'the index after the held answer');
+    // Another reader's answer (Settings' refresh, by its event) while the new source is still owed: the same.
+    store.adopt(rows(['standard', 'fast', 'ultrafast'], ['standard', 'fast']));
+    assert.equal(transport('z-ai/glm-5.3'), undefined);
+    assert.equal(ceiling('z-ai/glm-5.3'), null, 'nor through another reader\'s answer');
+    await flush();
+    assert.equal(answers.length, 1, 'a read under the new source follows the held one');
+    assert.equal(refreshed, false, 'callers recovering from a refusal wait for the queued read, not the one already out');
+    answers.shift()(rows(['standard'], ['standard', 'fast']));
+    await next;
+    assert.deepEqual(transport('z-ai/glm-5.3'), ['standard'], 'and its answer is told whole');
+    assert.deepEqual([ceiling('z-ai/glm-5.3'), ceiling('openai::gpt-6')], [['standard'], ['standard', 'fast']]);
+});
+
+test('a settings read out when a newer document is adopted never writes the older one back', async () => {
+    let answer = () => {};
+    const store = createModelCatalogStore({ readSettings: () => new Promise((resolve) => { answer = resolve; }) });
+    const model = 'claudexor::codex=gpt-6-astra';
+    const settings = (revision, main) => ({ OUROBOROS_MODEL: model, USE_LOCAL_MAIN: false, OUROBOROS_MODEL_ACCOUNTS: { main },
+        _meta: { tokens: {}, connections: [{ id: 'openrouter', revision }] } });
+    const reading = store.readConnections({ fresh: true });  // sent while the key is r1
+    await flush();  // the read is out
+    store.adoptSettings(settings('openrouter#r2', 'work'));  // the Settings page (or confirmation) delivered a newer document
+    answer(settings('openrouter#r1', 'home'));
+    await reading;
+    assert.equal(store.revisionOf(route('z-ai/glm-5.3')), 'openrouter#r2', 'the older answer does not stand over the newer');
+    assert.equal(store.mainAccount(route(model)), 'work', 'not even for a different pin on the exact same route');
+    const again = store.readConnections({ fresh: true });  // a read sent after it is adopted
+    await flush();
+    answer(settings('openrouter#r3', ''));
+    await again;
+    assert.equal(store.revisionOf(route('z-ai/glm-5.3')), 'openrouter#r3');
+});
+
+test('first settings adoption discards unbound endpoint facts, including outstanding detail and catalog reads', async () => {
+    const pending = [], catalogs = [];
+    const model = 'vendor/model';
+    const store = createModelCatalogStore({
+        readProcessing: () => new Promise((resolve) => pending.push(resolve)),
+        readCatalog: () => new Promise((resolve) => catalogs.push(resolve)),
+    });
+    const settled = route('another/model');
+    const first = store.readDetail(settled);
+    await Promise.resolve();
+    pending.shift()(endpoints(settled.model, ['standard', 'fast']));
+    await first;
+    const late = store.readDetail(route(model));
+    const catalog = store.read();
+    await Promise.resolve();
+    store.adoptSettings({ _meta: { connections: [{ id: 'openrouter', revision: 'openrouter#first' }] } });
+    assert.equal(store.detail(settled), null);
+    pending.shift()(endpoints(model, ['standard', 'ultrafast']));
+    catalogs.shift()({ items: [{ ...item(model), processing_transport: ['standard', 'ultrafast'] }] });
+    await Promise.all([late, catalog]);
+    assert.equal(store.detail(route(model)), null);
+    assert.equal(store.index().tiers(route(model))?.ceiling ?? null, null);
+    catalogs.shift()({ items: [{ ...item(model), processing_transport: ['standard'] }] });
+    await flush();
+    assert.deepEqual(store.index().tiers(route(model)).ceiling, ['standard']);
+});
+
+for (const shape of ['model row', 'rowless source']) test(`the first settings revision rereads a ${shape}’s transport`, async () => {
+    const rowless = shape === 'rowless source';
+    const id = rowless ? 'openrouter@work' : 'openrouter';
+    const model = rowless ? `${id}::vendor/model` : 'vendor/model';
+    const response = (tiers) => rowless ? { items: [], api_sources: [{ id, label: 'Work', processing_transport: tiers }] }
+        : { items: [{ ...item(model), processing_transport: tiers }] };
+    let finish;
+    const store = createModelCatalogStore({ readCatalog: () => new Promise((resolve) => { finish = resolve; }) });
+    const read = store.read();
+    finish(response(['standard', 'ultrafast']));
+    await read;
+    const ceiling = () => store.index().tiers(route(model)).ceiling;
+    assert.deepEqual(ceiling(), ['standard', 'ultrafast']);
+    store.adoptSettings({ _meta: { connections: [{ id, revision: `${id}#first` }] } });
+    assert.equal(ceiling(), null);
+    if (rowless) assert.equal(store.index().source(id).count, 0);  // the source survives, independently of its transport fact
+    else assert.equal(store.catalog().items[0].value, model);  // older catalogs keep their model row too
+    finish(response(['standard']));
+    await flush();
+    assert.deepEqual(ceiling(), ['standard']);
+});
+
+test('a work following Main gets the account read for its exact route, not an earlier one', async () => {
+    const a = 'claudexor::codex=gpt-6-astra', b = 'claudexor::codex=gpt-6.2-sol';
+    const settings = (model, pin, local = false) => ({ OUROBOROS_MODEL: model, USE_LOCAL_MAIN: String(local),
+        OUROBOROS_MODEL_ACCOUNTS: { main: pin } });
+    let answer = settings(a, 'account-a');
+    const store = createModelCatalogStore({ readSettings: async () => answer });
+    await store.readConnections();
+    assert.equal(store.mainAccount(), 'account-a');
+    assert.equal(store.mainAccount(route(a)), 'account-a');
+    assert.equal(store.mainAccount(route(b)), null); // pending model B, but Settings still only names A
+    assert.equal(store.mainAccount(route(a, true)), null);
+
+    answer = settings(b, '');
+    await store.readConnections({ fresh: true });
+    assert.equal(store.mainAccount(route(b)), ''); // read Auto, not unknown
+    assert.equal(store.mainAccount(route(a)), null);
+    store.adoptSettings(settings(b, 'account-b', true));
+    assert.equal(store.mainAccount(route(b)), null);
+    assert.equal(store.mainAccount(route(b, true)), 'account-b');
+    store.adoptMainAccount('');
+    assert.equal(store.mainAccount(), '');
+    assert.equal(store.mainAccount(route(b, true)), null); // a write's unscoped answer proves no read binding
+    answer = settings(b, 'stale');
+    const old = store.readConnections({ fresh: true }); // the preceding Settings document is still in flight
+    store.adoptMainAccount('', route(a)); // the latest write confirmed Auto for A, not B
+    await old;
+    assert.equal(store.mainAccount(route(a)), '');
+    assert.equal(store.mainAccount(route(b)), null);
 });

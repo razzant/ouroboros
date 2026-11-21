@@ -257,6 +257,8 @@ def review_wave_budget_gate(
     categories: str | list = "",
     slot_ids: str | list = "",
     processing_preferences: str | list = "",
+    use_local: bool | list | None = None,
+    session_slots: int = 0,
 ) -> Optional[dict]:
     """Shared review-wave budget admission (v6.69.0).
 
@@ -267,7 +269,9 @@ def review_wave_budget_gate(
     priced with its own pack size and output reservation — ``prompt_chars`` /
     ``max_completion_tokens`` take one value per slot, and ``categories`` /
     ``slot_ids`` name the usage scope each seat will SEND under, so its bound
-    reads the seat's own observed cache split rather than the caller's), against
+    reads the seat's own observed cache split rather than the caller's;
+    ``processing_preferences``/``use_local`` carry each seat's send envelope,
+    ``usage_admission.review_seat_envelope``), against
     every fence ``reserve_attempt`` enforces — global TOTAL_BUDGET, the task's
     current root and its original billing group — with the binding axis and
     remainders named in the event. The wave is admitted while KNOWN spend is
@@ -295,6 +299,8 @@ def review_wave_budget_gate(
             categories=categories,
             slot_ids=slot_ids,
             processing_preferences=processing_preferences,
+            use_local=use_local,
+            session_slots=session_slots,
         )
         unpriced = int(admission.get("unpriced_slots") or 0)
         base = {
@@ -312,6 +318,7 @@ def review_wave_budget_gate(
             "slots": admission.get("slots"),
             "slot_bounds": admission.get("slot_bounds"),
             "unpriced_slots": unpriced,
+            **({"session_slots": session_slots} if session_slots else {}),
         }
         unknown = admission.get("admission_unknown")
         if unknown or admission.get("reason") == "billing_authority_unavailable":

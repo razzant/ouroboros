@@ -740,9 +740,37 @@
  * @property {*=} availability
  * @property {*=} problem
  * @property {*=} processing
+ * @property {Array<'standard'|'fast'|'economy'|'ultrafast'>=} processing_transport  API rows: the host tiers their connection's transport can carry; absent where unknown, never the model's or the key's support
  * @property {boolean=} use_local
  * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
  * @property {string=} price_condition  DeepSeek rows whose published entry prices them only off-peak in USD: `off_peak_usd`
+ */
+
+/**
+ * One endpoint of an OpenRouter model: `service_tier` as its record states it (null = Standard; `flex`, `priority`,
+ * `ultrafast`; another string kept with no `mode`; absent when the record has no such field or a non-string), `mode`
+ * the host tier it reads as, `price` only where honest (no fee or time condition).
+ * @typedef {Object} ModelProcessingEndpoint
+ * @property {string} tag
+ * @property {(string|null)=} service_tier
+ * @property {('standard'|'fast'|'economy'|'ultrafast')=} mode
+ * @property {ModelPrice=} price
+ */
+
+/**
+ * The tiers one model's endpoints list; `complete` is a catalogue fact for this route, never a price or the key's
+ * entitlement. Nothing read is `[]` and false, never Standard-only.
+ * @typedef {Object} ModelProcessing
+ * @property {Array<'standard'|'fast'|'economy'|'ultrafast'>} modes
+ * @property {boolean} complete
+ * @property {ModelProcessingEndpoint[]} endpoints
+ */
+
+/**
+ * `GET /api/model-catalog?processing_model=<route>`: one OpenRouter route's tiers, `value` as asked.
+ * @typedef {Object} ModelProcessingResponse
+ * @property {string} value
+ * @property {ModelProcessing} processing
  */
 
 /**
@@ -1089,17 +1117,27 @@
  */
 
 /**
+ * A configured API connection even without model rows. Its transport is not model or key eligibility.
+ * @typedef {Object} ModelCatalogApiSource
+ * @property {string} id
+ * @property {string} label
+ * @property {Array<'standard'|'fast'|'economy'|'ultrafast'>=} processing_transport
+ */
+
+/**
  * `GET /api/model-catalog`: `view=sources` lists subscription descriptors with empty `items`.
- * `source_id` and optional `credential_profile_id` select subscription models, `provider_id` one API connection
+ * `source_id` and optional `credential_profile_id` select subscription models, `harness_id` selects an agent inventory, `provider_id` one API connection
  * or the local model. The full catalog collects sources concurrently, with a 20-second limit per read,
  * and returns the results together with failures in `errors`.
  * @typedef {Object} ModelCatalogResponse
  * @property {ModelCatalogItem[]} items
  * @property {Object[]} errors
  * @property {Object[]} model_sources
+ * @property {ModelCatalogApiSource[]=} api_sources
  * @property {Object[]=} account_catalogs
  * @property {Object=} session_catalog  // native harness row for a harness_id read
  * @property {boolean=} partial
+ * @property {string=} store_id  the engine store this read's handshake named, when it named one
  */
 
 /**

@@ -118,7 +118,7 @@
             "candidate_raw_size_bytes": 206,
             "candidate_measurement_kind": "canonical_json_v1",
             "state": "settled",
-            "transitions": 3,
+            "transitions": 4,
             "prompt_cache_ttl": "",
             "cost_final": true
           }
@@ -204,6 +204,7 @@
             "transport": "anthropic.messages.create",
             "client": {
               "api_key": "search-fixture-key",
+              "base_url": "https://api.anthropic.com",
               "max_retries": 0
             },
             "payload": {

@@ -313,10 +313,10 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/owner/effort-range": Shape(f"200:OwnerEffortRangeResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal", "OwnerEffortRangeRequest",
                                           note="helper min <= max; primary independent; optional project_id, otherwise Main"),
     "POST /api/owner/chat-model": Shape(f"200:OwnerChatModelResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal", "OwnerChatModelRequest",
-                                        note="the room's model for new owner work; optional project_id, otherwise Main"),
+                                        note="the room's model for new owner work; optional project_id, otherwise Main, whose if_unchanged binds the read"),
     "POST /api/owner/chat-processing": Shape(f"200:OwnerChatProcessingResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal",
                                              "OwnerChatProcessingRequest",
-                                             note="the room's processing tier for new owner work, '' = Default; optional project_id, otherwise Main's own"),
+                                             note="An empty tier means Default. Omit project_id for Main. Enabling Main Ultrafast requires its four read tokens, confirmed destination and any API connection revision in if_unchanged."),
     "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyRulesRequest"),
     "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModelRequest"),
     "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModeRequest"),
@@ -338,8 +338,10 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200,400,404,409,503:SkillPublishPreflightResponse", "SkillPublishPreflightRequest",
         note="read-only; every status carries the same shape; state hard_block is a refusal; destination "
              "{source_id, mode} picks where it would go (default: the skill's origin, else the hub)"),
-    "GET /api/model-catalog": Shape("200:ModelCatalogResponse 400:ErrorResponse", query="view provider_id source_id harness_id credential_profile_id",
-                                    note="read-only; a provider that failed is an errors row, not a failed read"),
+    "GET /api/model-catalog": Shape("200:ModelCatalogResponse|ModelProcessingResponse 400:ErrorResponse",
+                                    query="view provider_id source_id harness_id credential_profile_id processing_model",
+                                    note="read-only; a provider that failed is an errors row, not a failed read; "
+                                         "processing_model answers ModelProcessingResponse for that one route"),
     "POST /api/providers/test": Shape("200:ProviderTestResponse 400:ErrorResponse", "ProviderTestRequest",
                                       note="a failed probe is 200 with ok false; nothing is saved"),
     "POST /api/tasks": Shape(

@@ -1,16 +1,10 @@
-"""Ultrafast: a tier a room, a work, a helper or one call may carry, never a Settings value.
-
-Settings (Main's role options, the global default, an Agents row) keep standard, fast or economy: an older
-packaged reader refuses a document holding a value it does not know. A call is submitted Ultrafast only to a
-source that advertises it; an API provider gets no invented native field and its receipt says so. A review seat on
-it is unpriced. A helper started without a tier of its own takes the work's; a continuation keeps the tier its
-run was captured with. The owner's tier-only wake names itself as such.
-"""
+"""Main Ultrafast and its path through call receipts, review admission and inherited helper tiers."""
 from __future__ import annotations
 
 import asyncio
 import copy
 import json
+import time
 from types import SimpleNamespace
 from typing import get_args, get_type_hints
 
@@ -46,7 +40,7 @@ def _literal(annotation) -> set:
 # --- The vocabulary ------------------------------------------------------------------------------------------------
 
 
-def test_ultrafast_is_a_call_tier_and_never_a_settings_value():
+def test_ultrafast_is_a_call_tier_and_can_be_saved_only_for_main():
     assert PROCESSING_PREFERENCES == ("standard", "fast", "economy")
     assert CALL_TIERS == ("standard", "fast", "economy", "ultrafast")
     assert normalize_call_tier(" Ultrafast ") == "ultrafast" and normalize_call_tier(None) == normalize_call_tier("") == ""
@@ -55,12 +49,16 @@ def test_ultrafast_is_a_call_tier_and_never_a_settings_value():
             normalize_call_tier(bad)
     with pytest.raises(ValueError):
         normalize_processing_preference("ultrafast")
-    for options in ({"main": "ultrafast"}, {"light": "ultrafast"}, {"fallback": ["", "ultrafast"]}):
+    for options in ({"light": "ultrafast"}, {"safety": "ultrafast"}, {"fallback": ["", "ultrafast"]}):
         with pytest.raises(ValueError):
             normalize_model_role_options(ROLES, options)
-    # One call's captured override may be Ultrafast; a role or the default resolved from Settings never is.
     assert resolve_processing_preference(override="ultrafast") == "ultrafast"
-    assert resolve_processing_preference("main", settings={ROLES: '{"main":"fast"}', GLOBAL: "economy"}) == "fast"
+    settings = {ROLES: '{"main":"ultrafast"}', GLOBAL: "economy"}
+    assert resolve_processing_preference("main", settings=settings) == "ultrafast"
+    assert resolve_processing_preference("main", override="", settings=settings) == ""
+    assert resolve_processing_preference("light", settings=settings) == "economy"
+    with pytest.raises(ValueError):
+        resolve_processing_preference(settings={GLOBAL: "ultrafast"})
 
 
 def test_an_agents_row_keeps_the_settings_vocabulary():
@@ -82,10 +80,10 @@ def test_the_tier_contracts_name_ultrafast_where_a_room_a_work_or_a_call_holds_i
                        (OwnerChatProcessingResponse, "previous_processing_choice"), (ProjectEntry, "processing_choice"),
                        (TaskModelRequest, "processing"), (WorkProcessing, "choice")):
         assert _literal(get_type_hints(cls, include_extras=True)[field]) == calls, (cls.__name__, field)
-    # Main's own tier and the default are Settings values.
-    for field in ("main_processing", "previous_main_processing", "processing_default"):
-        assert _literal(get_type_hints(OwnerChatProcessingResponse, include_extras=True)[field]) == settings, field
-    assert all(_literal(hint) <= calls for hint in get_type_hints(ProcessingTiers, include_extras=True).values())
+    response = get_type_hints(OwnerChatProcessingResponse, include_extras=True)
+    tiers = get_type_hints(ProcessingTiers)
+    assert _literal(response["main_processing"]) == _literal(response["previous_main_processing"]) == _literal(tiers["main"]) == calls
+    assert _literal(response["processing_default"]) == _literal(tiers["default"]) == settings
 
 
 def test_a_carrier_on_ultrafast_answers_for_the_roots_own_calls_and_says_so():
@@ -103,14 +101,15 @@ def test_a_carrier_on_ultrafast_answers_for_the_roots_own_calls_and_says_so():
     assert PROCESSING_WORDS["ultrafast"] == "Ultrafast"
 
 
-# --- One call on an API provider: honestly not submitted -----------------------------------------------------------
+# --- One call through a surface without a native Ultrafast carrier --------------------------------------------------
 
 
-@pytest.mark.parametrize(("provider", "asynchronous"), [("openai", False), ("openrouter", True), ("anthropic", False)])
-def test_an_api_call_on_ultrafast_sends_no_invented_native_field(transport, provider, asynchronous):  # noqa: F811
+@pytest.mark.parametrize(("provider", "asynchronous"), [("openai", True), ("anthropic", False)])
+def test_an_api_call_on_ultrafast_sends_no_invented_native_field(transport, monkeypatch, provider, asynchronous):  # noqa: F811
     from tests._usage_store_testing import ledger_rows
 
     root, client, sent = transport
+    monkeypatch.setenv("OPENAI_API_SURFACE", "chat_completions")
     kwargs = dict(messages=[{"role": "user", "content": "unchanged input"}], model=f"{provider}::test-model",
                   model_role="light", processing_preference="ultrafast", max_tokens=12)
     message, usage = asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
@@ -130,7 +129,7 @@ def test_an_api_call_on_ultrafast_sends_no_invented_native_field(transport, prov
 
 
 @pytest.mark.parametrize("provider", ["openai", "openrouter", "anthropic", "claudexor", "openai-compatible"])
-def test_ultrafast_never_becomes_a_native_api_field(provider):
+def test_ultrafast_needs_a_known_adapter_endpoint_and_surface(provider):
     from ouroboros.llm_attempt import apply_processing_preference
 
     target, payload = {"provider": provider, "processing_preference": "ultrafast"}, {"model": "m"}
@@ -151,12 +150,128 @@ def test_the_receipt_of_an_unsubmitted_ultrafast_says_so():
     assert processing_receipt("anthropic", {"speed": "standard"}, requested="ultrafast")["observed"] == "standard"
 
 
-# --- A review seat on Ultrafast is unpriced, never Standard ---------------------------------------------------------
+_FILTERS = {"require_parameters": True, "allow_fallbacks": False}  # the adapter's own pins: they drop endpoints
 
 
-def test_a_review_seat_on_ultrafast_is_unpriced_never_priced_as_standard(data_root, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize(("routing", "preference", "native", "pinned"), [
+    (None, "fast", "priority", False),
+    (_FILTERS, "fast", "priority", False),
+    (None, "economy", "flex", False),
+    (_FILTERS, "economy", "flex", True),  # dropping every Flex endpoint may route the call normally
+    ({"allow_fallbacks": False, "only": ["vendor-a"]}, "fast", "priority", True),  # the router re-ask rung
+    ({"order": ["vendor-b"]}, "fast", "priority", True),
+    ("unreadable", "fast", "priority", True),
+])
+def test_a_reservation_prices_the_routing_its_sealed_candidate_carries(monkeypatch, routing, preference, native,
+                                                                       pinned):
+    """The tier pool's routing fact is read off the exact candidate, so a connection whose routing changes before
+    reserve, or a rung that adds its own provider selection, is priced as sent; the settings are not reread."""
+    from ouroboros import llm_routing
+    from ouroboros import usage_accounting as ua
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_attempt import _attempt_request, apply_processing_preference
+
+    slug = "vendor/synthetic-routing"
+    payload = {"model": slug, "messages": [{"role": "user", "content": "input"}],
+               **({"extra_body": {"provider": copy.deepcopy(routing)}} if routing is not None else {})}
+    target = {**LLMClient().resolve_remote_target(slug), "processing_preference": preference}
+    apply_processing_preference(target, payload)
+    request = _attempt_request(target, payload)
+    assert request.submitted_processing_mode == native and request.provider_routing_pinned is pinned
+    monkeypatch.setattr(llm_routing, "_resolve_or_provider", lambda *_a: pytest.fail("settings reread at reserve"))
+    seen = []
+    monkeypatch.setattr(ua, "estimate_cost_optional", lambda model, *a, **kw: seen.append(
+        (kw["processing_mode"], kw["routing_pinned"])) or 1.0)
+    assert ua._reservation_cost(request) == 1.0 and seen == [(native, pinned)]
+
+
+@pytest.mark.parametrize(("add_on", "unknown"), [
+    ({"tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]}, False),
+    ({"tools": [{"type": "openrouter:web_search", "parameters": {"max_total_results": 10}}]}, True),
+    ({"extra_body": {"plugins": [{"id": "web"}]}}, True),
+    ({"web_search_options": {"search_context_size": "low"}}, True),
+    ({"model": "vendor/synthetic-routing:online"}, True),
+], ids=["function_tool", "server_tool", "plugin", "web_search_options", "online_shortcut"])
+def test_an_add_on_charge_leaves_the_reservation_unknown_never_a_token_bound(monkeypatch, add_on, unknown):
+    """A server tool or plugin is billed per use beside the tokens, so no token tariff bounds that call: its
+    reservation is unknown whatever tier it carries, while an ordinary function tool keeps its tier pool."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_attempt import _attempt_request, apply_processing_preference
+
+    slug = "vendor/synthetic-routing"
+    payload = {"model": slug, "messages": [{"role": "user", "content": "input"}], **copy.deepcopy(add_on)}
+    target = {**LLMClient().resolve_remote_target(slug), "processing_preference": "fast"}
+    apply_processing_preference(target, payload)
+    request = _attempt_request(target, payload)
+    assert request.submitted_processing_mode == "priority" and request.force_unknown_reservation is unknown
+    monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **kw: 1.0)
+    assert ua._reservation_cost(request) == (None if unknown else 1.0)
+
+
+def test_a_review_preflight_projects_its_seats_routing_and_locality(monkeypatch):
+    """Before any candidate exists the projection carries what the adapter will add from the seat's resolved connection
+    (its provider routing), and a local seat is the local lane's own request, never its remote model's tariff."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.llm import LLMClient
+    from ouroboros.usage_admission import projected_pricing_request
+
+    monkeypatch.delenv("OUROBOROS_OR_PROVIDER", raising=False)
+    slug = "vendor/synthetic-routing"
+    base = LLMClient().resolve_remote_target(slug)
+    for routing, pinned in ((None, False), ("repro", False), ({"only": ["vendor-a"]}, True)):
+        request = projected_pricing_request(slug, "fast", lambda _model, value=routing: {**base, "provider_routing": value},
+                                            review=True, use_local=False)
+        assert (request.submitted_processing_mode, request.provider_routing_pinned) == ("priority", pinned)
+    local = projected_pricing_request(slug, "fast", lambda _model: pytest.fail("a local seat resolves no remote route"),
+                                      review=True, use_local=True)
+    assert (local.provider, local.model, local.force_unknown_reservation) == ("local", "local-model", False)
+    assert ua._reservation_cost(local) == 0.0
+    online = projected_pricing_request(slug + ":online", "fast", LLMClient().resolve_remote_target, review=True,
+                                       use_local=False)
+    assert online.force_unknown_reservation and ua._reservation_cost(online) is None
+
+
+@pytest.mark.parametrize(("slug", "sealed", "routing", "wire_usd", "preflight_usd"), [
+    ("anthropic/fixture", False, {"require_parameters": True}, 0.009, 0.009),
+    ("vendor/fixture", True, {"allow_fallbacks": False}, 0.009, 0.009),
+    ("vendor/fixture", False, {}, 0.001, 0.009),
+    ("google/gemini-fixture", True, {}, 0.001, 0.001),
+])
+def test_flex_preflight_bounds_the_chat_adapters_actual_provider_pool(
+        monkeypatch, slug, sealed, routing, wire_usd, preflight_usd):
+    from ouroboros import pricing, usage_accounting as ua
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_attempt import _attempt_request
+
+    monkeypatch.setenv("OUROBOROS_OR_PROVIDER", "")
+    key = ("openrouter", slug)
+    tariffs = {tier: pricing.PricingSchedule((0, 0, 0, rate), cache_write_1h=0, source={"processing": tier})
+               for tier, rate in [("economy", 1), ("standard", 9)]}
+    monkeypatch.setattr(pricing, "_cached_pricing", {key: tariffs})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {key: time.time()})
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *args: pytest.fail(f"unexpected fetch {args}"))
+    client = LLMClient()
+    target = {**client.resolve_remote_target(slug), "processing_preference": "economy"}
+    messages = [{"role": "user", "content": "input"}]
+    if sealed:
+        messages.append({"role": "assistant", "content": "output",
+                         "reasoning_details": [{"type": "reasoning.encrypted", "data": "fixture"}]})
+    payload = client._build_remote_kwargs(target, messages, "medium", 1000, "auto", None, None,
+                                          skip_capability_fetch=True)
+    assert payload["extra_body"].get("provider", {}) == routing and payload["service_tier"] == "flex"
+    physical = _attempt_request(target, payload)
+    assert ua._reservation_cost(physical) == pytest.approx(wire_usd)
+    wave = ua.review_wave_admission(root_task_id="review", models=[slug], use_local=False,
+                                   prompt_chars=physical.prompt_tokens_estimate * 4, max_completion_tokens=1000,
+                                   processing_preferences="economy", remaining_usd_override=1)
+    assert wave["slot_bounds"] == [preflight_usd] and wave["unpriced_slots"] == 0
+
+
+def test_review_cannot_price_ultrafast_on_openai_chat_completions(data_root, monkeypatch):  # noqa: F811
     from ouroboros import usage_accounting as ua
 
+    monkeypatch.setenv("OPENAI_API_SURFACE", "chat_completions")
     priced, real = [], ua._reservation_cost
 
     def reservation(request):
@@ -206,19 +321,19 @@ def test_a_source_that_does_not_advertise_ultrafast_never_receives_it(setup, mon
     assert ledger(root)[-1]["processing"] == usage["processing"]
 
 
-@pytest.mark.parametrize(("reason", "asynchronous"), [("capacity", False), ("unsupported", True)])
-def test_a_proved_unstarted_ultrafast_refusal_retries_standard_once(setup, monkeypatch, reason, asynchronous):  # noqa: F811
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_proved_pre_generation_ultrafast_refusal_retries_standard_once(setup, monkeypatch, asynchronous):  # noqa: F811
     root, gateway, client = setup
     _advertise(monkeypatch, "standard", "fast", "economy", "ultrafast")
-    gateway.results = [refusal("ultrafast", reason), {**result(), "processing": receipt()}]
+    gateway.results = [refusal("ultrafast", "unsupported"), {**result(), "processing": receipt()}]
     gateway.dispatch = ["response_received", "response_received"]
     kwargs = dict(messages=[{"role": "user", "content": "input"}], model=MODEL, processing_preference="ultrafast")
     _message, usage = asyncio.run(client.chat_async(**kwargs)) if asynchronous else client.chat(**kwargs)
     first, second = [row[0] for row in gateway.uploads]
     assert first["options"]["processingPreference"] == "ultrafast"
     assert {**first, "options": {**first["options"], "processingPreference": "standard"}} == second
-    finals = list({row["attempt_id"]: row for row in ledger(root)}.values())
-    assert [row["state"] for row in finals] == ["released", "settled"]
+    finals = ledger(root)
+    assert [row["state"] for row in finals] == ["settled", "settled"]
     assert all(row["processing_preference"] == "ultrafast" for row in finals)
     # The call asked Ultrafast and was sent and served Standard: its receipt says so (owner 13.11: continue on
     # Standard, the choice and the outcome visible); the physical attempt keeps the engine's own receipt.
@@ -231,32 +346,12 @@ def test_an_ultrafast_refusal_without_proof_is_not_retried(setup, monkeypatch): 
 
     _root, gateway, client = setup
     _advertise(monkeypatch, "standard", "fast", "economy", "ultrafast")
-    response = refusal("ultrafast")
+    response = refusal("ultrafast", "unsupported")
     response["problem"]["context"]["generationStarted"] = True
     gateway.results = [response]
     with pytest.raises(cx.ClaudexorModelError):
         client.chat([], MODEL, processing_preference="ultrafast")
     assert len(gateway.accepted_operations) == 1
-
-
-def test_the_retry_payload_covers_ultrafast_and_nothing_wider():
-    from ouroboros import llm_claudexor as cx
-
-    def error(**context):
-        problem = {"code": "processing_unavailable", "context": {"generationStarted": False, "processingFallback": "standard",
-                                                                  "processingRefusal": "capacity", **context}}
-        return SimpleNamespace(code="processing_unavailable", problem=problem,
-                               physical_attempt_capture=SimpleNamespace(state="released"))
-    for tier in ("fast", "economy", "ultrafast"):
-        payload = {"options": {"processingPreference": tier}, "model": "m"}
-        retried = cx._processing_retry_payload(payload, error())
-        assert retried == {"options": {"processingPreference": "standard"}, "model": "m"}
-        assert payload["options"]["processingPreference"] == tier, "the sent payload is never rewritten"
-    assert cx._processing_retry_payload({"options": {"processingPreference": "standard"}}, error()) is None
-    assert cx._processing_retry_payload({"options": {"processingPreference": "ultrafast", "serviceTier": "priority"}},
-                                        error()) is None
-    assert cx._processing_retry_payload({"options": {"processingPreference": "ultrafast"}},
-                                        error(generationStarted=True)) is None
 
 
 # --- A fallback row serves the work's own tier ---------------------------------------------------------------------
@@ -774,13 +869,15 @@ def _child(event) -> dict:
     return {key: event[key] for key in ("configured_subagent", "delegation_role")}
 
 
-@pytest.mark.parametrize("own,expected", [
-    (None, ""),  # Astra rl-20261115T134200-6ffa9baa207d: a helper that captured no tier hands none down
-    ("standard", "standard"),  # rows with a tier of their own keep it
+@pytest.mark.parametrize("main,own,expected", [
+    ("", None, ""),  # a helper that captured no tier hands none down
+    ("", "standard", "standard"),
+    ("ultrafast", None, "ultrafast"),  # Main changes after admission: the helper hands down its captured tier
+    ("ultrafast", "standard", "standard"),  # rows with a tier of their own keep it
 ])
 def test_both_doors_send_their_real_requests_on_the_tier_captured_before_the_global_became_fast(
-        tmp_path, monkeypatch, own, expected):
-    """An API helper scheduled while the owner's global was none keeps asking none after it became Fast. Each door,
+        tmp_path, monkeypatch, main, own, expected):
+    """An API helper keeps what it took from Main after its owner changes Settings. Each door,
     from that helper and from the API child it schedules, is read where its request leaves the host: delegate_start
     in the engine's start request, schedule_subagent in the event submitted to the supervisor; continuing the last
     run keeps the tier it was captured with."""
@@ -789,9 +886,12 @@ def test_both_doors_send_their_real_requests_on_the_tier_captured_before_the_glo
 
     requests = _engine(monkeypatch)
     monkeypatch.delenv(ROLES, raising=False)
-    first = _submitted(_owner_saves(monkeypatch, tmp_path, _catalog("")), "root", {}, subagent_id=API_ROW)
-    assert _runs_on(first["configured_subagent"]) == ""
-    ctx = _owner_saves(monkeypatch, tmp_path, _catalog("fast", own))
+    initial = {**_catalog(""), ROLES: json.dumps({"main": main})}
+    first = _submitted(_owner_saves(monkeypatch, tmp_path, initial), "root", {}, subagent_id=API_ROW)
+    assert _runs_on(first["configured_subagent"]) == main
+    assert first["configured_subagent"]["processing_preference"] == ""
+    ctx = _owner_saves(monkeypatch, tmp_path, {**_catalog("fast", own), ROLES: "{}"})
+    assert task_processing_preference({}) == "fast"
     seen, work, task_id = {}, _child(first), first["task_id"]
     for generation in (1, 2):
         run_work, started = work, _started(tmp_path, work, access="readonly")

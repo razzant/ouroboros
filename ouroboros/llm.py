@@ -491,6 +491,7 @@ class LLMClient(
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
+                    wire_completion=resp,
                 )
                 result[1]["ledger_attempt_ids"] = list(attempt_ids)
                 return _one_shot_result(result, tools)
@@ -522,6 +523,7 @@ class LLMClient(
             _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
+            wire_completion=resp,
         )
         result[1]["ledger_attempt_ids"] = list(attempt_ids)
         return _one_shot_result(result, tools)
@@ -814,14 +816,16 @@ def openrouter_web_search_server_tool(
     *, api_key: str, model: str, query: str, search_context_size: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
     processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
+    target: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Keep native search tools on the shared physical-send recovery driver.
 
-    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
+    ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted;
+    ``target`` the leg's resolved connection (``llm_openai_compatible.openrouter_web_search_server_tool``)."""
     return _openrouter_web_search_server_tool(
         api_key=api_key, model=model, query=query, search_context_size=search_context_size,
         accounting_scope=accounting_scope, timeout=timeout, processing_preference=processing_preference,
-        _recovery=LLMClient()._create_chat_completion_with_retries,
+        target=target, _recovery=LLMClient()._create_chat_completion_with_retries,
     )
 
 
@@ -830,12 +834,13 @@ def anthropic_web_search_server_tool(
     *, api_key: str, model: str, query: str,
     accounting_scope: Optional[UsageScope] = None, timeout: Optional[float] = None,
     processing_preference: str | None = None, caller_dispatch_deadline_ts: Optional[float] = None,
+    target: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Compose native Messages search without converting its provider-owned tool.
 
     ``caller_dispatch_deadline_ts`` is the leg's send window as in ``chat``, reserve already subtracted."""
     return _anthropic_web_search_server_tool(
         api_key=api_key, model=model, query=query, accounting_scope=accounting_scope,
-        timeout=timeout, processing_preference=processing_preference,
+        timeout=timeout, processing_preference=processing_preference, target=target,
         _recovery=LLMClient()._create_chat_completion_with_retries,
     )

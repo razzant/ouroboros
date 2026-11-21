@@ -104,6 +104,9 @@ export const sendModelWaitDecision = (body) => jsonPost('/api/decisions', body,
 const requestIdentity = () => globalThis.crypto?.randomUUID?.()
     || `model-wait-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+/** The wait card changes only the model. Moving Main's Ultrafast needs a confirmed destination. */
+export const MAIN_KEEPS_TIER = "Main keeps its tier. To move Ultrafast to another model or account, confirm it in Main or Settings › Models. Uncheck this option to switch only this task.";
+
 /** A requested Settings save that did not land, told once its wait resolved; '' otherwise. */
 export function unsavedPersistenceNotice(row, outcome) {
     if (!outcome || outcome.saved === true || row?.state !== 'resolved') return '';
@@ -232,9 +235,11 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         node.querySelector('[data-wait-persist-offer]').hidden = ownModel;
         persist.disabled = pending || taskOnlyLocal || ownModel;
         if (taskOnlyLocal || ownModel) persist.checked = false;
+        const keepsTier = (row.role === 'main' || row.role === 'reviewer:main') && persist.checked && !persist.disabled;
         node.querySelector('[data-wait-scope]').textContent = ownModel
             ? 'This changes this work\'s model only; a room\'s own model is set in its composer.' : taskOnlyLocal
             ? 'Local applies to all fallbacks in Settings. This change is task-only; edit Models for a permanent change.'
+            : keepsTier ? MAIN_KEEPS_TIER
             : row.review_operation ? 'This role changes for this review operation.' : 'This role changes until the task ends.';
     }
 
@@ -404,6 +409,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
             void submit(taskId, view, 'auto_continue', { auto_continue: event.target.checked });
         });
         node.querySelector('[data-wait-retry]').addEventListener('click', () => { void submit(taskId, view, 'retry'); });
+        node.querySelector('[data-wait-persist]').addEventListener('change', () => { onDomWrite(() => paint(taskId)); });
         node.querySelector('[data-wait-repeat]').addEventListener('click', () => { void submit(taskId, view, '', {}, true); });
         node.querySelector('[data-wait-settings]').addEventListener('click', () => { void openSettings('accounts'); });
         node.querySelector('[data-wait-login]').addEventListener('click', async () => {

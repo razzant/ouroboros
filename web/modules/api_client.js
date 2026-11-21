@@ -672,7 +672,7 @@ export const apiClient = {
     /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
      * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
     ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice, { headers: APP_SETTINGS_ORIGIN }),
-    /** The room's processing tier for new owner work ('' = Default); Main's own without project_id.
+    /** Save the room's tier, or Main's own. Forward Main Ultrafast's confirmation-time read tokens with the tier.
      * @param {import('./client_contract_types.js').OwnerChatProcessingRequest} choice
      * @returns {Promise<import('./client_contract_types.js').OwnerChatProcessingResponse>} */
     ownerChatProcessing: (choice) => jsonPost('/api/owner/chat-processing', choice, { headers: APP_SETTINGS_ORIGIN }),

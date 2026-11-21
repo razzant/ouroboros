@@ -964,21 +964,16 @@ def _assisted_update_pays() -> bool:
     (a root task, opening on Main) or a seat of the commit-review wave it asks for. The API rows of the
     review pool are answered at the global axis by ``review_wave_admission`` (the reservation's own rule);
     session rows ride subscriptions. An unknown answer pays; every send still meets its reservation."""
-    from ouroboros.review_execution import ReviewRouteKind
-    from ouroboros.reviewer_slot_config import review_pool_slots
-    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
-    from ouroboros.tools.review_multi_model import _review_output_budget
+    from ouroboros.tools.review_admission import managed_update_wave_inputs
     from ouroboros.usage_admission import review_wave_admission
     from supervisor import state
     from supervisor.worker_assignment import needs_paid_admission
 
     if needs_paid_admission({"metadata": {}}):
         return True
-    models = [row.model for row in review_pool_slots() if row.model
-              and str(getattr(row.route, "value", row.route) or "") != ReviewRouteKind.AGENT_SESSION.value]
-    return bool(models) and review_wave_admission(
-        drive_root=state.DRIVE_ROOT, root_task_id="managed-update-admission", models=models,
-        prompt_chars=int(REVIEW_PROMPT_TOKEN_BUDGET) * 4, max_completion_tokens=int(_review_output_budget()),
+    wave = managed_update_wave_inputs()
+    return bool(wave["models"]) and review_wave_admission(
+        **wave, drive_root=state.DRIVE_ROOT,
         global_limit_usd=float(state.TOTAL_BUDGET_LIMIT or 0.0)).get("fits") is not True
 
 

@@ -143,6 +143,19 @@ def slot_is_session(slot: Any) -> bool:
     return getattr(slot, "route", None) is ReviewRouteKind.AGENT_SESSION
 
 
+def plan_wave_budget_gate(ctx, slots, prompt_chars, default_chars):
+    """All callable seats consume the work's allowance. Only API seats have an API tariff to project."""
+    from ouroboros.review_substrate import review_usage_category
+    from ouroboros.tools.review_helpers import review_wave_budget_gate
+    from ouroboros.usage_admission import review_slot_wave_fields
+
+    wave = review_slot_wave_fields(slots)
+    return review_wave_budget_gate(
+        ctx, surface="plan_review", **wave, categories=review_usage_category("plan_review"),
+        prompt_chars=[prompt_chars.get(slot_id, default_chars) for slot_id in wave["slot_ids"]],
+        max_completion_tokens=PLAN_REVIEW_MAX_TOKENS)
+
+
 def slot_retrieves(slot: Any) -> bool:
     """DELIVERY class: this slot reads the subject with its own tools — a
     session row or a configured-subagent native row. Packet sizing, fit and

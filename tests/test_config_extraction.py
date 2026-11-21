@@ -118,7 +118,7 @@ _ADDED_OWNERS = {
     "task_processing_preference": model_slots,
     "normalize_processing_preference": model_slots,
     "resolve_processing_preference": model_slots,
-    # A call's tier (Settings' three and the runtime-only Ultrafast) and the tiers /api/state publishes.
+    # Main and call tiers, including Ultrafast, and their /api/state projection.
     "CALL_TIERS": model_slots,
     "normalize_call_tier": model_slots,
     "processing_tiers": model_slots,

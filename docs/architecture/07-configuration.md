@@ -85,8 +85,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_LIGHT | openai/gpt-6-luna | Light model |
 | OUROBOROS_MODEL_SAFETY | (empty) | Safety Supervisor; empty uses Light, then Main. Outside Cyber Pro only owner writes change the resolved checker (owner Safety endpoints, the model-wait card); a provider change that re-proposes an unauthored slot saves (audited); a deployment checker replaces it |
 | OUROBOROS_MODEL_ACCOUNTS | {} | Role-owned managed-account pins; empty = Auto |
-| OUROBOROS_PROCESSING_PREFERENCE | "" | Global provider-neutral tier standard/fast/economy; empty keeps the adapter default |
-| OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role-owned preferences; empty roles inherit the global one |
+| OUROBOROS_PROCESSING_PREFERENCE | "" | Global standard/fast/economy, empty uses adapter default |
+| OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role tiers inherit global when empty. Only `main` also accepts `ultrafast` |
 | OUROBOROS_MODEL_CONTEXT_WINDOWS | {} | Role-owned context sizing assertions; zero = Auto; grants no reviewer authority |
 | OUROBOROS_MODEL_VISION | "" | Vision model (empty inherits) |
 | OUROBOROS_IMAGE_INPUT_MODE | auto | Send-time image routing (`vision_routing.py`) |

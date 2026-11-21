@@ -37,7 +37,7 @@ from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normal
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
-from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
+from ouroboros.transport_custody import ProcessingNotStarted, attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
 from ouroboros._usage_response import (CONTENT_REFUSAL_FINISH_REASONS, INTERMEDIATE_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS,
                                        TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, provider_answer, reply_usability,
                                        response_finish_reason, typed_values, usage_reply_usability)
@@ -701,6 +701,10 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     """Classify provider errors without changing model/request semantics."""
 
     safe = safe_error or sanitize_tool_result_for_log(repr(exc))
+    if getattr(exc, "processing_refusal_conflict", False):
+        return LlmErrorClassification("provider_outcome_unknown", False, _exception_status_code(exc))
+    if isinstance(exc, ProcessingNotStarted):
+        return LlmErrorClassification("provider_error", False, _exception_status_code(exc))
     if getattr(exc, "stream_rejected", False): return LlmErrorClassification("provider_error", False)  # complete wire judged unusable: a local verdict, never a same-model repeat
     if getattr(exc, "code", "") == "model_outcome_unknown":
         return LlmErrorClassification("provider_outcome_unknown", False)
@@ -857,7 +861,8 @@ def _record_llm_call_error(
     display_message = getattr(error, "display_message", None)
     display_error = sanitize_tool_result_for_log(display_message) if isinstance(display_message, str) and display_message else safe_error
     custody_fields = attempt_custody_event_fields(error)
-    timed_out = bool(ctx.configured_api_child and custody_fields.get("explicit_timeout") and custody_fields.get("model_output_received"))
+    tier_conflict = getattr(error, "processing_refusal_conflict", False)
+    timed_out = bool(not tier_conflict and ctx.configured_api_child and custody_fields.get("explicit_timeout") and custody_fields.get("model_output_received"))
     will_retry = classification.retry_same_request or timed_out  # a typed timeout after output, HTTP-shaped or not (#1886)
     repeats = _transport_death_repeats(ctx.accumulated_usage, ctx.round_id)
     backoff = None
@@ -867,12 +872,13 @@ def _record_llm_call_error(
             "model_role": str(getattr(error, "model_role", "") or ""),
             "route": dict(getattr(error, "route", {}) or {}), "outcome": "unknown",
             "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
+            **({"processing_refusal_conflict": True} if tier_conflict else {}),
             **({"same_operation_recoverable": True} if getattr(error, "same_operation_recoverable", False) else {}),
         }
         # Only an explicit low-level repeat budget repeats here; each running turn's
         # new generation belongs to the round's recovery (its continuation and the configured routes).
         if (
-            is_retryable_transport_death(error)
+            not tier_conflict and is_retryable_transport_death(error)
             and repeats < ctx.transport_death_retries and ctx.attempt < ctx.transient_budget - 1
         ):
             backoff = _TRANSPORT_DEATH_BACKOFF_SEC[min(repeats + 1, len(_TRANSPORT_DEATH_BACKOFF_SEC)) - 1]

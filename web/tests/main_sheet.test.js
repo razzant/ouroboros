@@ -137,12 +137,18 @@ test('a sheet with nothing off Main has no lists and no ticks', async () => {
 
 /* --- the Main chat's capsule: Main is written first, then one act per tick --- */
 
+// Main as one settings GET has it, with the four tokens its write is bound to (the write is refused without them).
+const MAIN_TOKENS = { OUROBOROS_MODEL: 'a'.repeat(24), USE_LOCAL_MAIN: 'b'.repeat(24),
+    OUROBOROS_MODEL_ACCOUNTS: 'c'.repeat(24), OUROBOROS_MODEL_PROCESSING_PREFERENCES: 'd'.repeat(24) };
+const MAIN_SETTINGS = () => ({ OUROBOROS_MODEL: ASTRA, USE_LOCAL_MAIN: false, OUROBOROS_MODEL_ACCOUNTS: {},
+    OUROBOROS_MODEL_PROCESSING_PREFERENCES: {}, _meta: { connections: [], tokens: MAIN_TOKENS } });
+
 function mainChat({ moves, moveWork, model = {} } = {}) {
     const said = [];
     const asked = [];
     const moved = [];
     const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}),
-        readSettings: async () => ({ _meta: { connections: [] } }) });
+        readSettings: async () => MAIN_SETTINGS() });
     const m = mountPair({ projectId: '', chatId: 1, subagents: true, model: { store,
         askMain: async (request) => { asked.push({ ...request, readsBefore: m.refreshes.length }); return { moves }; },
         moveWork: moveWork || (async (taskId) => { moved.push(taskId); return { ok: true, task_id: taskId, applied: taskId === 't2' ? 'at_start' : 'next_step' }; }),
@@ -160,7 +166,7 @@ test('the sheet is given the page\'s census; each tick is its own act after the 
     await flush();
     assert.deepEqual([c.asked[0].census.complete, c.asked[0].census.works.length, c.asked[0].census.projects.length], [true, WORKS.length, 3]);
     assert.deepEqual([c.asked[0].readsBefore, c.refreshes[0]], [1, true], 'the state is read once more before the sheet lists it');
-    assert.deepEqual(c.posts(), [{ kind: 'model', model: GLM, use_local: false }, { project_id: 'p7', kind: 'main' }],
+    assert.deepEqual(c.posts(), [{ kind: 'model', model: GLM, use_local: false, if_unchanged: MAIN_TOKENS }, { project_id: 'p7', kind: 'main' }],
         'Main itself first, then the room: one write each, no batch');
     assert.deepEqual(c.moved, ['t3', 't2']);
     assert.deepEqual(c.said, [[

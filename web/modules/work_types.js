@@ -17,6 +17,12 @@
  * @property {string} basis  // main | a role it follows | room | owner | owner_words | owner_press | mind | fallback | place | circle
  */
 /**
+ * @typedef {Object} WorkPendingRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {string=} basis  // next chooser, when it is known
+ */
+/**
  * The route a work acts on and its chooser (`lead` on a work and on its activity row). A departure names the
  * primary it left: `basis` is then `fallback` or `mind`, with when (`since`) and why (`cause`).
  * @typedef {Object} WorkLead
@@ -28,13 +34,13 @@
  * @property {WorkPrimaryRoute=} primary  // only when the acting route is not the primary
  * @property {string=} since  // an ISO instant in UTC
  * @property {string=} cause  // a short code or phrase: `switch_model`, a failure's code, `configured fallback`
- * @property {import('./client_contract_types.js').ChatModelRoute=} pending  // the route the next step uses, when it differs
+ * @property {WorkPendingRoute=} pending  // the next route and, when known, its separate chooser
  */
 /**
  * Main's own tier ('' = none: Main takes the default) and the default every lead pays (`/api/state`).
  * @typedef {Object} ProcessingTiers
- * @property {""|"standard"|"fast"|"economy"} main
- * @property {""|"standard"|"fast"|"economy"} default
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"} main
+ * @property {""|"standard"|"fast"|"economy"} default  // never ultrafast
  */
 /**
  * One call's processing as its receipt states it: what was asked, sent and seen.
@@ -42,7 +48,7 @@
  * @property {?string} requested
  * @property {?string} submitted
  * @property {?string=} submittedNative  // the provider's own word for what was sent
- * @property {string} observed  // standard | fast | economy | unknown
+ * @property {string} observed  // standard | fast | economy | ultrafast | mixed | unknown
  * @property {Array<string>=} observedNative  // the provider's own words (an older Codex: `ultrafast` folded into fast)
  * @property {?string} reason  // processing_not_submitted | submitted_mode_differs | provider_mode_changed
  */
