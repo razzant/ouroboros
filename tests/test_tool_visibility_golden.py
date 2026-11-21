@@ -29,6 +29,8 @@ import hashlib
 import json
 import os
 import pathlib
+from collections import Counter
+
 import pytest
 
 from ouroboros import consciousness_authority as ca
@@ -313,7 +315,15 @@ def _snapshots(root: pathlib.Path, names=None) -> dict:
 
 
 def _pool(records: dict) -> dict:
-    """Store each array once, by the digest of its content; a record refers to it as ``@digest``."""
+    """The stored form, made for review diffs: each schema's usual bytes once (``schema_hashes``), a
+    context's canonical array as names plus only the hashes that differ there, and every other array
+    stored once by the digest of its content (a record refers to it as ``@digest``). A changed schema
+    description then moves one ``schema_hashes`` line and the transports' byte digests."""
+    counts = Counter(item for record in records.values() for item in record["canonical"])
+    usual: dict = {}
+    for item, _count in counts.most_common():
+        name, _, digest = item.rpartition("@")
+        usual.setdefault(name, digest)
     arrays: dict = {}
 
     def put(value):
@@ -328,12 +338,18 @@ def _pool(records: dict) -> dict:
             return {key: walk(value, depth + 1) for key, value in node.items()}
         return put(node)
 
-    contexts = {name: {key: walk(value, 1) for key, value in record.items()} for name, record in records.items()}
-    return {"arrays": arrays, "contexts": contexts}
+    contexts = {}
+    for name, record in records.items():
+        record = dict(record)
+        split = [item.rpartition("@") for item in record.pop("canonical")]
+        record["canonical_names"] = [tool for tool, _, _digest in split]
+        record["canonical_bytes"] = {tool: digest for tool, _, digest in split if usual[tool] != digest}
+        contexts[name] = {key: walk(value, 1) for key, value in record.items()}
+    return {"schema_hashes": dict(sorted(usual.items())), "arrays": arrays, "contexts": contexts}
 
 
 def _expand(pooled: dict) -> dict:
-    arrays = pooled["arrays"]
+    arrays, usual = pooled["arrays"], pooled["schema_hashes"]
 
     def walk(node):
         if isinstance(node, str) and node.startswith("@") and node[1:] in arrays:
@@ -342,7 +358,13 @@ def _expand(pooled: dict) -> dict:
             return {key: walk(value) for key, value in node.items()}
         return node
 
-    return {name: walk(record) for name, record in pooled["contexts"].items()}
+    result = {}
+    for name, record in pooled["contexts"].items():
+        record = walk(record)
+        names, own = record.pop("canonical_names"), record.pop("canonical_bytes")
+        record["canonical"] = [f"{tool}@{own.get(tool, usual[tool])}" for tool in names]
+        result[name] = record
+    return result
 
 
 def test_what_every_context_sees_and_may_call_is_pinned(tmp_path):
