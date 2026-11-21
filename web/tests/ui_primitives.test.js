@@ -367,28 +367,85 @@ const pageSheets = Object.fromEntries(fs.readdirSync(new URL('../', import.meta.
     .filter((name) => name.endsWith('.css') && name !== 'ui.css')
     .map((name) => [name, fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')]));
 // Search fields still drawn as a bare hairline field, without the one look DESIGN §3 gives every search field (a
-// capsule with the search glyph at its start). Owed to #3372; each leaves this list when it takes the look.
-const SEARCH_OWED = new Map([
-    ['skills.js', 'Find an installed skill'],
-    ['skill_browse.js', 'Search skills'],
-    ['files.js', 'Filter current folder'],
-]);
+// capsule with the search glyph at its start), each named by its own control, so another bare field in the same
+// module still fails. Owed to #3372; each leaves this list when it takes the look.
+const SEARCH_OWED = [
+    ['skills.js', 'id="skills-installed-search"'],
+    ['skill_browse.js', 'data-browse-search'],
+    ['files.js', 'id="files-search"'],
+];
 const SWITCH_ROLE = /(?<!\[)role="switch"|role:\s*'switch'|setAttribute\('role',\s*'switch'\)|\.role\s*=\s*'switch'/g;
 const SEARCH_INPUT = /(?<!\[)type="search"|type:\s*'search'|\.type\s*=\s*'search'/g;
-const count = (source, pattern) => (source.match(pattern) || []).length;
+// How far before its field a search glyph stands: in the field's own label, or a sibling the code builds just above it.
+const GLYPH_REACH = 400;
+
+/** The markup tag that opens at `start` (`<…`), up to its `>`, skipping `${…}` expressions; null if none closes. */
+function tagFrom(source, start) {
+    let depth = 0;
+    for (let i = start; i < source.length; i++) {
+        if (source.startsWith('${', i)) { depth++; i++; } else if (depth && source[i] === '{') depth++;
+        else if (depth && source[i] === '}') depth--;
+        else if (!depth && source[i] === '>') return { start, end: i + 1, text: source.slice(start, i + 1) };
+    }
+    return null;
+}
+
+/** The `<input …>` tag holding the attribute at `index`, or null for a control built by DOM calls. */
+function inputAround(source, index) {
+    const start = source.lastIndexOf('<input', index);
+    const tag = start < 0 ? null : tagFrom(source, start);
+    return tag && tag.end > index ? tag : null;
+}
+
+const GLUE = /^[\s`'"+]*$/;  // what may stand between two pieces of one markup string in source: quotes, `+`, breaks
+
+/** '' when the role="switch" at `index` is the .ui-switch part's own markup: its label, the input, then the track
+ * right after the input (the checked and focus looks read `input + .ui-switch-track`) holding the thumb. */
+function switchFault(source, index) {
+    const input = inputAround(source, index);
+    if (!input) {
+        // Built by DOM calls: the part's classes must be built around it.
+        const near = source.slice(Math.max(0, index - 400), index + 600);
+        return /['"`]ui-switch['"`\s]/.test(near) && near.includes('ui-switch-track') && near.includes('ui-switch-thumb')
+            ? '' : 'a role="switch" built outside .ui-switch';
+    }
+    const open = source.lastIndexOf('<', input.start - 1);
+    const wrapper = open < 0 ? null : tagFrom(source, open);
+    const wrapped = wrapper && /^<(label|span)\b[^>]*?\bclass="ui-switch(?=[\s"])/.test(wrapper.text)
+        && GLUE.test(source.slice(wrapper.end, input.start));
+    const track = /^[\s`'"+]*<span class="ui-switch-track"[^>]*>[\s`'"+]*<span class="ui-switch-thumb"/.test(source.slice(input.end));
+    return wrapped && track ? '' : 'a role="switch" outside .ui-switch (its label, the input, then the track and thumb)';
+}
 
 /** Where a module draws a switch, Back or a search field in a raw form instead of its part; [] when none does. */
 function rawFormFaults(modules, sheets = {}, searchOwed = SEARCH_OWED) {
     const faults = [];
     for (const [name, source] of Object.entries(modules)) {
-        const switches = count(source, SWITCH_ROLE);
-        if (switches && (!/\bui-switch(?![\w-])/.test(source) || count(source, /\bui-switch-track\b/g) < switches
-            || count(source, /\bui-switch-thumb\b/g) < switches)) faults.push(`${name}: a role="switch" outside .ui-switch's track and thumb`);
-        if (name !== 'page_header.js' && /SHELL_ICONS\.back\b|(?<!data-)\bshell-back\b/.test(source))
-            faults.push(`${name}: a Back of its own; page_header.js renderBackControl draws the one Back`);
-        const bare = count(source, SEARCH_INPUT) > 0 && !/SHELL_ICONS\.search\b/.test(source);
-        if (bare && !searchOwed.has(name)) faults.push(`${name}: a search field without its glyph (DESIGN "A search field has one look")`);
-        if (!bare && searchOwed.has(name)) faults.push(`${name}: its search field has the one look now; take it off SEARCH_OWED`);
+        for (const match of source.matchAll(SWITCH_ROLE)) {
+            const fault = switchFault(source, match.index);
+            if (fault) faults.push(`${name}: ${fault}`);
+        }
+        // Drawing Back is its glyph or its class written into markup; a selector that finds it (.shell-back,
+        // [data-shell-back]) only reads the one Back.
+        if (name !== 'page_header.js' && /SHELL_ICONS\.back\b|(?<![.\w-])shell-back\b/.test(source))
+            faults.push(`${name}: draws a Back of its own; page_header.js renderBackControl draws the one Back`);
+        const glyphs = [...source.matchAll(/SHELL_ICONS\.search\b/g)].map((glyph) => glyph.index);
+        const claimed = new Set();
+        const owed = searchOwed.filter(([module]) => module === name).map(([, control]) => control);
+        const met = new Set();
+        for (const match of source.matchAll(SEARCH_INPUT)) {
+            const glyph = glyphs.filter((at) => at < match.index && match.index - at <= GLYPH_REACH && !claimed.has(at)).at(-1);
+            const control = (inputAround(source, match.index)?.text ?? source.slice(match.index, match.index + 200));
+            const debt = owed.find((marker) => control.includes(marker));
+            if (debt) met.add(debt);
+            if (glyph !== undefined) {
+                claimed.add(glyph);
+                if (debt) faults.push(`${name}: ${debt} has the one search look now; take it off SEARCH_OWED`);
+            } else if (!debt) {
+                faults.push(`${name}: a search field without its glyph (DESIGN "A search field has one look")`);
+            }
+        }
+        for (const marker of owed) if (!met.has(marker)) faults.push(`${name}: SEARCH_OWED names ${marker}, which no search field here carries`);
     }
     for (const [name, css] of Object.entries(sheets)) {
         for (const part of ['ui-switch-track', 'ui-switch-thumb']) {
@@ -400,30 +457,43 @@ function rawFormFaults(modules, sheets = {}, searchOwed = SEARCH_OWED) {
 
 test('a switch, Back and a search field are drawn only as their own part (S4)', () => {
     assert.deepEqual(rawFormFaults(moduleSources, pageSheets), []);
-    assert.equal(SEARCH_OWED.size <= 3, true, 'a debt list, not a second rule');
+    assert.equal(SEARCH_OWED.length <= 3, true, 'a debt list, not a second rule');
     const part = '<label class="ui-switch"><input type="checkbox" role="switch">'
         + '<span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>';
-    const none = new Map();
-    // The blocked forms...
+    const builder = '`<label class="ui-switch"><input type="checkbox" role="switch" ${attrs} aria-checked="${on ? \'true\' : \'false\'}">`\n'
+        + "    + '<span class=\"ui-switch-track\" aria-hidden=\"true\"><span class=\"ui-switch-thumb\"></span></span></label>'";
+    const far = `\n${' '.repeat(GLYPH_REACH)}\n`;
+    // Each blocked form is caught where it stands, also beside a good one in the same module.
     assert.deepEqual(rawFormFaults({
-        'a.js': '<label class="my-toggle"><input type="checkbox" role="switch"></label>',
-        'b.js': "input.setAttribute('role', 'switch'); input.className = 'ui-switch';",
-        'c.js': '`<button type="button" class="back">${SHELL_ICONS.back}</button>`',
-        'd.js': '<button class="shell-icon-control shell-back">‹</button>',
-        'e.js': '<input type="search" class="ui-control" placeholder="Find">',
-        'f.js': "input.type = 'search';",
-    }, { 'page.css': '.my-row .ui-switch-track { background: red; }' }, none).map((fault) => fault.split(':')[0]),
-    ['a.js', 'b.js', 'c.js', 'd.js', 'e.js', 'f.js', 'page.css']);
-    // ...and the forms that keep working: the part's anatomy, the one Back's owner and readers, a glyph-led search,
-    // selectors that only find a control, a page laying out the switch's label.
+        'a.js': `${part}<label class="my-toggle"><input type="checkbox" role="switch"></label>`,
+        'b.js': '<label class="ui-switch"><span class="ui-switch-track"><span class="ui-switch-thumb"></span></span>'
+            + '<input type="checkbox" role="switch"></label>',
+        'c.js': "input.setAttribute('role', 'switch'); input.className = 'toggle';",
+        'd.js': '`<button type="button" class="back">${SHELL_ICONS.back}</button>`',
+        'e.js': '<button class="shell-icon-control shell-back">‹</button>',
+        'f.js': `\`<label class="find">\${SHELL_ICONS.search}<input type="search"></label>\`${far}<input type="search" id="related">`,
+        'g.js': '`<label class="find">${SHELL_ICONS.search}<input type="search" id="one"><input type="search" id="two"></label>`',
+        'h.js': "input.type = 'search';",
+    }, { 'page.css': '.my-row .ui-switch-track { background: red; }' }, []).map((fault) => fault.split(':')[0]),
+    ['a.js', 'b.js', 'c.js', 'd.js', 'e.js', 'f.js', 'g.js', 'h.js', 'page.css']);
+    // ...and the forms that keep working: the part's markup (one string or a concatenated builder), the one Back's owner
+    // and its readers, a glyph-led field (in its label or built just above it), selectors that only find a control.
     assert.deepEqual(rawFormFaults({
-        'a.js': part,
+        'a.js': `${part}\n${builder}`,
         'page_header.js': '`<button class="shell-icon-control shell-back">${SHELL_ICONS.back}</button>`',
-        'files.js': "page.querySelector('[data-shell-back]')",
+        'files.js': "page.querySelector('[data-shell-back]'); root.querySelector('.shell-back').focus();",
         'e.js': '`<label class="find">${SHELL_ICONS.search}<input type="search"></label>`',
+        'f.js': "glyph.innerHTML = SHELL_ICONS.search;\nconst input = document.createElement('input');\ninput.type = 'search';",
         'g.js': "field.matches('input[type=\"search\"], [role=\"searchbox\"]'); el.querySelector('[role=\"switch\"]')",
-    }, { 'page.css': '.my-row > .ui-switch { margin-inline-start: auto; }' }, none), []);
-    // An owed field that took the look must leave the list, so the list never outlives its debt.
-    assert.deepEqual(rawFormFaults({ 'skills.js': '`${SHELL_ICONS.search}<input type="search">`' }, {}, new Map([['skills.js', '']])),
-        ['skills.js: its search field has the one look now; take it off SEARCH_OWED']);
+    }, { 'page.css': '.my-row > .ui-switch { margin-inline-start: auto; }' }, []), []);
+    // A debt is one control: another bare field in an owed module fails, and an owed field that took the look, or that
+    // is gone, must leave the list.
+    const owed = [['skills.js', 'id="skills-installed-search"']];
+    assert.deepEqual(rawFormFaults({ 'skills.js': '<input type="search" id="skills-installed-search">' }, {}, owed), []);
+    assert.deepEqual(rawFormFaults({ 'skills.js': `<input type="search" id="skills-installed-search">${far}<input type="search" id="related">` }, {}, owed),
+        ['skills.js: a search field without its glyph (DESIGN "A search field has one look")']);
+    assert.deepEqual(rawFormFaults({ 'skills.js': '`${SHELL_ICONS.search}<input type="search" id="skills-installed-search">`' }, {}, owed),
+        ['skills.js: id="skills-installed-search" has the one search look now; take it off SEARCH_OWED']);
+    assert.deepEqual(rawFormFaults({ 'skills.js': '<p>no field</p>' }, {}, owed),
+        ['skills.js: SEARCH_OWED names id="skills-installed-search", which no search field here carries']);
 });
