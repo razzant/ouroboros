@@ -1077,6 +1077,27 @@ def test_a_restart_keeps_the_named_time_and_the_appointment_that_stood_when_it_w
     assert WAKE_TARGET_STATE_KEY not in clock.store
 
 
+@pytest.mark.parametrize("stored", ["named", "zone", "neither"])
+def test_a_launched_wake_shows_the_own_clock_of_the_state_it_was_admitted_with(clock, stored):
+    """``_launch`` carries the named time and my human's zone as it read them, this wake's appointment and the
+    owner's bounds; the carrier's message shows them as the "Own clock" section only while either fact stands."""
+    from ouroboros.consciousness import APPOINTMENT_STATE_KEY
+    from ouroboros.consciousness_clock import OWNER_ZONE_STATE_KEY
+
+    now = T0 + FLOOR + 1
+    facts = {"named": {WAKE_TARGET_STATE_KEY: _named(now + 1800)},
+             "zone": {OWNER_ZONE_STATE_KEY: {"zone": "Europe/Moscow", "at": _iso(now - 600)}}, "neither": {}}[stored]
+    clock.store.update(facts)
+    assert clock.clock.tick(now) == "launched"
+    launch = clock.launches[-1]
+    assert launch["prepare"]["clock"] == {**facts, APPOINTMENT_STATE_KEY: 0.0, "floor": FLOOR, "ceiling": CEILING}
+    projection = launch["task"]["metadata"]["wake_observation"]["projection_text"]
+    for text in (launch["text"], projection):
+        assert ("\nOwn clock (3):\n- named next wake-up time: " in text) is (stored != "neither")
+        assert (f"- named next wake-up time: {_iso(now + 1800)}, in 30 min;" in text) is (stored == "named")
+        assert ("- my human's last reported time zone: Europe/Moscow (UTC+03:00 now)" in text) is (stored == "zone")
+
+
 # --- events never move the wake (#1603) --------------------------------------------
 
 

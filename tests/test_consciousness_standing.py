@@ -306,3 +306,94 @@ def test_every_form_of_the_wake_keeps_the_section_and_the_bare_pointer_folds_it(
     source = facts["source"]
     rows = [json.loads(row) for row in read_actor_source_bytes(tmp_path, source["task_id"], source).splitlines()]
     assert rows[-1] == {"kind": "fallen_work", "line": line}
+
+
+# --- the own clock (consciousness_clock.own_clock_lines as a standing section) ----------------------------------------
+
+
+NAMED = {"at": "2027-01-15T11:30:00+03:00", "stored_at": "2027-01-15T07:00:00Z", "standing_appointment": None}
+ZONE = {"zone": "Europe/Moscow", "at": "2027-01-15T07:20:00Z", "message": {"chat_id": 1, "client_message_id": "c1"}}
+
+
+def _clock(**state):
+    """The own clock's facts as ``consciousness._launch`` carries them: the state keys it read, the owner's bounds."""
+    from ouroboros.consciousness import APPOINTMENT_STATE_KEY
+
+    return {APPOINTMENT_STATE_KEY: T0 - 30, "floor": 900, "ceiling": 14400, **state}
+
+
+def _state(**state):
+    from ouroboros.consciousness_clock import OWNER_ZONE_STATE_KEY, WAKE_TARGET_STATE_KEY
+
+    return {{"named": WAKE_TARGET_STATE_KEY, "zone": OWNER_ZONE_STATE_KEY}[key]: value for key, value in state.items()}
+
+
+@pytest.mark.parametrize("stored", [{"named": NAMED}, {"zone": ZONE}, {"named": NAMED, "zone": ZONE}])
+def test_the_own_clock_stands_while_a_named_time_or_a_reported_zone_does(tmp_path, stored):
+    from ouroboros.consciousness_clock import own_clock_lines
+
+    clock = _clock(**_state(**stored))
+    observation = wake.observe_wake(tmp_path, boundary=None, since=T0 - 3600, now=T0, reason="heartbeat", clock=clock)
+    [section] = observation.standing
+    assert section.kind == "own_clock" and section.title == "Own clock"
+    assert section.lines == tuple(own_clock_lines(clock, now=T0, floor=900, ceiling=14400))  # every line, as said
+    assert observation.counts()["own_clock"] == 4 and observation.composition().endswith("4 own clock facts")
+    assert "\nOwn clock (4):\n" + "\n".join(section.lines) in observation.full_text()
+    assert ("named next wake-up time: none" in section.lines[0]) is ("named" not in stored)
+    assert section.lines[-1].endswith(": unknown") is ("zone" not in stored)
+
+
+@pytest.mark.parametrize("clock", [
+    None,  # a preparation that carried no clock (an older admission)
+    _clock(),  # only this wake's appointment and the owner's bounds
+    _clock(**_state(named={"at": "tomorrow at nine"}, zone={"zone": "Not/A_Zone", "at": "2027-01-15T07:20:00Z"})),
+])
+def test_the_appointment_and_the_bounds_alone_make_no_own_clock_section(tmp_path, clock):
+    observation = wake.observe_wake(tmp_path, boundary=None, since=T0 - 3600, now=T0, reason="heartbeat", clock=clock)
+    assert observation.standing == () and "own_clock" not in observation.counts()
+    assert not [gap for gap in observation.gaps if gap.startswith("own_clock")]
+    assert "Own clock" not in observation.full_text()
+
+
+def test_the_own_clock_follows_the_fallen_works_in_every_form_and_the_bare_pointer_folds_it(tmp_path):
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    _registry(tmp_path, *PROJECTS)
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    observation = wake.observe_wake(tmp_path, boundary=None, since=T0 - 3600, now=T0, reason="heartbeat",
+                                    clock=_clock(**_state(named=NAMED, zone=ZONE)))
+    assert [section.kind for section in observation.standing] == ["fallen_work", "own_clock"]
+    task = {"id": "wake-clock", "metadata": {}}
+    wake.bind_wake_observation(tmp_path, task, observation, lambda events: events)
+    facts = task["metadata"][wake.WAKE_OBSERVATION_KEY]
+    lines = observation.standing[1].lines
+    block = "\nOwn clock (4):\n" + "\n".join(lines)
+    assert observation.full_text().endswith(block) and facts["projection_text"].endswith(block)
+    assert facts["pointer_text"].endswith("\nOwn clock (4): rows of kind own_clock at the source")
+    assert not any(line in facts["pointer_text"] for line in lines)
+    assert facts["composition"]["own_clock"] == 4
+    source = facts["source"]
+    rows = [json.loads(row) for row in read_actor_source_bytes(tmp_path, source["task_id"], source).splitlines()]
+    assert rows[-4:] == [{"kind": "own_clock", "line": line} for line in lines]
+
+
+def test_a_prepared_wake_message_shows_its_own_clock_and_leaves_punctuality_to_the_reason_line(tmp_path):
+    """``prepare_wake`` over the clock's facts renders the real prompt: the section stands in the wake's text and in
+    its projection; whether the wake came on time is said once, in the reason line."""
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    facts = {"boundary": None, "since": T0 - 3600, "now": T0, "reason": "heartbeat", "level": "act",
+             "repo_dir": str(repo), "last_wake_at": T0 - 3600, "last_wake_task_id": "", "disabled_tools": [],
+             "window": {"settled_usd": 0.0, "unknown_unmetered": 0, "limit_usd": 5.0, "spend_by_cause": None},
+             "counted_roots": [], "max_tasks": 2, "interval": 3300, "appointment_at": T0 - 30}
+    for stored, shown in (({"named": NAMED}, True), ({"zone": ZONE}, True), ({}, False)):
+        task = {"id": f"wake-{len(stored)}{'z' if 'zone' in stored else ''}", "chat_id": 1, "metadata": {},
+                "text": "[Wake-up · heartbeat]", "_wake_prepare": {**facts, "clock": _clock(**_state(**stored))}}
+        wake.prepare_wake(task, tmp_path)
+        projection = task["metadata"][wake.WAKE_OBSERVATION_KEY]["projection_text"]
+        for text in (task["text"], projection):
+            assert ("\nOwn clock (4):\n- named next wake-up time: " in text) is shown
+            assert text.count("- reason: heartbeat (on time)") == 1 and "due " not in text
+        if shown:
+            assert "- this wake's appointment: " in task["text"] and "the reason line)" in task["text"]

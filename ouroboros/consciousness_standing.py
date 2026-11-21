@@ -3,8 +3,9 @@
 A wake's observation is a delta (``consciousness_wake.observe_wake``): each transition reaches one accepted wake.
 After it every wake shows two inventories instead, in this order: my human's answerable cards (``outstanding_cards``;
 the card line renderers live here, also for the card transitions the observation prints), then the standing sections
-(``STANDING_PRODUCERS``): host facts, each line with its reader, never a waiting class, an instruction or a ranking.
-A section with nothing to say is not printed.
+(``STANDING_PRODUCERS``): host facts, a work's line with its reader, never a waiting class, an instruction or a
+ranking. A section with nothing to say is not printed. They stand whole in the full text and in the projection the
+wake takes when its observation does not fit; only the bare pointer folds each to its count and the kind of its rows.
 
 Works that ended without success (``fallen_works``): in each open project (lifecycle active, no ``closed`` record), its
 newest-started work root when that root ended failed or cancelled and ``ended_without_success`` holds. A root that
@@ -13,6 +14,9 @@ it out. Presence's own rows (a speaker turn, work acting for a binding) neither 
 related to a binding does both. Not covered: works with no project, and a root that fails while a later-started root
 of its project exists. Cost per wake: one index probe per open project and the bodies of the candidates, read by
 primary key in the same snapshot; nothing is stored.
+
+Own clock (``_clock_section``): ``consciousness_clock.own_clock_lines`` over the state the alarm read when it admitted
+the wake, while a named time or my human's reported zone stands; the appointment and the bounds alone make none.
 """
 
 from __future__ import annotations
@@ -132,12 +136,15 @@ class StandingSection:
 
 @dataclass(frozen=True)
 class StandingFacts:
-    """What a section is computed from in the wake's carrier: the data root, the wake's instant and the project
-    registry its observation read (``None``: unreadable)."""
+    """What a section is computed from in the wake's carrier: the data root, the wake's instant, the project
+    registry its observation read (``None``: unreadable) and the own clock's facts the alarm admitted it with
+    (``consciousness._launch``: this wake's appointment, the named time and my human's last reported zone under their
+    state keys, the owner's MIN and MAX as ``floor`` and ``ceiling``; ``None`` when none travelled)."""
 
     root: Any
     now: float
     registry: Optional[List[Dict[str, Any]]]
+    clock: Optional[Mapping[str, Any]] = None
 
 
 FALLEN_KIND = "fallen_work"
@@ -262,10 +269,29 @@ def _fallen_section(facts: StandingFacts) -> Optional[StandingSection]:
     return StandingSection(FALLEN_KIND, FALLEN_TITLE, FALLEN_WORDS, tuple(work.line for work in works)) if works else None
 
 
+CLOCK_KIND = "own_clock"
+CLOCK_TITLE = "Own clock"
+CLOCK_WORDS = ("own clock fact", "own clock facts")
+
+
+def _clock_section(facts: StandingFacts) -> Optional[StandingSection]:
+    """Every line of ``consciousness_clock.own_clock_lines`` while it has a fact of its own (a named time, or my
+    human's reported zone: ``has_own_clock_fact``); none for the appointment and the bounds alone. Whether this wake
+    came on time stays in the reason line, never repeated here."""
+    from ouroboros.consciousness_clock import has_own_clock_fact, own_clock_lines
+
+    clock = facts.clock or {}
+    if not has_own_clock_fact(clock):
+        return None
+    lines = own_clock_lines(clock, now=facts.now, floor=int(clock["floor"]), ceiling=int(clock["ceiling"]))
+    return StandingSection(CLOCK_KIND, CLOCK_TITLE, CLOCK_WORDS, tuple(lines))
+
+
 # The standing sections in their order after the outstanding cards: ``(kind, producer)``, each producer returning its
-# section or ``None``. The own clock's facts are the next entry.
+# section or ``None``.
 STANDING_PRODUCERS: Tuple[Tuple[str, Callable[[StandingFacts], Optional[StandingSection]]], ...] = (
     (FALLEN_KIND, _fallen_section),
+    (CLOCK_KIND, _clock_section),
 )
 
 

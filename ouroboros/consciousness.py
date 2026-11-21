@@ -69,7 +69,7 @@ from ouroboros.config import (
 )
 from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, allowance_window
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
-from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY, consumed_by, target_ts
+from ouroboros.consciousness_clock import OWNER_ZONE_STATE_KEY, WAKE_TARGET_STATE_KEY, consumed_by, target_ts
 from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_continuity, wake_continuity_after, wake_task_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -519,6 +519,10 @@ class BackgroundConsciousness:
             "window": allowance_fact(window),
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
             "interval": self._interval(), "appointment_at": self._appointment_at,
+            # The "Own clock" section's facts (``consciousness_standing._clock_section``), in the state's shape.
+            "clock": {**{key: persisted[key] for key in (WAKE_TARGET_STATE_KEY, OWNER_ZONE_STATE_KEY)
+                         if key in persisted},
+                      APPOINTMENT_STATE_KEY: self._appointment_at, "floor": self.floor, "ceiling": self.ceiling},
         }
         bound_over, stopped_before_binding = None, False
 

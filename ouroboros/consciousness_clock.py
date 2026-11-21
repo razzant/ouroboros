@@ -18,7 +18,9 @@ My human's last reported zone (``OWNER_ZONE_STATE_KEY``) is overwritten at owner
 their own message whose client reported a valid IANA zone; any other message leaves the dated fact as it is.
 
 ``own_clock_lines`` renders both for a wake with its appointment and the owner's bounds: facts with their meanings,
-no instruction and no cause beyond them (P5).
+no instruction and no cause beyond them (P5). They are the "Own clock" standing section
+(``consciousness_standing``) of every wake prepared while either stands, from the state the alarm read when it
+admitted that wake (``consciousness._launch``).
 """
 
 from __future__ import annotations
@@ -161,12 +163,16 @@ def note_owner_zone(live: Dict[str, Any], metadata: Any, *, own: bool, message: 
                                       **({"message": dict(message)} if isinstance(message, dict) else {})}
 
 
+def _zone_name(fact: Any) -> str:
+    from ouroboros.client_surface import normalize_timezone_name
+
+    return normalize_timezone_name(fact.get("zone")) if isinstance(fact, dict) else ""
+
+
 def _zone_line(fact: Any, *, now: float) -> str:
     from zoneinfo import ZoneInfo
 
-    from ouroboros.client_surface import normalize_timezone_name
-
-    zone = normalize_timezone_name(fact.get("zone")) if isinstance(fact, dict) else ""
+    zone = _zone_name(fact)
     if not zone:
         return "- my human's last reported time zone: unknown"
     offset = utc_offset_text(_dt.datetime.fromtimestamp(now, ZoneInfo(zone)))
@@ -198,3 +204,11 @@ def own_clock_lines(state: Mapping[str, Any], *, now: float, floor: int, ceiling
                  "ends (owner settings); a named time beyond MAX is reached through intermediate wake-ups")
     lines.append(_zone_line(state.get(OWNER_ZONE_STATE_KEY), now=now))
     return lines
+
+
+def has_own_clock_fact(state: Mapping[str, Any]) -> bool:
+    """Whether ``own_clock_lines`` has a fact of its own to say: a named time stands (ahead or passed), or my human
+    reported a zone. Its "none" and "unknown" lines, this wake's appointment (the reason line dates it) and the
+    owner's MIN and MAX alone are not one, so a wake with neither shows no "Own clock" section."""
+    return (target_ts(state.get(WAKE_TARGET_STATE_KEY)) is not None
+            or bool(_zone_name(state.get(OWNER_ZONE_STATE_KEY))))

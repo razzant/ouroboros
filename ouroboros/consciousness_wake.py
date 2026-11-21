@@ -691,12 +691,14 @@ def _task_window(root, prior, chat_rows):
     return rows, signatures, retained
 
 
-def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, reason: str = "") -> WakeObservation:
+def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, reason: str = "",
+                 clock: Optional[Dict[str, Any]] = None) -> WakeObservation:
     """Capture every fact since the accepted boundary, plus outstanding cards, with no count cut or category order.
 
     Chat events keep their physical append order; a canonical transition takes the position of the chat row that
     announced it, and one no row of this window announced follows. Answerable cards (``open``/``expired_terminal``
-    — В17a) are an inventory of the whole store, listed separately and in full, then the standing sections.
+    — В17a) are an inventory of the whole store, listed separately and in full, then the standing sections
+    (``clock``: the own clock's facts the alarm admitted the wake with, ``StandingFacts.clock``).
     ``now``, taken before this scan, anchors the next wake's transition window. An unreadable source is a disclosed
     gap, and what the wake accepts for it stays where it was.
     """
@@ -804,7 +806,7 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
             window["memory"] = memory_window
         changes, knowledge_boundary = knowledge_changes(root, knowledge_boundary, gaps)
         events.extend(changes)
-    standing = standing_sections(StandingFacts(root=root, now=now, registry=registry), gaps)
+    standing = standing_sections(StandingFacts(root=root, now=now, registry=registry, clock=clock), gaps)
     trigger = _trigger_line(reason)
     chat_boundary = window.get("boundary") or {key: accepted[key] for key in CHAT_BOUNDARY_KEYS if key in accepted}
     state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {}),
@@ -821,7 +823,7 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
 
     The clock admitted the wake with the facts only its process holds (``_wake_prepare``:
     the accepted boundary, the bootstrap, the allowance window, the live roots, the
-    schedule); everything that reads history runs here, in the carrier (owner decision 1A,
+    schedule and its own clock); everything that reads history runs here, in the carrier (owner decision 1A,
     L7). The complete observation becomes the task's text, its exact source is stored under
     the wake, and the boundary it accepts rides the task metadata to the clock
     (``consciousness._settle_wake``), as do the notes it carries (``previous_wake_text``). A failure
@@ -843,7 +845,7 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
     reason = str(facts.get("reason") or "heartbeat")
     window = facts.get("window") if isinstance(facts.get("window"), dict) else {}
     observation = observe_wake(root, boundary=facts.get("boundary"), since=float(facts.get("since") or 0.0),
-                               now=now, reason=reason)
+                               now=now, reason=reason, clock=facts.get("clock"))
     try:
         places = place_views(root, window)
     except Exception:
