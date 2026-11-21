@@ -234,7 +234,7 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     snapshot = _load_queue_snapshot(root)
     fact = {**queue_snapshot_observation(snapshot), "source_root": str(root),
             "max_workers": get_max_workers(),  # the owner's cap on acting tasks as configured here; None: no number
-            "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
+            "max_active_subagents_per_root": get_max_active_subagents_per_root()}  # the owner's number; None: none
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
     from ouroboros.project_admission import project_hold_fact

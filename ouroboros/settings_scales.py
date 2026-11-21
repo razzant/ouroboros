@@ -260,8 +260,10 @@ IMMEDIATE_SETTINGS = frozenset({
     # model_concurrency._cap() reads the settings document at every physical call in every
     # process, so a saved cap reaches running work at its next call, not at the next task.
     "OUROBOROS_MODEL_MAX_CONCURRENCY",
-    # The owner's cap on acting tasks: the supervisor reads it on every assignment pass.
+    # The owner's cap on acting tasks and his number of one root's acting subagents: the supervisor reads them on
+    # every assignment pass and subagent admission.
     "OUROBOROS_MAX_WORKERS",
+    "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
     "OUROBOROS_UPDATE_CHANNEL",
@@ -366,25 +368,25 @@ _WARNED_OPTIONAL_BOUNDS: set = set()
 
 
 def optional_bound_value(key: str, raw: Any) -> Optional[int]:
-    """One read of an optional bound or the owner cap: ``None`` = no bound, else a positive int.
+    """One read of an optional bound or an owner's number: ``None`` = no bound, else a positive int.
 
     An integral float is its integer (a harness may write ``10800.0``). Blank or null means
-    no cap only for the owner cap. Everything else the strict parser refuses — including
-    blank/null for other bounds — is a typo, never "no bound": it takes the key's finite
-    legacy value, reported once per process and value."""
-    owner_cap = key == OWNER_CAP_KEY
-    if owner_cap and (raw is None or isinstance(raw, str) and not raw.strip()):
+    no number only for an owner's number (``OWNER_NUMBERS``). Everything else the strict parser
+    refuses — including blank/null for other bounds — is a typo, never "no bound": it takes the
+    key's finite legacy value, reported once per process and value."""
+    owner_number = key in OWNER_NUMBERS
+    if owner_number and (raw is None or isinstance(raw, str) and not raw.strip()):
         return None
     value = int(raw) if isinstance(raw, float) and raw.is_integer() else raw
     try:
         return parse_positive_or_unlimited(value)
     except (TypeError, ValueError):
-        fallback = OWNER_CAP_LEGACY if owner_cap else OPTIONAL_BOUND_LEGACY[key]
+        fallback = OWNER_NUMBERS[key] if owner_number else OPTIONAL_BOUND_LEGACY[key]
         if (key, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
             _WARNED_OPTIONAL_BOUNDS.add((key, repr(raw)))
             logging.getLogger(__name__).warning(
                 "%s=%r is not a positive integer or %s; using the finite fallback %s",
-                key, raw, "blank" if owner_cap else repr(UNLIMITED), fallback)
+                key, raw, "blank" if owner_number else repr(UNLIMITED), fallback)
         return fallback
 
 
@@ -409,6 +411,13 @@ def defaults_for_settings_document(document_present: bool) -> dict:
 OWNER_CAP_KEY = "OUROBOROS_MAX_WORKERS"
 OWNER_CAP_LEGACY = 10
 OWNER_CAP_FORMAT_KEY = "_owner_cap_format"  # disk format, never an environment setting or owner knob
+# The owner's number of one root's acting subagents (owner, 21.11.2026, item 47): the same shape. Blank, the shipped
+# default, is no number (how many helpers to call is the mind's; the pool's memory admission and the hard cap of
+# ``runtime_limits.MAX_ACTIVE_SUBAGENTS_HARD_CAP`` still bound the tree); a typo reads the earlier default 6.
+SUBAGENT_CAP_KEY = "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"
+SUBAGENT_CAP_LEGACY = 6
+# The owner's optional numbers: blank is no number, a typo reads the finite value given here.
+OWNER_NUMBERS: dict[str, int] = {OWNER_CAP_KEY: OWNER_CAP_LEGACY, SUBAGENT_CAP_KEY: SUBAGENT_CAP_LEGACY}
 
 
 # «Requests at once per model» (owner, 13.11.2026, 5A and 6A): blank, the shipped default, is no number of the
@@ -452,16 +461,16 @@ def model_cap_value(raw: Any) -> Optional[int]:
         return MODEL_CAP_LOCAL
 
 
-OPTIONAL_VALUE_KEYS = frozenset({*OPTIONAL_BOUND_LEGACY, OWNER_CAP_KEY, MODEL_CAP_KEY})  # what the next function spells
+OPTIONAL_VALUE_KEYS = frozenset({*OPTIONAL_BOUND_LEGACY, *OWNER_NUMBERS, MODEL_CAP_KEY})  # spelled by the next function
 
 
 def document_optional_value(key: str, value: Any) -> Any:
-    """The document spelling of an optional bound or cap: its number, else "unlimited" (a bound) or blank (the
-    owner cap, the model limit); a typo reads finite."""
+    """The document spelling of an optional bound or cap: its number, else "unlimited" (a bound) or blank (an
+    owner's number, the model limit); a typo reads finite."""
     if key == MODEL_CAP_KEY:
         cap = model_cap_value(value)
         return "" if cap is None else cap
     bound = optional_bound_value(key, value)
     if bound is not None:
         return bound
-    return "" if key == OWNER_CAP_KEY else UNLIMITED
+    return "" if key in OWNER_NUMBERS else UNLIMITED

@@ -11,6 +11,7 @@ import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js
 import { agentName, rosterResult } from '../modules/subagents_settings.js';
 import { recheckDraft, recheckSaved } from '../modules/safety_recheck.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
+import '../modules/settings_ui.js';  // the shared ownerCap codec, registered before any page as settings.js does
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const KEY = 'OUROBOROS_SUBAGENTS';
@@ -457,6 +458,31 @@ test('Subagents may change files is a strip over the stored spelling: Auto is th
     await page.shown();
     assert.deepEqual(pressed(), ['Off']);
     assert.equal(page.server.posts.length, 0, 'the roster is no part of these rows');
+});
+
+test('At once, for one task is the owner\'s optional number: the server\'s blank is No limit, both ways', async (t) => {
+    const page = await open(t);
+    const key = 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT';
+    const fold = page.container.querySelector('[data-agents-fold]');
+    const row = fold.querySelector(`[data-setting-row="${key}"]`);
+    const field = row.querySelector('[data-setting-control]');
+    const noLimit = row.querySelector('[data-setting-no-limit]');
+    assert.equal(row.querySelector('[data-setting-meta]').textContent,
+        'A number caps the subagents one task runs at once. No limit: Ouroboros decides; this computer\u2019s memory still limits.');
+    assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['6', 'false'], 'a saved number is shown as itself');
+    await fold.fire('click', { target: noLimit });
+    await settle();
+    assert.deepEqual(page.server.generic.at(-1), { [key]: '' }, 'No limit is sent as the server\'s blank');
+    assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
+    field.value = '4';
+    await fold.fire('input', { target: field });
+    await fold.fire('change', { target: field });
+    await settle();
+    assert.deepEqual(page.server.generic.at(-1), { [key]: 4 });
+    assert.equal(noLimit.getAttribute('aria-pressed'), 'false');
+    page.server.plain[key] = '';  // a fresh install: nothing chosen reads as No limit
+    await page.shown();
+    assert.deepEqual([field.value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
 });
 
 test('a roster write says Saved with when it applies, a refusal with the server\'s sentence, and nothing for no change', () => {

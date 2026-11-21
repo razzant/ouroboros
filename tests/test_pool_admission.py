@@ -639,6 +639,10 @@ def test_the_root_child_limit_counts_acting_children(assigning, monkeypatch):
     workers.PENDING.append(child("third"))
     workers.assign_tasks()
     assert len(assigning.created) == 1
+    # No number of the owner's (the shipped default): the waiting child starts as soon as the pool admits it.
+    monkeypatch.setattr(config, "get_max_active_subagents_per_root", lambda: None)
+    workers.assign_tasks()
+    assert len(assigning.created) == 2, "no number: only the pool's admission holds a root's next child"
 
 
 def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assigning, monkeypatch):

@@ -376,9 +376,11 @@ def test_every_default_has_one_effect_without_changing_actor_snapshot_policy():
     from ouroboros.settings_integrity import _next_task_setting
     from ouroboros.settings_scales import setting_effect
 
-    # Target snapshot exclusions, independent of the presentation function (including the live worker cap).
+    # Target snapshot exclusions, independent of the presentation function (including the live worker and per-root
+    # subagent numbers, both read by the supervisor at every pass).
     original_live = {"TOTAL_BUDGET", "OUROBOROS_SUBAGENTS_MODE", "OUROBOROS_UI_LANGUAGE",
                      "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_MODEL_MAX_CONCURRENCY", "OUROBOROS_MAX_WORKERS",
+                     "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
                      "GITHUB_TOKEN", "GITHUB_REPO",
                      "OUROBOROS_UPDATE_CHANNEL", "MCP_ENABLED", "MCP_SERVERS", "MCP_TOOL_TIMEOUT_SEC"}
     original_restart = {"OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",

@@ -66,6 +66,10 @@ _ADDED_OWNERS = {
     "OWNER_CAP_LEGACY": settings_scales,
     "OWNER_CAP_FORMAT_KEY": settings_scales,
     "document_optional_value": settings_scales,
+    # The owner's optional number of one root's acting subagents (owner, 21.11.2026), and the table of such numbers.
+    "SUBAGENT_CAP_KEY": settings_scales,
+    "SUBAGENT_CAP_LEGACY": settings_scales,
+    "OWNER_NUMBERS": settings_scales,
     # The owner's optional limit on requests per model, and the one read seam that takes a shipped value saved
     # before either number became optional as not chosen (owner cap 09.11, model limit 13.11).
     "MODEL_CAP_LOCAL": settings_scales,
