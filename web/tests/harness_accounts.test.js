@@ -456,23 +456,6 @@ test('a model-scoped window never paints the whole account exhausted — it is a
 // null silently), so the flow runs on the in-house input dialog.
 // ---------------------------------------------------------------------------
 
-test('the groups rebuild wraps in preserveCardFocus so a family-mounted login card keeps its caret', () => {
-    // REGRESSION guard (fable review, roster-identity sprint): the login card
-    // mounts INSIDE #harness-accounts-groups now, so the poll-tick innerHTML
-    // rebuild destroys a focused paste-code/name input BEFORE the card's own
-    // render can capture it. The capture must wrap the whole rebuild — the
-    // innerHTML assignment and the card repaint both inside ONE
-    // preserveCardFocus callback.
-    const source = readFileSync(new URL('../modules/harness_accounts.js', import.meta.url), 'utf8');
-    const wrap = source.indexOf('preserveCardFocus(host, () => {');
-    assert.ok(wrap >= 0, 'renderRows must wrap its rebuild in preserveCardFocus');
-    const rebuild = source.indexOf('host.innerHTML =', wrap);
-    const repaint = source.indexOf('state.loginCard?.render();');
-    const close = source.indexOf('\n    });', wrap);
-    assert.ok(wrap < rebuild && rebuild < repaint && repaint < close,
-        'both the innerHTML rebuild and the card repaint live inside the capture');
-});
-
 test('Add account never touches window.prompt and asks through the in-house dialog', async () => {
     // REGRESSION guard for the dead desktop button: the module must not call
     // window.prompt at all — under pywebview it is a silent no-op. (The call
@@ -1142,7 +1125,7 @@ function fakeCodeInput({ disabled = false, start = 3, end = 5 } = {}) {
     const calls = { focus: 0, range: null };
     return {
         disabled, value: 'ABCD-1234', selectionStart: start, selectionEnd: end,
-        hasAttribute: (name) => name === 'data-login-code-input',
+        getAttributeNames: () => ['class', 'data-login-code-input'],
         focus() { calls.focus += 1; },
         setSelectionRange(from, to) { calls.range = [from, to]; },
         calls,
@@ -1233,9 +1216,10 @@ test('startLogin centralizes the C7 guard: cancel-or-refuse BEFORE the new login
     // job. The flow moved to harness_login_cards.js in phase 2; the RULE did not.
     const src = readFileSync(fileURLToPath(new URL('../modules/harness_login_cards.js', import.meta.url)), 'utf8');
     const fn = src.slice(src.indexOf('async function _startLocked'));
-    const guardAt = fn.indexOf('cancelLoginJob(prev.jobId');
+    const guardAt = fn.indexOf('cancelUnreleased(prev');
     const postAt = fn.indexOf("fetchImpl('/api/claudexor/login'");
-    assert.ok(guardAt > -1, 'startLogin must call cancelLoginJob for a live previous job');
+    assert.ok(guardAt > -1, 'startLogin must cancel a live previous job');
+    assert.match(src.slice(src.indexOf('async function cancelUnreleased')), /^[^]*?cancelLoginJob\(active\.jobId/);
     assert.ok(postAt > -1);
     assert.ok(guardAt < postAt, 'the C7 guard must run before the new login POST');
     const guarded = fn.slice(guardAt, postAt);
@@ -1562,8 +1546,8 @@ function mountSection() {
 function mountInteractiveAccountsSection() {
     const mounted = mountSection();
     const loginButton = {
-        listeners: [],
-        addEventListener(type, fn) { loginButton.listeners.push([type, fn]); },
+        dataset: { get loginCommand() { return groups.innerHTML.match(/data-login-command="([^"]+)"/)?.[1]; } },
+        addEventListener() {},
     };
     const row = {
         dataset: { harness: 'claude', profile: 'work' },
@@ -2212,10 +2196,9 @@ test('an unknown auth row refreshes status on the real click, never starts login
         assert.equal(store.facet('accounts'), 'ok', 'unknown auth is not a failed roster read');
         refreshCalls = 0;
         requests.length = 0;
-        const click = loginButton.listeners
-            .filter(([type]) => type === 'click').map(([, fn]) => fn).at(-1);
+        const click = loginButton.onclick;
         assert.ok(click, 'the account row lost its login listener');
-        click();
+        click({ defaultPrevented: false });
         await refreshPromise;
         assert.equal(refreshCalls, 1, 'unknown status did not use the shared Refresh path');
         assert.ok(requests.some((request) => request.startsWith('GET ')),

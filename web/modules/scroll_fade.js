@@ -1,6 +1,19 @@
 /** Reveal in this scroller alone, clear of its actual CSS fade, including rows inside the box but under the mask.
  * The sheet owns the edge size; Settings and the Dashboard read that same token, never a second pixel constant. */
 const activeBindings = new WeakMap();
+const restoringFocus = new WeakSet();
+export const isRestoringFocus = control => restoringFocus.has(control);
+
+// A repaint restores the keyboard's control even when the owner has scrolled away from it.
+export function restoreFocusWithoutReveal(control) {
+    if (!control) return;
+    restoringFocus.add(control);
+    try {
+        control.focus({ preventScroll: true });
+    } finally {
+        restoringFocus.delete(control);
+    }
+}
 
 export function revealPastFade(scroller, row, { axis = 'y' } = {}) {
     const style = scroller.ownerDocument?.defaultView?.getComputedStyle?.(scroller);
@@ -70,7 +83,8 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
         const row = event.target;
         const unmoved = left?.row === row && Math.abs(offset(row) - left.at) < 1;
         left = null;
-        if (row && row !== scroller && !unmoved && row.matches?.(':focus-visible') && scroller.contains?.(row)) {
+        if (row && row !== scroller && !unmoved && !isRestoringFocus(row)
+            && row.matches?.(':focus-visible') && scroller.contains?.(row)) {
             revealPastFade(scroller, row, { axis });
         }
         schedule();
