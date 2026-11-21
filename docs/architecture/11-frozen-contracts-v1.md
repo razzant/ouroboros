@@ -44,6 +44,7 @@
 | `SkillManifest` — unified frontmatter (instruction/script/extension), `scheduled_tasks` cron suggestions, canonical `conflicts`, `presence:` (`presence_profile.py`), granted `context_snapshot` (§6), instruction `always_in_context`, `secret_fields`; `parse_skill_manifest_text()` tolerates absent optional fields, `validate()` only warns | `ouroboros/contracts/skill_manifest.py` | `tests/test_contracts.py` |
 | `record_contract` — the record passport for external observers: anchor rows of the local JSONL ledgers, the narrow keys guaranteed within `RECORD_CONTRACT_VERSION`, correlation ids, planes, rotation, replica and money rules | `ouroboros/contracts/record_contract.py` | `tests/test_record_contract.py`, `tests/test_monitoring_examples.py` |
 | `schema_versions` — opt-in `_schema_version` stamping (`with_schema_version`/`read_schema_version`), used by extension `health.json`, the projects registry and bindings, and presence bindings | `ouroboros/contracts/schema_versions.py` | `tests/test_contracts.py` |
+| Reply — `reply_to` addresses the source; optional `reply_excerpt` echoes as `reply_to.excerpt` (sender-reported text and UTF-16 offset) | `ouroboros/chat_references.py` | `tests/test_reply_transports.py`, `tests/test_chat_references.py` |
 
 ### 11.2 What is NOT frozen (intentionally)
 

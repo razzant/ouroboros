@@ -96,6 +96,26 @@ def _stamp_owner_delivery(
     return held
 
 
+def _append_reply_context(messages, target, owner_ctx):
+    from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND, REPLY_SOURCE_SHA_KEY, bound_host_row, host_row_intact
+    from ouroboros.dialogue_provenance import excerpt_citation
+
+    if citation := excerpt_citation(target):
+        from ouroboros.owner_words import attachments_line
+
+        # The full source is a host row of its own, bound to its exact text (address, author, words and files). A later
+        # citation of the same source adds only its own selection while a row bound to that same text is still exactly as
+        # produced; with no such proof (a file known later, a read that now succeeds) the source is shown whole again.
+        source = bound_host_row(REPLY_CITATION_KIND, "\n".join(part for part in (
+            f"[Full source from {target.get('author') or 'author not recorded'} at {target['address']}]",
+            target["text"] or "(source unavailable)", attachments_line(target.get("attachments"))) if part))
+        if not any(row.get(HOST_CONTEXT_KIND_KEY) == REPLY_CITATION_KIND
+                   and row.get(HOST_TEXT_SHA_KEY) == source[HOST_TEXT_SHA_KEY] and host_row_intact(row) for row in messages):
+            messages.append(source)
+        _loop()._append_or_merge_user_message(messages, citation, slot=owner_ctx, kind=REPLY_CITATION_KIND)
+        messages[-1][REPLY_SOURCE_SHA_KEY] = source[HOST_TEXT_SHA_KEY]
+
+
 def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
     """This delivery's content; its words survive an unexpected image-composition failure.
 
@@ -162,9 +182,12 @@ def _drain_incoming_messages(
         try:
             injected = incoming_messages.get_nowait()
             if isinstance(injected, dict):
+                from ouroboros.owner_words import reply_target
+                target = reply_target(getattr(owner_ctx, "budget_drive_root", None) or drive_root, injected.get("reply_reference"))
+                _append_reply_context(messages, target, owner_ctx)
                 owner_content = _owner_content(injected, drive_root, task_id)
                 _loop()._record_owner_directive(
-                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected),
+                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected), reply_to=target or None,
                     msg_id=str(injected.get("client_message_id") or injected.get("msg_id") or ""),
                 )
                 _stamp_owner_delivery(
@@ -325,9 +348,7 @@ def _drain_incoming_messages(
                     mark_press_arrival(owner_ctx, messages[-1])
                 ack_content(entry)
                 continue
-            # A LATE quiz answer: the owner's row and this entry's text are the
-            # owner's own words; the model reads the FULL card frame rebuilt from the
-            # stored block on the canonical root, the corpus the card beside their words.
+            # A late answer keeps the owner's act or words separately from the full stored card frame.
             model_msg = dmsg
             if entry.get("late_answer") is not None:
                 from ouroboros.owner_quiz import late_answer_model_text
@@ -353,7 +374,10 @@ def _drain_incoming_messages(
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
             )
-            source = living.get("source") or row_source(entry, "owner_mailbox")  # a late answer's press without words is an act
+            source = living.get("source") or row_source(entry, "owner_mailbox", chats)
+            target = (living.get("reply_to") or answered_card_reply(*answered_card_source(entry, chats))
+                      or reply_target(chats, entry.get("reply_reference")))
+            _append_reply_context(messages, target, owner_ctx)
             _loop()._record_owner_directive(
                 owner_ctx,
                 source=source,
@@ -362,8 +386,7 @@ def _drain_incoming_messages(
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
                 origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id"),
                         "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id")},
-                reply_to=living.get("reply_to") or answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
-                or reply_target(chats, entry.get("reply_reference")) or None,
+                reply_to=target or None,
             )
             from ouroboros.client_surface import noted_owner_text
 

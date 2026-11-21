@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ouroboros.chat_references import media_caption
 from ouroboros.gateway._helpers import coerce_int
 
 _CARD_FIELDS = ("card_id", "kind", "title")
@@ -25,11 +26,12 @@ def delivery_fields(entry: Dict[str, Any]) -> Dict[str, Any]:
                 "download_url_compat": str(entry.get("download_url_compat") or ""),
                 "caption": str(entry.get("caption") or ""),
                 **({"size_bytes": coerce_int(entry.get("size_bytes"), 0)} if "size_bytes" in entry else {})}
-    if kind in {"photo", "video"} and entry.get("download_url"):
+    caption = media_caption(entry)
+    if kind in {"photo", "video"} and (entry.get("download_url") or caption.strip()):
         return {"msg_type": str(kind), "mime": str(entry.get("mime") or ""),
-                "download_url": str(entry["download_url"]),
+                "download_url": str(entry.get("download_url") or ""),
                 "download_url_compat": str(entry.get("download_url_compat") or ""),
-                "caption": str(entry.get("caption") or "")}
+                "caption": caption}
     if kind == "links":
         return {"msg_type": "links", "actions": list(entry.get("actions") or []), "title": str(entry.get("title") or "")}
     if kind == "card" and isinstance(entry.get("card"), dict):

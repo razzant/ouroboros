@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.claudexor_contracts import ClaudexorStatusResponse
+from ouroboros.gateway.reference_contracts import ReplyExcerpt
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot
 from ouroboros.gateway.contributions import UiContributionsResponse
 
@@ -1299,6 +1300,8 @@ class CommandRequest(TypedDict):
     message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
+    reply_to: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
     if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
     client_surface: NotRequired[Dict[str, Any]]
     visible_text: NotRequired[str]

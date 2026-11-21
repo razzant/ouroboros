@@ -755,7 +755,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         if project_id and not press:
             from ouroboros.owner_relay import carry_room_context
 
-            carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
+            carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task,
+                               reply=task_metadata.get("reply_reference"))
     elif realtime_turn is None and not (project_id or late or press or task_constraint):
         # Main: my human's next words reach the one turn already answering them in this chat, else their own turn.
         routed_to_task = _route_main_followup(ctx, chat_id, text or image_caption, client_message_id,
@@ -764,7 +765,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     if routed_to_task:
         from ouroboros.owner_relay import carry_row_at_receipt
 
-        carry_row_at_receipt(ctx.DRIVE_ROOT, routed_to_task, chat_id, client_message_id)  # down its tree, now
+        carry_row_at_receipt(ctx.DRIVE_ROOT, routed_to_task, chat_id, client_message_id,
+                             reply=task_metadata.get("reply_reference"))  # down its tree, now
         _record_routing_receipt(
             bridge,
             ctx,
