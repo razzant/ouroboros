@@ -8,6 +8,8 @@ import { NodeStub, setup } from '../dashboard_dom_fixture.js';
 // The fixture's element, reading a self-closed tag (an SVG `<path … />` of a glyph) as childless, so a row drawn
 // after a glyph is that glyph's sibling here as it is in a browser.
 export class Stub extends NodeStub {
+    // No layout in this fixture; a geometry test supplies its own boxes.
+    getBoundingClientRect() { return { x: 0, y: 0, top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 }; }
     toggleAttribute(name, force = !this.hasAttribute(name)) {
         if (force) this.setAttribute(name, ''); else this.removeAttribute(name);
         return force;
@@ -45,7 +47,7 @@ export const STARTS = ['/api/model-catalog', '/api/review-pool', '/api/claudexor
     '/api/update/check', '/api/storage/measure'];
 export const settle = async () => { for (let round = 0; round < 12; round += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-export function world(t) {
+export function world(t, { history } = {}) {
     forgetSettingRows();
     // A Settings shell mounted in this world is put away after its test (its `pagehide`, with the globals it was mounted
     // with, which a second world of the same test may have replaced): a shell left mounted keeps the module-wide
@@ -70,9 +72,9 @@ export function world(t) {
     env.document.body.appendChild(content);
     const state = { activePage: 'chat' };
     const shown = [];
-    const layers = createLayerStack({ doc: env.document, win: env.window });
+    const layers = createLayerStack({ doc: env.document, win: env.window, history });
     const off = bindPageBack({ layers, doc: env.document, win: env.window,
-        currentHeader: () => content.querySelector('.app-page-header') });
+        currentHeader: () => content.querySelector(`#page-${state.activePage}`)?.querySelector('.app-page-header') });
     t.after(() => { off(); layers.destroy(); });
     const showPage = async (name, options = {}) => {
         shown.push([name, options]);
