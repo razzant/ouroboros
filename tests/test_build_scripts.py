@@ -1747,3 +1747,13 @@ def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
     assert "runner.temp" not in job_env
     assert steps.count("OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-betterleaks-data") == 3
     assert "secrets." not in job
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+def test_spec_does_not_bundle_the_tests_tree_but_keeps_runtime_trees():
+    """The managed checkout comes from ``repo.bundle`` (which carries ``tests``); nothing reads a bundled copy."""
+    source = _pkg_read("Ouroboros.spec")
+    assert "('tests', 'tests')" not in source
+    for entry in ("('web', 'web')", "('docs', 'docs')", "('prompts', 'prompts')", "('skills', 'skills')",
+                  "('supervisor', 'supervisor')", "('repo.bundle', '.')"):
+        assert entry in source
