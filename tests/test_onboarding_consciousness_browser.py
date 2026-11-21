@@ -47,7 +47,7 @@ OFFLINE = {
 MOCK_MODEL = "openai-compatible::mock-model"
 STEP = "[data-consciousness-step]"
 LIMITS = ("Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not "
-          "change itself. Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
+          "change itself. Up to $15.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
           "tasks at once.")
 # The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A); the meaning leads as its copy.
 STEP_TEXT = f"Off {FIRST_RUN['off']} On {FIRST_RUN['on']} {LIMITS} {FIRST_RUN['door']}"

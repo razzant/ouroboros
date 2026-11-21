@@ -72,7 +72,7 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     from ouroboros.consciousness_view import FIRST_RUN, ON_WITHOUT_PLACES, POSITION_WORDS, first_run_words
 
-    assert consciousness_offer({}) == {"offered": True, "enabled": None, "autonomy": "act", "dailyUsd": 20.0, "maxTasks": 2,
+    assert consciousness_offer({}) == {"offered": True, "enabled": None, "autonomy": "act", "dailyUsd": 15.0, "maxTasks": 2,
                                        "words": FIRST_RUN}  # the switch's words (owner 15.11, 5A)
     # The two positions of an install with no place yet, and a subscription's quota said where it is the one payer.
     assert (FIRST_RUN["off"], FIRST_RUN["on"]) == (POSITION_WORDS[False], ON_WITHOUT_PLACES)

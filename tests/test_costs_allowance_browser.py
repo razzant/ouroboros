@@ -160,7 +160,7 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             _switch(page, url, True)  # a fresh install starts it Off, which this card says first
             _costs(page, url)
             allowance = page.locator(FIELD)
-            expect(allowance).to_have_value("20")
+            expect(allowance).to_have_value("15")
             expect(page.locator(f"label[for=setting-{KEY}]")).to_have_text("Consciousness per 24 hours")
             # The keyboard reaches it after the per-task cap, as the card reads.
             page.focus("#setting-OUROBOROS_PER_TASK_COST_USD")
