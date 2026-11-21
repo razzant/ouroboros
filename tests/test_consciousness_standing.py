@@ -239,6 +239,27 @@ def test_a_presence_row_whose_carrier_lost_its_id_neither_stands_nor_retires(tmp
     assert _listed(tmp_path) == ["fell"]
 
 
+def test_an_answer_that_reached_the_chat_reads_done_and_does_not_stand(tmp_path):
+    """A final that reached the chat before its finalization was cut is stored ``failed`` and reads Done on every
+    owner surface (owner 15.11); an owed one keeps its Failed word and stands."""
+    from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
+    from ouroboros.working_checkpoint import REASON_FINALIZATION_INCOMPLETE
+
+    def cut(answer):
+        return _root(tmp_path, "cut", ts=T0 - 1800, ended=T0 - 600, reason_code=REASON_FINALIZATION_INCOMPLETE,
+                     terminal_origin="model_final", result="Here is the finished audit.",
+                     finalization_recovery={"cause": "worker_crash", "answer": answer, "delivery_id": "d1",
+                                            "attempt": 0},
+                     outcome_axes=terminal_outcome_axes(lifecycle="failed", execution=EXECUTION_INFRA_FAILED,
+                                                        reason_code=REASON_FINALIZATION_INCOMPLETE,
+                                                        review_trigger="supervisor_terminal"))
+
+    assert not standing.ended_without_success(cut("delivered")) and _listed(tmp_path) == []
+    assert standing.ended_without_success(cut("owed"))
+    [work] = standing.fallen_works(tmp_path, now=T0, projects=PROJECTS)
+    assert work.task_id == "cut" and "- task cut Failed in project Audit," in work.line
+
+
 def _bind(root, **projects_by_task):
     """``state/project_task_bindings.json`` as "Turn into project" leaves it: the binding names a work's project."""
     (root / "state").mkdir(exist_ok=True)

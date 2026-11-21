@@ -162,17 +162,22 @@ class FallenWork(NamedTuple):
 
 
 def ended_without_success(row: Any) -> bool:
-    """Whether a task row is a work root that ended without success and was taken up by nobody: failed or cancelled;
-    not stopped by my human (an ``owner_continue.OWNER_STOP_SOURCES`` origin, Panic included, read here: a stopped
-    root's retained budget cause can answer ``hard_limit_reached`` before the offer reads the stop) nor wrapped up at
-    their word (``owner_requested_finalization``); not cancelled by a focus's tool; not a wake (work a wake started
-    is not one); no successor: a Continue past ``bound``, a supersession or a retry under another id. A Continue
-    bound and not yet admitted keeps it (its line names the successor). Presence's own rows are not judged here:
-    ``fallen_works`` skips them by their typed column."""
+    """Whether a task row is a work root that ended without success and was taken up by nobody: failed or cancelled,
+    and its outcome word says so (``outcome_phase``: a stored failure whose own final answer reached the chat before
+    its finalization was cut reads Done everywhere, owner 15.11); not stopped by my human (an
+    ``owner_continue.OWNER_STOP_SOURCES`` origin, Panic included, read here: a stopped root's retained budget cause can
+    answer ``hard_limit_reached`` before the offer reads the stop) nor wrapped up at their word
+    (``owner_requested_finalization``); not cancelled by a focus's tool; not a wake (work a wake started is not one);
+    no successor: a Continue past ``bound``, a supersession or a retry under another id. A Continue bound and not yet
+    admitted keeps it (its line names the successor). Presence's own rows are not judged here: ``fallen_works`` skips
+    them by their typed column."""
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION, recorded_cause
     from ouroboros.owner_continue import OWNER_STOP_SOURCES
+    from ouroboros.project_dialogue import outcome_phase
 
     if not isinstance(row, dict) or str(row.get("status") or "") not in FALLEN_STATUSES:
+        return False
+    if outcome_phase(row, {}) not in ("error", "cancelled"):  # the word every owner surface says: Failed or Stopped
         return False
     task_id = str(row.get("task_id") or "")
     if str(row.get("parent_task_id") or "") or row.get("delegation_role") == "subagent":
