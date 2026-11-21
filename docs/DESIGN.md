@@ -2999,7 +2999,8 @@ skills change, so no tick is shown that Finish would ignore. It is a list, not c
 of the same day): one row per skill with no surface of its own, its box, its human title and, muted on one line with
 it, what it gives (an author's longer description falls back there) and, quieter, what it lacks in a few words (the
 catalog's mark: «· Gemini key», else «· needs setup»), whose whole sentence a screen reader hears instead. The catalog's
-pitches are written to keep each row on one line at 980 px; a narrower row wraps whole under its title, never cut. The
+pitches are written to keep each row on one line at 980 px; where the step is narrower than 35rem (a phone) every row
+takes two, the title and then what it gives with its mark, one rhythm instead of breaks mid-sentence, never cut. The
 groups, by category with built-ins first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each
 group whole in its column, and one column below that and on a phone; a group's head is its name only, and categories
 of a single skill close the list together as «More». The maintainer's recommended skills are
