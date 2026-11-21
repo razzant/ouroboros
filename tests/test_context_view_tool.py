@@ -736,3 +736,24 @@ def test_the_own_calls_pointer_leaves_native_replay_and_keeps_a_complete_unit(tm
     at = next(i for i, message in enumerate(folded) if (message.get("tool_calls") or [{}])[0].get("id") == "native")
     assert not valid(folded[at]) and "working_note" in folded[at]["tool_calls"][0]["function"]["arguments"]
     assert any(unit.start == at and unit.end == at + 1 for unit in context_units(folded, scope="dialogue"))
+
+
+def test_an_untyped_start_row_takes_the_first_anchor_but_not_the_typed_start(tmp_path, monkeypatch):
+    """A host notice written untyped at the start (as the capability omission notice is) is ordinary prose: the first
+    full fold writes its note in its place, before the typed start rows, so that fold's own call does not follow the
+    note and leaves no anchor (a disclosed gap). Both directions: the typed start rows still stand through the next
+    full fold (a note is no answer that would end the start), and that fold's call points at its note and stands."""
+    from ouroboros.tools.compact_context import NOTE_POINTER, standing_rows
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    notice = {"role": "user", "content": "[SYSTEM NOTICE]\n[CAPABILITY_OMISSION_MANIFEST]\n- tools: missing credentials"}
+    start = [*_source()[:2], notice, _facts("round 1")]
+    first = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-1", keep_unit_ids=[])
+    assert _notes(first) == [2] and first[3] == start[3]
+    assert "Note written by fold-1." in first[4]["tool_calls"][0]["function"]["arguments"]  # no pointer
+    request = [*first, _facts("round 3")]
+    assert sorted(standing_rows(request)) == [3]
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-2", keep_unit_ids=[])
+    assert second[:4] == request[:4] and _notes(second) == [2, 4]
+    assert NOTE_POINTER.split("{")[0] in second[5]["tool_calls"][0]["function"]["arguments"]
+    assert sorted(standing_rows([*second, _facts("round 5")])) == [3, *range(5, len(second) + 1)]
