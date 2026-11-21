@@ -130,17 +130,35 @@ def test_aggregate_lever_preserves_element_addresses_and_requires_uncovered_note
         floor.level_with(snap, mv.FULL_VIEW, ['F7a:1'])
 
 
-def test_compact_range_form_keeps_an_authored_capsule_for_uncovered_owner_words(tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved", ["with_its_write_time", "before_requests_carried_one"])
+def test_compact_range_form_keeps_an_authored_capsule_for_uncovered_owner_words(tmp_path, monkeypatch, saved):
+    """The commitments' note is dated like every note of that call, by the compact_context call that wrote it; a
+    request queued before requests carried that time is dated when it is applied."""
+    import datetime
+    from ouroboros import utils
+    from ouroboros.context_compaction import _capsule_metadata
+
+    written = '2026-11-13T19:40:00+00:00'
     p, snap = plan()
     p = floor.select_view(p, 'max', ['F7:' + snap.room['lane1'][0]['address']], owner_note=True)
     ctx = SimpleNamespace(context_fit_plan=p, active_context_mode='max')
     messages, schemas = p.messages_for('max'), []
     record_context_view(ctx, messages, schemas)
     assert 'working_note' in _compact_context(ctx, view_address=['F7a:1'])
-    assert 'requested' in _compact_context(ctx, view_address=['F7a:1'], working_note='Keep the owner commitment.')
+    with monkeypatch.context() as at_call:  # when the mind wrote its note: the compact_context call
+        at_call.setattr(utils, 'utc_now_iso', lambda *_args, **_kwargs: written)
+        assert 'requested' in _compact_context(ctx, view_address=['F7a:1'], working_note='Keep the owner commitment.')
+    if saved == 'before_requests_carried_one':
+        del ctx._pending_compaction['written_at']
     result = _run_round_compaction(messages, _context(tmp_path, ctx, schemas, monkeypatch))
     assert ctx._context_view_receipt['status'] == 'applied'
     assert 'Keep the owner commitment.' in json.dumps(result)
+    stamps = {meta.get('written_at') for row in result if (meta := _capsule_metadata(row)[1])}
+    if saved == 'with_its_write_time':
+        assert stamps == {written}  # one call, one write time, the owner commitments' note included
+    else:
+        assert stamps and all(abs(datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(
+            stamp)) < datetime.timedelta(minutes=5) for stamp in stamps)
     assert dict(floor.kept_level(snap, ctx.context_fit_plan.max_projection.memory_facts).addressed)['F7a'] == ('1',)
     sources = list(tmp_path.rglob('*.json'))
     assert any(snap.room['lane1'][0]['line'] in path.read_text() for path in sources)

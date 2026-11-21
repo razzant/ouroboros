@@ -110,7 +110,7 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
 
     view = activity_stop_view(activity)
     return waits, (phase in {"budget_paused", "budget_pausing"} and not activity.get("live")
-                   and view["resumable"] and activity.get("can_resume") is True)
+                   and view["resumable"] and view["pause_cause"] != "authority" and activity.get("can_resume") is True)
 
 
 def question_waits(row: dict) -> bool:

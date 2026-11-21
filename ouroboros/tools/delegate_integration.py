@@ -1257,7 +1257,7 @@ def claimed_start_request(drive: pathlib.Path, *, actor_ctx: Any = None,
 
 def _payload_mutation_authority(
     ctx: ToolContext, drive: pathlib.Path, bucket: str, skill_name: str,
-    binding: Any, access: str = "workspace_write",
+    binding: Any, access: str = "workspace_write", *, prior: Optional[_RunCustody] = None,
 ) -> Tuple[Optional[Any], Optional[Dict[str, Any]], Optional[ToolResult]]:
     """The payload counterpart of ``_mutation_authority`` (R1 item 1).
 
@@ -1269,12 +1269,25 @@ def _payload_mutation_authority(
     from ouroboros.subagents import delegated_run_shape
     from ouroboros.tool_access import active_tool_profile, build_resolved_resource_binding
 
-    if access == "readonly":
+    if access == "readonly" and prior is None:
         return None, None, _fail(
             "delegate_start", "payload_delegation_forbidden",
             "The skill-payload selector requires write access; omit the selector for a readonly run.",
             definitely_unrun=True)
     b, s = str(bucket or "").strip(), str(skill_name or "").strip()
+    if prior is not None:
+        # An explicit selector is only a consistency assertion. Both forms
+        # revalidate current rights to the same semantic and physical target.
+        from ouroboros.presence_authority import presence_ceiling_allows_binding, presence_ceiling_from_context
+
+        _target, binding, refusal = _rebind_payload_reference(
+            ctx, prior.resource_ref, prior.target_root,
+            tool="delegate_start", context=f"continue_from={prior.run_id}")
+        if refusal:
+            return None, None, refusal
+        if (ceiling := presence_ceiling_from_context(ctx)) is not None and not presence_ceiling_allows_binding(ceiling, binding):
+            return None, None, _fail("delegate_start", "payload_delegation_forbidden",
+                "The recorded payload is outside this task's current Presence ceiling.", definitely_unrun=True)
     if binding is None:
         # Policy BEFORE lookup (Fable F4): a caller whose profile cannot hold
         # payload-write authority gets an authority denial, not a target-
@@ -1335,7 +1348,7 @@ def _payload_mutation_authority(
         # The host-minted semantic reference: replayed by retry, consumed by the
         # owned apply rebind. ``payload_hash`` is filled by snapshot provisioning
         # (the pre-copy loader hash is the CAS baseline).
-        "resource_ref": {
+        "resource_ref": dict(prior.resource_ref) if prior is not None else {
             "root": "skill_payload",
             "source": str(binding.source or ""),
             "skill_name": str(binding.skill_name or ""),

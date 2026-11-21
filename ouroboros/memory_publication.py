@@ -100,7 +100,7 @@ def publication_refusal(result: Publication, path: str) -> str:
             f"Read {path}, reconcile your change, then retry with expected_revision from that read.")
 
 
-# One read of the journal's tail per write, the note writer's budget (knowledge._JOURNAL_TAIL_BYTES): the replaced
+# One read of the journal's tail per write, the note writer's budget (knowledge_versions.WRITE_TAIL_BYTES): the replaced
 # version's writer and its base are looked for there; a miss says "no row wrote it" and stores both texts whole.
 _TAIL_BYTES = 8 * 1024 * 1024
 

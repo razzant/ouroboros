@@ -83,6 +83,9 @@ test('the card offers Continue only as the server says, and otherwise points to 
     assert.deepEqual(continueOfferView({ continuation_offer: { eligible: false, successor_task_id: 's-1' } }),
         { kind: 'successor', successorId: 's-1' });
     assert.deepEqual(continueOfferView({}), { kind: 'none' });
+    // A deep self-review keeps no saved midpoint: no Continue, and its reason in plain words.
+    assert.deepEqual(continueOfferView({ continuation_offer: { eligible: false, refusal: 'deep_review_restart_required',
+        cause: 'deep_self_review' } }), { kind: 'refusal', refusal: 'deep_review_restart_required' });
 });
 
 test('a lost answer is retried under the SAME nonce; an already accepted press names its successor', async () => {
@@ -248,6 +251,17 @@ test('a canonical hard-bound refusal remains one readable fact beside the existi
             refusal: 'hard_limit_reached', cause: 'budget_exhausted' } });
         assert.equal(card.root.querySelector('[data-continue-refusal]'), note);
         assert.equal(note.textContent, `Continue unavailable. ${taskReasonPhrase('budget_exhausted')}`);
+        syncContinueAction(card, { continuation_offer: { eligible: false,
+            refusal: 'deep_review_restart_required', cause: 'deep_self_review' } });
+        assert.equal(note.textContent,
+            'Continue unavailable. A deep self-review keeps no saved point to continue from; send /review to start a new one.');
+        assert.equal(card.root.querySelector('[data-continue-task]'), null);
+        // A finished review is answered author_finished by the server (no refusal note, no Continue).
+        const finished = settledRootCard('finished-review');
+        syncContinueAction(finished, { status: 'completed',
+            continuation_offer: { eligible: false, refusal: 'author_finished', cause: 'finished' } });
+        assert.equal(finished.root.querySelector('[data-continue-refusal]'), null);
+        assert.equal(finished.root.querySelector('[data-continue-task]'), null);
         const reloaded = settledRootCard('expired-root');
         syncContinueAction(reloaded, detail);
         assert.equal(reloaded.root.querySelector('[data-continue-refusal]').textContent,

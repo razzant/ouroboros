@@ -452,13 +452,13 @@ def test_ordinary_project_and_main_receipts_name_only_acceptance(tmp_path):
 
     ctx = _ctx(tmp_path, _project(tmp_path), event_queue=queue_module.Queue())
     family = _family(ctx, tmp_path)
-    assert family["send_file"]() == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to Project room \"Launch\"."
     assert family["send_user_message"]() == 'OK: message accepted for delivery to Project room "Launch".'
     assert json.loads(family["show_card"]())["delivery"] == 'OK: card accepted for delivery to Project room "Launch".'
     plain = _ctx(tmp_path / "other", 1, event_queue=queue_module.Queue())
     family = _family(plain, tmp_path)
     assert family["send_user_message"]() == "OK: message accepted for delivery to owner chat."
-    assert family["send_file"]() == "OK: file 'a.txt' accepted for delivery to owner chat."
+    assert family["send_file"]().split("\n")[0] == "OK: file 'a.txt' accepted for delivery to owner chat."
     assert json.loads(family["show_card"]())["delivery"] == "OK: card accepted for delivery to owner chat."
 
 

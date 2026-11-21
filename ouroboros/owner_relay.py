@@ -45,6 +45,9 @@ def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
 
 
 def owner_text(row) -> str:
+    from ouroboros.answer_facts import living_card_input
+    if living := living_card_input(row):
+        return living["content"]
     if row.get("type") == "quiz_answer":
         from ouroboros.owner_quiz import late_answer_owner_text
         return late_answer_owner_text(row["quiz"])
@@ -231,6 +234,8 @@ def quote_rows(ctx, handles) -> tuple[list, str]:
 
 def owner_quote(root, row: dict, *, address: str = "") -> dict:
     """One retained owner row as a quote: exact words, attachments and where/when."""
+    from ouroboros.answer_facts import late_quiz_input, living_card_input
+    from ouroboros.owner_quiz import late_answer_ref, recorded_answer_frame, resolved_late_quiz
     from ouroboros.owner_words import answered_card_source
     from ouroboros.projects_registry import list_reserved_projects
     root = row.get("_owner_source_root") or root
@@ -241,11 +246,33 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
                         "address": address or owner_row_address(row),
                         "client_message_id": str(row.get("client_message_id") or "")},
              "owner_row": copy.deepcopy(row)}
-    if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
+    if root and row.get("late_answer"):
+        quote["owner_row"].setdefault("_owner_source_root", str(root))
+    if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
         quote["reply_to"] = copy.deepcopy(row["reply_to"])
-    if isinstance(answered := answered_card_source(row)[0], dict):  # a quiz row's card or a late answer's snapshot
-        from ouroboros.owner_quiz import recorded_answer_frame
-        quote["question_frame"] = recorded_answer_frame(answered)
+    if late := late_answer_ref(row.get("late_answer")):
+        block = resolved_late_quiz(root, late)
+        fact = late_quiz_input(late, block)
+        quote.update(input_source=fact["source"], text=fact["content"])
+        if fact.get("quiz_id"):
+            quote["question_frame"] = recorded_answer_frame(block, asker=late["task_id"])
+        return quote
+    if carried := row.get("corpus_answer"):
+        quote["input_source"] = carried["source"]
+        if card := carried.get("reply_to"):
+            quote["question_frame"] = f"{card.get('author')}: {card.get('text')}"
+    if living := living_card_input(row, root):
+        quote.update(input_source=living["source"], text=living["content"])
+        if target := living.get("reply_to"):
+            quote["question_frame"] = f"Card of task {living['source_task_id']}: {target['text']}"
+            if living["source"] == "owner_press":
+                from ouroboros.answer_facts import press_record
+                quote["question_frame"] += "\n" + press_record(living["content"], living["source_task_id"])
+    answered, asker = answered_card_source(row, root)
+    if isinstance(answered, dict):  # the delivered quiz snapshot, under the asking task's name
+        from ouroboros.answer_facts import row_source
+        quote["input_source"] = row_source(row, "owner_mailbox", root)
+        quote["question_frame"] = recorded_answer_frame(answered, asker=str(asker or ""))
     return quote
 
 
@@ -325,13 +352,18 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     return entry, True
 
 
-def carried_quote_line(quote: dict, *, address: str, fact=None) -> str:
+def carried_quote_line(quote: dict, *, address: str, fact=None, input_source="") -> str:
     """The one line over an owner row's quoted words, for a relay's quote and a carried row alike: the pinned
     prefix, the time and the room the quote names (a part the host does not have is left out, never invented),
     the carriage fact of a carried row (``reached this work`` | ``went to <task>`` | ``in the project room; routed by
     a head``, for ``ROUTED_BY_HEAD``) and the row's handle."""
     source = quote.get("source") if isinstance(quote, dict) and isinstance(quote.get("source"), dict) else {}
-    parts = ["Owner words quoted verbatim", str(source.get("ts") or ""), str(source.get("label") or "")]
+    from ouroboros.answer_facts import row_source
+    from ouroboros.owner_words import OWNER_CARD_INPUT, OWNER_PRESS
+
+    kind = input_source or quote.get("input_source") or row_source(quote.get("owner_row") or {}, "")
+    heading = {OWNER_PRESS: "Owner card press", OWNER_CARD_INPUT: "Owner card input"}.get(kind, "Owner words quoted verbatim")
+    parts = [heading, str(source.get("ts") or ""), str(source.get("label") or "")]
     if isinstance(fact, dict):
         went = str(fact.get("went_to") or "")
         where = ("in the project room; routed by a head" if went == ROUTED_BY_HEAD else f"went to {went}" if went
@@ -340,18 +372,31 @@ def carried_quote_line(quote: dict, *, address: str, fact=None) -> str:
     return "[" + "; ".join(part for part in [*parts, f"handle {address}"] if part) + "]"
 
 
-def _quote_body(row: dict, line: str) -> str:
-    """The quoted row under its line: its words whole, then the message it replies to, the card it answers and
-    the files it carries, each as a host frame beside my human's words."""
-    from ouroboros.owner_words import answered_card_source
+def _quote_body(row: dict, line: str, living: dict | None = None, root=None) -> str:
+    """The quoted row under its line: its words whole (a press without words: the host's record of the act), then
+    the message it replies to, the card it answers and the files it carries, each as a host frame beside my human's
+    words."""
+    from ouroboros.answer_facts import card_input, press_record, row_words
+    from ouroboros.owner_words import OWNER_PRESS, answered_card_source
 
-    body = f"{line}\n{owner_text(row)}"
+    root = row.get("_owner_source_root") or root
+    if living is None:
+        living = card_input(row, root)
+    if living:
+        text = (press_record(living["content"], living["source_task_id"]) if living["source"] == OWNER_PRESS
+                else living["content"])
+    else:
+        text = row_words(row, root)
+    body = f"{line}\n{text}"
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
         body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"
                  + json.dumps(row["reply_to"], ensure_ascii=False))
-    if isinstance(answered := answered_card_source(row)[0], dict):  # the question it answers, for the model too
+    if (target := (living or row.get("corpus_answer") or {}).get("reply_to")) and not row.get("late_answer"):
+        body += f"\n[Host question frame]\n{target.get('author')}: {target.get('text')}"
+    answered, asker = answered_card_source(row, root)
+    if isinstance(answered, dict):  # the question it answers, for the model too, under the asking task's name
         from ouroboros.owner_quiz import recorded_answer_frame
-        body += "\n[Host question frame]\n" + recorded_answer_frame(answered)
+        body += "\n[Host question frame]\n" + recorded_answer_frame(answered, asker=str(asker or ""))
     if row.get("attachments"):
         body += "\n[Host-retained attachments]\n" + json.dumps(row["attachments"], ensure_ascii=False)
     return body
@@ -394,7 +439,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     own voice. A ``host_carried`` entry takes the carried mode (``inject_carried``) instead. Returns the addresses
     of carried rows shown here under the fact ``reached this work`` (the drain's closing control); ``[]`` otherwise."""
     from ouroboros import loop
-    from ouroboros.owner_words import answered_card_reply, answered_card_source, owner_place_accounts, reply_target
+    from ouroboros.answer_facts import mark_press_arrival, row_source
+    from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, owner_place_accounts, reply_target
     from ouroboros.tool_access import canonical_data_root
 
     if isinstance(entry.get("host_carried"), dict):
@@ -420,14 +466,28 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
         retain_owner_message(ctx, row, accounts=accounts, source_root=source_root)
         address = owner_row_address(row)
         # An answer replies to its card (a quiz row's own, or a late answer's snapshot), else to its chat target.
-        replied = answered_card_reply(*answered_card_source(row)) or reply_target(source_root, row.get("reply_to")) or None
-        loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
-                                     origin={"source_task_id": entry.get("source_task_id"),
+        from ouroboros.answer_facts import card_input
+        living = card_input(row, source_root)
+        answered, asker = answered_card_source(row, source_root)
+        carried_answer = row.get("corpus_answer") or {}
+        target = living.get("reply_to") or answered_card_reply(answered, asker) or carried_answer.get("reply_to")
+        replied = target or reply_target(source_root, row.get("reply_to")) or None
+        source = living.get("source") or row_source(row, "owner_mailbox")
+        teller = entry.get("source_task_id")
+        author = living.get("source_task_id") or asker or carried_answer.get("source_task_id")
+        loop._record_owner_directive(ctx, source=source, content=living.get("content") if living else owner_text(row),
+                                     msg_id=address, carried=True,
+                                     origin={"source_task_id": author or teller, "relayed_from_task_id": teller if author else None,
+                                             "quiz_id": (answered or {}).get("quiz_id") or carried_answer.get("quiz_id"),
                                              "client_message_id": row.get("client_message_id"),
-                                             "chat_id": row.get("chat_id"), "ts": row.get("ts")},
+                                             "chat_id": row.get("chat_id"), "ts": row.get("ts"),
+                                             "relay_source_root": str(source_root) if source_root and str(source_root) != str(root) else ""},
                                      reply_to=replied)
-        content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address)))
+        line = carried_quote_line(quote, address=address, input_source=source)
+        content = quote_content(ctx, entry, row, _quote_body(row, line, living, source_root))
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)
+        if source == OWNER_PRESS:
+            mark_press_arrival(ctx, messages[-1])
         delivered.add(index)
     note = str(entry.get("text") or "")
     relay = entry["relay"]
@@ -533,7 +593,8 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     this work that stood there under its room, the one host fact line. Attachments are staged either way (by saved
     hash, idempotent). Returns the addresses shown under ``reached this work``."""
     from ouroboros import loop
-    from ouroboros.owner_words import _chat_ref
+    from ouroboros.answer_facts import card_input, mark_press_arrival, row_source
+    from ouroboros.owner_words import OWNER_PRESS, _chat_ref
 
     fact_of = entry["host_carried"]
     went = str(fact_of.get("went_to") or "")
@@ -553,9 +614,14 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
         refs = {address, _chat_ref(row) if row.get("client_message_id") else "", str(fact_of.get("earlier_ref") or "")}
         seen = [stamps[ref] for ref in refs - {""} if ref in stamps]
         if not seen:
-            body = _quote_body(row, carried_quote_line(quote, address=address, fact={"went_to": went}))
-            loop._append_or_merge_user_message(messages, quote_content(ctx, entry, row, body), slot=ctx,
-                                               kind=OWNER_WORDS_KIND)
+            source_root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or getattr(ctx, "drive_root", None)
+            living = card_input(row, source_root)
+            kind = living.get("source") or row_source(row, "")
+            line = carried_quote_line(quote, address=address, fact={"went_to": went}, input_source=kind)
+            loop._append_or_merge_user_message(messages, quote_content(ctx, entry, row, _quote_body(row, line, living, source_root)),
+                                               slot=ctx, kind=OWNER_WORDS_KIND)
+            if kind == OWNER_PRESS:
+                mark_press_arrival(ctx, messages[-1])
         elif row.get("attachments") and ctx is not None:
             stage_quoted(ctx, entry, row)  # its words stand in the first request; its bytes are on this drive
         if seen and (went or not any(part.startswith("room_message") for part in seen)):
@@ -810,7 +876,7 @@ def _words_identity(row: dict) -> Any:
     return row["ref"] or ("words", _text_sha256(row["text"]), str(row.get("ts") or ""))
 
 
-def _pristine_form(ctx, row: dict) -> tuple:
+def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     """``(address, chat row)`` for a row of the set this run holds no chat row for (a direct turn's input): its
     words, time, room and client id as the corpus recorded them, in the shape a quote is built from."""
     ref, client = str(row.get("ref") or ""), ""
@@ -823,6 +889,17 @@ def _pristine_form(ctx, row: dict) -> tuple:
     pristine = {"direction": "in", "chat_id": chat_id, "ts": str(row.get("ts") or ""), "text": row["text"],
                 **({"client_message_id": client} if client else {}),
                 **({"attachments": copy.deepcopy(row["attachments"])} if row.get("attachments") else {})}
+    if "answer_input" in row or row["source"] in ("owner_press", "owner_card_input"):
+        fact = row.get("answer_input") or {}
+        address = fact.get("reply_address")
+        target = (targets or {}).get(address) or {}
+        answer = {"source": row["source"], **{k: fact[k] for k in ("source_task_id", "quiz_id") if fact.get(k)}}
+        if target:
+            answer["reply_to"] = {"address": address, "author": target.get("author"), "text": target["text"],
+                                  **{k: fact[k] for k in ("card_id", "pressed_label", "submitted_values") if fact.get(k)}}
+        if row["source"] == "owner_press" and "shown" not in fact:
+            answer["rendered"] = True  # an older inherited field holds only the host's account
+        pristine.update(text=fact.get("shown", row["text"]), corpus_answer=answer)
     return format_address(row_address(pristine)), pristine
 
 
@@ -843,11 +920,12 @@ def _rows_to_carry(ctx, root) -> list:
                 str(key), {k: v for k, v in value.items() if k != "carried"}, str(fact.get("went_to") or ""))
     rows, _root, accounts = _tree_words(ctx)
     rows = _deduped(rows + _held_words(held, root, str(ctx.task_id), context=True, accounts=accounts))
+    targets = {row["ref"]: row for row in rows if row["source"] == REPLY_TARGET}
     earlier, carried = _earlier_refs(ctx), []
     for row in rows:
         if row["source"] == REPLY_TARGET:
             continue
-        address, pristine, went = by_ref.get(row["ref"]) or (*_pristine_form(ctx, row), "")
+        address, pristine, went = by_ref.get(row["ref"]) or (*_pristine_form(ctx, row, targets), "")
         before = earlier.get(row["ref"], "") if row["ref"] else ""
         identities = {_words_identity(row), address, before} - {""}
         carried.append((identities, address, owner_quote(root, pristine, address=address), went, before))

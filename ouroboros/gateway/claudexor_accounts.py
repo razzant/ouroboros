@@ -670,6 +670,51 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
     return payload
 
 
+def _harness_models(gateway, harness_id, per_account, profile_id=""):
+    """The native program inventory for one agent session, on Auto or its exact credential."""
+    from ouroboros.gateway.models import account_catalog_models
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    if not per_account:
+        if profile_id:
+            raise ClaudexorUnavailable("profile_catalog_unsupported", "This engine cannot list models for a pinned agent account.")
+        return {"models": gateway.harness_models(harness_id)}
+    catalog = gateway.harness_model_catalog(harness_id, view="accounts",
+                                           **({"credential_profile_id": profile_id} if profile_id else {}))
+    models = [
+        {**model, "credential_profile_id": account.get("credentialProfileId"),
+         "availability": account.get("availability"), "problem": account.get("problem"),
+         "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
+         "catalog_source": source.get("source")}
+        for account, source, model in account_catalog_models(catalog)
+    ]
+    return {"models": models, "model_catalog": catalog}
+
+
+def session_model_catalog(harness_id, profile_id):
+    """Read one native session inventory on demand, without asking other programs or waking the engine."""
+    from ouroboros.claudexor_daemon import read_owned_gateway
+    from ouroboros.gateways.claudexor import account_catalog_supported
+
+    row = {"id": harness_id}
+    result = {"items": [], "model_sources": [], "errors": [], "session_catalog": row}
+    try:
+        with read_owned_gateway() as gateway:
+            try:
+                operations = gateway.operations()
+            except Exception:
+                operations = []  # An engine without account-view support can still serve its native Auto catalog.
+            row.update(_harness_models(gateway, harness_id,
+                account_catalog_supported(operations, "/v2/harnesses/:id/models"), profile_id))
+            if row.get("model_catalog", {}).get("partial"):
+                result["partial"] = True
+    except Exception as exc:
+        code = str(getattr(exc, "code", "catalog_unavailable"))
+        row.update(models=[], models_error=code)
+        result["errors"].append({"provider_id": "claudexor", "harness_id": harness_id, "code": code, "error": str(exc)})
+    return result
+
+
 def _attach_model_catalogs(gateway: Any, rows: List[Dict[str, Any]], operations: List[Any]) -> None:
     """Attach each visible harness's model list, asking for all of them at once.
 
@@ -680,39 +725,20 @@ def _attach_model_catalogs(gateway: Any, rows: List[Dict[str, Any]], operations:
     every read ends while the client is open, and the rows are filled in catalog
     order. A refused read stays that row's ``models_error``; any other failure
     leaves the status read."""
-    from ouroboros.gateway.models import account_catalog_models, account_catalog_supported
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable, account_catalog_supported
 
     targets = [row for row in rows if row["id"]]
     if not targets:
         return
     per_account = account_catalog_supported(operations, "/v2/harnesses/:id/models")
-
-    def read(harness_id: str) -> Any:
-        if per_account:
-            return gateway.harness_model_catalog(harness_id, view="accounts")
-        return gateway.harness_models(harness_id)
-
     with ThreadPoolExecutor(max_workers=len(targets)) as pool:
-        calls = [(row, pool.submit(read, row["id"])) for row in targets]
+        calls = [(row, pool.submit(_harness_models, gateway, row["id"], per_account)) for row in targets]
     for row, call in calls:
         try:
-            result = call.result()
+            row.update(call.result())
         except ClaudexorUnavailable as exc:
-            row["models"] = []
-            row["models_error"] = exc.code
-            continue
-        if not per_account:
-            row["models"] = result
-            continue
-        row["model_catalog"] = result
-        row["models"] = [
-            {**model, "credential_profile_id": account.get("credentialProfileId"),
-             "availability": account.get("availability"), "problem": account.get("problem"),
-             "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
-             "catalog_source": source.get("source")}
-            for account, source, model in account_catalog_models(result)
-        ]
+            row.update(models=[], models_error=exc.code)
+
 
 
 def _facet_outcome(

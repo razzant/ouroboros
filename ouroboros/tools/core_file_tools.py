@@ -291,7 +291,7 @@ def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) ->
         raw = work_domain.read_bytes(target)
     except FileNotFoundError:
         from ouroboros.evidence_packs import materialize_path
-        if work_domain.is_work(target) or materialize_path(target) is None:  # a packed checkpoint handle is written back first
+        if work_domain.is_work(target) or materialize_path(target, explain=True) is None:  # a packed handle is written back first
             raise
         raw = store.read_file_bytes(target)
     content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
@@ -654,7 +654,7 @@ def _data_read(
             return _render_line_slice(display_path, content, max_lines=full_line_count, start_line=1, extent=extent)
         return _render_line_slice(display_path or norm, content, max_lines=max_raw, start_line=start_raw,
                                   start_char=start_char, extent=extent, max_chars=max_chars)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         if norm.replace("\\", "/").startswith("memory/"):
             explanation = (
                 "Memory artifacts under memory/ are created lazily on first "
@@ -668,6 +668,7 @@ def _data_read(
                 "memory/; if this path was expected to exist, verify it was "
                 "written correctly."
             )
+        explanation = f"{exc}." if getattr(exc, "retired", False) else explanation  # a retired saved state's record
         return _publish_tool_result(ctx, ToolResult(
             status="ok",
             code="LEGACY_WARNING",
@@ -750,12 +751,11 @@ def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, 
 
 
 def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", skill_name: str = "",
-                   resolved_binding: Any = None) -> tuple[str, Optional[ResolvedResourceBinding], Any]:
-    """``read_file``'s whole admission of one target, unpublished: ``(root, binding, refusal)``.
-
-    ``refusal`` is None when admitted, else the ToolResult to publish (a protected path's is final
-    text). The one sequence for read_file and delegated ``input_files`` (#2593): profile, binding,
-    Presence ceiling (as the registry applies it), runtime-data rules, protected paths."""
+                   resolved_binding: Any = None,
+                   prospective_copy: Optional[pathlib.Path] = None) -> tuple[str, Optional[ResolvedResourceBinding], Any]:
+    """Unpublished admission. For a measured copy about to be handed off, require its exact address
+    instead of hashing a copy not yet published; the actual read still verifies the copy's identity.
+    The profile, runtime-data and protected-path checks always apply."""
     from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED, _presence_binding_allowed
 
     normalized, refusal = _access_refusal(ctx, root, "read")
@@ -768,7 +768,7 @@ def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", 
         refusal = ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}")
     if refusal is not None:
         return normalized, None, refusal
-    if not _presence_binding_allowed(ctx, binding):
+    if not (_presence_binding_allowed(ctx, binding) if prospective_copy is None else binding.target_path == prospective_copy):
         return normalized, binding, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=PRESENCE_RESOURCE_BLOCKED)
     if runtime_block := _runtime_data_read_block(ctx, binding.target_path, root=binding.root):
         return normalized, binding, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block)
@@ -902,9 +902,9 @@ def _read_file(
                                       max_lines=max_lines, start_line=start_line,
                                       start_char=start_char, extent=extent, max_chars=max_chars)
         return _stamp_read_view(ctx, target, opened, opened_root, extent, rendered)
-    except FileNotFoundError:
-        return _publish_tool_result(ctx, ToolResult(
-            status="ok", code="LEGACY_WARNING", text=f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)} (resolved: {target})"))
+    except FileNotFoundError as exc:  # a retired saved state says when it went and where its content is
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="LEGACY_WARNING", text=f"⚠️ NOT_FOUND: "
+                                    f"{_root_display_path(normalized, path)} (resolved: {target}){f'; {exc}' if getattr(exc, 'retired', False) else ''}"))
     except UnicodeDecodeError as exc:
         return _publish_tool_result(ctx, _not_text_error(normalized, path, target, exc, selectors))
     except UserFilesPathBlockedError as exc:

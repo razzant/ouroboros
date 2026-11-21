@@ -19,11 +19,12 @@ import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, 
 import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
     configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults, spendGapsWords } from './route_editor_primitives.js';
-import { mergeModelCatalog, catalogReadState, readDraftCatalog, summarizeReadErrors } from './settings_catalog.js';
+import { mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
+import { bindCompatibleModelLoader, createOnboardingCatalog } from './onboarding_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
-import { createConsciousnessOffer } from './onboarding_consciousness.js';
+import { createConsciousnessStep } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
@@ -105,25 +106,42 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     let localStatusPollStarted = false;
     let agentsStep = null;
     let modelSources = [];
+    let sourceRead = {};
     let modelCatalog = {};
-    let catalogRequest = null;
-    let catalogRead = '';  // the access whose catalog was read whole
-    let askedAccess = '';  // the keys, rows and local model the owner last asked the model catalog with (the Models step, Retry)
+    let rereadRoleCatalogs = false;
     let disposed = false;
     let disposeLanguage = null;
-    let catalogGeneration = 0;
     const stepScrollPositions = new Map();
     // What we proposed, per slot: seeded with the slots no document or operator variable sets (#2969); a slot the
     // owner edits leaves it, and only one still holding it takes a later proposal: saved values and blanks stay.
     const proposedModels = Object.fromEntries((INITIAL_STATE.automaticModels || []).map((key) => [key, INITIAL_STATE[key]]));
     const ours = (key) => key in proposedModels && state[key] === proposedModels[key];
+    const previewed = {};  // what a preview put into a slot: until the owner edits a role, one still holding it is asked again (an updated catalog proposes anew)
+    const asked = (slot) => ours(slot.stateKey) && previewed[slot.stateKey] === state[slot.stateKey];
     let connectionsEditor = null;
     let footerObserver = null;
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
-    const consciousness = createConsciousnessOffer(bootstrap.consciousnessOffer, { onChange: () => render() }); // its one Start waits for the confirmed save
-    const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
+    const consciousness = createConsciousnessStep(bootstrap.consciousnessOffer); // its position rides the one completion request
+    const supportsScopes = () => SETUP_CONTRACT.scopedModelCatalogs === true;
+    const discovery = createOnboardingCatalog({ draftSettings, providerFields: PROVIDER_FIELDS, supportsScopes,
+        onSources(data) {
+            sourceRead = mergeModelCatalog(sourceRead, data);
+            adoptSources(); syncCurrentStepActionState();
+        },
+        onFull(data) {
+            adoptModelCatalog(data);
+            if (state.currentStep === 'models') refreshShownCatalogs();
+            else rereadRoleCatalogs = true;
+            refreshSummary();
+        },
+        onReset() {
+            modelRoles.resetCatalogs(); agentsStep?.resetCatalogs(); compatibleCatalogs = {};
+            modelCatalog = {};
+        }, changed: syncCurrentStepActionState });
+    const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles',
+        supportsScopes, legacyCatalog: () => modelCatalog, readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed, onChange: (settings, { slot } = {}) => {
         delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
         state.modelsDirty = true;
@@ -137,7 +155,12 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         return { ...onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS,
             budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim }), ...keyChoices.draft() };
     }
-    const openedDraft = draftSettings();  // the access the install had saved when the wizard opened
+    function previewDraft() {  // blank where a slot is asked again, only beside a Main asked again or blank (the server proposes only there)
+        const draft = draftSettings(), main = MODEL_SLOTS.find((slot) => slot.slot === 'main');
+        if (!state.skipSubscriptionPresets && !state.modelsDirty && main && (!draft[main.settingKey] || asked(main)))
+            MODEL_SLOTS.filter(asked).forEach((slot) => { draft[slot.settingKey] = ''; });
+        return draft;
+    }
 
     function adoptModelSettings(settings = {}) {
         MODEL_SLOTS.forEach((slot) => {
@@ -166,55 +189,22 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         }
     }
 
-    // The catalog of the draft's access: its keys, rows and local model, which only this draft knows, and the
-    // connected subscriptions. `once` skips an access already read whole (the Models step asks it when it opens).
-    // A read the owner did not ask for (`asked: false`: a preview's answer, a changed account) sends the draft only
-    // while it is the one he last asked with, else the access the wizard opened with: a key or an address typed,
-    // changed or deleted since leaves this page only when the Models step opens or on Retry.
-    function refreshModelSources({ once = false, asked = true } = {}) {
-        const own = (draft) => JSON.stringify([draft.OUROBOROS_CONNECTIONS, PROVIDER_FIELDS.map((field) => draft[field.settingKey]),
-            draft.LOCAL_MODEL_SOURCE, draft.LOCAL_MODEL_FILENAME, draft.LOCAL_MODEL_CONTEXT_LENGTH]);
-        const current = draftSettings();
-        const draft = asked || own(current) === askedAccess ? current : openedDraft;
-        const access = JSON.stringify([state.agentsConnected, own(draft)]);
-        if (asked) askedAccess = own(draft);  // his ask, also when its list is already read or in flight
-        if (catalogRequest?.access === access) return catalogRequest.promise;
-        // A read in flight for another access is no longer wanted, also when this access needs none.
-        catalogRequest?.abort();
-        const generation = ++catalogGeneration;
-        catalogRequest = null;
-        if ((once && access === catalogRead) || (!state.agentsConnected.length && !hasApiAccess() && !hasLocalModel())) {
-            syncCurrentStepActionState();
-            return Promise.resolve();
-        }
-        const request = catalogRequest = { access, ...readDraftCatalog(draft) };
-        request.promise = request.promise.then((catalog) => {
-            if (generation !== catalogGeneration) return;
-            modelCatalog = mergeModelCatalog(modelCatalog, catalog);
-            catalogRead = catalogReadState(catalog) === 'ok' ? access : '';
-            catalogRequest = null;
-            adoptModelCatalog();
-            refreshSummary();
-        });
-        syncCurrentStepActionState();
-        return request.promise;
-    }
-
     // The reviewers arrive inside the previewed catalog (rows marked Reviewer),
     // which the Available subagents editor itself adopts. A proposed model lands only
     // in a slot still ours, and stays ours: a saved or edited slot, blank included, is kept (#2969).
     function applySetupPreview(response) {
         if (!state.skipSubscriptionPresets) state.presetFailure = null;
-        if (!state.modelsDirty && response.model_settings) {
+        if (!state.modelsDirty && response.model_settings) {  // an adoption reloads the roles editor: never under an owner's edit
             const previous = JSON.stringify(draftSettings());
             MODEL_SLOTS.filter((slot) => slot.settingKey in response.model_settings && ours(slot.stateKey))
                 .forEach((slot) => {
-                    state[slot.stateKey] = proposedModels[slot.stateKey] = response.model_settings[slot.settingKey];
+                    const value = response.model_settings[slot.settingKey];
+                    if (value !== state[slot.stateKey]) previewed[slot.stateKey] = value;
+                    state[slot.stateKey] = proposedModels[slot.stateKey] = value;
                 });
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
         }
         if (Array.isArray(response.items)) adoptModelCatalog(response);
-        if (state.agentsConnected.length) void refreshModelSources({ asked: false });
         state.spendGaps = response.known_spend_gaps;  // what this draft's limits cannot count, said on the limits step
         state.partlyCounted = response.partly_counted_spend;
         refreshSummary();
@@ -226,12 +216,24 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             modelSlots: MODEL_SLOTS.map((slot) => ({ ...slot, settingsToggleId: '' })) });
     }
 
+    function adoptSources() {
+        modelSources = (sourceRead.model_sources || []).filter(source => state.agentsConnected.includes(source.credentialHarness));
+        clearFreshSubscriptionDefaults();
+        const filtered = { ...sourceRead, model_sources: modelSources };
+        modelRoles.adoptSources(filtered);
+        agentsStep?.adoptSources(filtered);
+    }
+
     function adoptModelCatalog(data) {
         if (data) modelCatalog = mergeModelCatalog(modelCatalog, data);
-        modelSources = (modelCatalog.model_sources || []).filter((source) => state.agentsConnected.includes(source.credentialHarness));
-        clearFreshSubscriptionDefaults();
+        adoptSources();
         modelRoles.adoptCatalog({ ...modelCatalog, model_sources: modelSources }, { connectionCatalogs: compatibleCatalogs });
-        agentsStep?.adoptCatalog({ ...modelCatalog, model_sources: modelSources });
+        if (modelCatalog.read_state) agentsStep?.adoptCatalog(modelCatalog);
+    }
+
+    function refreshShownCatalogs(options = {}) {
+        void modelRoles.refreshCatalogs({ descriptors: false, subscriptionsOnly: Boolean(options.accounts) });
+        agentsStep?.refreshCatalogs(options);
     }
 
     function trim(value) {
@@ -321,13 +323,13 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
         if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
-        const access = accessRowState({ connected: state.agentsConnected, sources: modelCatalog.model_sources,
-            read: catalogReadState(modelCatalog), checking: Boolean(catalogRequest), readErrors: summarizeReadErrors(modelCatalog.errors),
+        const access = accessRowState({ connected: state.agentsConnected, sources: sourceRead.model_sources || [],
+            read: catalogReadState(sourceRead), checking: discovery.pending, readErrors: summarizeReadErrors(sourceRead.errors),
             previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
         const note = document.getElementById('onboarding-access-note');
         if (note) Object.assign(note, { textContent: access.note, hidden: !access.note });
         const retry = document.getElementById('onboarding-access-retry');
-        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: Boolean(catalogRequest || agentsStep?.previewPending) });
+        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: false });
         const optional = root.querySelector('[data-collapse="api-access"] > summary .selection-badge');
         if (optional) Object.assign(optional, { textContent: access.badge, hidden: !access.badge });
         const accessRow = document.getElementById('onboarding-access-row');
@@ -423,7 +425,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
-                return mainSourceReason(state.agentsConnected, modelCatalog.model_sources,
+                return mainSourceReason(state.agentsConnected, sourceRead.model_sources || [],
                     { snapshot: agentsStep?.snapshot, catalogKnown: agentsStep?.catalogKnown });
             }
             if (trim(state.minimaxRegion) && !['global_en', 'cn_zh'].includes(trim(state.minimaxRegion).toLowerCase())) {
@@ -480,12 +482,13 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
         const index = STEP_ORDER.indexOf(state.currentStep);
         if (index >= 0 && index < STEP_ORDER.length - 1) {
-            navigateStep(STEP_ORDER[index + 1]);
+            navigateStep(state.quickStarted && state.currentStep === 'consciousness' ? 'summary' : STEP_ORDER[index + 1]);
         }
     }
 
     function previousStep() {
         const index = STEP_ORDER.indexOf(state.currentStep);
+        state.quickStarted = false;  // walking back returns to the ordinary order
         if (index > 0) navigateStep(STEP_ORDER[index - 1], { restorePosition: true });
     }
 
@@ -591,7 +594,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
             ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
-            // The Consciousness offer above already uses that word alone (#1603); its model row says what it is.
+            ...consciousness.summaryRows(),  // the step's choice; the model row below says what it is
             ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
         const compatible = compatibleEndpoint(draftSettings());
@@ -644,6 +647,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             OUROBOROS_SUBAGENTS: catalogDraft(),
             ...(agentsStep?.allowEmptyReviewPool ? { [ALLOW_EMPTY_REVIEW_POOL]: true } : {}),
             ...starterSkills.payload(),
+            ...consciousness.payload(),
         };
     }
 
@@ -765,15 +769,20 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                 isVisible: () => ['accounts', 'models', 'budget'].includes(state.currentStep),
                 onChange: (connected) => {
                     state.agentsConnected = connected;
-                    void refreshModelSources({ asked: false });
+                    adoptSources();
                     syncCurrentStepActionState();
                 },
-                previewPayload: draftSettings,
+                previewPayload: previewDraft,
                 providerProfiles: PROVIDER_PROFILES,
+                supportsScopes, readApiCatalog: discovery.readApi, apiCatalogAllowed: discovery.allowed,
                 onSubagentsChange: (setting) => { state.availableSubagents = setting; },
                 onSetupPreview: applySetupPreview,
                 onPreviewStatus: syncCurrentStepActionState,
-                onStatus: () => {
+                onStatus: ({ catalogChanged } = {}) => {
+                    if (catalogChanged) {
+                        if (state.agentsConnected.length) void discovery.sources({ force: true });
+                        if (state.currentStep === 'models' && discovery.allowed()) refreshShownCatalogs({ accounts: true });
+                    }
                     const quota = document.getElementById('wizard-subscription-quota');
                     if (quota && state.currentStep === 'budget') quota.innerHTML = subscriptionQuotaHtml();
                 },
@@ -813,7 +822,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             state.error = agentsStep.previewError || 'Setup suggestions could not be prepared. Try again or choose your models manually.';
             syncCurrentStepActionState(); return;
         }
-        navigateStep('summary');
+        navigateStep((state.quickStarted = STEP_ORDER.includes('consciousness')) ? 'consciousness' : 'summary');  // its Continue goes to Summary
     }
 
     function subscriptionQuotaHtml() {
@@ -964,7 +973,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     <p class="step-copy">${escapeHtml(STEP_META.summary.copy)}</p>
                 </div>
             </div>
-            <div class="summary-card"><div data-starter-skills></div><div data-consciousness-offer></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
+            <div class="summary-card"><div data-starter-skills></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
             ${packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
@@ -991,9 +1000,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function renderStepContent() {
-        if (consciousness.running()) return consciousness.screenHtml();
         if (state.currentStep === 'accounts') return renderAccountsStep();
         if (state.completedRestartMode) return renderRestartRequiredScreen();
+        if (state.currentStep === 'consciousness') return consciousness.html({ title: STEP_META.consciousness.title, subscriptionOnly: hasModelSubscription() && !hasApiAccess() });
         if (state.currentStep === 'models') return renderModelsStep();
         if (state.currentStep === 'review_mode') return renderReviewModeStep();
         if (state.currentStep === 'budget') return renderBudgetStep();
@@ -1034,7 +1043,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                 <div class="wizard-steps" role="group" aria-label="Step ${index + 1} of ${STEP_ORDER.length}">${stepCards()}</div>
                 <div class="wizard-content">
                     ${renderStepContent()}
-                    ${state.completedRestartMode || consciousness.running() ? '' : `
+                    ${state.completedRestartMode ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                         <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
@@ -1056,9 +1065,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         `;
         bindEvents();
         starterSkills.mount(root.querySelector('[data-starter-skills]'));
-        consciousness.mount(root.querySelector('[data-consciousness-offer]'));
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
-        disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode && !consciousness.running() ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
+        disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
         observeFooter();
         revealCurrentStep();
@@ -1258,48 +1266,21 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         syncCurrentStepActionState();
     }
 
-    function bindCompatibleModelLoader() {
-        const button = document.getElementById('load-compatible-models');
-        const select = document.getElementById('compatible-model-source');
-        const status = document.getElementById('compatible-load-status');
-        if (!button) return;
-        select.addEventListener('change', () => { status.textContent = 'Load this server’s models, or type a model ID below.'; });
-        button.addEventListener('click', async () => {
-            const source = select.value;
-            const name = source.split('@')[1] || '';
-            const row = name ? state.connections.find((entry) => entry.kind === 'openai-compatible' && entry.name === name) : null;
-            // The built-in source sends the one pair the draft reaches, naming whose key a kept one is.
-            const { baseUrl, apiKey, apiKeySetting } = name ? { baseUrl: row?.base_url, apiKey: row?.api_key || '' }
-                : compatibleEndpoint(draftSettings());
-            const payload = { baseUrl, apiKey, ...(name ? { connection: name } : { apiKeySetting }) };
-            const sent = JSON.stringify(payload);
-            status.textContent = 'Loading…';
-            button.disabled = true;
-            try {
-                const data = await fetchJson('/api/openai-compatible/models', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: sent, cache: 'no-store',
-                });
-                if (disposed || !button.isConnected) return;
-                const models = (data.models || []).map(trim).filter(Boolean).sort();
-                compatibleCatalogs[source] = models.map((id) => ({ value: `${source}::${id}`, label: id }));
-                adoptModelCatalog();
-                if (select.value === source) status.textContent = models.length
-                    ? `${models.length} model${models.length === 1 ? '' : 's'} listed for this server. Choose one in its role below.`
-                    : 'No models listed. You can type a model ID below.';
-            } catch (error) {
-                if (!disposed && button.isConnected && select.value === source) status.textContent = `Could not load models: ${error.message}. You can type a model ID below.`;
-            } finally {
-                if (button.isConnected) button.disabled = false;
-            }
-        });
-    }
-
     function bindModelsStep() {
-        bindCompatibleModelLoader();
+        discovery.accept();
+        if (!supportsScopes()) void discovery.full();
+        bindCompatibleModelLoader(draftSettings, (source, items) => {
+            compatibleCatalogs[source] = items;
+            adoptModelCatalog();
+        });
         loadModelRoles();
         modelRoles.mount();
         adoptModelCatalog();
-        void refreshModelSources({ once: true });
+        if (rereadRoleCatalogs) {
+            rereadRoleCatalogs = false;
+            refreshShownCatalogs();
+        }
+        if (state.agentsConnected.length) void discovery.sources();
         agentsStep?.mount();
         agentsStep?.setProcessingPreference(state.processingPreference);
         syncCurrentStepActionState();
@@ -1422,7 +1403,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         state.saveAttempt = '';
         await agentsStep?.disposeForCompletion();
         agentsStep = null;
-        if (!disposed) await consciousness.afterSave({ isDisposed: () => disposed, announce: () => announceCompletion(outcome.receipt) });
+        if (!disposed) announceCompletion(outcome.receipt);
     }
 
     async function completeOnboardingAtomically(payload) {
@@ -1450,13 +1431,11 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     async function saveWizardPayload(payload) {
-        await consciousness.beforeSave();
-        if (disposed) return 'cancelled';
         const result = await completeOnboardingAtomically(payload);
         await applyStagedLanguage();
         await agentsStep?.disposeForCompletion();
         agentsStep = null;
-        await consciousness.afterSave({ isDisposed: () => disposed, announce: () => announceCompletion(result) });
+        announceCompletion(result);
         return 'ok';
     }
 
@@ -1530,7 +1509,6 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function bindEvents() {
-        if (consciousness.running()) return consciousness.bindScreen(root);
         if (state.completedRestartMode) {
             document.getElementById('open-app-btn')?.addEventListener('click', () => {
                 window.location.replace('/');
@@ -1558,13 +1536,14 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         document.getElementById('check-save-btn')?.addEventListener('click', checkSaveStatus);
         document.getElementById('quick-start-btn')?.addEventListener('click', reviewAndStart);
         document.getElementById('onboarding-access-retry')?.addEventListener('click', async () => {
-            await Promise.allSettled([agentsStep?.refreshStatus(), refreshModelSources(),
+            await Promise.allSettled([agentsStep?.refreshStatus(), discovery.sources({ force: true }), discovery.full(),
                 agentsStep?.refreshSubagentsPreview({ force: true })]);
             if (!disposed) syncCurrentStepActionState();
         });
         if (state.currentStep === 'accounts') { bindProvidersStep(); bindAgentsStep(); }
         if (state.currentStep === 'models') bindModelsStep();
         if (state.currentStep === 'review_mode') bindReviewModeStep();
+        if (state.currentStep === 'consciousness') consciousness.bind(root);
         if (state.currentStep === 'budget') bindBudgetStep();
         syncCurrentStepActionState();
     }
@@ -1573,15 +1552,12 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     root.addEventListener('focusin', clearFooterOnFocus);
     window.addEventListener('ouro:language-changed', paintGaps);
     window.addEventListener('pagehide', (event) => {
-        consciousness.leave();  // every departure retires a Start not sent yet; the form itself survives the back/forward cache
         if (event.persisted) return;
         disposed = true;
-        consciousness.dispose();
         root.removeEventListener('focusin', clearFooterOnFocus);
         window.removeEventListener('ouro:language-changed', paintGaps);
         disposeLanguage?.();
-        catalogGeneration += 1;
-        catalogRequest?.abort();
+        discovery.dispose();
         modelRoles.destroy();
         connectionsEditor?.destroy();
         footerObserver?.disconnect();

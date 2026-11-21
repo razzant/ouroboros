@@ -497,6 +497,60 @@ def test_an_unreadable_archive_is_unknown_not_an_orphan_accusation(data_root):
     assert _violation_files(data_root) == []
 
 
+
+def test_a_record_whose_bytes_cannot_be_located_now_is_unknown_never_a_violation(data_root, monkeypatch):
+    """The audit reads each sealed record back; bytes that cannot be located now (``EvidenceUnavailable``:
+    the packs catalog cannot answer) are neither unreadable nor missing. The pass reports ``unknown`` and
+    writes no violation fact, the write-once latch that would keep a false verdict for good; the next pass,
+    the bytes readable, verifies the record clean. The read names the record's task."""
+    from ouroboros import evidence_packs
+
+    final = _dispatch(data_root, "task-unknown-place")
+    digest, real, tasks = _manifest(final)["full_payload_ref"]["sha256"], evidence_packs.blob_bytes, []
+
+    def unlocatable(root, ref, **kwargs):
+        tasks.append(kwargs.get("task_id"))
+        if ref.get("sha256") == digest:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        report = seal_mod.reconcile_model_send_seals(data_root)
+    assert report["status"] == "unknown" and report["facts_written"] == 0, report
+    assert _violation_files(data_root) == [] and _violation_events(data_root) == []
+    assert "task-unknown-place" in tasks, tasks
+    report = seal_mod.reconcile_model_send_seals(data_root)
+    assert report["status"] == "completed" and report["facts_written"] == 0, report
+    assert _violation_files(data_root) == []
+
+
+def test_a_seal_whose_version_cannot_be_located_now_is_unknown_never_unlogged(data_root, monkeypatch):
+    """The reverse direction reads each dispatched attempt's seal, falling back to the manifest's stored
+    version; a version that cannot be located now leaves that attempt unknown, never an unlogged one. With
+    the catalog answering, the vanished seal is the durable ``unlogged_attempt`` fact as before."""
+    from ouroboros import evidence_packs
+
+    final = _dispatch(data_root, "task-unknown-seal")
+    ref = final["candidate_manifest_ref"]
+    pathlib.Path(ref["path"]).unlink()
+    real = evidence_packs.blob_bytes
+
+    def unlocatable(root, blob, **kwargs):
+        if blob.get("sha256") == ref["sha256"]:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, blob, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        report = seal_mod.reconcile_model_send_seals(data_root)
+    assert report["status"] == "unknown" and report["unlogged_attempts"] == 0, report
+    assert _violation_files(data_root) == []
+    report = seal_mod.reconcile_model_send_seals(data_root)
+    assert report["unlogged_attempts"] == 1 and report["facts_written"] == 1, report
+
 def test_sweep_flags_a_dispatched_attempt_whose_seal_vanished(data_root):
     final = _dispatch(data_root, "task-sweep-unlogged")
     pathlib.Path(final["candidate_manifest_ref"]["path"]).unlink()

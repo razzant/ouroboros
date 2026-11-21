@@ -722,8 +722,9 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
             w.busy_task_id == task_id for w in _pool().WORKERS.values()):
         # The carrier that parked this Presence turn still holds its slot until its own settlement (#2566).
         return True
-    if str(candidate.get("delegation_role") or "") == "subagent":  # the root's limit counts its acting children
-        if (acting_children(root_task_id, running) >= get_max_active_subagents_per_root()
+    if str(candidate.get("delegation_role") or "") == "subagent":  # the owner's number counts acting children
+        limit = get_max_active_subagents_per_root()
+        if (limit is not None and acting_children(root_task_id, running) >= limit
                 and not _pool()._assignment_depth_reservation_admits(candidate, running)):
             return True
     if stat and not refresh_pending_placement(_pool().DRIVE_ROOT, candidate, lane=True):  # a moved room's binding first

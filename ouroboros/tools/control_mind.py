@@ -98,8 +98,9 @@ def mind_tool_entries() -> list:
              _pause_task),
         ToolEntry("resume_task", _accepting_schema(_control_schema("resume_task",
              "Request Resume of listed paused work through the owner's existing grants. "
-             "Nothing returns a Pause by itself: Resume it when the return its sentence names has come, or on the "
-             "word of whoever decided it; a sleep wakes by itself on what it chose. Your human's general word to "
+             "A technical pause waits for the named billing or control record to become readable. "
+             "The host rechecks the saved task's controls then. Resume a deliberate Pause when its named return "
+             "has come or its author asks. A sleep wakes on what it chose. Your human's general word to "
              "continue returns what their general request paused; work they paused by name waits for their word "
              "about it or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
@@ -109,5 +110,7 @@ def mind_tool_entries() -> list:
              "as unfinished (finish_task action=stop), through the same Continue action as the owner's button. "
              "An ordinary finished answer, owner Stop/Panic and hard money/deadline stops refuse. A finite execution budget carries only its recorded unspent "
              "remainder; when that remainder cannot be read the request refuses as execution_budget_unknown "
-             "and starts no successor, never with fresh time. Repeated delivery of this call reuses its one "
+             "and starts no successor, never with fresh time. An interrupted deep self-review saves no midpoint "
+             "and refuses as deep_review_restart_required: request_deep_self_review starts a new one. "
+             "Repeated delivery of this call reuses its one "
              "successor. The outcome arrives in your task mailbox."), _continue_task)]

@@ -210,7 +210,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     subagent_role: NotRequired[str]
     accepted: NotRequired[bool]
     active_subagent_count: NotRequired[int]
-    max_active_subagents: NotRequired[int]
+    max_active_subagents: NotRequired[int]  # the owner's number per root; absent: no number
     queued_behind_active_cap: NotRequired[bool]
     required_capabilities: NotRequired[list[str]]
     write_surface: NotRequired[str]
@@ -950,14 +950,15 @@ class SkillGrantResponse(TypedDict, total=False):
     granted_permissions: list[str]
     turn_on_when_ready: str
     setup_error: str  # grants succeeded; the requested setup did not
-    enabled: bool  # present when this grant also carried the owner's Enable
-    extension_action: str
-    extension_reason: str
-    load_error: str
+    enabled: bool  # present with the owner's Enable, except a grants refusal over an unreadable enabled.json
+    extension_action: Optional[str]  # null, as live_loaded, when no reconcile answered (an Enable refused first)
+    extension_reason: Optional[str]
+    load_error: Optional[str]
     grants: Dict[str, Any]
     process: str
     server_reconcile: str
-    live_loaded: bool
+    live_loaded: Optional[bool]
+    retained_companions: Dict[str, str]  # as SkillToggleResponse: registered names awaiting confirmed exit
     error: str
 
 
@@ -1400,6 +1401,7 @@ class OnboardingCompleteRequest(TypedDict, total=False):
     starter_skills: List[str]  # catalog ids installed once after completion; absent: the default starter list
     skill_source_trust: Dict[str, str]  # {hub row id: trusted|review}; marks those rows confirmed
     attempt_id: str  # client-made per save (16-128 of A-Z a-z 0-9 _ -); read back by GET with ?attempt=
+    consciousness: bool  # setup's Consciousness switch: true turns it on (owner's start); false and absent change nothing
 
 
 class OnboardingSubagentsPreviewResponse(TypedDict):
@@ -1491,6 +1493,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "log",
     "heartbeat",
     "extension_lifecycle",
+    "extension_health_changed",
     "message_annotation",
     "projects_changed",
     "ui_preferences_changed",

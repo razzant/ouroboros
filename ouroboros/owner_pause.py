@@ -48,6 +48,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from ouroboros.store import StoreBusy, StoreError, acquisition_budget, admission_acquisition, physical_acquisition
 
+from ouroboros.work_stop import direct_selection
+
 log = logging.getLogger(__name__)
 
 _TOOL_OPERATION = ContextVar("owner_pause_tool_operation", default=None)
@@ -473,7 +475,7 @@ def select_member_resume(root_drive: Any, root_task_id: str, task_id: str, *,
             or row.get("state") != STATE_RESUMED or not grant_id
             or grant.get("grant_id") != grant_id or not grant.get("consumed_at")
             or grant.get("revoked_at") or grant.get("authority") != "explicit_resume"
-            or grant.get("selected_by") != "owner"
+            or not direct_selection(grant)
             or grant.get("owner_pause_fence_id") != fence_id):
         raise OwnerPauseRefused("member_resume_authority_changed")
     fence = read_fence(root_drive, root_task_id)
@@ -533,7 +535,7 @@ def interrupted_member_resume(root_drive: Any, root_task_id: str, task_id: str, 
         grant = row.get("grant") or {}
         own = bool(row.get("state") == STATE_RESUMED and int(row.get("task_attempt") or 0) == int(attempt)
                    and grant.get("grant_id") and grant.get("consumed_at") and not grant.get("revoked_at")
-                   and grant.get("authority") == "explicit_resume" and grant.get("selected_by") == "owner")
+                   and grant.get("authority") == "explicit_resume" and direct_selection(grant))
     except Exception:
         return None
     if not own:  # the member's own facts already say no: its root is never read
@@ -832,7 +834,7 @@ def _validate_launch(source: Any, root_resume=None):
             row = controls(task_id).get("budget_pause") or {}
             grant = row.get("grant") or {}
             root_allowed = root_actor(root_drive, root_id, task_id)
-            if not root_allowed and grant.get("selected_by") == "owner":
+            if not root_allowed and direct_selection(grant):
                 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
                 root_allowed = controls(root_id).get("status") in _TRULY_TERMINAL_STATUSES
             allowed = bool(row.get("state") == STATE_RESUME_GRANTED

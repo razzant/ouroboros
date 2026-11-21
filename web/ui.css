@@ -1362,7 +1362,7 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
 /* WebKit (the packaged desktop shell) computes `overflow: visible` on a native
    select, so a long selected option paints past the control and turns the page
    scroller into a horizontal one; the clip keeps it inside the control's box. */
-select.ui-control {
+select.ui-control, .ui-source-picker {
     -webkit-appearance: none;
     appearance: none;
     overflow: hidden;
@@ -1371,6 +1371,36 @@ select.ui-control {
     background-image: var(--select-arrow);
     background-repeat: no-repeat;
     background-position: right var(--space-3) center;
+}
+.ui-source-picker { text-align: start; white-space: nowrap; cursor: pointer; }
+.ui-source-field { position: relative; }
+select.ui-source-backing {
+    position: absolute;
+    inset-inline-start: 0;
+    top: 0;
+    width: 1px;
+    max-width: 1px;
+    height: 1px;
+    padding: 0;
+    border: 0;
+    clip-path: inset(50%);
+    /* The menu button stands in for it: no pointer, no tab stop, nothing to see (opacity says so to layout gates). */
+    opacity: 0;
+    pointer-events: none;
+}
+.ui-source-options { width: var(--ui-popup-anchor-width); padding: var(--space-1); }
+.ui-source-options [role="group"]::before {
+    display: block;
+    content: attr(aria-label);
+    padding: var(--space-2) var(--space-3) var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    font-weight: 600;
+}
+.ui-source-options [data-active] { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+.ui-source-options [aria-disabled="true"] { color: var(--text-disabled); cursor: default; }
+@media (pointer: coarse) {
+    .ui-source-options [role="option"] { min-height: 44px; align-content: center; }
 }
 textarea.ui-control { resize: vertical; }
 /* A read-only multiline value (renderSafeField's output): whole and wrapped in the field's box, selectable, in the value's

@@ -7,18 +7,15 @@ bypasses, append is exempt, and a normal (non-shrinking) write is unaffected.
 
 from __future__ import annotations
 
-import subprocess
-
 from ouroboros.tools.core import _check_data_shrink_guard, _edit_text, _write_file
 from ouroboros.tools.registry import ToolContext
+from tests._workspace_git import git_repository
 
 
 def _ctx(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "repo", unborn=True)
     drive = tmp_path / "data"
     drive.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
     return ToolContext(repo_dir=repo, drive_root=drive)
 
 

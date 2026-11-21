@@ -2,6 +2,11 @@
  *  the marketplaces, agent accounts (relayed Claudexor engine objects), local model, MCP, the model
  *  catalog, updates and core control. `UpdateLetter` sits in ./api_types.js. */
 
+/** `extension_health_changed`: re-read the installed Skills listing; no health data rides the frame.
+ * @typedef {Object} ExtensionHealthChangedOutbound
+ * @property {'extension_health_changed'} type
+ */
+
 /**
  * One declared server's passive state in an installed skill's `mcp_servers` list.
  * @typedef {Object} SkillMcpServerFact
@@ -31,6 +36,7 @@
  * @property {string} source  // native | clawhub | ouroboroshub | external | self_authored | user_repo
  * @property {string} content_hash
  * @property {string} payload_root
+ * @property {string=} manifest_file  // the manifest the loader parsed; '' when none was readable (permissions and grants are then a placeholder); absent on an older host
  * @property {string} installed_at
  * @property {string=} removal  // uninstall | delete | ''
  * @property {string=} review_status
@@ -46,6 +52,7 @@
  * @property {boolean=} desired_live
  * @property {boolean=} live_loaded
  * @property {string=} live_reason
+ * @property {Object<string,string>=} retained_companions
  * @property {string=} process
  * @property {string=} server_reconcile
  * @property {boolean=} health_regressed
@@ -62,6 +69,7 @@
  * @property {Object=} presence_runtime
  * @property {Object=} provenance
  * @property {boolean=} identity_collision
+ * @property {string=} collision_row_id  // display identity for one colliding directory, never an operation target
  * @property {?Object=} install  // source, official (exact endorsed bytes), release, basis, base_known, modified, update_available, withdrawn ({reason, version} for a withdrawn release), left_source, turn_on_when_ready, installed_by, installed_at, reason?, task_id?, check?: {by, notes, at}, pending_update?: {version, digest}, update_rejected?: {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}
  * @property {string[]=} category
  * @property {Object=} deployment  // a policy requires this name: the server's requirement row with its when_unmet
@@ -143,6 +151,8 @@
  * @property {Object=} grants
  * @property {?string=} extension_action
  * @property {?string=} extension_reason
+ * @property {?string=} load_error  // as SkillReconcileResponse: an unfinished repair's words, the switch staying On
+ * @property {Object<string,string>=} retained_companions
  * @property {string=} process
  * @property {string=} server_reconcile
  */
@@ -168,6 +178,7 @@
  * @property {boolean=} enabled
  * @property {?string=} extension_action
  * @property {?string=} extension_reason
+ * @property {Object<string,string>=} retained_companions  // a failed Enable's pending exits
  * @property {string=} process
  * @property {string=} server_reconcile
  * @property {?string=} load_error
@@ -225,6 +236,7 @@
  * @property {?string} extension_reason
  * @property {boolean} live_loaded
  * @property {?string} load_error
+ * @property {Object<string,string>=} retained_companions  // may coexist with a separate load error
  * @property {string} process
  * @property {string} server_reconcile
  */
@@ -1077,13 +1089,16 @@
  */
 
 /**
- * `GET /api/model-catalog`: with `source_id` (and optionally `credential_profile_id`) one agent
- * account's models only; otherwise every configured provider's, a failed one as an `errors` row.
+ * `GET /api/model-catalog`: `view=sources` lists subscription descriptors with empty `items`.
+ * `source_id` and optional `credential_profile_id` select subscription models, `provider_id` one API connection
+ * or the local model. The full catalog collects sources concurrently, with a 20-second limit per read,
+ * and returns the results together with failures in `errors`.
  * @typedef {Object} ModelCatalogResponse
  * @property {ModelCatalogItem[]} items
  * @property {Object[]} errors
  * @property {Object[]} model_sources
  * @property {Object[]=} account_catalogs
+ * @property {Object=} session_catalog  // native harness row for a harness_id read
  * @property {boolean=} partial
  */
 

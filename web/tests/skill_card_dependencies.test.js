@@ -22,6 +22,56 @@ function onExtension(overrides = {}) {
 }
 
 const traysOf = (html) => html.split('data-skill-trays>')[1].split('<div data-skill-errors>')[0];
+const factsOf = (html) => html.split('data-skill-detail-facts>')[1]
+    .split('<div class="skills-details-facts" data-skill-detail-publication=')[0];
+
+test('a retained companion warns on a loaded skill alongside any independent failure', () => {
+    const live = onExtension({ desired_live: true, live_loaded: true });
+    const held = { ...live, retained_companions: { beta: 'stop requested' } };
+    const warning = 'Waiting for beta to exit.';
+    const card = renderInstalledSkillCard(held);
+    assert.ok(traysOf(card).includes(warning));
+    assert.doesNotMatch(card, /Couldn’t start|data-skill-action="repair"/);
+    const failed = traysOf(renderInstalledSkillCard({ ...held, load_error: 'Alpha failed to import' }));
+    assert.ok(failed.includes(warning) && failed.includes('Alpha failed to import'));
+    assert.ok(!traysOf(renderInstalledSkillCard(live)).includes(warning));
+});
+
+test('every currently failed companion is named and escaped in Details, and recovery removes only its own name', () => {
+    const failed = onExtension({ desired_live: true, live_loaded: true, dispatch_live: true, process: 'server',
+        live_reason: 'companion_restart_exhausted:alpha,beta,gamma,delta,<epsilon>',
+        load_error: 'Only the first diagnostic is visible before the names are needed' });
+    const before = factsOf(renderInstalledSkillCard(failed));
+    assert.match(before, /background process stopped: alpha, beta, gamma, delta, &lt;epsilon&gt;/);
+    assert.doesNotMatch(before, /<epsilon>/);
+    const recovered = factsOf(renderInstalledSkillCard({ ...failed,
+        live_reason: 'companion_failed:beta,<epsilon>', load_error: 'beta; <epsilon>' }));
+    assert.match(recovered, /background process stopped: beta, &lt;epsilon&gt;/);
+    assert.doesNotMatch(recovered, /alpha|gamma|delta/);
+    const ready = factsOf(renderInstalledSkillCard({ ...failed, live_reason: 'ready', load_error: null }));
+    assert.doesNotMatch(ready, /background process stopped|alpha|beta|gamma|delta|epsilon/);
+});
+
+test('a pending companion replacement is neutral, not a repair or a Needs you fact', () => {
+    const pending = onExtension({ desired_live: true, live_loaded: true, dispatch_live: true,
+        live_reason: 'companion_refresh_pending', load_error: null });
+    const model = installedSkillModel(pending);
+    assert.match(model.chip, /Background restart pending/);
+    assert.equal(model.needs, false);
+    assert.match(renderInstalledSkillCard(pending), /Background restart pending/);
+    assert.doesNotMatch(renderInstalledSkillCard(pending), /data-skill-action="repair"|data-needs-you/);
+});
+
+test('only a typed companion failure on an already loaded skill is a stopped background process', () => {
+    const loaded = onExtension({ desired_live: true, live_loaded: true, dispatch_live: true, process: 'server', load_error: 'Daemon unavailable' });
+    for (const live_reason of ['companion_failed:daemon', 'companion_restart_exhausted:daemon']) {
+        assert.match(installedSkillModel({ ...loaded, live_reason }).chip, /Background process stopped/);
+        assert.match(renderInstalledSkillCard({ ...loaded, live_reason }), />Loaded · server · background process stopped: daemon</);
+    }
+    assert.match(renderInstalledSkillCard({ ...loaded, live_reason: 'ready', load_error: null }), />Loaded · server</);
+    assert.match(installedSkillModel({ ...loaded, live_reason: 'load_error' }).chip, /Couldn’t start/);
+    assert.match(installedSkillModel({ ...loaded, live_loaded: false, live_reason: 'companion_failed:daemon' }).chip, /Couldn’t start/);
+});
 
 test('only pending-aware skill consumers opt into early HTTP answers', async () => {
     const original = globalThis.fetch;

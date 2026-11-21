@@ -28,6 +28,22 @@ def seed_result(root: Any, task_id: str, document: Dict[str, Any]) -> Dict[str, 
     return patch_document(root, task_id, lambda _current: body)
 
 
+def add_artifact_conflict(root, task_id, record):
+    """Publish two measured claims for the same address, preserving any original records."""
+    from hashlib import sha256
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    other = sha256(b"a different recorded version").hexdigest()
+    current = load_task_result(root, task_id)
+    rows = list(current.get("artifacts") or [])
+    original = next((row for row in rows if row.get("path") == record["path"]), None)
+    if original is None:
+        rows.append(record)
+    rows.append({**(original or record), "sha256": other})
+    write_task_result(root, task_id, current["status"], artifacts=rows)
+    return record["sha256"], other
+
+
 @contextlib.contextmanager
 def as_install(root: Any):
     """Act as the install ROOT names, as its own processes do: a root another process booted

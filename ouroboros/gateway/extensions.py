@@ -28,6 +28,7 @@ from ouroboros.gateway.extension_receipts import extension_process_receipt, exte
 from ouroboros.skill_lifecycle_queue import queue_snapshot
 from ouroboros.skill_review_history import review_history_detail as _skill_review_history_detail_sync
 from ouroboros.skill_loader import (
+    collision_row_id,
     discover_skills,
     find_skill,
     grant_status_for_skill,
@@ -226,6 +227,7 @@ def _skill_mcp_card_facts(skills: list) -> Any:
 
 def _build_extensions_index(drive_root, repo_path):
     """Threaded, request-scope-free body for ``GET /api/extensions``."""
+    from ouroboros.extension_liveness import retained_companions_for_directory
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
 
     live_snapshot = snapshot()
@@ -356,10 +358,22 @@ def _build_extensions_index(drive_root, repo_path):
             # broken/collision rows, whose loader hash never existed.
             "content_hash": str(getattr(s, "content_hash", "") or ""),
             "payload_root": payload_root,
+            # The manifest the loader parsed; "" when it could not (a placeholder row: its permissions and grants are
+            # not that folder's declarations). Independent of the payload hash, which can fail on another file.
+            "manifest_file": str(getattr(s, "manifest_file", "") or ""),
             "installed_at": _path_installed_at(s.skill_dir),
             **({"deployment": requirements[s.name]} if s.name in requirements else {}),
             **({"trust": trust} if trust is not None else {}),
         }
+        runtime = runtime_states.get(s.name, {})
+        # The inventory resolves every directory, even when a broken or colliding manifest has no runtime state.
+        # A collision row never owns that name-keyed state (the live same-name occupant does), so it resolves
+        # only its own directory: one occupant's pending exit never lands on its twin's card.
+        retained = (runtime.get("retained_companions")
+                    if runtime and not getattr(s, "identity_collision", False)
+                    else retained_companions_for_directory(s.name, str(s.skill_dir)))
+        if retained:
+            entry["retained_companions"] = retained
         if bool(getattr(s, "identity_collision", False)):
             stale = True
             gate = skill_review_gate(s.review.status, stale=stale, findings=s.review.findings)
@@ -367,6 +381,7 @@ def _build_extensions_index(drive_root, repo_path):
             # (no-action conflict card) instead of first-wins joining one of
             # several same-name occupants (scope-review reproduction).
             entry["identity_collision"] = True
+            entry["collision_row_id"] = collision_row_id(s.skill_dir)
             entry.update({
                 "review_status": s.review.status,
                 "review_stale": stale,
@@ -395,18 +410,20 @@ def _build_extensions_index(drive_root, repo_path):
             catalog.append(entry)
             continue
 
-        health = read_extension_health(drive_root, s.name) if s.manifest.is_extension() else None
+        # While another folder's publication holds the name, its kept record speaks for that folder, not this row.
+        health = (read_extension_health(drive_root, s.name)
+                  if s.manifest.is_extension() and not runtime.get("foreign_publication") else None)
         entry.update({
             **_review_fields(
                 s, github_token_configured=_gh_token_configured,
             ),
             **listing_install_fields(drive_root, s, source_snapshots),
             "conflict": skill_conflict_status(s, skills),
-            "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
-            "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
-            "live_loaded": runtime_states.get(s.name, {}).get("live_loaded", False),
-            "live_reason": runtime_states.get(s.name, {}).get("reason", "not_extension"),
-            **extension_process_receipt(runtime_states.get(s.name)),
+            "load_error": runtime.get("load_error", s.load_error),
+            "desired_live": runtime.get("desired_live", False),
+            "live_loaded": runtime.get("live_loaded", False),
+            "live_reason": runtime.get("reason", "not_extension"),
+            **extension_process_receipt(runtime),
             "health_regressed": bool((health or {}).get("regressed")),
             "last_known_good": (health or {}).get("last_known_good"),
             "health_observations": (health or {}).get("observations", {}),
@@ -422,8 +439,8 @@ def _build_extensions_index(drive_root, repo_path):
             # above (same function, same drive_root and skill): one settings
             # read per skill, not two.
             "grants": (
-                runtime_states[s.name]["grant_status"]
-                if s.name in runtime_states
+                runtime["grant_status"]
+                if runtime
                 else grant_status_for_skill(drive_root, s)
             ),
             "mcp_servers": mcp_facts(s),
@@ -727,7 +744,9 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
         "review_status": payload.get("review_status"), "review_stale": payload.get("review_stale"),
         "review_gate": payload.get("review_gate"), "executable_review": payload.get("executable_review"),
         "grants": payload.get("grants", {}), "extension_action": payload.get("extension_action"),
-        "extension_reason": payload.get("extension_reason"), **extension_process_receipt(payload),
+        "extension_reason": payload.get("extension_reason"), "load_error": payload.get("load_error"),
+        **({"retained_companions": payload["retained_companions"]} if payload.get("retained_companions") else {}),
+        **extension_process_receipt(payload),
     })
 
 

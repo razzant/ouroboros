@@ -330,14 +330,19 @@ def retained_log_display(service: Dict[str, Any], *, drive_root: Any = None, tas
     then does the tail become ``tail_chars``. Without a readable source (no blob,
     ``full_log_omitted``, capture ``errors``, no task store) the tail stays; an
     unreadable blob keeps its digest marked ``unavailable``, with no path a review
-    closure would have to fetch. Errors, gaps and sizes are never dropped.
+    closure would have to fetch. A blob that cannot be located now keeps the row as
+    it is, address included. Errors, gaps and sizes are never dropped.
     """
+    from ouroboros.evidence_packs import EvidenceUnavailable
+
     finalization = service.get("log_finalization")
     ref = finalization.get("full_log_ref") if isinstance(finalization, dict) else None
     if not (drive_root and task_id and isinstance(ref, dict) and ref.get("sha256")):
         return service
     try:
-        text = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="txt")
+        text = read_blob_ref(pathlib.Path(drive_root), ref, expected_kind="txt", task_id=task_id)
+    except EvidenceUnavailable:
+        return service
     except Exception as exc:
         unavailable = {key: ref[key] for key in ("kind", "sha256", "size", "encoding") if key in ref}
         return {**service, "log_finalization": {**finalization, "full_log_ref": {

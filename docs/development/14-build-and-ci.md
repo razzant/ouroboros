@@ -132,7 +132,7 @@ ARCHITECTURE §8 and `.github/workflows/ci.yml` own the artifact pipeline. Prese
 - Valid tags start builds and configured signing beside tests. Red tests still spend notarization and eSigner signings and record attestations, but publish no Release.
 - Proof/notes carry each job's actual conclusion and the run's FLAKY and ACCEPTED tests; no tag waives a lane.
 - Publication is draft-first with per-tag concurrency. Revalidate the remote annotated tag against the event SHA before drafting and publishing; reruns never overwrite published releases.
-- Astra/RED OS smokes are evidence, not release authority: third-party registry reachability is outside pipeline control.
+- Vendor smokes report separately. Only the RED OS CI image fetch uses its registry CA. Neither gates release.
 - Native Linux requires Jammy x86_64 and authenticated source indices; missing exact sources fail capture. Other builders keep the host backend. CI retains complete/partial sources for 30 days; recipient delivery remains a release obligation.
 - Release AppImage smoke stays headless. [Native GTK qualification](../../packaging/appimage/README.md) is separate.
 - Local-only `OUROBOROS_SKIP_PLAYWRIGHT_INSTALL_DEPS=1` skips host-library installation, not browser bundling; disclose unproven host compatibility.

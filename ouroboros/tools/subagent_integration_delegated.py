@@ -28,7 +28,7 @@ from ouroboros.runtime_mode_policy import (
 )
 from ouroboros.workspace_copies import protected_apply_refusal
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
-from ouroboros.workspace_patch_rules import format_patch_exclusions
+from ouroboros.workspace_patch_rules import declared_capture_paths, format_patch_exclusions
 from ouroboros.tools.patch_staging import (
     index_entries, sparse_absent, stage_applied, staging_receipt, undo_applied,
 )
@@ -718,14 +718,12 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     snapshot_key = entry.snapshot_id or rid
     patch_path = cap_dir / "workspace.patch"
     orphan_note = f"(orphan of terminal task {orphan_of}) " if orphan_of else ""
-    touched = [str(p) for p in (manifest.get("tracked_changed") or [])]
-    touched += [str(p) for p in (manifest.get("untracked_included") or [])]
     from ouroboros.workspace_file_outputs import file_output_changes
     try:
         file_changes = file_output_changes(manifest, cap_dir)
     except Exception as exc:
         return _capture_failed_refusal(rid, str(manifest.get("status") or ""), str(exc))
-    touched = sorted(set(touched) | {row["path"] for row in file_changes})
+    touched = declared_capture_paths(manifest)
 
     named = run_named_evidence(drive, entry)  # (#2070) evidence first: a gap keeps a surviving copy undisposed
     if named.get("status") in ("partial", "capture_failed") and pathlib.Path(str(entry.execution_root)).is_dir():
@@ -770,7 +768,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
         return (
             f"{orphan_note}🚫 Rejected delegated run {rid}'s captured patch ({len(touched)} file(s) not "
             f"applied); its private copy and pins are released. Verdict: {verdict_path or '(unwritten)'}. "
-            f"Reason: {reason or '(none)'}.{format_patch_exclusions(manifest)}{note}"
+            f"Reason: {reason or '(none)'}.{format_patch_exclusions(manifest, file_changes)}{note}"
         )
 
     if capture_status != ARTIFACT_STATUS_READY_WITH_CHANGES:
@@ -928,7 +926,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
                 "was reversed — your tree is back to its pre-apply state and NOTHING is "
                 "left half-applied. The snapshot and the patch are preserved; fix the "
                 f"index problem, then call this tool again. Verdict: {verdict_path or '(unwritten)'}."
-                f"{format_patch_exclusions(manifest)}"
+                f"{format_patch_exclusions(manifest, file_changes, 'reverted')}"
             )
         recorded, _ = _dispose("applied", cleanup=False)
         tail = "" if recorded else (
@@ -942,7 +940,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
             "changes are already in your working tree and a second apply would double "
             "them. Inspect with vcs_read diff, stage what you accept yourself, and note that "
             "the run is recorded as applied. Its captured patch is kept for "
-            f"comparison. Verdict: {verdict_path or '(unwritten)'}.{format_patch_exclusions(manifest)}{tail}"
+            f"comparison. Verdict: {verdict_path or '(unwritten)'}.{format_patch_exclusions(manifest, file_changes, 'incomplete')}{tail}"
         )
 
     if proc.returncode != 0:
@@ -994,7 +992,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     staged, delivered, closing = staging_receipt(len(touched), unindexed)
     return (
         f"{orphan_note}✅ Integrated delegated run {rid}'s patch into {target} ({staged}).{prot_note}{delivered}\n"
-        f"{diffstat}{format_patch_exclusions(manifest)}\n"
+        f"{diffstat}{format_patch_exclusions(manifest, file_changes, 'applied', unindexed)}\n"
         f"Verdict: {verdict_path or '(unwritten)'}. Its private copy and pins are released.\n"
         f"{closing} — review them yourself; you are the sole committer.{note}"
     )

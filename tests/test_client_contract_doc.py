@@ -61,6 +61,14 @@ def test_every_cited_shape_is_a_contract_type():
         assert contract_typed_dict(name), name
 
 
+def test_the_client_work_lead_contract_names_every_published_chooser():
+    from ouroboros.route_choice import LEAD_SOURCES
+
+    [chooser_line] = [line for line in DOC.splitlines() if line.startswith("`basis` names a followed role")]
+    documented_bases = set(re.findall(r"`([a-z_]+)`", chooser_line)) - {"basis"}
+    assert documented_bases == {*LEAD_SOURCES, "fallback"}
+
+
 def test_every_named_websocket_type_is_indexed_and_every_section_reference_exists():
     section = re.search(r"\*\*Message types\.\*\*(?P<body>.*?)\*\*Extension messages\*\*", DOC, re.S).group("body")
     named = set(re.findall(r"`([a-z0-9_]+)`", section)) - {"chat_annotation", "suggested_name", "type", "data",

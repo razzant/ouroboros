@@ -506,6 +506,7 @@ def _rebind_context_fit_plan(
     start_mode: Optional[str] = None,  # the task's mode: a new route may lower it; a return to the primary resumes its held view
     route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
     reasoning_effort: Optional[str] = None,  # the effort of the send this prepares; None: the acting one (``active_effort``)
+    restoring_held: bool = False,
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -577,7 +578,7 @@ def _rebind_context_fit_plan(
     ).reproject_for_route(  # the shown view kept while this route admits it (``WindowRecord.admitted``), else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried, admitted=True,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
-        room_if_narrowed=True, reasoning_effort=shape["reasoning_effort"])
+        room_if_narrowed=True, reasoning_effort=shape["reasoning_effort"], restoring_held=restoring_held)
     mode = rebound.initial_mode
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas, **shape)
     shown = messages[0] if messages else None
@@ -1297,13 +1298,13 @@ def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
         return False
     earlier = frozenset(getattr(ctx.tools._ctx, "_route_left_out_tool_names", ()) or ())
     loaded = frozenset(getattr(ctx.tools._ctx, "_actor_loaded_tool_names", ()) or ())
-    total = len(schemas)
+    before = list(schemas)
     schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded,
                                                      protect=history_tool_names(ctx.messages))
     ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
     rewrite_view(ctx.tools._ctx, ctx.task_id, "route_tool_ceiling", scope="tools")
     _loop()._append_or_merge_user_message(ctx.messages, route_tool_limit_notice(
-        ctx.active_model, limit, total, left_out, selectors=usable_selectors(ctx.tools, schemas)))
+        ctx.active_model, limit, len(before), left_out, selectors=usable_selectors(ctx.tools, schemas), schemas=before))
     return True
 
 

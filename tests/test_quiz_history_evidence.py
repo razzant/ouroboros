@@ -20,6 +20,15 @@ from ouroboros.question_answers import MAILBOX_ROUTE_FACT
 from supervisor import message_bus, queue, state
 
 
+
+def _letter(fact):
+    """The live letter for this history row: its frame told to the asking task ("your text" for a pressed label, where
+    the room's row names the task), then the route fact only the letter states."""
+    from ouroboros.owner_quiz import recorded_answer_frame
+
+    assert fact["text"] == recorded_answer_frame(fact["quiz"], asker="task-quiz")
+    return recorded_answer_frame(fact["quiz"], asker="task-quiz", reader="task-quiz") + "\n" + MAILBOX_ROUTE_FACT
+
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     # Explicitly bind process-global roots before any production helper runs.
@@ -140,7 +149,7 @@ def test_answers_survive_eighteen_quizzes_mailbox_gc_and_rotation(runtime):
                 "answered in their own words without choosing an offered option" in row["text"])
             assert "rejected" not in row["text"]
         else:
-            assert quiz["answered_index"] == 0 and "chose option 1: First" in row["text"]
+            assert quiz["answered_index"] == 0 and "pressed option 1 («First», the text of task task-quiz)" in row["text"]
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz"]) == 18
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz_state"]) == 18
     assert not [frame for frame in runtime.frames if frame.get("type") == "chat"]
@@ -172,13 +181,13 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
                if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(inbound) == 1 and inbound[0]["direction"] == "in"
     assert inbound[0]["chat_id"] == 1 and inbound[0]["source"] == "web"
-    # The owner's row is the owner's words (the ingress strips edge whitespace
-    # of every owner row), never the host frame; the frame is for the model.
-    assert inbound[0]["text"] == "After the fact"
+    # The accepted comment keeps its edge spaces in the room, at broadcast and on replay.
+    comment = fact["quiz"]["comment"]
+    assert inbound[0]["text"] == comment
     assert "[Owner quiz answer]" not in inbound[0]["text"]
     chats = [frame for frame in runtime.frames if frame.get("type") == "chat"]
     assert [frame["role"] for frame in chats] == ["user"]
-    assert chats[0]["content"] == "After the fact"
+    assert chats[0]["content"] == comment
 
     # Reload: history replays the late answer as an ordinary user row carrying
     # the owner's words; no path re-injects the frame into the bubble.
@@ -191,7 +200,7 @@ def test_a_late_answer_keeps_its_evidence_row_and_also_enters_dialogue(runtime, 
     replayed = [row for row in messages
                 if row.get("client_message_id") == "quiz_late_answer:task-quiz:late"]
     assert len(replayed) == 1 and replayed[0]["role"] == "user"
-    assert replayed[0]["text"] == "After the fact"
+    assert replayed[0]["text"] == comment
     assert not [row for row in messages if row.get("role") == "user"
                 and "[Owner quiz answer]" in str(row.get("text") or "")]
 
@@ -259,7 +268,7 @@ def test_competing_answers_preserve_only_the_recorded_winner(runtime, monkeypatc
     assert not [row for row in messages if row.get("system_type") == "quiz_answer"]
     assert len([frame for frame in runtime.frames if frame.get("type") == "quiz_state"]) == 1
     [delivery] = drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
-    assert delivery["text"] == f"{fact['text']}\n{MAILBOX_ROUTE_FACT}"  # only the letter states its route
+    assert delivery["text"] == _letter(fact)  # only the letter states its route
     assert MAILBOX_ROUTE_FACT not in fact["text"]
 
 
@@ -283,7 +292,7 @@ def test_retry_heals_history_write_failure_from_the_winning_block(runtime, monke
     [fact] = _facts(runtime)
     assert fact["quiz"]["answered_index"] == 0 and fact["quiz"]["comment"] == "Accepted"
     [mailbox] = drain_owner_entries(runtime.root, runtime.task["id"], include_acknowledged=True)
-    assert mailbox["text"] == f"{fact['text']}\n{MAILBOX_ROUTE_FACT}" and MAILBOX_ROUTE_FACT not in fact["text"]
+    assert mailbox["text"] == _letter(fact) and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_answer_history_uses_canonical_root_and_project_binding(runtime):
@@ -299,7 +308,7 @@ def test_answer_history_uses_canonical_root_and_project_binding(runtime):
     assert fact["chat_id"] == project["chat_id"]
     assert not dialogue_test.log_rows(child / "logs" / "chat.jsonl")
     [mailbox] = drain_owner_entries(child, runtime.task["id"], include_acknowledged=True)
-    assert mailbox["text"] == f"{fact['text']}\n{MAILBOX_ROUTE_FACT}" and MAILBOX_ROUTE_FACT not in fact["text"]
+    assert mailbox["text"] == _letter(fact) and MAILBOX_ROUTE_FACT not in fact["text"]
 
 
 def test_history_recovers_evicted_answer_without_an_extra_bubble(runtime):

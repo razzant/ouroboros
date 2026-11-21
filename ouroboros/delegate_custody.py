@@ -1004,20 +1004,23 @@ def record_start_requested(drive_root: Any, **payload: Any) -> bool:
 
     The full replay envelope goes to raw CAS before its event reference. Use
     ``write_blob``, never a redacted ``persist_call`` projection: request values
-    must retain the engine's canonical JSON digest on an idempotent retry.
+    must retain the engine's canonical JSON digest on an idempotent retry. Held
+    heads (``held_heads``) ride it by address and revision (``delegate_pending.stored_request``).
     """
-    body = payload.get("request")
+    body, heads = payload.get("request"), payload.pop("held_heads", None)
     if isinstance(body, dict) and body:
-        from ouroboros.delegate_pending import request_shape
+        from ouroboros.delegate_pending import request_shape, stored_request
         from ouroboros.observability import write_blob
 
         try:
-            ref = write_blob(pathlib.Path(drive_root), body, kind="json")
+            stored, held = stored_request(drive_root, body, heads)
+            ref = write_blob(pathlib.Path(drive_root), stored, kind="json")
         except Exception:
             log.warning("delegate custody request body could not be stored", exc_info=True)
             return False
         payload = {key: value for key, value in payload.items() if key != "request"}
-        payload.update(request_ref=ref, request_shape=request_shape(body), prompt_chars=len(str(body.get("prompt") or "")))
+        payload.update(request_ref=ref, request_shape=request_shape(body), prompt_chars=len(str(body.get("prompt") or "")),
+                       **held)
     from ouroboros.owner_pause import admit_delegated_start
 
     return admit_delegated_start(drive_root, payload)

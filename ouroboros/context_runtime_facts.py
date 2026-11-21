@@ -227,14 +227,14 @@ def snapshot_labelled(section: str, captured_at: str) -> str:
 
 def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     """One dated canonical-queue view, frozen with the task's ContextCore."""
-    from ouroboros.config import DATA_DIR, get_max_active_subagents_per_root, get_max_workers
+    from ouroboros.config import DATA_DIR, MAX_ACTIVE_SUBAGENTS_HARD_CAP, get_max_active_subagents_per_root, get_max_workers
     from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
 
     root = pathlib.Path(task.get("budget_drive_root") or DATA_DIR)
     snapshot = _load_queue_snapshot(root)
     fact = {**queue_snapshot_observation(snapshot), "source_root": str(root),
             "max_workers": get_max_workers(),  # the owner's cap on acting tasks as configured here; None: no number
-            "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
+            "max_active_subagents_per_root": get_max_active_subagents_per_root()}  # the owner's number; None: none
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
     from ouroboros.project_admission import project_hold_fact
@@ -303,17 +303,18 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         fact["free_worker_slots"] = None
         fact["free_worker_slots_basis"] = "unknown"
     fact["note"] = (
-        "Last recorded queue counts at ts; freshness and age were measured when this context "
-        "was built and do not refresh during the task. Stale or unknown observations do not "
+        "Last recorded queue counts at ts; freshness and age date from this context's build "
+        "and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
-        "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so "
-        "explicitly, and other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on its own process "
-        "(a warm sleep, an owner wait or an in-slot wait) and is not counted against the owner's cap, which counts "
-        "acting tasks only (recorded_max_workers; null: no number, the machine's memory is the limit). "
+        "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so; "
+        "other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on "
+        "its own process (warm sleep, owner wait or in-slot wait), uncounted by the owner's cap, which counts acting "
+        "tasks only (recorded_max_workers; null: no number, the machine's memory limits; "
+        f"max_active_subagents_per_root likewise, within {MAX_ACTIVE_SUBAGENTS_HARD_CAP} children per root). "
         "free_worker_slots is assignable idle existing capacity, not headroom; booting and reaping overlap for "
         "fresh slots. memory_admission is the supervisor's last reading of the machine (dated read_at): available, "
-        "reserve, the typical worker size, the processes still starting, how many new processes it admitted and why "
-        "a start waits. Scheduling owns admission; these observations reserve no slots."
+        "reserve, typical worker size, processes still starting, new processes admitted and why a start waits. "
+        "Scheduling owns admission; these observations reserve no slots."
     )
     return fact
 
@@ -435,7 +436,7 @@ def disk_view(path: Any, *, observed_at: Optional[str] = None) -> Dict[str, Any]
 def storage_fact(data_root: Any, *, observed_at: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """What the mind knows about its disk, as one compact fact, every turn: free and total space of the
     data folder's disk, read fresh with or without a count, in bytes and the Storage page's decimal GB with
-    when it was read (``disk_view``); what every retirer holds and why
+    when it was read (``disk_view``) and the preceding dated reading (``previous_free``); what every retirer holds and why
     (``holds``: by remover, each class with its count, one example and since when, from the job rows the
     server's five retirer passes and the custody sweep's engine record keep; never an engine call while a
     turn is prepared) and what the last pass of each released; the last finished storage count when there
@@ -473,6 +474,10 @@ def storage_fact(data_root: Any, *, observed_at: Optional[str] = None) -> Option
             "previous_at": count.get("growth_since"),
             "growth_bytes": count.get("growth_bytes"),
         })
+        volume = count.get("volume")
+        if (isinstance(volume, dict) and type(volume.get("free_bytes")) is int and isinstance(volume.get("observed_at"), str)
+                and volume["observed_at"] and volume.get("total_bytes") == fact.get("volume_total_bytes")):
+            fact["previous_free"] = {"free_bytes": volume["free_bytes"], "observed_at": volume["observed_at"]}
         if count.get("growth_flag"):
             fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
     if removers:

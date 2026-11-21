@@ -518,3 +518,30 @@ def test_ledger_projection_restart_and_export_reimport(env, capsys):
         assert restored[key] == final[key]
     assert usage.usage_breakdown(env)["physical_calls"] == before_calls
     assert invoke(env, row, capsys, "--apply")[1]["status"] == "duplicate"
+
+
+def test_a_receipt_whose_evidence_cannot_be_located_now_is_neither_valid_nor_invalid(env, capsys, monkeypatch):
+    """A retained receipt whose evidence bytes cannot be located now (``EvidenceUnavailable``: the packs
+    catalog cannot answer) is no invalid receipt: the explicit command reports that typed failure and changes
+    nothing, and once the evidence is readable the same receipt applies."""
+    from ouroboros import evidence_packs
+
+    row = attempt(env)
+    retained = receipt(env, row, 0.25)
+    real = evidence_packs.blob_bytes
+
+    def unlocatable(root, ref, **kwargs):
+        if ref.get("sha256") == retained["evidence_ref"]["sha256"]:
+            raise evidence_packs.EvidenceUnavailable(
+                "evidence_unavailable: the packs catalog cannot answer now", reason="busy")
+        return real(root, ref, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(evidence_packs, "blob_bytes", unlocatable)
+        with pytest.raises(evidence_packs.EvidenceUnavailable):
+            cost.validate_retained_receipt(env, row["attempt_id"], retained)
+        code, applied = invoke(env, row, capsys, "--apply")
+    assert code == 1 and applied["status"] == "error" and applied["error_type"] == "EvidenceUnavailable", applied
+    assert current(env, row["attempt_id"]) == row
+    code, applied = invoke(env, row, capsys, "--apply")
+    assert code == 0 and applied["status"] == "applied", applied

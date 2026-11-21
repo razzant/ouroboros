@@ -227,7 +227,8 @@ def cached_finalization_children(function):
     @functools.wraps(function)
     def children(drive_root, **kwargs):
         cache = _FINALIZATION_CHILDREN.get()
-        if cache is None:
+        # Placement discovery reads canonical IDs only. Its rows never share a finalization cache.
+        if cache is None or kwargs.get("placement_reads") is not None:
             return function(drive_root, **kwargs)
         parent, root = (str(kwargs.get(key) or "").strip() for key in ("parent_task_id", "root_task_id"))
         scope = "direct" if str(kwargs.get("scope") or "subtree").strip().lower() == "direct" else "subtree"

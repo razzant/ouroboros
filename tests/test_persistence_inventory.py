@@ -642,6 +642,10 @@ class _PathResolver:
                         rel, ok = self.resolve(node, consts, local)
                         if ok and _is_named(rel):
                             found.add(SUBROOT_ALIASES.get(rel, rel))
+                    elif isinstance(node, ast.Call) and _call_name(node) == "store_continuation_source" and len(node.args) >= 3:
+                        name = node.args[2]
+                        if isinstance(name, ast.BinOp) and isinstance(name.op, ast.Add) and isinstance(name.left, ast.Constant):
+                            found.add(f"task_results/artifacts/*/source_handles/context_checkpoints/{name.left.value}*-*.json")
                     elif isinstance(node, ast.Call) and _call_name(node) == "store_actor_source_bytes":
                         rel = self._source_handle_path(node, scope)
                         if rel:
@@ -1003,7 +1007,14 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 473 -> 474: an explicit context inspection retains its ordinary-memory map,
 # ``task_results/artifacts/*/source_handles/context_checkpoints/ordinary-memory-*.json``
 # (``ouroboros/tools/compact_context.py``, ``_ordinary_memory``); its own row beside the other context checkpoints.
-EXPECTED_SCAN_PATHS = 474
+# The owner-wait and exact-pause writers name their checkpoint prefix at the shared serializer.
+# 476 -> 478: the retirer of saved states writes ``source_handles/retired_copies.jsonl`` (its own row) and its
+# scheduling looks at ``source_handles/working`` (``ouroboros/maintenance_retirement.py``).
+# 478 -> 479: the evidence index's damage mark ``observability/packs/.index.sqlite.damaged``, left by a read
+# that met the live index unusable or damaged and removed by its rebuild (``ouroboros/evidence_packs.py``,
+# ``DAMAGED_MARK``); the existing evidence-pack row names it.
+# 479 -> 480: the capture reader also names the existing task artifact workspace.patch.
+EXPECTED_SCAN_PATHS = 480
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1230,6 +1241,13 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # rotates it through ``rotate_jsonl_log_if_needed``, which takes the name as a
     # parameter the scan does not resolve.
     "logs/task_reflections.jsonl",
+    # Live writers the scan cannot root: ``knowledge_versions.claim_record_path`` and ``_held_version_path`` build
+    # ``shelf.parent / "knowledge_note_records" | "knowledge_held_versions"`` from the shelf they are handed. Every
+    # writing call site hands them the global shelf: ``prepare_claim_write`` takes a record path only for
+    # ``address.scope == "global"`` (a project note's claims hold nowhere), ``held_notes._entry`` retains versions
+    # of global notes alone, and ``held_write`` writes only into a folder that retention already made.
+    "memory/knowledge_note_records/*.json",
+    "memory/knowledge_held_versions/*",
 })
 
 
@@ -1567,3 +1585,21 @@ def test_an_enclosing_binding_is_unknown_never_the_module_literal(tmp_path):
         "    return inner, deeper, store\n",
         encoding='utf-8')
     assert scan_data_paths(tmp_path) == frozenset({'state/*', 'logs/*'})
+
+
+def test_wait_and_pause_source_prefixes_have_lifetime_rows():
+    for name in ("owner_wait", "budget_pause"):
+        tree = ast.parse((REPO / "ouroboros" / (name + ".py")).read_text(encoding="utf-8"))
+        prefixes = [node.args[2].left.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "store_continuation_source"]
+        assert prefixes
+        for prefix in prefixes:
+            assert any("/context_checkpoints/" + prefix in line.split("|")[1]
+                       and "[disposable: ouroboros.saved_state_retirement.prune_worked_copies]" in line
+                       for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("|"))
+
+    for term in ("park_task", "cause", "auto_resume", "resume_policy", "authority_notice_registered", "selection_door"):
+        assert f"`{term}`" in next(line for line in DOC.read_text(encoding="utf-8").splitlines() if line.startswith("| task documents:"))
+    for line in DOC.read_text(encoding="utf-8").splitlines():
+        if "/context_checkpoints/" in line and ("owner-wait-" in line or "budget-pause-" in line):
+            assert "prune_worked_copies" in line, "a saved state's row names the step that retires it"

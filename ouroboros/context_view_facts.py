@@ -63,7 +63,8 @@ def memory_facts(plan, mode, messages=()):
     knowledge and runtime facts, connections, assignment, reply reserve, work room, tool schemas) and how that build settled.
     A cold restore builds a new capture; the task's historical ``plan.start`` is separate and may be unknown.
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
-    most of them) and the rooms' lines; what this view shows only by address; marks and waiting classes
+    most of them) and the rooms' lines; what this view shows only by address and, beside it, the held note heads
+    that stand whole where the window took that from memory (``held_heads_fact``); marks and waiting classes
     with their count, oldest date, list reader and closure act.
     Counted from the captured snapshot and its receipt; measures only, no advice and no
     threshold. Without a Max room fact (the owner's Low or Nano, an unknown window) it names the memory alone."""
@@ -82,9 +83,26 @@ def memory_facts(plan, mode, messages=()):
             "route": f"; {floor.MAPS}, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here",
         }[room["cause"]]
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
-    line += (f"; shown only by address: {shown}" if shown else "") + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting)
+    line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
+             + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
     return "" if any(message.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME
                      and f" | {line} | " in f" | {message.get('content') or ''} | " for message in messages) else line
+
+
+def held_heads_fact(plan, receipt):
+    """``; held note heads: N tokens stand whole``, beside what memory yielded to the window: held heads yield to the
+    window last (``memory_floor._host_steps``), so at such a start their room came out of memory's farthest forms. ""
+    when no held head stands whole in this view or the window took nothing from memory: what only an owner's mode
+    target took (``by_budget``) is not the window's."""
+    from ouroboros.held_notes import HeldNoteSection
+
+    fact = receipt.get("floor") or {}
+    if sum((fact.get("steps") or {}).values()) <= int(fact.get("by_budget") or 0):
+        return ""
+    stepped = {row["section_id"] for row in receipt.get("host_sections_addressed", ()) if row.get("held_note_form")}
+    tokens = sum(floor.view_tokens(part.full_text) for part in plan.core.dynamic_sections
+                 if isinstance(part, HeldNoteSection) and part.section_id not in stepped)
+    return f"; held note heads: {tokens:,} tokens stand whole" if tokens else ""
 
 
 def low_start_line(plan, mode, task_id):

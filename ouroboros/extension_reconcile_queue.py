@@ -357,7 +357,8 @@ def process_extension_reconcile_requests(
     runs — then removes every marker of the group (``requests`` counts them). It used to run
     one reconcile per marker, so a backlog only grew (2,252 markers, +7/min on 01.11, every one
     re-read each pass); the same grouping drains such a legacy backlog in one pass. A deferred
-    skill (``live_call_active``) and a failing one keep only their newest marker, a failure
+    skill (``live_call_active``) and a failing one (a raise, or the load error a companion recovery
+    answers with after disposing the publication) keep only their newest marker, a failure
     counted on it from the group's highest attempt toward ``MAX_ATTEMPTS`` (``_mark_failed``
     keeps the terminal fact durable), so neither multiplies markers while it waits.
     """
@@ -384,30 +385,36 @@ def process_extension_reconcile_requests(
                 processed.append({"skill": skill, "action": state["action"], "reason": state["reason"],
                                   "marker_removed": False, "requests": len(items)})
                 continue
-            companion_state = ensure_companions_running(
-                skill,
-                pathlib.Path(drive_root),
-                settings_reader,
-                repo_path=repo_path,
-            )
-            _remove_markers(items)
-            processed.append({
-                "skill": skill,
-                "action": state.get("action"),
-                "reason": state.get("reason"),
-                "marker_removed": True,
-                "companions": companion_state,
-                "requests": len(items),
-            })
+            if (state.get("companions") or {}).get("action") != "recovery_failed":
+                companion_state = ensure_companions_running(
+                    skill,
+                    pathlib.Path(drive_root),
+                    settings_reader,
+                    repo_path=repo_path,
+                )
+                _remove_markers(items)
+                processed.append({
+                    "skill": skill,
+                    "action": state.get("action"),
+                    "reason": state.get("reason"),
+                    "marker_removed": True,
+                    "companions": companion_state,
+                    "requests": len(items),
+                })
+                continue
+            # A companion recovery that disposed the publication answers with its load error: a failed attempt, as
+            # when that error was raised here.
+            error = str(state.get("load_error") or "companion recovery failed")
         except Exception as exc:
             log.warning("server extension reconcile request failed for %s", skill, exc_info=True)
-            _remove_markers(older)
-            _mark_failed(
-                pathlib.Path(str(newest.get("_path") or "")),
-                {**newest, "attempts": max(int(row.get("attempts") or 0) for row in items)},
-                f"{type(exc).__name__}: {exc}",
-                drive_root=pathlib.Path(drive_root),
-            )
+            error = f"{type(exc).__name__}: {exc}"
+        _remove_markers(older)
+        _mark_failed(
+            pathlib.Path(str(newest.get("_path") or "")),
+            {**newest, "attempts": max(int(row.get("attempts") or 0) for row in items)},
+            error,
+            drive_root=pathlib.Path(drive_root),
+        )
     return processed
 
 

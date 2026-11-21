@@ -235,6 +235,15 @@ def recorded_execution_drive(row: Dict[str, Any], drive: pathlib.Path, spellings
     return any(physical_path(spellings, recorded) == target for recorded in child_drive_candidates(row))
 
 
+def child_layout_owner(parts: tuple[str, ...]) -> str:
+    """Directory owner of a host child layout, compared lexically even after retirement."""
+    if len(parts) == 2 and parts[:1] == TASK_DRIVES_DIR.parts and parts[1] != "..":
+        return parts[1]
+    if len(parts) == 4 and parts[:2] == HEADLESS_TASKS_DIR.parts and parts[3] == "data" and parts[2] != "..":
+        return parts[2]
+    return ""
+
+
 def own_child_drives(canonical_root: Any, task_id: str, *, store_row: Optional[Dict[str, Any]] = None,
                      strict: bool = False) -> List[pathlib.Path]:
     """TASK's physical child layouts, never created; no row widens the layouts.
@@ -952,12 +961,18 @@ def _verify_readback(row: Dict[str, Any], source: pathlib.Path, rows: List[Dict[
         raise _Retained("canonical_listing_references_child")
 
 
-def _copied_back(drive: pathlib.Path, row: Dict[str, Any]) -> bool:
-    """Whether copy-back published this drive's child result onto ROW (its promotion mark)."""
+def copied_child_drive(row: Dict[str, Any]) -> Optional[pathlib.Path]:
+    """The drive named by copy-back's promotion mark, without accessing its old location."""
     promotion, source = row.get("child_ref_promotion"), str(row.get("headless_child_drive_root") or "")
-    return bool(isinstance(promotion, dict) and promotion.get("schema_version") == 1
-                and promotion.get("status") in {"complete", "incomplete"}
-                and source and pathlib.Path(source).resolve(strict=False) == drive)
+    if (source and isinstance(promotion, dict) and type(promotion.get("schema_version")) is int
+            and promotion["schema_version"] == 1 and promotion.get("status") in {"complete", "incomplete"}):
+        return pathlib.Path(source)
+    return None
+
+
+def _copied_back(drive: pathlib.Path, row: Dict[str, Any]) -> bool:
+    source = copied_child_drive(row)
+    return source is not None and source.resolve(strict=False) == drive
 
 
 def _pending_refs_under(row: Dict[str, Any], drive: pathlib.Path) -> bool:

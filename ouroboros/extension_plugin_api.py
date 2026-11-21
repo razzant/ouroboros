@@ -1125,6 +1125,7 @@ class PluginAPIImpl:
                     self._state_dir.mkdir(parents=True, exist_ok=True)
                     token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
                     for spawn in staged.companion_spawns:
+                        spawn.descriptor.skill_dir = bundle.skill_dir
                         spawn.descriptor.env.clear()
                         spawn.descriptor.env.update(companion_spawn_env(
                             spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
@@ -1158,7 +1159,8 @@ class PluginAPIImpl:
         # same dispose+unload path as a mid-attach failure.
         for spawn in companion_spawns:
             try:
-                companion_supervisor.start(spawn.descriptor)
+                if not companion_supervisor.start(spawn.descriptor):  # workers did not stage a spawn
+                    raise ExtensionRegistrationError(f"companion {spawn.descriptor.name!r} start was declined")
             except Exception:
                 log.warning("extension %s companion %s failed to start; disposed through "
                             "the standard unload path", self._skill, spawn.descriptor.name, exc_info=discloses_failure(self._skill))

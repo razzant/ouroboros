@@ -295,10 +295,8 @@ def serve_directory_archive(drive_root: Any, task_id: str, name: str, directory:
         spool.close()
         raise
     size = spool.tell()
-    quoted = quote(name)
-    disposition = f"attachment; filename*=utf-8''{quoted}" if quoted != name else f'attachment; filename="{name}"'
     return StreamingResponse(_drain(spool), media_type="application/zip",
-                             headers={"Content-Length": str(size), "Content-Disposition": disposition})
+                             headers={"Content-Length": str(size), "Content-Disposition": _disposition("attachment", name)})
 
 
 def serve_wrap_up_document(drive_root: Any, task_id: str, name: str, request_id: str, *,
@@ -345,6 +343,12 @@ def chat_media_identity(name: str) -> Dict[str, Any]:
     return {"sha256": match.group(1)}
 
 
+def _disposition(kind: str, name: str) -> str:
+    """``Content-Disposition`` naming a stored file: it marks the answer as that file's bytes (never re-encoded)."""
+    quoted = quote(name)
+    return f"{kind}; filename*=utf-8''{quoted}" if quoted != name else f'{kind}; filename="{name}"'
+
+
 def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[str, Any], task_id: str,
                       name: str, source: str) -> Response:
     """``?source=<store-relative path>``: one source a task's own records name.
@@ -374,7 +378,7 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
                                task_id=task_id)
     try:
         return Response(artifact_store.read_task_result_source_bytes(drive_root, result, name, source),
-                        media_type="application/json")
+                        media_type="application/json", headers={"Content-Disposition": _disposition("inline", name)})
     except (OSError, ValueError, RuntimeError):
         pass
     record = _ACCEPTANCE_SOURCE_RE.fullmatch(str(source or ""))
@@ -383,7 +387,7 @@ def serve_task_source(drive_root: Any, stores: List[pathlib.Path], result: Dict[
             from ouroboros.task_finalization import host_acceptance_source
 
             return Response(host_acceptance_source(drive_root, task_id, record.group(2), anchor=drive_root)[1],
-                            media_type="application/json")
+                            media_type="application/json", headers={"Content-Disposition": _disposition("inline", name)})
     except (OSError, ValueError, RuntimeError):
         pass
     return json_error("task source is unavailable or does not match its recorded identity", 404)
@@ -450,7 +454,8 @@ class DescriptorResponse(Response):
 
 
 def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: str,
-                    expected: Optional[Dict[str, Any]], *, task_id: str, mutable: bool = False) -> Response:
+                    expected: Optional[Dict[str, Any]], *, task_id: str, mutable: bool = False,
+                    head_only: bool = False) -> Response:
     """The ONE file the handler attributed to ``relpath`` of ``store``, read through the confined
     descent: the descriptor response (``x-ouroboros-artifact-identity`` verified/unmeasured), else
     409 ``artifact_identity_changed`` (a ``mutable`` row's bytes no longer match the digest it
@@ -467,16 +472,21 @@ def serve_task_file(drive_root: Any, store: pathlib.Path, relpath: str, name: st
         with _Parents() as parents:
             handle, observed = _open_member(parents, route)
         if expected is not None:
-            with handle:  # closed whatever the spool allocation or verification does
-                spool = tempfile.TemporaryFile()
-                try:
-                    measured = artifact_store.stream_artifact_file(handle, spool, expected=expected)
-                    if measured["size"] != observed.st_size:
-                        raise OSError("task file changed between its open and its verification")
-                except BaseException:
+            spool = None
+            try:
+                if not head_only:
+                    spool = tempfile.TemporaryFile()
+                measured = artifact_store.stream_artifact_file(handle, spool, expected=expected)
+                if measured["size"] != observed.st_size:
+                    raise OSError("task file changed between its open and its verification")
+            except BaseException:
+                handle.close()
+                if spool is not None:
                     spool.close()
-                    raise
-            handle = spool
+                raise
+            if spool is not None:
+                handle.close()
+                handle = spool
     except OSError as exc:
         if mutable and exc.errno is None and expected and "verification" in str(exc):
             return json_error("artifact bytes no longer match the identity the task result records for this file",

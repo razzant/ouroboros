@@ -475,8 +475,7 @@ def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monke
     assert agent.task["text"].startswith(LATE_HEAD.format("task-1") + "\n[Owner quiz answer] quiz q1")
     assert LATE_HEAD.format("task-1") in content
     assert f"answered {block['answered_at']}" in content
-    assert "The owner chose option 2: postgres" in content
-    assert "Owner comment (verbatim): prod parity" in content
+    assert "The owner pressed option 2 («postgres», the text of task task-1) and wrote: prod parity" in content
 
     plain = _Agent()
     carried_turn(monkeypatch, tmp_path, plain, 1, "prod parity", None, task_metadata={"client_message_id": "m-2"})

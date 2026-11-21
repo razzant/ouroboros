@@ -7534,7 +7534,6 @@ html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
     padding: 0;
     border: 0;
     background: none;
-    cursor: pointer;
     text-align: left;
     color: var(--text-primary);
     font: inherit;
@@ -7543,6 +7542,7 @@ html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
     line-height: var(--line-title);
     overflow-wrap: anywhere;
 }
+button.skills-card-name { cursor: pointer; }
 .skills-card-name:focus-visible,
 .skills-read-more:focus-visible,
 .skills-mark:focus-visible,
@@ -10178,6 +10178,8 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+/* A press's failure reason on the program line, in the chooser footer and on a setup family row alike (as the Accounts notice). */
+.harness-model-program [data-tone="warn"] { color: var(--status-warn-fg); }
 .harness-model-latest { white-space: nowrap; }
 .ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }

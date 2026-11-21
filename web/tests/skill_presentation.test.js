@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    catalogWhoHtml, chipHtml, factsText, officialMarkHtml, officialPromise, permissionWords, popularityText, relativeAge,
+    catalogWhoHtml, chipHtml, declaredPermissionWords, factsText, officialMarkHtml, officialPromise, permissionWords, popularityText, relativeAge,
     routeExternalLink, sourceAboutText, statusHtml, trayHtml, trustSentence, trustValueText, versionText,
 } from '../modules/skill_presentation.js';
 
@@ -79,6 +79,17 @@ test('the Official promise is bound to the source that set it and follows its tr
 test('permissions read as plain words, once each', () => {
     assert.deepEqual(permissionWords(['net', 'tool', 'subscribe_event:chat.outbound', 'subscribe_event:chat.typing', 'unknown']),
         ['Internet', 'New tools for Ouroboros', 'Sees app events']);
+});
+
+test('declared permissions keep their id when no friendlier word exists, and invent none', () => {
+    assert.deepEqual(declaredPermissionWords(['page_module', 'net', 'subscribe_event:chat.typing', 'net', ' page_module ', 'odd:id']),
+        ['page_module', 'Internet', 'Sees app events', 'odd:id']);
+    // Only a non-empty string is an id: nothing is made of a malformed entry, and a prototype key is an id, not a word.
+    assert.deepEqual(declaredPermissionWords(['', ' ', null, undefined, 7, {}, ['net'], 'constructor']), ['constructor']);
+    assert.deepEqual(declaredPermissionWords(undefined), []);
+    assert.deepEqual(declaredPermissionWords('net'), []);
+    // Browse's and the grant dialogs' words are unchanged: an id with no word is left out there.
+    assert.deepEqual(permissionWords(['page_module', 'net']), ['Internet']);
 });
 
 test('status sentences and trays are markup the page styles, with escaped words', () => {

@@ -41,6 +41,8 @@ from ouroboros.configured_subagents import (
     serialize_configured_subagents,
 )
 from ouroboros.provider_models import (
+    OPENAI_DIRECT_DEFAULTS,
+    OPENAI_RESPONSES_DIRECT_DEFAULTS,
     image_input_from_modalities,
     model_has_credentials_in_settings,
     parse_model_route,
@@ -780,6 +782,21 @@ def compile_available_subagents(
     return make_configured_subagents(actors), tuple(diagnostics)
 
 
+def _light_proposal(model_catalog: Sequence[Mapping[str, Any]], default: Mapping[str, Any]) -> str:
+    """Light as the default row's source lists OpenAI's direct-API Light (Responses, then Chat), '' if it does not.
+
+    A source that names one of those ids serves OpenAI's models (today Codex); one marked unavailable for its
+    account is passed over, and the proposal is that row's own value (owner decision 2026-11-20)."""
+    rows = [row for row in model_catalog if row.get("value") and row.get("availability") != "unavailable"
+            and row.get("source_id") == default.get("source_id")]
+    for table in (OPENAI_RESPONSES_DIRECT_DEFAULTS, OPENAI_DIRECT_DEFAULTS):
+        wanted = parse_model_route(table["light"]).model
+        found = next((str(row["value"]) for row in rows if str(row.get("id") or "") == wanted), "")
+        if found:
+            return found
+    return ""
+
+
 def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
                            settings: Mapping[str, Any]) -> Dict[str, Any]:
     """Suggest a complete zero-key setup from exact raw-route catalog evidence.
@@ -788,6 +805,7 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
     the proposal, not an invented model family or a CLI alias table. Vision is
     a row whose input modalities state image input, else blank: Auto, which
     still tries an unknown route when an image needs one (``vision_routing``).
+    Light is ``_light_proposal`` where the source lists it, else the default.
     Safety stays blank to inherit Light's full binding unless explicitly pinned.
     """
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
@@ -802,6 +820,8 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
         return {}
     vision = next((str(row["value"]) for row in model_catalog if row.get("value")
                    and image_input_from_modalities(row.get("input_modalities")) is True), "")
+    default_value = str(default["value"])
+    light = _light_proposal(model_catalog, default) or default_value
     proposed = {}
     for role, key in MODEL_ROLE_SETTINGS.items():
         if role == "websearch":
@@ -811,7 +831,7 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
         current = str(settings.get(key) or "")
         if current and current != str(SETTINGS_DEFAULTS.get(key) or ""):
             continue
-        proposed[key] = {"fallback": "", "vision": vision, "safety": ""}.get(role, str(default["value"]))
+        proposed[key] = {"fallback": "", "vision": vision, "safety": "", "light": light}.get(role, default_value)
     return proposed
 
 

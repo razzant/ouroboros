@@ -18,7 +18,8 @@ from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TO
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
-from tests._store_shared import read_result, seed_result
+from tests._store_shared import seed_result
+from tests._workspace_git import capture_manifest_fields, publish_capture
 
 
 def _git(repo, *args, check=True, text=True):
@@ -468,49 +469,14 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     return art
 
 
-def _make_child_delete_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: str, rel: str, parent_task_id: str = "parent1", surface: str = ""):
-    """Produce a real workspace.patch that deletes ``rel``."""
-    from ouroboros.artifacts import task_artifact_dir_path
-    from hashlib import sha256
-
-    (target_repo / rel).unlink()
-    patch = _git(target_repo, "diff", "--binary", "HEAD", "--", text=False).stdout
-    _git(target_repo, "checkout", "--", rel)
-    art = task_artifact_dir_path(drive, child_id, create=True)
-    patch_bytes = patch
-    (art / "workspace.patch").write_bytes(patch_bytes)
-    digest = sha256(patch_bytes).hexdigest()
-    manifest = {
-        "schema_version": 1,
-        "status": "ready_with_changes",
-        "patch_name": "workspace.patch",
-        "sha256": digest,
-        "tracked_changed": [rel],
-        "untracked_included": [],
-        "diffstat": f"{rel} | 1 -",
-    }
-    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
-    result = {
-        "_schema_version": 1,
-        "id": child_id,
-        "task_id": child_id,
-        "parent_task_id": parent_task_id,
-        "root_task_id": parent_task_id,
-        "delegation_role": "subagent",
-        "status": "done",
-    }
-    if surface:
-        result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
-    seed_result(drive, child_id, result)
-    return art
-
-
-def _record_child_workspace_root(drive: pathlib.Path, child_id: str, workspace: pathlib.Path) -> None:
-
-    child_result = read_result(drive, child_id)
-    child_result["workspace_root"] = str(workspace)
-    child_result.setdefault("task_constraint", {})["write_root"] = str(workspace)
-    seed_result(drive, child_id, child_result)
+def _publish_external_child(drive, child_id, workspace, base):
+    _, manifest = publish_capture(drive, {
+        "id": child_id, "parent_task_id": "parent-ext", "root_task_id": "parent-ext", "delegation_role": "subagent",
+        "workspace_root": str(workspace), "workspace_mode": "external",
+        "task_constraint": {"mode": "acting_subagent", "surface": "external_workspace",
+                            "write_root": str(workspace), "base_sha": base},
+    })
+    assert manifest["status"] == "ready_with_changes", manifest
 
 
 def _integrate_ctx(target_repo, drive, **constraint_kw):
@@ -751,13 +717,12 @@ def test_integrate_external_workspace_verifies_shared_files_without_reapplying(t
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext1", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     # Production external_workspace children write into the same directory the parent
     # can inspect; integration should verify, not apply the patch a second time.
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext1", workspace)
+    _publish_external_child(drive, "ext1", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -779,11 +744,11 @@ def test_integrate_external_workspace_rejects_existing_but_mismatched_files(tmp_
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext-drift", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _publish_external_child(drive, "ext-drift", workspace, base)
     (workspace / "a.txt").write_text("hi\ndrifted\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-drift", workspace)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -806,11 +771,10 @@ def test_integrate_external_workspace_verifies_without_parent_active_workspace(t
     system_repo = tmp_path / "system"
     _init_repo(system_repo, {"README.md": "system\n"})
     workspace = tmp_path / "project"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "state"; drive.mkdir()
-    _make_child_patch(workspace, drive, "ext-project", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-project", workspace)
+    _publish_external_child(drive, "ext-project", workspace, base)
     ctx = ToolContext(repo_dir=system_repo, drive_root=drive, task_id="parent-ext")
 
     monkeypatch.setattr("ouroboros.tool_access._user_files_root", lambda: tmp_path)
@@ -831,11 +795,10 @@ def test_integrate_external_workspace_verifies_assigned_child_root_outside_paren
     parent_workspace = tmp_path / "parent-project"
     _init_repo(parent_workspace, {"a.txt": "parent\n"})
     child_workspace = tmp_path / "other-project"
-    _init_repo(child_workspace, {"a.txt": "hi\n"})
+    base = _init_repo(child_workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_patch(child_workspace, drive, "ext-other", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
     (child_workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-other", child_workspace)
+    _publish_external_child(drive, "ext-other", child_workspace, base)
     ctx = ToolContext(
         repo_dir=system_repo,
         drive_root=drive,
@@ -857,11 +820,10 @@ def test_integrate_external_workspace_verifies_deletions(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"obsolete.txt": "remove me\n"})
+    base = _init_repo(workspace, {"obsolete.txt": "remove me\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    _make_child_delete_patch(workspace, drive, "ext-delete", "obsolete.txt", parent_task_id="parent-ext", surface="external_workspace")
     (workspace / "obsolete.txt").unlink()
-    _record_child_workspace_root(drive, "ext-delete", workspace)
+    _publish_external_child(drive, "ext-delete", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,
@@ -878,19 +840,15 @@ def test_integrate_external_workspace_verifies_deletions(tmp_path):
     assert verdict["files"] == ["obsolete.txt"]
 
 
-def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path):
+def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path, monkeypatch):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
-    _init_repo(workspace, {"a.txt": "hi\n"})
+    base = _init_repo(workspace, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
-    art = _make_child_patch(workspace, drive, "ext-lie", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
-    manifest = json.loads((art / "workspace_patch.json").read_text(encoding="utf-8"))
-    manifest["tracked_changed"] = []
-    manifest["untracked_included"] = []
-    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+    capture_manifest_fields(monkeypatch, tracked_changed=[], untracked_included=[])
     (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
-    _record_child_workspace_root(drive, "ext-lie", workspace)
+    _publish_external_child(drive, "ext-lie", workspace, base)
     ctx = ToolContext(
         repo_dir=tmp_path / "live",
         drive_root=drive,

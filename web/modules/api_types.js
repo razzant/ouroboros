@@ -163,9 +163,8 @@
  * @property {boolean=} automatic The read's own unsaved catalog, following Main and access.
  */
 /**
- * The wizard payload plus two DECLARATIONS about the onboarding run. Settings
- * keys ride through unchanged (open shape); neither flag is authority — the
- * server re-proves fresh-install status and re-reads the live account state.
+ * The wizard payload plus two DECLARATIONS about the onboarding run. Settings keys ride through unchanged (open
+ * shape); neither flag is authority — the server re-proves fresh-install status and re-reads the live account state.
  * @typedef {Object} OnboardingCompleteRequest
  * @property {boolean=} subscriptionsConnected
  * @property {boolean=} skipSubscriptionPresets
@@ -174,6 +173,7 @@
  * @property {string[]=} starter_skills  // catalog ids installed once after completion; absent: the default list
  * @property {Object<string, string>=} skill_source_trust  // {hub row id: trusted|review}; marks them confirmed
  * @property {string=} attempt_id  // client-made per save; GET /api/onboarding/complete?attempt= reads it back
+ * @property {boolean=} consciousness  // setup's Consciousness switch: true turns it on; false and absent change nothing
  */
 /**
  * POST /api/onboarding/subagents/preview accepts the same open provider/local draft and subscription
@@ -300,7 +300,7 @@
  * @property {string=} subagent_role
  * @property {boolean=} accepted
  * @property {number=} active_subagent_count
- * @property {number=} max_active_subagents
+ * @property {number=} max_active_subagents  // the owner's number per root; absent: no number
  * @property {boolean=} queued_behind_active_cap
  * @property {string[]=} required_capabilities
  * @property {string=} write_surface
@@ -1057,13 +1057,14 @@
  * @property {string[]=} granted_permissions
  * @property {string=} turn_on_when_ready
  * @property {string=} setup_error
- * @property {string=} extension_action
- * @property {string=} extension_reason
- * @property {string=} load_error
+ * @property {?string=} extension_action  // null, as live_loaded, when no reconcile answered (an Enable refused first)
+ * @property {?string=} extension_reason
+ * @property {?string=} load_error
  * @property {Object=} grants
  * @property {string=} process
  * @property {string=} server_reconcile
- * @property {boolean=} live_loaded
+ * @property {?boolean=} live_loaded
+ * @property {Object<string,string>=} retained_companions  // as SkillToggleResponse
  * @property {string=} error
  */
 
@@ -1473,7 +1474,7 @@
  * @property {boolean} keep  // the fact as it now stands
  * @property {('kept'|'released'|'partly_retired'|'already_retired'|'release_unconfirmed'|'inflight'|'refused')} status
  * @property {string} reason
- * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `review_thread:<id>` no recorded release let go
+ * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `saved_states:<folder>` while it holds a saved state, `review_thread:<id>` no recorded release let go
  * @property {string[]} retired  // gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
  * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
  * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
@@ -1577,7 +1578,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.11.1-alpha.0';
+export const GATEWAY_CONTRACT_VERSION = '7.12.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

@@ -599,8 +599,9 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 
-def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, mode="max"):
-    """Keep the mind's account of selected owner commitments with their exact captured source."""
+def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, mode="max", written_at=None):
+    """Keep the mind's account of selected owner commitments with their exact captured source, dated like the call's
+    other notes by ``written_at`` (when the mind wrote it; else now, as for a request queued before it carried one)."""
     from ouroboros import context_compaction as cc
     from ouroboros.context_budget import _Selection
 
@@ -623,7 +624,8 @@ def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, m
     source = cc._persist_reclaim_checkpoint(rows, request, selection, drive_root=drive_root, task_id=task_id)
     if not source:
         raise ValueError("The exact owner-word source could not be retained")
-    return cc._capsule_message(unit, note, [cc._part(unit.unit_id, unit.source_text)], source, request)[0]
+    return cc._capsule_message(unit, note, [cc._part(unit.unit_id, unit.source_text)], source, request,
+                               written_at=written_at)[0]
 
 
 def view_inventory(plan, mode: str, *, memory_facts=None) -> List[Dict[str, Any]]:
@@ -739,7 +741,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          measure_text: Optional[Callable[[str, str], int]] = None,
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
-                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
+                         shortest: bool = False, level: Optional[mv.FloorLevel] = None,
+                         report_nano_miss: bool = False) -> ViewFit:
     """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -770,6 +773,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     # never takes this room, and a Max start keeping whole books never goes below it either; only the window's own
     # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
+    reports_miss = binds or (report_nano_miss and kept is None and mode == owner_mode == "nano"
+                             and target is not None and (window is None or target < window))
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
                     if mode == "max" and (kept is None or start_work) else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
@@ -781,9 +786,10 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     def receipt(level):
         note = floor_note(level, window_tokens=named, mode=mode, target_tokens=target, lowered_from=lowered_from,
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
-        if binds and (need := total(level, note)) > target:
-            note += (f"\nLow's target ({target:,} tokens) is not met at this start: this request needs "
-                     f"about {need:,} with my memory in its shortest tellings, "
+        if reports_miss and (need := total(level, note)) > target:
+            telling = " with my memory in its shortest tellings" if binds else ""
+            note += (f"\n{mode.capitalize()}'s target ({target:,} tokens) is not met at this start: this request needs "
+                     f"about {need:,}{telling}, "
                      f"{math.ceil(non_memory_tokens * ratio) + reserve:,} with no memory at all.")
         if room_bound is not None and size(level) > room_bound:
             gone = dict(level.addressed)
@@ -810,7 +816,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                        target_tokens=target, lowered_from=lowered_from)
     bound, note = allowances["margin"], receipt(level)
     facts["floor"]["ordinary_unfit"] = bound is not None and measure(ordinary_level(snapshot)) > bound
-    facts["floor"]["target_missed"] = binds and total(level, note) > target
+    facts["floor"]["target_missed"] = reports_miss and total(level, note) > target
     if facts["floor"]["target_missed"]:  # where the mode is chosen it says what the rest of the request took (3A)
         facts["floor"]["no_memory_tokens"] = math.ceil(non_memory_tokens * ratio) + reserve
     return ViewFit(snapshot, level, note, facts)
@@ -851,8 +857,52 @@ WINDOW_ONLY = ("world",)
 TELLING_SPARED = ("return_facts", "return_facts_words")
 
 
+def _held_note_steps(sections, receipts, fits, *, form="summary"):
+    """The last host forms to yield: the captured heads in address order, one at a time until ``fits``, a head only a
+    link holds (``carried_by``) before every claimed one.
+
+    In a map frame each steps to its authored summary beside its exact reader, once the physical window has left no
+    index or registry it could still outline and the request with memory at its shortest forms still exceeds the
+    heads' bound (``_host_steps``); there a claimed head without a summary stays whole, while a carried one whose
+    summary form saves no room (or that has none) keeps only its exact reader where that is shorter, so it still
+    yields first; a head shorter than its reader form stays whole. At the emergency floor only the exact reader
+    remains. A head whose reader the actor cannot open has no shorter form at either step: it stays whole.
+    """
+    from ouroboros.held_notes import HeldNoteSection
+
+    addressed = section_views(sections, receipts)
+    positions = {row["section_id"]: index for index, row in enumerate(receipts)}
+    entries = [part for part in sections if isinstance(part, HeldNoteSection)]
+    # At the emergency floor a resident summary already kept its meaning: spend the label's small saving last.
+    entries.sort(key=lambda part: (form == "reader" and part.section_id in positions
+                                   and part.summary_is_resident(addressed), not part.carried_by))
+    saved = 0
+    for part in entries:
+        position = positions.get(part.section_id)
+        if position is not None and (form != "reader" or receipts[position].get("held_note_form") != "summary"):
+            continue
+        row = part.window_receipt(form)
+        short = part.view_for_receipt(row, addressed)
+        if form == "summary" and part.carried_by and not part.summary_saves(addressed):  # its reader yields first
+            row = part.window_receipt("reader")
+            short = part.view_for_receipt(row, addressed)
+        current = addressed.get(part.section_id, part.full_text)
+        if short is None or (delta := view_tokens(current) - view_tokens(short)) <= 0:
+            continue
+        if fits(addressed):
+            break
+        addressed[part.section_id] = short
+        if position is None:
+            receipts.append({**row, "tokens_saved": delta})
+        else:
+            receipts[position] = {**row, "tokens_saved": receipts[position]["tokens_saved"] + delta}
+        saved += delta
+    return saved
+
+
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
-                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None):
+                shortest=None, budget_mode=None, slack=0, bare=None, retain=None, window_bound=None, told=None,
+                held_least=None, held_bound=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -883,18 +933,38 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     ``window_bound``, the window's own start bound: neither an owner's target nor the start's own room shortens it.
     A ``TELLING_SPARED`` section steps only while the window cannot hold the request with memory at my shortest telling
     and the books as the frame holds them (``told``: ``max_room_lost``'s own test), so before the books or a telling.
+    Held heads yield last (``_held_note_steps``). A map frame that holds them passes ``held_least(addressed,
+    physical)``, the request beside these host forms with memory at its shortest forms (``shortest``'s measure, for a
+    view already sent too), and ``held_bound``, the window's own bound for a head: a start's keeps its work room, a
+    view already sent has the window less its reply reserve. The indexes and the registry answer to the physical
+    window alone in every frame, with or without heads (owner 2.11.2026, ``context_layout.WHOLE_OR_OUTLINE_STEPS``).
+    A head steps only when both hold: this walk left no outline untaken that the physical window still holds whole,
+    and the request still exceeds ``held_bound``; then one at a time. So where a start misses its own bound while the
+    physical window holds the whole index, neither yields: that start has less work room, as a start without heads
+    has there. A target, a soft frame or a requested saving shortens no head.
     """
-    if measure is None or not window or not root or not task_id:
-        return list(previous), saving
+    from ouroboros.held_notes import HeldNoteSection
+
     receipts = list(previous)
+    physical = floor_allowances(window_tokens=window or None, output_reserve_tokens=reserve,
+                                non_memory_tokens=0, calibration_ratio=ratio)["physical"]
+
+    def finish(remaining, outline_left=False):
+        if held_least is not None and physical is not None and not outline_left:
+            def fits(forms):  # as the request stands first: memory is priced at its shortest forms only past the bound
+                return (measure is not None and measure(forms) <= held_bound) or held_least(forms, physical) <= held_bound
+            remaining = max(0, remaining - _held_note_steps(sections, receipts, fits))
+        return receipts, remaining
+
+    if measure is None or not window or not root or not task_id:
+        return finish(saving)
     addressed = section_views(sections, receipts)
     candidates = [part for part in sections if part.section_id not in addressed
-                  and part.section_id not in PROTECTED and part.operative_view is not None
+                  and part.section_id not in PROTECTED and not isinstance(part, HeldNoteSection)
+                  and part.operative_view is not None
                   and len(part.operative_view) < len(part.full_text)]
     if not candidates:
-        return receipts, saving
-    physical = floor_allowances(window_tokens=window, output_reserve_tokens=reserve,
-                                non_memory_tokens=0, calibration_ratio=ratio)["physical"]
+        return finish(saving)
     # No step reaches a shorter form (a pointer follows the operative view) and memory only adds to a request.
     least = bare({**addressed, **{part.section_id: min((part.full_text, part.operative_view), key=view_tokens)
                                   for part in candidates}}) if bare else None
@@ -903,10 +973,11 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     initial = current = measure(addressed)
     bound = allowance if allowance is not None else physical
     if (bound is None or current <= bound) and saving == 0:
-        return receipts, 0
+        return receipts, 0  # this frame's allowance holds the request as it stands: nothing yields, a head least
     soft = bound is not None and bound < physical
     excess = max(0, saving - slack)  # what a window or a refusal measured; slack never outlines
     fits = None  # what this start can send, uncovered owner words whole: priced when a step needs it
+    outline_left = False  # an index or the registry the physical window still holds whole: a head waits for it
     order = {name: i for i, name in enumerate((*HOST_STEPS, *WHOLE_OR_OUTLINE_STEPS))}
     for part in sorted(candidates, key=lambda p: (p.section_id in WHOLE_OR_OUTLINE_STEPS,
                                                order.get(p.section_id, len(HOST_STEPS)))):
@@ -918,6 +989,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
             sent_least = shortest(addressed, physical) if shortest else current  # memory at its shortest forms
             fits = sent_least <= physical
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
+            outline_left = True
             continue  # an outline is a physical step, never a start-room or slack choice
         spared = part.section_id in WINDOW_ONLY or part.section_id in TELLING_SPARED
         if part.section_id in WINDOW_ONLY and window_bound is not None and sent_least <= window_bound:
@@ -938,7 +1010,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         addressed[part.section_id] = short
         receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
         current, fits = measure(addressed), None
-    return receipts, max(0, saving - (initial - current))
+    return finish(max(0, saving - (initial - current)), outline_left)
 
 
 # --- a pairwise start fit of other memories in one captured frame ------------------------------------------------

@@ -249,6 +249,35 @@ def test_helper_never_finalizes_without_terminal_child_source(tmp_path, monkeypa
     assert "result" not in load_task_result(parent, task["id"])
 
 
+@pytest.mark.parametrize("recorded_placement", [True, False])
+def test_copyback_stamps_its_read_drive_without_borrowing_replica_placement(tmp_path, recorded_placement):
+    from ouroboros.task_status import effective_task_result
+
+    parent, child, task = _child(tmp_path)
+    tid = task["id"]
+    placement = {"drive_root": str(child), "child_drive_root": str(child), "budget_drive_root": str(parent)}
+    admitted = placement if recorded_placement else {}
+    # A legacy row can have its placement only in metadata. Neither spelling may be replaced by copyback.
+    write_task_result(parent, tid, "running", **admitted, metadata={"child_drive_root": str(child)})
+    older = {"drive_root": str(parent), "child_drive_root": str(parent),
+             "budget_drive_root": str(child), "headless_child_drive_root": str(parent)}
+    write_task_result(child, tid, "completed", result="finished notes",
+                      **older, metadata={**older, "summary": "notes from the worker"})
+
+    def check(result, expected_placement):
+        assert result["result"] == "finished notes"
+        assert result["headless_child_drive_root"] == str(child)
+        assert {key: result[key] for key in placement if key in result} == expected_placement
+        assert result["metadata"] == {"child_drive_root": str(child), "summary": "notes from the worker"}
+
+    copied = headless.copy_child_task_result(parent, task)
+    check(copied, admitted)
+    assert headless.terminal_task_files_ready(parent, task, copied)
+    # The effective read still supplies a display-only child_drive_root on legacy rows.
+    check(effective_task_result(parent, copied, materialize_artifacts=False), {"child_drive_root": str(child), **admitted})
+    check(headless.retry_child_task_refs(parent, child, tid), admitted)
+
+
 def test_missing_terminal_source_does_not_stamp_running_result_with_artifact_failure(tmp_path, monkeypatch):
     parent, child, task = _child(tmp_path)
     write_task_result(parent, task["id"], "running", result="still executing")

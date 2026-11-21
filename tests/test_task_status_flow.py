@@ -2024,6 +2024,13 @@ def test_handle_schedule_task_admits_identical_siblings_without_semantic_veto(tm
 def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constraint(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_SCHEDULED
+    from ouroboros import task_tree_ledger as ledger
+    from ouroboros.tools.join_ledger import _override_delegation_constraint
+    from ouroboros.tools.task_tree import _tree_note
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setattr(ledger, "DATA_DIR", str(tmp_path))
+    root = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root123")
 
     enqueued = []
     sent = []
@@ -2047,29 +2054,37 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
         def persist_queue_snapshot(self, reason=""):
             self.snapshot_reason = reason
 
-    ev_module._handle_schedule_task(
-        {
-            "type": "schedule_subagent",
-            "task_id": "child123",
-            "objective": "Inspect scheduling",
-            "expected_output": "Findings table",
-            "constraints": "No writes",
-            "role": "reviewer",
-            "context": "Parent facts",
-            "depth": 1,
-            "parent_task_id": "parent123",
-            "root_task_id": "root123",
-            "session_id": "sess123",
-            "actor_id": "subagent:reviewer",
-            "delegation_role": "subagent",
-            "memory_mode": "forked",
-            "drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
-            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
-            "budget_drive_root": str(tmp_path),
-            "task_constraint": {"mode": "skill_repair", "allow_enable": True, "allow_review": True},
-        },
-        FakeCtx(),
-    )
+    event = {
+        "type": "schedule_subagent",
+        "task_id": "child123",
+        "objective": "Inspect scheduling",
+        "expected_output": "Findings table",
+        "constraints": "No writes",
+        "role": "reviewer",
+        "context": "Parent facts",
+        "depth": 1,
+        "parent_task_id": "parent123",
+        "root_task_id": "root123",
+        "session_id": "sess123",
+        "actor_id": "subagent:reviewer",
+        "delegation_role": "subagent",
+        "memory_mode": "forked",
+        "drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
+        "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child123" / "data"),
+        "budget_drive_root": str(tmp_path),
+        "task_constraint": {"mode": "skill_repair", "allow_enable": True, "allow_review": True},
+    }
+    assert _tree_note(root, "delegation_constraint", "Wait for the inspection",
+                      payload={"constraint_id": "hold", "directive": "halt_fanout"}).startswith("OK:")
+    held_id = "held-child"
+    held_drive = str(tmp_path / "state" / "headless_tasks" / held_id / "data")
+    ev_module._handle_schedule_task(dict(event, task_id=held_id, drive_root=held_drive,
+                                        child_drive_root=held_drive), FakeCtx())
+    assert not enqueued
+    assert "delegation_constraint_halt_fanout" in read_result(tmp_path, held_id)["result"]
+    assert _override_delegation_constraint(root, "hold", "Inspection complete").startswith("OK:")
+    sent.clear()
+    ev_module._handle_schedule_task(event, FakeCtx())
 
     assert len(enqueued) == 1
     task = enqueued[0]
@@ -2341,14 +2356,31 @@ def test_configured_zero_subagent_depth_truly_disables_delegation(tmp_path, monk
     assert enqueued and enqueued[0]["id"] == "root-at-0"
 
 
-def test_other_bounded_int_settings_keep_their_min_of_one(monkeypatch):
-    """``min_value`` defaults to 1, so the depth fix does not leak into sibling settings."""
-    from ouroboros.config import get_max_active_subagents_per_root, SETTINGS_DEFAULTS
+def test_other_bounded_int_settings_keep_their_min_of_one(monkeypatch, tmp_path):
+    """``min_value`` defaults to 1, so the depth fix does not leak into sibling settings: the Presence gate, which
+    still reads the bounded integer, takes its default for a 0 (a gate built with 0 would hold 1)."""
+    from ouroboros import presence_runner
+    from ouroboros.config import SETTINGS_DEFAULTS
 
-    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "0")
-    assert get_max_active_subagents_per_root() == int(
-        SETTINGS_DEFAULTS["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"]
-    )
+    monkeypatch.setattr(presence_runner, "_GATES", {})
+    monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "0")
+    assert presence_runner._configured_gate(tmp_path)._max_active == int(SETTINGS_DEFAULTS["OUROBOROS_PRESENCE_MAX_ACTIVE"])
+
+
+@pytest.mark.parametrize(("raw", "read"), [
+    (None, None), ("", None), ("unlimited", None),  # no number: the shipped default, the row's No limit
+    ("4", 4), ("6", 6), ("64", 64), ("500", 500), ("9999", 500),  # the owner's number; past the hard limit, the limit
+    ("0", 6), ("-3", 6), ("six", 6), ("1.5", 6),  # a typo, zero or a negative is the finite earlier 6, never no number
+])
+def test_the_owners_subagent_number_is_optional_and_a_typo_reads_finite(monkeypatch, raw, read):
+    """Unlike depth (an explicit 0 turns subagents off), the per-root number is optional: blank is none."""
+    from ouroboros.config import get_max_active_subagents_per_root
+
+    if raw is None:
+        monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raw)
+    assert get_max_active_subagents_per_root() == read
 
 
 def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, monkeypatch):
@@ -2399,24 +2431,33 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
 
-@pytest.mark.parametrize("count, wait, pending, blocked, rejected", [
-    (6, "acting", 0, True, False),
-    (6, "warm", 0, False, False),
-    (6, "in_slot", 0, False, False),
-    (6, "slot_flag", 0, False, False),
-    (6, "expired", 0, True, False),
-    (6, "warm", 6, True, False),
-    (0, "cold", 6, False, False),
-    (0, "cold", 499, False, False),
-    (0, "cold", 500, True, True),
-    (499, "warm", 0, False, False),
-    (500, "warm", 0, True, True),
+@pytest.mark.parametrize("number, count, wait, pending, blocked, rejected", [
+    ("6", 6, "acting", 0, True, False),
+    ("6", 6, "warm", 0, False, False),
+    ("6", 6, "in_slot", 0, False, False),
+    ("6", 6, "slot_flag", 0, False, False),
+    ("6", 6, "expired", 0, True, False),
+    ("6", 6, "warm", 6, True, False),
+    ("6", 0, "cold", 6, False, False),
+    ("6", 0, "cold", 499, False, False),
+    ("6", 0, "cold", 500, True, True),
+    ("6", 499, "warm", 0, False, False),
+    ("6", 500, "warm", 0, True, True),
+    # No number of the owner's (the shipped default): nothing queues behind it, the hard limit still refuses.
+    (None, 6, "acting", 0, False, False),
+    (None, 6, "expired", 6, False, False),
+    (None, 499, "acting", 0, False, False),
+    (None, 500, "acting", 0, True, True),
+    (None, 0, "cold", 500, True, True),
 ])
 def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
-        tmp_path, monkeypatch, count, wait, pending, blocked, rejected):
+        tmp_path, monkeypatch, number, count, wait, pending, blocked, rejected):
     from supervisor import events, workers
 
-    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "6")
+    if number is None:
+        monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", number)
     running, slots, enqueued, sent = {}, {-1: SimpleNamespace(busy_task_id=None)}, [], []
     for wid in range(count):
         tid = f"running-{wid}"
@@ -2455,6 +2496,48 @@ def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
     else:
         assert ("queued behind active subagent cap" in sent[0][0]) is blocked
         assert bool(sent[0][1]["progress_meta"].get("queued_behind_active_cap")) is blocked
+        meta = sent[0][1]["progress_meta"]
+        assert meta.get("max_active_subagents") == (None if number is None else int(number))
+        assert ("max_active_subagents" in meta) is (number is not None), "no number: the feed names none"
+
+
+@pytest.mark.parametrize("reads, decided", [([10, 2, 1], 1), ([1, 1, None], None)])
+def test_the_queue_notice_names_the_number_that_decided_under_the_lock(tmp_path, monkeypatch, reads, decided):
+    """The owner's number is read again under the queue lock; the notice, the feed and the tree's advisory name that
+    last read, not an earlier one, in both directions (a number written, a number removed)."""
+    from supervisor import events, events_schedule_task, workers
+
+    seen = []  # each read returns the next value; reads past the list repeat its last
+    monkeypatch.setattr(events_schedule_task, "get_max_active_subagents_per_root",
+                        lambda: seen.append(1) or reads[min(len(seen), len(reads)) - 1])
+    recorded = []
+    monkeypatch.setattr(events_schedule_task, "_record_delegation_constraint",
+                        lambda root, **kw: recorded.append(kw))
+    running = {"r1": {"task": {"id": "r1", "root_task_id": "root", "delegation_role": "subagent"}, "worker_id": 0}}
+    slots = {0: SimpleNamespace(busy_task_id="r1", active_capacity=True), -1: SimpleNamespace(busy_task_id=None)}
+    monkeypatch.setattr(workers, "WORKERS", slots)
+    sent = []
+    ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, RUNNING=running, WORKERS=slots, PENDING=[],
+        load_state=lambda: {"owner_chat_id": 1},
+        send_with_budget=lambda chat, text, **kw: sent.append((text, kw)),
+        enqueue_task=lambda task: task, persist_queue_snapshot=lambda reason="": None,
+    )
+    drive = str(tmp_path / "state" / "headless_tasks" / "next" / "data")
+    events._handle_schedule_task({
+        "type": "schedule_subagent", "task_id": "next", "objective": "Inspect", "expected_output": "Findings",
+        "depth": 1, "root_task_id": "root", "parent_task_id": "root", "delegation_role": "subagent",
+        "memory_mode": "forked", "drive_root": drive, "child_drive_root": drive,
+    }, ctx)
+    assert len(seen) >= len(reads), "the number was read again under the lock"
+    meta = sent[0][1]["progress_meta"]
+    if decided is None:
+        assert "queued behind" not in sent[0][0] and not meta.get("queued_behind_active_cap") and not recorded
+        assert "max_active_subagents" not in meta
+    else:
+        assert f"queued behind active subagent cap {decided};" in sent[0][0] and meta["queued_behind_active_cap"]
+        assert meta["max_active_subagents"] == decided
+        assert [row["scope"] for row in recorded] == [{"max_children": decided}]
 
 
 def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, monkeypatch):
@@ -3080,6 +3163,7 @@ def test_override_delegation_constraint_requires_parent_lineage(tmp_path, monkey
     child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child1", task_metadata={"root_task_id": "root1"})
     parent = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="parent1", task_metadata={"root_task_id": "root1"})
 
+    assert "non-empty reason" in _override_delegation_constraint(child, "c1", "  ")
     assert "only the parent" in _override_delegation_constraint(child, "c1", "self-clear")
     assert "only the parent" in _override_delegation_constraint(sibling, "c1", "not my constraint")
     assert _override_delegation_constraint(parent, "c1", "I gathered the evidence").startswith("OK:")

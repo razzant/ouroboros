@@ -164,7 +164,8 @@ class FakeClaudexorDaemon:
                  runs_dir: Optional[pathlib.Path] = None,
                  live_input: str = "mid_turn",
                  reports_created: bool = False,
-                 require_registration: bool = False) -> None:
+                 require_registration: bool = False,
+                 start_lookup_unavailable: bool = False) -> None:
         self.harness_id = str(harness_id)
         # The harness row's declared live-input capability (``liveInput``); a
         # scenario passes "none" to script a route with no mid-run channel.
@@ -175,6 +176,7 @@ class FakeClaudexorDaemon:
         # project root with the real 404 ``project_not_registered``.
         self.reports_created = bool(reports_created)
         self.require_registration = bool(require_registration)
+        self.start_lookup_unavailable = start_lookup_unavailable
         pin_version, pin_sha = _tree_engine_identity()
         self.engine_version = str(engine_version or pin_version)
         self.engine_build_sha = str(engine_build_sha or pin_sha)
@@ -189,6 +191,7 @@ class FakeClaudexorDaemon:
         self.requests: List[Dict[str, Any]] = []
         self.runs: Dict[str, Dict[str, Any]] = {}
         self._projects: Dict[str, str] = {}          # root -> project id
+        self._busy_project_root: Optional[str] = None
         self._replay: Dict[str, Dict[str, Any]] = {}  # idempotency key -> {digest, kind, payload}
         outer = self
 
@@ -231,6 +234,9 @@ class FakeClaudexorDaemon:
                         return self._send({"code": "unauthorized",
                                            "message": "bad bearer token"}, 401)
                     status, payload = outer._route(method, self.path, record)
+                    if ((method == "POST" and self.path in ("/v2/projects", "/v2/runs", "/v2/runs/lookup"))
+                            or (method == "DELETE" and self.path.startswith("/v2/projects/"))):
+                        record.update(status=status, response=payload)
                 return self._send(payload, status)
 
             def do_GET(self):     # noqa: N802 - stdlib callback name
@@ -297,6 +303,11 @@ class FakeClaudexorDaemon:
         return [row for row in self.calls("POST", "/v2/runs")
                 if row["path"].rstrip("/") == "/v2/runs"]
 
+    def set_busy_project(self, root: Optional[pathlib.Path]) -> None:
+        """Model another engine user holding this root. Passing None releases it."""
+        with self._lock:
+            self._busy_project_root = str(root) if root is not None else None
+
     # -- routing ---------------------------------------------------------------
 
     def _route(self, method: str, path: str, record: Dict[str, Any]) -> tuple:
@@ -313,12 +324,18 @@ class FakeClaudexorDaemon:
         if method == "GET" and clean == "/v2/operations":
             # The engine's own route catalog (Express-style templates, the shape
             # ``run_message_supported`` negotiates against).
-            return 200, {"protocolMajor": 3, "operations": [
+            operations = [
                 {"id": "run.message", "method": "POST", "path": "/v2/runs/:id/messages",
                  "mutability": "mutating", "idempotency": "key_required"},
                 {"id": "run.control", "method": "POST", "path": "/v2/runs/:id/control",
                  "mutability": "mutating", "idempotency": "natural"},
-            ]}
+            ]
+            if self.start_lookup_unavailable:
+                operations.append({"id": "run.lookup", "method": "POST", "path": "/v2/runs/lookup",
+                                   "mutability": "read_only", "idempotency": "key_required"})
+            return 200, {"protocolMajor": 3, "operations": operations}
+        if self.start_lookup_unavailable and method == "POST" and clean == "/v2/runs/lookup":
+            return 503, {"code": "lookup_unavailable", "message": "Accepted work cannot be read."}
         if method == "GET" and clean == "/v2/harnesses":
             return 200, {"harnesses": [self._harness_row()]}
         if method == "GET" and clean == "/v2/quota":
@@ -345,8 +362,12 @@ class FakeClaudexorDaemon:
         if method == "DELETE" and len(parts) == 3 and parts[:2] == ["v2", "projects"]:
             for root, pid in list(self._projects.items()):
                 if pid == parts[2]:
+                    if root == self._busy_project_root or any(
+                            run["project_id"] == pid and run["state"] in {"queued", "running"}
+                            for run in self.runs.values()):
+                        return 409, {"code": "project_has_active_run", "message": "project has an active run"}
                     del self._projects[root]
-                    return 200, {"removed": True}
+                    return 200, {"projectId": pid, "root": root, "registryRemoved": True, "artifactsRetained": True}
             return 404, {"code": "project_not_found", "message": "no such project"}
         if method == "POST" and clean == "/v2/runs":
             return self._start_run(record)
@@ -482,6 +503,8 @@ class FakeClaudexorDaemon:
             pathlib.Path(run_dir).mkdir(parents=True, exist_ok=True)
         self.runs[rid] = {
             "id": rid, "state": "running", "polls": 0,
+            "project_id": (self._projects.get(str(scope.get("root") or ""))
+                           if scope.get("kind") == "project" and scope.get("ephemeral") is not True else None),
             "hang": FAKE_HANG_MARKER in prompt,
             "access": str(body.get("access") or ""),
             "run_dir": run_dir, "body": body, "cancel_reason": "",

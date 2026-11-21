@@ -996,7 +996,7 @@ def api_task_artifact(request: Request):
         return json_error("artifact not found", 404, task_id=task_id, artifact=name)
     (index, _path, relative), _order, artifact = min(matches, key=lambda item: (item[0][0], item[1]))
     return serve_task_file(drive_root, stores[index], relative, name, recorded_identity(artifact), task_id=task_id,
-                           mutable=not artifact.get("immutable"))
+                           mutable=not artifact.get("immutable"), head_only=request.method == "HEAD")
 
 
 def _record_cascade_incident(task_id: str, kind: str, detail: str = "") -> None:
@@ -1396,12 +1396,16 @@ async def api_task_resume(request: Request) -> JSONResponse:
             or not all(isinstance(value, str) for value in named)):
         return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
                           reason_code="unexpected_fields")
-    try:
+    def resume() -> Dict[str, Any]:
         from ouroboros.control_actor import accepting_unknown, owner_door
         from supervisor.queue import resume_budget_paused_task
 
+        # Bound on the worker thread itself: the grant decisions read these where the call runs.
         with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
-            result = resume_budget_paused_task(task_id)
+            return resume_budget_paused_task(task_id)
+
+    try:
+        result = await asyncio.to_thread(resume)  # its writes wait on Q and the disk, never on the web loop
     except Exception as exc:
         return json_exception(exc, 503)
     if result.get("ok"):
@@ -1414,25 +1418,9 @@ async def api_task_resume(request: Request) -> JSONResponse:
         return json_error(message + " The task stays paused; budget exhaustion was not established.", 409,
                           code=error, reason_code=result.get("cause", ""), task_id=task_id,
                           **({"action": result["action"]} if result.get("action") else {}))
-    status = 409 if error in {
-        "task_not_budget_paused", "replay_unsafe", "root_budget_fence_missing",
-        # exact-continuation refusals (#1196): the task stays paused
-        "budget_still_exhausted", "root_hard_cap_exhausted", "cancel_intent_active",
-        "deadline_passed", "lifetime_exhausted", "root_still_paused", "resume_already_granted",
-        "restart_no_resume", "update_in_progress", "pause_record_missing", "pause_source_missing", "pause_source_unreadable",
-        "pause_record_unreadable", "grant_not_recorded", "snapshot_not_persisted",
-        "monetary_authority_unavailable", "cancellation_authority_unavailable", "task_terminal",
-        # holds and root-grant refusals (#1196, owner Q9): the row stays paused/held
-        "root_resume_grant_missing", "root_resume_generation_stale", "root_replay_unsafe",
-        "root_accounting_unavailable", "root_accounting_degraded", "external_custody_unreadable",
-        "accounting_unavailable", "resume_grant_revocation_unwritten",
-        # fresh custody at grant (#1196, owner Q8): a delegated run not proven
-        # terminal keeps the task paused; a marker/attempt drift is typed too
-        "external_runs_unsettled", "pause_attempt_mismatch",
-        "owner_pause_effects_unsettled", "owner_pause_custody_unreadable", "selection_authority_changed",
-        # a held Continue's observed blockers (#1721): an existing successor, never Not Found
-        "predecessor_writers_unsettled", "selection_owner_held",
-    } else 404
+    # Only a task the queue does not hold is Not Found; every other answer is a typed refusal of a task that
+    # exists (Panic's owner-only hold, an unresumable stop, a selection still to observe, money, custody...).
+    status = 404 if error in {"task_not_pending", "missing_task_id"} else 409
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
                              "action", "blockers", "message", "acceptable_unknown") if result.get(key)}},
                         status_code=status)

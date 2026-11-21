@@ -23,7 +23,7 @@ SELECTION_KEY = "_resume_selection"
 INTERRUPTED_SELECTION = "interrupted_selection"
 SELECTION_BINDING = (
     "root_task_id", "root_resume_basis", "root_grant_id", "root_resume_generation",
-    "fence_id", "root_fence_id", "grant_id", "grant_generation",
+    "fence_id", "root_fence_id", "grant_id", "grant_generation", "selection_door",
 )
 
 # The only translation from transport names to lifecycle policy.
@@ -146,7 +146,8 @@ def current_stop(task: dict | None, fences: dict | None = None) -> dict:
 def _display_task(task: dict) -> dict:
     """Join the display snapshot's locator with its current durable point."""
     source = dict(task)
-    pause = source.get("budget_pause") or {}
+    from ouroboros.budget_pause import saved_budget_pause
+    pause = saved_budget_pause(source)
     if pause.get("state") in {"pausing", "paused", "resume_granted"}:
         source["_budget_pause"] = {"reason": "budget", **pause, **(source.get("_budget_pause") or {})}
     return source
@@ -181,7 +182,11 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     release = stop.get("release") or ("resume" if needs_resume else "none")
     if release_refusal(stop, {"actor": "ouroboros"}):
         release = "owner" if release_refusal(stop, {"actor": "owner"}) is None else "none"
-    entry = {"code": code, "text": STOP_TEXT[code]}
+    text = STOP_TEXT[code]
+    if code == "technical_pause":
+        from ouroboros.pause_notices import authority_wait_text
+        text = authority_wait_text((point or task.get("budget_pause") or {}).get("cause")) or text
+    entry = {"code": code, "text": text}
     since = (author.get("at") or stop.get("held_at") or stop.get("requested_at") or stop.get("paused_at")
              or (hold_fact(task) or {}).get("held_at"))
     if since:
@@ -212,7 +217,10 @@ def activity_stop_view(row: dict, raw: dict | None = None) -> dict:
             task["_budget_pause"] = {"reason": cause}
         elif cause == "restart" and not task.get("_budget_pause_hold"):
             task["_budget_pause_hold"] = {"reason": "owner_restart_hold"}
-    return stop_presentation(task, fences)
+    view = stop_presentation(task, fences)
+    if view["reason"]["code"] == "technical_pause" and row.get("pause_reason") and not raw.get("_budget_pause"):
+        view["reason"]["text"] = row["pause_reason"]
+    return view
 
 
 # --- One queue row's current control: the census and the mind's readers read it alike -------------
@@ -492,15 +500,15 @@ def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
 
 
 def door_can_replace(task: dict, reason: str) -> bool:
-    """The existing door matrix: only sleep recovery / writer waits are weak.
-
-    Sleep recovery itself replaces nothing. Exact money/owner pauses keep their
-    own rule; a sleep marker is a wait and can acquire the door's stop.
+    """Panic and owner Restart hold automatically returning technical pauses and sleeps.
+    Existing holds follow their door policy. Exact money and owner pauses keep their own rule.
     """
     prior = hold_fact(task)
     if prior:
         return bool(record_policy(prior).get("door_replaceable")
                     and reason_policy(reason).get("replaces_door", True))
+    if reason in {"owner_restart_hold", "panic_hold"} and (pause_marker(task) or {}).get("reason") == "authority":
+        task = {k: v for k, v in task.items() if k != "_budget_pause"}
     return not current_stop(task)
 
 
@@ -621,6 +629,11 @@ def stop_record(reason: str, *, held_at: str, detail: str = "", by: dict | None 
             "held_at": held_at, "detail": str(detail or "")[:300]}
 
 
+def direct_selection(grant: dict) -> bool:
+    """The direct Resume door, independent of its author. Older grants named the door in selected_by."""
+    return grant.get("selection_door") == "direct" or grant.get("selected_by") == "owner"
+
+
 def resume_selection(binding: dict, *, selected_by: str, selected_at: str, by: dict) -> dict:
     """Copy identities only. ``selected_by`` is the Q9 door, ``by`` its attribution."""
     return {**{key: binding[key] for key in SELECTION_BINDING if key in binding},
@@ -714,6 +727,10 @@ def resume_outcome(outcome: dict) -> dict:
                "pause_record_missing": STOP_TEXT["restore_failed"],
                "root_still_paused": STOP_TEXT["awaiting_selection"],
                "root_resume_grant_missing": STOP_TEXT["awaiting_selection"]}
+    from ouroboros.pause_notices import authority_wait_text
+    if error in {"billing_authority_unavailable", "billing_authority_unreadable", "control_authority_unreadable"} and (
+            cause := authority_wait_text(outcome.get("cause"))):
+        phrases[error] = cause
     words = []
     for block in outcome.get("blockers") or ():
         kind, tid = block.get("kind"), block.get("task_id", "")

@@ -78,7 +78,7 @@ def test_a_folder_investigation_copy_keeps_its_evidence_channel_and_a_folder_pro
     investigation = directory_copy_binding_instruction("/authority", investigation=True)
     assert "no evidence folder" not in investigation and "every file you leave in it" not in investigation
     assert f"outside this copy goes outside every Git working tree ({scratch_fact()})" in investigation
-    assert "under .review-evidence/: the host retains that folder" in INVESTIGATION_INSTRUCTION
+    assert "under .review-evidence/. Evidence is retained indefinitely" in INVESTIGATION_INSTRUCTION
     product = directory_copy_binding_instruction("/authority")
     assert "no evidence folder is retained for this run" in product and "safe_test" not in product
 
@@ -273,9 +273,9 @@ def test_check_output_stays_out_only_as_new_files_git_ignores_and_evidence_has_n
     copy_binding = execution_binding_text(str(copy), str(target))
     for text in (copy_binding, access_instruction("full", investigation=True) + copy_binding):
         assert CHECK_BYPRODUCTS in text and "in new files Git ignores here (tracking overrides ignore rules)" in text
-        assert "intended binaries of any size" in text and "no cache, binary, size or ignore filter" in text
-        assert "a link or special entry is only recorded as a gap" in text
-    assert "no cache or binary filter" in access_instruction("workspace_write", investigation=True)
+        assert "bytes retained" in text and "address, byte size and hash" in text
+        assert "link or special entry is recorded as a gap" in text
+    assert "receipt names its byte size" in access_instruction("workspace_write", investigation=True)
     facts = session_environment_facts(target, data_root=tmp_path / "data")
     assert SNAPSHOT_ENVIRONMENT_NOTE in facts
     assert "generated build/dependency output is not automatically excluded from the capture; Git ignore rules " \

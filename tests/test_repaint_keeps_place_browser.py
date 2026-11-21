@@ -150,6 +150,9 @@ def test_an_account_provider_page_keeps_its_place_through_the_status_poll(gate_u
     status['profiles']['profiles'] = [
         {**one, 'profile': {**one['profile'], 'profile_id': f'account-{n}'}, 'identity': {'label': f'Account {n}'}}
         for n in range(24)]
+    window = {'id': 'session', 'used_ratio': 0.23}
+    status['quota'] = [{'subject': {'harness': 'codex', 'subject_id': 'account-0'}, 'freshness': 'fresh',
+                        'constraints': [window]}]
     page = seed_page(gate_ui, 1087, 744, touch=False)
     page.route('**/api/claudexor/status*', lambda route: setup_browser.status_answer(route, status))
     try:
@@ -160,9 +163,11 @@ def test_an_account_provider_page_keeps_its_place_through_the_status_poll(gate_u
         assert level.evaluate('box => box.scrollHeight - box.clientHeight') > 600, 'the page holds a long list'
         level.evaluate('box => { box.scrollTop = 300; }')
         rest(page)
-        drawn = level.evaluate_handle("box => box.querySelector('#harness-accounts-groups').firstElementChild")
-        page.wait_for_function("""old => document.querySelector('#harness-accounts-groups')?.firstElementChild !== old""",
-                               arg=drawn, timeout=12_000)
+        meta = level.locator('[data-profile="account-0"] .harness-account-meta')
+        assert '23% used' in meta.inner_text()
+        with page.expect_response('**/api/claudexor/status?view=quota', timeout=12_000):
+            window['used_ratio'] = 0.61
+        meta.get_by_text('61% used', exact=True).wait_for()
         rest(page)
         assert level.evaluate('box => box.scrollTop') == 300
     finally:

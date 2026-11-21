@@ -14,7 +14,7 @@ Tasks privately keep their entry Context/Effort, review settings and catalog (`T
 
 `normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. Colab budget/mode: launch > saved Drive > fresh 200/advanced; workers have no default cap. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test (minus the search Model) and credential plans (its route legs) share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
 
-Unmarked saved `OUROBOROS_MAX_WORKERS` 10 (Colab's first-launch 1; its explicit launch value wins) and `OUROBOROS_MODEL_MAX_CONCURRENCY` 3 read empty until a save writes `_owner_cap_format=1`/`_model_cap_format=1`; other values stay; malformed ones read finite 10/3. Normalization drops retired `OUROBOROS_DELEGATE_WAIT_SEC`/`OUROBOROS_DELEGATE_WAIT_MAX_SEC`; no wait-window setting remains.
+Unmarked saved `OUROBOROS_MAX_WORKERS` 10 (Colab's first-launch 1; an explicit launch value wins), `OUROBOROS_MODEL_MAX_CONCURRENCY` 3 and `OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT` 6 read empty until a save marks them (`_UNCHOSEN_SAVED`); others stay; typos: 10/3/6. Normalization drops retired `OUROBOROS_DELEGATE_WAIT_SEC`/`OUROBOROS_DELEGATE_WAIT_MAX_SEC`; no wait-window setting remains.
 
 `HOST_MEMORY_RESERVE_FRACTION = 0.10` is the shared code constant for process/test memory admission and the test overload stop (DEVELOPMENT §9), not an owner setting.
 
@@ -104,7 +104,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_FALLBACK_ATTEMPTS_PER_MODEL | 1 | Attempts per model in the fallback walk |
 | OUROBOROS_MODEL_DEEP_SELF_REVIEW | (migrated) | Retired with the review lanes: a stored value becomes the deep-review helper row of `OUROBOROS_SUBAGENTS` (no Reviewer mark) at load; env inert (`/review` reviewer: §6 Deep self-review) |
 | OUROBOROS_MAX_WORKERS | "" | Optional cap on acting project tasks; blank: memory admits |
-| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 6 | Acting-subagent cap per root (hard caps in `runtime_limits.py`) |
+| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | "" | Optional acting-child cap per root; hard: `runtime_limits.py` |
 | OUROBOROS_MAX_SUBAGENT_DEPTH | 3 | Subagent tree depth |
 | OUROBOROS_DISABLE_MANAGED_UPDATES | unset | Env-only: `1` disables managed updates (`git_ops.py`) |
 | OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS | "" | Mutative-subagent Auto override |
@@ -142,6 +142,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_SUBAGENT_PRESET_RECEIPT | "" | Install-preset receipt; likewise |
 | OUROBOROS_ONBOARDING_COMPLETED_AT | "" | Onboarding completion fact; likewise |
 | OUROBOROS_ONBOARDING_ATTEMPT_ID | "" | Client attempt that wrote it (§2); likewise |
+| OUROBOROS_ONBOARDING_CONSCIOUSNESS | "" | Setup's switch for a first state (PERSISTENCE); likewise |
 | OUROBOROS_TASK_REVIEW_MODE | auto | Result review mode `auto`/`required`/`off` (§6 Result review) |
 | OUROBOROS_SAFETY_MODE | full | Safety supervision mode; a fresh desktop wizard may author `light`; lowering is owner-guarded (§6 Safety and runtime mode) |
 | OUROBOROS_CONSCIOUSNESS_SAFETY_MODE | full | Coverage for consciousness work (own wakes, places, what they start); existing installs copy the saved Safety level once |
