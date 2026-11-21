@@ -439,7 +439,7 @@ def _append_interrupted_review_progress(
     ):
         if key in payload:
             lifecycle[key] = payload[key]
-    text = f"Skill review: `{skill_name}` — interrupted — {reason}"
+    text = f"Skill review: `{skill_name}` — interrupted"  # its reason code: the notice's detail (DESIGN principle 7)
     dialogue_store.append_quietly(
         drive_root, "progress",
         {
@@ -455,6 +455,7 @@ def _append_interrupted_review_progress(
             "content": text,
             "format": "",
             "lifecycle": lifecycle,
+            "notice": {"code": "skill_review_interrupted", "details": reason},
         },
     )
 

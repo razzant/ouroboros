@@ -235,11 +235,24 @@ def deep_review_route(row: Optional[ConfiguredReviewerSlot] = None) -> Tuple[str
 
 
 def deep_review_unavailable_text(reason: str) -> str:
-    """The ONE unavailable message (prefix classified by ``outcomes``)."""
-    return (
-        f"❌ Deep self-review unavailable: {reason}. Run /review on a row this install can pay: "
-        "any enabled Settings → Agents row, or the Main model (the default)."
-    )
+    """The ONE unavailable sentence: the mind's tool answer and the review task's record, its cause and its step."""
+    from ouroboros.host_notice import STEPS
+
+    return f"Deep self-review is unavailable: {reason}. {STEPS['choose_reviewer']}"
+
+
+def deep_review_unavailable(reason: str) -> Tuple[str, Dict[str, Any]]:
+    """A review that cannot run on the named row: its record and the notice its row says (``_failed``)."""
+    return _failed(deep_review_unavailable_text(reason), reason_code="deep_self_review_unavailable",
+                   phrase="Deep self-review cannot run on this reviewer row.", step="choose_reviewer", details=reason)
+
+
+def deep_review_error(exc: BaseException, usage: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, Any]]:
+    """A review an unexpected exception ended: its record keeps the error; its row says the phrase with it behind
+    Details (``_failed``)."""
+    raw = f"{type(exc).__name__}: {exc}"
+    return _failed(f"Deep self-review failed: {raw}", reason_code="deep_self_review_error", usage=usage,
+                   phrase="Deep self-review stopped on an unexpected error.", details=raw)
 
 
 # ---------------------------------------------------------------------------
@@ -479,13 +492,23 @@ def _memory_line(memory: Dict[str, Any]) -> str:
     return f"memory {memory['inlined']}/{memory['total']} inlined" + (f" (omitted: {', '.join(omitted)})" if omitted else "")
 
 
-def _failed(text: str, *, reason_code: str, usage: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, Any]]:
+def _failed(text: str, *, reason_code: str, usage: Optional[Dict[str, Any]] = None, phrase: str = "",
+            step: str = "", details: str = "") -> Tuple[str, Dict[str, Any]]:
     """A failure result: the text plus TYPED usage, so the caller keeps the
     previous report instead of overwriting durable memory with an error.
     Callers spell ``reason_code`` as a literal — the runtime's reason-code
-    drift guard (outcomes vocabulary) reads emit sites, not constants."""
+    drift guard (outcomes vocabulary) reads emit sites, not constants. With a
+    ``phrase`` the host's words end the review: its row is a System notice
+    (DESIGN principle 7) saying the phrase, its step and its raw details,
+    while ``text`` stays the task's record."""
+    from ouroboros.host_notice import fields
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+
     out = dict(usage or {})
     out.update({"execution_status": "infra_failed", "reason_code": reason_code})
+    if phrase:
+        out.update(terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE,
+                   host_notice_row={"text": phrase, "record": text, **fields(reason_code, step=step, details=details)})
     return text, out
 
 
@@ -750,8 +773,7 @@ def _run_retrieving_review(
         if isinstance(exc, BudgetExceeded):
             raise
         log.error("Deep self-review failed: %s", exc, exc_info=True)
-        return _failed(f"❌ Deep self-review failed: {type(exc).__name__}: {exc}",
-                       reason_code="deep_self_review_error", usage=custody)
+        return deep_review_error(exc, usage=custody)
     finally:
         emit_cognitive_operation_event(events, phase=settled, **lease)
     usage = dict(attempt.usage or {})
@@ -884,7 +906,7 @@ def run_deep_self_review(
         row = apply_review_model_override(row, waiter.overrides) if waiter else row
         reason, model = deep_review_route(row)
         if reason:
-            return _failed(deep_review_unavailable_text(reason), reason_code="deep_self_review_unavailable")
+            return deep_review_unavailable(reason)
         # ONE delivery class: the row retrieves. An api row runs the bounded
         # native inspection episode on the route the availability check
         # resolved (the session keeps its own target as its identity).
@@ -903,4 +925,4 @@ def run_deep_self_review(
         from ouroboros.llm_claudexor import propagate_model_error
         propagate_model_error(e)
         log.error("Deep self-review failed: %s", e, exc_info=True)
-        return _failed(f"❌ Deep self-review failed: {type(e).__name__}: {e}", reason_code="deep_self_review_error")
+        return deep_review_error(e)

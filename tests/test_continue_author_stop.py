@@ -78,7 +78,7 @@ def test_a_real_stop_is_offered_and_admits_one_successor_with_the_same_work_and_
     assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
     assert outcome_phase(stored, {}) == outcome_phase({}, stored) == "cancelled"
     assert shown_outcome(stored) == "cancelled"
-    assert _completed_lifecycle_display({}, stored) == ("⏹", "stopped")
+    assert _completed_lifecycle_display({}, stored) == "stopped"
     assert _completion_verdict(stored, {}) == TASK_CAUSE_PHRASES["author_stop"][:-1] + " · " + STOP_RATIONALE
     _queue, _state, workers = _install_queue(data, monkeypatch)
     assert continuation_offer(stored, "stop-root") == {"eligible": True, "cause": AUTHOR_STOP_CAUSE, "refusal": ""}

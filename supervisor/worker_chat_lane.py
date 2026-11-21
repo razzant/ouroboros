@@ -43,6 +43,7 @@ import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from supervisor.state import append_jsonl
+from ouroboros.host_notice import fields, with_notice
 from ouroboros.consciousness_authority import wake_cause
 from ouroboros.task_carrier import EXECUTOR_INLINE_CALL
 from ouroboros.utils import utc_now_iso
@@ -718,6 +719,7 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     correlation = _host_operation_failure(metadata).get("progress_meta", {})
     origin = {"origin_message_ref": correlation["origin_message_ref"]} if "origin_message_ref" in correlation else {}
+    notice: Dict[str, Any] = {}
     try:
         if held:
             text = hold_text()
@@ -727,8 +729,8 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
             from ouroboros.subagents import effort_result_fields
             from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
 
-            text = ("⏹ The owner stopped this chat turn before it started; no work was done." if stopped else
-                    "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
+            notice = {} if stopped else _budget_spent_notice()
+            text = "⏹ The owner stopped this chat turn before it started; no work was done." if stopped else notice["text"]
             write_task_result(
                 agent.env.drive_root, task_id, STATUS_CANCELLED if stopped else STATUS_FAILED,
                 _field_projector=lambda current, incoming: (None if current.get("status") in _TRULY_TERMINAL_STATUSES
@@ -739,8 +741,10 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
                 **origin, **effort_result_fields(task))
         else:
             from ouroboros.agent import _task_exception_terminal
+            from ouroboros.task_finalization import exception_notice
 
-            text = f"⚠️ Error during processing: {type(exc).__name__}: {exc}"
+            notice = exception_notice(exc, "turn")
+            text = notice["text"]
             _task_exception_terminal(agent.env, task, exc, agent.env.drive_path("logs"), keep_terminal=True)
     except Exception:
         log.warning("Terminal of turn %s was not recorded", task_id, exc_info=True)
@@ -752,6 +756,8 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
         progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
     if metadata.get("initiator"):
         progress_meta["initiator"] = str(metadata["initiator"])
+    if notice.get("notice"):  # its step and raw error beside the phrase (DESIGN principle 7)
+        progress_meta["notice"] = notice["notice"]
     try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
         event_queue.put({"type": "send_message", "task_id": task_id, "chat_id": int(task.get("chat_id") or 0),
                          "text": text, "progress_meta": progress_meta, "role": "system",
@@ -905,6 +911,12 @@ class CarrierTurn:
                 log.debug("direct_turn receipt failed for %s", self.task_id, exc_info=True)
 
 
+def _budget_spent_notice() -> Dict[str, Any]:
+    """A turn the spent total budget refused before it started: its phrase, and the owner's step to raise it."""
+    return {"text": "The total budget is spent, so this turn did not start.",
+            **fields("budget_exhausted", step="raise_total_budget")}
+
+
 def _host_operation_failure(metadata: Optional[dict]) -> dict:
     """A refusal's correlation: the owner submission it answers (only that
     ``Sending...`` settles) and, for the host's preaccepted skill messages,
@@ -973,8 +985,9 @@ def _defer_chat_for_restart(task: dict, chat_id: int, metadata: Optional[dict]) 
     admitted = queue.enqueue_with_admission_receipt(task, durable=True)
     blocked = (admitted or {}).get("_admission_blocked") or ""
     if blocked:
-        _pool().send_with_budget(chat_id, f"This turn was not accepted ({blocked}). Send it after Restart.",
-            **_host_operation_failure(metadata), role="system", system_type="task_not_started")
+        _pool().send_with_budget(chat_id, "This turn was not accepted.", role="system", system_type="task_not_started",
+                                 **with_notice(_host_operation_failure(metadata), "turn_not_accepted",
+                                               step="send_after_restart", details=blocked))
         return
     from ouroboros.task_finalization import host_operation_reply_kwargs
 
@@ -1000,9 +1013,10 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
     stopped = (getattr(e, "before_task_start", False)
                and getattr(e, "control_reason", "") in {"cancelled", "finalize_requested"})
     exhausted = getattr(e, "before_task_start", False) and getattr(e, "control_reason", "") == "budget_exhausted"
-    err_msg = ("⏹ The owner stopped this chat turn before it started; no work was done." if stopped else
-               "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings." if exhausted else
-               f"⚠️ Error: {type(e).__name__}: {e}")
+    from ouroboros.task_finalization import exception_notice
+
+    notice = {} if stopped else _budget_spent_notice() if exhausted else exception_notice(e, "turn")
+    err_msg = "⏹ The owner stopped this chat turn before it started; no work was done." if stopped else notice["text"]
     append_jsonl(
         _pool().DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
@@ -1034,6 +1048,8 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
         initiator = str((task_metadata or {}).get("initiator") or "")
         if initiator:
             progress_meta["initiator"] = initiator
+        if notice.get("notice"):  # its step and raw error beside the phrase (DESIGN principle 7)
+            progress_meta["notice"] = notice["notice"]
         _pool().send_with_budget(
             chat_id,
             err_msg,

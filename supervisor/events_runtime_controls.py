@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 from typing import Any, Dict
+from ouroboros.host_notice import fields
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -66,8 +67,8 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
             if st.get("owner_chat_id"):
                 ctx.send_with_budget(
                     int(st["owner_chat_id"]),
-                    "❌ Evolution promotion refused: the exact reviewed campaign claim "
-                    f"is no longer valid ({authority.get('reason') or 'unknown'}).",
+                    "Evolution's promotion was refused: its reviewed campaign claim is no longer valid.",
+                    progress_meta=fields("promotion_claim_invalid", details=authority.get("reason") or "unknown"),
                     role="system", system_type="promotion_notice")
             return
         try:
@@ -109,23 +110,20 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
         st = ctx.load_state()
         if st.get("owner_chat_id"):
             ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                f"❌ Failed to promote to stable: {result.get('error') or 'unknown error'}",
+                int(st["owner_chat_id"]), "Promotion to Stable failed.",
+                progress_meta=fields("promotion_failed", details=result.get("error") or "unknown error"),
                 role="system", system_type="promotion_notice")
         return
 
     st = ctx.load_state()
     if st.get("owner_chat_id"):
         new_sha = str(result["sha"])
-        if result.get("remote_pushed"):
-            remote_status = " (pushed to origin)"
-        elif result.get("remote_error"):
-            remote_status = f" (local only; remote push failed: {result['remote_error']})"
-        else:
-            remote_status = ""
-        ctx.send_with_budget(
-            int(st["owner_chat_id"]),
-            f"✅ Promoted: {ctx.BRANCH_DEV} → {ctx.BRANCH_STABLE} ({new_sha[:8]}){remote_status}",
+        pushed = " and pushed to origin" if result.get("remote_pushed") else (
+            ", but only here: its push to origin failed" if result.get("remote_error") else "")
+        push_error = f"; push: {result['remote_error']}" if result.get("remote_error") else ""
+        ctx.send_with_budget(  # the branches and the commit are its details (DESIGN principle 7)
+            int(st["owner_chat_id"]), f"Development is promoted to Stable{pushed}.",
+            progress_meta=fields("promoted", details=f"{ctx.BRANCH_DEV} → {ctx.BRANCH_STABLE} at {new_sha[:12]}{push_error}"),
             role="system", system_type="promotion_notice")
 
 
@@ -494,17 +492,20 @@ def _handle_rollback_request(evt: Dict[str, Any], ctx: Any) -> None:
             status, payload = rollback_through_door(target, door="vcs_rollback", request_restart=_restart)
         except Exception as exc:  # the door raised past its own typed answers
             status, payload = 500, {"error": str(exc)}
-        if status == 200:
-            text = (f"⏪ Rollback to {target[:12]} (agent request): {payload.get('message') or 'done'}; "
-                    f"{'the authority switch runs at the restart exit' if payload.get('switch_deferred') else 'restarting'}.")
+        if status == 200:  # the target commit and the door's own message are the notice's details
+            text = ("Ouroboros rolled its code back at its own request; "
+                    f"{'the switch completes as it restarts' if payload.get('switch_deferred') else 'it is restarting'}.")
+            notice = fields("rollback_done", details=f"to {target[:12]}: {payload.get('message') or 'done'}")
         else:
             blockers = payload.get("blockers")
-            text = (f"❌ Rollback to {target[:12]} (agent request) refused: {payload.get('error') or payload.get('message') or status}"
-                    + (f"; blockers: {blockers}" if blockers else ""))
+            text = "Ouroboros asked to roll its code back, and the rollback was refused."
+            notice = fields("rollback_refused", details=f"to {target[:12]}: {payload.get('error') or payload.get('message') or status}"
+                            + (f"; blockers: {blockers}" if blockers else ""))
         try:
             st = ctx.load_state()
             if st.get("owner_chat_id"):
-                ctx.send_with_budget(int(st["owner_chat_id"]), text, role="system", system_type="rollback_notice")
+                ctx.send_with_budget(int(st["owner_chat_id"]), text, progress_meta=notice, role="system",
+                                     system_type="rollback_notice")
         except Exception:
             log.warning("rollback_request outcome not delivered: %s", text, exc_info=True)
 

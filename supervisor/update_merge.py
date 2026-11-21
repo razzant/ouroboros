@@ -1398,6 +1398,16 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
     return {"finalized": False, "rolled_back": ok, "msg": msg, "stash_note": msg}
 
 
+def boot_outcome_notice(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The owner's row for a boot finalization that left a note (Q1=C: the exact recovery command reaches the owner,
+    not only the log): one phrase, and the note itself, Git's facts and the command, as the notice's details."""
+    from ouroboros.host_notice import fields
+
+    lead = "The last update was rolled back" if result.get("rolled_back") is True else "The last update did not finish cleanly"
+    return {"text": f"{lead}; what Git kept and how to restore it are in Details.",
+            "progress_meta": fields("managed_update_outcome", details=str(result.get("stash_note") or ""))}
+
+
 def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, Any]:
     """Finish boot recovery under one update lock, never raising.
 

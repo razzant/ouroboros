@@ -935,7 +935,7 @@ def _boot_managed_update_tasks() -> None:
     try:
         from ouroboros.gateway.update_progress import observe_boot
         from supervisor.git_ops import advance_recovery_point, compute_managed_update_status
-        from supervisor.update_merge import active_update_tx, finalize_managed_update_on_boot
+        from supervisor.update_merge import active_update_tx, boot_outcome_notice, finalize_managed_update_on_boot
 
         ready = _wait_for_supervisor_update_finalize()
         # Observation only: the finalizer's result and every decision below stay its own.
@@ -955,7 +955,7 @@ def _boot_managed_update_tasks() -> None:
 
                 owner_chat = int((_load_state() or {}).get("owner_chat_id") or 0)
                 if owner_chat:
-                    send_with_budget(owner_chat, f"📦 Managed update: {stash_note}", role="system", system_type="managed_update_notice")
+                    send_with_budget(owner_chat, **boot_outcome_notice(result), role="system", system_type="managed_update_notice")
             except Exception:
                 log.debug("stash note owner notification failed", exc_info=True)
         if result.get("rolled_back") is True and active_update_tx():

@@ -238,15 +238,16 @@ def _notify_chat_progress(job: LifecycleJob, phase: str) -> None:
     try:
         from supervisor.message_bus import send_with_budget
 
-        detail = job.error or job.message or job.status
+        from ouroboros.host_notice import notice
+
         lifecycle = job.to_dict()
         lifecycle["phase"] = str(phase or "")
-        send_with_budget(
+        send_with_budget(  # a failed job's raw error is the notice's detail; its message says what happened
             _effective_chat_id(job),
-            f"Skill {job.kind}: `{job.target}` — {phase}{f' — {detail}' if detail else ''}",
+            f"Skill {job.kind}: `{job.target}` — {phase}{f' — {job.message}' if job.message and not job.error else ''}",
             is_progress=True,
             task_id=_chat_task_id(job),
-            progress_meta={"lifecycle": lifecycle},
+            progress_meta={"lifecycle": lifecycle, "notice": notice(f"skill_{job.kind}_{phase}", details=job.error)},
             role="system", system_type="skill_lifecycle")
     except Exception:
         return
@@ -266,10 +267,9 @@ def _notify_duplicate_pointer(requested: LifecycleJob, existing: LifecycleJob) -
     try:
         from supervisor.message_bus import send_with_budget
 
-        send_with_budget(
+        send_with_budget(  # the job's id is the pointer's own field, not a word of its line
             requested_chat,
-            f"Skill {existing.kind}: `{existing.target}` — already {existing.status} "
-            f"(job {existing.id}); progress reports in its original chat.",
+            f"Skill {existing.kind}: `{existing.target}` — already {existing.status}; progress reports in its original chat.",
             is_progress=True,
             # A pointer is an acknowledgement to the duplicate caller, not a
             # scheduled task.  Giving it the synthetic lifecycle id promoted

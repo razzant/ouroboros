@@ -643,12 +643,10 @@ def _disclose_exhausted_delivery(
     if chat_id == 0 or reached:
         return
     try:
+        from ouroboros.host_notice import fields
         from supervisor.message_bus import send_with_budget
 
-        copy_note = (
-            f"A copy of this message is saved at {preserved}." if preserved
-            else "No copy of this message could be saved."
-        )
+        copy_note = "a copy is saved" if preserved else "no copy could be saved"
         cause = (
             f"its pending-outbox slot was taken by newer owed messages (capacity {_PENDING_CAP})"
             if capacity else
@@ -657,9 +655,10 @@ def _disclose_exhausted_delivery(
         )
         send_with_budget(
             chat_id,
-            f"⚠️ Sending a message for task {tid} was not confirmed: {cause}. {copy_note}",
+            f"A message for a task was not confirmed as sent; {copy_note}.",
             role="system",
             system_type="terminal_incident",
+            progress_meta=fields("delivery_unconfirmed", details=f"task {tid}: {cause}" + (f"; copy: {preserved}" if preserved else "")),
         )
     except Exception:
         log.debug("exhausted-delivery chat notice failed for %s", did, exc_info=True)
@@ -1136,13 +1135,15 @@ def deliver_miss_lane_outcome(
             chat_id = lineage_chat_id(root, row, task_id)
             if not chat_id:
                 return True
-            # GR7-4: the id digests the STABLE core (task id + settled
-            # status); the mutable note rides the text only, so a replay
-            # whose list shrank dedups instead of owing a second message.
+            # GR7-4: the id digests the STABLE core (task id + settled status); the mutable note rides the
+            # notice only, so a replay whose list shrank dedups instead of owing a second message.
+            from ouroboros.host_notice import fields
+
             core = f"Task {task_id} settled as {status}."
-            event = {
-                "type": "send_message", "chat_id": chat_id, "task_id": task_id,
-                "text": core + note, "delivery_id": delivery_id_for(task_id, core),
+            event = {  # the words say the fact; the task and its open runs are the notice's details
+                "type": "send_message", "chat_id": chat_id, "task_id": task_id, "delivery_id": delivery_id_for(task_id, core),
+                "text": f"This task settled as {status}, and some of its delegated runs may still be live.",
+                "progress_meta": fields("delegated_runs_open", details=core + note.replace("\n\n⚠️ ", " ")),
                 # Host-authored disclosure fact — typed SYSTEM (Q4 non-mimicry).
                 "role": "system", "system_type": "cancel_receipt",
                 "ts": utc_now_iso(),

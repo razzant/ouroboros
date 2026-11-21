@@ -1137,7 +1137,8 @@ def test_a_handle_task_exception_is_the_tasks_own_terminal_without_a_crash_retry
 
     current = load_task_result(tmp_path, job["task_id"], strict=True)
     assert (current["status"], current["reason_code"]) == ("failed", "task_exception")
-    assert current["result"] == "⚠️ Error during processing: ValueError: predecessor plan source unavailable"
+    # The record keeps the raw error in a sentence (the parent's digest, the CLI); the row says the phrase.
+    assert current["result"] == "This task stopped on an unexpected error: ValueError: predecessor plan source unavailable"
     assert current["terminal_time"]["source"] == "executor_terminal" and current["terminal_time"]["occurred_at"]
     assert "platform-level" not in json.dumps(current, ensure_ascii=False)
     # A host-written text: delivered as a System row, never as the model's answer.

@@ -107,9 +107,13 @@ def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
         reason = outcome.get("reason") or outcome.get("message") or "the app stopped before changing versions"
         # The headline line only: Git's whole output stays in the receipt and progress record.
         reason = " ".join((str(reasons.get(reason, reason)).splitlines() or [""])[0].split()).rstrip(".")
-        msg = (f"{door} to {target} did not happen: {reason}. The app is running the current version. "
-               "You can press that door again.")
-        send_with_budget(owner_chat_id, msg, role="system", system_type="storage_switch_notice", require_write=True)
+        known = reason in reasons.values()  # a known cause in words; any other, and the target, are the details
+        msg = f"{door} did not happen{': ' + reason if known else ''}. The app is running the current version."
+        from ouroboros.host_notice import fields
+
+        send_with_budget(owner_chat_id, msg, role="system", system_type="storage_switch_notice", require_write=True,
+                         progress_meta=fields("version_switch_refused", step="press_again",
+                                              details=f"{door} to {target}{'' if known else ': ' + reason}"))
         outcome["reported"] = utc_now_iso()
         atomic_write_json(root / PROGRESS_REL, progress, fsync=True)
 

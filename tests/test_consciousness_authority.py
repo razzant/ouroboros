@@ -763,7 +763,7 @@ def test_campaign_keeps_the_origin_and_its_cycle_tasks_inherit_it(tmp_path, monk
     assert pending == [] and state.load_state()["evolution_cycle"] == 1
     paused = evolution_lifecycle._read_evolution_campaign()
     assert paused["status"] == "paused" and paused["pause_reason"] == "admission_refused:consciousness_allowance_exhausted"
-    assert len(sent) == 1 and "Evolution paused" in sent[0] and "consciousness_allowance_exhausted" in sent[0]
+    assert len(sent) == 1 and sent[0] == "Evolution is paused: its next cycle was not admitted."  # the code: its notice
     assert not state.load_state().get("evolution_mode_enabled")
 
 

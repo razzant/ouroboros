@@ -108,11 +108,13 @@ def test_pending_outbox_gives_up_loudly_instead_of_retrying_forever(tmp_path, mo
     assert preserved.is_file() and preserved.read_text(encoding="utf-8") == "never lands"
     (notice,) = notices
     assert notice[0] == 9
-    # A missing ACK is not non-delivery, and the copy is of THIS message.
-    assert "Sending a message for task outbox2 was not confirmed" in notice[1]
+    # A missing ACK is not non-delivery, and the copy is of THIS message: its words say so, and the task and the
+    # copy's path are the notice's details (DESIGN principle 7).
+    assert notice[1] == "A message for a task was not confirmed as sent; a copy is saved."
     assert "could not be delivered" not in notice[1] and "full text" not in notice[1]
-    assert f"A copy of this message is saved at {preserved}." in notice[1]
-    assert notice[2] == {"role": "system", "system_type": "terminal_incident"}
+    details = notice[2]["progress_meta"]["notice"]["details"]
+    assert details.startswith("task outbox2: ") and details.endswith(f"; copy: {preserved}")
+    assert {k: v for k, v in notice[2].items() if k != "progress_meta"} == {"role": "system", "system_type": "terminal_incident"}
 
 def test_pending_outbox_spaces_replays_with_backoff(tmp_path):
     """Queue admission dates backoff; dispatch entries increase its interval."""
@@ -234,7 +236,7 @@ def test_outbox_capacity_eviction_is_disclosed(tmp_path, monkeypatch):
     notices: list = []
     monkeypatch.setattr(
         "supervisor.message_bus.send_with_budget",
-        lambda chat_id, text, **kw: notices.append((chat_id, text)),
+        lambda chat_id, text, **kw: notices.append((chat_id, text, kw)),
     )
     for i in range(td._PENDING_CAP):
         td.register_pending_delivery(tmp_path, {
@@ -260,7 +262,8 @@ def test_outbox_capacity_eviction_is_disclosed(tmp_path, monkeypatch):
     assert evicted["reason"] == "outbox_capacity"
     preserved = pathlib.Path(str(evicted["preserved_path"]))
     assert preserved.is_file() and "answer 0" in preserved.read_text(encoding="utf-8")
-    assert notices and "cap0" in notices[0][1], "owner-visible notice"
+    assert notices and "not confirmed as sent" in notices[0][1], "owner-visible notice"
+    assert notices[0][2]["progress_meta"]["notice"]["details"].startswith("task cap0: "), "the evicted task, in its details"
 
 
 def _exhaust(td, drive, task_id, chat_id, text="copy me"):
@@ -304,7 +307,7 @@ def test_only_the_same_delivery_recorded_at_the_same_chat_retires_the_notice(tmp
     td.register_delivery(tmp_path, td.delivery_id_for("t-registry", "copy me"))
     _row, event = _exhaust(td, tmp_path, "t-registry", 9)
     assert "owner_notice" not in event and len(notices) == 3
-    assert all("was not confirmed" in text for _chat, text in notices)
+    assert all("was not confirmed as sent" in text for _chat, text in notices)
 
 
 def test_capacity_eviction_and_a_failed_copy_are_worded_as_unconfirmed(tmp_path, monkeypatch):
@@ -321,5 +324,4 @@ def test_capacity_eviction_and_a_failed_copy_are_worded_as_unconfirmed(tmp_path,
     row = {"task_id": "t-evicted", "chat_id": 9, "text": "owed", "delivery_id": "d-evicted"}
     td._disclose_exhausted_delivery(tmp_path, row, reason="outbox_capacity")
     (text,) = notices
-    assert text.startswith("⚠️ Sending a message for task t-evicted was not confirmed: its pending-outbox slot")
-    assert text.endswith("No copy of this message could be saved.")
+    assert text == "A message for a task was not confirmed as sent; no copy could be saved."

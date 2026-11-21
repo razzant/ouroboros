@@ -241,12 +241,10 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list) -> list:
                 not in emitted_ids
             )
             if omitted:
-                synthesized.append({
-                    "text": (
-                        f"⚠️ OMISSION NOTE: {omitted} more archived project origin "
-                        "message(s) not rendered; full copies live in "
-                        "state/project_task_bindings.json (source_text)."
-                    ),
+                text = f"{omitted} more archived Project start message(s) are not shown here; their full copies are kept."
+                synthesized.append({  # where they are kept is its notice's detail (DESIGN principle 7)
+                    "text": text, **notice_view({"text": text, "notice": {"code": "origin_omission", "details":
+                        "state/project_task_bindings.json (source_text)"}}),
                     "role": "system", "ts": str(ref.get("ts") or ""),
                     "is_progress": False, "system_type": "origin_omission",
                     "markdown": False, "source": "", "sender_label": "",
@@ -1075,10 +1073,10 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
         active = queue_snapshot().get("active")
         if isinstance(active, dict) and active.get("status") == "running":
             label = "stale" if active.get("stale") else "running"
-            detail = active.get("error") or active.get("message") or active.get("status") or ""
+            said = "" if active.get("error") else str(active.get("message") or "")  # a raw error: its notice's detail
             text = (
                 f"Skill {active.get('kind') or 'operation'}: `{active.get('target') or 'skill'}`"
-                f" — {label}{f' — {detail}' if detail else ''}"
+                f" — {label}{f' — {said}' if said else ''}"
             )
             lifecycle = dict(active)
             lifecycle["phase"] = label
@@ -1104,6 +1102,8 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
                 "lifecycle": lifecycle,
                 "lifecycle_virtual": True,
             }
+            if active.get("error"):  # the running job's raw error stays behind Details
+                row.update(notice_view({**row, "notice": {"code": "skill_operation_error", "details": str(active["error"])}}))
             if row_matches_thread(chat_id, row):
                 return row
     except Exception as exc:

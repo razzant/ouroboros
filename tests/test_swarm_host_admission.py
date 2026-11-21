@@ -33,7 +33,7 @@ SURFACE = {"channel": "web", "viewport": {"width": 1280, "height": 800}}
 CONSTRAINT = {"mode": "normal"}
 REFUSALS = {
     "update": "🔒 An update is using the repository. Try this message again when it finishes.",
-    "budget": "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.",
+    "budget": "The total budget is spent, so this turn did not start.",
     "ledger": "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.",
 }
 

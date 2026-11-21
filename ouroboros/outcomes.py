@@ -945,7 +945,9 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
     return public
 
 
-# INFRA-failure host-fallback text prefixes: (prefix, failure kind, default reason_code).
+# INFRA-failure host-fallback text prefixes: (prefix, failure kind, default reason_code). Only text whose producer
+# typed no usage reaches them (an older or forked producer): every producer here types its status and reason, and
+# writes a notice phrase that opens with none of these (DESIGN principle 7).
 _INFRA_TEXT_PREFIXES = (
     ("⚠️ Failed to get a response", "provider", REASON_PROVIDER_FAILURE),
     ("⚠️ All models are down", "provider", REASON_PROVIDER_FAILURE),
@@ -1067,6 +1069,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # this one function contradict each other.
         failure = {"kind": "runtime" if reason_code in {
             REASON_TASK_EXCEPTION, "context_overflow", "context_capacity", "required_reference_unavailable",
+            REASON_DEEP_SELF_REVIEW_UNAVAILABLE, REASON_DEEP_SELF_REVIEW_ERROR,
         } else "provider", "reason_code": reason_code}
         # Forecasts use context_overflow; actual/legacy provider failures keep llm_api_error.
         # A waited-out outage or unknown outcome keeps its own terminal cause.

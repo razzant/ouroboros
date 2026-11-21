@@ -577,8 +577,9 @@ class TestTerminalFrameDelivery:
     def test_a_clean_completion_still_reads_as_a_clean_completion(
             self, tmp_path, monkeypatch):
         text, meta = self._dispatch_text(tmp_path, monkeypatch)
-        assert text == "✅ Subagent child-1 completed (publication-auditor)."
+        assert text == "Subagent completed (publication-auditor)."
         assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
+        assert meta["notice"] == {"code": "subagent_finished", "details": "task child-1"}, "its id is a detail"
 
     @pytest.mark.parametrize("terminal_facts", [
         {"outcome_axes": {"execution": {"status": "degraded"}}},
@@ -598,7 +599,7 @@ class TestTerminalFrameDelivery:
         key on, and a terminal must not change identity to change its wording.
         """
         text, meta = self._dispatch_text(tmp_path, monkeypatch, **terminal_facts)
-        assert text == "⚠️ Subagent child-1 finished with warnings (publication-auditor)."
+        assert text == "Subagent finished with warnings (publication-auditor)."
         assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
 
     def test_panel_chat_zero_receives_the_terminal_evidence_frame(

@@ -131,7 +131,8 @@ def test_mind_closes_and_reopens_with_one_durable_system_row_per_change(room):
     for event in events:
         assert event["role"] == "system" and event["system_type"] == "project_closure"
         assert event["chat_id"] == before["chat_id"] and not event.get("task_id")
-        assert "Ouroboros (one)" in event["text"]
+        assert event["text"].startswith("Ouroboros ") and "(one)" not in event["text"], "which work: the notice's detail"
+        assert event["progress_meta"]["notice"]["details"] == "by task one"
     assert closed["closed"]["at"] not in events[0]["text"]
     assert "Finished." in events[0]["text"] and "message from you" in events[0]["text"]
     assert "reopened" in events[1]["text"] and "More work." in events[1]["text"]

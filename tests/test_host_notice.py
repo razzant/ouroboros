@@ -117,3 +117,28 @@ def test_the_persisted_row_keeps_the_notice_without_any_readers_line(tmp_path):
     _root, plain = _chat_record("system", 1, 7, "A phrase.", drive_root=tmp_path, message_meta={})
     assert "notice" not in plain
 
+
+def test_a_host_notice_terminal_says_its_phrase_while_the_record_keeps_the_error(tmp_path):
+    """``agent._task_exception_terminal``'s notice reaches the row through the terminal seam; a published text the
+    host joined other words to (a suffix) keeps its whole text instead."""
+    from ouroboros.outcomes import derive_loop_outcome
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, exception_notice, prepare_terminal_send_event
+
+    notice = exception_notice(ValueError("boom"))
+    assert notice["record"] == "This task stopped on an unexpected error: ValueError: boom"
+    usage = {"terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "host_notice_row": notice,
+             "execution_status": "infra_failed", "reason_code": "task_exception"}
+    task = {"id": "t-ex", "chat_id": 7}
+    base = {"type": "send_message", "chat_id": 7, "task_id": "t-ex", "text": notice["record"], "log_text": notice["record"]}
+    event = prepare_terminal_send_event(tmp_path, task, notice["record"], dict(usage), dict(base), presence=False)
+    assert (event["text"], event["log_text"], event["role"]) == ("This task stopped on an unexpected error.",) * 2 + ("system",)
+    assert event["progress_meta"]["notice"] == {"code": "task_exception", "details": "ValueError: boom"}
+    joined = notice["record"] + "\n\nPlan review was still open."
+    kept = prepare_terminal_send_event(tmp_path, task, joined, dict(usage), {**base, "text": joined}, presence=False)
+    assert kept["text"] == joined and "notice" not in (kept.get("progress_meta") or {})
+    # The outcome is classified by its typed status and reason, not by its words (no prefix matches them now).
+    outcome = derive_loop_outcome(notice["record"], usage, {})
+    assert outcome["reason_code"] == "task_exception" and outcome["failure"]["kind"] == "runtime"
+    review = derive_loop_outcome("Deep self-review failed: X: y", {"execution_status": "infra_failed",
+                                                                  "reason_code": "deep_self_review_error"}, {})
+    assert review["failure"]["kind"] == "runtime", "a deep review's own failure is the runtime's, as its old prefix said"

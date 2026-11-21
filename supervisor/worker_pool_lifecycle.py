@@ -590,13 +590,15 @@ def _open_ready_slot(
         **relation,
     })
     if owner_chat_id and relation["relation"] in {"non_descendant", "unavailable"}:
-        observation = f"baseline {expected_sha[:8]}, observed {(observed_sha or 'unknown')[:8]}"
-        detail = ("is not a descendant of the recorded baseline"
+        from ouroboros.host_notice import fields
+
+        detail = ("is not a descendant of the code it started from"
                   if relation["relation"] == "non_descendant"
-                  else "could not be compared with the recorded baseline")
-        _pool().send_with_budget(
-            owner_chat_id,
-            f"⚠️ Worker checkout sampled after initialization {detail}: {observation}.",
+                  else "could not be compared with the code it started from")
+        _pool().send_with_budget(  # both commits are the notice's details (DESIGN principle 7)
+            owner_chat_id, f"A worker's code, read after it started, {detail}.",
+            progress_meta=fields("worker_checkout_drift",
+                                 details=f"baseline {expected_sha[:12]}, observed {(observed_sha or 'unknown')[:12]}"),
             role="system", system_type="worker_readiness_notice")
     return True
 
@@ -772,10 +774,12 @@ def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, start
         pool_admission.note_park(slot)  # count this park until the next successful worker_ready
         first_park = pool_admission.parked(_pool().WORKERS.values()) == 1
     if owner_chat_id and first_park:
-        _pool().send_with_budget(
-            owner_chat_id,
-            f"⚠️ Worker slot {wid} never confirmed ready in {attempt} attempts "
-            f"(waited {time.time() - started:.0f}s on the last attempt); the slot is parked. Use /restart.",
+        from ouroboros.host_notice import fields
+
+        _pool().send_with_budget(  # the slot, its attempts and its wait are the notice's details
+            owner_chat_id, "A worker never confirmed it was ready, so its slot is set aside.",
+            progress_meta=fields("worker_slot_parked", step="restart", details=(
+                f"worker slot {wid}: {attempt} attempts, {time.time() - started:.0f} s on the last one")),
             role="system", system_type="worker_readiness_notice")
     if is_project_slot(slot):
         _pool().disable_exhausted_worker_pool()

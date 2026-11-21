@@ -97,7 +97,7 @@ def test_existing_terminal_callers_keep_their_fact_when_wrapup_authority_fails(t
     if rail == "budget":
         ctx.accumulated_usage["rounds"] = 1  # real work already happened; global remainder really is zero
         text, usage, _trace = loop._check_budget_limits(ctx, 0.0)
-        assert usage["reason_code"] == "budget_exhausted" and "Total budget exhausted" in text
+        assert usage["reason_code"] == "budget_exhausted" and "total budget is spent" in text
     else:
         text, usage, _trace = loop._handle_forced_finalization(
             ctx, "owner_requested_finalization" if rail == "owner_stop" else "deadline")

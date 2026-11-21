@@ -17,6 +17,7 @@ import pathlib
 import time
 from typing import Any, Dict, List, Optional
 
+from ouroboros.host_notice import notice
 from ouroboros.model_wait import execution_close
 from ouroboros.outcomes import (
     EXECUTION_FAILED,
@@ -601,13 +602,8 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             raise TerminalFileRecoveryPending("crash terminal result could not be stored") from exc
         # Message before task_done: otherwise the UI may close the card first.
         try:
-            if replay_unsafe:
-                user_msg = result_text
-            else:
-                user_msg = (
-                    f"❌ Task `{task_id[:8]}` failed after {attempt} crash(es). "
-                    "Worker process crashed repeatedly. Please try again."
-                )
+            # A crash that exhausted its retries says so in words; its ids and exit code are the notice's details.
+            user_msg = result_text if replay_unsafe else "The task failed because its worker process kept crashing."
             incident_task_id = str(task_id or "")
             _pool().send_with_budget(
                 chat_id,
@@ -617,6 +613,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 progress_meta={
                     "task_incident": reason_code,
                     "toast_once": f"{incident_task_id}:{reason_code}:{attempt}",
+                    "notice": notice(reason_code, details=f"task {task_id}, {attempt} attempts, last exit code {exitcode}"),
                 },
                 role="system", system_type="worker_failure")
         except Exception:

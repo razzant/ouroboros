@@ -166,7 +166,7 @@ def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monke
     # durable terminal origin (its client id stays on the live receipt).
     stored = load_task_result(workers.DRIVE_ROOT, receipt["activity_id"])
     assert stored["status"] == "failed", stored
-    assert stored["result"] == "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."
+    assert stored["result"] == "The total budget is spent, so this turn did not start."
     assert [row for row in chat_rows(workers.DRIVE_ROOT) if row.get("origin_message_ref")] == []
 
 

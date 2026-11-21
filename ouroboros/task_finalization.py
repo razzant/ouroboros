@@ -63,6 +63,17 @@ TERMINAL_PLAN_REVIEW_NOTE = (
 )
 
 
+def exception_notice(exc: BaseException, subject: str = "task") -> Dict[str, Any]:
+    """The host notice of work an unexpected exception ended (``host_notice``): ``text``, the owner's one phrase;
+    ``notice``, its code and the raw error as details; ``record``, the sentence the task result keeps with the raw
+    error, which the parent's digest, the CLI and the task's details read as before (BIBLE P1)."""
+    from ouroboros.host_notice import fields
+
+    raw = f"{type(exc).__name__}: {exc}"
+    phrase = f"This {subject} stopped on an unexpected error."
+    return {"text": phrase, **fields("task_exception", details=raw), "record": f"{phrase[:-1]}: {raw}"}
+
+
 def set_terminal_host_notice(usage: Dict[str, Any], *parts: str) -> None:
     """Keep the current host disclosure beside the answer, never inside its identity."""
     notice = sanitize_tool_result_for_log("\n\n".join(part.strip() for part in parts if part.strip()))
@@ -154,11 +165,14 @@ def send_provider_death_notice(
         "A model-provider outage stopped this task. Partial work and workspace files "
         "are preserved; inspect the task details before starting another run."
     )
-    ctx.send_with_budget(
+    from ouroboros.host_notice import fields
+
+    ctx.send_with_budget(  # the outage's own words say the task stopped; the task's id is the notice's detail
         chat_id,
-        f"🔌 Task {task_id} was NOT completed.\n\n{notice}{plan_note}",
+        f"{notice}{plan_note}",
         role="system",
         system_type="terminal_incident",
+        progress_meta=fields("provider_outage", details=f"task {task_id}"),
     )
     return True
 
@@ -288,6 +302,13 @@ def prepare_terminal_send_event(
             log.warning("Wrap up receipt row unavailable for %s", task.get("id"), exc_info=True)
     if origin not in _STAMPED_TERMINAL_ORIGINS:
         return send_event
+    row = usage.get("host_notice_row") if isinstance(usage.get("host_notice_row"), dict) else {}
+    if (origin == TERMINAL_ORIGIN_HOST_NOTICE and not presence and row.get("text") and row.get("notice")
+            and text == row.get("record")):
+        # The host published its notice's record (no suffix or other words joined it): the row says the phrase with
+        # the notice beside it, and the result keeps the record's sentence.
+        send_event.update(text=str(row["text"]), log_text=str(row["text"]))
+        send_event.setdefault("progress_meta", {})["notice"] = dict(row["notice"])
     canonical_root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
     preserved_path = ""
     if text and origin == TERMINAL_ORIGIN_HOST_SALVAGE:
