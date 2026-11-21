@@ -809,10 +809,8 @@ def _verify_and_record(
             return refusal
         try:
             if use_executor:
-                # Route the check through the host-owned executor backend (e.g. docker_exec
-                # with NetworkMode=none) EXACTLY like run_command, so the verification runs
-                # in the SAME place + isolation as the agent's other commands — not on the
-                # host while the work lives in a container.
+                # Same host-owned executor backend + isolation as run_command (e.g. docker_exec
+                # NetworkMode=none): the check runs where the agent's other commands run, not on the host.
                 res = executor_execute(
                     ctx, exec_argv, pathlib.Path(work_dir), timeout,
                     env_overlay=interpreter_path_overlay(node_resolution),
@@ -849,9 +847,8 @@ def _verify_and_record(
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
-        # Same typed publication as the timeout branch: the check's own exit and
-        # (POSIX) signal, measured here where the truth is, not re-read from the
-        # ``exit=`` the result text renders for the agent.
+        # Same typed publication as the timeout branch: the check's own exit and (POSIX) signal,
+        # measured here, not re-read from the ``exit=`` the result text renders for the agent.
         _facts = publish_process_facts(
             returncode=rc, started_ts=_check_started_ts,
             resolved_runtime=_resolved_runtime, memory_oom=getattr(res, "memory_oom", None),
