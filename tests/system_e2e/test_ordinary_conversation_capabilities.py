@@ -165,7 +165,9 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                     assert delivered
                     if not_delivered:  # the answer a later one replaced is not what the task delivered
                         assert not_delivered not in str(stored.get("result") or ""), stored
-                        assert not [f for f in delivered if not_delivered in str(f.get("content"))], delivered
+                        finals = [f for f in frames.find(type="chat", task_id=task_id) if not f.get("is_progress")]
+                        assert not [f for f in finals if not_delivered in str(f.get("content"))], finals
+                        assert marker in [str(f.get("content")) for f in finals], finals
                     assert not oracle.child_task_ids(task_id), "ordinary work was delegated/promoted"
                     return task_id
 
