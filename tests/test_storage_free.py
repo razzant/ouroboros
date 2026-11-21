@@ -3,6 +3,7 @@ retirers with the wait set to zero for the previewed items only, honest removed/
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import json
 import os
@@ -750,6 +751,44 @@ def test_cancel_during_listing_drops_the_plan_and_kills_the_sizing_child(tmp_pat
     view = owner.projection(root)
     assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
     assert owner.cancel() is False
+
+
+def test_stop_never_waits_for_a_request_holding_the_lock(tmp_path, monkeypatch):
+    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``): a page
+    request holding the lock (a preview or run being started over a large plan) delays neither Stop nor the
+    sizing child's kill, and the listing settles as stopped once the request lets go."""
+    root = tmp_path / "data"
+    probes = _drives(root, [("done", "direct", "completed", OLD)])
+    hold = threading.Event()
+    spawned = _fake_sizer(monkeypatch, hold=hold)
+    owner = _owner(probes)
+    assert owner.preview(root, tmp_path) is True
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not (spawned and owner._process is spawned[0]):
+        time.sleep(0.01)  # the sizing thread publishes the child right after the spawn returns
+    assert spawned and owner._process is spawned[0]
+    holding, release = threading.Event(), threading.Event()
+
+    def request():
+        with owner._lock:
+            holding.set()
+            assert release.wait(30)
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    try:
+        held = pool.submit(request)
+        assert holding.wait(10)
+        pool.submit(owner.stop).result(timeout=5)  # blocked direction: Stop returns while the request holds the lock
+        assert spawned[0].killed and owner._lock.locked(), "the child is signalled before the request lets go"
+    finally:
+        release.set()
+        hold.set()
+        pool.shutdown(wait=True)
+    held.result()
+    _join(owner)
+    view = owner.projection(root)  # still-working direction: the stop settles exactly as the owner's Cancel does
+    assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
+    assert owner.preview(root, tmp_path) is False and owner.cancel() is False, "after Stop nothing starts"
 
 
 # ------------------------------------------------------------------- B12

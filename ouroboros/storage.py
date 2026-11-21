@@ -759,13 +759,12 @@ class StorageCounter:
                 return False
             self._cancel = True
             process = self._process
-        if process is not None:
-            self._signal(process)
+        self._signal(process)
         return True
 
     def stop(self) -> None:
-        self._stopped.set()
-        self.cancel()
+        self._stopped.set()  # never under the lock a page read holds across the saved file: Panic must not wait
+        self._signal(self._process)  # the run thread publishes its child, then rechecks Stop
 
     def live_children(self) -> list:
         """Exit census after Stop: include an unfinished spawn until its owner returns."""
@@ -776,8 +775,9 @@ class StorageCounter:
 
     @staticmethod
     def _signal(process) -> None:
-        with contextlib.suppress(OSError):
-            process.kill()  # its own process group: the signal reaches only our child
+        if process is not None:  # none published: not spawned yet, or already reaped
+            with contextlib.suppress(OSError):
+                process.kill()  # its own process group: the signal reaches only our child
 
     def _run(self, data_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
         from ouroboros.startup_historical_audit import read_job_lines, spawn_maintenance_job

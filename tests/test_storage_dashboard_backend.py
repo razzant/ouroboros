@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -671,6 +672,50 @@ def test_stop_reaches_a_child_spawned_moments_before(tmp_path, monkeypatch):
     _join(counter)
     assert spawned[0][3]._killed.is_set()
     assert counter.projection(data)["error"]["stopped"] is True
+
+
+def test_stop_never_waits_for_a_page_read_holding_the_lock(tmp_path, monkeypatch):
+    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``): a page
+    read holding the lock across the saved file (a slow disk) delays neither Stop nor the child's kill, and the
+    count settles as stopped once the read lets go."""
+    data = tmp_path / "data"
+    _write(data / "observability" / "a.bin", 10)
+    save_count(data, _count(data))
+    hold = threading.Event()
+    spawned = _fake_spawn(monkeypatch, [], hold=hold)
+    counter = StorageCounter()
+    assert counter.start(data, tmp_path) is True
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not (spawned and counter.live_children() == [spawned[0][3]]):
+        time.sleep(0.01)  # the owner thread publishes the child right after the spawn returns
+    child = spawned[0][3]
+    assert counter.live_children() == [child]
+    reading, release = threading.Event(), threading.Event()
+    real = storage.load_saved
+
+    def slow_disk(root):
+        reading.set()
+        assert release.wait(30)
+        return real(root)
+
+    monkeypatch.setattr(storage, "load_saved", slow_disk)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    try:
+        read = pool.submit(counter.projection, data)
+        assert reading.wait(10) and counter._lock.locked()
+        pool.submit(counter.stop).result(timeout=5)  # blocked direction: Stop returns while the read holds the lock
+        assert child._killed.is_set() and counter._lock.locked(), "the child is signalled before the read lets go"
+    finally:
+        release.set()
+        hold.set()
+        pool.shutdown(wait=True)
+    assert read.result()["count"] is not None, "the read itself completes"
+    _join(counter)
+    projection = counter.projection(data)  # still-working direction: the stop settles exactly as an ordinary one
+    assert projection["counting"] is None and projection["error"]["stopped"] is True
+    rows = (data / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["phase"] for line in rows] == ["stopped"]
+    assert counter.start(data, tmp_path) is False, "after Stop nothing starts"
 
 
 def test_the_two_stop_sites_and_the_census_name_the_storage_count_and_the_free_owner():

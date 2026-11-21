@@ -711,20 +711,24 @@ class FreeSpace:
                 return False
             self._cancel.set()
             process = self._process
-        if process is not None:
-            with contextlib.suppress(OSError):
-                process.kill()
+        self._signal(process)
         return True
 
     def stop(self) -> None:
-        self._stopped.set()
-        self.cancel()
+        self._stopped.set()  # never under the lock a page request holds: Panic must not wait
+        self._signal(self._process)  # the sizing thread publishes its child, then rechecks Stop
 
     def live_children(self) -> list:
         process, thread = self._process, self._thread
         if process is not None and process.poll() is None:
             return [process]
         return [thread] if thread is not None and thread.is_alive() else []
+
+    @staticmethod
+    def _signal(process) -> None:
+        if process is not None:  # none published: not spawned yet, or already reaped
+            with contextlib.suppress(OSError):
+                process.kill()
 
     # ---- the preview ------------------------------------------------------------------------
 
