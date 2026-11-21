@@ -146,6 +146,30 @@ def test_a_later_failure_clears_the_stamp():
     assert sr.stamped(usage) is None
 
 
+def test_numberless_zai_form_does_not_shadow_a_stated_limit():
+    """"Prompt too long" carries no numbers, but a wording that continues to state a token limit
+    ("Prompt too long; maximum context length is 80000 tokens") must keep it: the numberless form is
+    anchored to the whole sentence, so the shared vocabulary — not the form — reads the numbers.
+    Both bodies pass through the real SDK and the host classifier, as a Main call meets them."""
+    import json as _json
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    verbatim = (ROOT / "bodies/zai-1261.body.json").read_bytes()
+    exc = _sdk_error(400, verbatim)
+    found = sr.from_exception(exc)
+    assert found is not None and found.source == "text:zai/prompt-too-long" and not found.has_numbers
+    assert classify_llm_exception(exc).kind == "context_overflow"
+
+    combined_body = _json.dumps({"error": {"code": "1261",
+                                "message": "Prompt too long; maximum context length is 80000 tokens"}}).encode()
+    exc = _sdk_error(400, combined_body)
+    found = sr.from_exception(exc)
+    assert found is not None and found.source != "text:zai/prompt-too-long"
+    assert found.token_window == 80_000 and found.meaning == "total"
+    assert classify_llm_exception(exc).kind == "context_overflow"
+    assert ce._parse_ctx_limit_number(sr.refusal_sentence({"_last_llm_provider_message": found.upstream})) == 80_000
+
+
 def test_a_dropped_connection_is_no_size_refusal():
     from ouroboros.loop_llm_call import classify_llm_exception
 
