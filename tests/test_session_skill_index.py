@@ -84,7 +84,8 @@ def test_genesis_request_gets_index_only_for_shared_inputs(tmp_path, monkeypatch
         tmp_path, monkeypatch, compiled=compiled, kind="foreign_copy", input_sources=input_sources,
         prepare=lambda ctx: _install_skill(ctx.drive_root, "external_guide"))
     assert ("HOST SKILL REFERENCES" in request["instructions"]) is (input_sources == "shared")
-    assert "DESIGN DELIVERY" not in request["instructions"]
+    # The installed bible may ride (a true declaration on the work's own folder); the copy's own DESIGN never does.
+    assert not any(f"{name} heading" in request["instructions"] for name in ("Live target", "Prepared copy"))
     assert row["request"] == request
     canonical, fingerprint = compile_external_work_order(task), work_order_fingerprint(task)
     if compiled:

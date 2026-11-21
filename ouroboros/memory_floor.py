@@ -844,10 +844,15 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 
 # Host producers before the whole-or-outline sections, then the memory walk, all under the same
 # start budget. Running views narrow only under physical pressure or a refusal. The author's design bible
-# (``context_layout.task_design_navigation``) is an ordinary step placed before WORLD and every book map: it takes
-# its navigation before memory takes a shorter telling or a book shortens (item 97, council C13 R3, 21.11.2026).
-HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
-              "design_bible", "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+# (``context_layout.task_design_navigation``) leads as an ordinary step: under the start's room or the mode's
+# budget it takes its navigation before any other form, memory or a book pays (item 97, council C13 R3 and RV1).
+HOST_STEPS = ("design_bible", "runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
+              "world", "subagents", "architecture_map", "development_map", "return_facts_words")
+# Optional attachments whose map names their source (item 97, RV1): where no ordinary step runs, with no numeric
+# window or no reader for a retained pointer, they still pay a requested saving or the start's bound before memory
+# (``_optional_steps``), and a start whose directly required handbook would not fit beside its view takes them to
+# their maps before it refuses (``optional_for_book``).
+OPTIONAL_STEPS = ("design_bible",)
 # Host forms only the window's own start bound takes: my WORLD map stays whole while that bound holds the request with
 # memory at its shortest forms, whatever soft frame the start has (memory audit 15.11.2026, F7); when the bound cannot
 # hold it, it still steps before memory.
@@ -943,7 +948,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     A head steps only when both hold: this walk left no outline untaken that the physical window still holds whole,
     and the request still exceeds ``held_bound``; then one at a time. So where a start misses its own bound while the
     physical window holds the whole index, neither yields: that start has less work room, as a start without heads
-    has there. A target, a soft frame or a requested saving shortens no head.
+    has there. A target, a soft frame or a requested saving shortens no head. With no numeric window or no reader
+    for a pointer no step runs here, except that ``OPTIONAL_STEPS`` still pay before memory (``_optional_steps``).
     """
     from ouroboros.held_notes import HeldNoteSection
 
@@ -959,6 +965,10 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         return receipts, remaining
 
     if measure is None or not window or not root or not task_id:
+        if measure is not None:  # no window measured or no reader for a pointer: only optional attachments still pay
+            saving = _optional_steps(sections, receipts, measure=measure, saving=saving, physical=physical,
+                                     bound=allowance if allowance is not None else physical, budget_mode=budget_mode,
+                                     root=root if task_id else "", task_id=task_id, retain=retain)
         return finish(saving)
     addressed = section_views(sections, receipts)
     candidates = [part for part in sections if part.section_id not in addressed
@@ -1013,6 +1023,54 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
         current, fits = measure(addressed), None
     return finish(max(0, saving - (initial - current)), outline_left)
+
+
+def _optional_steps(sections, receipts, *, measure, saving, physical, bound, budget_mode, root, task_id, retain):
+    """``OPTIONAL_STEPS`` where ``_host_steps`` takes no step: each pays a requested ``saving``, else the request's
+    excess over ``bound``, before memory does; a step the physical window or a refusal asks is the window's, the rest
+    the start's room or ``budget_mode``. Returns the saving still owed."""
+    addressed = section_views(sections, receipts)
+    for part in sections:
+        if part.section_id not in OPTIONAL_STEPS or part.section_id in addressed:
+            continue
+        current = measure(addressed)
+        if saving <= 0 and (bound is None or current <= bound):
+            break
+        window_asks = saving > 0 or (physical is not None and current > physical)
+        saving = max(0, saving - _address_optional(part, receipts, addressed, root=root, task_id=task_id,
+                                                   retain=retain, start_room=False if window_asks else budget_mode or True))
+    return saving
+
+
+def _address_optional(part, receipts, addressed, *, root, task_id, retain=None, start_room=False):
+    """Take one optional attachment to its map: its full text retained behind a pointer, or, for an actor with no reader
+    (``root`` empty), behind no pointer: its map names the source an authorized reader opens. Returns tokens saved."""
+    if part.operative_view is None or len(part.operative_view) >= len(part.full_text):
+        return 0
+    row = {"section_id": part.section_id, "source_ref": None, "reader": ""}
+    if root and task_id:
+        try:
+            row = (retain or retain_section)(part, root=root, task_id=task_id)
+        except (OSError, ValueError):
+            log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
+            return 0
+    short = relocated_text(part, row["reader"], start_room=start_room)
+    saved = view_tokens(part.full_text) - view_tokens(short)
+    if saved <= 0:
+        return 0
+    addressed[part.section_id] = short
+    receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
+    return saved
+
+
+def optional_for_book(sections, receipts, *, root, task_id, retain=None):
+    """A start whose directly required handbook would not fit beside its view: each optional attachment takes its map
+    for the window, once, so the admission check runs again on a request no optional attachment holds whole."""
+    receipts, addressed = list(receipts), section_views(sections, receipts)
+    for part in sections:
+        if part.section_id in OPTIONAL_STEPS and part.section_id not in addressed:
+            _address_optional(part, receipts, addressed, root=root, task_id=task_id, retain=retain)
+    return receipts
 
 
 # --- a pairwise start fit of other memories in one captured frame ------------------------------------------------

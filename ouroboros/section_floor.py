@@ -59,11 +59,13 @@ def labelled_section(section: str, label: Callable[[str], str]) -> str:
 
 def relocated_text(section: HostSection, reader: str, *, start_room: Union[bool, str] = False) -> str:
     """``start_room``: the step paid this start's allowance while the physical window held the whole request;
-    a mode name says the owner's budget for that mode framed it, ``True`` the start's own room."""
+    a mode name says the owner's budget for that mode framed it, ``True`` the start's own room. An empty ``reader``:
+    this actor can open no pointer (``memory_floor.OPTIONAL_STEPS`` alone step so; their map names the source)."""
     soft = f"the owner's {start_room.capitalize()} mode budget" if isinstance(start_room, str) else "this start's room"
     bound = f"{soft}, not for the physical window" if start_room else "the physical window"
-    return (section.operative_view + "\n\n"
-            + f"[Host section details omitted for {bound}; retained full text: {reader}.]")
+    where = (f"retained full text: {reader}" if reader
+             else "this actor has no reader for them; an authorized reader opens the source named above")
+    return section.operative_view + "\n\n" + f"[Host section details omitted for {bound}; {where}.]"
 
 
 def retain_section(section: HostSection, *, root: str, task_id: str) -> dict:

@@ -129,12 +129,13 @@ def design_bible_section(text: str) -> Optional[str]:
     return found[0] if found else None
 
 
-def design_bible_view(text: Optional[str], *, source: str) -> str:
+def design_bible_view(text: Optional[str], *, source: str, installed: bool = False) -> str:
     """An author's DESIGN: its design bible whole, the rest of the book by headings and ranges, the exact source.
 
     Only the file's bytes and its path shape it (no time, counter or service state), so the block it rides keeps its
     bytes through a return. A source that cannot be read, or a book without the section, keeps the navigation's own
-    honest form (``design_navigation``)."""
+    honest form (``design_navigation``). ``installed``: the book is the installed body's for work whose own tree is
+    not established as that body (``author_design_source``), and its first line says whose interface it governs."""
     found = None if text is None else _design_bible(text)
     if found is None:
         navigation = design_navigation(text, source=source)
@@ -142,7 +143,9 @@ def design_bible_view(text: Optional[str], *, source: str) -> str:
     section, first, last = found
     rest = [(level, f"{title} (whole above)", first, last) if line == first else (level, title, line, end)
             for level, title, line, end in _nav_entries(text) if not first < line <= last]
-    return "\n".join([section, "", "## DESIGN.md (navigation map)", "", *_nav_lines(rest), "",
+    whose = ["These are the interface rules of Ouroboros itself, from its installed body; this work's own tree is "
+             "not established as that body.", ""] if installed else []
+    return "\n".join([*whose, section, "", "## DESIGN.md (navigation map)", "", *_nav_lines(rest), "",
                       f"Source: {source}. Use this exact source path when reading; relative paths may address a "
                       f"candidate. Ranges are inclusive. Inlined above: its design bible whole (lines {first}-{last}); "
                       "every other section by its heading and range only. Availability is not evidence of reading or "
@@ -210,39 +213,42 @@ def _design_source(ctx: Any, task: Mapping[str, Any]) -> tuple[pathlib.Path | No
     return None, fact.body
 
 
-def author_design_source(ctx: Any, task: Mapping[str, Any]) -> pathlib.Path | None:
-    """Whose DESIGN an author's own context carries (the owner's item 97 of 21.11.2026; council C13, R2).
+def author_design_source(ctx: Any, task: Mapping[str, Any]) -> tuple[pathlib.Path | None, bool]:
+    """Whose DESIGN an author's own context carries, and whether it is the installed body's for a tree not
+    established as that body (the owner's item 97 of 21.11.2026; council C13, R2).
 
-    The recognized body's book first (``task_design_source``). Otherwise the installed one: for work the task itself
-    declares Ouroboros's (``context_requires_self_body_docs`` true, from a foreign folder too), and for work whose body
-    is unknown yet not proven foreign (a project room without a folder), as the handbook stays resident there
+    The recognized body's book first (``task_design_source``). Otherwise the installed one, never an unadopted
+    candidate the context is bound to (``body_candidate.serving_repo_dir_for``): for work the task itself declares
+    Ouroboros's (``context_requires_self_body_docs`` true, from a foreign folder too), and for work whose body is
+    unknown yet not proven foreign (a project room without a folder), as the handbook stays resident there
     (``context_input_selection.development_resident``: missing facts never narrow it). A false or absent declaration
     narrows nothing: the contract writes false for silence. Proven-foreign work without the declaration gets none;
     children, nannies and background work of the body keep it (no on-demand surface narrows it).
     """
+    from ouroboros.body_candidate import serving_repo_dir_for
     from ouroboros.context_input_selection import _explicit_self_body_docs_flag
     from ouroboros.review_body_fact import BODY_FALSE
-    from ouroboros.tools.tool_resolution import system_repo_dir_for
 
     root, body = _design_source(ctx, task)
     if root is None and (_explicit_self_body_docs_flag(dict(task)) is True or body != BODY_FALSE):
-        root = system_repo_dir_for(ctx)
-    return root
+        return serving_repo_dir_for(ctx), True
+    return root, False
 
 
 # The owner's horizon choice for Low and Nano, still open (item 97, council C13 R4): A, every mode, holds the design
-# bible whole until the window takes it to its map; B, ``{"max"}``, gives an owner-selected Low or Nano the map alone.
-# This set is that choice, read where a work's view is captured (``task_design_navigation``).
+# bible whole until the start's room or the mode's budget runs short; B, ``{"max"}``, gives an owner-selected Low or
+# Nano the map alone. This set is that choice, read where a work's view is captured (``task_design_navigation``).
 DESIGN_BIBLE_MODES = frozenset({"max", "low", "nano"})
 
 
 def task_design_navigation(ctx: Any, task: Mapping[str, Any], *, mode: str = "max") -> str:
     """Capture once before context fitting; the task-specific root stays out of A'.
 
-    The author's view (``design_bible_view``) is a host section whose operative form is the book's navigation: a
-    window too small for the request takes it there first, before my memory takes a shorter telling or any book shortens
-    (``memory_floor.HOST_STEPS``). ``mode`` is the owner's selected one (``DESIGN_BIBLE_MODES``)."""
-    root = author_design_source(ctx, task)
+    The author's view (``design_bible_view``) is a host section whose operative form is the book's navigation. It is
+    the first host form to yield (``memory_floor.HOST_STEPS``, ``OPTIONAL_STEPS``): whenever the start's room, the
+    mode's budget, a requested saving or a directly required handbook needs its room, it takes its map before my memory
+    takes a shorter telling or any book shortens. ``mode`` is the owner's selected one (``DESIGN_BIBLE_MODES``)."""
+    root, installed = author_design_source(ctx, task)
     if root is None:
         return ""
     path = root / "docs/DESIGN.md"
@@ -254,7 +260,7 @@ def task_design_navigation(ctx: Any, task: Mapping[str, Any], *, mode: str = "ma
     navigation = design_navigation(text, source=source)
     if mode not in DESIGN_BIBLE_MODES:
         return navigation
-    view = design_bible_view(text, source=source)
+    view = design_bible_view(text, source=source, installed=installed)
     if text is None or design_bible_section(text) is None:
         return view  # no section, nothing shorter to yield to
     from ouroboros.section_floor import HostSection  # section_floor reads TIER0_ALWAYS_FULL from here

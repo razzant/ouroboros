@@ -25,7 +25,7 @@ def _doc(root, heading):
 
 
 def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=False, missing_bible=False,
-           input_sources="declared", prepare=None):
+           input_sources="declared", prepare=None, declared=True):
     from ouroboros import claudexor_daemon, subagent_runtime
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools import delegate
@@ -37,6 +37,10 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
     _doc(system, "Installed heading")
     if kind == "system":
         target = system
+    elif kind == "foreign_git":  # someone else's repository: proven foreign
+        from tests.test_doc_context import foreign_tree
+
+        foreign_tree(target)
     live_path = _doc(target, "Live target heading")
     prepared_path = _doc(prepared, "Prepared copy heading")
     if missing:
@@ -48,7 +52,7 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
         "source_is_system_repo": kind != "foreign_copy",
     }} if kind.endswith("copy") else {})
     contract = {"objective": "Inspect the selected source", "input_sources": input_sources,
-                "context_requires_self_body_docs": True}
+                "context_requires_self_body_docs": declared}
     ctx = ToolContext(
         repo_dir=system, system_repo_dir=system, drive_root=drive,
         task_id="design-session", task_metadata=metadata, task_contract=contract,
@@ -151,11 +155,25 @@ def test_session_start_carries_the_design_bible_whole_with_its_digest(tmp_path, 
     assert row["request"] == request  # pinned in custody: a retry replays these bytes
 
 
-@pytest.mark.parametrize("kind", ["foreign_copy", "unknown"])
-def test_foreign_and_unidentified_workspaces_get_no_body_design(tmp_path, monkeypatch, kind):
-    request, row, _task, _ctx, _live, _prepared = _start(tmp_path, monkeypatch, kind=kind)
-    assert "DESIGN DELIVERY" not in request["instructions"]
-    assert not any(f"{name} heading" in request["instructions"] for name in ("Installed", "Live target", "Prepared copy"))
+@pytest.mark.parametrize(("kind", "declared", "delivered"), [
+    ("foreign_git", True, True), ("foreign_git", False, False), ("foreign_copy", True, True),
+    ("unknown", True, True), ("unknown", False, True),
+])
+def test_a_session_on_the_works_own_folder_takes_the_authors_choice(tmp_path, monkeypatch, kind, declared, delivered):
+    """A session on the task's own folder that is not the body (RV1, Astra 3): a true declaration, or a body that is
+    unknown, brings the installed bible as it does to the native author; a proven-foreign folder without the
+    declaration brings none. A foreign target's or its copy's own DESIGN never stands in for it."""
+    def installed_bible(_ctx):
+        (tmp_path / "system/docs/DESIGN.md").write_text("# Design\n\n" + BIBLE + "\n## Installed heading\nRule.\n",
+                                                       encoding="utf-8", newline="\n")
+
+    request, row, _task, _ctx, _live, _prepared = _start(tmp_path, monkeypatch, kind=kind, declared=declared,
+                                                         prepare=installed_bible)
+    instructions = request["instructions"]
+    assert ("DESIGN DELIVERY" in instructions) is delivered and (BIBLE.strip() in instructions) is delivered
+    assert (str(tmp_path / "system/docs/DESIGN.md") in instructions) is delivered
+    assert ("These are the interface rules of Ouroboros itself, from its installed body" in instructions) is delivered
+    assert not any(f"{name} heading" in instructions for name in ("Live target", "Prepared copy"))
     assert row["request"] == request
 
 
@@ -242,9 +260,11 @@ def test_nested_admitted_copy_keeps_its_body_identity_and_document_root(tmp_path
                                          "source_is_system_repo": own_body}}, task_contract={})
     text = session_design_navigation(ctx, target_root=str(copy / "ouroboros"),
                                      source_root=str(prepared / "ouroboros"))
-    assert bool(text) is own_body
     if own_body:
         assert str(prepared / "docs/DESIGN.md") in text and "prepared — lines" in text
+    else:  # a copy of a source not proven to be the body: the installed book, never the copy's own (RV1, Astra 3)
+        assert str(system / "docs/DESIGN.md") in text and "system — lines" in text
+        assert "copy — lines" not in text and "prepared — lines" not in text
 
 
 def test_nested_git_body_source_maps_the_worktree_document(tmp_path):
