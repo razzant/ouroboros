@@ -229,6 +229,69 @@ test('one row is one queue: a value given during a write waits, the newest repla
     assert.equal(view.line(PER_TASK), 'Saved · applies to new tasks · was 60 · Undo');
 });
 
+test('a caller\'s own ticket comes back on the answer of the job that ran, which the callers it replaced share', async (t) => {
+    const { server } = await start(t, [PER_TASK]);
+    const gate = deferred();
+    server.answers.push((body) => gate.promise.then(() => server.save(body)));
+    const untouched = new Proxy({}, { get() { throw new Error('the queue read a ticket it only hands back'); } });
+    const [two, three] = [{ own: 2 }, { own: 3 }];
+    const first = commitSetting(PER_TASK, 60, { ticket: untouched });
+    await settle();
+    const second = commitSetting(PER_TASK, 70, { ticket: two });
+    const third = commitSetting(PER_TASK, 80, { ticket: three });
+    await settle();
+    gate.resolve();
+    const [a, b, c] = await Promise.all([first, second, third]);
+    assert.deepEqual(server.posts.map((body) => body.OUROBOROS_PER_TASK_COST_USD), [60, 80], 'only the first and the newest value went out');
+    assert.equal(a.answers, untouched, 'an answer names the ticket of the job it answers');
+    assert.equal(b, c, 'the value replaced while it waited is answered by what replaced it: one shared outcome');
+    assert.equal(b.answers, three, 'whose ticket it names, never the replaced caller\'s own');
+    assert.notEqual(b.answers, two);
+    // Without a ticket nothing is associated, and the queue adds no value of its own to any answer.
+    const plain = await commitSetting(PER_TASK, 90);
+    assert.equal(plain.state, 'saved');
+    assert.deepEqual(['answers', 'sent', 'value'].filter((name) => Object.hasOwn(plain, name)), []);
+});
+
+test('a credential\'s value never comes back in an Outcome: saved, refused, unconfirmed, or answered for a value it replaced', async (t) => {
+    const { server } = await start(t, [PER_TASK]);
+    // The row settings_secrets.js saves a custom key through, and three inputs that are not credentials.
+    const KEY = { id: 'CUSTOM_SYNTHETIC_KEY', keys: ['CUSTOM_SYNTHETIC_KEY'], page: 'accounts', name: 'CUSTOM_SYNTHETIC_KEY', control: { kind: 'secret' }, writer: 'generic' };
+    const inputs = ['synthetic-input-0001', 'synthetic-input-0002', 'synthetic-input-0003'];
+    const mentions = (value, needle, seen = new Set()) => {
+        if (typeof value === 'string') return value.includes(needle);
+        if (!value || typeof value !== 'object' || seen.has(value)) return false;
+        seen.add(value);
+        return Object.entries(value).some(([key, inner]) => key.includes(needle) || mentions(inner, needle, seen));
+    };
+    const showing = (outcome) => inputs.filter((input) => mentions(outcome, input));
+    const withheld = () => response({ status: 'saved', changes: { CUSTOM_SYNTHETIC_KEY: { withheld: 'secret' } } });
+    server.answers.push(withheld);
+    const saved = await commitSetting(KEY, inputs[0], { confirmed: true });
+    assert.deepEqual([saved.state, saved.withheld, showing(saved)], ['saved', 'secret', []]);
+    server.answers.push(() => response({ error: 'The key was refused.', saved: false }, 400));
+    const refused = await commitSetting(KEY, inputs[1], { confirmed: true });
+    assert.deepEqual([refused.state, showing(refused)], ['refused', []]);
+    server.answers.push(() => { throw new TypeError('Failed to fetch'); });
+    const lost = await commitSetting(KEY, inputs[2], { confirmed: true });
+    assert.deepEqual([lost.state, showing(lost)], ['unknown', []]);
+    // One in flight, a second replaced by a third: every caller holds the shared answer, and none of them is told a value.
+    const gate = deferred();
+    server.answers.push(() => gate.promise.then(withheld));
+    server.answers.push(withheld);
+    const calls = inputs.map((input) => commitSetting(KEY, input, { confirmed: true }));
+    await settle();
+    gate.resolve();
+    const answers = await Promise.all(calls);
+    assert.equal(answers[1], answers[2], 'the replaced caller shares the answer of the one that replaced it');
+    assert.deepEqual(answers.flatMap(showing), []);
+    for (const outcome of [saved, refused, lost, ...answers]) {
+        assert.deepEqual(['answers', 'sent', 'value'].filter((name) => Object.hasOwn(outcome, name)), [], 'no ticket was given, so nothing is associated');
+    }
+    assert.deepEqual(server.posts.map((body) => body.CUSTOM_SYNTHETIC_KEY).filter(Boolean), [inputs[0], inputs[1], inputs[2], inputs[0], inputs[2]],
+        'the inputs went to the fake server, and only there');
+});
+
 test('a refusal keeps the typed text and says the server\'s sentence; a value refused here sends nothing', async (t) => {
     const { server, view } = await start(t, [TOTAL, ALLOWANCE, ROUNDS]);
     server.answers.push(() => response({ error: "OUROBOROS_MAX_ROUNDS must be a positive integer or 'unlimited'.", saved: false }, 400));
@@ -305,6 +368,29 @@ test('an unknown outcome says "Not confirmed yet", reads again before anything e
     server.values.OUROBOROS_CONSCIOUSNESS_DAILY_USD = 14;  // the timed-out save did land
     await readSettings();
     assert.equal(view.line(ALLOWANCE), 'Saved', 'a later read that shows the value says it saved, without a receipt');
+});
+
+test('a saved a read showed is marked byRead, unanswered only after a sent write, and neither carries the value', async (t) => {
+    const { server } = await start(t, [PER_TASK]);
+    const lostAnswer = () => response({ error: 'The save did not answer in time.', saved: null }, 503);
+    const marks = (outcome) => [outcome.state, outcome.byRead === true, outcome.unanswered === true];
+    const carries = (outcome, value) => JSON.stringify(outcome).includes(String(value));
+    assert.deepEqual(marks(await commitSetting(PER_TASK, 61)), ['saved', false, false], 'answered by the write itself');
+    // No answer, and the read that follows shows the value: the read is all that says it is saved — and the write
+    // was sent and lost its answer, so it may still land: unanswered.
+    server.answers.push(() => { server.values.OUROBOROS_PER_TASK_COST_USD = 62; return lostAnswer(); });
+    const shown = await commitSetting(PER_TASK, 62);
+    assert.deepEqual([...marks(shown), carries(shown, 62)], ['saved', true, true, false]);
+    // No answer and the read shows the old value: unknown. The next press reads first, finds the value already there
+    // and sends nothing: a read that avoided a write settles the press — nothing was sent, so it is not unanswered.
+    server.answers.push(lostAnswer);
+    assert.deepEqual(marks(await commitSetting(PER_TASK, 63)), ['unknown', false, false]);
+    const posts = server.posts.length;
+    const matched = await commitSetting(PER_TASK, 62);
+    assert.deepEqual([...marks(matched), carries(matched, 62), server.posts.length - posts], ['saved', true, false, false, 0]);
+    // The reread is spent: the same value pressed again goes to the server, whose answer is its own.
+    const again = await commitSetting(PER_TASK, 64);
+    assert.deepEqual([...marks(again), server.posts.length - posts], ['saved', false, false, 1]);
 });
 
 test('an unknown outcome of a list or a map is judged field by field: an entry that did not land is never called saved', async (t) => {

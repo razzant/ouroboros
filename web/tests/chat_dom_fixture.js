@@ -105,6 +105,7 @@ export class ElementStub {
         this.listeners.get(type).push(fn);
     }
     removeEventListener() {}
+    dispatchEvent(event) { for (const fn of this.listeners.get(event.type) || []) fn(event); return true; }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
@@ -151,6 +152,7 @@ export class ElementStub {
     get lastChild() { return this.children.at(-1) || null; }
     replaceChild(next, current) { this.insertBefore(next, current); this.removeChild(current); return current; }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((node) => this.appendChild(node)); }
+    replaceWith(node) { this.parentNode?.insertBefore(node, this); this.remove(); }
     contains(node) {
         if (node === this) return true;
         return this.children.some((child) => child.contains(node));

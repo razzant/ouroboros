@@ -1,3 +1,4 @@
+import { roomStorage, whenRoomOpens } from './desktop_room_session.js';
 // Replies of one chat instance (docs/DESIGN.md "Replies"): the Reply control beside Copy in a bubble's
 // control row (the registered message actions stand between them, message_actions.js), the quote above the
 // replying bubble's text, the strip in the composer's field while the owner is replying, the jump from a quote to the
@@ -62,7 +63,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     // test fixture) takes it itself.
     const textRow = input.closest('.chat-text-row') || input;
     let storage = null;
-    try { storage = sessionStorage; } catch { /* storage blocked: a staged reply lives for this page only */ }
+    try { storage = roomStorage(); } catch { /* storage blocked: a staged reply lives for this page only */ }
     const storageKey = key;
     let staged = null;
     let strip = null;
@@ -288,6 +289,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         if (!ref?.address) return;
         const door = rowOf(ref.address)?.querySelector('.chat-quiz-comment:not(:disabled):not([readonly])');
         if (door) { door.focus(); return; }
+        if (input.dataset.desktopRoomOpening === '1') return;
         staged = ref;
         paint();
         remember();
@@ -296,7 +298,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
 
     /** Drops the strip and keeps whatever the owner already typed. */
     function cancel() {
-        if (!staged) return;
+        if (!staged || input.dataset.desktopRoomOpening === '1') return;
         staged = null;
         paint();
         remember();
@@ -309,6 +311,14 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         staged = null;
         paint();
         remember();
+    }
+
+    /** After a send that carried the reply it captured when it was pressed (`echoRow().reply_to`, the staged reference
+     * itself): the strip leaves — unless the owner staged a reply meanwhile, to another row or to the same one again;
+     * that one is for its own next message and stays. The reference, never its address: a reply chosen again is new. */
+    function consume(sent) {
+        if (!staged || !sent || staged !== sent) return;
+        clear();
     }
 
     function onKeydown(event) {
@@ -355,10 +365,13 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return button;
     }
 
-    try {
-        const saved = storage && storageKey ? storage.getItem(storageKey) : '';
-        if (saved) { staged = normalizeReplyRef(JSON.parse(saved)); paint(false); }
-    } catch { staged = null; }
+    whenRoomOpens(() => {
+        if (destroyed || staged) return;
+        try {
+            const saved = storage && storageKey ? storage.getItem(storageKey) : '';
+            if (saved) { staged = normalizeReplyRef(JSON.parse(saved)); paint(false); }
+        } catch { staged = null; }
+    });
 
     /**
      * What a reply to a work card quotes, or null while the card offers none: the work itself (its task id is its
@@ -473,6 +486,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
          * a new message with a fresh id); nothing is sent here.
          */
         compose(words) {
+            if (input.dataset.desktopRoomOpening === '1') return;
             const draft = input.value.trimEnd();
             input.value = draft ? `${draft}\n\n${words}` : words;
             input.dispatchEvent?.(new Event('input', { bubbles: true }));  // the composer's own sizing and draft keeping
@@ -483,6 +497,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         /** The local echo of a reply, shaped like a row so it draws the same quote (it has no row address yet). */
         echoRow: () => (staged ? { reply_to: staged } : null),
         clear,
+        consume,
         destroy() {
             destroyed = true;
             clearTimeout(targetTimer);

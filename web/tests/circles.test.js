@@ -10,6 +10,7 @@ import {
     placeRowHtml, placeRowsHtml, unassignedFoldHtml,
 } from '../modules/circles.js';
 import { normalizePlacesResponse } from '../modules/consciousness_api.js';
+import { openDesktopRoomSession } from '../modules/desktop_room_session.js';
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
 
 const strip = (html) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -781,4 +782,292 @@ test('a circle editor names a model\'s catalog price while its places pay it, an
     } finally {
         language({ language: '', english: true, revision: 52, entries: {} });
     }
+});
+
+test('a refreshed directory keeps removed edits accessible and releases the desktop hold when they are discarded', async t => {
+    const holds = [];
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: { ouroborosRoomSession: {
+        postMessage(message) { if (message.op === 'editor') holds.push(message.dirty); return {}; },
+    } } } });
+    host.top = host;
+    await openDesktopRoomSession(host, { documentElement: { dataset: {} }, querySelector: () => ({ content: 'circle-test', remove() {} }) }, assert.fail);
+    const view = page(t);
+    await settled();
+    await view.press('[data-circles-act="edit"][data-circle="team"]');
+    await view.type('team:text', 'Changed');
+    await view.type('team:text', team.text);  // a reverted field still has a draft key
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await view.type('home:text', 'My unsaved\nwords');
+    await view.press('[data-circles-act="edit"][data-circle="team"]');  // Home's editor is now folded away
+    view.serve({ ...RESPONSE, circles: [] });
+    await view.controller.refresh();
+    assert.match(view.body.textContent, /Home.*is no longer listed/);
+    assert.ok(view.body.querySelector('textarea[readonly]').textContent.endsWith('My unsaved\nwords'));
+    assert.equal(view.body.querySelector('[data-circles-act="discard-draft"][data-circle="team"]'), null);
+    assert.deepEqual(holds, [true, false, true]);
+    await view.press('[data-circles-act="discard-draft"][data-circle="home"]');
+    assert.equal(view.body.querySelector('textarea[readonly]'), null);
+    assert.deepEqual(holds, [true, false, true, false]);
+});
+
+// A write still out can land after the owner typed the saved words back: those words are unsaved against it, so the desktop
+// window stays held until its answer is known (circles.js `outrun`). The session records each change of the editors' hold.
+async function circleHolds() {
+    const holds = [];
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: { ouroborosRoomSession: {
+        postMessage(message) { if (message.op === 'editor') holds.push(message.dirty); return {}; },
+    } } } });
+    host.top = host;
+    await openDesktopRoomSession(host, { documentElement: { dataset: {} }, querySelector: () => ({ content: 'circle-writes', remove() {} }) }, assert.fail);
+    return holds;
+}
+
+// Home's text saved while the test holds each answer back: `outs[n].resolve(reply)` answers the n-th save with `reply(circle)`,
+// which returns the circle written or throws what the server said. The owner types the saved words back while the first is out.
+async function savingHome(t) {
+    const holds = await circleHolds();
+    const sent = [], outs = [];
+    const view = page(t, { writes: { updateCircle: (id, change, revision) => {
+        sent.push([id, change, revision]);
+        const out = deferred();
+        outs.push(out);
+        return out.promise.then((reply) => reply({ ...home, ...change, id, revision: revision + 1 }));
+    } } });
+    await settled();
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await view.type('home:text', 'Changed');
+    assert.deepEqual(holds, [true], 'an unsaved edit holds the window');
+    const saving = view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    assert.deepEqual(sent, [['home', { text: 'Changed' }, 4]]);
+    await view.type('home:text', home.text);  // back to the saved words, while the save is out
+    return { holds, view, saving, out: outs[0], outs, sent };
+}
+const landed = { ...RESPONSE, circles: [RESPONSE.circles[0], { ...RESPONSE.circles[1], text: 'Changed', revision: 5 }] };
+// Home on a later revision, as a read finds it after any change of the circle (its words only when `text` says so).
+const moved = (revision, text = home.text) => ({ ...RESPONSE, circles: [RESPONSE.circles[0], { ...RESPONSE.circles[1], text, revision }] });
+const noAnswer = () => { throw new TypeError('Failed to fetch'); };
+const refusal = () => { throw Object.assign(new Error('Name the circle first.'), { status: 400, body: {} }); };
+
+test('Circles: words typed back to the saved ones keep holding the window while the save is out, then follow what it wrote', async (t) => {
+    const { holds, view, saving, out } = await savingHome(t);
+    assert.deepEqual(holds, [true], 'the save out may still land and leave these words unsaved: the hold stays');
+    view.serve(landed);
+    out.resolve((circle) => circle);
+    await saving;
+    await settled();
+    assert.match(view.body.textContent, /Saved\. Newer edits are still unsaved\./);
+    assert.deepEqual(holds, [true], 'it landed: the words are unsaved against what it wrote, with no moment of letting go in between');
+    assert.equal(draftOf(view, 'home:text'), home.text, 'and the owner\'s newest words are the draft');
+    await view.type('home:text', 'Changed');
+    assert.deepEqual(holds, [true, false], 'typed what landed: nothing is unsaved any more');
+});
+
+test('Circles: a refused save wrote nothing, so the saved words typed back release the hold; other words keep it', async (t) => {
+    const { holds, view, saving, out } = await savingHome(t);
+    assert.deepEqual(holds, [true]);
+    out.resolve(refusal);
+    await saving;
+    await settled();
+    assert.deepEqual(holds, [true, false], 'a definite no-write: the words are the saved ones');
+    await view.type('home:text', 'Something else');
+    assert.deepEqual(holds, [true, false, true]);
+});
+
+test('Circles: a save that got no answer keeps holding through reads of the same revision, until a later revision rules it out', async (t) => {
+    const { holds, view, saving, out } = await savingHome(t);
+    out.resolve(noAnswer);  // the write may be on its way: the read that follows it finishes first, on the revision it expects
+    await saving;
+    await settled();
+    assert.deepEqual(holds, [true], 'a read of the same revision proves nothing: the write may land after it');
+    await view.controller.refresh();
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true], 'however often it is read');
+    view.serve(moved(5));  // the circle changed by another hand: a write that expected revision 4 can no longer land
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true, false], 'what the owner typed back is the saved words');
+});
+
+test('Circles: an unanswered save that lands after an old read is seen by the next read: the typed-back words are unsaved against it', async (t) => {
+    const { holds, view, saving, out } = await savingHome(t);
+    out.resolve(noAnswer);
+    await saving;
+    await settled();
+    assert.deepEqual(holds, [true], 'the first read found the circle as it was');
+    view.serve(landed);  // it landed after that read
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true], 'the read that sees it landed holds the typed-back words by what they now differ from');
+    assert.equal(draftOf(view, 'home:text'), home.text);
+    await view.type('home:text', 'Changed');
+    assert.deepEqual(holds, [true, false], 'typed what landed: nothing is unsaved any more');
+});
+
+test('Circles: a later save of the circle that is answered settles the unanswered one', async (t) => {
+    const { holds, view, saving, out, outs, sent } = await savingHome(t);
+    out.resolve(noAnswer);
+    await saving;
+    await settled();
+    assert.deepEqual(holds, [true]);
+    await view.type('home:text', 'Second words');
+    const again = view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    assert.deepEqual(sent.at(-1), ['home', { text: 'Second words' }, 4]);
+    view.serve(moved(5, 'Second words'));
+    outs[1].resolve((circle) => circle);
+    await again;
+    await settled();
+    assert.deepEqual(holds, [true, false], 'it landed on revision 5, so the first, which expected 4, cannot, and nothing is left unsaved');
+});
+
+test('Circles: a second save of the circle does not make the window forget the unanswered first', async (t) => {
+    const { holds, view, saving, out, outs } = await savingHome(t);
+    out.resolve(noAnswer);
+    await saving;
+    await settled();
+    await view.type('home:name', 'Renamed');
+    const again = view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    outs[1].resolve(refusal);  // a refusal of the second says nothing of the first
+    await again;
+    await settled();
+    await view.type('home:name', home.name);
+    assert.deepEqual(holds, [true], 'the first may still land: the typed-back words keep the window held');
+    view.serve(moved(6));
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true, false]);
+});
+
+test('Circles: the owner discarding the draft is their way to let go of an unanswered save', async (t) => {
+    const { holds, view, saving, out } = await savingHome(t);
+    out.resolve(noAnswer);
+    await saving;
+    await settled();
+    assert.deepEqual(holds, [true]);
+    await view.press('[data-circles-act="cancel"][data-circle="home"]');
+    assert.deepEqual(holds, [true, false]);
+});
+
+test('Circles: Save with nothing to send keeps an unanswered save held; a read or a confirmed save that shows no later revision does not settle it; Cancel does', async (t) => {
+    const { holds, view, saving, out, outs, sent } = await savingHome(t);
+    out.resolve(noAnswer);
+    await saving;
+    await settled();
+    const shown = view.body.textContent;  // the editor with the words typed back, and the line the failure left under it
+    await view.press('[data-circles-act="save"][data-circle="home"]');  // the draft equals the circle, and Save is not Cancel
+    await settled();
+    assert.equal(sent.length, 1, 'nothing is sent again');
+    assert.equal(view.body.textContent, shown, 'the editor, its draft and its line stay as they were');
+    assert.deepEqual(holds, [true]);
+    view.serve(moved(3));  // reads that show no later revision than the 4 it expects: an earlier one...
+    await view.controller.refresh();
+    view.serve({ ...RESPONSE, circles: [RESPONSE.circles[0], { ...RESPONSE.circles[1], revision: null }] });  // ...and one with none
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true], 'neither rules it out');
+    await view.type('home:text', 'Second words');
+    const again = view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    await view.type('home:text', home.text);  // typed back while it is out
+    outs[1].resolve(() => ({ ...home }));  // the server's answer to a save that found nothing to change: the circle as it stands, on 4
+    await again;
+    await settled();
+    assert.deepEqual(holds, [true], 'a confirmed save that left revision 4 cannot rule out one that expects 4');
+    await view.press('[data-circles-act="cancel"][data-circle="home"]');
+    assert.deepEqual(holds, [true, false], 'Cancel is the owner letting go');
+});
+
+test('Circles: a new circle that got no answer has no revision to rule it out: it holds until it is answered or cancelled', async (t) => {
+    const holds = await circleHolds();
+    const answer = deferred();
+    const view = page(t, { writes: { createCircle: async () => answer.promise } });
+    await settled();
+    await view.press('[data-circles-act="new"]');
+    await view.type('new:name', 'Work');
+    const creating = view.press('[data-circles-act="create"]');
+    await settled();
+    await view.type('new:name', '');  // cleared while it is being made
+    answer.reject(new TypeError('Failed to fetch'));
+    await creating;
+    await settled();
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true], 'reads that do not list a circle of that name prove nothing about a create');
+    await view.press('[data-circles-act="cancel-new"]');
+    assert.deepEqual(holds, [true, false], 'cancelling the draft lets go');
+});
+
+test('Circles: a new circle being made keeps the hold while its fields are cleared, and the made circle holds the newer words', async (t) => {
+    const holds = await circleHolds();
+    const answer = deferred();
+    const view = page(t, { writes: { createCircle: async () => answer.promise } });
+    await settled();
+    await view.press('[data-circles-act="new"]');
+    await view.type('new:name', 'Work');
+    assert.deepEqual(holds, [true]);
+    const creating = view.press('[data-circles-act="create"]');
+    await settled();
+    await view.type('new:name', '');  // cleared while it is being made: it will be made with the name that was sent
+    assert.deepEqual(holds, [true], 'the circle being made would leave an empty name unsaved against it');
+    view.serve({ ...RESPONSE, circles: [...RESPONSE.circles, { circle_id: 'work', name: 'Work', text: '', text_author: 'owner', text_at: '', revision: 1 }] });
+    answer.resolve({ id: 'work', name: 'Work', text: '', textAuthor: 'owner', textAt: '', revision: 1 });
+    await creating;
+    await settled();
+    assert.deepEqual(holds, [true], 'made: the cleared name is an unsaved edit of the circle made');
+    assert.equal(draftOf(view, 'work:name'), '');
+});
+
+// The server collapses a name's inner spaces (places.py `_circle_name`): a retyped name that only differs there is a save
+// it answers with the circle as it stands, on the revision it had. Home here is "Home base" with notes; the first save of
+// its notes got no answer and the owner typed the notes back before retyping the name.
+async function normalizedName(t) {
+    const holds = await circleHolds();
+    const based = { ...RESPONSE, circles: [RESPONSE.circles[0], { ...RESPONSE.circles[1], name: 'Home base', text: 'Notes' }] };
+    const stands = normalizePlacesResponse(based).circles[1];
+    const sent = [], outs = [];
+    const view = page(t, { response: based, writes: { updateCircle: (id, change, revision) => {
+        sent.push([id, change, revision]);
+        const out = deferred();
+        outs.push(out);
+        return out.promise.then((reply) => reply());
+    } } });
+    const save = () => view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await view.type('home:text', 'Changed');
+    const first = save();
+    await settled();
+    outs[0].resolve(noAnswer);  // it may still land on the revision it expects, 4
+    await first;
+    await settled();
+    await view.type('home:text', 'Notes');
+    await view.type('home:name', 'Home  base');
+    const second = save();
+    await settled();
+    assert.deepEqual(sent, [['home', { text: 'Changed' }, 4], ['home', { name: 'Home  base' }, 4]]);
+    outs[1].resolve(() => ({ ...stands }));  // nothing to change: the circle as it stands, still on revision 4
+    await second;
+    await settled();
+    return { holds, view, sent, save, based };
+}
+
+test('Circles: a save that changed nothing leaves the notes an unanswered save may overwrite as a held draft, and sends nothing again', async (t) => {
+    const { holds, view, sent, save, based } = await normalizedName(t);
+    assert.deepEqual(holds, [true], 'revision 4 again proves nothing of the save that expects 4: the typed-back notes stay held');
+    assert.equal(draftOf(view, 'home:text'), 'Notes', 'the editor stays open on the notes the owner restored');
+    assert.equal(view.body.querySelector('[data-circles-draft="home:name"]').attrs.value, 'Home base', 'the name answered is the circle\'s own');
+    assert.match(view.body.textContent, /Saved\. Newer edits are still unsaved\./);
+    await save();  // the draft equals the circle: Save is not Cancel, and the unanswered save is not sent again
+    await settled();
+    assert.equal(sent.length, 2);
+    assert.deepEqual(holds, [true]);
+    assert.equal(draftOf(view, 'home:text'), 'Notes');
+    view.serve({ ...based, circles: [based.circles[0], { ...based.circles[1], revision: 5 }] });  // changed by another hand
+    await view.controller.refresh();
+    assert.deepEqual(holds, [true, false], 'a later revision rules the unanswered save out: the notes are the saved ones');
+});
+
+test('Circles: after a save that changed nothing, Cancel is still the owner\'s way to let go of the unanswered save', async (t) => {
+    const { holds, view } = await normalizedName(t);
+    assert.deepEqual(holds, [true]);
+    await view.press('[data-circles-act="cancel"][data-circle="home"]');
+    assert.deepEqual(holds, [true, false]);
+    assert.equal(draftOf(view, 'home:text'), null, 'the editor closed with its draft');
 });

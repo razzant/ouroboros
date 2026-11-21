@@ -553,6 +553,114 @@ def test_a_document_that_never_ran_the_script_is_ordinary(mac):
     assert native.appearances[-1] is None, "an unthemed document inherits the system appearance"
 
 
+def spoke(shell, view, kind, doc, /, **facts):
+    """A word of ``view``'s document as the script handler passes it on, with the view that sent it. The shell is
+    positional only: a declaration's own ``chrome`` fact is one of the words."""
+    shell.receive_from(view, {"type": kind, "doc": doc, **facts})
+
+
+def test_a_replacement_view_brings_its_own_declaration_and_a_reversal_returns_the_first_views(mac):
+    """In a renderer replacement (``launcher_webkit``) the window follows its content view. The presented view's kept
+    declaration and appearance apply before pywebview's ``before_load`` asks whether its document declared, so that
+    question never returns the bar to ordinary; a view put back by a reversal gets its own again, its band included."""
+    chrome, window, native = shown()
+    first, second = mac.webview, WebView()
+    spoke(chrome, first, "declare", DOC_A, chrome=wc.INTEGRATED, choice="light", theme="light")
+    window.events.before_load.fire()  # the first document finished loading
+    told = list(first.evaluated)
+    chrome.renderer_changed(first)  # already the content view: nothing to follow
+    assert first.evaluated == told == [{"doc": DOC_A, "top": TOOLBAR_BAND, "start": 73.0}]
+
+    chrome.prepare_renderer(second)  # a successor loads off screen
+    spoke(chrome, second, "declare", DOC_B, chrome="", choice="dark", theme="dark")
+    held = pressed(mac, press(native))
+    spoke(chrome, second, "drag", DOC_B)
+    assert native.mask & wc._FULL_SIZE_CONTENT and native.appearances == [("appearance", "Aqua")]
+    assert second.evaluated == [] and ("drag", held) not in native.calls, "off screen it changes and drags nothing"
+
+    chrome.renderer_changed(second)  # presented
+    assert_ordinary(native)
+    assert native.appearances == [("appearance", "Aqua"), ("appearance", "DarkAqua")]
+    assert second.evaluated == [{"doc": DOC_B, "top": 0, "start": 0}] and first.evaluated == told
+    window.events.before_load.fire()  # pywebview's didFinish for the presented view: its document had declared
+    assert_ordinary(native)
+    assert native.appearances[-1] == ("appearance", "DarkAqua")
+    spoke(chrome, first, "drag", DOC_A)  # the view off screen
+    assert ("drag", held) not in native.calls
+
+    chrome.renderer_changed(first)  # the replacement is reversed
+    assert native.mask & wc._FULL_SIZE_CONTENT and native.toolbar() is not None
+    assert native.appearances[-1] == ("appearance", "Aqua")
+    assert first.evaluated == told * 2, "its document is told its band again"
+    chrome.prepare_renderer(None)  # the dropped successor is forgotten
+    spoke(chrome, second, "declare", DOC_B + 1.0, chrome="", choice="dark", theme="dark")
+    assert native.mask & wc._FULL_SIZE_CONTENT and native.appearances[-1] == ("appearance", "Aqua")
+    held = pressed(mac, press(native))
+    spoke(chrome, first, "drag", DOC_A)
+    assert native.calls[-1] == ("drag", held), "the returned document's band drags the window again"
+
+
+def test_a_presented_view_that_never_spoke_is_ordinary_at_before_load_like_any_silent_document(mac):
+    chrome, window, native = shown()
+    spoke(chrome, mac.webview, "declare", DOC_A, chrome=wc.INTEGRATED, choice="dark", theme="dark")
+    window.events.before_load.fire()
+    silent = WebView()
+    chrome.prepare_renderer(silent)
+    chrome.renderer_changed(silent)
+    assert native.mask & wc._FULL_SIZE_CONTENT, "nothing of it to read yet: before_load decides, as for any document"
+    window.events.before_load.fire()
+    assert_ordinary(native)
+    assert native.appearances[-1] is None and silent.evaluated == []
+
+
+@pytest.mark.parametrize("an_earlier_document_declared", [False, True])
+def test_a_view_put_back_returns_the_window_of_a_document_that_never_declared(mac, an_earlier_document_declared):
+    """A reversal puts the first view back with no new load, so no ``before_load`` asks again. The window returns to
+    what it was for that view's document: ordinary and inherited for one that never spoke (an older or custom UI),
+    whatever an earlier document of the same view had declared and whatever the reversed successor brought."""
+    chrome, window, native = shown()
+    first, second = mac.webview, WebView()
+    if an_earlier_document_declared:
+        spoke(chrome, first, "declare", DOC_A, chrome=wc.INTEGRATED, choice="light", theme="light")
+        window.events.before_load.fire()
+    window.events.before_load.fire()  # the first view's current document finished loading without a word
+    assert_ordinary(native)
+    assert not native.appearances or native.appearances[-1] is None
+
+    chrome.prepare_renderer(second)
+    spoke(chrome, second, "declare", DOC_B, chrome=wc.INTEGRATED, choice="dark", theme="dark")
+    chrome.renderer_changed(second)  # presented
+    window.events.before_load.fire()
+    assert native.mask & wc._FULL_SIZE_CONTENT and native.appearances[-1] == ("appearance", "DarkAqua")
+
+    chrome.renderer_changed(first)  # the replacement is reversed
+    chrome.prepare_renderer(None)
+    assert_ordinary(native)
+    assert native.appearances[-1] is None, "neither the successor's Dark nor an earlier document's Light"
+    assert all(told["top"] == 0 for told in first.evaluated[1:]), "its silent document is told no band to reserve"
+
+
+def test_a_returned_view_keeps_its_words_since_and_its_next_silent_document_is_ordinary(mac):
+    chrome, window, native = shown()
+    first, second = mac.webview, WebView()
+    spoke(chrome, first, "declare", DOC_A, chrome=wc.INTEGRATED, choice="light", theme="light")
+    window.events.before_load.fire()
+    chrome.prepare_renderer(second)
+    chrome.renderer_changed(second)
+    window.events.before_load.fire()  # the silent successor is ordinary
+    assert_ordinary(native)
+    spoke(chrome, first, "appearance", DOC_A, choice="dark", theme="dark")  # the first view's page repainted off screen
+    assert native.appearances[-1] is None
+
+    chrome.renderer_changed(first)  # reversed: its integrated bar again, and the appearance it painted meanwhile
+    chrome.prepare_renderer(None)
+    assert native.mask & wc._FULL_SIZE_CONTENT and native.toolbar() is not None
+    assert native.appearances[-2:] == [("appearance", "Aqua"), ("appearance", "DarkAqua")]
+    window.events.before_load.fire()  # no load came with the reversal: this is its next navigation, and it is silent
+    assert_ordinary(native)
+    assert native.appearances[-1] is None
+
+
 def test_full_screen_hides_the_toolbar_band_reserves_nothing_and_defers_the_switches(mac):
     chrome, _window, native = shown()
     declare(chrome, DOC_A)

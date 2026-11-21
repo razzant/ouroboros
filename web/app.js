@@ -6,6 +6,7 @@ import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.j
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
+import { desktopRoomStorage, finishDesktopStartup, openDesktopRoomSession } from './modules/desktop_room_session.js';
 import { bindChatSearchKeys } from './modules/chat_search.js';
 import { createStateSnapshotSequencer, heldProjectChatIds, readStateSnapshot } from './modules/state_snapshots.js';
 import { IDLE_SUMMARY, buildProjectActivityIndex, markWords, pictureOwner, reconcileProjectRooms } from './modules/project_activity.js';
@@ -87,7 +88,6 @@ const state = {
     projectListableCount: null,
 };
 
-// Connect only after modules register listeners.
 const ws = createWS();
 // Loopback-only debug hook: the Playwright leak test counts live ws listeners
 // through this handle (the module-scoped `ws` is unreachable from page.evaluate).
@@ -110,9 +110,9 @@ window.__ouroLayers = layers;
 syncMarkPhases(document);
 // What the owner scrolled keeps its place while hidden (page_places.js), registered before any page's own show handler.
 const restorePlaces = initPagePlaces();
-const pageNavigation = createPageNavigation({ layers, capture: opener => capturePagePlace({
+const pageNavigation = createPageNavigation({ layers, capture: (opener, capturePending) => capturePagePlace({
     state, navState, settingsControls, dashboardControls, skillsControls, projectInstances, projectPanelTitle,
-    rooms, mainChat, logsControls, restorePlaces, commitPage,
+    rooms, mainChat, logsControls, restorePlaces, commitPage, pendingRoom: capturePending && desktopRoomStorage()?.returnToProject,
 }, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers), land: () => restorePlaces.land(document.querySelector('.page.active')),
 leave: () => rooms.rememberSelection(shownRoom()) });
 bindPageBack({ layers, currentHeader: () => navState.activeProjectId
@@ -235,6 +235,7 @@ function commitPage(pageName, options = {}) {
     if (options.closeProject !== false) closeProjectPanel({ sync: false, reveal: options.reveal });
     if (options.closeDrawer !== false) navState.mobileDrawerOpen = false;
     options.enter?.();
+    if (pageName === 'chat' && !options.initialRoom) desktopRoomStorage()?.selectRoom(navState.activeProjectId);
     if (options.sync !== false) syncNavigationState();
 }
 
@@ -671,6 +672,7 @@ function closeNotificationReaders() {
     for (const inst of projectInstances.values()) inst.closeTransient?.();
 }
 
+openDesktopRoomSession(window, document, text => showToast(text, 'warn', { ttl: 0 }));
 mainChat = initChat({ ...ctx, ws: roomSocket(ws) });
 // The start's opening ends at the reader's own first move in Main's feed or its ↓: a key, wheel, touch or press (DESIGN "Unread").
 for (const id of ['chat-messages', 'chat-scroll-bottom']) for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) document.getElementById(id)?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
@@ -738,6 +740,7 @@ function closeProjectPanel({ sync = true, reveal = false } = {}) {
     projectReveals.clear();
     const activeId = navState.activeProjectId;
     navState.activeProjectId = null;
+    if (sync && activeId && state.activePage === 'chat') desktopRoomStorage()?.selectRoom(null);
     // Anything left is a room away (room_retire.js): hidden, quiet, its paint cancelled when it was put away.
     if (activeId) rooms.retire(activeId);
     const beside = !mainChat?.ws?.paused;  // docked beside the room, Main stayed live
@@ -750,7 +753,7 @@ function closeProjectPanel({ sync = true, reveal = false } = {}) {
     void acknowledgeMainAfterPaint();  // Main is the room on screen again: what came while it was covered is read now
 }
 
-async function openProjectPanel(project, { closeDrawer = true, openOnly = false, taskId = '', quizId = '', sourceReveal = null, pointer = false, latest = false, map = false } = {}) {
+async function openProjectPanel(project, { closeDrawer = true, openOnly = false, taskId = '', quizId = '', sourceReveal = null, pointer = false, latest = false, map = false, mounted, readProject, unavailable } = {}) {
     if (sourceReveal && !sourceReveal.current()) return null;
     // A reference may carry a stale deleting/closed projection. It still names an id that must be checked against the
     // registry before we decide whether to stay put; rejecting it here would skip the exact lookup and hide the reason.
@@ -766,11 +769,11 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         if (!(taskId && quizId)) { projectReveals.delete(project.id); cancelProjectPaint(project.id, inst); }
         return landInProject(freshProjectRow(project), inst, { taskId, quizId, latest });
     }
-    const origin = pageNavigation.capture();
+    const origin = pageNavigation.capture(!mounted);
     // The room is the registry's. A row that names its room is its caller's own answer (or the row pressed in the list)
     // and opens as it stands; a reference names only {id, name} and is read by its id first, whatever an older feed row
     // says. Until then the room on screen stays as it is.
-    if (!(Number.isSafeInteger(project.chat_id) && project.chat_id > 1)) project = await resolveProjectRoom(project, navigation);
+    if (!(Number.isSafeInteger(project.chat_id) && project.chat_id > 1)) project = await resolveProjectRoom(project, navigation, readProject, unavailable);
     if (!project) return;
     projectReveals.clear();
     // perf2 P4.2: signal chat.js that a panel open is in flight so Main's
@@ -779,7 +782,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     try {
         // One paint for the whole step (the sync below): a handover leaves the room that was on screen.
         let inst;
-        const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false,
+        const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, initialRoom: Boolean(mounted), closeProject: false, closeDrawer: false, sync: false,
             current: () => navigation === projectNavigationGeneration && (!sourceReveal || sourceReveal.current()),
             enter: () => {
         // A document Main had open (a modal over the whole app) closes rather than sit over the room. Covered (a phone,
@@ -791,12 +794,11 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         projectPanelTitle.textContent = projectPanelTitle.title = project.name || project.id;  // whole name on hover too
         // Every OTHER room is put away (room_retire.js) before the target is created or
         // shown; the one on screen, left from the open phone drawer, is retired to fade out inside the card.
-        rooms.settle(project.id, undefined, false);
+        inst = rooms.reopen(project.id);
         const handingOver = isStackLayout() && navState.mobileDrawerOpen && closeDrawer;
         for (const pid of [...projectInstances.keys()]) {
             if (pid !== project.id) (handingOver ? rooms.retire : rooms.putAway)(pid);
         }
-        inst = projectInstances.get(project.id);
         if (!inst) {
             inst = createChatInstance({
                 ...ctx, ws: roomSocket(ws),
@@ -820,6 +822,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         syncNavigationState();
         } });
         if (movedToChat === false || navigation !== projectNavigationGeneration) return;
+        mounted?.(inst);  // the room can take input before its history read completes
         if (sourceReveal) {
             const reveal = {};
             projectReveals.set(project.id, reveal);
@@ -850,10 +853,11 @@ async function landInProject(project, inst, { taskId, quizId, latest, forcePaint
 // A Project named by its id alone (a reference, a portal, a completion row, a row older than the feed) opens its own
 // room or none: the registry's row for that id (CLIENT_CONTRACT §6). A later navigation, a close or another page
 // supersedes the read; a missing, deleting or unreadable answer keeps the room on screen and says so. Never Main.
-async function resolveProjectRoom(project, navigation) {
+async function resolveProjectRoom(project, navigation, read = apiClient.projectById, unavailable) {
     const name = project.name || project.id;
-    let rows = null, error = '';
-    try { rows = (await apiClient.projectById(project.id))?.projects; } catch (err) { error = err?.message || 'unknown error'; }
+    let rows = null, error = '', failure;
+    try { rows = (await read(project.id, () => navigation === projectNavigationGeneration))?.projects; }
+    catch (err) { failure = err; error = err?.message || 'unknown error'; }
     if (navigation !== projectNavigationGeneration) return null;
     const room = Array.isArray(rows) && rows.length === 1 && rows[0]?.id === project.id ? rows[0] : null;
     const valid = room && Number.isSafeInteger(room.chat_id) && room.chat_id > 1;
@@ -861,9 +865,9 @@ async function resolveProjectRoom(project, navigation) {
     if (!error && !(Array.isArray(rows) && (rows.length === 0 || (valid && room.lifecycle === 'deleting')))) {
         error = fmt('the answer could not be read');
     }
-    showToast(error ? fmt('Could not open “{name}”: {error}', { name, error })
-        : rows.length ? fmt('“{name}” is being deleted.', { name }) : fmt('“{name}” is no longer available.', { name }),
-    error ? 'error' : 'warn');
+    if (unavailable) unavailable(error ? 'unreadable' : rows.length ? 'deleting' : 'missing', failure);
+    else showToast(error ? fmt('Could not open “{name}”: {error}', { name, error }) : rows.length
+        ? fmt('“{name}” is being deleted.', { name }) : fmt('“{name}” is no longer available.', { name }), error ? 'error' : 'warn');
     return null;
 }
 
@@ -1254,10 +1258,10 @@ document.getElementById('nav-projects-add')?.addEventListener('click', async (ev
     }
 });
 
-// Callers that must observe a read taken AFTER their own change (or after a
-// socket open) force one, coalesced behind an in-flight read; the boot prefetch
-// and the periodic poll join whatever page-wide read is in flight. Every read
-// settles within its lifetime, so the boot's socket connect never waits forever.
+// Callers that must observe a read taken AFTER their own change (or after a socket open) force one,
+// coalesced behind an in-flight read; the boot prefetch and the periodic poll join whatever read is
+// in flight, and every read settles within its lifetime — so connectRooms knows the Project ids
+// before ws.connect (chat.js::isMyThread routes by state.projectChatIds) and still connects when it fails.
 async function refreshProjectsNav(force = true) {
     const request = await stateSnapshots.gate(force);
     if (request) await readStateSnapshot(stateSnapshots, request);
@@ -1590,8 +1594,7 @@ bindDocumentSelectionDismissal(document, { onPress: () => rooms.forgetShownSelec
 // Every strip (.ui-segment-group) on every page gets the one travelling fill, wherever its markup came from.
 watchSegmentFills(document.body);
 
-// Populate the project-thread isolation set BEFORE opening the socket so the live
-// fan-out never misclassifies an early project frame as main-chat traffic during
-// startup (chat.js::isMyThread relies on state.projectChatIds). Connect even if
-// the prefetch fails, then ws.on('open') keeps it fresh.
-refreshProjectsNav(false).finally(() => ws.connect());
+const connectRooms = () => { refreshProjectsNav(false).finally(() => ws.connect()); };
+finishDesktopStartup(() => state.activePage === 'chat' ? shownRoom() : null, (id, mounted, readProject, unavailable, returning) =>
+    !location.hash && (returning ? state.activePage === 'chat' : !projectNavigationGeneration)
+        && openProjectPanel({ id }, { openOnly: true, mounted, readProject, unavailable }), connectRooms);

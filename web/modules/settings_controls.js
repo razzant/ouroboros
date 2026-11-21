@@ -139,6 +139,9 @@ const repaintAll = () => BOUND.forEach((paints) => paints.forEach((paint) => pai
 // (model_catalog_store.js): a read, or a row's landed write.
 const announce = (data) => globalThis.document?.dispatchEvent?.(new CustomEvent('settings-document:applied', { detail: data }));
 
+// A saved row or a saved entry says so to the window: one event, one payload shape (the reason, then the row's own facts).
+const announceSaved = (reason, detail) => globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:settings-updated', { detail: { reason, source: 'settings-row', ...detail } }));
+
 /** One fresh read of the settings document; the helper keeps the newest for values, effects, tokens and the setup
  *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. The rows on
  *  screen are painted from the read that lands; while none has, from what the newest read says (settingsReadMessage). */
@@ -156,7 +159,7 @@ export async function readSettings() {
     announce(data);
     ROW_STATES.forEach((state) => {
         if (state.busy || state.outcome?.state !== 'unknown' || !sameValue(currentValue(state.row, data), state.sent)) return;
-        Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '' }, reread: false, typed: null, seen: false });
+        Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '', byRead: true }, reread: false, typed: null, seen: false });
     });
     repaintAll();
     return data;
@@ -471,22 +474,22 @@ function patchSettings(row, value, outcome) {
 
 async function writeOnce(row, state, value, options) {
     if (state.reread) {
-        // An unknown outcome may still commit (a timed-out worker goes on): read before anything else is sent.
+        // An unknown outcome may still commit (a timed-out worker goes on): read before anything else is sent. The read
+        // can be outrun by a newer read or a save; only the read that brought the newest document shows the value.
         let fresh;
-        try { fresh = await readSettings(); } catch (error) {
+        try { fresh = await readSettings(); state.reread = false; } catch (error) {
             return { state: 'unknown', effect: effectOf(row), withheld: '', message: errorWords(error).text, code: '' };
         }
-        state.reread = false;
-        if (sameValue(currentValue(row, fresh), value)) return { state: 'saved', effect: effectOf(row), withheld: '', message: '', code: '' };
+        if (settingsSnapshot() === fresh && sameValue(currentValue(row, fresh), value)) return { state: 'saved', effect: effectOf(row), withheld: '', message: '', code: '', byRead: true };
     }
     let outcome = await (WRITERS[row.writer || 'generic'] || WRITERS.generic)(row, value, options);
     if (outcome.state === 'unknown' || outcome.state === 'changed_elsewhere') {
         state.reread = outcome.state === 'unknown';
         try {
             const fresh = await readSettings();
-            if (state.reread && sameValue(currentValue(row, fresh), value)) {
+            if (state.reread && settingsSnapshot() === fresh && sameValue(currentValue(row, fresh), value)) {
                 state.reread = false;
-                outcome = { ...outcome, state: 'saved', message: '', details: '' };
+                outcome = { ...outcome, state: 'saved', message: '', details: '', byRead: true, unanswered: true };
             }
         } catch { /* the row keeps saying what it knows */ }
     }
@@ -501,17 +504,14 @@ async function drain(row, state, first) {
         const outcome = job.local || await writeOnce(row, state, job.value, job.options);
         const landed = outcome.state === 'saved' || outcome.state === 'saved_then_failed';
         if (landed) patchSettings(row, job.value, outcome);
-        if (!job.local) state.sent = job.value;
+        if (!job.local) { state.sent = job.value; if (job.ticket) outcome.answers = job.ticket; }  // the caller's own token, never read here
         // The answer stands as the row's result unless a newer value is already on its way.
         if (!state.waiting) {
             Object.assign(state, { outcome, seen: false });
             if (landed || outcome.state === 'unchanged' || outcome.state === 'changed_elsewhere') state.typed = null;
         }
         job.settle.forEach((settle) => settle(outcome));
-        if (landed) {
-            globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:settings-updated',
-                { detail: { reason: 'setting saved', source: 'settings-row', row: row.id, page: row.page, keys: row.keys } }));
-        }
+        if (landed) announceSaved('setting saved', { row: row.id, page: row.page, keys: row.keys });
         job = state.waiting;
         state.waiting = null;
     }
@@ -533,17 +533,18 @@ function enqueue(row, job) {
 
 /**
  * Write one row and answer its Outcome. While a write of the row is in flight a newer value waits and is sent after
- * it, alone. `confirmed` skips the row's question (Undo); `ifUnchanged` is the token Undo sends as its precondition;
- * `only` names the keys Undo writes; `ask` stands in for the shared confirm dialog.
+ * it, alone, and answers the value it replaced; a caller's `ticket` (its own token) comes back as `outcome.answers` of
+ * the job that ran. A `saved` marked `byRead` is a read that showed the value, not the write's own answer: `unanswered`
+ * says its POST was sent and lost its answer — it may still land; `confirmed` skips the question (Undo); `ifUnchanged`: Undo's token; `only`: its keys; `ask`: the dialog.
  */
-export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], only = null, ask = openConfirmDialog } = {}) {
+export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], only = null, ask = openConfirmDialog, ticket = null } = {}) {
     if (!lastSettings) await ensureRead();  // effects, tokens and a contract field's bounds
     const question = CONFIRMS[row.confirm];
     if (question && !confirmed && !(await question(row, value, currentValue(row), ask))) {
         repaintRow(row.id);
         return unchanged(row);
     }
-    return enqueue(row, { value, options: { ifUnchanged, unset, only, ask } });
+    return enqueue(row, { value, ticket, options: { ifUnchanged, unset, only, ask } });
 }
 
 function entryList(document) {
@@ -588,8 +589,7 @@ export function writeEntry(key, id, change, { confirmed = false, ask = openConfi
         }
         if (outcome.state === 'saved' || outcome.state === 'saved_then_failed') {
             patchSettings(row, stored.wrap(next), { ...outcome, new: undefined });
-            globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:settings-updated',
-                { detail: { reason: 'entry saved', source: 'settings-row', row: key, keys: [key] } }));
+            announceSaved('entry saved', { row: key, keys: [key] });
         }
         return outcome;
     };

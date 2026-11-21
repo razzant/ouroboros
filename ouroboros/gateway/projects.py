@@ -14,8 +14,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir
+from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_repo_dir
 from ouroboros.project_admission import ProjectAdmissionError, project_admission_basis
+from ouroboros.store import StoreMigrating
 
 log = logging.getLogger(__name__)
 
@@ -304,6 +305,8 @@ async def api_projects_list(request: Request) -> JSONResponse:
         projects = await run_in_threadpool(projects_summary, drive_root, by_message=True,
                                            limit=None if query.get("all") == "1" else 200)
         return JSONResponse({"projects": projects})
+    except StoreMigrating as exc:
+        return json_error(str(exc), 503, reason_code="migrating")
     except Exception as exc:
         return json_exception(exc)
 

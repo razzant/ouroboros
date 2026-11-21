@@ -108,6 +108,13 @@ class PageZoom:
         if percent != 100:
             self._apply_now(kind, view)
 
+    def renderer_changed(self, view: Any) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._view = view
+        self._apply_now("cocoa", view)
+
     def _close(self) -> None:
         with self._lock:
             self._closed = True
@@ -212,7 +219,7 @@ class PageZoom:
     def _apply_now(self, kind: str, view: Any) -> bool:
         """The engine's own page zoom (on its GUI thread), at the newest size, whichever request queued this write."""
         with self._lock:
-            if self._closed:
+            if self._closed or (kind == "cocoa" and self._view is not view):
                 return False
             factor = self._percent / 100
         try:

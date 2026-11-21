@@ -57,7 +57,7 @@ export function normalizeReplyRef(raw) {
         task_id: oneSpace(raw.task_id),
         // The quoted message's first photo, as its own attachment view (the same safe upload URL the
         // bubble shows): a reply to a photo carries its thumbnail, never an arbitrary address.
-        media: attachmentViews([raw.attachment]).find((view) => view.kind === 'image' && view.available) || null,
+        media: attachmentViews([raw.attachment ?? raw.media]).find((view) => view.kind === 'image' && view.available) || null,
     };
     return ref.address || ref.snippet ? ref : null;
 }

@@ -1,3 +1,4 @@
+import { markDesktopEditor } from './desktop_room_session.js';
 // The Safety Supervisor in Settings. Permissions and checks, "Who watches its actions": the two levels are rows that
 // save themselves (settings_rows.js; settings_controls.js writes them through the owner endpoint and asks before a
 // level is lowered); this module says the facts beside them: which model checks, who re-checks, what a managed
@@ -121,7 +122,81 @@ export function spareWords(walks, verdicts, span) {
 }
 
 const RULES_SAVED = 'Saved · applies from the next task or turn';
+const NOT_SAVED = { text: 'Not saved yet', tone: 'warn' };
 let unsavedRules = null;  // text typed and not saved survives leaving the page, in this window
+// What the owner typed last, in whichever mount of this page (`typedRules`), is safe from a window replacement only when
+// it is the persisted text however every save still in flight or unconfirmed (`writing`) ends; `savedRules` is the text
+// a read or a landed save last showed persisted. Saves line up in commitSetting's one row queue across mounts, which
+// sends the newest value waiting behind the one in flight and answers the values it replaced with that one. Each save
+// hands the queue its own record as a ticket and learns whose answer it got (`outcome.answers`): it is reconciled with the
+// save the queue ran, never with the text its own press carried. The queue carries no text; the records stay here.
+let typedRules = null, savedRules = null;
+const writing = new Set();  // `{ text, open }`: open while in flight, then kept only while its outcome stays unknown
+
+/** Whether a save whose answer never came still counts against the words in the field: such a request may complete
+ *  after anything and put its own words back, so even words typed back to what is persisted are not safe while one
+ *  of other words counts. A field that follows what is persisted (`typedRules` null) holds nothing: no words of the
+ *  owner's are at risk. */
+function unsettledRules() {
+    return typedRules !== null && typedRules === savedRules
+        && [...writing].some((write) => !write.open && write.text !== typedRules);
+}
+
+/** Weigh the newest typed words against what may be persisted: while a save in flight or unconfirmed could leave them
+ *  unsaved they stay held, and the page restores them when it opens again — even words typed back to the saved text. */
+function holdRules() {
+    const open = typedRules !== null && (typedRules !== savedRules || [...writing].some((write) => write.text !== typedRules));
+    unsavedRules = open ? typedRules : null;
+    markDesktopEditor('Your rules', open);
+}
+
+/** A read showed `text` persisted: that is what is saved now. It proves no request ended — a save whose answer never
+ *  came may still complete after the read and put its words back — so nothing is retired here; a save is settled by
+ *  its own answer (`rulesSettled`) or given up by the owner (`releaseUnsettledRules`). */
+function rulesRead(text) {
+    savedRules = text;
+    holdRules();
+}
+
+/** A save settled with `outcome`, the answer of the save the queue ran: one whose own text was replaced while it waited
+ *  is answered by the one that replaced it, so its words never went out and it counts for nothing. Landed says the
+ *  text was persisted at that moment; the server's own answer settles the save it is about — no other. A read alone
+ *  (`outcome.byRead`, settings_controls.js) settles it only when nothing was sent for it (writeOnce's read before
+ *  the send); a read after a write whose own answer was lost (`outcome.unanswered`) settles nothing, for that request
+ *  was sent, may still land over newer words, and keeps counting until its own answer or the owner's give-up
+ *  (`releaseUnsettledRules`). A read of what landed retires nothing (`rulesRead`), and an earlier save of other words
+ *  may still land too. Refused, or changed elsewhere (the fresh read has what is persisted): nothing was written, so
+ *  words typed back to the persisted text are saved after all. Unconfirmed: it may yet land, and keeps counting.
+ *  Returns the save the answer is about. */
+function rulesSettled(write, outcome) {
+    const answered = typeof outcome.answers?.text === 'string' ? outcome.answers : write;
+    const sent = answered.text;
+    const { state } = outcome;
+    write.open = false;
+    if (answered !== write) writing.delete(write);
+    if (state === 'saved' || state === 'saved_then_failed' || state === 'unchanged') {
+        savedRules = sent;
+        // The server's answer settles the save it is about, and only that one: another save of the same words,
+        // answered later, is no proof that this one completed — it may still land after it and put these words back.
+        // A read alone settles it only when nothing was sent for it: a save whose own answer was lost
+        // (`outcome.unanswered`) was sent, may still land over newer words, and keeps counting until its own answer
+        // or the owner's give-up.
+        if (answered === write && !outcome.unanswered) writing.delete(write);
+    } else if (state === 'refused' || state === 'changed_elsewhere') {
+        writing.delete(write);
+        if (state === 'changed_elsewhere') savedRules = settingsSnapshot() ? String(settingsSnapshot()[SAFETY_RULES_KEY] ?? '') : null;
+    }
+    holdRules();
+    return answered;
+}
+
+/** The owner stops waiting for the saves whose answer never came: they accept that such a save may still land and
+ *  replace what is saved. Nothing is sent, no words change and no request is claimed ended — the form only stops
+ *  holding the owner's words against it, until they type new words or press Save again. */
+function releaseUnsettledRules() {
+    for (const write of writing) if (!write.open) writing.delete(write);
+    holdRules();
+}
 
 /** What Save says: the page's own sentence once saved, else the row helper's words (a refusal, an unknown outcome,
  *  a failed after-step); `{ text, tone, details }`. */
@@ -133,7 +208,8 @@ export function rulesSaveWords(outcome, row = rowById(SAFETY_RULES_KEY)) {
     return { text: line?.text || 'Not saved.', tone: line?.tone || 'danger', details: line?.details || '' };
 }
 
-/** Your rules, as a page: the text, Save and its result. `mount(container, { ctx })` of settings_pages.js. */
+/** Your rules, as a page: the text, Save and its result, and — while a save whose answer never came still counts —
+ *  the line that says so, with the owner's way to stop waiting for it. `mount(container, { ctx })` of settings_pages.js. */
 export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     const row = rowById(SAFETY_RULES_KEY);
     container.innerHTML = `<p class="settings-page-lead">Standing rules in your own words. Ouroboros reads them every time; the Safety Supervisor reads them before actions.</p>
@@ -146,15 +222,21 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
             </div>
             <p class="settings-card-note" id="settings-rules-note">Running work keeps the text it started with. Rules for one chat or channel live with that place, in Circles.</p>
             <p class="settings-card-note" data-rules-organization hidden>Your organization’s rules apply too; its administrator sets them.</p>
+            <p class="settings-card-note" data-rules-unsettled hidden>An older save may still land and replace what is saved.
+                <button type="button" class="consciousness-inline-link ui-hit-area" data-rules-give-up>Stop waiting for it</button></p>
         </section>`;
     const field = container.querySelector('#settings-rules');
     const button = container.querySelector('[data-editor-save]');
     const result = container.querySelector('[data-editor-result]');
+    const standing = container.querySelector('[data-rules-unsettled]');
     let stored = null;  // the saved text as last read; null until a read answers
     let gone = false;
     let locked = false;
-    const say = (words) => setResult(result, words || {});
-    const unsaved = () => (unsavedRules === null ? null : { text: 'Not saved yet', tone: 'warn' });
+    // The standing line is not a save's result: it says a risk that outlives every result, and its link is the owner's
+    // way to give this form's draft up. Both follow the words, so both are repainted wherever the result is.
+    const paintStanding = () => { standing.hidden = !unsettledRules(); };
+    const say = (words) => { setResult(result, words || {}); paintStanding(); };
+    const unsaved = () => (unsavedRules === null ? null : NOT_SAVED);
     // Until a read answers the text is no value: not operable, and it says it is being read or could not be.
     const lock = () => {
         const words = stored === null ? settingsReadMessage() : '';
@@ -166,7 +248,9 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     const adopt = (settings) => {
         stored = String(settings?.[SAFETY_RULES_KEY] ?? '');
         container.querySelector('[data-rules-organization]').hidden = !deploymentOf(settings?._meta)?.organization_rules;
-        if (unsavedRules === null && field.value !== stored) field.value = stored;
+        // A page with nothing unsaved follows what is persisted; one holding words weighs them against it.
+        if (unsavedRules === null && field.value !== stored) { field.value = stored; typedRules = null; }
+        rulesRead(stored);
     };
     // Until a read answers, the text follows every read: one that lands is adopted, the others say what they found.
     const follow = () => { if (stored === null && settingsSnapshot()) adopt(settingsSnapshot()); lock(); };
@@ -180,31 +264,43 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
         let settings;
         try { settings = await ctx.readSettings(); } catch { settings = settingsSnapshot(); }  // failed: the last read, if any
         if (gone) return;
+        // A read a newer document outran (a save or a newer read landed meanwhile) says nothing of what is persisted
+        // now: the page follows the newest document, never the older answer.
+        if (settings && settings !== settingsSnapshot()) settings = settingsSnapshot();
         if (settings) adopt(settings);
         lock();
     }
     const onInput = () => {
-        unsavedRules = stored !== null && field.value === stored ? null : field.value;
+        typedRules = field.value;
+        holdRules();
         say(null);  // an edit starts a new subject: the last result goes
     };
     const onSave = async () => {
         if (button.disabled) return;
         const text = field.value;
+        const write = { text, open: true };
+        writing.add(write);  // from the press: words typed back to the saved text meanwhile are unsaved if this lands
         button.disabled = true;
         button.setAttribute('aria-busy', 'true');
-        const outcome = await save(row, text);
+        let outcome;
+        try { outcome = await save(row, text, { ticket: write }); } catch { outcome = { state: 'unknown', message: '' }; }  // a save that threw is not confirmed
         const landed = outcome.state === 'saved' || outcome.state === 'saved_then_failed' || outcome.state === 'unchanged';
-        if (landed) {
-            stored = text;
-            if (field.value === text) unsavedRules = null;
-        }
+        // Whatever the owner typed meanwhile, here or in a page opened since, is weighed against how this ended: kept and
+        // held when unsaved against it, so leaving and reopening shows their actual words, not the text this save carried.
+        const answered = rulesSettled(write, outcome);
+        if (landed) stored = answered.text;
         if (gone) return;
         button.disabled = false;
         button.removeAttribute('aria-busy');
-        // A refusal leaves the text in the field: nothing here rewrites it.
-        say(rulesSaveWords(outcome, row));
+        // A refusal leaves the text in the field: nothing here rewrites it. What landed is the save the queue ran, and the
+        // line is about the words in the field now: other words (one it replaced, an edit since the press) are not saved
+        // by it, and words an earlier save without an answer may still overwrite are not confirmed.
+        const doubted = [...writing].some((other) => !other.open && other.text !== field.value);
+        say(!landed ? rulesSaveWords(outcome, row) : field.value !== answered.text ? NOT_SAVED
+            : doubted ? rulesSaveWords({ state: 'unknown' }, row) : rulesSaveWords(outcome, row));
     };
     const onShown = (event) => { if (event.detail?.path === 'rules') void read(); };
+    standing.querySelector('[data-rules-give-up]').addEventListener('click', () => { releaseUnsettledRules(); say(null); });
     field.addEventListener('input', onInput);
     button.addEventListener('click', onSave);
     globalThis.window?.addEventListener?.('ouro:settings-page-shown', onShown);
@@ -218,5 +314,9 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     } };
 }
 
-/** Forget the unsaved text (a test). */
-export function forgetUnsavedRules() { unsavedRules = null; }
+/** Forget the typed words, what is known persisted and every save in flight, and release the window replacement (a test). */
+export function forgetUnsavedRules() {
+    unsavedRules = typedRules = savedRules = null;
+    writing.clear();
+    markDesktopEditor('Your rules', false);
+}

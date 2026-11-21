@@ -12,7 +12,8 @@ import { forgetSettingRows, readSettings, settingsRow } from '../modules/setting
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { policyValueLabel } from '../modules/settings_policy.js';
 import { HOME_ROWS, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
-import { forgetUnsavedRules, rulesSaveWords, spareWords } from '../modules/settings_safety.js';
+import { openDesktopRoomSession } from '../modules/desktop_room_session.js';
+import { forgetUnsavedRules, mountRulesPage, rulesSaveWords, spareWords } from '../modules/settings_safety.js';
 import { tunePermissionRows, voiceFacts } from '../modules/settings_ui.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
@@ -391,6 +392,114 @@ test('Your rules: its own Save, the server\'s refusal on the page with the text 
     // The words of every outcome: an unknown one is never called saved.
     assert.deepEqual(rulesSaveWords({ state: 'unknown', message: 'timeout' }), { text: 'Not confirmed yet', tone: 'warn', details: '' });
     assert.equal(rulesSaveWords({ state: 'saved_then_failed', message: 'The audit step failed afterwards.' }).text, 'Saved. The audit step failed afterwards.');
+});
+
+test('Your rules: an edit made while Save runs survives what lands, even back to the formerly saved text', async (t) => {
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const save = page.container.querySelector('[data-editor-save]');
+    const type = async (text) => { field.value = text; await field.fire('input', { target: field }); };
+    // The owner's Save hangs; while it runs, they edit the field back to the formerly saved text.
+    const gate = deferred();
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => { await gate.promise; return was(url, init); });
+    await type('Ask before paying.\nNever email my clients.');
+    void save.fire('click', { target: save });  // fire awaits its listener: the save hangs on the gate
+    await type('Ask before paying.');
+    gate.resolve();
+    await settle();
+    assert.equal(page.server.values.OUROBOROS_SAFETY_OWNER_RULES, 'Ask before paying.\nNever email my clients.',
+        'what was clicked landed on the server');
+    assert.equal(field.value, 'Ask before paying.', 'the newer edit stays in the field');
+    // That edit is unsaved against what landed: leaving and reopening keeps the owner\'s actual words.
+    page.handle.unmount();
+    const again = new NodeStub();
+    const handle = await settingsPageFor('rules').mount(again, { path: 'rules', row: '', ctx: { readSettings } });
+    await settle();
+    assert.equal(again.querySelector('#settings-rules').value, 'Ask before paying.');
+    assert.equal(again.querySelector('[data-editor-result]').textContent, 'Not saved yet');
+    handle.unmount();
+});
+
+test('Your rules: a save whose answer was lost is not settled by the read that shows its words', async (t) => {
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const save = page.container.querySelector('[data-editor-save]');
+    const result = page.container.querySelector('[data-editor-result]');
+    const standing = page.container.querySelector('[data-rules-unsettled]');
+    const type = async (text) => { field.value = text; await field.fire('input', { target: field }); };
+    const was = page.routes.get('/api/owner/safety-rules');
+    let lost = true;
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => {
+        const answer = was(url, init);  // the write is accepted; only its answer is lost
+        if (!lost) return answer;
+        lost = false;
+        return response({ error: 'The save did not answer in time.', saved: null }, 503);
+    });
+    // The stored words are saved again; the answer never comes back, and the read that follows shows the same words.
+    await save.fire('click', { target: save });
+    await settle();
+    assert.equal(result.textContent, 'Saved · applies from the next task or turn');
+    assert.equal(standing.hidden, true, 'the words in the field are what is persisted: safe for themselves');
+    assert.deepEqual(page.server.writes('/api/owner/safety-rules'), [{ rules: 'Ask before paying.' }]);
+    // Newer words land: the save whose answer was lost may still land after them and put the stored words back, so
+    // they are not confirmed and the standing line says so, until the owner stops waiting.
+    await type('Ask before paying.\nNever email my clients.');
+    await save.fire('click', { target: save });
+    await settle();
+    assert.equal(page.server.values.OUROBOROS_SAFETY_OWNER_RULES, 'Ask before paying.\nNever email my clients.');
+    assert.deepEqual(page.server.writes('/api/owner/safety-rules'),
+        [{ rules: 'Ask before paying.' }, { rules: 'Ask before paying.\nNever email my clients.' }]);
+    assert.equal(result.textContent, 'Not confirmed yet');
+    assert.equal(standing.hidden, false, 'the save whose answer was lost still counts against the newer words');
+    // Held across a replacement of the page: the owner\'s actual words come back, with the warning.
+    page.handle.unmount();
+    const again = new NodeStub();
+    const handle = await settingsPageFor('rules').mount(again, { path: 'rules', row: '', ctx: { readSettings } });
+    await settle();
+    assert.equal(again.querySelector('#settings-rules').value, 'Ask before paying.\nNever email my clients.');
+    assert.equal(again.querySelector('[data-editor-result]').textContent, 'Not saved yet');
+    assert.equal(again.querySelector('[data-rules-unsettled]').hidden, false);
+    await again.querySelector('[data-rules-give-up]').fire('click', { target: again.querySelector('[data-rules-give-up]') });
+    await settle();
+    assert.equal(again.querySelector('[data-rules-unsettled]').hidden, true, 'given up, the older save no longer counts');
+    handle.unmount();
+});
+
+test('Your rules: a read that avoided the write settles its own press and leaves no phantom', async (t) => {
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const save = page.container.querySelector('[data-editor-save]');
+    const result = page.container.querySelector('[data-editor-result]');
+    const standing = page.container.querySelector('[data-rules-unsettled]');
+    const type = async (text) => { field.value = text; await field.fire('input', { target: field }); };
+    const was = page.routes.get('/api/owner/safety-rules');
+    let lost = true;
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => {
+        if (!lost) return was(url, init);
+        lost = false;  // the answer is lost, and nothing lands
+        return response({ error: 'The save did not answer in time.', saved: null }, 503);
+    });
+    // New words are saved and the answer is lost: they stay unconfirmed, and the request keeps counting.
+    await type('Never email my clients.');
+    await save.fire('click', { target: save });
+    await settle();
+    assert.equal(result.textContent, 'Not confirmed yet');
+    assert.equal(page.server.values.OUROBOROS_SAFETY_OWNER_RULES, 'Ask before paying.', 'nothing landed');
+    // Typed back to the stored words: the older save may still land, so even they are warned about.
+    await type('Ask before paying.');
+    assert.equal(standing.hidden, false, 'the words typed back are not safe while the older save may land');
+    // Saving them again reads first, finds them stored and sends nothing: the press is settled by that read, and
+    // the warning that remains is the older save\'s alone — no phantom of the press that sent nothing.
+    const posts = page.server.posts.length;
+    await save.fire('click', { target: save });
+    await settle();
+    assert.equal(page.server.posts.length, posts, 'nothing was sent: the read avoided the write');
+    assert.equal(result.textContent, 'Not confirmed yet', 'the older save may still land over these words');
+    assert.equal(standing.hidden, false, 'only the save whose answer never came keeps counting');
+    await page.container.querySelector('[data-rules-give-up]').fire('click', { target: page.container.querySelector('[data-rules-give-up]') });
+    await settle();
+    assert.equal(standing.hidden, true, 'given up, nothing counts');
 });
 
 test('Notifications keeps the notifier\'s own switches, as switches that act at once, and its two status lines', async (t) => {
@@ -824,4 +933,650 @@ test('Your rules follows the reads made anywhere: its own fails while a newer on
     gates[2].resolve(200);
     await elsewhere;
     assert.deepEqual(facts(), ['Ask before paying.', false, ''], 'the read that lands is the page\'s too');
+});
+
+// Your rules and a desktop window replacement: an unsaved edit holds the replacement (markDesktopEditor), and a save
+// that lands settles only the words it was clicked on. These open the native desktop session last in the file, with a
+// channel that only records which editors hold, so nothing real is replaced.
+async function desktopHolds() {
+    const editors = new Set();
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: { ouroborosRoomSession: { postMessage(message) {
+        if (message.op === 'editor') { if (message.dirty) editors.add(message.name); else editors.delete(message.name); }
+        return {};
+    } } } } });
+    host.top = host;
+    await openDesktopRoomSession(host, { documentElement: { dataset: {} }, querySelector: () => ({ content: 'rules-document', remove() {} }) }, () => {});
+    return () => [...editors];
+}
+
+const reopen = async (path = 'rules') => {
+    const container = new NodeStub();
+    const handle = await settingsPageFor(path).mount(container, { path, row: '', ctx: { readSettings } });
+    await settle();
+    return { container, handle, field: container.querySelector('#settings-rules'),
+        result: container.querySelector('[data-editor-result]'), save: container.querySelector('[data-editor-save]') };
+};
+const typeInto = async (field, text) => { field.value = text; await field.fire('input', { target: field }); };
+
+test('Your rules: a save that lands after the page was left and reopened never clears a newer edit or its hold', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const gate = deferred();
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => { await gate.promise; return was(url, init); });
+    const clicked = 'Ask before paying.\nNever email my clients.';
+    await typeInto(page.container.querySelector('#settings-rules'), clicked);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // this text's save hangs
+    page.handle.unmount();                                  // the page is left while it saves…
+    const next = await reopen();                            // …and opened again: the words come back unsaved
+    assert.equal(next.field.value, clicked);
+    await typeInto(next.field, 'A newer edit made after reopening');
+    assert.deepEqual(holds(), ['Your rules']);
+    gate.resolve();
+    await settle();
+    assert.equal(page.server.values.OUROBOROS_SAFETY_OWNER_RULES, clicked, 'the old click landed on the server');
+    assert.equal(next.field.value, 'A newer edit made after reopening');
+    assert.deepEqual(holds(), ['Your rules'], 'the newer edit still holds the window replacement');
+    next.handle.unmount();
+    const last = await reopen();
+    assert.equal(last.field.value, 'A newer edit made after reopening', 'and survives leaving the page again');
+    assert.equal(last.result.textContent, 'Not saved yet');
+    // Once nothing newer was typed, what landed leaves nothing unsaved and nothing holding.
+    await typeInto(last.field, clicked);
+    await last.save.fire('click', { target: {} });
+    await settle();
+    assert.deepEqual(holds(), []);
+    last.handle.unmount();
+});
+
+// A save in flight may still land. Words typed back to the text that was saved before it are the owner's newest choice, and a
+// window replacement that settled now would show them what lands instead: they hold it from the keystroke, in any mount, and
+// are weighed against how the older save ends. The hold is `desktopHolds()` below; the saves line up in commitSetting's row queue.
+const RULES_KEY = 'OUROBOROS_SAFETY_OWNER_RULES';
+const CLICKED = 'Ask before paying.\nNever email my clients.';
+const SAVED = 'Ask before paying.';  // what the fake server holds when the page opens
+async function pendingSave(t, { refuse = false } = {}) {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const gate = deferred();
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => { await gate.promise; return was(url, init); });
+    if (refuse) page.server.refuse.set('/api/owner/safety-rules', [{ error: 'Rules are limited to 64,000 bytes.', saved: false }, 400]);
+    const field = page.container.querySelector('#settings-rules');
+    await typeInto(field, CLICKED);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // this text's save hangs on the gate
+    return { holds, page, gate, field };
+}
+
+test('Your rules: words typed back to the formerly saved text hold the replacement while the older save is in flight, even across a reopening', async (t) => {
+    const { holds, page, gate, field } = await pendingSave(t);
+    await typeInto(field, SAVED);  // back to what is saved
+    assert.deepEqual(holds(), ['Your rules'], 'the save in flight may land and overwrite these words: the replacement waits now');
+    page.handle.unmount();
+    assert.deepEqual(holds(), ['Your rules'], 'leaving the page releases nothing');
+    const next = await reopen();
+    assert.equal(next.field.value, SAVED);
+    assert.equal(next.result.textContent, 'Not saved yet');
+    assert.deepEqual(holds(), ['Your rules'], 'a read of the unchanged server does not settle the save in flight');
+    gate.resolve();
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], CLICKED, 'the older click landed');
+    assert.deepEqual(holds(), ['Your rules'], 'against what landed those words are unsaved: the replacement keeps waiting for them');
+    next.handle.unmount();
+    const last = await reopen();
+    assert.equal(last.field.value, SAVED);
+    assert.equal(last.result.textContent, 'Not saved yet');
+    last.handle.unmount();
+});
+
+test('Your rules: a save refused after words were typed back to the saved text releases the hold: nothing was written', async (t) => {
+    const { holds, page, gate, field } = await pendingSave(t, { refuse: true });
+    await typeInto(field, SAVED);
+    assert.deepEqual(holds(), ['Your rules'], 'held before the save settles, since it may still land');
+    page.handle.unmount();
+    const next = await reopen();
+    assert.deepEqual(holds(), ['Your rules']);
+    gate.resolve();
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], SAVED, 'the refusal wrote nothing');
+    assert.deepEqual(holds(), [], 'the words are the persisted text: nothing is left to lose');
+    assert.equal(next.field.value, SAVED);
+    next.handle.unmount();
+    const last = await reopen();
+    assert.equal(last.field.value, SAVED);
+    assert.notEqual(last.result.textContent, 'Not saved yet');
+    last.handle.unmount();
+});
+
+test('Your rules: a refused save leaves words that differ from the persisted text held, whoever typed them after the click', async (t) => {
+    const { holds, page, gate } = await pendingSave(t, { refuse: true });
+    page.handle.unmount();
+    const next = await reopen();
+    await typeInto(next.field, 'Something else entirely');
+    gate.resolve();
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], SAVED);
+    assert.deepEqual(holds(), ['Your rules'], 'an older completion never erases a later unsaved edit');
+    assert.equal(next.field.value, 'Something else entirely');
+    next.handle.unmount();
+});
+
+test('Your rules: a save whose outcome stays unknown keeps the words held, until a read shows what was persisted', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const gate = deferred();
+    page.routes.set('/api/owner/safety-rules', async () => { await gate.promise; throw new TypeError('Failed to fetch'); });
+    const field = page.container.querySelector('#settings-rules');
+    await typeInto(field, CLICKED);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });
+    await typeInto(field, SAVED);
+    gate.resolve();
+    await settle();
+    assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Not confirmed yet');
+    assert.deepEqual(holds(), ['Your rules'], 'an unknown write may still land: it is not assumed refused');
+    // It did land. A read shows it: the words typed back are unsaved against it; the words it carried are the persisted text.
+    page.server.values[RULES_KEY] = CLICKED;
+    await page.shown();
+    assert.deepEqual(holds(), ['Your rules']);
+    await typeInto(field, CLICKED);
+    assert.deepEqual(holds(), [], 'the persisted text is nothing to lose');
+});
+
+// The save of CLICKED got no answer and the owner typed SAVED back. Save pressed now reads before it sends (the row queue's
+// rule after an unknown outcome), finds SAVED persisted and sends nothing: a read, which cannot say the unanswered save
+// will not land after it. Only each request's own answer lets go of it — a read never can — so the page's standing line
+// offers the owner's give-up while such a save counts.
+async function unansweredRules(t) {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async () => { throw new TypeError('Failed to fetch'); });
+    const field = page.container.querySelector('#settings-rules');
+    const result = page.container.querySelector('[data-editor-result]');
+    const save = async () => { await page.container.querySelector('[data-editor-save]').fire('click', { target: {} }); await settle(); };
+    await typeInto(field, CLICKED);
+    await save();
+    assert.equal(result.textContent, 'Not confirmed yet');
+    page.routes.set('/api/owner/safety-rules', was);  // the server answers again from here on
+    await typeInto(field, SAVED);
+    assert.deepEqual(holds(), ['Your rules']);
+    const sent = () => page.server.writes('/api/owner/safety-rules').length;
+    return { holds, page, field, result, save, sent };
+}
+
+test('Your rules: a Save that only a read confirms does not retire the earlier save without an answer, or call the words saved', async (t) => {
+    const { holds, page, field, result, save, sent } = await unansweredRules(t);
+    const before = sent();
+    await save();
+    assert.equal(sent(), before, 'the read showed these words persisted: nothing was sent');
+    assert.deepEqual(holds(), ['Your rules'], 'the save without an answer may still land after that read: the words stay held');
+    assert.equal(result.textContent, 'Not confirmed yet', 'and the line does not call them saved');
+    assert.equal(field.value, SAVED);
+    // It did land after the read. The next read shows it, and the owner's words are unsaved against it.
+    page.server.values[RULES_KEY] = CLICKED;
+    await page.shown();
+    assert.equal(field.value, SAVED, 'the owner\'s words stay in the field');
+    assert.deepEqual(holds(), ['Your rules']);
+    await save();  // an ordinary Save of the words meant: sent, and answered by the server
+    assert.deepEqual(page.server.writes('/api/owner/safety-rules').at(-1), { rules: SAVED });
+    assert.equal(page.server.values[RULES_KEY], SAVED);
+    assert.equal(result.textContent, 'Not confirmed yet',
+        'the server answered this save; the earlier one may still land after it');
+    assert.deepEqual(holds(), ['Your rules'], 'so the words stay held');
+    // The standing line says what holds the window, and its link is the owner's give-up: nothing is sent.
+    const standing = page.container.querySelector('[data-rules-unsettled]');
+    assert.equal(standing.hidden, false);
+    assert.equal(standing.querySelector('[data-rules-give-up]').textContent, 'Stop waiting for it');
+    const settled = sent();
+    await standing.querySelector('[data-rules-give-up]').fire('click', {});
+    assert.equal(sent(), settled, 'giving up waits for nothing and sends nothing');
+    assert.equal(result.textContent, '');
+    assert.equal(field.value, SAVED, 'their words stay in the field');
+    assert.deepEqual(holds(), [], 'and nothing unsettled counts against them');
+    // It lands after all, once the owner stopped waiting: the page reports what is saved now, and holds nothing —
+    // the words it replaced were the saved text itself, given up with the waiting.
+    page.server.values[RULES_KEY] = CLICKED;
+    await page.shown();
+    assert.equal(field.value, CLICKED, 'the accepted save is what the page shows, not a silent revert');
+    assert.equal(result.textContent, '');
+    assert.deepEqual(holds(), []);
+});
+
+test('Your rules: neither a save the server answers nor a read retires an earlier one that got no answer', async (t) => {
+    const { holds, page, result, save, sent } = await unansweredRules(t);
+    await save();  // the read's match: nothing sent, still held
+    const before = sent();
+    assert.deepEqual(holds(), ['Your rules']);
+    await save();  // this press goes to the server, which finds the words already persisted
+    assert.equal(sent(), before + 1);
+    assert.equal(page.server.values[RULES_KEY], SAVED);
+    assert.equal(result.textContent, 'Not confirmed yet', 'the earlier save without an answer may still complete after this one');
+    assert.deepEqual(holds(), ['Your rules'], 'so the owner\'s words stay held');
+    // It did complete, after the answered save: a read shows it, and the words are unsaved against it.
+    page.server.values[RULES_KEY] = CLICKED;
+    page.handle.unmount();
+    const again = await reopen();
+    assert.equal(again.field.value, SAVED, 'the owner\'s words are kept, not replaced by what landed');
+    assert.equal(again.result.textContent, 'Not saved yet');
+    assert.deepEqual(holds(), ['Your rules']);
+    void again.save.fire('click', { target: {} });  // the owner means their own words: sent and answered
+    await settle();
+    assert.equal(sent(), before + 2);
+    assert.equal(page.server.values[RULES_KEY], SAVED);
+    assert.equal(again.result.textContent, 'Not confirmed yet', 'the earlier save may still complete after this answered one');
+    assert.deepEqual(holds(), ['Your rules'], 'so the words stay held');
+    // The read at the reopening showed what landed, and the owner accepts that it may land again, over their words.
+    await again.container.querySelector('[data-rules-give-up]').fire('click', {});
+    assert.equal(again.field.value, SAVED, 'the give-up ends the waiting, not the words');
+    assert.deepEqual(holds(), []);
+    again.handle.unmount();
+});
+
+// The words a second save of them landed are no proof of the first: a read shows them, and still the first request may
+// complete after the read, after a newer save, and put them back over it. The page that read them holds the newer words.
+test('Your rules: a read of the words a second save landed does not settle the first save of them', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const result = page.container.querySelector('[data-editor-result]');
+    const was = page.routes.get('/api/owner/safety-rules');
+    let taken = null;  // the first save's words, which the server took and will finish on its own
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => {
+        if (taken === null) { taken = JSON.parse(init.body).rules; throw new TypeError('Failed to fetch'); }
+        return was(url, init);
+    });
+    await typeInto(field, CLICKED);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // the first save of them: no answer
+    await settle();
+    assert.equal(result.textContent, 'Not confirmed yet');
+    assert.equal(taken, CLICKED, 'the server took these words');
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // the same words again: answered
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], CLICKED, 'the second save took them');
+    assert.equal(result.textContent, 'Saved · applies from the next task or turn',
+        'the first save of these same words can only rewrite them: nothing is at risk yet');
+    assert.deepEqual(holds(), []);
+    page.handle.unmount();
+    const again = await reopen();  // a read shows the words the second save landed
+    assert.equal(again.field.value, CLICKED, 'nothing else was typed: the field follows what is persisted');
+    const NEW = 'Rules set after the read.';
+    await typeInto(again.field, NEW);
+    void again.save.fire('click', { target: {} });  // answered
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], NEW);
+    assert.equal(again.result.textContent, 'Not confirmed yet',
+        'the first save of the read words may still land after this one');
+    assert.deepEqual(holds(), ['Your rules'], 'so the newer words stay held');
+    // It does land, after the answered save: the words the server holds go back to the first save's.
+    page.server.values[RULES_KEY] = taken;
+    again.handle.unmount();
+    const seen = await reopen();
+    assert.equal(seen.field.value, NEW, 'the owner\'s words are kept, not the first save\'s');
+    assert.equal(seen.result.textContent, 'Not saved yet');
+    assert.deepEqual(holds(), ['Your rules']);
+    seen.handle.unmount();
+});
+
+test('Your rules: a read a newer save outran neither overwrites the field with the older text nor certifies it', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const NEW = 'Rules typed and saved while an older read was out';
+    const was = page.routes.get('/api/settings');
+    let release = null;
+    page.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return was(url, init);
+        const answer = was(url, init);  // the document as it is at this moment
+        if (!release) return new Promise((resolve) => { release = () => resolve(answer); });
+        return answer;
+    });
+    await page.shown();  // the page's own read is held back with the older text
+    await typeInto(field, NEW);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], NEW, 'the save landed while the older read was out');
+    assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Saved · applies from the next task or turn');
+    release();  // the held read answers with the older text
+    await settle();
+    assert.equal(field.value, NEW, 'the field keeps the words the save landed, never the older read\'s text');
+    assert.deepEqual(holds(), []);
+});
+
+test('Your rules: a read held back behind a newer one cannot pass the owner\'s words off as already persisted', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const wasRules = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async () => { throw new TypeError('Failed to fetch'); });
+    await typeInto(field, CLICKED);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // no answer
+    await settle();
+    assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Not confirmed yet');
+    const was = page.routes.get('/api/settings');
+    let release = null;
+    page.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return was(url, init);
+        const answer = was(url, init);  // the document as it is at this moment
+        if (!release) return new Promise((resolve) => { release = () => resolve(answer); });
+        return answer;
+    });
+    page.routes.set('/api/owner/safety-rules', wasRules);  // the server answers again
+    await typeInto(field, SAVED);
+    const sent = () => page.server.writes('/api/owner/safety-rules').length;
+    const before = sent();
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // reads first: held back
+    await settle();
+    page.server.values[RULES_KEY] = 'Changed on the server meanwhile.';  // what is persisted is not these words
+    await readSettings();  // a newer read lands while the older one is held
+    release();  // the held read answers with the older text, the very words about to be sent
+    await settle();
+    assert.equal(sent(), before + 1, 'the held read said nothing of what is persisted now: the words went to the server');
+    assert.equal(page.server.values[RULES_KEY], SAVED, 'and the server took the owner\'s words over the later change');
+    assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Not confirmed yet',
+        'the earlier save without an answer still counts against the words');
+    assert.deepEqual(holds(), ['Your rules']);
+});
+
+// A save the server took and answered with nothing is not proved done by the same words being saved again: that answer
+// is about the second request. The first may still land after it — and after the owner's next words.
+test('Your rules: a save with no answer is not retired by the same words being saved again', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const result = page.container.querySelector('[data-editor-result]');
+    const was = page.routes.get('/api/owner/safety-rules');
+    const B = 'Rules set B.';
+    const C = 'Rules set C.';
+    let taken = null;  // what the server took and will finish on its own
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => {
+        if (!taken) { taken = JSON.parse(init.body).rules; throw new TypeError('Failed to fetch'); }  // taken, no answer
+        return was(url, init);
+    });
+    await typeInto(field, B);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });
+    await settle();
+    assert.equal(result.textContent, 'Not confirmed yet', 'the first save got no answer');
+    assert.equal(taken, B, 'the server took these words');
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // the same words again
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], B, 'the second save reached the server and took them');
+    await typeInto(field, C);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // the owner's next words
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], C, 'the next words are what the server holds now');
+    assert.equal(result.textContent, 'Not confirmed yet', 'the first request may still land after this one');
+    assert.deepEqual(holds(), ['Your rules'], 'so the owner\'s words stay held');
+    // It did land, late: the words the server holds are the first save's again, over the owner's next ones.
+    page.server.values[RULES_KEY] = taken;
+    page.handle.unmount();
+    const again = await reopen();
+    assert.equal(again.field.value, C, 'the owner\'s words are kept, not replaced by what landed');
+    assert.equal(again.result.textContent, 'Not saved yet');
+    assert.deepEqual(holds(), ['Your rules']);
+    again.handle.unmount();
+});
+
+// A read a newer one outran says nothing of what is persisted now: the kept document may be from before it began, and
+// a Save that trusts it would pass the owner's words off as already persisted while the server holds other words. The
+// Save goes out as it always does, and the server's own answer settles it.
+test('Your rules: a read a newer one outran does not pass the owner\'s words off as already persisted', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    const result = page.container.querySelector('[data-editor-result]');
+    const wasRules = page.routes.get('/api/owner/safety-rules');
+    const A = 'Rules set A.';
+    const B = 'Rules set B.';
+    let posts = 0;
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => {
+        const answer = await wasRules(url, init);  // the server takes the words
+        posts += 1;
+        if (posts === 2) throw new TypeError('Failed to fetch');  // the second save's answer is lost
+        return answer;
+    });
+    const was = page.routes.get('/api/settings');
+    const gates = [deferred(), deferred()];
+    let gets = 0;
+    page.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return was(url, init);
+        gets += 1;
+        if (gets === 1 || gets === 3) { await gates[(gets - 1) / 2].promise; return response(page.server.document()); }  // held back
+        if (gets === 2 || gets === 4) { await new Promise(() => {}); return response(page.server.document()); }  // a newer read, still out
+        return was(url, init);
+    });
+    await typeInto(field, A);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // these words are saved
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], A);
+    await typeInto(field, B);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // no answer: the server took them
+    await settle();
+    assert.equal(gets, 1, 'the read that follows the save without an answer is held back');
+    void readSettings();  // a newer read, made while the verification read is still out
+    await settle();
+    gates[0].resolve();  // the held read answers with the words the server holds now
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], B, 'the server took the second words, though the answer was lost');
+    await typeInto(field, A);  // the owner means their own words again
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // reads first: held back
+    await settle();
+    assert.equal(gets, 3, 'the read before the save is held back too');
+    void readSettings();  // a newer read again, made while that one is out
+    await settle();
+    gates[1].resolve();  // the held read answers with the words the server holds now
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], A, 'the owner\'s words reached the server');
+    assert.equal(result.textContent, 'Not confirmed yet', 'the save without an answer still counts against them');
+    assert.deepEqual(holds(), ['Your rules'], 'and the words stay held');
+});
+
+// Saves A, B and C pressed across three mounts while A is in flight: the row queue keeps one value waiting behind it, so C
+// replaces B, only A and C go out, and B's caller is answered with C's outcome. What that answer says is true of C. The page
+// reconciles with the save the answer names (`outcome.answers`, the ticket each press handed the queue), never with the
+// words its own press carried.
+async function threeSaves(t, { thirdTyped, afterFirst = () => {}, failSecond = false } = {}) {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const gates = [deferred(), deferred()];
+    let posts = 0;
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => {
+        const n = posts++;
+        await gates[n]?.promise;  // the first two saves wait for the test; a later one goes through
+        if (failSecond && n === 1) throw new TypeError('Failed to fetch');
+        return was(url, init);
+    });
+    const A = 'Rules A', B = 'Rules B', C = 'Rules C';
+    await typeInto(page.container.querySelector('#settings-rules'), A);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });  // A is in flight
+    page.handle.unmount();
+    const second = await reopen();
+    await typeInto(second.field, B);
+    void second.save.fire('click', { target: {} });  // B waits behind A
+    second.handle.unmount();
+    const third = await reopen();
+    await typeInto(third.field, C);
+    void third.save.fire('click', { target: {} });  // C takes B's place in the one waiting slot
+    await typeInto(third.field, thirdTyped(A, B, C));
+    await settle();
+    assert.equal(posts, 1, 'only A is on the wire');
+    gates[0].resolve();
+    await settle();
+    assert.equal(posts, 2, 'C is sent next, alone');
+    assert.equal(page.server.values[RULES_KEY], A);
+    afterFirst(page);
+    gates[1].resolve();
+    await settle();
+    return { holds, page, third, A, B, C, writes: () => page.server.writes('/api/owner/safety-rules').map((body) => body.rules) };
+}
+
+test('Your rules: B, replaced by C in the row queue, never marks its words saved, even typed back to B', async (t) => {
+    const { holds, page, third, writes, B, C } = await threeSaves(t, { thirdTyped: (A, B) => B });
+    assert.deepEqual(writes(), ['Rules A', C], 'the server saw A, then C: B never went out');
+    assert.equal(page.server.values[RULES_KEY], C);
+    assert.equal(third.field.value, B);
+    assert.deepEqual(holds(), ['Your rules'], 'B is unsaved against what C left, however late B\'s answer comes');
+    third.handle.unmount();
+    const last = await reopen();
+    assert.equal(last.field.value, B, 'and survives leaving the page');
+    assert.equal(last.result.textContent, 'Not saved yet');
+    await typeInto(last.field, C);
+    assert.deepEqual(holds(), [], 'the words the queue wrote are nothing to lose');
+    last.handle.unmount();
+});
+
+test('Your rules: a page still showing the words another save replaced does not say Saved when the replacing one lands', async (t) => {
+    await desktopHolds();
+    const page = await open(t, 'rules');
+    const gates = [deferred(), deferred()];
+    let posts = 0;
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => { await gates[posts++]?.promise; return was(url, init); });
+    await typeInto(page.container.querySelector('#settings-rules'), 'Rules A');
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });
+    const second = await reopen();  // both pages stay mounted
+    await typeInto(second.field, 'Rules B');
+    void second.save.fire('click', { target: {} });
+    const third = await reopen();
+    await typeInto(third.field, 'Rules C');
+    void third.save.fire('click', { target: {} });  // replaces B in the one waiting place
+    gates[0].resolve();
+    await settle();
+    gates[1].resolve();
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], 'Rules C');
+    assert.equal(third.result.textContent, 'Saved · applies from the next task or turn');
+    assert.equal(second.field.value, 'Rules B');
+    assert.equal(second.result.textContent, 'Not saved yet', 'B was never written: this page\'s words are not the saved ones');
+    for (const mounted of [second, third]) mounted.handle.unmount();
+});
+
+test('Your rules: the words C carried settle with C, and a Save of the persisted words is unchanged and holds nothing', async (t) => {
+    const { holds, page, third, writes, C } = await threeSaves(t, { thirdTyped: (A, B, C) => C });
+    assert.deepEqual(writes(), ['Rules A', C]);
+    assert.equal(page.server.values[RULES_KEY], C);
+    assert.deepEqual(holds(), [], 'typed C, and C is what landed');
+    assert.equal(third.result.textContent, 'Saved · applies from the next task or turn');
+    await third.save.fire('click', { target: {} });  // C again: the server says nothing changed
+    await settle();
+    assert.equal(third.result.textContent, 'Saved · applies from the next task or turn');
+    assert.deepEqual([holds(), writes().length], [[], 3]);
+    third.handle.unmount();
+});
+
+test('Your rules: a refused C wrote nothing, so words equal to what A left are saved and any other words stay held', async (t) => {
+    const { holds, page, third, writes, A, B } = await threeSaves(t, { thirdTyped: (A) => A,
+        afterFirst: (page) => page.server.refuse.set('/api/owner/safety-rules', [{ error: 'Rules are limited to 64,000 bytes.', saved: false }, 400]) });
+    assert.equal(page.server.values[RULES_KEY], A, 'A landed and the refusal wrote nothing');
+    assert.deepEqual(writes(), [A, 'Rules C'], 'C reached the server once, and was refused there; B never went out');
+    assert.deepEqual(holds(), [], 'typed A is the persisted text');
+    await typeInto(third.field, B);
+    assert.deepEqual(holds(), ['Your rules'], 'B was never written: it is unsaved');
+    third.handle.unmount();
+});
+
+test('Your rules: a C that never answered may still land, so the words stay held until a read shows what was persisted', async (t) => {
+    const { holds, page, third, A, C } = await threeSaves(t, { thirdTyped: (A) => A, failSecond: true });
+    assert.equal(page.server.values[RULES_KEY], A);
+    assert.equal(third.result.textContent, 'Not confirmed yet');
+    assert.deepEqual(holds(), ['Your rules'], 'typed A equals what is persisted, but the unconfirmed C could still replace it');
+    third.handle.unmount();
+    const again = await reopen();
+    assert.deepEqual(holds(), ['Your rules'], 'a read that still shows A does not settle C');
+    page.server.values[RULES_KEY] = C;  // it did land after all
+    again.handle.unmount();
+    const seen = await reopen();
+    assert.equal(seen.field.value, A, 'the owner\'s words are kept, not replaced by the read');
+    assert.deepEqual(holds(), ['Your rules'], 'unsaved against the C that landed');
+    await typeInto(seen.field, C);
+    assert.deepEqual(holds(), [], 'typed C: the persisted text');
+    seen.handle.unmount();
+});
+
+test('Your rules: a page with nothing unsaved follows what another device saved and holds nothing; words differing from it do hold', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const field = page.container.querySelector('#settings-rules');
+    await typeInto(field, 'Typed, then typed back');
+    await typeInto(field, SAVED);
+    assert.deepEqual(holds(), [], 'equal to the persisted text and nothing in flight: nothing to lose');
+    page.server.values[RULES_KEY] = 'Saved from another device.';
+    await page.shown();
+    assert.equal(field.value, 'Saved from another device.', 'a page with nothing unsaved shows what is persisted now');
+    assert.deepEqual(holds(), []);
+    await typeInto(field, 'My own words');
+    assert.deepEqual(holds(), ['Your rules']);
+    page.server.values[RULES_KEY] = 'Saved from yet another device.';
+    await page.shown();
+    assert.equal(field.value, 'My own words', 'words that differ from the persisted text are never replaced by a read');
+    assert.deepEqual(holds(), ['Your rules']);
+    await typeInto(field, 'Saved from yet another device.');
+    assert.deepEqual(holds(), [], 'typed to the persisted text: saved');
+});
+
+test('Your rules: saves pressed in two pages line up in the row queue, and the hold follows both', async (t) => {
+    const holds = await desktopHolds();
+    const page = await open(t, 'rules');
+    const gates = [deferred(), deferred()];
+    let posts = 0;
+    const was = page.routes.get('/api/owner/safety-rules');
+    page.routes.set('/api/owner/safety-rules', async (url, init = {}) => { await gates[posts++].promise; return was(url, init); });
+    await typeInto(page.container.querySelector('#settings-rules'), CLICKED);
+    void page.container.querySelector('[data-editor-save]').fire('click', { target: {} });
+    page.handle.unmount();
+    const next = await reopen();
+    await typeInto(next.field, 'The second page\'s words');
+    void next.save.fire('click', { target: {} });  // waits behind the first in the row's one queue
+    await settle();
+    assert.equal(posts, 1, 'only the first is on the wire');
+    gates[0].resolve();
+    await settle();
+    assert.deepEqual([posts, page.server.values[RULES_KEY]], [2, CLICKED]);
+    assert.deepEqual(holds(), ['Your rules'], 'the first landed, the second is still in flight against what it left');
+    gates[1].resolve();
+    await settle();
+    assert.equal(page.server.values[RULES_KEY], 'The second page\'s words');
+    assert.deepEqual(holds(), [], 'both settled on the newest words');
+    next.handle.unmount();
+});
+
+test('Your rules: a refused or a thrown save leaves the words, their hold and a usable Save', async (t) => {
+    const holds = await desktopHolds();
+    forgetSettingRows();
+    forgetUnsavedRules();
+    const env = setup(t);
+    const server = fakeServer(env.routes);
+    const container = new NodeStub();
+    let thrown = 0;
+    const handle = mountRulesPage(container, { ctx: { readSettings }, save: async () => { thrown += 1; throw new Error('the request never answered'); } });
+    t.after(() => handle.unmount());
+    await settle();
+    const field = container.querySelector('#settings-rules');
+    const save = container.querySelector('[data-editor-save]');
+    const result = container.querySelector('[data-editor-result]');
+    await typeInto(field, 'New standing rules');
+    await save.fire('click', { target: {} });
+    await settle();
+    assert.equal(result.textContent, 'Not confirmed yet', 'a save that threw is not called saved');
+    assert.equal(save.disabled, false, 'Save can be pressed again');
+    assert.equal(field.value, 'New standing rules');
+    assert.deepEqual(holds(), ['Your rules']);
+    await save.fire('click', { target: {} });
+    assert.equal(thrown, 2);
+    handle.unmount();
+    // A refusal by the server, from a page left and reopened meanwhile, changes neither the words nor the hold.
+    const gate = deferred();
+    const was = env.routes.get('/api/owner/safety-rules');
+    env.routes.set('/api/owner/safety-rules', async (url, init = {}) => { await gate.promise; return was(url, init); });
+    server.refuse.set('/api/owner/safety-rules', [{ error: 'Rules are limited to 64,000 bytes.', saved: false }, 400]);
+    const first = await reopen();
+    void first.save.fire('click', { target: {} });
+    first.handle.unmount();
+    const second = await reopen();
+    await typeInto(second.field, 'Edited while the refused save ran');
+    gate.resolve();
+    await settle();
+    assert.equal(second.field.value, 'Edited while the refused save ran');
+    assert.deepEqual(holds(), ['Your rules']);
+    second.handle.unmount();
 });

@@ -1,3 +1,4 @@
+import { markDesktopEditor } from './desktop_room_session.js';
 // Circles (docs/DESIGN.md "Circles"): the one home of the places Ouroboros lives in, gathered into circles of people
 // whose shared words every place in a circle inherits beside its own notes. The page header carries New circle; the
 // body is one .ui-card directory: each circle is a row that opens (details.ui-disclosure, the Dashboard's Details
@@ -254,6 +255,38 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     const paintedOpen = new WeakSet();
     const shown = () => !document.hidden && state?.activePage === 'circles';
     const circleById = (id) => (view?.circles || []).find((entry) => entry.id === id) || null;
+    const removedDrafts = new Map();
+    const fields = ['name', 'text', 'model'];
+    const changedFields = (id, circle) => fields.filter(field => {
+        const value = ui.drafts[`${id}:${field}`];
+        return value !== undefined && value !== (circle?.[field] ?? '');
+    });
+    // A write still out can land after the owner typed the saved words back: those words are unsaved against it, so the window
+    // stays held until its answer is known. Each is `{ id, change, sent, revision }`: the draft it writes, what it writes, the
+    // drafts as it read them and the revision it expects (the server lands it on that revision alone). One that got no answer
+    // (`doubt`) keeps holding until a later whole-number revision of its circle is seen by a read or left by a confirmed write
+    // (it can no longer land), or its draft is discarded: the same, an earlier or no revision proves nothing, it may be on its way.
+    const writing = new Set();
+    const ruledOut = (entry, revision) => Number.isSafeInteger(entry.revision) && Number.isSafeInteger(revision) && revision > entry.revision;
+    const outrun = () => [...writing].some(({ id, change, sent }) => fields.some(field => {
+        const draft = ui.drafts[`${id}:${field}`];
+        return field in change && draft !== undefined && draft !== sent[field] && draft !== change[field];
+    }));
+    const settleWrites = (id) => { for (const entry of writing) if (entry.id === id) writing.delete(entry); };
+    function discardDraft(id) {
+        for (const field of [...fields, 'revision']) delete ui.drafts[`${id}:${field}`];
+        removedDrafts.delete(id);
+        settleWrites(id);
+    }
+
+    function removedDraftHtml(circle) {
+        const labels = { name: tr('circles.name', 'Name'), text: tr('circles.delete.words', 'Its words'), model: tr('circles.model', 'Model') };
+        const note = fmt('“{circle}” is no longer listed. Copy any edits you want to keep.', { circle: circle.name });
+        return `<section class="ui-card consciousness-card"><p class="consciousness-copy">${escapeHtml(note)}</p>
+            ${changedFields(circle.id, circle).map(field => `<label class="ui-field">${escapeHtml(labels[field])}
+                <textarea class="ui-control" readonly data-i18n-authored data-circles-draft="${escapeHtml(circle.id)}:${field}" rows="${field === 'text' ? 4 : 1}">\n${escapeHtml(ui.drafts[`${circle.id}:${field}`])}</textarea></label>`).join('')}
+            ${actButton('discard-draft', tr('circles.discard_edits', 'Discard edits'), `data-circle="${escapeHtml(circle.id)}"`, 'btn-ghost')}</section>`;
+    }
 
     function html() {
         const top = readError ? { text: readError, tone: 'error' } : !view ? { text: tr('circles.reading', 'Reading…'), tone: '' } : ui.status.page;
@@ -267,11 +300,14 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
                 + unassignedFoldHtml(unassigned, ui, answered, { alone: !groups.length }) + '</section>';
         }
         return `<p class="ui-status consciousness-read-status" role="status"${top?.tone ? ` data-tone="${escapeHtml(top.tone)}"` : ''}>${escapeHtml(top?.text || '')}</p>${moved}`
-            + (ui.creating ? newCircleCardHtml(ui) : '') + directory;
+            + [...removedDrafts.values()].map(removedDraftHtml).join('') + (ui.creating ? newCircleCardHtml(ui) : '') + directory;
     }
 
     // A repaint keeps the reader's place: the scroll, the focused control and a field's selection.
+    const trackDraft = () => markDesktopEditor('Circles', removedDrafts.size || changedFields('new').length
+        || view?.circles.some(circle => changedFields(circle.id, circle).length) || outrun());
     function paint() {
+        trackDraft();
         const scroll = body.scrollTop;
         const active = document.activeElement;
         const key = body.contains(active) ? focusKeyOf(active) : '';
@@ -323,8 +359,20 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             const data = await read();
             if (current !== generation) return;
             if (!Array.isArray(data.circles)) throw new Error(tr('circles.unavailable', 'Circles could not be read.'));
+            const listed = new Set(data.circles.map(circle => circle.id));
+            for (const circle of view?.circles || []) {
+                if (listed.has(circle.id)) continue;
+                if (changedFields(circle.id, circle).some(field => ui.drafts[`${circle.id}:${field}`])) removedDrafts.set(circle.id, circle);
+                else discardDraft(circle.id);
+            }
+            for (const id of listed) removedDrafts.delete(id);
             view = data;
             readError = '';
+            // A later revision of its circle than the one an unanswered write expects: that write can no longer land.
+            for (const entry of writing) {
+                const now = entry.doubt && data.circles.find(circle => circle.id === entry.id);
+                if (now && ruledOut(entry, now.revision)) writing.delete(entry);
+            }
         } catch (error) {
             if (current !== generation) return;
             readError = fmt('Places could not be read: {reason}', { reason: failureText(error) });
@@ -366,17 +414,22 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     }
 
     // The fields stay open while a write is out: `onConflict` hears the circle as it stands now, the facts a resave uses.
-    async function write(key, run, onConflict = null) {
+    async function write(key, run, onConflict = null, out = null) {
         if (ui.busy) return false;
-        ui.busy = true; ui.status = { [key]: { text: tr('circles.saving', 'Saving…'), tone: 'muted' } }; paint();
+        ui.busy = true; ui.status = { [key]: { text: tr('circles.saving', 'Saving…'), tone: 'muted' } };
+        if (out) writing.add(out);
+        paint();
         try {
             await run();
-            return true;
+            return true;  // the caller's keepNewer settles `out` once the drafts are weighed against what was written
         } catch (error) {
             const conflict = error?.status === 409 && error.body?.code === 'circle_revision_conflict';
             ui.status = { [key]: { text: conflict ? tr('places.conflict', 'Changed elsewhere; your text is kept.') : failureText(error),
                 tone: conflict ? 'warn' : 'error' } };
             if (conflict) { onConflict?.(error.body.circle); void refresh(); }
+            // A refusal wrote nothing. No answer, or a failed one, may still land: held until a later revision says it cannot.
+            if (out && (error?.status >= 400 && error.status < 500)) writing.delete(out);
+            else if (out) { out.doubt = true; void refresh(); }
             return false;
         } finally {
             ui.busy = false;
@@ -388,14 +441,25 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     // After a confirmed write, what it sent is done; words typed since stay, as an edit of `circle` on the revision
     // that write made. True when such words stay.
     function keepNewer(from, circle, sent) {
+        // A confirmed write answers its own record, and rules out an older unanswered one of the circle as a read would: by the later
+        // revision it left. The circle a create made takes the New card's whole draft.
+        for (const entry of writing) if (entry.id === from && (from !== circle.id || !entry.doubt || ruledOut(entry, circle.revision))) writing.delete(entry);
+        // A save that changed nothing leaves the revision an unanswered one still expects: a field that one may yet overwrite
+        // stays a draft, though this answer shows its words saved, until a later revision, an answer or Cancel lets go of it.
+        const exposed = (field, draft) => [...writing].some(({ id, change, sent: then }) => id === circle.id && field in change
+            && draft !== then[field] && draft !== change[field]);
         let kept = false;
         for (const field of ['name', 'text', 'model']) {
             const draft = ui.drafts[`${from}:${field}`];
             delete ui.drafts[`${from}:${field}`];
-            if (draft !== undefined && draft !== sent[field]) { ui.drafts[`${circle.id}:${field}`] = draft; kept = true; }
+            if (draft !== undefined && (draft !== sent[field] || exposed(field, draft))) { ui.drafts[`${circle.id}:${field}`] = draft; kept = true; }
         }
         delete ui.drafts[`${from}:revision`];
         if (kept) ui.drafts[`${circle.id}:revision`] = circle.revision;
+        if (!circleById(circle.id) && kept) removedDrafts.set(circle.id, circle);
+        else removedDrafts.delete(circle.id);
+        if (circleById(circle.id)) Object.assign(circleById(circle.id), circle);  // the words saved are the circle's now, before the read says so
+        trackDraft();
         return kept;
     }
 
@@ -413,7 +477,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         const done = await write(circle.id, async () => { removed = await writes.deleteCircle(circle.id, circle.revision); });
         if (!done) return;
         ui.editing = ''; ui.open = UNASSIGNED;
-        Object.keys(ui.drafts).filter((key) => key.startsWith(`${circle.id}:`)).forEach((key) => delete ui.drafts[key]);
+        discardDraft(circle.id);
         ui.status = { page: { text: fmt(removed.detached.length === 1 ? 'Deleted {circle}; its place is in no circle now.'
             : 'Deleted {circle}; its {n} places are in no circle now.', { circle: circle.name, n: removed.detached.length }), tone: 'ok' } };
         await refresh();
@@ -431,6 +495,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (!button || button.disabled || ui.busy) return;
         const act = button.dataset.circlesAct;
         const circle = circleById(button.dataset.circle);
+        if (act === 'discard-draft') { discardDraft(button.dataset.circle); paint(); return; }
         if (act === 'new') {
             ui.creating = true; ui.status = {}; ui.modelsFailed = false; paint();
             void readSuggestions();
@@ -438,14 +503,15 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             body.querySelector('[data-circles-draft="new:name"]')?.focus();
             return;
         }
-        if (act === 'cancel-new') { ui.creating = false; ['name', 'text', 'model'].forEach((field) => delete ui.drafts[`new:${field}`]); ui.status = {}; paint(); return; }
+        if (act === 'cancel-new') { ui.creating = false; discardDraft('new'); ui.status = {}; paint(); return; }
         if (act === 'create') {
             const name = String(ui.drafts['new:name'] || '').trim();
             if (!name) { ui.status = { new: { text: tr('circles.name.first', 'Name the circle first.'), tone: 'muted' } }; paint(); body.querySelector('[data-circles-draft="new:name"]')?.focus(); return; }
             const sent = { name: ui.drafts['new:name'], text: ui.drafts['new:text'], model: ui.drafts['new:model'] };
             let made = null;
             const model = String(sent.model || '').trim();  // a circle made without one sends none
-            if (!await write('new', async () => { made = await writes.createCircle({ name, text: String(sent.text || '').trim(), ...(model ? { model } : {}) }); })) return;
+            const change = { name, text: String(sent.text || '').trim(), ...(model ? { model } : {}) };
+            if (!await write('new', async () => { made = await writes.createCircle(change); }, null, { id: 'new', change, sent })) return;
             // Made once: words typed after the press open as its edit (the caret where it was), never a second New circle.
             const active = document.activeElement, typing = active?.dataset?.circlesDraft || '';
             const caret = active?.selectionStart == null ? null : [active.selectionStart, active.selectionEnd, active.selectionDirection];
@@ -471,7 +537,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         }
         const editAgain = () => body.querySelector(`[data-circle="${CSS.escape(circle.id)}"] [data-circles-act="edit"]`)?.focus();
         if (act === 'cancel') {
-            ui.editing = ''; ['name', 'text', 'model', 'revision'].forEach((field) => delete ui.drafts[`${circle.id}:${field}`]); ui.status = {}; paint(); editAgain();
+            ui.editing = ''; discardDraft(circle.id); ui.status = {}; paint(); editAgain();
             return;
         }
         if (act === 'save') {
@@ -482,13 +548,19 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             if (!name) { ui.status = { [circle.id]: { text: tr('circles.name.first', 'Name the circle first.'), tone: 'muted' } }; paint(); return; }
             const change = { ...(name !== circle.name ? { name } : {}), ...(words !== circle.text ? { text: words } : {}),
                 ...(model !== circle.model ? { model } : {}) };
-            if (!Object.keys(change).length) { ui.editing = ''; ui.status = { [circle.id]: { text: tr('circles.unchanged', 'Nothing to save.'), tone: 'muted' } }; paint(); editAgain(); return; }
+            const nothing = !Object.keys(change).length;
+            // Save is not Cancel: a save of this circle that got no answer may still land, and only a later revision, its answer or a
+            // discard lets go of it. The editor, its draft, its line and the hold stay, and nothing is sent again.
+            if (nothing && [...writing].some((entry) => entry.id === circle.id)) return;
+            if (nothing) { ui.editing = ''; discardDraft(circle.id); ui.status = { [circle.id]: { text: tr('circles.unchanged', 'Nothing to save.'), tone: 'muted' } }; paint(); editAgain(); return; }
             // Sent on the draft's own revision: a newer read never turns another client's edit into ours to overwrite.
             // A conflict re-bases the draft on the circle as it stands, so only a second Save writes over it.
             const sent = { name: ui.drafts[`${circle.id}:name`], text: ui.drafts[`${circle.id}:text`], model: ui.drafts[`${circle.id}:model`] };
             let saved = null;
-            if (!await write(circle.id, async () => { saved = await writes.updateCircle(circle.id, change, ui.drafts[`${circle.id}:revision`] ?? circle.revision); },
-                (now) => { if (Number.isSafeInteger(now?.revision)) ui.drafts[`${circle.id}:revision`] = now.revision; else delete ui.drafts[`${circle.id}:revision`]; })) return;
+            const revision = ui.drafts[`${circle.id}:revision`] ?? circle.revision;
+            if (!await write(circle.id, async () => { saved = await writes.updateCircle(circle.id, change, revision); },
+                (now) => { if (Number.isSafeInteger(now?.revision)) ui.drafts[`${circle.id}:revision`] = now.revision; else delete ui.drafts[`${circle.id}:revision`]; },
+                { id: circle.id, change, sent, revision })) return;
             const kept = keepNewer(circle.id, saved, sent);
             if (!kept) ui.editing = '';
             ui.status = { [circle.id]: { text: kept ? tr('circles.saved.newer', 'Saved. Newer edits are still unsaved.') : tr('circles.saved', 'Saved.'), tone: kept ? 'muted' : 'ok' } };
@@ -519,6 +591,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         // The first key fixes the revision the draft is written on; later reads repaint around it.
         if (!(`${id}:revision` in ui.drafts) && circleById(id)) ui.drafts[`${id}:revision`] = circleById(id).revision;
         ui.drafts[key] = field.value;
+        trackDraft();
     };
     const onShown = (event) => { if (event?.detail?.page === 'circles') void refresh(); };
     const onChanged = () => { if (shown()) void refresh(); else behind = true; };
@@ -560,6 +633,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         destroy() {
             generation += 1;
             destroyed = true;
+            markDesktopEditor('Circles', false);
             disposeChoosers();
             statusReads.clear();  // a late status answer finds no read of this page
             offLifecycle();

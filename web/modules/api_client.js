@@ -580,7 +580,7 @@ export const apiClient = {
         return fetchJson(`/api/chat/search?${params}`, { cache: 'no-store', signal });
     },
     /** @returns {Promise<import('./api_types.js').HealthResponse>} */
-    health: () => fetchJson('/api/health', { cache: 'no-store' }),
+    health: ({ signal } = {}) => fetchJson('/api/health', { cache: 'no-store', signal }),
     /** @returns {Promise<import('./api_types.js').StateResponse>} */
     state: () => readStateJson(),
     /** One composer file into the upload store. @returns {Promise<import('./api_types.js').UploadResponse>} */
@@ -724,7 +724,7 @@ export const apiClient = {
     projectList: ({ signal } = {}) => fetchJson('/api/projects?all=1', { cache: 'no-store', signal }),
     /** One Project by its id while active or deleting; an empty list when it is neither.
      *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
-    projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),
+    projectById: (projectId, { signal } = {}) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store', signal }),
     projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),

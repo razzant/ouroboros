@@ -1,9 +1,4 @@
-"""The launcher's ``/api/health`` probe of a server it waits for.
-
-The server answers 200 as soon as its socket serves, during boot too; the probe logs the ``boot``
-phase the body reports and leaves the rest to the UI. It has no clock for the launcher's own child,
-which it waits for as long as that child lives.
-"""
+"""Probe the launcher's child for first display or a planned main-window replacement."""
 
 from __future__ import annotations
 
@@ -16,17 +11,15 @@ from typing import Optional
 log = logging.getLogger("launcher")
 
 
-def wait_for_server(port: int, timeout: Optional[float] = None, abort_event=None, proc=None) -> bool:
-    """Wait for the agent HTTP server to answer ``/api/health`` (200 as soon as its socket serves;
-    the body's ``boot`` phase is logged, the UI shows the rest).
+def wait_for_server(port: int, timeout: Optional[float] = None, abort_event=None, proc=None, *, for_room=False) -> bool:
+    """First display needs only HTTP 200. A replacement also waits out the child's room startup.
 
-    The wait ends with the first answer, ``proc``'s exit or ``abort_event`` (headless mode: a
-    shutdown signal only sets the event, so the wait itself owns the early exit). ``timeout`` is a
-    bound for probing a server this launcher does not own (the already-running notice); the
-    launcher's own child is waited for as long as it lives. The per-probe HTTP timeout stays: it is
-    a transport bound, not a verdict."""
+    Room startup is over once dialogue is ready and the ``projects`` step is done or failed, or on any terminal boot
+    outcome. Both waits end on child exit or shutdown. A caller probing a server it does not own may set a timeout.
+    """
     url = f"http://127.0.0.1:{port}/api/health"
     deadline = None if timeout is None else time.time() + timeout
+    unreadable = False
     while deadline is None or time.time() < deadline:
         if abort_event is not None and abort_event.is_set():
             return False
@@ -35,20 +28,58 @@ def wait_for_server(port: int, timeout: Optional[float] = None, abort_event=None
         try:
             with urllib.request.urlopen(url, timeout=2) as response:
                 if response.status == 200:
-                    _log_boot_phase(response)
-                    return True
+                    boot = _read_boot(response)
+                    # Retry a cut body once. With an older 200-only probe the page proves its own room.
+                    retry_body = boot is None and not unreadable
+                    unreadable = boot is None
+                    if not for_room or (not retry_body and not _room_starting(boot or {})):
+                        if boot:
+                            log.info("Agent server is serving: boot phase %s, dialogue_ready=%s, tasks_ready=%s",
+                                     boot.get("phase"), boot.get("dialogue_ready"), boot.get("tasks_ready"))
+                        return True
         except Exception:
             pass
         time.sleep(0.5)
     return False
 
 
-def _log_boot_phase(response) -> None:
-    """One line about the phases the serving generation reports (older cores report none)."""
+def absent_rooms(port: int, rooms) -> set:
+    """Rooms the child's registry positively has no active Project for, once its ``projects`` step is done.
+
+    The one answer that counts is HTTP 200 with an empty list (CLIENT_CONTRACT §6: a deleting, tombstoned or unknown
+    room). One failed read, another status or shape, a registry still reconciling or an older server keeps every room:
+    temporary unavailability is never deletion. Only room numbers travel, never what was typed there."""
+    def read(path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as response:
+            return json.load(response) if response.status == 200 else None
+
     try:
-        boot = json.loads(response.read().decode("utf-8")).get("boot")
+        if not rooms or not any(step["name"] == "projects" and step["state"] == "done"
+                                for step in read("/api/health")["boot"]["steps"]):
+            return set()
+        answers = {room: read(f"/api/projects?chat_id={int(room)}")["projects"] for room in rooms}
+        if not all(isinstance(rows, list) for rows in answers.values()):
+            return set()
+        return {room for room, rows in answers.items() if not rows}
     except Exception:
-        return
-    if isinstance(boot, dict):
-        log.info("Agent server is serving: boot phase %s, dialogue_ready=%s, tasks_ready=%s",
-                 boot.get("phase"), boot.get("dialogue_ready"), boot.get("tasks_ready"))
+        return set()
+
+
+def _read_boot(response) -> Optional[dict]:
+    try:
+        boot = json.load(response).get("boot", {})
+    except Exception:
+        return None  # a cut-off response cannot confirm the end of room startup
+    return boot if isinstance(boot, dict) else {}
+
+
+def _room_starting(boot: dict) -> bool:
+    if boot.get("phase") not in ("starting", "serving"):
+        return False  # includes terminal boot outcomes and older servers without a boot document
+    if boot.get("dialogue_ready") is not True:
+        return True
+    steps = boot.get("steps")
+    return isinstance(steps, list) and not any(
+        isinstance(step, dict) and step.get("name") == "projects" and step.get("state") in ("done", "failed")
+        for step in steps
+    )

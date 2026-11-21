@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { WS, decide, decideServedPage, pageOwnedByCore, RECOVERY_HEALTHY_PROBE_LIMIT, SERVER_ANSWERS_EVENT } from '../modules/ws.js';
+import { isPanicFrame } from '../modules/panic.js';
+import { WS, decide, decideServedPage, keepsChatReceipt, pageOwnedByCore, RECOVERY_HEALTHY_PROBE_LIMIT, SERVER_ANSWERS_EVENT } from '../modules/ws.js';
 
 // Behavior coverage for the served-SHA reconciliation contract (netres Lane B):
 // one SSOT decision drives both the post-open refresh and the socket-down
@@ -1134,4 +1137,49 @@ test('a page whose socket never opened is not reloaded by the fuse; after its fi
     } finally {
         await teardown(ws);
     }
+});
+
+// keepsChatReceipt (ws.js) decides which sent frames the page keeps a receipt for across a desktop
+// restart. A command is not a message — the server's own bridge dispatch turns it into an action with
+// no saved row, so no receipt, no "Send again", is ever owed for one. The client's exclusion list must
+// be the server's command set, and this test derives that set from server.py's dispatch itself (the
+// wire_contract.test.js pattern): a server-side change fails here until the client follows.
+const server = readFileSync(fileURLToPath(new URL('../../server.py', import.meta.url)), 'utf-8')
+    .replace(/\r\n?/g, '\n');
+
+/** The bridge batch's own dispatch, as the server writes it: its command spellings and nothing else. */
+function serverDispatch() {
+    const start = server.indexOf('def _handle_bridge_update_batch(');
+    assert.notEqual(start, -1, 'the server still owns its bridge batch dispatch — update this test');
+    const rest = server.slice(start);
+    const body = rest.slice(0, rest.search(/\n\S/) < 0 ? rest.length : rest.search(/\n\S/));
+    const prefixes = [...body.matchAll(/lowered\.startswith\("\/([a-z]+)"\)/g)].map((match) => `/${match[1]}`);
+    assert.ok(prefixes.length >= 4, `the dispatch still spells its command prefixes (${prefixes})`);
+    // /review answers only to itself or a space; /panic has its own emergency branch before the rest.
+    assert.match(body, /lowered == "\/review" or lowered\.startswith\("\/review "\)/,
+        'the server still reads /review as itself or a space — update this test');
+    assert.match(body, /panic = lowered\.startswith\("\/panic"\)/,
+        'the server still reads /panic in its own emergency branch — update this test');
+    return prefixes.filter((prefix) => prefix !== '/review' && prefix !== '/panic');
+}
+
+test('every command the server dispatches keeps no chat receipt; everything else does', () => {
+    const commands = [...serverDispatch(), '/panic'];
+    for (const command of commands) {
+        assert.equal(keepsChatReceipt({ type: 'chat', content: command }), false, command);
+        assert.equal(keepsChatReceipt({ type: 'chat', content: `${command} now` }), false, `${command} with args`);
+        assert.equal(isPanicFrame({ type: 'chat', content: command }), command === '/panic', command);
+    }
+    // /review needs a space or end, exactly as the server reads it: /reviews is an owner message.
+    for (const review of ['/review', '/review a commit']) {
+        assert.equal(keepsChatReceipt({ type: 'chat', content: review }), false, review);
+    }
+    assert.equal(keepsChatReceipt({ type: 'chat', content: '/reviews' }), true, 'a word the server reads as a message');
+    // Ordinary words, a bare path and an uploaded attachment are messages the receipt belongs to.
+    assert.equal(keepsChatReceipt({ type: 'chat', content: 'plain words' }), true);
+    assert.equal(keepsChatReceipt({ type: 'chat', content: '/tmp/project logs' }), true);
+    assert.equal(keepsChatReceipt({ type: 'chat', content: 'see this', attachments: [{ filename: 'a.png' }] }), true);
+    // Not a chat frame at all, and Panic never rides a receipt.
+    assert.equal(keepsChatReceipt({ type: 'command', cmd: '/status' }), false);
+    assert.equal(keepsChatReceipt({ type: 'chat', content: '/panic', attachments: [{ filename: 'a' }] }), false);
 });

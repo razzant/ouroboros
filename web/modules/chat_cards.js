@@ -151,18 +151,23 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
     // Every change to a card's height goes through the room's viewport write, so a room reading its newest message
     // keeps following it (a late growth outside it would leave that message under the composer).
     const write = (fn) => (destroyed ? undefined : onDomWrite(fn));
-    const insertLine = (line) => {
-        const room = composer();
-        if (!room?.input) return false;
-        const at = room.input.selectionStart ?? room.input.value.length;
-        const before = room.input.value.slice(0, at);
-        room.insertAtCursor(`${before && !before.endsWith('\n') ? '\n' : ''}${line}`);
-        return true;
-    };
     const setStatus = (record, text, tone = 'muted') => {
         record.status.hidden = !text;
         record.status.textContent = text;
         record.status.dataset.tone = tone;
+    };
+    // A line for the room's draft. A field not open for typing yet (composer.js, a room still restoring) takes nothing:
+    // the card says so under itself instead of passing for added, and the line goes in at the next press that can.
+    const NOT_ADDED = 'Not added to your message: the message field is not open for typing yet. Try again once it is.';
+    const insertLine = (record, line) => {
+        const room = composer();
+        if (!room?.input) return false;
+        const at = room.input.selectionStart ?? room.input.value.length;
+        const before = room.input.value.slice(0, at);
+        const added = room.insertAtCursor(`${before && !before.endsWith('\n') ? '\n' : ''}${line}`) !== false;
+        if (!added) write(() => setStatus(record, NOT_ADDED, 'warn'));
+        else if (record.status.textContent === NOT_ADDED) write(() => setStatus(record, ''));
+        return added;
     };
     const showFallback = (record, note = '', tone = 'muted', retry = false) => write(() => {
         record.body.innerHTML = `<p class="chat-card-fallback">${escapeHtml(record.fallback)}</p>`;
@@ -250,7 +255,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         if (record.framedKind === 'app') {
             readAppText(body.app.url, body.app.sha256).then((html) => done(write(() => mountCardApp(host, {
                 cardId: record.id, title: body.title, sha256: body.app.sha256, html, fit, fresh, onFault: fault,
-                onSubmit: (line) => insertLine(line),
+                onSubmit: (line) => insertLine(record, line),
                 onLeave: () => {
                     budget.forget(record);
                     write(() => setStatus(record, 'The app tried to open a page and was stopped.', 'danger'));
@@ -411,7 +416,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             budget.forget(record);
         } else if (target.hasAttribute('data-card-pin')) setPinned(record, true);
         else if (target.hasAttribute('data-card-unpin')) setPinned(record, false);
-        else if (target.hasAttribute('data-card-make-skill')) insertLine(MAKE_SKILL(record.title));
+        else if (target.hasAttribute('data-card-make-skill')) insertLine(record, MAKE_SKILL(record.title));
     }
 
     /** The bubble for a card row (live frame or history row), or null without a card id. */

@@ -23,23 +23,44 @@
 # them between tags runs this by hand (`gh workflow run desktop-window.yml --ref
 # <branch>` once the default branch carries the file). It reads the repository and
 # writes nothing.
-name: Desktop window (Windows)
+#
+# MACOS WINDOW RENEWAL (#2791): manually select the reviewed ref and supply both full commit IDs, the
+# baseline and the candidate (no default: the pair is chosen for each run). It
+# runs `devtools/macos_wkwebview/window_renewal.py` instead of the Windows case, on one macOS runner:
+# the real launcher window of the baseline beside the dispatched commit through the same ordinary
+# Restart and Update (what a verdict proves and leaves out: window_renewal.md beside it). No tag
+# or push ever starts it; it uses no secret and uploads only its report, synthetic screenshots and
+# numerical observations.
+name: Desktop window
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      macos_window_renewal:
+        description: 'Instead of the Windows fit: compare an ordinary Restart and Update in the real macOS launcher window (devtools/macos_wkwebview/window_renewal.md)'
+        type: boolean
+        default: false
+      baseline_sha:
+        description: 'macOS window renewal only (required there). Full 40-character commit without the change, an ancestor of the candidate.'
+        type: string
+      candidate_sha:
+        description: 'macOS window renewal only (required there). Full reviewed candidate SHA, identical to the selected workflow ref.'
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-window-${{ github.sha }}
+  # A renewal dispatch never cancels the Windows case of the same commit, nor the reverse.
+  group: desktop-window-${{ github.sha }}-${{ inputs.macos_window_renewal && 'macos-renewal' || 'windows-fit' }}
   cancel-in-progress: true
 
 jobs:
   native-window:
     name: native window fits its screen (Windows, 100 %)
+    if: ${{ !inputs.macos_window_renewal }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -74,3 +95,111 @@ jobs:
             exit 1
           }
           "### A real window on Windows, left/top/right/bottom`n`n``````json`n$($measured.value)`n``````" >> $env:GITHUB_STEP_SUMMARY
+
+  # The real launcher window of two commits through the same ordinary Restart and managed Update: the
+  # baseline must keep its web view (the control), the dispatched commit must show a new one and keep
+  # the owner's draft, reply, unconfirmed message, input and tasks. Never on a tag or a push.
+  macos-window-renewal:
+    name: macOS window renewal after Restart and Update (baseline beside candidate)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_window_renewal }}
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      BASELINE_SHA: ${{ inputs.baseline_sha }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind both arms to the reviewed commits
+        run: |
+          set -euo pipefail
+          [[ "$BASELINE_SHA" =~ ^[0-9a-f]{40}$ && "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::supply both full 40-character commit IDs, baseline_sha and candidate_sha"; exit 1; }
+          test "$BASELINE_SHA" != "$CANDIDATE_SHA"
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+          test "$CANDIDATE_SHA" = "$(git rev-parse HEAD)"
+          git cat-file -e "${BASELINE_SHA}^{commit}"
+          git merge-base --is-ancestor "$BASELINE_SHA" "$CANDIDATE_SHA"
+          mkdir -p "$RUNNER_TEMP/window-renewal/private"
+      - uses: ./.github/actions/setup-python-env
+        id: prepared
+        with:
+          profile: build
+          interpreter: shipped
+          install-project: 'false'
+      - name: Focused Home Python and Node checks
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/.venv/bin/python"
+          private="$RUNNER_TEMP/window-renewal/private"
+          check=(env -i "PATH=$PATH" "HOME=$private" python3 -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$private/evidence")
+          py_status=0
+          "${check[@]}" --timeout 360 -- \
+            "$PY" -m pytest -o addopts="" -q tests/test_macos_window_renewal.py tests/test_launcher_webkit.py \
+            tests/test_launcher_webkit_diagnostics.py tests/test_desktop_room_session.py tests/test_macos_source_entry.py \
+            tests/test_launcher_source_handoff.py tests/test_launcher_panic.py tests/test_appearance_static.py > "$private/python" 2>&1 || py_status=$?
+          node_status=0
+          "${check[@]}" --timeout 180 -- \
+            node --test --test-reporter=tap web/tests/desktop_room_session.test.js web/tests/chat_reply_send.test.js \
+            web/tests/panic_delivery.test.js > "$private/node" 2>&1 || node_status=$?
+          # Only the exit codes and the names of failed synthetic cases leave the runner, never their output.
+          { printf 'Home Python exit %d · Home Node exit %d\n' "$py_status" "$node_status"
+            grep -E '^(FAILED|ERROR) tests/' "$private/python" | cut -d' ' -f2 | head -n 20 | sed 's/^/- /' || true
+            grep -E '^ *not ok [0-9]+ - ' "$private/node" | sed -E 's/^ *not ok [0-9]+ - /- node: /' | cut -c1-160 | head -n 20 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          (( py_status == 0 && node_status == 0 ))
+      - name: Size and structure of the same candidate
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/.venv/bin/python"
+          private="$RUNNER_TEMP/window-renewal/private"
+          check=(env -i "PATH=$PATH" "HOME=$private" python3 -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" --evidence-dir "$private/evidence")
+          size_status=0
+          "${check[@]}" --timeout 400 -- \
+            env "OURO_SIZE_RATCHET_BASE_REF=$BASELINE_SHA" "$PY" -m pytest -o addopts="" -q -m size_ratchet \
+            tests/test_smoke.py tests/test_repo_health_smoke.py tests/test_reference_book_budgets.py > "$private/size" 2>&1 || size_status=$?
+          structure_status=0
+          "${check[@]}" --timeout 240 -- "$PY" scripts/check_domains.py > "$private/structure" 2>&1 || structure_status=$?
+          { printf 'Size ratchet exit %d · Domain structure exit %d\n' "$size_status" "$structure_status"
+            grep -E '^(FAILED|ERROR) tests/' "$private/size" | cut -d' ' -f2 | head -n 20 | sed 's/^/- /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          (( size_status == 0 && structure_status == 0 ))
+      - name: Observe both launcher sessions on this Mac
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/window-renewal"
+          status=0
+          env -i "PATH=$PATH" "HOME=$out/private" python3 -I -S scripts/safe_test.py \
+            --temp-parent "$RUNNER_TEMP" --evidence-dir "$out/private/evidence" --timeout 4200 -- \
+            "$GITHUB_WORKSPACE/.venv/bin/python" -I -B "$GITHUB_WORKSPACE/devtools/macos_wkwebview/window_renewal.py" \
+            --baseline "$BASELINE_SHA" --candidate "$CANDIDATE_SHA" --out "$out/report" > "$out/private/native" 2>&1 || status=$?
+          if [[ -f "$out/report/report.json" ]]; then
+            python3 -I -S - "$out/report/report.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as stream:
+              result = json.load(stream)
+          judgement = result.get("judgement", {})
+          print("### macOS window renewal", judgement.get("verdict", "unfinished"))
+          print("\n| Check | Baseline | Candidate |\n|---|---|---|")
+          for key, pair in judgement.get("comparison", {}).items():
+              print(f"| {key} | {pair['baseline']} | {pair['candidate']} |")
+          for gap in (judgement.get("failures", []) + judgement.get("gaps", []))[:40]:
+              print("-", gap)
+          PY
+          fi
+          exit "$status"
+      - name: Preserve the synthetic observations and owned-window images
+        if: ${{ always() && steps.prepared.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-window-renewal-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/window-renewal/report/report.json
+            ${{ runner.temp }}/window-renewal/report/baseline/*.png
+            ${{ runner.temp }}/window-renewal/report/candidate/*.png
+          if-no-files-found: error
+          retention-days: 7

@@ -14,10 +14,12 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from ouroboros.desktop_media import host_environment
+from ouroboros.desktop_room_session import SessionRefused
 from ouroboros.unindexed import bytecode_prefix
 
 
@@ -916,7 +918,7 @@ LAUNCHER_HANDOFF_ENV = "OUROBOROS_LAUNCHER_HANDOFF"
 def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_lock: Callable[[], None],
                          acquire_lock: Callable[[], bool], before_release: Callable[[], None],
                          on_failure: Callable[[], None], desktop: bool, macos: bool, cancelled=lambda: False,
-                         windowed: Callable[..., bool] | None = None) -> None:
+                         windowed: Callable[..., bool] | None = None, desktop_session=None) -> None:
     """Hand off to compatible managed source; keep the shell on probe or spawn refusal.
 
     macOS selects its signed entry and probes imports/protocol with plain Python before
@@ -932,10 +934,14 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
 
     entry = macos_source_entry(context.bundle_dir) if macos else None
     frozen = getattr(sys, "frozen", False)
+    carry_room = desktop_session is not None and desktop_session.session.needs_transfer
+    needs_builtin = desktop_session is not None and desktop_session.session.has_room_input
     if not source_launcher_importable(
             context, desktop=desktop, python=(find_embedded_python(context.bundle_dir, macos=macos)
                 if entry is not None or frozen else context.embedded_python),
-            require_macos_entry=entry is not None):
+            require_macos_entry=entry is not None,
+            **({"require_room_session": True, "require_builtin": needs_builtin}
+               if carry_room else {})):
         return  # old/rollback source or a missing dependency must not lose the working shell
     handoff = source_handoff_argv(argv, keep_runtime_venv=entry is not None)
     if frozen:
@@ -961,17 +967,25 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
         def replace() -> None:  # Stop is checked again after unlock, Panic's claim included
             nonlocal released
             if source_handoff.begin(cancelled):
+                if validate:
+                    validate()
                 before_release()
                 release_lock()
                 released = True
                 if source_handoff.begin(cancelled):
-                    os.execve(command[0], command, env)  # returns only by raising
+                    with inherit(env) if inherit else nullcontext():
+                        os.execve(command[0], command, env)  # returns only by raising
 
         try:
-            if windowed is not None and macos and desktop:
-                windowed(replace, cancelled)  # on the main thread once no window is in full screen, or never
-            else:
-                replace()
+            with ExitStack() as preparation:
+                validate, inherit = (preparation.enter_context(desktop_session.prepare_exec(needs_builtin, transfer=carry_room))
+                                     if desktop_session else (None, None))
+                if windowed is not None and macos and desktop:
+                    windowed(replace, cancelled)  # on AppKit after every window has left full screen
+                else:
+                    replace()
+        except SessionRefused as exc:
+            context.log.warning("Source handoff refused: %s; previous window retained", exc)
         except Exception:
             context.log.error("The checkout's launcher did not start", exc_info=True)
         if released:  # a refusal before teardown leaves this shell as it was
@@ -1006,7 +1020,7 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
 
 
 def source_launcher_importable(context: BootstrapContext, *, desktop: bool, python: str | None = None,
-                               require_macos_entry: bool = False) -> bool:
+                               require_macos_entry: bool = False, require_room_session: bool = False, require_builtin: bool = False) -> bool:
     """Bounded handoff check using plain Python, before losing the running shell.
 
     Import only: no main(), window, server or notification center. A source update
@@ -1018,6 +1032,17 @@ def source_launcher_importable(context: BootstrapContext, *, desktop: bool, pyth
     if require_macos_entry:
         code += ("\nif getattr(launcher, 'MACOS_SOURCE_ENTRY_PROTOCOL', None) != 1:\n"
                  "    raise SystemExit('Source launcher does not support macOS source entry protocol 1')\n")
+    if require_room_session:
+        code += ("\nimport _posixshmem, WebKit\nfrom ouroboros.launcher_webkit import MainRenderer\n"
+                 "if not hasattr(WebKit.WKUserContentController, 'addScriptMessageHandlerWithReply_contentWorld_name_'):\n"
+                 "    raise SystemExit('WebKit cannot receive the current desktop room session')\n"
+                 "if getattr(launcher, 'MACOS_ROOM_SESSION_PROTOCOL', None) != 1:\n"
+                 "    raise SystemExit('Source launcher cannot receive the current desktop room session')\n")
+    if require_builtin:
+        code += ("\nfrom ouroboros.server_web import UI_DIR_SETTING, resolve_web_dir, select_ui\n"
+                 "ui = select_ui(launcher._load_settings().get(UI_DIR_SETTING), resolve_web_dir(launcher.REPO_DIR),"
+                 " protected=(launcher.DATA_DIR, launcher.REPO_DIR, launcher.SETTINGS_PATH.parent))\n"
+                 "if ui.source != 'builtin': raise SystemExit('Unsaved room input needs the built-in main document')\n")
     env = embedded_python_env(context.data_dir, {**os.environ, "PYTHONPATH": str(context.repo_dir)})
     try:
         result = context.hidden_run([python or context.embedded_python, "-c", code], cwd=str(context.repo_dir),

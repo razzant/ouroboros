@@ -1,5 +1,6 @@
 import { isPanicFrame, panicWithoutSocket } from './panic.js';
 import { openSignIn, readState } from './api_client.js';
+import { desktopRoomStorage } from './desktop_room_session.js';
 /** WebSocket manager; connect after modules register listeners.
  *
  * Outbound messages sent while the socket is down are queued in memory (at most
@@ -91,6 +92,16 @@ export function decideServedPage(prevSha, state, previouslyConnected, coreOwnedP
 
 const RELOAD_REASONS = { reload_changed: 'sha-change', reload_unknown: 'sha-unknown', reload_source: 'ui-source' };
 
+// Ordinary chat keeps a saved-echo receipt if its queue cannot cross a desktop restart.
+// server._handle_bridge_update_batch recognizes these prefixes, but /review needs a space or end.
+export function keepsChatReceipt(frame) {
+    if (frame?.type !== 'chat' || isPanicFrame(frame)) return false;
+    if (frame.attachments?.length) return true;  // submitted uploads already have their own receipt
+    const text = String(frame.content || '').trim().toLowerCase();
+    return !['/restart', '/evolve', '/bg', '/status'].some(prefix => text.startsWith(prefix))
+        && text !== '/review' && !text.startsWith('/review ');
+}
+
 export class WS {
     constructor(url) {
         this.url = url;
@@ -118,6 +129,7 @@ export class WS {
         this._answeredAtAttempt = null;
         this._serverAnswers = false;
         this._pendingMessages = [];
+        this._flushingSocket = null;
         this._nextClientMessageId = 1;
     }
 
@@ -351,27 +363,38 @@ export class WS {
         }, retry).catch(() => {});
     }
 
-    _flushPendingMessages() {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this._pendingMessages.length === 0) {
-            return;
-        }
-        const queued = [...this._pendingMessages];
-        this._pendingMessages = [];
-        for (const msg of queued) {
-            if (isPanicFrame(msg)) continue;
-            try {
-                this.ws.send(JSON.stringify(msg));
-                this.emit('outbound_sent', {
-                    clientMessageId: msg.client_message_id || '',
-                    queued: true,
-                    type: msg.type || '',
-                });
-            } catch {
-                this._pendingMessages.unshift(msg);
-                this._scheduleReconnect();
-                break;
+    async _flushPendingMessages() {
+        const socket = this.ws;
+        if (!socket || socket.readyState !== WebSocket.OPEN || this._flushingSocket === socket) return;
+        const session = desktopRoomStorage();
+        this._flushingSocket = socket;
+        try {
+            while (this.ws === socket && socket.readyState === WebSocket.OPEN && this._pendingMessages.length) {
+                // One native decision covers the frames already queued. Later actions join the tail.
+                const batch = this._pendingMessages.slice();
+                const allowed = !session || await session.mayFlushChat();
+                for (const msg of batch) {
+                    if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+                    if (this._pendingMessages[0] !== msg) continue;  // evicted while waiting
+                    if (allowed && !isPanicFrame(msg)) {
+                        try { socket.send(JSON.stringify(msg)); }
+                        catch { this._scheduleReconnect(); return; }  // keep the unwritten tail
+                    }
+                    this._pendingMessages.shift();
+                    if (isPanicFrame(msg)) continue;
+                    const receipt = { clientMessageId: msg.client_message_id || '', type: msg.type || '' };
+                    if (allowed) this._reportOutbound('outbound_sent', { ...receipt, queued: true });
+                    else this._reportOutbound('outbound_dropped', { ...receipt, held: keepsChatReceipt(msg) });
+                }
             }
+        } finally {
+            if (this._flushingSocket === socket) this._flushingSocket = null;
         }
+    }
+
+    _reportOutbound(event, detail) {
+        try { this.emit(event, detail); }
+        catch (error) { console.error('WebSocket send notification failed:', error); }
     }
 
     connect() {
@@ -458,34 +481,39 @@ export class WS {
         if (!payload.client_message_id && payload.type === 'chat') {
             payload.client_message_id = `msg-${Date.now()}-${this._nextClientMessageId++}`;
         }
-        if (this.ws?.readyState === WebSocket.OPEN) {
+        // Ordinary desktop actions keep their place behind the pending generation check.
+        const behindQueue = options.queue !== false && this._pendingMessages.length && desktopRoomStorage();
+        let written = false;
+        if (!behindQueue && this.ws?.readyState === WebSocket.OPEN) {
             try {
                 this.ws.send(JSON.stringify(payload));
-                this.emit('outbound_sent', {
-                    clientMessageId: payload.client_message_id || '',
-                    queued: false,
-                    type: payload.type || '',
-                });
-                return { status: 'sent', clientMessageId: payload.client_message_id || '' };
+                written = true;
             } catch {}
+        }
+        if (written) {
+            this._reportOutbound('outbound_sent', { clientMessageId: payload.client_message_id || '', queued: false, type: payload.type || '' });
+            return { status: 'sent', clientMessageId: payload.client_message_id || '' };
         }
         if (options.queue === false) {
             return { status: 'failed', clientMessageId: payload.client_message_id || '' };
         }
         if (this._pendingMessages.length >= 100) {
             const dropped = this._pendingMessages.shift();
-            this.emit('outbound_dropped', {
+            this._reportOutbound('outbound_dropped', {
                 clientMessageId: (dropped && dropped.client_message_id) || '',
                 type: (dropped && dropped.type) || '',
             });
         }
         this._pendingMessages.push(payload);
-        this.emit('outbound_queued', {
+        this._reportOutbound('outbound_queued', {
             clientMessageId: payload.client_message_id || '',
             type: payload.type || '',
         });
-        this._scheduleReconnect();
-        this.connect();
+        if (behindQueue && this.isConnected()) this._flushPendingMessages();
+        else {
+            this._scheduleReconnect();
+            this.connect();
+        }
         return { status: 'queued', clientMessageId: payload.client_message_id || '' };
     }
 

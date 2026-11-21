@@ -324,6 +324,47 @@ def test_macos_recovery_uses_the_live_window_and_current_gateway_after_setup(mon
     assert len(main.loaded_urls) == 1, "a retired window is no longer a navigation target"
 
 
+def test_macos_recovery_gives_the_main_windows_page_to_its_view_owner(monkeypatch):
+    """The main window's view can be replaced under the menu (``launcher_webkit``): its owner, not pywebview, picks
+    the view Help's one fixed page loads in. The same window and retirement checks come first. Between two server
+    generations no port is confirmed, and the choice is still handed over, as the fixed path alone: the owner carries
+    it until a live child's settled view can load it."""
+    from ouroboros import launcher_onboarding as host
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _created, webview = _install_fake_webview(monkeypatch)
+    gateway, owned = {"port": 8901}, []
+    main = webview.create_window("Ouroboros", url="http://127.0.0.1:8901")
+    webview.start(menu=host.setup_recovery_menu(main, lambda: gateway["port"], owned.append))
+    (action,) = webview.app_menu[0].items
+    action.function()
+    assert owned == ["http://127.0.0.1:8901/onboarding?builtin=1"] and not main.loaded_urls
+    gateway["port"] = None  # the gap between two generations: nothing is confirmed, and the choice is not dropped
+    action.function()
+    assert owned[1:] == ["/onboarding?builtin=1"] and not main.loaded_urls
+    front = webview.create_window("Another window")
+    action.function()
+    assert len(owned) == 2, "a window that is not the active one is asked nothing, gap or not"
+    front.destroy()
+    webview.windows.remove(main)
+    gateway["port"] = 8902
+    action.function()
+    assert len(owned) == 2 and not main.loaded_urls, "a retired window is asked nothing"
+
+
+def test_the_main_renderer_takes_help_as_a_bare_path_exactly_as_it_takes_the_address(monkeypatch):
+    """What the menu hands over in the gap is the path alone: the renderer keeps only the path and query of whatever
+    it is given, so the address read at the menu and the fixed path are one action."""
+    from ouroboros import launcher_webkit as kit
+
+    turns = []
+    monkeypatch.setattr(kit, "_on_appkit", lambda callback, *args, **_: turns.append((callback.__name__, args)))
+    renderer = kit.MainRenderer.__new__(kit.MainRenderer)
+    renderer.load("http://127.0.0.1:8901/onboarding?builtin=1")
+    renderer.load("/onboarding?builtin=1")
+    assert turns == [("_help", ("/onboarding?builtin=1",))] * 2
+
+
 @pytest.mark.parametrize("platform", ["win32", "linux"])
 def test_recovery_adds_no_menu_chrome_on_other_platforms(monkeypatch, platform):
     from ouroboros import launcher_onboarding as host
@@ -338,7 +379,7 @@ def test_launcher_binds_both_recovery_menus_to_its_generation_endpoint():
 
     source = inspect.getsource(launcher.main)
     assert "open_external_url=_open_external_url, read_port=lambda: _generation_port" in source
-    assert "menu=setup_recovery_menu(window, lambda: _generation_port)" in source
+    assert "menu=setup_recovery_menu(window, lambda: _generation_port, _main_renderer and _main_renderer.load)" in source
 
 
 # --------------------------------------------------------------------------

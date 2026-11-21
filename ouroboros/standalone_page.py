@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import logging
 import pathlib
+import sys
 
 log = logging.getLogger(__name__)
 
@@ -47,3 +48,23 @@ def themed_page(web_dir: pathlib.Path, title: str, body: str, css: str = "", hea
         f"{_inline(web_dir / 'theme.js', 'script')}\n{_inline(web_dir / 'ui.css', 'style')}\n"
         f"<style>{css}</style>\n</head>\n<body>\n{body}\n</body>\n</html>\n"
     )
+
+
+# The layout of a window shown before the server, on the interface's tokens (standalone_page).
+_WINDOW_CSS = """
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-primary, Canvas); color: var(--text-primary, CanvasText); font-family: var(--font-sans, system-ui); }
+.window { box-sizing: border-box; max-width: 460px; padding: 24px; text-align: center; }
+.window h2 { margin: 0 0 12px; font-size: var(--type-page, 24px); font-weight: 600; line-height: var(--line-title); }
+.window p { margin: 0; font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.window .muted { margin-top: 10px; font-size: var(--type-meta); line-height: var(--line-meta); }
+.window .btn { margin: 16px auto 0; }
+.window .ui-status { margin-top: 12px; }
+"""
+
+
+def launcher_window_page(title: str, body: str) -> str:
+    """A window shown before the server: no saved choice can reach it, so it follows the device (macOS),
+    in the web/ shipped with this launcher's own code (the app's when frozen, the checkout's otherwise)."""
+    code_dir = pathlib.Path(sys._MEIPASS) if getattr(sys, "frozen", False) else pathlib.Path(__file__).resolve().parents[1]
+    return themed_page(code_dir / "web", title, f'<div class="window">{body}</div>', _WINDOW_CSS)

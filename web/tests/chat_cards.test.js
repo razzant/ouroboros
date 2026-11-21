@@ -195,6 +195,23 @@ test('an app shows its face with Open; open, its submit and Make it a skill fill
         composer.input = { value: '', selectionStart: 0 };
         bubble.querySelector('[data-card-make-skill]').click();
         assert.equal(inserted[2], 'Turn the card «Loan» into a skill so I can keep it on Widgets.', 'an empty draft takes the line as is');
+        // A field not open for typing yet (composer.js answers false while its room restores) takes nothing: the card
+        // says so under itself, for its own button and for the app's submit, and a press that can add clears the line.
+        const status = bubble.querySelector('.chat-card-status');
+        const put = composer.insertAtCursor;
+        composer.insertAtCursor = () => false;
+        bubble.querySelector('[data-card-make-skill]').click();
+        assert.equal(inserted.length, 3, 'nothing reached the draft');
+        assert.match(status.textContent, /^Not added to your message: the message field is not open for typing yet\./);
+        assert.deepEqual([status.hidden, status.dataset.tone], [false, 'warn']);
+        status.textContent = '';
+        window.emit('message', { source: frame.contentWindow, data: { type: 'ouro-card-submit', value: { monthly: 1 }, summary: 'Again', nonce } });
+        assert.equal(inserted.length, 3);
+        assert.match(status.textContent, /^Not added to your message/, 'a submitted line the field refused is said the same way');
+        composer.insertAtCursor = put;
+        bubble.querySelector('[data-card-make-skill]').click();
+        assert.equal(inserted.length, 4);
+        assert.deepEqual([status.textContent, status.hidden], ['', true], 'added: the refusal is gone');
         cards.release(bubble);
         assert.equal(bubble.querySelector('iframe'), null, 'released: the frame is gone');
         assert.equal(window.listeners('message'), 0);

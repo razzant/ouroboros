@@ -1,45 +1,44 @@
 """The macOS main window as one surface: its page runs under a transparent title bar, the real traffic lights on top.
 
-pywebview 5.4 offers a titled window or ``frameless``, and frameless hides the system traffic
-lights and turns the page into a drag handle. This leaf keeps the titled NSWindow and flips its
-public switches instead: full-size content view, transparent title bar, hidden title (still the
-window's accessible name), an empty unified toolbar that gives the bar the height of the page's
-header row, no separator, no window tabs. One step is pywebview's own private detail undone:
-pywebview paints its theme frame's last subview, the title bar container, with the window colour;
-integration clears exactly that view and refuses when the view it painted does not hold the close
-button. Any failed step restores the ordinary title bar for the window's lifetime.
+pywebview 5.4 offers a titled window or ``frameless``, and frameless hides the system traffic lights and turns the page
+into a drag handle. This leaf keeps the titled NSWindow and flips its public switches instead: full-size content view,
+transparent title bar, hidden title (still the window's accessible name), an empty unified toolbar that gives the bar
+the height of the page's header row, no separator, no window tabs. One step is pywebview's own private detail undone:
+pywebview paints its theme frame's last subview, the title bar container, with the window colour; integration clears
+exactly that view and refuses when the view it painted does not hold the close button. Any failed step restores the
+ordinary title bar for the window's lifetime.
 
-The web UI is replaced independently of this shell, and a replacement may never speak to it: an
-older UI after Restore, a custom ``OUROBOROS_UI_DIR`` page, and every page until pywebview injects its
-bridge, which it does only after loading, when the first page is already on screen. So the opt-in is a
-static declaration (``<meta name="ouroboros-window-chrome" content="integrated">``) the window reads
-itself: one script, registered in ``before_show`` and injected at document start into the main
-frame, posts it here on the main thread. It runs in its own content world, so a replaced page's
-scripts can neither call nor overwrite it and no names collide. A document without the declaration
-gets the ordinary title bar back, and one that never ran the script (``before_load`` fires at each
-finished navigation) does too; messages name their document by ``performance.timeOrigin``, so an
-older document never undoes a newer one. The window starts integrated: pywebview adds the web view
-only after the first document loaded and declared, so the bar never flashes. The page reserves room
-only for what is applied: this leaf measures the overlap (content height above ``contentLayoutRect``)
-and the traffic lights' far edge and writes them into that document (``data-window-chrome``,
-``--window-chrome-top``, ``--window-chrome-start``). A browser, another OS, an older shell, full
-screen or a refused apply writes nothing, so nothing is reserved there; geometry that cannot be
-measured returns the window to the ordinary bar rather than leave a transparent one over the page.
+The web UI is replaced independently of this shell, and a replacement may never speak to it: an older UI after Restore,
+a custom ``OUROBOROS_UI_DIR`` page, and every page until pywebview injects its bridge, which it does only after loading,
+when the first page is already on screen. So the opt-in is a static declaration
+(``<meta name="ouroboros-window-chrome" content="integrated">``) the window reads itself: one script, registered in
+``before_show`` and injected at document start into the main frame, posts it here on the main thread. It runs in its own
+content world, so a replaced page's scripts can neither call nor overwrite it and no names collide. A document without
+the declaration gets the ordinary title bar back, and one that never ran the script (``before_load`` fires at each
+finished navigation) does too; messages name their document by ``performance.timeOrigin``, so an older document never
+undoes a newer one. In a renderer replacement the window follows its content view: a presented view's kept declaration
+and appearance apply before that ``before_load``; one put back gets the bar and appearance the window had when it left,
+a document that never declared included, then its words since; off screen it drags nothing. The window starts
+integrated: pywebview adds the web view only after the first document loaded and declared, so the bar never flashes. The
+page reserves room only for what is applied: this leaf measures the overlap (content height above ``contentLayoutRect``)
+and the traffic lights' far edge and writes them into that document (``data-window-chrome``, ``--window-chrome-top``,
+``--window-chrome-start``). A browser, another OS, an older shell, full screen or a refused apply writes nothing, so
+nothing is reserved there; geometry that cannot be measured returns the window to the ordinary bar rather than leave a
+transparent one over the page.
 
-WKWebView takes the clicks under a transparent bar, so AppKit's title bar never sees them: the script
-reports a plain left press inside the measured band, off any control and any text the page declares
-selectable (``cursor: text``). The report arrives after AppKit dequeued later events (a Force Touch trackpad
-sends pressure events within half a millisecond of a press; one was AppKit's current event at 17 of 19 band
-reports, owner's probe 17.11), so it acts on the mouse-down a local monitor kept, when in this window's band. A first
-press, while the button is down, goes back to AppKit's ``performWindowDragWithEvent:``. A second cannot go back:
-natively the title bar view hands a press under a transparent bar to the web view again, never zooming. So this
-leaf performs the Mac's "Double-click a window's title bar" choice, read at each double-click as Chromium reads it:
-Zoom (stored as ``Maximize``, and the default) and Minimize by their public calls, Do Nothing by nothing.
-Fill uses AppKit's private ``_zoomFill:`` only when present, as Chromium does; it is not Zoom.
-An isolated macOS 26.4 probe matched the ordinary bar; other versions remain unqualified.
-A visible toolbar stays as an opaque band over a full-screen page, so it hides on entering full screen. AppKit
-ends the exit with the toolbar hidden again, one set during the exit too, so it is shown again once
-the window is out; the style mask never changes in full screen.
+WKWebView takes the clicks under a transparent bar, so AppKit's title bar never sees them: the script reports a plain
+left press inside the measured band, off any control and any text the page declares selectable (``cursor: text``). The
+report arrives after AppKit dequeued later events (a Force Touch trackpad sends pressure events within half a
+millisecond of a press; one was AppKit's current event at 17 of 19 band reports, owner's probe 17.11), so it acts on the
+mouse-down a local monitor kept, when in this window's band. A first press, while the button is down, goes back to
+AppKit's ``performWindowDragWithEvent:``. A second cannot go back: natively the title bar view hands a press under a
+transparent bar to the web view again, never zooming. So this leaf performs the Mac's "Double-click a window's title
+bar" choice, read at each double-click as Chromium reads it: Zoom (stored as ``Maximize``, and the default) and Minimize
+by their public calls, Do Nothing by nothing. Fill uses AppKit's private ``_zoomFill:`` only when present, as Chromium
+does; it is not Zoom. An isolated macOS 26.4 probe matched the ordinary bar; other versions remain unqualified. A
+visible toolbar stays as an opaque band over a full-screen page, so it hides on entering full screen. AppKit ends the
+exit with the toolbar hidden again, one set during the exit too, so it is shown again once the window is out; the style
+mask never changes in full screen.
 
 The window's full-screen phase is AppKit's four notifications, observed from ``before_show`` with or without the
 document script, and its two failures, which AppKit sends only to the window's delegate: a small delegate stands in
@@ -52,26 +51,23 @@ registered (not yet shown, or the setup window), refuses at once, before anythin
 a failed exit, a Stop before the windows agree, or no confirmation within ``MACOS_HANDOFF_FULLSCREEN_WAIT_SEC`` also
 keeps the running shell: nothing is torn down.
 
-The window's appearance follows the document's painted ``data-theme-choice`` (``data-theme`` for a
-page without one): Light and Dark force Aqua or DarkAqua on this window only, System and an unthemed
-page inherit. The window's appearance is also its page's ``prefers-color-scheme``, so forcing the
-palette a System page painted would pin System to it; the Windows caption tint stays the bridge's
-(``launcher_appearance``), which cannot say System.
+The window's appearance follows the document's painted ``data-theme-choice`` (``data-theme`` for a page without one):
+Light and Dark force Aqua or DarkAqua on this window only, System and an unthemed page inherit. The window's appearance
+is also its page's ``prefers-color-scheme``, so forcing the palette a System page painted would pin System to it; the
+Windows caption tint stays the bridge's (``launcher_appearance``), which cannot say System.
 
-Until its first document has loaded, a window shows only its own background, which pywebview paints
-from a fixed ``background_color`` (the main window's was always the dark room). ``paint_room`` swaps
-it, before the window is shown, for one dynamic colour AppKit resolves against the window's effective
-appearance: the room colour (``web/ui.css`` ``--bg-primary``) of the Mac's Light or Dark, so the first
-frame follows macOS and nothing waits for the page (owner decision on #1111: A). A page whose choice
-differs forces its appearance when it declares, and the same colour then follows it, live resizes
-included. The windows shown before the server have no page choice to read and keep the Mac's.
-On Windows ``paint_room`` sets that fixed colour to the room of the app mode instead; it stays put
-after the page paints. On GTK that colour reaches nothing seen: pywebview 5.4's ``GtkWindow`` style rule
-showed no effect, so the window keeps its theme's colour, and from the first load the web view's own
-surface, opaque white by default, covers it on every host until a page paints (hosted run on GTK 3.24.33
-and WebKitGTK 2.50.4; a head-blocked ``html=`` document still showed the theme's colour). ``paint_room``
-gives that surface the room of the palette the theme resolved; a subsequent hosted run observed it
-before the held URL's page painted.
+Until its first document has loaded, a window shows only its own background, which pywebview paints from a fixed
+``background_color`` (the main window's was always the dark room). ``paint_room`` swaps it, before the window is shown,
+for one dynamic colour AppKit resolves against the window's effective appearance: the room colour (``web/ui.css``
+``--bg-primary``) of the Mac's Light or Dark, so the first frame follows macOS and nothing waits for the page (owner
+decision on #1111: A). A page whose choice differs forces its appearance when it declares, and the same colour then
+follows it, live resizes included. The windows shown before the server have no page choice to read and keep the Mac's.
+On Windows ``paint_room`` sets that fixed colour to the room of the app mode instead; it stays put after the page
+paints. On GTK that colour reaches nothing seen: pywebview 5.4's ``GtkWindow`` style rule showed no effect, so the
+window keeps its theme's colour, and from the first load the web view's own surface, opaque white by default, covers it
+on every host until a page paints (hosted run on GTK 3.24.33 and WebKitGTK 2.50.4; a head-blocked ``html=`` document
+still showed the theme's colour). ``paint_room`` gives that surface the room of the palette the theme resolved; a
+subsequent hosted run observed it before the held URL's page painted.
 
 On Windows a window can open larger than its screen shows. pywebview 5.4 gives the WinForms form the size and minimum
 it was asked for, the form scales both by the display's DPI (``AutoScaleMode.Dpi``), and a form taller than its screen's
@@ -211,7 +207,7 @@ def _handler_class():
 
         class OuroborosWindowChromeHandler(Foundation.NSObject):
             def userContentController_didReceiveScriptMessage_(self, controller, message):
-                self.chrome.receive(message.body())
+                self.chrome.receive_from(message.webView(), message.body())
 
         _classes["handler"] = OuroborosWindowChromeHandler
     return _classes["handler"]
@@ -397,6 +393,7 @@ class WindowChrome:
     def __init__(self) -> None:
         self._window: Any = None
         self._native: Any = None
+        self._incoming, self._declarations, self._left = None, {}, None  # a replacement's other view: words, last state
         self._webview: Any = None
         self._world: Any = None
         self._press: Any = None  # the app's last left mouse-down as AppKit dispatched it (the monitor in before_show)
@@ -472,6 +469,27 @@ class WindowChrome:
         # document has finished loading, after it declared, so the bar never flashes at launch and an undeclaring
         # first document is ordinary again before it is seen.
         self._wanted = True
+        self._reconcile()
+
+    def prepare_renderer(self, view: Any) -> None:
+        self._incoming, self._declarations, self._left = view, {}, None
+
+    def receive_from(self, view: Any, body: Any) -> None:
+        if view is self._webview:
+            self.receive(body)
+        elif view is self._incoming and body.get("type") in ("declare", "appearance"):
+            self._declarations[body["type"]] = body
+
+    def renderer_changed(self, view: Any) -> None:
+        if self._closed or self._webview is None or view is self._webview:
+            return
+        left, words = (self._left, self._declarations) if view is self._incoming else (None, {})  # put back, or new
+        self._left = self._doc, self._declared, self._wanted, self._appearance  # the window as the leaving view had it
+        self._incoming, self._declarations, self._webview, self._press = self._webview, {}, view, None
+        self._doc, self._declared, self._wanted, look = left or (-math.inf, False, self._wanted, self._appearance)
+        self._set_appearance(look, "")  # put back: all as it left, a never-declared document's too; new: its words only
+        for body in words.values():  # sent while off screen
+            self.receive(body)
         self._reconcile()
 
     def receive(self, body: Any) -> None:
@@ -857,14 +875,14 @@ class WindowChrome:
 
     def _set_appearance(self, choice: Any, theme: Any) -> None:
         choice, theme = str(choice or ""), str(theme or "")
-        name = APPEARANCES.get(choice) if choice else APPEARANCES.get(theme)
-        if name == self._appearance:
+        look = (choice or theme) if (choice or theme) in APPEARANCES else None
+        if look == self._appearance:
             return
         try:
             import AppKit
 
-            self._native.setAppearance_(AppKit.NSAppearance.appearanceNamed_(getattr(AppKit, name)) if name else None)
-            self._appearance = name
+            self._native.setAppearance_(look and AppKit.NSAppearance.appearanceNamed_(getattr(AppKit, APPEARANCES[look])))
+            self._appearance = look
         except Exception:
             log.warning("The window's appearance could not follow the page.", exc_info=True)
 
@@ -885,14 +903,11 @@ class WindowChrome:
         except Exception:
             log.debug("The closed window's delegate or waiting handoff was not reached.", exc_info=True)
         observers, self._observers = self._observers, []
-        if not observers:
-            return
         try:
             import AppKit
 
-            center = AppKit.NSNotificationCenter.defaultCenter()
             for token in observers:
-                center.removeObserver_(token)
+                AppKit.NSNotificationCenter.defaultCenter().removeObserver_(token)
         except Exception:
             log.debug("Full-screen observers not released.", exc_info=True)
 

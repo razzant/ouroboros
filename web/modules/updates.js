@@ -1,3 +1,4 @@
+import { desktopRestartNote } from './desktop_room_session.js';
 import { escapeHtmlAttr as escapeHtml, lastAppVersion, watchAppVersion } from './utils.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
 import { mountVersionList } from './update_versions.js';
@@ -1342,7 +1343,7 @@ export function initUpdates({ mount, state, ws }) {
                 body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
                     : `Git applies this update directly (${plan.local_dirty_count || 0} uncommitted file(s) are stashed and restored). The server restarts when it lands.`)
-                    + '\n\n' + updateEffectsText(preflight),
+                    + '\n\n' + updateEffectsText(preflight) + desktopRestartNote(),
                 details: { summary: 'Checks for this range', rows: preflightEvidenceRows(preflight) },
                 confirmLabel: assisted ? 'Start reviewed resolution' : 'Update now',
             });

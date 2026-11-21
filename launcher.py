@@ -85,7 +85,7 @@ from ouroboros.launcher_server_reaper import QuitEngineStop, reap_same_install_s
 from ouroboros.launcher_context_menu import attach_every_window
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
 from ouroboros.launcher_window_chrome import paint_room, transfer_when_windowed
-from ouroboros.standalone_page import themed_page
+from ouroboros.standalone_page import launcher_window_page as _window_page
 from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
     _prepare_windows_webview_runtime,
     _show_windows_message,
@@ -123,6 +123,7 @@ CRASH_WINDOW_SEC = 120
 # Entry protocol 1: --seed-bundle selects plain Python for the body and its
 # installs; --runtime-venv is retained separately while the shell keeps app identity.
 MACOS_SOURCE_ENTRY_PROTOCOL = 1
+MACOS_ROOM_SESSION_PROTOCOL = 1
 # One bounded visible retry when dependency installation fails.
 _DEPS_RETRY_DELAY_SEC = 5
 
@@ -196,26 +197,6 @@ def _bundle_dir() -> pathlib.Path:
     return _external_seed_bundle or pathlib.Path(__file__).parent
 
 
-# The layout of a window shown before the server, on the interface's tokens (standalone_page).
-_WINDOW_CSS = """
-body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: var(--bg-primary, Canvas); color: var(--text-primary, CanvasText); font-family: var(--font-sans, system-ui); }
-.window { box-sizing: border-box; max-width: 460px; padding: 24px; text-align: center; }
-.window h2 { margin: 0 0 12px; font-size: var(--type-page, 24px); font-weight: 600; line-height: var(--line-title); }
-.window p { margin: 0; font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
-.window .muted { margin-top: 10px; font-size: var(--type-meta); line-height: var(--line-meta); }
-.window .btn { margin: 16px auto 0; }
-.window .ui-status { margin-top: 12px; }
-"""
-
-
-def _window_page(title: str, body: str) -> str:
-    """A window shown before the server: no saved choice can reach it, so it follows the device (macOS),
-    in the web/ shipped with this launcher's own code (the app's when frozen, the checkout's otherwise)."""
-    code_dir = pathlib.Path(sys._MEIPASS) if getattr(sys, "frozen", False) else pathlib.Path(__file__).parent
-    return themed_page(code_dir / "web", title, f'<div class="window">{body}</div>', _WINDOW_CSS)
-
-
 def _already_running_window(line: str) -> None:
     """A second launch's pre-server notice (``webview`` is imported by then)."""
     import webview
@@ -228,7 +209,8 @@ def _exec_source_launcher(windowed=None) -> None:
     exec_source_launcher(_bootstrap_context(), _launch_argv, release_lock=release_pid_lock,
                          acquire_lock=acquire_pid_lock, before_release=lambda: stop_tray_before_exit(lambda: None),
                          on_failure=restore_tray_after_handoff, desktop=not _external_ui, macos=IS_MACOS,
-                         cancelled=_shutdown_event.is_set, windowed=windowed)
+                         cancelled=_shutdown_event.is_set, windowed=windowed,
+                         **({"desktop_session": _main_renderer} if _main_renderer and (_main_renderer.view or _main_renderer.session.items) else {}))
 
 
 def _shell_facts() -> dict:
@@ -275,6 +257,7 @@ _quit = QuitEngineStop(LAUNCHER_STOP_GRACE_SEC)  # only an explicit Quit ends th
 _agent_restart_requested = threading.Event()
 _agent_exit_before_ready = threading.Event()  # the child exited before it served: the UI wait ends now
 _webview_window = None
+_main_renderer = None
 # Linux-only browser-fallback flag (#56): set by _detect_headless() when no
 # pywebview GUI backend can initialize. Stays False on macOS/Windows — the
 # probe never runs there, so every `if _headless:` branch is dead code on
@@ -460,6 +443,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
     settings = _load_settings()
     _apply_settings_to_env(settings)
     env = embedded_python_env(DATA_DIR, host_environment() if IS_LINUX else os.environ.copy())
+    if _main_renderer is not None:
+        _main_renderer.server_environment(env)
     env["PYTHONPATH"] = str(REPO_DIR)
     # Environment owns the bind host (config.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV).
     # Merged settings include the unauthored 127.0.0.1 default: setdefault supplies
@@ -704,6 +689,7 @@ def _kill_orphaned_children(reason: str = "window_close") -> None:
 def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
     """Start/monitor agent; restart on code 42 or bounded crashes."""
     global _external_host_result, _generation_port
+    replace_main = False
     crash_times: list[float] = []
     while not _shutdown_event.is_set():
         unresolved = _pre_generation_cleanup()
@@ -735,7 +721,13 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         else:
             _update_server_process_record_port(proc.pid, actual_port)
             if _wait_for_server(actual_port, abort_event=_shutdown_event, proc=proc):
-                _generation_port = actual_port
+                _generation_port = actual_port  # first: the renderer's word below answers pages waiting on this server
+                if _main_renderer is not None and not replace_main:
+                    _main_renderer.confirmed(proc, actual_port, replace=False)
+                if replace_main and _wait_for_server(actual_port, abort_event=_shutdown_event, proc=proc, for_room=True):
+                    _main_renderer.confirmed(proc, actual_port, replace=True)
+                    _main_renderer.schedule_confirmed()
+                    replace_main = False
             else:
                 log.warning("Agent server exited before it answered /api/health on port %d", actual_port)
 
@@ -743,6 +735,9 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
         proved = _generation_port is not None
         _generation_port = None
         exit_code = proc.returncode
+        if _main_renderer is not None and not _shutdown_event.is_set() and exit_code != PANIC_EXIT_CODE:
+            if _main_renderer.server_exited(proc):
+                replace_main = True  # its confirmed view never took over; the deliberate restart is still owed
         log.info("Agent exited with code %d", exit_code)
         if not proved and exit_code not in (RESTART_EXIT_CODE, PANIC_EXIT_CODE) and not _agent_restart_requested.is_set():
             _agent_exit_before_ready.set()  # a child that died before serving: the UI wait fails now, not at a deadline
@@ -798,6 +793,9 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             continue
 
         if exit_code == RESTART_EXIT_CODE:
+            replace_main = _main_renderer is not None and _main_renderer.window is not None
+            if replace_main:
+                _main_renderer.replacement_requested()
             log.info("Agent requested restart (exit code 42). Restarting...")
             sync_existing_repo_from_bundle(_bootstrap_context())  # a deployment policy's packages are its administrator's: none synced
             if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not install_deps(_bootstrap_context()):
@@ -1159,6 +1157,11 @@ def main(argv=()):
     if not _external_ui:
         _detect_headless()
 
+    global _main_renderer
+    if IS_MACOS and not _headless:
+        from ouroboros.launcher_webkit import MainRenderer
+        _main_renderer = MainRenderer(DATA_DIR, lambda proc, p: proc is _agent_proc and p == _generation_port
+                                      and not _shutdown_event.is_set() and proc.poll() is None)
     if not _headless:
         import webview
         attach_every_window(webview)
@@ -1423,19 +1426,17 @@ def main(argv=()):
         background.ended_before_main(lambda: _quit.stop_engine(server_stopped=stopped))  # after the server stop
         return
 
-    def _resolve_bridge_file_url(raw_url: str) -> str:
-        """Validate a loopback file-bridge URL, returning the resolved full URL.
-
-        Shared SSOT for both the download-to-Downloads and open-in-default-app
-        bridge methods so the loopback guard cannot drift between them.
-        """
-        full_url = urllib.parse.urljoin(f"http://127.0.0.1:{actual_port}", str(raw_url or ""))
+    def _resolve_bridge_file_url(raw_url: str) -> str:  # the one loopback guard of both file bridges, so it cannot drift
+        port = _generation_port if _main_renderer is not None else actual_port
+        if port is None:
+            raise ValueError("The local Ouroboros server has not confirmed its port")
+        full_url = urllib.parse.urljoin(f"http://127.0.0.1:{port}", str(raw_url or ""))
         parsed = urllib.parse.urlparse(full_url)
         if parsed.scheme != "http":
             raise ValueError("file URL must be http://")
         if parsed.hostname not in {"127.0.0.1", "localhost"}:
             raise ValueError("desktop file access is limited to the local Ouroboros server")
-        if parsed.port != actual_port:
+        if parsed.port != port:
             raise ValueError("file URL port must match the local Ouroboros server")
         if parsed.path != "/api/files/download" and not parsed.path.startswith(("/api/extensions/", "/api/tasks/")):
             raise ValueError("file URL path must be /api/files/download, /api/extensions/<skill>/... or /api/tasks/...")
@@ -1537,12 +1538,8 @@ def main(argv=()):
                 return {"ok": False, "error": str(exc)}
 
         def open_file_with_default_app(self, url: str, filename: str) -> dict:
-            """Open a delivered file in the OS default app (external window).
-
-            Fetches the loopback file into a private temp dir (NOT ~/Downloads)
-            and hands it to the platform default handler. This never navigates
-            the in-app WKWebView, which was the original fullscreen-lockup bug.
-            """
+            """Fetch a delivered file into a private temp dir (not ~/Downloads) for the OS default app. It never
+            navigates the in-app WKWebView: that navigation was the original full-screen lockup."""
             try:
                 full_url = _resolve_bridge_file_url(url)
                 # Per-open private dir: mkdtemp atomically creates a fresh 0700
@@ -1577,9 +1574,11 @@ def main(argv=()):
         background_color="#0f0f11",
         text_select=True, hidden=background.start_hidden(options.launch_intent),
     )
+    if _main_renderer is not None:
+        _main_renderer.attach(window, background)
     _webview_window = attach_media_permissions(background.attach(window), url)  # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
     webview.start(func=background.run, debug=False, private_mode=False,
-                  menu=setup_recovery_menu(window, lambda: _generation_port))
+                  menu=setup_recovery_menu(window, lambda: _generation_port, _main_renderer and _main_renderer.load))
 
 
 if __name__ == "__main__":

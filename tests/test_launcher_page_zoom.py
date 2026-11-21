@@ -93,6 +93,26 @@ def test_only_the_newest_request_of_the_newest_page_is_kept(mac):
     assert [factor for _kind, factor in queued] == [1.5, 1.1]
 
 
+def test_the_size_follows_the_windows_content_view_and_returns_with_the_previous_one(mac):
+    """A renderer replacement (``launcher_webkit``) presents another view and may put the previous one back: the owner's
+    size is on whichever view the window shows, and a write queued for a view that left is dropped."""
+    zoom, first, _queued, changed, _root = mac
+    window = _Window()
+    zoom.attach(window)
+    window.events.before_show.handlers[0]()
+    assert zoom.request(125, page=1.0, sequence=1)["percent"] == 125
+    second = _CocoaView()
+    zoom.renderer_changed(second)  # presented
+    assert second.zooms == [1.25] and first.zooms == [1.25]
+    assert zoom.request(150, page=2.0, sequence=1)["percent"] == 150
+    assert second.zooms == [1.25, 1.5] and first.zooms == [1.25], "the view off screen is not written"
+    assert zoom._apply_now("cocoa", first) is False, "a write queued before the change finds its view gone"
+    measured = len(changed)
+    zoom.renderer_changed(first)  # the replacement is reversed
+    assert first.zooms == [1.25, 1.5], "it returns at the newest size"
+    assert len(changed) == measured + 1, "and the title band is measured again"
+
+
 def test_two_requests_that_overlap_on_their_threads_leave_the_newest_size(mac, monkeypatch):
     """Bridge calls run on pywebview's worker threads: the older one may finish its write after the newer one."""
     zoom, view, _queued, _changed, root = mac

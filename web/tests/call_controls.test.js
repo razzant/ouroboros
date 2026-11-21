@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bindConversationControls, projectRoomOptions, startConversations } from '../modules/conversation_controls.js';
+import { installDomDouble } from './dom_double.js';
 
 test('conversation mounts receive the room label, reveal, visibility and settled callback from navigation', () => {
     let options, shown = false, active = true, pending = false, destroyed = 0, revealed = 0, released = 0;
@@ -197,4 +198,45 @@ test('a reserved face gives way to Send when the composer fills or no feature wi
             assert.equal(older.storage.has('ouro:conversation-entry'), true, 'its version is not the feature\'s answer');
         } finally { boundOlder.dispose(); }
     } finally { delete globalThis.localStorage; delete globalThis.MutationObserver; }
+});
+
+// The conversation entry's reserved face on Send (conversation_controls.js): before a conversation
+// feature mounts, the face the feature last asked this device to show (Talk) sits on the Send button
+// of an empty field, announced as not ready. A field the room FILLS — a draft restored after a window
+// replacement, words the owner did not type — releases it the same way typing does, so the button
+// says what a press does: Send, which sends the draft, never a call it cannot start yet.
+function entryFixture() {
+    const env = installDomDouble();
+    const { doc, el } = env;
+    const field = el('textarea');
+    const send = el('button', { className: 'chat-send-inline' });
+    const preview = el('div', { className: 'chat-attachment-preview' });
+    const page = el('div', {}, send, el('div', { className: 'chat-text-row' }, field), preview);
+    doc.body.append(page);
+    doc.parseHtml = true;  // the face the entry reserves lands as innerHTML: read it as parsed words
+    globalThis.localStorage = {
+        getItem: (key) => key === 'ouro:conversation-entry'
+            ? JSON.stringify({ html: 'Talk', title: 'Start a voice call' }) : null,
+        setItem() {}, removeItem() {},
+    };
+    return { ...env, field, send, page };
+}
+
+test('the reserved Talk face yields to Send when the room fills the field the owner did not type', (t) => {
+    const prior = globalThis.localStorage;
+    const f = entryFixture();
+    t.after(() => { f.restore(); globalThis.localStorage = prior; });
+    // The feature's own configuration read has not answered, so the remembered face stays reserved.
+    const store = { status: () => ({ loaded: false }), providers: () => [], fault: () => null, onChange: () => () => {} };
+    const composer = { hasPendingWork: () => false };
+    startConversations({ hosts: { onProvidersChange() {}, clientProviders: () => [] }, openSettings() {} });  // no feature has mounted
+    const dispose = bindConversationControls({ composer, page: f.page, chatId: 1, ws: {}, contributions: store });
+    t.after(dispose);
+    assert.deepEqual([f.send.textContent, f.send.title, f.send.getAttribute('aria-disabled')],
+        ['Talk', 'Start a voice call', 'true'], 'the reserved face, announced as not ready');
+    // The same 'input' event the composer's draft restoration dispatches releases the face.
+    f.field.value = 'kept words';
+    f.field.emit('input', { target: f.field });
+    assert.deepEqual([f.send.textContent, f.send.title, f.send.getAttribute('aria-disabled')],
+        ['Send', 'Send message', null], 'a press says what it does: Send, with the draft in the field');
 });

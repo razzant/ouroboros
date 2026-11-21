@@ -173,6 +173,29 @@ test('recording face, Stop, words at the saved caret or an Insert/Copy offer; no
     } finally { r.restore(); }
 });
 
+test('a field not open for typing takes no dictated words: the offer keeps them and says why, until Insert can put them in', () => {
+    const r = room();
+    try {
+        const fake = fakeDictation();
+        let open = false;
+        const put = r.composer.insertAtCursor;
+        r.composer.insertAtCursor = (text) => (open ? put(text) : false);  // composer.js answers false while its room restores
+        bindVoiceControls({ composer: r.composer, speech: speechHub([LIVE], LIVE.key), makeDictation: fake.make });
+        fake.opts.onTranscript({ kind: 'insert', text: 'call mum', start: 0, end: 0 });
+        assert.equal(r.input.value, '', 'nothing reached the field');
+        const kept = () => r.wrap.querySelector('.voice-offer');
+        assert.equal(kept().querySelector('.voice-offer-text').textContent, 'call mum', 'the words are kept, not dropped');
+        assert.match(kept().querySelector('.voice-offer-note').textContent, /not open for typing yet/, 'and the offer says why');
+        kept().querySelector('.voice-offer-actions').children[0].click();  // Insert while the field still refuses
+        assert.equal(kept().querySelector('.voice-offer-text').textContent, 'call mum', 'a refused Insert keeps them too');
+        assert.equal(r.input.value, '');
+        open = true;
+        kept().querySelector('.voice-offer-actions').children[0].click();
+        assert.equal(r.input.value, 'call mum');
+        assert.equal(kept(), null, 'in the draft: the offer is gone');
+    } finally { r.restore(); }
+});
+
 test('Esc, Panic, the room hiding and the engine leaving end a recording', () => {
     const r = room();
     try {

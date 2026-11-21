@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLayerStack } from '../modules/layers.js';
 import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage } from '../modules/page_navigation.js';
+import { desktopRoomStorage, openDesktopRoomSession } from '../modules/desktop_room_session.js';
 
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
@@ -144,6 +145,34 @@ test('a captured place restores its retained owners before their independent rea
         assert.equal(captured.title, ({ settings: 'Settings › Tools', dashboard: 'Dashboard › Logs', skills: 'Skills', chat: 'Main' })[page],
             'a section\'s return names the section, then its page');
     }
+});
+
+test('Back to a chat whose saved Project was still opening resumes it only while no room was chosen since; after a choice the chat shown is the active room', async () => {
+    const host = Object.assign(new EventTarget(), { webkit: { messageHandlers: { ouroborosRoomSession: { postMessage: () => ({}) } } } });
+    host.top = host;
+    await openDesktopRoomSession(host, { documentElement: { dataset: {} }, querySelector: () => ({ content: 'navigation-test', remove() {} }) }, assert.fail);
+    const session = desktopRoomStorage();
+    const active = () => session.getItem('ouro_chat_active_project');
+    // The neutral chat while the saved Project still opens. `commitPage` keeps app.js's rule: a chat shown as anything
+    // but the pending room is the active room from then on (Main here: no Project is open on it).
+    const neutralChat = (log) => capturePagePlace({ state: { activePage: 'chat' }, navState: {}, projectInstances: new Map(), projectPanelTitle: {},
+        mainChat: { captureReading: () => () => {} }, doc: { getElementById: () => ({}) }, restorePlaces: { capture: () => () => {} },
+        pendingRoom: () => log.push('resume'),
+        commitPage: (name, options) => { options.enter(); log.push(options.initialRoom); if (!options.initialRoom) session.selectRoom(null); } }, {});
+    let log = [];
+    const waiting = neutralChat(log);
+    assert.equal(waiting.label, 'your last Project');
+    waiting.restore();
+    assert.deepEqual([log, session.chosen], [[true, 'resume'], false], 'nothing chosen: the return resumes the saved Project and chooses nothing itself');
+
+    const later = neutralChat(log = []);
+    assert.deepEqual([later.label, later.title], ['your last Project', 'your last Project']);
+    session.selectRoom('p9');  // a Project opened from the page the jump went to: the owner's newer choice
+    assert.equal(active(), 'p9');
+    assert.deepEqual([later.label, later.title], ['Main', 'Main'], 'Back names where this return now leads');
+    later.restore();           // Back from there, down to the chat this place was captured on: Main is on screen
+    assert.deepEqual(log, [false], 'the pending selection ended with that choice: nothing is resumed');
+    assert.equal(active(), null, 'and the room kept as active is the one on screen, not the Project chosen meanwhile');
 });
 
 test('jumps stack after the veto, section choices retain them, the map clears them, and Back restores each retained place atomically', async () => {

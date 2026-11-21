@@ -1,3 +1,4 @@
+import { markDesktopEditor } from './desktop_room_session.js';
 import { bindPageHeader, renderPageHeader, revealStripChoice } from './page_header.js';
 import { PAGE_ICONS, SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
@@ -142,11 +143,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     };
     let viewRequest = 0;
     let draftRevision = 0;
+    // The saves of this editor that may still land: each from its press until its answer is known, and after one that got none.
+    // The text shown is unsaved against such a save even when it equals the last read text (`outrun`). `unsaved` is the one
+    // answer for the desktop window's wait, Save, the row's mark, leaving the file and closing the page.
+    const writing = new Set();
+    const outrun = () => [...writing].some((write) => write.content !== state.editorValue);
+    const unsaved = () => state.editorDirty || outrun();
 
-    // A page too narrow for both (style.css, the `files` container) shows the folder's list first and the chosen file
-    // once one is chosen, never both: `data-files-view` says which. Back to folder returns to the list and keeps an
-    // unsaved draft, which the file's row (or a new file's own row) reopens and which leaving the file still asks
-    // about. Side by side the view changes nothing on screen; focus moves there only off a control a resize hid.
+    // A page too narrow for both (style.css, the `files` container) shows the folder's list first and the chosen file once one is chosen, never both: `data-files-view` says which.
+    // Back to folder returns to the list and keeps an unsaved draft, which the file's row (or a new file's own row) reopens and which leaving the file still asks about. Side by side the view changes nothing on screen; focus moves there only off a control a resize hid.
     // The file shown alone is one layer of the shell's stack (layers.js, DESIGN "Layers and dismissal"), so Escape,
     // the system Back and Telegram's Back close it exactly as Back to folder does; beside the list it is no layer.
     const FILE_LAYER = 'files-file';
@@ -154,7 +159,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     let unsavedMark = '';
     const panesShown = () => [sidebarEl, previewEl].filter((pane) => pane.getClientRects().length > 0).length;
     const singlePane = () => panesShown() === 1;
-    const unsavedPath = () => (state.editorDirty && !state.editorIsNew ? state.editorPath : '');
+    const unsavedPath = () => (unsaved() && !state.editorIsNew ? state.editorPath : '');
 
     // On the list alone, the folder's status (a failed read, a copy waiting for Paste, an upload) stands over the list
     // it is about; beside the file it stays under the file's header.
@@ -201,12 +206,13 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     function updateEditorActions() {
+        markDesktopEditor('Files', unsaved());
         const visible = state.editorWritable && state.selectedType === 'file';
         const canSave = visible && (
             state.editorIsNew
                 ? Boolean(state.editorFilename.trim())
                 : state.selectedPath === state.editorPath
-        ) && (state.editorDirty || state.editorIsNew);
+        ) && (unsaved() || state.editorIsNew);
         saveBtn.hidden = !visible;
         discardBtn.hidden = !state.editorIsNew;
         discardBtn.disabled = state.editorSaving;
@@ -218,17 +224,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         markUnsaved();
     }
 
-    function resetEditorState() {
-        state.editorPath = '';
-        state.editorOriginalFilename = '';
-        state.editorOriginal = '';
-        state.editorValue = '';
-        state.editorDirty = false;
-        state.editorWritable = false;
-        state.editorIsNew = false;
-        state.editorFilename = '';
-        updateEditorActions();
+    // The editor's state at once: a file's text, a new file's draft or none. Every way here but a new file's Discard asked
+    // first (`canLeaveEditor`), so a save still out is let go with the draft it belongs to, by the owner's own choice.
+    function setEditor(values = {}) {
+        writing.clear();
+        Object.assign(state, { editorPath: '', editorOriginalFilename: '', editorOriginal: '', editorValue: '', editorDirty: false,
+            editorWritable: false, editorIsNew: false, editorFilename: '', ...values });
     }
+
+    function resetEditorState() { setEditor(); updateEditorActions(); }
 
     function updateClipboardActions() {
         pasteBtn.hidden = !state.clipboard;
@@ -313,7 +317,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     async function canLeaveEditor() {
-        if (!state.editorDirty) return true;
+        if (!unsaved()) return true;
         const result = await showModal({
             title: 'Discard changes?',
             message: 'You have unsaved edits in the current file. Leave without saving?',
@@ -523,9 +527,9 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     // A draft kept (owner 2026-11-03) began from `editorOriginal`: shown again, Files says if the file changed meanwhile.
     async function noticeChangedElsewhere() {
         const { editorPath: path, editorOriginal: original } = state;
-        if (!state.editorDirty || state.editorIsNew || !path) return;
+        if (!unsaved() || state.editorIsNew || !path) return;
         const data = await fetchJson(`/api/files/read?${new URLSearchParams({ path })}`).catch(() => null);
-        if (!data || state.editorPath !== path || state.editorOriginal !== original || !state.editorDirty) return;
+        if (!data || state.editorPath !== path || state.editorOriginal !== original || !unsaved()) return;
         if (!data.is_text || data.truncated || (data.content || '') !== original) showStatus('This file changed after this draft began; Save replaces those changes.', 'warn');
     }
 
@@ -627,14 +631,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             });
         } else {
             const editable = !data.truncated;
-            state.editorPath = state.selectedPath;
-            state.editorOriginalFilename = data.name || '';
-            state.editorOriginal = data.content || '';
-            state.editorValue = data.content || '';
-            state.editorDirty = false;
-            state.editorWritable = editable;
-            state.editorIsNew = false;
-            state.editorFilename = data.name || '';
+            setEditor({ editorPath: state.selectedPath, editorOriginalFilename: data.name || '', editorOriginal: data.content || '',
+                editorValue: data.content || '', editorWritable: editable, editorFilename: data.name || '' });
             updateEditorActions();
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
@@ -775,7 +773,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     async function saveCurrentFile() {
-        if (!state.editorWritable || state.editorSaving || (!state.editorDirty && !state.editorIsNew)) return;
+        if (!state.editorWritable || state.editorSaving || (!unsaved() && !state.editorIsNew)) return;
         const relName = state.editorFilename.trim();
         if (state.editorIsNew && !relName) return;
         const savePath = state.editorIsNew
@@ -785,6 +783,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         const editor = previewContentEl.querySelector('.files-editor');
         const nameInput = previewContentEl.querySelector('.files-editor-name');
         const content = state.editorValue;
+        const mine = { content };
+        writing.add(mine);
         state.editorSaving = true;
         if (nameInput) nameInput.disabled = true;
         updateEditorActions();
@@ -796,6 +796,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 create: state.editorIsNew,
             });
             if (editor !== previewContentEl.querySelector('.files-editor')) return;
+            // This answer speaks for this save alone (the finally removes its own record): an earlier save that got
+            // no answer may still complete after it, so its record stays and keeps the shown text unsaved (`outrun`).
             state.selectedPath = data.path || savePath;
             state.selectedType = 'file';
             state.editorPath = state.selectedPath;
@@ -808,10 +810,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             nameInput?.remove();
             previewPathEl.textContent = data.display_path || state.editorPath;
             previewMetaEl.textContent = metaLine(formatBytes(data.size), 'editable');
-            showStatus(state.editorDirty ? 'Saved. Newer edits are still unsaved.' : 'Saved.', 'success');
+            showStatus(state.editorDirty ? 'Saved. Newer edits are still unsaved.'
+                : outrun() ? 'Saved. An earlier save that got no answer may still replace this text.' : 'Saved.', 'success');
+        } catch (error) {
+            mine.doubt = !(error?.status >= 400 && error.status < 500);  // a refusal wrote nothing; no answer, or a failed one, may have landed
+            throw error;
         } finally {
             state.editorSaving = false;
             if (nameInput) nameInput.disabled = false;
+            if (!mine.doubt) writing.delete(mine);  // a refusal says nothing of an earlier save that got no answer
             updateEditorActions();
         }
         try {
@@ -824,19 +831,12 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     function createNewFile(options = {}) {
-        if (state.editorDirty && !options.force) return;
+        if (unsaved() && !options.force) return;
         hideContextMenu();
         viewRequest += 1;
         state.selectedPath = '';
         state.selectedType = 'file';
-        state.editorPath = '';
-        state.editorOriginalFilename = '';
-        state.editorOriginal = '';
-        state.editorValue = '';
-        state.editorDirty = true;
-        state.editorWritable = true;
-        state.editorIsNew = true;
-        state.editorFilename = '';
+        setEditor({ editorDirty: true, editorWritable: true, editorIsNew: true });
         renderList();
         updateEditorActions();
         setPreview({
@@ -964,7 +964,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     });
 
     window.addEventListener('beforeunload', (event) => {
-        if (!state.editorDirty) return;
+        if (!unsaved()) return;
         event.preventDefault();
         event.returnValue = '';
     });

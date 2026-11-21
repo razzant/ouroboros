@@ -274,6 +274,33 @@ test('Reply stages the strip and the next frame carries only the address; Esc or
     } finally { f.close(); }
 });
 
+test('a send consumes the reply it captured, not one chosen again for the same row while it was sending', () => {
+    const f = fixture();
+    try {
+        const saved = f.bubble('assistant', 'The audit found three stale projects.');
+        f.feed.append(saved);
+        f.replies.decorate(saved, { row_address: 'row:1@b#2', role: 'assistant' });
+        const choose = () => saved.querySelector('.chat-message-reply').click();
+        choose();
+        const sent = f.replies.echoRow().reply_to;       // what a send captures when it is pressed
+        choose();                                        // the same row again while it saves or uploads: a new staging
+        const again = f.replies.echoRow().reply_to;
+        assert.notEqual(again, sent, 'a new reference');
+        assert.equal(again.address, sent.address, 'to the same address');
+        f.replies.consume(sent);
+        assert.ok(f.strip(), 'the reply chosen again stays');
+        assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@b#2' });
+        f.replies.consume(undefined);
+        f.replies.consume(sent.address);                 // an address is no identity
+        assert.ok(f.strip(), 'nothing but the captured reference consumes');
+        f.replies.consume(again);
+        assert.equal(f.strip(), null, 'the send that carried the staged reply clears it');
+        assert.deepEqual(f.replies.frameField(), {});
+        f.replies.consume(again);                        // a second consume of a cleared strip changes nothing
+        assert.equal(f.replies.echoRow(), null);
+    } finally { f.close(); }
+});
+
 test('a staged strip is held shut through the first frame after staging and opens from the next', async () => {
     const frames = [], prior = globalThis.requestAnimationFrame;
     globalThis.requestAnimationFrame = (callback) => frames.push(callback);

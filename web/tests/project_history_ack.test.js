@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import * as readAhead from '../modules/read_ahead.js';
+import { desktopRoomStorage } from '../modules/desktop_room_session.js';
 import { createRoomRetirement } from '../modules/room_retire.js';
 import { forgetProjectPreviews } from '../modules/chat_preview.js';
 
@@ -16,6 +17,25 @@ const start = source.indexOf('async function acknowledgeProjectAfterPaint(');
 const end = source.indexOf('\n}\n', start);
 assert.ok(start >= 0 && end > start, 'acknowledgeProjectAfterPaint is a top-level function in app.js');
 const ackSource = source.slice(start, end + 2);
+
+// The observer mode (DESIGN "Unread") is kept in the tab's sessionStorage — in Node ONE storage for this whole file,
+// not one per view — so a view opened with `?observer=1` is captured inside a storage whose contents are left exactly
+// as they were found. Otherwise every later view in this file wakes up as an observer tab, `ownerReads()` refuses its
+// reads, and the cursor POSTs the assertions below expect simply never happen (Node ≥26 exposes sessionStorage here).
+const OBSERVER_KEY = 'ouroboros.observer';
+
+async function leavingObserverStorageAsFound(body) {
+    const storage = globalThis.sessionStorage;
+    const found = storage?.getItem(OBSERVER_KEY) ?? null;
+    try {
+        return await body();
+    } finally {
+        if (storage) {
+            if (found === null) storage.removeItem(OBSERVER_KEY);
+            else storage.setItem(OBSERVER_KEY, found);
+        }
+    }
+}
 
 function harness({ refreshHistory, page = {} }) {
     const acked = [], errors = [];
@@ -150,8 +170,11 @@ test('an ACK keeps the server-confirmed cursor, not the requested revision', asy
 });
 
 test('an observer view acknowledges no Project; its room stays unread', async () => {
-    const view = await import('../modules/read_ahead.js?observer-project');
-    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    const view = await leavingObserverStorageAsFound(async () => {
+        const view = await import('../modules/read_ahead.js?observer-project');
+        view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+        return view;
+    });
     const rows = [{ id: 'p1', visible_revision: 3, _unread: true }];
     const h = cursorHarness({ seen: { p1: 1 }, rows, view, answer: () => ({ project_seen_revision: { p1: 3 } }) });
     assert.equal(await h.api.markProjectViewed('p1', 3), false);
@@ -392,6 +415,7 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
     const project = { id: 'p1', name: 'P', chat_id: 9, lifecycle: 'active', visible_revision: 5 };
     const context = vm.createContext({
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
+        desktopRoomStorage,
         navState: { activeProjectId: null, mobileDrawerOpen: false },
         projectInstances: new Map(), projectPaintRequests: new Map(), projectReveals: new Map(),
         lastProjectRows: [project], state: { projectSeenRevision: {} }, mainChat: null,
@@ -474,6 +498,10 @@ for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p
         assert.equal(h.built.length, 0, 'no room is built');
         assert.equal(h.context.navState.activeProjectId, null, 'the view stays');
         assert.equal(toasts.length, 1, 'and says why');
+        const result = [];
+        await h.api.openAs({ id: 'p1' }, { openOnly: true, unavailable: issue => result.push(issue) });
+        assert.deepEqual(result, [says === 'gone' ? 'missing' : says]);
+        assert.equal(toasts.length, 1, 'desktop startup owns its selection notice');
     });
 }
 

@@ -237,14 +237,12 @@ export function draftPort(room) {
         insert(text) {
             const target = composer();
             if (!target?.insertAtCursor) return false;
-            target.insertAtCursor(String(text ?? ''));
-            return true;
+            return target.insertAtCursor(String(text ?? '')) !== false;
         },
         clear() {
             const target = composer();
             if (!target?.setDraft) return false;
-            target.setDraft('');
-            return true;
+            return target.setDraft('') !== false;
         },
     };
 }

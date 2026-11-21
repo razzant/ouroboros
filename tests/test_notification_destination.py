@@ -53,3 +53,16 @@ def test_unreadable_registry_is_explicit_failure_and_read_does_not_repair_it(tmp
         assert response.status_code == 500
         assert 'error' in response.json()
     assert registry.read_text() == '{broken'
+
+
+def test_addressed_project_distinguishes_an_import_in_progress_from_a_missing_room(tmp_path):
+    from tests._dialogue import import_all, seed
+
+    project = create_project(tmp_path, 'p', origin='reconcile')
+    seed(tmp_path, archives={'chat_20260101T000000.jsonl': [{'chat_id': project['chat_id'], 'text': 'older words'}]})
+    with _client(tmp_path) as client:
+        response = client.get('/api/projects', params={'id': project['id']})
+        assert response.status_code == 503 and response.json()['reason_code'] == 'migrating'
+        assert client.get('/api/projects', params={'id': 'missing'}).json() == {'projects': []}
+        import_all(tmp_path)
+        assert client.get('/api/projects', params={'id': project['id']}).json()['projects'][0]['id'] == project['id']

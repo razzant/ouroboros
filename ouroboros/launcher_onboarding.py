@@ -24,7 +24,8 @@ from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startu
 log = logging.getLogger("launcher")
 
 
-def setup_recovery_menu(window, read_port: Callable[[], int | None]) -> list:
+def setup_recovery_menu(window, read_port: Callable[[], int | None],
+                        load: Callable[[str], None] | None = None) -> list:
     """macOS recovery outside the selected page; other hosts keep their existing chrome.
 
     pywebview 5.4 retains its application menu across GUI loops. Each normal
@@ -34,6 +35,16 @@ def setup_recovery_menu(window, read_port: Callable[[], int | None]) -> list:
     commits no new load until the loop ends, so the way out is Quit and reopen, and
     the start ledger (web/modules/holds.js) keeps the code that did not finish its
     start from running again by itself.
+
+    ``load`` is the main window's own way in (``launcher_webkit.MainRenderer.load``).
+    That owner carries the page as a path until the window has settled on a view and
+    opens it once there; pywebview would hand it to whichever view is installed in a
+    later turn, where a successor still handing over refuses it as its own
+    navigation. A document with unsaved forms is never navigated away for it: the
+    shell says so and the page waits. Between two server generations no port is
+    confirmed, and the choice is handed over all the same as that fixed path: the
+    owner decides where and when it loads. The setup window has no such owner and
+    loads only from a confirmed endpoint.
     """
     if sys.platform != "darwin":
         return []
@@ -48,7 +59,9 @@ def setup_recovery_menu(window, read_port: Callable[[], int | None]) -> list:
             if window not in webview.windows or webview.active_window() is not window:
                 return
             port = read_port()
-            if port:
+            if load is not None:
+                load(f"http://127.0.0.1:{port}{path}" if port else path)
+            elif port:
                 window.load_url(f"http://127.0.0.1:{port}{path}")
         except Exception:
             log.warning("Could not open %s in this window.", path, exc_info=True)

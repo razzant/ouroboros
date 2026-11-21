@@ -60,7 +60,7 @@ def launch(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "environ", dict(os.environ))
     for key, value in {"IS_MACOS": True, "IS_WINDOWS": False, "REPO_DIR": repo,
                        "DATA_DIR": tmp_path / "data", "SETTINGS_PATH": tmp_path / "data/settings.json",
-                       "_headless": False, "_external_ui": False, "_external_seed_bundle": None,
+                       "_headless": False, "_external_ui": False, "_external_seed_bundle": None, "_main_renderer": None,
                        "_runtime_venv": None, "_launch_argv": [], "APP_VERSION": "7.7.0",
                        "EMBEDDED_PYTHON": str(python)}.items():
         monkeypatch.setattr(launcher, key, value)
@@ -286,6 +286,74 @@ def _lifecycle(l, monkeypatch, *, returncode=42, landed=lambda: None, waited=lam
         return types.SimpleNamespace(pid=4242, returncode=returncode, wait=waited)
 
     monkeypatch.setattr(module, "start_agent", start)
+
+
+def test_backend_only_restart_replaces_once_at_the_successors_proven_port(launch, monkeypatch):
+    module = launch.module
+    _lifecycle(launch, monkeypatch)
+    monkeypatch.setattr(module, "launcher_sources_changed", lambda *a, **kw: False)
+    first = types.SimpleNamespace(pid=101, returncode=42, wait=lambda: None)
+    second = types.SimpleNamespace(pid=102, returncode=0, wait=module._shutdown_event.set)
+    children = iter([first, second])
+    monkeypatch.setattr(module, "start_agent", lambda port: next(children))
+    monkeypatch.setattr(module, "_await_generation_endpoint", lambda p, **kw: 9000 + p.pid)
+    events = []
+
+    def health(port, *, proc, for_room=False, **_kw):
+        if for_room:
+            assert proc is second and port == module._generation_port  # Help already has the new serving port
+            events.append("rooms ready")
+        return True
+
+    monkeypatch.setattr(module, "_wait_for_server", health)
+
+    def confirmed(p, port, *, replace):
+        # The renderer's word answers pages whose queue waited for this server: it must already be the current one.
+        assert module._generation_port == port
+        events.append((p.pid, port, replace))
+
+    presentation = types.SimpleNamespace(window=object(), confirmed=confirmed,
+        server_exited=lambda p: events.append(("exit", p.pid)),
+        replacement_requested=lambda: events.append("requested"),
+        schedule_confirmed=lambda: events.append(("present", module._generation_port)))
+    monkeypatch.setattr(module, "_main_renderer", presentation)
+    module.agent_lifecycle_loop()
+    assert events == [(101, 9101, False), ("exit", 101), "requested", "rooms ready", (102, 9102, True), ("present", 9102)]
+    assert launch.calls == ["sync", "deps"]
+
+
+def test_warm_signed_entry_inherits_the_room_once_before_its_own_first_view(launch, monkeypatch):
+    pytest.importorskip("_posixshmem")
+    from ouroboros.desktop_room_session import FD_ENV, RoomSession
+    from ouroboros.launcher_webkit import MainRenderer
+
+    module = launch.module
+    _lifecycle(launch, monkeypatch)
+    owner = MainRenderer(module.DATA_DIR, lambda proc, port: True)
+    owner.window = owner.view = object()
+    owner.installed = True
+    draft = "Signed handoff\n  "
+    owner.session.update("ouro_chat_draft", draft)
+    monkeypatch.setattr(module, "_main_renderer", owner)
+    def probe(context, **kw):
+        assert kw["require_macos_entry"] and kw["require_room_session"] and kw["require_builtin"]
+        launch.calls.append("probe")
+        return True
+
+    def receive(exe, argv, env):
+        assert exe == str(launch.entry) and draft not in argv and draft not in env.values()
+        fd, size = map(int, env[FD_ENV].split(":"))
+        monkeypatch.setenv(FD_ENV, f"{os.dup(fd)}:{size}")
+        assert RoomSession.receive(module.DATA_DIR).items == {"ouro_chat_draft": draft}
+        launch.calls.append("exec")
+        raise Handoff(exe, argv, env)
+
+    monkeypatch.setattr(boot, "source_launcher_importable", probe)
+    monkeypatch.setattr(module.os, "execve", receive)
+    with pytest.raises(Handoff):
+        module.agent_lifecycle_loop()
+    assert launch.calls == ["server", "sync", "deps", "probe", "windows", "teardown", "release", "exec"]
+    assert owner.pending is None
 
 
 @pytest.mark.parametrize("mode", ["helper-change", "source", "tray-panic"])
@@ -633,6 +701,55 @@ def test_entry_handoff_requires_source_capability_in_a_real_plain_python_probe(l
     assert (l.repo / "launcher.py").read_bytes() == before, "old source remains recoverable"
     assert l.module.EMBEDDED_PYTHON == str(l.python)
     assert platform.pip_install_target_args(str(l.python)) == ["--user"]
+
+
+@pytest.mark.parametrize("source", ["current", "no-room-protocol", "custom-interface"])
+def test_room_handoff_requires_a_receiving_source_in_a_real_plain_python_probe(launch, tmp_path, source):
+    """A shell that carries room input hands off only to a source that can receive it and whose saved interface is
+    still the built-in main document; anything else keeps the running shell and its input.
+
+    The probe's own text runs in a fresh plain-Python child, as at a real handoff: no main(), window or server.
+    WebKit there is a stand-in with the one selector the probe asks about, so every POSIX CI host runs it; the real
+    framework's answer belongs to the native qualification. The settings file is the child's own.
+    """
+    pytest.importorskip("_posixshmem")  # the room travels in anonymous POSIX shared memory
+    l = launch
+    root = pathlib.Path(__file__).resolve().parents[1]
+    code = (root / "launcher.py").read_text(encoding="utf-8")
+    if source == "no-room-protocol":
+        assert code.count("\nMACOS_ROOM_SESSION_PROTOCOL = 1\n") == 1
+        code = code.replace("\nMACOS_ROOM_SESSION_PROTOCOL = 1\n", "\n")
+    (l.repo / "launcher.py").write_text(code, encoding="utf-8")
+    (l.repo / "WebKit.py").write_text(
+        "class WKUserContentController:\n    addScriptMessageHandlerWithReply_contentWorld_name_ = None\n", encoding="utf-8")
+    data, custom = tmp_path / "probe data", tmp_path / "custom interface"
+    for folder in (data, custom):
+        folder.mkdir()
+    (custom / "index.html").write_text("<!doctype html><title>custom</title>", encoding="utf-8")
+    settings = data / "settings.json"
+    settings.write_text(json.dumps({"OUROBOROS_UI_DIR": str(custom)} if source == "custom-interface" else {}),
+                        encoding="utf-8")
+    probes = []
+
+    def run(cmd, **kwargs):
+        assert cmd[0] == str(l.python), "the probe must select plain bundled Python"
+        env = kwargs["env"]
+        env["PYTHONPATH"] += os.pathsep + str(root)  # the local launcher first, its unchanged package from this tree
+        env.update(OUROBOROS_REPO_DIR=str(l.repo), OUROBOROS_DATA_DIR=str(data), OUROBOROS_SETTINGS_PATH=str(settings))
+        env.pop("OUROBOROS_UI_DIR", None)  # only the saved choice speaks
+        probes.append(subprocess.run([sys.executable, *cmd[1:]], **kwargs))
+        return probes[-1]
+
+    context = boot.BootstrapContext(l.seed, l.repo, data, settings, str(l.python), "7.7.0", run, lambda *a: None,
+                                    logging.getLogger("probe"))
+    accepted = source_launcher_importable(context, desktop=False, require_macos_entry=True,
+                                          require_room_session=True, require_builtin=True)
+    refusal = {"no-room-protocol": "Source launcher cannot receive the current desktop room session",
+               "custom-interface": "Unsaved room input needs the built-in main document"}.get(source)
+    assert len(probes) == 1 and accepted is (refusal is None), probes[0].stderr
+    assert (probes[0].returncode == 0) if refusal is None else (refusal in probes[0].stderr)
+    if source == "custom-interface":  # the same source is accepted once no room input needs the built-in document
+        assert source_launcher_importable(context, desktop=False, require_macos_entry=True, require_room_session=True)
 
 
 @pytest.mark.parametrize("kind", ["outside-app", "symlink", "non-executable"])

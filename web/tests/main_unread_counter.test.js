@@ -67,10 +67,31 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 // A view opened with `?observer=1` (DESIGN "Unread"): its own instance of read_ahead.js, in the observer mode.
+// Its mode is also kept in the tab's sessionStorage — which in Node is ONE storage for this whole file, not one per
+// view — so the observer is entered inside a storage whose contents are left exactly as they were found: the view's
+// own mode stays with its instance, and no later view in this file wakes up as an observer tab (its cursor writes
+// would be silently skipped, which is what `ownerReads()` refuses). Node ≥26 exposes sessionStorage by default.
+const OBSERVER_KEY = 'ouroboros.observer';
+
+async function leavingObserverStorageAsFound(body) {
+    const storage = globalThis.sessionStorage;
+    const found = storage?.getItem(OBSERVER_KEY) ?? null;
+    try {
+        return await body();
+    } finally {
+        if (storage) {
+            if (found === null) storage.removeItem(OBSERVER_KEY);
+            else storage.setItem(OBSERVER_KEY, found);
+        }
+    }
+}
+
 async function observerView() {
-    const view = await import('../modules/read_ahead.js?observer-main');
-    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
-    return view;
+    return leavingObserverStorageAsFound(async () => {
+        const view = await import('../modules/read_ahead.js?observer-main');
+        view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+        return view;
+    });
 }
 
 test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async () => {
@@ -424,6 +445,7 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         window: { dispatchEvent() {} },
         CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
         updateUnreadBadge() {}, acknowledgeMainAfterPaint() {},
+        desktopRoomStorage: () => null,
         syncNavigationState() { context.syncMainLifetime(); },
         // Its own return to Main is project_history_ack.test.js's; here it says only that it closed.
         closeProjectPanel(options) {

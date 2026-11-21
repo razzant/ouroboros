@@ -76,18 +76,22 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
         return { value: input.value, revision, start, end: input.selectionEnd ?? start };
     };
 
+    /** False when the room's field took nothing: it is not open for typing yet (composer.js, a room still restoring). */
     function insertAt(text, start, end) {
         input.setSelectionRange?.(start, end);
-        composer.insertAtCursor(spacedWords(input.value.slice(0, start) + input.value.slice(end), start, text));
+        return composer.insertAtCursor(spacedWords(input.value.slice(0, start) + input.value.slice(end), start, text)) !== false;
     }
+    // Words the field refused are never dropped: the offer holds them, and says why they are not in the draft.
+    const offerRefused = (text) => showOffer(text, tr('voice.offer.closed', 'The message field is not open for typing yet. These words wait here.'));
 
     function closeOffer() {
         offer?.remove();
         offer = null;
     }
 
-    /** The words of a transcription whose draft changed meanwhile: the owner puts them in, or copies them. */
-    function showOffer(text) {
+    /** The words of a transcription whose draft changed meanwhile, or that the field could not take (`why` says so):
+     *  the owner puts them in, or copies them. */
+    function showOffer(text, why = '') {
         closeOffer();
         const panel = doc.createElement('div');
         panel.className = 'voice-offer';
@@ -95,7 +99,7 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
         panel.setAttribute('aria-label', tr('voice.offer.label', 'Dictated text'));
         const note = doc.createElement('p');
         note.className = 'voice-offer-note';
-        note.textContent = tr('voice.offer.note', 'The draft changed while this was transcribed.');
+        note.textContent = why || tr('voice.offer.note', 'The draft changed while this was transcribed.');
         const words = doc.createElement('p');
         words.className = 'voice-offer-text';
         words.setAttribute('aria-live', 'polite');
@@ -107,7 +111,7 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
                 text: tr('voice.offer.insert', 'Insert'), onPress: () => {
                     closeOffer();
                     const at = input.selectionStart ?? input.value.length;
-                    insertAt(text, at, input.selectionEnd ?? at);
+                    if (!insertAt(text, at, input.selectionEnd ?? at)) offerRefused(text);
                 } }),
             button(doc, { className: 'btn btn-sm btn-default', label: tr('voice.offer.copy', 'Copy'),
                 text: tr('voice.offer.copy', 'Copy'), onPress: () => { closeOffer(); void copy(text); } }),
@@ -164,8 +168,8 @@ export function bindVoiceControls({ composer, speech = getSpeech(), notice = (te
             render(stream);
         },
         onTranscript(result) {
-            if (result.kind === 'insert') insertAt(result.text, result.start, result.end);
-            else if (result.kind === 'offer') showOffer(result.text);
+            if (result.kind === 'offer') showOffer(result.text);
+            else if (result.kind === 'insert' && !insertAt(result.text, result.start, result.end)) offerRefused(result.text);
         },
     });
 
