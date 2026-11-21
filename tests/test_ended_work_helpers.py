@@ -235,7 +235,9 @@ def test_a_refusal_that_offers_resume_closes_with_the_ended_work(env, reason):
 @pytest.mark.parametrize("marks", [
     {"_continuation_prepared": True}, {"_owner_hold": {"reason": "owner"}},
     {"_budget_pause_hold": {"reason": "dispatch_outcome_unknown"}},
-], ids=["publication_unconfirmed", "owner_hold", "dispatch_unknown"])
+    {"_budget_pause": {"refusal": {"reason": "dispatch_outcome_unknown", "dispatch_unknown": True,
+                                  "refusal_basis": "saved_work_unverified"}}},
+], ids=["publication_unconfirmed", "owner_hold", "dispatch_unknown", "saved_source_unverified"])
 def test_an_unknown_dispatch_or_an_owner_hold_keeps_the_helper(env, marks):
     _work_root(env.root)
     write_task_result(env.root, CHILD, "scheduled", root_task_id=ROOT, parent_task_id=ROOT, delegation_role="subagent")
@@ -1369,13 +1371,17 @@ def _closures_capture_stands(row, first):
 
 
 def _entered(env, task):
-    """The resumed worker's entry, as ``loop._resume_continuation`` makes it once the continuation is consumed and
-    before any effect (that order, through the real handover, is pinned in test_resume_handover): on the canonical
-    row the loop names, its budget root, else its own drive."""
+    """The resumed worker's entry. Its start first records itself on its own drive, naming its attempt (the ``agent``
+    start write): for a split helper that is the child drive its end then extends, as the dispatch mirror named the
+    attempt on the canonical row. Then ``loop._resume_continuation`` reopens the capture once the continuation is
+    consumed and before any effect (that order, through the real handover, is pinned in test_resume_handover): on the
+    canonical row the loop names, its budget root, else its own drive."""
     import pathlib
 
     from ouroboros.headless import reopen_capture_at_entry
 
+    if task.get("drive_root"):  # only a split helper runs on a drive of its own
+        write_task_result(task["drive_root"], CHILD, "running", task_attempt=task["_attempt"])
     reopen_capture_at_entry(pathlib.Path(task.get("budget_drive_root") or task.get("drive_root") or env.root), CHILD)
 
 
@@ -1397,7 +1403,7 @@ def test_a_resumed_helper_hands_in_its_new_work_not_the_withdrawn_closures_captu
     env.workers.assign_tasks()
     assert [launched["id"] for launched in sent] == [CHILD]
     _closures_capture_stands(load_task_result(env.root, CHILD), first)  # put: nothing reopened before the worker
-    _entered(env, task)
+    _entered(env, sent[0])
     entered = load_task_result(env.root, CHILD)
     assert entered["artifact_status"] == entered["artifact_bundle"]["status"] == "pending"  # the new execution owes one
     assert set(first) <= {item["path"] for item in entered["artifacts"] if item.get("kind") == "workspace_capture_history"}

@@ -16,7 +16,8 @@ from tests.test_task_correlation_facts import _Clock, _TimedLLM
 
 
 @pytest.mark.parametrize("direct", [False, True])
-def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch, direct):
+@pytest.mark.parametrize("attempt", [None, 0, 2])
+def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch, direct, attempt):
     from ouroboros import loop_llm_call
 
     logs = tmp_path / "logs"
@@ -42,13 +43,20 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     monkeypatch.setattr(pipeline, "_task_cost_fields", lambda *a: {"total_rounds": 99})
     task = {"id": "counter-task", "type": "task", "chat_id": 7, "text": "check",
             "_is_direct_chat": direct, "_skip_post_task_synthesis": True}
+    if attempt is not None:
+        task["_attempt"] = attempt
+        pipeline.write_task_result(tmp_path, task["id"], "running", task_attempt=attempt)
     pending = []
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
     pipeline.emit_task_results(env, None, None, pending, task, message["content"], usage,
                                {"tool_calls": [], "reasoning_notes": []}, 0.0, logs)
     metrics = next(evt for evt in pending if evt["type"] == "task_metrics")
+    evaluation = next(row for line in (logs / "events.jsonl").read_text().splitlines()
+                      if (row := json.loads(line)).get("type") == "task_eval")
     _handle_task_metrics(json.loads(json.dumps(metrics)), ctx)
     assert pushed[-1]["rounds"] == 3 and pushed[-1]["tool_calls"] == 0
+    for row in (metrics, evaluation, pushed[-1]):
+        assert row.get("task_attempt") == attempt and ("task_attempt" in row) == (attempt is not None)
     stored = pipeline.load_task_result(tmp_path, "counter-task")
     assert stored["total_rounds"] == 99
     assert stored["loop_outcome"]["usage"]["total_rounds"] == 3
@@ -58,6 +66,70 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     rows = json.loads(response.body)["messages"]
     summaries = [row for row in rows if row.get("system_type") == "task_summary"]
     assert summaries and all(row["rounds"] == 3 for row in summaries)
+
+
+def _card_attempt(frame):
+    """The attempt a card folds a frame into (``settled_card.attemptOf``): its own number, else its task's owner."""
+    owner = frame.get("execution_owner") if isinstance(frame.get("execution_owner"), dict) else {}
+    ordinals = (frame.get("task_attempt"), frame.get("_attempt"),
+                owner.get("task_attempt") if owner.get("task_id") == frame.get("task_id") else None)
+    return next((value for value in ordinals if type(value) is int and value >= 0), None)
+
+
+@pytest.mark.parametrize("running", ["same", "next", "gone"])
+@pytest.mark.parametrize("lane", ["first-direct", "pooled"])
+def test_a_round_drained_after_the_next_assignment_keeps_its_own_attempt(tmp_path, monkeypatch, lane, running):
+    """The round ended, its worker died and the same task was assigned again before the bus was drained. The
+    endpoint made for that attempt names it, so the drain's RUNNING owner (the next attempt's, or none) never
+    counts the round toward another attempt's card; an explicit producer number still wins."""
+    from ouroboros import loop_llm_call
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from ouroboros.task_status import execution_owner_record
+    from supervisor.log_addressing import task_event_queue
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    clock, queue_sink, pushed = _Clock(), queue.Queue(), []
+    monkeypatch.setattr(loop_llm_call, "time", clock)
+    task = {"id": "drained-round", "chat_id": 7}
+    if lane == "first-direct":  # admitted without a queue ordinal: physical attempt 0, the loop's number None
+        task["_is_direct_chat"] = True
+        task["_execution_owner"] = {**execution_owner_record(tmp_path, task, "direct"),
+                                    "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
+        own, ordinal, newer = 0, None, 2
+    else:
+        task["_attempt"] = 2
+        task["_execution_owner"] = execution_owner_record(tmp_path, task, "pooled")
+        own, ordinal, newer = 2, 2, 3
+    assert task["_execution_owner"]["task_attempt"] == own
+    llm = _TimedLLM(clock, [({"content": "Checked.", "tool_calls": []}, {})])
+    call_llm_with_retry(llm, [{"role": "user", "content": "check"}], "fixture/model", None, "medium", 2, logs,
+                        task["id"], 1, task_event_queue(queue_sink, task), {}, task_attempt=ordinal)
+    raw = next(evt for evt in queue_sink.queue if evt.get("data", {}).get("type") == "llm_round_finished")
+    assigned = {**task, "_attempt": newer, "_execution_owner": {**task["_execution_owner"], "task_attempt": newer}}
+    rows = {"same": {task["id"]: {"task": task}}, "next": {task["id"]: {"task": assigned}}, "gone": {}}[running]
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=rows, bridge=SimpleNamespace(push_log=pushed.append),
+                          append_jsonl=lambda *_: None)
+    _handle_log_event(json.loads(json.dumps(raw)), ctx)
+    assert pushed[-1]["rounds"] == 1 and _card_attempt(pushed[-1]) == own
+
+
+@pytest.mark.parametrize('owner', [{}, {'task_id': 'other', 'task_attempt': 0},
+                                   {'task_id': 'root', 'task_attempt': False}, {'task_id': 'root', 'task_attempt': '0'}])
+def test_evaluation_does_not_invent_attempt_from_unbound_execution(tmp_path, monkeypatch, owner):
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    task = {'id': 'root', 'type': 'task', 'chat_id': 1, 'text': 'Check', '_is_direct_chat': True,
+            '_execution_owner': owner, '_attempt': 1, '_skip_post_task_synthesis': True}
+    pending = []
+    monkeypatch.setattr(pipeline, '_task_cost_fields', lambda *_: {})
+    pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None,
+                               pending, task, 'Checked.', {'rounds': 3},
+                               {'tool_calls': [], 'reasoning_notes': []}, 0.0, logs)
+    [metrics] = [row for row in pending if row['type'] == 'task_metrics']
+    [evaluation] = [row for line in (logs / 'events.jsonl').read_text().splitlines()
+                    if (row := json.loads(line)).get('type') == 'task_eval']
+    assert 'task_attempt' not in metrics and 'task_attempt' not in evaluation
 
 
 @pytest.mark.parametrize(("retained", "saved_usage"), [
@@ -91,6 +163,41 @@ def test_history_rounds_override_stale_physical_summary_only_when_known(tmp_path
         else:
             assert "rounds" not in row, "physical task.total_rounds is never a fallback"
     assert read_result(tmp_path, "old") == full
+
+
+@pytest.mark.parametrize(("own", "replica_attempt", "expected"), [
+    pytest.param({"loop_outcome": {"usage": {"total_rounds": 0}}, "terminal_origin": "host_notice"}, 1,
+                 (0, "host_notice"), id="own-zero-foreign-replica"),
+    pytest.param({}, 1, (None, None), id="own-unknown-foreign-replica"),
+    pytest.param({"loop_outcome": {"usage": {"total_rounds": 0}}, "terminal_origin": "host_notice"}, None,
+                 (0, "host_notice"), id="own-zero-unnumbered-replica"),
+    pytest.param({}, None, (None, None), id="own-unknown-unnumbered-replica"),
+    # The same attempt's replica: the host's own failure still shows its own count and origin, not the child's success.
+    pytest.param({'loop_outcome': {'usage': {'total_rounds': 0}}, 'terminal_origin': 'host_notice'}, 2,
+                 (0, 'host_notice'), id='own-zero-same-number-replica'),
+    pytest.param({}, 2, (None, None), id='own-unknown-same-number-replica'),
+    pytest.param(None, 2, (3, "model_final"), id="replica-supplies-the-ending"),
+])
+def test_a_canonical_failure_shows_only_its_own_rounds_and_origin(tmp_path, own, replica_attempt, expected):
+    """Attempt 2 failed on the canonical drive while the actor drive still holds an older completed result. The
+    effective read keeps the failure's status and number beside that replica's loop facts; on reload its card shows
+    the failure's own count and origin, an unknown one staying unknown. A replica that supplies the ending itself
+    (its canonical row still running) keeps its own."""
+    child = tmp_path / "actor"
+    pipeline.write_task_result(tmp_path, "split-root", "running" if own is None else "failed", chat_id=7,
+                               task_attempt=2, child_drive_root=str(child), _terminal_observed=own is not None,
+                               **(own or {}))
+    pipeline.write_task_result(child, "split-root", "completed", chat_id=7, _terminal_observed=True,
+                               loop_outcome={"usage": {"total_rounds": 3}}, terminal_origin="model_final",
+                               **({} if replica_attempt is None else {"task_attempt": replica_attempt}))
+    pipeline._record_task_facts(SimpleNamespace(drive_root=tmp_path),
+                                {"id": "split-root", "chat_id": 7, "_attempt": 2}, {}, {"tool_calls": []},
+                                tmp_path / "logs")
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "7"})))
+    assert response.status_code == 200
+    [row] = [r for r in json.loads(response.body)["messages"] if r.get("system_type") == "task_summary"]
+    assert row["task_attempt"] == 2 and row["task_terminal_status"] == ("completed" if own is None else "failed")
+    assert (row["rounds"], row.get("terminal_origin")) == expected
 
 
 @pytest.mark.parametrize("source, expected", [("no_response", 0), ("unavailable", None)])
@@ -234,3 +341,72 @@ def test_recovery_facts_use_retained_loop_rounds(tmp_path, monkeypatch, snapshot
     facts = next(row for row in _dialogue.chat_rows(tmp_path) if row.get("summary_kind") == "host_task_facts")
     assert facts["rounds"] == expected
     assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path) == 0
+
+
+def test_recovery_facts_use_only_their_own_saved_execution_owner(tmp_path, monkeypatch):
+    from ouroboros.task_status import execution_owner_record
+    from tests._dialogue import chat_rows
+
+    for tid in ('bound', 'unbound'):
+        owner_id = tid if tid == 'bound' else 'other'
+        pipeline.write_task_result(tmp_path, tid, pipeline.STATUS_COMPLETED, chat_id=1, root_task_id=tid,
+            objective='finish recovery', _is_direct_chat=True,
+            execution_owner=execution_owner_record(tmp_path, {'id': owner_id}, 'direct'),
+            loop_outcome={'usage': {'total_rounds': 3}},
+            root_phase_checkpoint={'phase': 'task_acceptance', 'status': 'pass', 'post_task_synthesis': 'pending_once'})
+
+    def free_facts(env, task, usage, trace, logs, **_kwargs):
+        pipeline._record_task_facts(env, task, usage, trace, logs)
+        pipeline._set_root_post_task_checkpoint(env, task, 'completed')
+
+    monkeypatch.setattr(pipeline, '_run_post_task_processing_async', free_facts)
+    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path) == 2
+    facts = {row['task_id']: row for row in chat_rows(tmp_path) if row.get('summary_kind') == 'host_task_facts'}
+    assert facts['bound']['task_attempt'] == 0 and facts['bound']['rounds'] == 3
+    assert 'task_attempt' not in facts['unbound'] and facts['unbound']['rounds'] == 3
+
+
+@pytest.mark.parametrize('stale', [True, False], ids=['older-beside-failed', 'same-attempt-finishes'])
+def test_a_late_copy_keeps_each_attempts_stored_ending_and_card_its_own(tmp_path, stale):
+    # Attempt 2 failed with zero rounds, a host origin and its own reason. Attempt 1's old completed result is copied
+    # back late: the stored row and the history card read the same ending before and after. Attempt 2's OWN completed
+    # result, copied the same way, does land on both.
+    from ouroboros import headless
+    from tests._store_shared import read_result
+
+    parent = tmp_path / 'data'
+    parent.mkdir()
+    tid, child = 'late-copy', headless.prepare_task_drive(parent, 'late-copy', 'empty')
+    own = {'attempt': 2, 'status': 'failed', 'reason': 'provider_unavailable', 'origin': 'host_notice', 'rounds': 0}
+    if stale:
+        pipeline.write_task_result(parent, tid, 'failed', chat_id=7, task_attempt=2, child_drive_root=str(child),
+                                   _terminal_observed=True, result='Attempt 2 stopped by the host.',
+                                   reason_code='provider_unavailable', terminal_origin='host_notice',
+                                   loop_outcome={'usage': {'total_rounds': 0}})
+    else:
+        pipeline.write_task_result(parent, tid, 'running', chat_id=7, task_attempt=2, child_drive_root=str(child))
+    pipeline.write_task_result(child, tid, 'completed', chat_id=7, task_attempt=1 if stale else 2,
+                               _terminal_observed=True, result='Attempt answer.', terminal_origin='model_final',
+                               loop_outcome={'usage': {'total_rounds': 3}})
+    pipeline._record_task_facts(SimpleNamespace(drive_root=parent), {'id': tid, 'chat_id': 7, '_attempt': 2}, {},
+                                {'tool_calls': []}, parent / 'logs')
+
+    def seen():
+        row = read_result(parent, tid)
+        response = asyncio.run(make_chat_history_endpoint(parent)(SimpleNamespace(query_params={'chat_id': '7'})))
+        assert response.status_code == 200
+        [card] = [r for r in json.loads(response.body)['messages'] if r.get('system_type') == 'task_summary']
+        usage = (row.get('loop_outcome') or {}).get('usage') or {}
+        return {'stored': {'attempt': row.get('task_attempt'), 'status': row['status'], 'reason': row.get('reason_code'),
+                           'origin': row.get('terminal_origin'), 'rounds': usage.get('total_rounds')},
+                'card': {'attempt': card.get('task_attempt'), 'status': card.get('task_terminal_status'),
+                         'reason': card.get('reason_code') or None, 'origin': card.get('terminal_origin'),
+                         'rounds': card.get('rounds')}}
+
+    if stale:
+        assert seen() == {'stored': own, 'card': own}  # a real setup: attempt 2 holds its own non-empty ending
+    else:
+        assert seen()['stored']['status'] == 'running'
+    headless.copy_child_task_result(parent, {'id': tid, 'drive_root': str(child), '_attempt': 1 if stale else 2})
+    ending = own if stale else {'attempt': 2, 'status': 'completed', 'reason': None, 'origin': 'model_final', 'rounds': 3}
+    assert seen() == {'stored': ending, 'card': ending}

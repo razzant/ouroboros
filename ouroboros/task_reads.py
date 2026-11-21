@@ -65,6 +65,7 @@ class TaskReads:
         self._events: Any = None
         self._stamps: Dict[str, Optional[tuple]] = {}  # child store stamps, one stat per read
         self.versions: Dict[str, int] = {}  # canonical task id -> write_seq of the view read
+        self.replica_results: set[str] = set()  # effective reads that loaded a noncanonical task document
         self._successors: Dict[str, str] = {}  # canonical task id -> the successor its projection overlays
         self.store_reads = 0  # store transactions this read opened (cost evidence for tests)
         self.failed = False  # a read the store could not answer: what this page shows is not known to be current
@@ -168,6 +169,8 @@ class TaskReads:
         if (str(root), str(task_id)) not in self._documents:
             self._fetch(root, [str(task_id)])
         text = self._documents.get((str(root), str(task_id)))
+        if root != self.root and text is not None:
+            self.replica_results.add(str(task_id))
         return _normalize_swarm_efficiency(json.loads(text)) if text is not None else None
 
     def absent(self, task_id: str) -> bool:

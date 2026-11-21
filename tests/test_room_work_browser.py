@@ -413,6 +413,171 @@ def capture(page, name):
     setup_browser.capture(page, name)
 
 
+@pytest.mark.parametrize("width", [1240, 390])
+def test_first_project_web_echo_with_a_cold_main(subscription_ui, tmp_path, monkeypatch, width):
+    from playwright.sync_api import expect
+    from ouroboros import projects_registry
+    from supervisor import message_bus
+    from tests._room_browser_shared import recording_chat_bridge, serve_chat_history
+    from tests._shared import producer_evidence_dir
+
+    project = projects_registry.create_project(tmp_path, "garden-notes", name="Garden notes")
+    bridge, frames = recording_chat_bridge(tmp_path, monkeypatch)
+    main, writer = subscription_ui["page"], subscription_ui["new_page"]()
+    viewport = {"width": width, "height": 844}
+    viewer = Transport(main)
+
+    def missing_state(route):
+        viewer.state_reads += 1
+        route.fulfill(status=503, json={"error": "state unavailable"})
+
+    main.route("**/api/state*", missing_state)
+    open_app(subscription_ui, viewer, viewport=viewport)
+    nav = main.locator('.nav-project-row[data-project-id="garden-notes"]')
+    assert viewer.state_reads and nav.count() == 0
+
+    sender = Transport(writer, projects=[project])
+    open_app({**subscription_ui, "page": writer}, sender, viewport=viewport)
+    open_project(writer, project)
+    project_text, external_text = "Add sage to the map.", "The library is open today."
+    prefix = "#pchat-garden-notes"
+
+    def accept(raw):
+        frame = json.loads(raw)
+        if frame.get("type") == "chat":
+            assert (frame["chat_id"], frame["project_id"]) == (project["chat_id"], project["id"])
+            bridge.ui_send(frame["content"], chat_id=frame["chat_id"], project_id=frame["project_id"],
+                           client_message_id=frame["client_message_id"], sender_session_id=frame["sender_session_id"])
+            sender.send(frames[-1])
+            viewer.send(frames[-1])
+
+    sender.sockets[-1].on_message(accept)
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(projects_registry, "project_thread_chat_ids", lambda root: frozenset())
+        writer.locator(f"{prefix}-input").fill(project_text)
+        writer.locator(f"{prefix}-send").click()
+        project_rows = writer.locator(f"{prefix}-messages .chat-bubble.user")
+        expect(project_rows.locator('[data-ingress-saved=""], [data-ingress-saved="pending"]')).to_have_count(1)
+    [accepted] = frames
+    assert accepted["chat_id"] == project["chat_id"] and accepted["kind"] == "room_echo"
+    assert "project_thread" not in accepted and 1 not in accepted.get("also_rooms", [])
+
+    message_bus.record_inbound_message(bridge, {"source": "skill:telegram", "text": external_text},
+                                       chat_id=987654, user_id=7, client_message_id="library-note",
+                                       text=external_text, ts=accepted["ts"])
+    external = frames[-1]
+    assert "kind" not in external and external["chat_id"] == 987654
+    viewer.send(external)
+    viewer.send(external)  # A repeated external frame still names the same saved row.
+    sender.send(external)
+    main_rows = main.locator("#chat-messages .chat-bubble.user")
+    expect(main_rows.locator(".message")).to_have_text([external_text])
+    expect(project_rows.locator(".message")).to_have_text([project_text])
+    out = producer_evidence_dir(tmp_path, "room-echo", env="OUROBOROS_UI_EVIDENCE_DIR")
+    for page, rows, room in [(main, main_rows, "main"), (writer, project_rows, "project")]:
+        expect(rows).to_be_in_viewport()
+        page.screenshot(path=str(out / f"web-echo-{room}-{width}.png"), animations="disabled")
+
+    serve_chat_history(main, tmp_path)
+    viewer.projects = [project]
+    main.unroute("**/api/state*", missing_state)
+    viewer.refresh()
+    expect(nav).to_have_count(1)
+    expect(main_rows.locator(".message")).to_have_text([external_text])
+    subscription_ui["errors"].watch(main)
+    main.reload(wait_until="domcontentloaded")
+    expect(nav).to_have_count(1)
+    expect(main.locator("#chat-messages .chat-bubble.user[data-history-id] .message")).to_have_text([external_text])
+    expect(main_rows.locator(".message")).to_have_text([external_text])
+    open_project(main, project)
+    expect(main.locator(f"{prefix}-messages .chat-bubble.user[data-history-id] .message")).to_have_text([project_text])
+
+
+@pytest.mark.parametrize(("width", "mode"), [(1240, "warm"), (390, "cold")])
+def test_nested_cards_show_their_own_current_work(subscription_ui, tmp_path, monkeypatch, width, mode):
+    from types import SimpleNamespace
+    from playwright.sync_api import expect
+    from tests._shared import producer_evidence_dir
+
+    parent, reader, queued, run = "garden-map", "map-reader", "map-index", "map-proof"
+    lineage = {"parent_task_id": parent, "root_task_id": parent}
+    sleep = {"mode": mode, "runs": [run]}
+    if mode == "warm":
+        member = activity(reader, **lineage)
+        raw = {"running": True, "owner_wait": {"reason": "sleep", "state": "waiting", "task_attempt": 1, "sleep": sleep}}
+    else:
+        member = activity(reader, "budget_paused", pause_cause="sleep", **lineage)
+        raw = {"_budget_pause": {"rail": "model_sleep", "reason": "sleep", "exact_continuation": True, "sleep": sleep}}
+    rows = [activity(parent), member, activity(queued, "queued", **lineage)]
+    history = [progress(parent, "Drawing the garden map.", 1, suggested_name="Garden map")]
+    for child, event, title in [(reader, "running", "Read the map"), (queued, "scheduled", "Index the beds")]:
+        history.append(progress(child, title, 2, **lineage, delegation_role="subagent", subagent_task_id=child,
+                                subagent_event=event, subagent_role=title))
+    page = subscription_ui["page"]
+    transport = Transport(page, activities=rows[:1], history={1: history})
+    body = transport.body()
+    fact = {"task_id": reader, "run_id": run, "run_state": "running", "answered": True, "at": time.monotonic()}
+    observer = SimpleNamespace(observation=lambda rid: fact if rid == run else {})
+    monkeypatch.setattr("ouroboros.delegate_collection.body_runtime", lambda _root: observer)
+    body.update(work_fields(rows, {parent: {"running": True}, reader: raw},
+                            held={parent: [{"task_id": reader, "run_id": run}]}))
+    monkeypatch.setattr(transport, "body", lambda: body)
+    open_app(subscription_ui, transport, viewport={"width": width, "height": 844})
+
+    root = page.locator(f'#chat-messages .chat-live-card[data-task-id="{parent}"]')
+    summary = ":scope > [data-live-summary-button]"
+    sleeper = root.locator(f'.subagent[data-task-id="{reader}"]').locator(summary)
+    sibling = root.locator(f'.subagent[data-task-id="{queued}"]').locator(summary)
+    root.scroll_into_view_if_needed()
+    for head, word in [(root.locator(summary), "Working"), (sleeper, "Waiting"), (sibling, "Queued")]:
+        chip = head.locator("[data-live-phase]")
+        expect(chip).to_have_text(word)
+        expect(chip).to_be_in_viewport()
+    cause = sleeper.locator("[data-live-phase-secondary]")
+    expect(cause).to_have_text("Sleeping until its external run finishes · 1 external run still working")
+    expect(cause).to_be_in_viewport()
+    expect(sibling).not_to_contain_text("external run")
+    out = producer_evidence_dir(tmp_path, "room-work", env="OUROBOROS_UI_EVIDENCE_DIR")
+    page.screenshot(path=str(out / f"nested-members-{width}.png"), animations="disabled")
+
+
+def test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resume(subscription_ui, monkeypatch):
+    from playwright.sync_api import expect
+
+    root, waiter, held, other = "map-root", "map-reader", "map-index", "map-notes"
+    members = [(waiter, root, "running"), (held, waiter, "running"), (other, root, "running")]
+    rows = [activity(root), activity(waiter, parent_task_id=root, root_task_id=root),
+            activity(held, "budget_paused", parent_task_id=waiter, root_task_id=root),
+            activity(other, parent_task_id=root, root_task_id=root)]
+    history = [progress(root, "Drawing the map.", 1)]
+    for child, parent, event in members:
+        history.append(progress(child, "Working on the map", 2, parent_task_id=parent, root_task_id=root,
+                                delegation_role="subagent", subagent_task_id=child, subagent_event=event))
+
+    def sleep(target):
+        return {"running": True, "owner_wait": {"reason": "sleep", "state": "waiting", "task_attempt": 1,
+                "sleep": {"mode": "warm", "tasks": [target]}}}
+
+    raw = {root: {"running": True}, waiter: sleep(held), other: sleep("unknown-target"),
+           held: {"_budget_pause_hold": {"reason": "panic_hold", "release": "owner"}}}
+    page = subscription_ui["page"]
+    transport = Transport(page, activities=rows[:1], history={1: history})
+    body = {**transport.body(), **work_fields(rows, raw)}
+    monkeypatch.setattr(transport, "body", lambda: body)
+    open_app(subscription_ui, transport, viewport={"width": 1240, "height": 844})
+    assert len(body["works"]) == 1 and body["works"][0]["episode"]["task_id"] == root
+
+    def head(task_id):
+        return page.locator(f'.chat-live-card[data-task-id="{task_id}"] > [data-live-summary-button]')
+
+    expect(head(waiter).locator("[data-live-phase]")).to_have_text("Waiting")
+    phrase = "1 subagent it waits for is paused until you resume it"
+    expect(head(waiter)).to_contain_text(phrase)
+    expect(head(root)).not_to_contain_text(phrase)
+    expect(head(other).locator("[data-live-phase]")).to_have_text("Waiting")
+    expect(head(other)).not_to_contain_text(phrase)
+
+
 # ------------------------------------------------------------------------------------------------
 # Main: each census state in its own words, tone and controls.
 

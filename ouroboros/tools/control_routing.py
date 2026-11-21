@@ -538,19 +538,24 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
     """Enumerate the owner's projects (id, name, recency) so the one mind can
     decide whether a main-chat message belongs to an existing project. The registry
     lives on the CANONICAL data root: a forked execution drive never carries
-    ``state/projects.json``, so reading the task's own drive answered "no projects"."""
+    ``state/projects.json``, so reading the task's own drive answered "no projects".
+    The list requires readability (``GET /api/projects``' own check): a registry that
+    cannot be read, or that is lost beside its commit witness, is a typed
+    PROJECTS_ERROR; filter/offset misses in a partial read never prove absence."""
     if type(start) is not int or start < 0:
         return "⚠️ TOOL_ARG_ERROR (list_projects): start must be a nonnegative integer."
     try:
-        from ouroboros.projects_registry import projects_summary
+        from ouroboros.projects_registry import list_sidebar_projects, projects_summary
         limit = max(1, min(int(limit or 50), 200))
-        rows = projects_summary(canonical_data_root(ctx), limit=limit + 1, start=start,
-                                closed=closed, oldest_first=oldest_first)
+        root = canonical_data_root(ctx)
+        sidebar_rows, complete = list_sidebar_projects(root, require_readable=True, with_coverage=True)
+        rows = projects_summary(root, limit=limit + 1, start=start, closed=closed, oldest_first=oldest_first,
+                                sidebar_rows=sidebar_rows)
     except Exception as exc:
         return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
-    if not rows:
+    if not rows and complete:
         return "No matching projects. move_to_project places this work in a named room."
-    lines = []
+    lines = [] if rows else ["No readable projects match on this page."]
     for p in rows[:limit]:
         pid = str(p.get("id") or "")
         name = str(p.get("name") or pid)
@@ -558,6 +563,8 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
         closure = json.dumps(p.get("closed", False), ensure_ascii=False)
         # No liveness word: the registry's activity flag records that a room ever held work, not that work runs now.
         lines.append(f"- {pid} — {name} · last_active_at={last} · closed={closure}")
+    if not complete:
+        lines.append("Project registry read is incomplete. Only readable matches are shown.")
     if len(rows) > limit:
         args = [f"start={start + limit}", f"limit={limit}", f"oldest_first={oldest_first!r}"]
         if closed is not None:

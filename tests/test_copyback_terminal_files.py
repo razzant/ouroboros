@@ -15,7 +15,7 @@ from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_byte
 from ouroboros.outcomes import collect_trace_refs
 from ouroboros.store_import import ensure_current_store
 from ouroboros.task_results import load_task_result, write_task_result
-from tests._store_shared import result_signature
+from tests._store_shared import read_result, result_signature
 
 
 def _child(tmp_path, task_id="copyback"):
@@ -408,3 +408,291 @@ def test_helper_canonical_cancellation_precedes_child_retry(tmp_path, monkeypatc
     assert report["terminal_source_present"] is True and report["error"] == ""
     assert report["result"] == cancelled
     assert headless.terminal_task_files_ready(parent, task, cancelled)
+
+
+_OWN = {'result': 'Attempt 2 stopped by the host.', 'reason_code': 'provider_unavailable',
+        'terminal_origin': 'host_notice', 'loop_outcome': {'usage': {'total_rounds': 0}}}
+_COPY = {'result': 'Answer held in the child drive.', 'terminal_origin': 'model_final',
+         'loop_outcome': {'usage': {'total_rounds': 3}}}
+
+
+def _ending(row):
+    # What a reader takes of an attempt's ending from its stored row: status, attempt, reason, author, counter.
+    row = row or {}
+    return {'status': row.get('status'), 'attempt': row.get('task_attempt'), 'reason': row.get('reason_code'),
+            'origin': row.get('terminal_origin'), 'result': row.get('result'),
+            'rounds': ((row.get('loop_outcome') or {}).get('usage') or {}).get('total_rounds')}
+
+
+@pytest.mark.parametrize(('canonical', 'replica_attempt', 'lands'), [
+    pytest.param(('failed', 2), 1, False, id='older-beside-failed'),
+    pytest.param(('running', 2), 1, False, id='older-beside-running'),
+    pytest.param(('interrupted', 2), 1, False, id='older-beside-interrupted'),
+    pytest.param(('running', 2), 2, True, id='same-attempt-finishes'),
+    pytest.param(('running', None), None, True, id='unnumbered-legacy-pair'),
+    pytest.param(None, 1, True, id='empty-parent-first-copy'),
+    pytest.param(('failed', 1), 0, False, id='zero-beside-failed-one'),
+    pytest.param(('failed', 0), 1, False, id='one-beside-failed-zero'),
+    pytest.param(('running', 1), 0, False, id='zero-beside-running-one'),
+    pytest.param(('failed', 0), None, False, id='unnumbered-beside-attempt-zero'),
+    pytest.param(('failed', 1), 1, False, id='same-ordinal-other-ending'),
+    pytest.param(('running', 0), 0, True, id='attempt-zero-finishes'),
+])
+def test_a_late_copy_never_lends_its_ending_to_another_attempt(tmp_path, canonical, replica_attempt, lands):
+    # Another numbered attempt's result — older or newer, and zero is the real first attempt, never "unset" or one —
+    # changes neither a failed attempt's own ending (an own ordinal ended differently keeps its own stored zero) nor
+    # an open attempt's status. The attempt's own finish (its own ordinal, zero included), a wholly unnumbered
+    # legacy pair and an empty parent adopt theirs.
+    parent, child, task = _child(tmp_path)
+    tid, own = task['id'], copy.deepcopy(_OWN) if canonical and canonical[0] == 'failed' else {}
+    if canonical:
+        status, attempt = canonical
+        write_task_result(parent, tid, status, child_drive_root=str(child), _terminal_observed=status == 'failed',
+                          **own, **({} if attempt is None else {'task_attempt': attempt}))
+    write_task_result(child, tid, 'completed', _terminal_observed=True, **copy.deepcopy(_COPY),
+                      **({} if replica_attempt is None else {'task_attempt': replica_attempt}))
+    expected = _ending({'status': canonical[0], 'task_attempt': canonical[1], **own}) if canonical else _ending(None)
+    before = _ending(read_result(parent, tid))
+    assert before == expected  # a real setup: a failed attempt holds its own non-empty ending
+    assert load_task_result(child, tid)['status'] == 'completed'  # and a terminal result waits in the child drive
+    headless.copy_child_task_result(parent, task)
+    now = _ending(read_result(parent, tid))
+    if lands:
+        assert before['status'] != 'completed'
+        assert (now['status'], now['origin'], now['rounds'], now['result']) == (
+            'completed', 'model_final', 3, _COPY['result'])
+        assert replica_attempt is None or now['attempt'] == replica_attempt
+    else:
+        assert now == expected
+
+
+def test_a_kept_late_result_list_survives_a_matching_replicas_old_copy(tmp_path):
+    # The row keeps other attempts' replies as its own canonical custody (``late_attempt_results``). A later
+    # matching replica of the winner attempt carries the field's older snapshot — the same stale copy a split
+    # worker carries of ``focus`` or ``continuation_narrative``. Neither the effective read nor the copy-back
+    # lets that old copy age or drop the kept list; every retained entry stays addressable on the row.
+    from ouroboros.task_status import load_effective_task_result
+
+    parent, _prepared, task = _child(tmp_path)
+    tid = task['id']
+    write_task_result(parent, tid, 'failed', task_attempt=2, _terminal_observed=True, **copy.deepcopy(_OWN))
+    for name, attempt in (('first', 1), ('second', 0)):
+        drive = tmp_path / name
+        drive.mkdir()
+        write_task_result(drive, tid, 'completed', task_attempt=attempt, _terminal_observed=True,
+                          result=f'Attempt {attempt} reply.', loop_outcome={'usage': {'total_rounds': attempt + 1}})
+        headless.copy_child_task_result(parent, {'id': tid, 'drive_root': str(drive)})
+    kept = read_result(parent, tid)['late_attempt_results']
+    assert [row['task_attempt'] for row in kept] == [1, 0]  # two distinct physical attempts, one entry each
+
+    stale = tmp_path / 'third'
+    stale.mkdir()
+    write_task_result(stale, tid, 'completed', task_attempt=2, _terminal_observed=True,
+                      late_attempt_results=[kept[0]], result='Winner attempt reply.',
+                      loop_outcome={'usage': {'total_rounds': 9}})
+    write_task_result(parent, tid, 'failed', child_drive_root=str(stale))  # its own attempt's drive now serves the row
+    assert load_effective_task_result(parent, tid, materialize_artifacts=False)['late_attempt_results'] == kept
+
+    headless.copy_child_task_result(parent, {'id': tid, 'drive_root': str(stale)})
+
+    stored = read_result(parent, tid)
+    assert stored['late_attempt_results'] == kept  # the old copy neither ages nor drops the kept list
+    assert (stored['status'], stored['result']) == ('failed', _OWN['result'])  # and the chosen ending stays whole
+
+
+def test_a_kept_ending_keeps_its_own_clock_beside_its_workers_late_one(tmp_path):
+    # The host already chose attempt 2's ending — its provider failure, at its own clock. That same attempt's
+    # worker then supplies a different ending from its drive: the copy-back keeps the chosen words, rounds,
+    # origin and reason, and their timestamp too, never the worker's earlier clock.
+    parent, child, task = _child(tmp_path)
+    tid = task['id']
+    write_task_result(parent, tid, 'failed', task_attempt=2, child_drive_root=str(child), _terminal_observed=True,
+                      ts='2026-11-21T12:00:00+00:00', **copy.deepcopy(_OWN))
+    write_task_result(child, tid, 'completed', task_attempt=2, _terminal_observed=True,
+                      ts='2026-11-21T11:00:00+00:00', **copy.deepcopy(_COPY))
+    chosen = read_result(parent, tid)
+    assert chosen['ts'] == '2026-11-21T12:00:00+00:00'
+
+    headless.copy_child_task_result(parent, task)
+
+    stored = read_result(parent, tid)
+    assert (stored['status'], stored['result'], stored['ts']) == (
+        'failed', _OWN['result'], '2026-11-21T12:00:00+00:00')
+    assert stored['terminal_time'] == chosen['terminal_time']  # the observed end stays the host's fact
+    assert _ending(stored)['rounds'] == 0 and _ending(stored)['origin'] == 'host_notice'
+    assert stored.get('child_status') == 'completed'
+
+
+def test_a_kept_ending_keeps_its_clock_when_the_host_settles_mid_copy(tmp_path, monkeypatch):
+    # The host chooses attempt 2's ending while that attempt's own worker result is being copied back: the
+    # re-prepared write keeps the chosen words, rounds and freshly chosen clock together, never the worker's.
+    from ouroboros.task_results import write_task_result as real_write
+
+    parent, child, task = _child(tmp_path)
+    tid = task['id']
+    write_task_result(parent, tid, 'running', task_attempt=2, child_drive_root=str(child))
+    write_task_result(child, tid, 'completed', task_attempt=2, _terminal_observed=True,
+                      ts='2026-11-21T11:00:00+00:00', **copy.deepcopy(_COPY))
+    raced = []
+
+    def race(root, task_id, status, **fields):
+        if not raced:  # the host's ending lands between the copy's basis read and its commit
+            raced.append(True)
+            real_write(parent, tid, 'failed', _terminal_observed=True, ts='2026-11-21T12:00:00+00:00',
+                       **copy.deepcopy(_OWN))
+        return real_write(root, task_id, status, **fields)
+
+    monkeypatch.setattr(headless, 'write_task_result', race)
+    headless.copy_child_task_result(parent, task)
+
+    stored = read_result(parent, tid)
+    assert (stored['status'], stored['result'], stored['ts']) == (
+        'failed', _OWN['result'], '2026-11-21T12:00:00+00:00')
+    assert _ending(stored)['rounds'] == 0 and stored.get('child_status') == 'completed'
+
+
+def _old_attempt(child, tid, same_name=None):
+    # Attempt 1's completed result as it waits in its child drive: its reply, a unique attachment and, when asked,
+    # a file named like the winner's. Returns the child's artifact folder.
+    from ouroboros import artifacts
+
+    store = artifacts.task_artifact_dir_path(child, tid, create=True)
+    files = {'old-only.txt': b'unique old attachment', **({'report.txt': same_name} if same_name else {})}
+    for name, data in files.items():
+        (store / name).write_bytes(data)
+    write_task_result(child, tid, 'completed', task_attempt=1, _terminal_observed=True, **copy.deepcopy(_COPY),
+                      artifacts=[artifacts.artifact_record(store / name) for name in files])
+    return store
+
+
+def _listed(parent, tid):
+    # The artifacts a real read of the task shows, by name.
+    from ouroboros.task_status import load_effective_task_result
+
+    return {row.get('relpath') or row['name']: row for row in load_effective_task_result(parent, tid)['artifacts']}
+
+
+def test_a_late_old_copy_keeps_the_winners_files_exact_and_its_own_unique_ones_readable(tmp_path):
+    # Attempt 2 won with its own report. Attempt 1's old result arrives late with a report of the same name, a file
+    # nobody else has and its reply: the winner's ending, row and bytes stay exact; the old reply and attachment stay
+    # readable through the real reads (in the child drive, or wherever later custody places them).
+    from ouroboros import artifacts
+
+    parent, child, task = _child(tmp_path)
+    tid = task['id']
+    won = artifacts.task_artifact_dir_path(parent, tid, create=True)
+    (won / 'report.txt').write_bytes(b'winner report')
+    winner = artifacts.artifact_record(won / 'report.txt')
+    write_task_result(parent, tid, 'failed', task_attempt=2, child_drive_root=str(child), _terminal_observed=True,
+                      artifacts=[winner], **copy.deepcopy(_OWN))
+    _old_attempt(child, tid, same_name=b'old report of attempt 1')
+    before = _ending(read_result(parent, tid))
+    assert (before['status'], before['rounds'], before['result']) == ('failed', 0, _OWN['result'])  # a real winner
+
+    headless.copy_child_task_result(parent, task)
+
+    stored = read_result(parent, tid)
+    assert _ending(stored) == before
+    assert (won / 'report.txt').read_bytes() == b'winner report'
+    row = next(item for item in stored['artifacts'] if Path(item['path']).resolve() == (won / 'report.txt').resolve())
+    assert row['sha256'] == winner['sha256']  # the winner's row still names the winner's bytes
+    assert load_task_result(child, tid)['result'] == _COPY['result']  # the old reply is kept whole
+    assert Path(_listed(parent, tid)['old-only.txt']['path']).read_bytes() == b'unique old attachment'
+
+
+@pytest.mark.parametrize('retain_fails', [False, True])
+def test_a_late_reply_survives_its_drives_settlement_in_canonical_custody(tmp_path, monkeypatch, retain_fails):
+    # The reply lives in canonical custody, not in the folder: after copy-back and the settlement that removes the
+    # source drive (no longer needed), the row's ``late_attempt_results`` source_ref still answers with the old
+    # reply's exact bytes, and the old attempt's unique attachment keeps its own file beside the winner's different
+    # same-named bytes. A retention that fails certifies nothing: no kept entry, readiness answers False, the drive
+    # stays unadopted and the winner's bytes untouched.
+    from ouroboros import artifacts, task_custody
+
+    parent, child, task = _child(tmp_path)
+    tid = task['id']
+    won = artifacts.task_artifact_dir_path(parent, tid, create=True)
+    (won / 'report.txt').write_bytes(b'winner report')
+    winner = artifacts.artifact_record(won / 'report.txt')
+    write_task_result(parent, tid, 'failed', task_attempt=2, child_drive_root=str(child), _terminal_observed=True,
+                      artifacts=[winner], **copy.deepcopy(_OWN))
+    _old_attempt(child, tid, same_name=b'old report of attempt 1')
+
+    def settle():
+        return task_custody.settle_child_drive(parent, tid, child, live=lambda _task: False)
+
+    if retain_fails:
+        from ouroboros import history_retention
+
+        def refuse(*_args, **_kwargs):
+            raise OSError('no room for the late copy')
+
+        monkeypatch.setattr(history_retention, 'retain_late_result', refuse)
+        with pytest.raises(OSError, match='no room for the late copy'):
+            headless.copy_child_task_result(parent, task)
+        stored = read_result(parent, tid)
+        assert 'late_attempt_results' not in stored
+        assert _ending(stored) == _ending({'status': 'failed', 'task_attempt': 2, **copy.deepcopy(_OWN)})
+        assert not headless.terminal_task_files_ready(parent, task, stored)
+        assert settle()['reason'] == 'child_result_unadopted' and child.is_dir()
+        assert (won / 'report.txt').read_bytes() == b'winner report'
+        return
+
+    headless.copy_child_task_result(parent, task)
+    entry = read_result(parent, tid)['late_attempt_results'][0]
+    assert (entry['task_attempt'], entry['status']) == (1, 'completed')
+    assert settle()['reason'] == 'child_refs_pending'  # refs first, exactly as the settlement pass demands
+    headless.retry_child_task_refs(parent, child, tid)
+    assert settle()['status'] == 'removed'
+    assert not child.exists()  # the source folder is no longer needed
+
+    stored = read_result(parent, tid)
+    assert _ending(stored) == _ending({'status': 'failed', 'task_attempt': 2, **copy.deepcopy(_OWN)})
+    reply = json.loads(read_actor_source_bytes(parent, tid, stored['late_attempt_results'][0]['source_ref']))
+    assert reply['result'] == _COPY['result'] and reply['task_attempt'] == 1
+    assert reply['loop_outcome'] == _COPY['loop_outcome']  # the exact old reply, from canonical custody
+    assert (won / 'report.txt').read_bytes() == b'winner report'  # never replaced by the older same-named file
+    copies = {row['name']: Path(row['path']).read_bytes() for row in stored['artifacts']}
+    assert copies['report.txt'] == b'winner report'
+    assert copies['old-only.txt'] == b'unique old attachment'
+    assert b'old report of attempt 1' in copies.values()  # its own file, published beside the winner's
+
+
+@pytest.mark.parametrize('won', ['stop', 'next-attempt', 'unchanged', 'first-result'])
+def test_a_late_file_error_marks_only_the_attempt_it_was_preparing(tmp_path, monkeypatch, won):
+    # The copy's own I/O fails after the strict reads. A Stop or the next attempt that took the row meanwhile keeps
+    # its own outcome and gets no file failure of the older attempt's preparation; an unchanged matching attempt gets
+    # the real error, and a first result meets no row at all. The old source and its attachment stay in every case.
+    from ouroboros import history_retention
+
+    parent, child, task = _child(tmp_path)
+    tid = task['id']
+    if won != 'first-result':
+        write_task_result(parent, tid, 'running', task_attempt=1, child_drive_root=str(child))
+    store = _old_attempt(child, tid)
+
+    def fail_copy(*_args, **_kwargs):
+        if won == 'stop':
+            write_task_result(parent, tid, 'cancelled', result='Stopped by the owner.')
+        elif won == 'next-attempt':
+            write_task_result(parent, tid, 'running', task_attempt=2, result='Attempt 2 is running.')
+        raise OSError('disk full while copying')
+
+    monkeypatch.setattr(history_retention, 'prepare_result_retention', fail_copy)
+    report = headless.prepare_terminal_task_files(parent, task)
+    current = load_task_result(parent, tid) or {}
+
+    if won in ('stop', 'next-attempt'):
+        own = {'stop': ('cancelled', 1, 'Stopped by the owner.'),
+               'next-attempt': ('running', 2, 'Attempt 2 is running.')}[won]
+        assert (current['status'], current.get('task_attempt'), current.get('result')) == own
+        assert current.get('artifact_status') != 'failed' and 'artifact_error' not in current
+    elif won == 'unchanged':
+        assert 'disk full while copying' in report['error']
+        assert current['artifact_status'] == 'failed' and 'disk full while copying' in current['artifact_error']
+    else:
+        assert 'disk full while copying' in report['error'] and not current
+    assert load_task_result(child, tid)['result'] == _COPY['result']  # the source stays whole
+    assert (store / 'old-only.txt').read_bytes() == b'unique old attachment'
+    if current:
+        assert Path(_listed(parent, tid)['old-only.txt']['path']).read_bytes() == b'unique old attachment'

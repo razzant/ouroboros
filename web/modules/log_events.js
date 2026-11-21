@@ -3,7 +3,7 @@ import { formatUsd } from './storage_format.js';
 import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase } from './task_reason_words.js';
+    handledRefusalHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause, refusedByStop, refusedStepPhrase } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -11,7 +11,7 @@ import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentatio
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
-import { checkFailureView, redCheckPhrase } from './verification_presentation.js';
+import { checkFailureView, redCheckPhrase, toolStepDiagnostic } from './verification_presentation.js';
 import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
@@ -353,16 +353,6 @@ function compactJson(value, maxLen = 220) {
     }
 }
 
-function extractCommandText(args) {
-    if (!args || typeof args !== 'object') return '';
-    const cmd = args.cmd;
-    if (Array.isArray(cmd)) {
-        return cmd.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
-    }
-    if (typeof cmd === 'string') return cmd;
-    return '';
-}
-
 // Legacy observations lack host identity: retain them separately rather than
 // guessing a call from a reused provider id, tool name or target.
 const legacyToolObservations = new WeakMap();
@@ -439,9 +429,13 @@ function advisoryProceduralRefusal(record) {
 // the saved copy when one exists and says so when it does not. Twin: project_dialogue.terminal_delivery_clause.
 export function terminalDeliveryClause(delivery) {
     const state = String(delivery?.state || '');
+    if (state === 'exhausted' && delivery.scope === 'task') {
+        return tr('task.delivery.unidentified', 'Delivery attempts ran out for a terminal message from this task. The affected answer is unknown.');
+    }
     if (!TASK_CAUSE_PHRASES[`terminal_delivery_${state}`]) return '';
     const path = String(delivery?.preserved_path || '');
     return taskReasonPhrase(`terminal_delivery_${state}`) + (state !== 'exhausted' ? ''
+        : delivery.preserved_path === null ? '; the saved copy for this answer could not be verified.'
         : path ? `; a copy of the answer is saved at ${path}.` : '; no copy of the answer could be saved.');
 }
 
@@ -536,8 +530,9 @@ export function taskReasonDetail(evt, codes = []) {
     const completion = record.task_completion ?? record.outcome_axes?.execution?.task_completion;
     const [storedReason, custody] = custodyDebtReason(record);
     const typedReason = String(record.outcome_axes?.execution?.reason_code || '');
-    const reason = ['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON
-        ? (typedReason || storedReason) : storedReason;
+    const earlier = severity === 'cancelled' ? execution?.earlier_stop : null;
+    const reason = ((['', 'final_message'].includes(storedReason) && typedReason !== CUSTODY_DEBT_REASON)
+        || (typedReason === 'cancelled' && storedReason === earlier)) ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
     const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
     const authorStop = completion?.action === 'stop' && record.outcome_axes?.execution?.status !== 'cancelled' && !Object.keys(origin || {}).length;
@@ -558,7 +553,8 @@ export function taskReasonDetail(evt, codes = []) {
         clause = joinCauseClauses(cancelCauseClauses(origin, record));
     } else if (held) {
         clause = phrase(String(objective.reason || ''));
-    } else if (!reason || reason === 'final_message' || (authorStop && reason === 'plan_review_advisory')) {
+    } else if (!reason || reason === 'final_message' || (severity === 'cancelled' && reason === 'cancelled')
+        || (authorStop && reason === 'plan_review_advisory')) {
         // A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
         clause = authorStop ? taskReasonPhrase('author_stop')
             : severity === 'done' && record.outcome_axes?.execution?.plan_review === 'awaiting' ? taskReasonPhrase('plan_review_awaiting') : '';
@@ -586,7 +582,12 @@ export function taskReasonDetail(evt, codes = []) {
         : remainder?.state === 'known' && Number.isInteger(count) && count > 0
             ? `${count} uncommitted file${count === 1 ? '' : 's'} remain${count === 1 ? 's' : ''} in the saved candidate` : '';
     const cleanupClause = String(record.outcome_axes?.execution?.evolution_cleanup?.line || '');  // the host's stored words
-    const line = joinCauseClauses([clause, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
+    const context = typeof earlier === 'string' && earlier
+        ? [fmt('Earlier recorded stop: {cause}', { cause: phrase(earlier) })] : [];
+    if (severity === 'cancelled' && execution?.cancel_policy_reason === 'evolution_disabled_in_light_mode') {
+        context.unshift(phrase('evolution_disabled_in_light_mode'));
+    }
+    const line = joinCauseClauses([clause, ...context, ...warningClauses, phrase(reviewCause), rationale, remainderClause, cleanupClause,
         ...acceptanceIncidentClauses(decision, reason, causePhraseLookup),
         ...terminalLimitations(record, reason, held, authorStop), custody ? taskReasonPhrase(custody) : '',
         terminalDeliveryClause(record.terminal_delivery)]);  // the host twin appends the delivery clause last too
@@ -869,11 +870,12 @@ export function summarizeLogEvent(evt) {
         // A refusal of further work cannot hide the current call's failure.
         const refusal = refusedStepPhrase(evt);
         const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
+        const handled = handledRefusalHeadline(evt);
         const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
         const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : evt.status === 'interrupted'
             ? `interrupted (${evt.control_reason || 'control'})` : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(refusedByStop(evt) ? 'info' : held ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || `${tool} ${label}`, {
+        return view(refusedByStop(evt) ? 'info' : held || handled ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || handled || `${tool} ${label}`, {
             body: shortText([!held && refusal,
                 toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220))].filter(Boolean).join(' '), 260),
             meta: [formatLogDuration(evt.duration_sec)],
@@ -1261,15 +1263,17 @@ function summarizeChatLiveEventView(evt) {
         const resultText = describeText(evt.result || '', 320, { markdown: true });
         const traceText = describeText(evt.trace_summary || '', 320);
         const errorText = describeText(evt.error || '', 220);
-        const cancelDetail = evt.cancel_origin && (rawEvent === 'cancelled'
+        const earlier = evt.outcome_axes?.execution?.earlier_stop;
+        const cancelDetail = (evt.cancel_origin || (typeof earlier === 'string' && earlier)) && (rawEvent === 'cancelled'
             || (rawEvent === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'))
             // The child's OWN lineage rides along, so the cancel clause can prove the
             // parent relation instead of naming the swept root as an initiator (#1061).
             ? taskReasonDetail({ status: 'cancelled', cancel_origin: evt.cancel_origin,
+                outcome_axes: { execution: { earlier_stop: earlier } },
                 task_id: evt.subagent_task_id || evt.task_id,
                 parent_task_id: evt.parent_task_id, root_task_id: evt.root_task_id }) : '';
         const stopDetail = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop' ? taskReasonDetail(evt) : '';
-        const reasonDetail = cancelDetail || stopDetail || (evt.outcome_axes?.execution?.plan_review
+        const reasonDetail = cancelDetail || stopDetail || (evt.outcome_axes?.execution?.plan_review || deliveredAnswerCause(evt) || evt.terminal_delivery
             ? taskReasonDetail(evt) : evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
         // Completed frames take label and phase from their authoritative outcome axes.
         const completionSeverity = rawEvent === 'completed' ? taskOutcomeSeverity(evt) : 'done';
@@ -1295,7 +1299,7 @@ function summarizeChatLiveEventView(evt) {
                 : event === 'cancelled' ? 'cancelled'
                     : event === 'failed' ? 'error'
                         : ['rejected', 'interrupted'].includes(event) ? 'warn'
-                            : event === 'scheduled' ? 'start'
+                            : event === 'scheduled' ? (evt.accepted === true ? 'queued' : 'start')
                                 : 'working';
         const terminal = ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event);
         const terminalCause = terminal ? (cancelDetail || stopDetail || (UNSTARTED_REASONS.has(String(evt.reason_code || '')) ? reasonDetail : '')) : '';
@@ -1413,11 +1417,14 @@ function summarizeChatLiveEventView(evt) {
         // call is a host-stamped routing or completion act. Failures keep their own row; so does a
         // completed check whose criterion failed, while its call still counts once as `ok`. `done`
         // is the TASK's phase; a finished CALL is `ok`.
-        const status = t === 'tool_call_started' ? (evt._live_tool_frame ? 'calling' : 'unknown') : 'ok';
+        const started = t === 'tool_call_started';
+        const refusal = !started && handledRefusalHeadline(evt);
+        const status = started ? (evt._live_tool_frame ? 'calling' : 'unknown') : refusal ? evt.status : 'ok';
+        const callKey = toolCallKey(evt, groupId);
         return chatView({
             phase: status, headline: '', visible: true, dedupeKey: `tools|${groupId}`,
             receipt: Boolean(evt.routing_action) || evt.completion_control === true,
-            ...checkFailureView(evt, toolCallKey(evt, groupId)),
+            ...(!started && (refusal ? toolStepDiagnostic(evt, callKey) : checkFailureView(evt, callKey))),
             toolCall: toolObservation(evt, groupId, status),
         });
     }
@@ -1472,23 +1479,9 @@ function summarizeChatLiveEventView(evt) {
         });
     }
     if (['tool_call_finished', 'tool_call'].includes(t) && evt.is_error) {
-        const refusal = refusedStepPhrase(evt);
-        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusal);
-        const commandText = describeText(extractCommandText(evt.args), 120);
-        const errorResult = describeText(evt.result_preview || evt.error, 220);
-        const bodyParts = !held && refusal ? [refusal] : [];
-        const fullBodyParts = [...bodyParts];
-        if (commandText.preview) bodyParts.push(`Command: ${commandText.preview}`);
-        if (errorResult.preview) bodyParts.push(errorResult.preview);
-        if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
-        if (errorResult.full) fullBodyParts.push(errorResult.full);
+        const held = heldCallPhrase(evt.tool, evt.status) || (evt.status === 'blocked' && refusedStepPhrase(evt));
         return chatView({
-            phase: refusedByStop(evt) ? 'info' : held || evt.status === 'non_zero_exit' ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
-            headline: failedStepHeadline(evt),
-            body: shortText(bodyParts.join(' '), 220),
-            fullBody: fullBodyParts.join('\n\n'),
-            visible: true, hostRefusedStep: Boolean(refusal),
-            dedupeKey: toolCallKey(evt, groupId),
+            ...toolStepDiagnostic(evt, toolCallKey(evt, groupId)),
             toolCall: toolObservation(evt, groupId, held ? 'held' : evt.status === 'interrupted' ? 'interrupted' : 'error'),
         });
     }

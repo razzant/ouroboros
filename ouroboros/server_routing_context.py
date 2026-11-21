@@ -243,7 +243,7 @@ def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
     that author's account. Computed on the LOADED row, whose stop the stripped projection no longer holds; a row
     these facts cannot be read from is unknown, never ``author_finished``."""
     try:
-        from ouroboros.outcomes import recorded_cause
+        from ouroboros.outcomes import normalize_outcome_axes, recorded_cause
         from ouroboros.owner_continue import offer_view
         from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
         from ouroboros.review_records import recorded_stop_rationale
@@ -254,17 +254,23 @@ def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
             "outcome": "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(ended, {})],
             "cause": recorded_cause(row), "ended_at": terminal_time_fact(row).get("occurred_at")}
         origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
-        if row.get("status") == "cancelled" and origin:
-            # A cancel ended this work. Its row keeps the reason code of the stop that preceded the cancel
-            # (a pause, a spent budget): that is the earlier stop, never the cause of the end. The owner-stop
-            # rail's own code (Stop now ending an inline turn, or the provider wait it ended) is that same
-            # stop, read as one command by the rail's reader, never an earlier one.
-            from supervisor.owner_stop import owner_stop_ending
+        if row.get("status") == "cancelled":
+            execution = normalize_outcome_axes(row)["execution"]
+            earlier = execution.get("earlier_stop")
+            policy = execution.get("cancel_policy_reason")
+            if origin:
+                from supervisor.owner_stop import owner_stop_ending
 
-            same_stop = any(owner_stop_ending(row))
-            earlier = facts["cause"] if facts["cause"] not in ("", "cancelled") and not same_stop else None
-            facts.update(cause="cancelled", **({"cancelled_by": str(origin["source"])} if origin.get("source") else {}),
-                         **({"earlier_stop": earlier} if earlier else {}))
+                # Old rows kept an earlier cause in reason_code. A reason of this very Stop is not earlier.
+                if not earlier and facts["cause"] not in ("", "cancelled") and not any(owner_stop_ending(row)):
+                    earlier = facts["cause"]
+                facts.update(cause="cancelled", **({"cancelled_by": str(origin["source"])} if origin.get("source") else {}))
+            elif policy == "evolution_disabled_in_light_mode":
+                facts["cause"] = policy  # display only: offer_view still consumes the untouched result
+            elif earlier == facts["cause"] and execution.get("reason_code") == "cancelled":
+                facts["cause"] = "cancelled"  # current cancellation, source unknown
+            if isinstance(earlier, str) and earlier:
+                facts["earlier_stop"] = earlier
         offer = offer_view(row, task_id)
         if offer is not None:
             facts["continuation_offer"] = offer

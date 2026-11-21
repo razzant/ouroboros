@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { clearStickyCardState } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
+import { replayedTerminalRecords } from '../modules/settled_card.js';
 import { classifyLiveFrame } from '../modules/notifications.js';
 
 import {
@@ -132,11 +133,39 @@ test('interrupted task_done remains retryable and cannot finish a root card', ()
         phase: 'working', headline: 'Working',
     });
     assert.match(chatSource, /if \(eventType === 'task_done' && summary\.terminal\)/);
-    assert.match(chatSource, /if \(!taskDoneIsTerminal\(terminalRecord\)\) return;/);
+    // History settles a card only from a terminal stamp: an interrupted one selects no ending.
+    const replayed = (status) => replayedTerminalRecords([{ task_id: 'retry', role: 'system', is_progress: true,
+        task_terminal_status: status, reason_code: evt.reason_code }], new Map(), new Map()).has('retry');
+    assert.deepEqual([replayed('interrupted'), replayed('failed')], [false, true]);
     assert.equal(taskDoneIsTerminal({
         status: 'completed',
         root_phase_checkpoint: { post_task_synthesis: 'running' },
     }), false);
+});
+
+test('history keeps one ending per task: a later lifecycle wins, detail refines its own, a bubble draws no completion', () => {
+    const select = (rows) => replayedTerminalRecords(rows, new Map(), new Map()).get('t');
+    const progress = { task_id: 't', role: 'system', is_progress: true, ts: '2026-09-05T00:00:00Z',
+        task_terminal_status: 'failed', reason_code: 'owner_requested_finalization',
+        outcome_axes: { lifecycle: { status: 'failed' }, execution: { status: 'failed' } } };
+    const final = { task_id: 't', role: 'assistant', text: 'Stopped.', ts: '2026-09-05T00:00:10Z' };
+    const newer = select([progress, { ...final, task_terminal_status: 'completed' }]);
+    assert.deepEqual([newer.phase, newer.drawn], ['done', true], 'the newer final of another lifecycle is the last word');
+    assert.equal(select([progress, { ...final, task_terminal_status: 'failed' }]).phase, 'error', 'the same lifecycle keeps its detail');
+    const answer = select([{ ...final, task_terminal_status: 'completed', outcome_axes: { execution: { status: 'ok' } } }]);
+    assert.deepEqual([answer.phase, answer.rich, answer.drawn], ['done', true, false], 'an answer applies its facts, draws no row');
+    // An unnumbered receipt cannot lend its quiet effect to a known attempt in the same physical task.
+    const summary = { task_id: 't', role: 'system', system_type: 'task_summary', ts: '2026-10-24T07:49:00Z', status: 'completed',
+        outcome_final: true, outcome_phase: 'done', reason_code: 'final_message',
+        terminal_time: { v: 1, source: 'executor_terminal', occurred_at: '2026-10-24T07:49:00Z', attempt: { task_attempt: 0 } } };
+    const receipt = { task_id: 't', role: 'system', system_type: 'task_summary', summary_kind: 'terminal_root_projection',
+        ts: '2026-10-24T07:50:00Z', historical_terminal: { status: 'completed', phase: 'done', ts: '2026-10-24T07:50:00Z',
+            quiet_effective: true } };
+    const quiet = select([summary, receipt]);
+    assert.deepEqual([quiet.detail.ts, quiet.detail.quiet_effective, quiet.drawn], [summary.ts, undefined, true]);
+    const matched = select([summary, { ...receipt, task_attempt: 0,
+        historical_terminal: { ...receipt.historical_terminal, task_attempt: 0 } }]);
+    assert.equal(matched.detail.quiet_effective, true, 'the exact attempt’s receipt still lends its quiet effect');
 });
 
 test('review lifecycle timeout and error are terminal lifecycle errors', () => {

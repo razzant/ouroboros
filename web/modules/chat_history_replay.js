@@ -86,7 +86,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
                     && summary.cardReview.revision > item.cardReview.revision);
             if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision < item.cardRowRevision
                 || summary.cardRowRevision === item.cardRowRevision && !newerReview) return adoptedSource;
-        } else if (!Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
+        } else if (!(outcome && summary.currentOutcome) && !Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
                 && compareHistoryPosition(row.history_position, existingPosition) < 0)) return adoptedSource;
         const update = { headline: summary.headline || item.headline,
             cardRowRevision: summary.cardRowRevision,

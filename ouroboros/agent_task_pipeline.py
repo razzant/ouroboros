@@ -971,10 +971,15 @@ def emit_task_results(
                                            addressed=True, emit_evidence=True)
     duration_sec = round(time.time() - start_time, 3)
     task_cost_fields = _task_cost_fields(env, task)
+    from ouroboros.terminal_time import source_task_attempt
+
+    attempt = source_task_attempt(task)
+    attempt_field = {"task_attempt": attempt} if attempt is not None else {}
     try:
         append_jsonl(drive_logs / "events.jsonl", {
             "ts": utc_now_iso(), "type": "task_eval", "ok": execution_status not in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED},
             "task_id": task.get("id"), "task_type": task.get("type"),
+            **attempt_field,
             "outcome_axes": outcome_axes,
             "reason_code": reason_code,
             "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
@@ -988,6 +993,7 @@ def emit_task_results(
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
+        **attempt_field,
         "rounds": loop_rounds,
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,

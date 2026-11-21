@@ -153,7 +153,10 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     }
     let current;
     const modelPhase = modelActivityPresentation(modelActivity);
-    if (phase === 'unknown') current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
+    if (phase === 'unknown') {
+        current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
+        if (workView?.phase === 'unknown' && workView.secondary) current.secondary = workView.secondary;
+    }
     // The card of a work's current episode says the work's word and its line (work_status.cardWorkView).
     else if (workView) current = { ...phaseView(workView.phase, workView.text, workView.classes, { mark: work?.mark,
         tone: workView.tone, waiting: workView.waiting }), ...(workView.secondary ? { secondary: workView.secondary } : {}),
@@ -226,15 +229,18 @@ export function censusTaskPhase(activity, detail = null, connected = true, { wai
 }
 
 function recordPhase(record = {}, terminalPhase = 'done') {
+    const finishingChild = record.isSubagent && record.finalizingHold;
+    const view = finishingChild && !record.workView?.finalizing ? null : record.workView;
+    const phase = record.isSubagent ? view?.phase || record.censusPhase || '' : record.censusPhase || 'working';
     // The card's one parked word also represents an optional question gap;
     // its observed census phase distinguishes that from unknown activity.
     const ownerWait = record.parkedPhase === 'owner_wait' ? 'owner_wait'
         : record.parkedPhase === 'unknown' && record.censusPhase && record.censusPhase !== 'unknown' ? 'unknown' : '';
     return taskActivityPresentation({
         phase: ownerWait ? record.censusPhase || 'working'
-            : record.parkedPhase || record.censusPhase || 'working',
+            : record.parkedPhase || (finishingChild ? 'finalizing' : phase),
         outcome: record.finished ? terminalPhase || 'done' : record.observedOutcome,
-        ended: Boolean(record.finished), finalizing: Boolean(record.finalizingHold),
+        ended: Boolean(record.finished), finalizing: Boolean(record.finalizingHold || view?.finalizing),
         quietEffective: record.quietEffective ?? record.historicalTerminal?.quiet_effective,
         ownerWait,
         modelWaiting: Boolean(record.modelWaiting), modelOwnerAction: Boolean(record.modelWaiting && record.modelOwnerAction),
@@ -243,7 +249,7 @@ function recordPhase(record = {}, terminalPhase = 'done') {
         ownerMove: Boolean(record.ownerMove), hold: record.projectHold,
         pauseCause: record.pauseCause, pauseReason: record.pauseReason, stopPolicy: record.cancelPendingPolicy,
         finishingReviews: Boolean(record.finishingReviews),
-        modelActivity: record.modelActivity, workView: record.workView, work: record.workLook,
+        modelActivity: record.modelActivity, workView: view, work: finishingChild && !view ? null : record.workLook,
     });
 }
 
@@ -290,6 +296,30 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     record.detached = activity.detached === true;  // a detached work's census row (CONTRACTS K7/K8), in any room
     const desired = desiredLiveCardPhase(record);
     return setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary);
+}
+
+// A fresh frame can settle a gap. An exact member projection still owns its published word and reason. true when the
+// card then agrees with this frame (a running member does); a recorded hold ignores it (work_status.applyCardWorkViews).
+export function observeChildPhase(record, phase) {
+    const parkedUnknown = record.parkedPhase === 'unknown';
+    if (!parkedUnknown && record.workView && record.workView.phase !== 'unknown') return record.workView.phase === 'working';
+    if (parkedUnknown || record.workView || record.censusPhase !== phase) {
+        record.workView = record.workLook = null;
+        syncParkedPhase(record, phase);
+    }
+    return true;
+}
+
+// A live admission can fill a child's unknown phase, never override its later state. A leaf's
+// activity speaks for that executor alone; historical frames do not establish current work.
+export function frameObservesPhase(record, summary, live) {
+    if (!live || (record.isSubagent && summary.activity)) return false;
+    const phase = summary.phase;
+    if (phase === 'working' || phase === 'thinking') return true;
+    if (phase !== 'queued' || record.finished || !record.isSubagent) return false;
+    const known = record.workView ? record.workView.phase !== 'unknown'
+        : Boolean(record.censusPhase) && record.censusPhase !== 'unknown';
+    return !known;
 }
 
 // A replayed final may preserve only an already-terminal phase. Ordinary DOM
@@ -432,6 +462,10 @@ function phaseSecondaryElement(record) {
     if (record.phaseSecondaryEl === undefined) {
         record.phaseSecondaryEl = record.root?.querySelector?.('[data-live-phase-secondary]') || null;
     }
+    const el = record.phaseSecondaryEl;
+    if (record.isSubagent && el && record.summaryButtonEl && el.parentNode !== record.summaryButtonEl) {
+        record.summaryButtonEl.insertBefore(el, record.episodesEl || null);
+    }
     return record.phaseSecondaryEl;
 }
 
@@ -482,7 +516,12 @@ export function setHistoricalUnavailable(record, enabled, held) {
 
 export function setHistoricalUnconfirmed(record) {
     if (!record || record.finished || record.reviewAnchor || record.historicalUnavailable
-            || record.historicalUnconfirmed) return false;
+            || record.historicalUnconfirmed
+            // A nested card its member state already speaks for is no quiet historical row: a known own
+            // phase, or its own external work observed beside an unknown one (the view's secondary line,
+            // the same fact taskActivityPresentation carries into the unconfirmed chip).
+            || (record.isSubagent && record.workView
+                && (record.workView.phase !== 'unknown' || record.workView.secondary))) return false;
     record.historicalUnconfirmed = true;
     setInertCardPresentation(record, true);
     return true;

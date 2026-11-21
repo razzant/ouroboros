@@ -665,6 +665,182 @@ for (const phase of ['unknown', 'done', 'error', 'warn', 'cancelled']) {
     });
 }
 
+for (const [extraAxes, expected] of [[{}, 'Done'], [{ review: { status: 'degraded' } }, 'Done with warnings'],
+    [{ artifacts: { status: 'missing' } }, 'Failed']]) {
+    test(`history keeps the recorded ending through row and page ordering: ${expected}`, async t => {
+        recordRenderedMarkup(t);
+        const id = 'recovered-report';
+        const outcome = { status: 'failed', terminal_origin: 'model_final',
+            reason_code: 'finalization_incomplete', finalization_recovery: { answer: 'delivered' },
+            outcome_axes: { lifecycle: { status: 'failed' }, execution: { status: 'infra_failed' }, ...extraAxes } };
+        const source = expected === 'Done' ? 'current_outcome' : 'task_outcome';
+        // An outcome names the stored result's attempt, as the host projects it; one without an attempt is another result.
+        const rich = row('chat:6', 'Recorded ending', { task_id: id, role: 'system', system_type: 'task_summary',
+            task_attempt: 2, [source]: { ...outcome, task_attempt: 2, revision: TS } });
+        const bare = row('progress:7', 'Last progress', { task_id: id, is_progress: true, narration: true,
+            task_terminal_status: 'failed', ts: '2026-09-12T12:01:00Z' });
+        const stopped = { status: 'cancelled', outcome_axes: { lifecycle: { status: 'cancelled' } }, revision: '2026-09-12T12:03:00Z' };
+        const old = row('chat:3', 'Previous attempt', { task_id: id, role: 'system', system_type: 'task_summary',
+            task_attempt: 1, current_outcome: { ...stopped, task_attempt: 1 } });
+        const f = fixture(t, page([rich, bare], 'recent', 'older'), () => page([old], 'older'));
+        const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+        await f.refresh();
+        assert.equal(phase(), expected);
+        await f.clickOlder();
+        assert.equal(phase(), expected, 'an older attempt cannot replace this attempt, even when it has a later row time');
+        await f.refresh(page([bare, { ...rich, current_outcome: undefined, task_outcome: outcome }]));
+        assert.equal(phase(), expected);
+        await f.refresh(page([{ ...old, history_id: 'chat:8', task_attempt: 3, current_outcome: { ...stopped, task_attempt: 3 } }]));
+        assert.equal(phase(), 'Stopped', 'the new attempt owns its own status and causes');
+    });
+}
+
+test('older history can supply the missing outcome behind a lifecycle stamp', async t => {
+    recordRenderedMarkup(t);
+    const id = 'older-diagnostic';
+    const progress = row('progress:8', 'Preparing the report', { task_id: id, is_progress: true, narration: true,
+        task_attempt: 1, task_terminal_status: 'completed' });
+    const summary = row('chat:2', 'Recorded summary', { task_id: id, role: 'system', system_type: 'task_summary',
+        ts: '2026-09-12T11:59:00Z', task_attempt: 1, status: 'completed', outcome_axes: { review: { status: 'degraded' } } });
+    const f = fixture(t, page([progress], 'recent', 'older'), () => page([summary], 'older'));
+    const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+    await f.refresh();
+    assert.equal(phase(), 'Done');
+    await f.clickOlder();
+    assert.equal(phase(), 'Done with warnings');
+    await f.refresh(page([progress]));
+    assert.equal(phase(), 'Done with warnings');
+});
+
+for (const first of ['legacy', 'receipt']) {
+    test(`a retained delivery warning survives a legacy status on either history page (first ${first})`, async t => {
+        recordRenderedMarkup(t);
+        const id = 'export-with-delivery-warning';
+        const progress = row('progress:1', 'Preparing export', { task_id: id, is_progress: true, narration: true });
+        const legacy = row('chat:4', 'Completed', { role: 'system', system_type: 'task_summary', task_id: id,
+            task_attempt: 1, status: 'completed', ts: '2026-09-12T12:04:00Z' });
+        const frozen = { status: 'completed', phase: 'warn', task_attempt: 1, ts: TS,
+            provenance: 'canonical_task_result_after_finalization' };
+        const receipt = row('chat:2', '', { role: 'system', system_type: 'task_summary', task_id: id,
+            summary_kind: 'terminal_root_projection', historical_terminal: frozen });
+        const [recent, older] = first === 'legacy' ? [legacy, receipt] : [receipt, legacy];
+        const f = fixture(t, page([progress, recent], 'recent', 'older'), () => page([older], 'older'));
+        const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+        await f.refresh();
+        assert.equal(phase(), first === 'legacy' ? 'Done' : 'Done with warnings');
+        await f.clickOlder();
+        assert.equal(phase(), 'Done with warnings');
+        await f.refresh(page([progress, older, recent]));
+        assert.equal(phase(), 'Done with warnings');
+        // An older gateway filled in these default axes for the same bare status.
+        const defaults = { execution: { status: 'ok' }, artifacts: { status: 'not_applicable' }, review: { status: 'skipped' } };
+        await f.refresh(page([progress, { ...legacy, outcome_axes: defaults }]));
+        assert.equal(phase(), 'Done with warnings');
+        const late = { ...receipt, current_outcome: { task_attempt: 1, status: 'completed', outcome_phase: 'done',
+            revision: '2026-09-12T12:05:00Z', outcome_axes: { review: { status: 'pass', source: 'result_review' } } } };
+        await f.refresh(page([progress, late, legacy]));
+        assert.equal(phase(), 'Done', 'the current revision outranks its frozen phase');
+        await f.refresh(page([progress, receipt, { ...legacy, task_attempt: 2, status: 'cancelled' }]));
+        assert.equal(phase(), 'Stopped', 'the newer attempt outranks the revision of the old one');
+    });
+}
+
+test('a pruned summary reads its attached receipt and a hidden notice cannot settle its task', async t => {
+    recordRenderedMarkup(t);
+    const id = 'delivery-held';
+    const progress = row('progress:1', 'Preparing export', { task_id: id, is_progress: true, narration: true });
+    const notice = row('chat:2', '', { task_id: id, role: 'system', system_type: 'quiz_closed',
+        quiz: { quiz_id: 'choose', state: 'closed' }, task_outcome: { status: 'completed' } });
+    const f = fixture(t, page([progress, notice]));
+    await f.refresh();
+    assert.notEqual(walkCard(f.messages, id).dataset.finished, '1');
+    const summary = row('chat:3', 'Completed', { task_id: id, role: 'system', system_type: 'task_summary', status: 'completed',
+        historical_terminal: { status: 'completed', phase: 'warn', ts: TS, provenance: 'canonical_task_result_after_finalization' } });
+    await f.refresh(page([progress, summary]));
+    assert.equal(walkCard(f.messages, id).querySelector('[data-live-phase]').textContent, 'Done with warnings');
+});
+
+test('a sparse history refresh preserves a delivered final already seen live', async t => {
+    recordRenderedMarkup(t);
+    const id = 'answer-seen-live';
+    const progress = row('progress:1', 'Writing the answer', { task_id: id, is_progress: true, narration: true });
+    const f = fixture(t, page([progress]));
+    await f.refresh();
+    f.emitLog({ type: 'task_done', task_id: id, ts: TS, status: 'failed', task_attempt: 1,
+        reason_code: 'finalization_incomplete', terminal_origin: 'model_final', finalization_recovery: { answer: 'delivered' },
+        outcome_axes: { execution: { status: 'infra_failed' } } });
+    const phase = () => walkCard(f.messages, id).querySelector('[data-live-phase]').textContent;
+    assert.equal(phase(), 'Done');
+    await f.refresh(page([{ ...progress, task_attempt: 1, task_terminal_status: 'failed' }]));
+    assert.equal(phase(), 'Done');
+});
+
+// A receipt backs the current outcome beside it only as that same attempt's publication. Zero is an attempt like any
+// other; where neither names one, the pair is the legacy whole and keeps its retained words.
+for (const [name, receiptAttempt, currentAttempt, shares] of [
+    ['an outcome of unknown attempt takes nothing from a numbered receipt', 1, undefined, false],
+    ['an outcome of unknown attempt takes nothing from a receipt numbered zero', 0, undefined, false],
+    ['an outcome of the receipt\'s own attempt keeps its retained words', 1, 1, true],
+    ['zero is the same attempt as zero', 0, 0, true],
+    ['a wholly unnumbered pair keeps its retained words', undefined, undefined, true],
+]) test(`history joins a current outcome to its own attempt's receipt: ${name}`, async t => {
+    recordRenderedMarkup(t);
+    const id = 'retried-export', words = 'The first attempt closed with these words.';
+    const numbered = attempt => (attempt === undefined ? {} : { task_attempt: attempt });
+    const progress = row('progress:1', 'Preparing the export', { task_id: id, is_progress: true, narration: true });
+    const frozen = { status: 'completed', phase: 'warn', ts: '2026-09-12T11:00:00Z', wake_summary: words,
+        provenance: 'canonical_task_result_after_finalization', ...numbered(receiptAttempt) };
+    const receipt = row('chat:2', '', { role: 'system', system_type: 'task_summary', task_id: id, ts: frozen.ts,
+        summary_kind: 'terminal_root_projection', historical_terminal: frozen, ...numbered(receiptAttempt),
+        current_outcome: { task_id: id, status: 'completed', reason_code: 'final_message', outcome_phase: 'done',
+            quiet_effective: false, _result_text_present: true, revision: '2026-09-12T12:05:00Z',
+            outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } }, ...numbered(currentAttempt) } });
+    const f = fixture(t, page([progress, receipt]));
+    await f.refresh();
+    const card = walkCard(f.messages, id);
+    const shown = (node) => [node.innerHTML || '', node.textContent || '', ...(node.children || []).map(shown)].join('\n');
+    assert.equal(card.querySelector('[data-live-phase]').textContent, 'Done', 'the stored result settles the card either way');
+    assert.equal(shown(card).includes(words), shares);
+});
+
+test('a finalizing retry shows its own early answer, and an earlier attempt\'s ending is no part of it', async t => {
+    const markup = recordRenderedMarkup(t);
+    const open = 'recount', settled = 'sorted-notes';
+    const stop = (rationale) => ({ lifecycle: { status: 'completed' },
+        execution: { status: 'ok', task_completion: { action: 'stop', rationale, source: 'finish_task' } },
+        objective: { status: 'fail', source: 'task_completion' } });
+    const earlier = 'The first count stopped before the east bed.', own = 'The notes could not be sorted by date.';
+    // The host stamps the stored result's early answer on the rows of its attempt; these two carry no attempt of their own.
+    const answered = { task_phase: 'finalizing', outcome_final: false, outcome_phase: 'done', reason_code: 'final_message',
+        rounds: 17, outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } } };
+    const f = fixture(t, page([
+        row('progress:1', 'Counting it again', { task_id: open, is_progress: true, narration: true, ...answered }),
+        row('chat:2', '', { task_id: open, role: 'system', system_type: 'task_summary', task_attempt: 1, status: 'completed',
+            outcome_axes: stop(earlier), outcome_phase: 'error', outcome_final: false, rounds: 4, tool_calls: 3,
+            task_phase: 'unfinished' }),
+        row('chat:3', 'The east bed holds sage.', { task_id: open, task_terminal_status: 'completed', ...answered }),
+        // A summary that is its own task's ending still states its cause.
+        row('progress:4', 'Sorting the notes', { task_id: settled, is_progress: true, narration: true }),
+        row('chat:5', '', { task_id: settled, role: 'system', system_type: 'task_summary', status: 'completed',
+            task_terminal_status: 'completed', outcome_axes: stop(own) }),
+    ]));
+    await f.refresh();
+    const retried = walkCard(f.messages, open);
+    const chip = retried.querySelector('[data-live-phase]');
+    const label = chip.getAttribute('aria-label') || chip.textContent;
+    assert.notEqual(retried.dataset.finished, '1');
+    assert.match(label, /Finalizing/);
+    assert.doesNotMatch(label, /Failed/);
+    assert.equal(walkCard(f.messages, settled).querySelector('[data-live-phase]').textContent, 'Failed');
+    assert.ok(markup.some(html => html.includes(own)), 'a card states the cause of its own ending');
+    assert.ok(!markup.some(html => html.includes(earlier)), 'another attempt\'s cause is not the open attempt\'s');
+    const retriedFacts = retried.querySelector('[data-live-facts]').innerHTML;
+    const retriedMeta = retried.querySelector('[data-live-meta]').innerHTML;
+    assert.doesNotMatch(retriedFacts, /4 · usable solve responses/, 'the earlier attempt\'s rounds do not own the open attempt\'s card');
+    assert.doesNotMatch(retriedMeta, /3 tool calls/, 'the earlier attempt\'s calls do not own the open attempt\'s card either');
+    assert.match(retriedFacts, /17 · usable solve responses/, 'the open attempt\'s own stamped facts carry its counters');
+});
+
 // One saved row, one bubble: a relay's live frame names the row as history does (row_client_message_id),
 // while a host reply's client_message_id names the owner's submission and keys nothing.
 const savedRelay = (seq, text = 'Same words') => row(`chat:${seq}`, text, {
