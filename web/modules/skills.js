@@ -1,17 +1,14 @@
-// The Skills page: three views of one page — Installed (what Ouroboros can do
-// now), Browse (what else it could do, from every connected source) and Sources
-// (where skills come from and how much each place is trusted). Installed is the
-// default and never waits for a source or GitHub: it reads the local listing and
-// the serialized lifecycle queue, and every owner action keeps its own words,
-// confirmation and refusal. Browse and Sources live in their own modules.
+// Skills' Installed view reads the local listing and lifecycle queue without waiting for a source.
+// Browse and Sources own their views; every action keeps its words, confirmation and refusal.
 import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
-import { apiClient, apiFetch, skillSourcesApi } from './api_client.js';
+import { apiClient, apiFetch, readStateJson, skillSourcesApi, withinRequestLifetime } from './api_client.js';
 import {
-    continuableReview, fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
+    continuableReview, fillFindingsOnOpen, installedSkillModel, installedSkillRowKey, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
     renderInstalledSkillCard,
+    renderRequirementNotice,
 } from './skill_card_renderer.js';
 import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
@@ -19,9 +16,10 @@ import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import { getContributions } from './contributions.js';
 import { getHostModules } from './host_modules.js';
 import {
-    openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
+    connectSkillTools, openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog,
+    updateWithoutReview,
 } from './skill_dialogs.js';
-import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
+import { manifestUnread, opensDetail, plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
 import { bindScrollFade } from './scroll_fade.js';
@@ -36,33 +34,41 @@ const SKILLS_TABS = [
     { value: 'sources', label: 'Sources', tabId: 'skills-tab-sources', panelId: 'skills-pane-sources' },
 ];
 const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
+// What a job's name-level row says of itself while more than one installed folder uses the name, and once the page that
+// read the job beside several folders lists fewer (the queue names no directory, so it cannot say which one it was for).
+const SHARED_NAME_ATTEMPT = 'Latest attempt on this name. More than one installed folder uses it; this is not one of them.';
+const SEEN_SHARED_ATTEMPT = 'Latest attempt on this name. It was seen while more than one installed folder shared the name, so it can’t say which folder it was for.';
 const INSTALLED_FILTERS = [
     ['all', 'All'], ['needs', 'Needs you'], ['updates', 'Updates'], ['off', 'Off'], ['made', 'Made here'],
 ];
+// The line under an Installed filter that shows no card: an empty Needs you is good news, not a search that missed.
+const FILTER_EMPTY = 'No installed skill matches.';
+const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
-function skillsPageTemplate() {
+export function skillsPageTemplate() {
     return `
         <section class="page app-page-glass" id="page-skills">
             ${renderPageHeader({
                 page: 'skills',
-                actionsHtml: '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
+                actionsHtml: '<button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
                 tabsHtml: renderTabStrip({
                     items: SKILLS_TABS, active: 'installed', dataAttr: 'data-tab', activeClass: 'is-active',
                     ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
-                }),
+                }) + '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button>',
             })}
-            <div class="skills-search-chrome" data-chrome-pane="installed">
+            <div class="skills-scroll scroll-fade-y">
+                <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
                 <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
-            <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
+                    <div id="skills-org-requirements" hidden></div>
                     <div id="skills-list" class="skills-list"></div>
-                    <p id="skills-filter-empty" class="skills-empty" hidden>No installed skill matches.</p>
+                    <p id="skills-filter-empty" class="skills-empty" hidden>${FILTER_EMPTY}</p>
                     <div id="skills-empty" class="skills-empty" hidden>
                         <p>No skills yet. Pick one in Browse, or ask Ouroboros: “find a skill for …”.</p>
                         <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
@@ -86,49 +92,152 @@ export function lifecycleEventsFromQueue(queueResp) {
     return [...deduped, active];
 }
 
-export function mergeLifecycleEvents(skills, events) {
+/**
+ * The listed row is an installed extension that is On and affirmatively ready: the host lists it loaded with the
+ * reason `ready` (a recovered restart shows as `ready` too), and nothing waits on it or on a process to exit.
+ * A script or instruction, a missing or unfamiliar reason, an Off or still-unhealthy row proves no recovery.
+ */
+export function listedReadyOn(skill, pageModules = {}) {
+    if (!skill || skill.lifecycle_virtual || skill.identity_collision || skill.type !== 'extension') return false;
+    if (skill.enabled !== true || skill.load_error || skill.live_loaded !== true || skill.live_reason !== 'ready') return false;
+    if (Object.keys(skill.retained_companions || {}).length) return false;
+    if ((skill.mcp_servers || []).some((server) => server.configured && (server.error || !server.listed))) return false;
+    return !installedSkillModel(skill, { pageModules }).needs;
+}
+
+/**
+ * Observation marks of the failed jobs of one accepted queue read, by the queue's own job id: an earlier mark carries
+ * over, a job first seen failed takes `nextTick()` now. A job the queue no longer lists keeps nothing, and one with no
+ * id has no identity to mark, so no later listing can be said to answer it.
+ */
+export function tickFailures(events, earlier, nextTick) {
+    const ticks = new Map();
+    for (const event of events) {
+        const id = typeof event?.id === 'string' ? event.id : '';
+        if (id && event.status === 'failed') ticks.set(id, earlier?.get(id) ?? nextTick());
+    }
+    return ticks;
+}
+
+/**
+ * The job ids one accepted queue read lists in any visible status — queued, running or failed. The name-level
+ * ambiguity ids are pruned by this, not by the failed marks: a job remembered while its name was listed for more
+ * than one folder is still a visible record of the queue while it runs, and dropping it before it fails would
+ * hand it to whichever folder is listed next.
+ */
+export function visibleJobIds(events) {
+    const ids = new Set();
+    for (const event of events) {
+        const id = typeof event?.id === 'string' ? event.id : '';
+        if (id && LIFECYCLE_VISIBLE_STATUSES.has(event.status)) ids.add(id);
+    }
+    return ids;
+}
+
+// The failed Enable jobs a listing has answered are kept by the queue's job id and nothing else, in this tab's
+// sessionStorage: a reload still knows the answer while the queue lists the job. Every accepted queue read drops the ids it
+// no longer lists as failed, so the copy never outgrows the queue (80 jobs). A store that refuses leaves them to this page.
+// The jobs this page read while their name was listed for more than one folder — of any visible status, a job still
+// queued or running included — are kept the same way, under a key of their own (they are shown, where the answered
+// ones are hidden): the queue names no directory, so such a job is never given to a folder listed later, and a reload
+// of this tab still knows it. An accepted queue read drops one of these ids once the queue lists it in no visible
+// status at all; a job merely not failed yet is still listed, so it is not forgotten before it can fail. A page
+// without that memory (a new tab, or storage that refuses) has only the queue and the listing it reads now, which
+// cannot say which folder a job was for.
+const ANSWERED_FAILURES_KEY = 'ouroboros.skills.answeredFailures';
+const NAME_LEVEL_FAILURES_KEY = 'ouroboros.skills.nameLevelFailures';
+
+const tabStore = (storage) => {
+    try { return storage === undefined ? globalThis.sessionStorage || null : storage; } catch { return null; }
+};
+
+/** The job ids this tab kept under `key` (the answered ones); what is not a non-empty string is no id. */
+export function readAnsweredFailures(storage, key = ANSWERED_FAILURES_KEY) {
+    try {
+        const ids = JSON.parse(tabStore(storage)?.getItem(key) || '[]');
+        return new Set(Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : []);
+    } catch { return new Set(); }
+}
+
+export function writeAnsweredFailures(ids, storage, key = ANSWERED_FAILURES_KEY) {
+    try {
+        const store = tabStore(storage);
+        if (ids.size) store?.setItem(key, JSON.stringify([...ids]));
+        else store?.removeItem(key);
+    } catch { /* full or refused: the answers last for this page only */ }
+}
+
+export const readNameLevelFailures = (storage) => readAnsweredFailures(storage, NAME_LEVEL_FAILURES_KEY);
+export const writeNameLevelFailures = (ids, storage) => writeAnsweredFailures(ids, storage, NAME_LEVEL_FAILURES_KEY);
+
+/**
+ * The kept ids that stay: all of them while no queue read has been accepted (`marks` unknown), then only those the
+ * accepted queue still marks — its failed-job ticks for the answered ids, its visibly listed job ids (any visible
+ * status) for the name-level ones. A queue that could not be read takes none away.
+ */
+export function carryAnsweredFailures(ids, marks) {
+    return new Set(marks ? [...ids].filter((id) => marks.has(id)) : ids);
+}
+
+/**
+ * `answered(event)` says a failed job was settled earlier. It is asked of each failed job by its queue id alone, before
+ * the join by name, so two directories of one name, or their order, never decide which row carries it.
+ * `superseded(event, row)` is the caller's proof that a failed job has now been answered by a newer listing; it is asked
+ * only of an ordinary failed job of a name listed once, so neither an ambiguous identity nor a name-level attempt ever
+ * makes a new answer. The history entry stays in the queue, only the card stops carrying the failure. A job names no
+ * directory: while more than one directory carries its name, it stands as its own placeholder row, never on one of them,
+ * so the order of the listing decides nothing. `nameLevel(event, shared)` is the caller's memory of that (`shared`: the
+ * name is listed more than once now), asked of every visible job, one still in flight included: a job remembered so
+ * stays that placeholder when fewer directories are listed later — while it is still queued or running, and after it
+ * fails — with words that no longer say two folders exist, and is never given to one of them, so it never sets a
+ * listed row's toggle, busy state or error. No listed row can answer it, so it stays until a newer job of its name or
+ * the queue's own eviction. With no memory a job is a placeholder only while `shared`.
+ */
+export function mergeLifecycleEvents(skills, events, { answered = null, superseded = null, nameLevel = null } = {}) {
     const out = skills.map((skill) => ({ ...skill }));
-    const byName = new Map(out.map((skill) => [skill.name, skill]));
-    const names = new Set(byName.keys());
+    const byName = new Map();
+    // A null entry means there is no unique installed row for that name.
+    for (const row of out) byName.set(row.name, byName.has(row.name) ? null : row);
     const processedTargets = new Set();
     for (const event of [...events].reverse()) {
         const name = event.target;
         if (!name) continue;
+        const existing = byName.get(name);
+        const shared = existing === null;
+        const visible = LIFECYCLE_VISIBLE_STATUSES.has(event.status);
+        // Remember every visible job, even one shadowed by an active or newer job of the same name.
+        const attempt = visible && (Boolean(nameLevel?.(event, shared)) || shared);
         if (processedTargets.has(name)) continue;
         processedTargets.add(name);
-        if (!LIFECYCLE_VISIBLE_STATUSES.has(event.status)) continue;
-        if (names.has(name)) {
+        // A settled or answered newest job still takes the name; it does not expose older failures.
+        if (!visible || (event.status === 'failed' && answered?.(event))) continue;
+        if (existing && !attempt) {
             // The skill already has a real card: annotate it with the in-flight
             // transition so it shows "Turning off…" instead of a stale toggle
             // while the serialized lifecycle lane works through it.
-            const existing = byName.get(name);
-            if (existing) {
-                existing.lifecycle_status = event.status;
-                existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
-                existing.lifecycle_message = event.message || '';
-                existing.lifecycle_pending = event.status !== 'failed';
-                if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
-            }
+            // Neither a shared name nor an attempt gets here, so neither is answered by a listed row: no row can say which
+            // directory the job was for.
+            if (event.status === 'failed' && superseded?.(event, existing)) continue;
+            existing.lifecycle_status = event.status;
+            existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
+            existing.lifecycle_message = event.message || '';
+            existing.lifecycle_job_id = typeof event.id === 'string' ? event.id : '';
+            existing.lifecycle_pending = event.status !== 'failed';
+            if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
             continue;
         }
-        names.add(name);
+        // A queue-only record: its action, status and error. The queue's `source` is the caller, never the package's
+        // origin, and nothing here is an installed version, review or grant, so none is invented.
         out.unshift({
             name,
-            description: event.message || event.error || 'Skill lifecycle operation',
-            version: '',
-            type: 'skill',
-            enabled: false,
-            review_status: 'pending',
-            review_stale: true,
-            permissions: [],
+            description: shared ? SHARED_NAME_ATTEMPT : attempt ? SEEN_SHARED_ATTEMPT : event.message || event.error || 'Skill lifecycle operation',
             load_error: event.status === 'failed' ? event.error : '',
-            source: event.source || 'external',
             lifecycle_kind: event.kind || '',
             lifecycle_status: event.status,
             lifecycle_pending: event.status !== 'failed',
             lifecycle_error: event.error || '',
             lifecycle_virtual: true,
-            grants: { all_granted: true },
+            ...(attempt ? { lifecycle_name_level: true } : {}),
         });
     }
     return out;
@@ -183,6 +292,7 @@ export function updateAllCandidates(skills, sources = null) {
     return skills.filter((skill) => {
         const install = skill.install;
         if (!install?.update_available?.digest || install.modified || install.base_known === false || install.withdrawn || skill.lifecycle_pending) return false;
+        if (!installedSkillModel(skill).update) return false;  // the same change eligibility as its individual card
         if (install.basis !== 'trusted') return false;
         const rowTrust = trust.get(install.source?.id);
         return rowTrust === undefined || rowTrust === 'trusted';
@@ -270,13 +380,14 @@ async function postWithFeedback(url, body) {
     return payload;
 }
 
-async function fetchSkills() {
-    const extResp = await apiClient.extensions();
+async function fetchSkills(signal) {
+    const extResp = await apiClient.extensions({ signal });
     if (!Array.isArray(extResp?.skills)) throw new Error('Installed skills response is unavailable.');
-    return { skills: extResp.skills, live: extResp.live || {} };
+    return { skills: extResp.skills, live: extResp.live || {}, deployment: extResp.deployment || null };
 }
 
 export function initSkills(ctx = {}) {
+    // A Settings page opened from here leads back to Skills, where it was opened.
     const page = document.createElement('div');
     page.innerHTML = skillsPageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
@@ -284,6 +395,7 @@ export function initSkills(ctx = {}) {
     const root = document.getElementById('page-skills');
     const container = document.getElementById('skills-list');
     const status = document.getElementById('skills-status');
+    const requirementsEl = document.getElementById('skills-org-requirements');
     const emptyEl = document.getElementById('skills-empty');
     const filterEmpty = document.getElementById('skills-filter-empty');
     const filtersEl = document.getElementById('skills-installed-filters');
@@ -296,13 +408,23 @@ export function initSkills(ctx = {}) {
     let activeTab = 'installed';
     let visible = false;
     let destroyed = false;
-    let renderGeneration = 0;
+    let listingReadController = null;
     let filter = 'all';
+    let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
     let activeMenu = null;
     let sheet = null;
+    let sheetPending = null;  // the pending install the open sheet describes: its row key and queue job
     let pollTimer = 0;
+    let hintTimer = 0;
     let lastListingRead = 0;
+    // The order of observations, not clocks. A snapshot carries the tick at which its queue first showed each failed
+    // job (`failureTicks`) and the tick at which its listing request began (`listingTick`): only a listing begun after
+    // the failure was seen can answer it. Both commit with the snapshot, so a queue read that is not accepted, or a
+    // listing that never lands, leaves the visible snapshot's marks as they were.
+    let readTick = 0;
+    let listingReadState = 'idle';
+    let pendingListingHint = null;
     let firstStartAsked = false;
     const contributions = getContributions();
     const hostModules = getHostModules();
@@ -333,9 +455,54 @@ export function initSkills(ctx = {}) {
             return cache.catalog;
         },
     };
-    const projected = () => (snapshot?.rawSkills
-        ? sortSkillsForDisplay(mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue))) : []);
+    const failureTick = (id) => (typeof id === 'string' && id ? snapshot?.failureTicks?.get(id) : undefined);
+    const failureAnswered = (event) => event.kind === 'enable' && snapshot?.listingTick > (failureTick(event.id) ?? Infinity);
+    // A job a fresh listing has once answered stays answered, by its queue id alone, while the queue still lists it: a
+    // later, different fault of the same row (another companion stopping), a second directory taking the name, the order
+    // of the two, or a reload of this tab must not bring the resolved Enable's error back. The ids are the snapshot's own,
+    // so they live no longer than the failed jobs of the accepted queue read; this tab's sessionStorage keeps a copy.
+    const answeredFailure = (event) => typeof event.id === 'string' && Boolean(snapshot?.answeredFailures?.has(event.id));
+    // A new answer needs a listing begun after the failure was seen, and that listing's one row of the name ready and On.
+    const supersededFailure = (event, row) => {
+        if (!failureAnswered(event) || !listedReadyOn(row, pageModuleFacts())) return false;
+        snapshot.answeredFailures.add(event.id);
+        writeAnsweredFailures(snapshot.answeredFailures);
+        return true;
+    };
+    // A job of any visible status this page reads while its name is listed for more than one folder names none of them,
+    // now or later: its queue id is kept (as the answered ones are), so a folder listed afterwards is never given it —
+    // neither its toggle and busy state while it runs, nor its error after it fails — and it stays its own row in a
+    // later listing as in a reload of this tab. A job with no id has no identity to keep.
+    const nameLevelAttempt = (event, shared) => {
+        const ids = snapshot?.nameLevelFailures;
+        if (!ids || typeof event.id !== 'string' || !event.id) return shared;
+        if (shared) ids.add(event.id);
+        return ids.has(event.id);
+    };
+    // What a snapshot keeps of the answered and the name-level ids (a first one starts from this tab's copy); a change
+    // reaches the copy too.
+    const carryAnswers = (ids, marks, write = writeAnsweredFailures) => {
+        const kept = carryAnsweredFailures(ids, marks);
+        if (kept.size !== ids.size) write(kept);
+        return kept;
+    };
+    const projected = () => {
+        if (!snapshot?.rawSkills) return [];
+        const ids = snapshot.nameLevelFailures;
+        const size = ids.size;
+        const rows = mergeLifecycleEvents(snapshot.rawSkills, lifecycleEventsFromQueue(snapshot.queue), {
+            answered: answeredFailure, superseded: supersededFailure, nameLevel: nameLevelAttempt,
+        });
+        if (ids.size !== size) writeNameLevelFailures(ids);
+        return sortSkillsForDisplay(rows);
+    };
+    // A card carrying a failed Enable whose row, as listed, is ready, though no listing begun after the failure was
+    // seen has answered it yet: one more read settles it. (`listed` is the row as the listing gave it: the card's own
+    // failure would make its model ask for the owner.) A name-level attempt is no such card: no listed row answers it.
+    const awaitsNewerListing = (card, listed, facts) => card.lifecycle_status === 'failed' && card.lifecycle_kind === 'enable'
+        && !card.lifecycle_name_level && snapshot.listingTick <= (failureTick(card.lifecycle_job_id) ?? -Infinity) && listedReadyOn(listed, facts);
     const installedByName = () => (snapshot?.rawSkills ? new Map(projected().map((skill) => [skill.name, skill])) : null);
+    const cardRowKey = (card) => card.dataset.skillRow || card.dataset.skill;
     const officialSource = () => (cache.sourcesValue || []).find((source) => source.kind === 'hub' && source.part === 'official') || null;
     // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
     const catalogEntry = (skill) => (cache.catalogValue?.items || [])
@@ -346,7 +513,8 @@ export function initSkills(ctx = {}) {
         const facts = host?.pageModuleFacts?.() || { faults: contributions?.faults?.() || [], held: [] };
         return { ...facts, startHeldModule: (key) => host?.startHeldModule?.(key) === true };
     };
-    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts() });
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
+        contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
@@ -360,17 +528,22 @@ export function initSkills(ctx = {}) {
 
     function applyInstalledFilter() {
         const query = searchInput.value.trim().toLowerCase();
-        const byName = installedByName() || new Map();
+        const byRow = new Map(projected().map((skill) => [installedSkillRowKey(skill), skill]));
         const pageModules = pageModuleFacts();
         let shown = 0;
+        let members = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
-            const skill = byName.get(card.dataset.skill);
-            const ok = !skill || (matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }))
-                && (!query || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query))));
+            const skill = byRow.get(cardRowKey(card));
+            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }));
+            const ok = member && (!skill || !query
+                || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query)));
             card.hidden = !ok;
+            if (member) members += 1;
             if (ok) shown += 1;
         }
         const total = container.querySelectorAll(':scope > .skills-card').length;
+        const sentence = filter === 'needs' && !members ? NOTHING_NEEDS_YOU : FILTER_EMPTY;
+        if (sentence !== filterEmptySentence) filterEmpty.textContent = filterEmptySentence = sentence;
         filterEmpty.hidden = !(total && !shown);
     }
 
@@ -379,7 +552,8 @@ export function initSkills(ctx = {}) {
         paintFilters(skills);
         const candidates = skills ? updateAllCandidates(skills, cache.sourcesValue) : [];
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
-        updateAllBtn.textContent = `Update ${candidates.length} trusted`;
+        updateAllBtn.textContent = `Update ${candidates.length}`;
+        updateAllBtn.setAttribute('aria-label', `Update ${candidates.length} trusted skills`);
         const pill = document.getElementById('skills-tab-pill-installed');
         const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
         if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
@@ -389,19 +563,21 @@ export function initSkills(ctx = {}) {
         if (!snapshot?.rawSkills || destroyed) return;
         const skills = projected();
         const pageFacts = pageModuleFacts();
-        const options = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageFacts });
-        const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [card.dataset.skill, card]));
+        const options = cardOptions;
+        const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [cardRowKey(card), card]));
         let replacementFocus = null;
         if (replace) {
             closeMenus();
             container.innerHTML = skills.map((skill) => renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options())).join('');
         } else {
             for (const skill of [...skills].reverse()) {
-                const card = cards.get(skill.name);
+                const key = installedSkillRowKey(skill);
+                const card = cards.get(key);
                 if (card) {
                     // A queue placeholder has no controls to enrich. Replace only this
                     // structural transition; real cards retain drafts and disclosures.
-                    if (card.hasAttribute('data-lifecycle-virtual') !== Boolean(skill.lifecycle_virtual)) {
+                    if (card.hasAttribute('data-lifecycle-virtual') !== Boolean(skill.lifecycle_virtual)
+                        || (card.querySelector('.skills-card-name')?.tagName === 'BUTTON') !== opensDetail(skill)) {
                         const ownsMenu = activeMenu?.card === card;
                         const focused = card.contains(document.activeElement)
                             || (ownsMenu && activeMenu.popover.contains(document.activeElement));
@@ -415,7 +591,7 @@ export function initSkills(ctx = {}) {
                         patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, options(),
                             activeMenu?.card === card ? activeMenu.popover : card);
                     }
-                    cards.delete(skill.name);
+                    cards.delete(key);
                 } else {
                     const template = document.createElement('template');
                     template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options());
@@ -428,29 +604,60 @@ export function initSkills(ctx = {}) {
             }
         }
         emptyEl.hidden = skills.length > 0;
+        const notice = renderRequirementNotice(snapshot.deployment);  // a missing required package has no card
+        if (requirementsEl.innerHTML !== notice) requirementsEl.innerHTML = notice;
+        requirementsEl.hidden = !notice;
         paintChrome();
         applyInstalledFilter();
         if (replacementFocus && !replacementFocus.hidden) {
             replacementFocus.querySelector('.skills-card-name')?.focus({ preventScroll: true });
         }
+        retirePendingSheet(skills);
         browse?.repaintStates();
         schedulePoll();
     }
 
+    // The preview of a queue-only install describes one queue job. The repaint whose rows no longer show that same job
+    // as a pending install (failed, replaced, gone, or now a listed skill) closes it; focus then follows its binder to the
+    // title this row key has now (`titleOf` in openInstalledSheet), if one is shown.
+    function newestJobId(name) {
+        const id = lifecycleEventsFromQueue(snapshot?.queue).filter((event) => event.target === name).pop()?.id;
+        return typeof id === 'string' ? id : '';
+    }
+    function retirePendingSheet(rows) {
+        if (!sheet || sheet.closed || !sheetPending) return;
+        const row = rows.find((skill) => installedSkillRowKey(skill) === sheetPending.key);
+        if (row?.lifecycle_virtual && opensDetail(row) && newestJobId(row.name) === sheetPending.job) return;
+        sheet.close();
+    }
+
+    function clearListingTimers() {
+        clearTimeout(pollTimer);
+        clearTimeout(hintTimer);
+        hintTimer = 0;
+    }
+
     async function readInstalled({ quiet = false } = {}) {
         if (destroyed) return;
-        const generation = ++renderGeneration;
-        const current = () => generation === renderGeneration && !destroyed;
-        const next = { rawSkills: null, live: {}, queue: snapshot?.queue || null, githubTokenConfigured: snapshot?.githubTokenConfigured };
+        clearListingTimers();
+        const hint = pendingListingHint;
+        // A new listing reads its own optional facts; it does not leave the previous reads in flight.
+        listingReadController?.abort();
+        const controller = listingReadController = new AbortController();
+        listingReadState = 'pending';
+        const current = () => controller === listingReadController && !destroyed;
+        const earlierTicks = snapshot?.failureTicks;
+        const next = { rawSkills: null, live: {}, queue: snapshot?.queue || null, failureTicks: earlierTicks, visibleIds: snapshot?.visibleIds, githubTokenConfigured: snapshot?.githubTokenConfigured };
         const optional = { state: 'loading', queue: 'loading' };
         const showReads = () => {
-            if (!current() || !snapshot?.rawSkills) return;
+            // Optional facts describe the new list only after it has been published.
+            if (!current() || snapshot !== next) return;
             const notes = Object.entries(optional).filter(([, value]) => value === 'failed')
                 .map(([name]) => (name === 'state' ? 'Skill settings' : 'Lifecycle progress'));
             status.dataset.tone = notes.length ? 'warn' : 'muted';
             status.textContent = notes.length ? `${notes.join(' and ')} could not be refreshed. Refresh to retry; earlier facts are kept.` : '';
         };
-        apiClient.state().then((data) => {
+        readStateJson({ signal: controller.signal }).then((data) => {
             if (!current()) return;
             const ok = typeof data?.github_token_configured === 'boolean';
             optional.state = ok ? 'ready' : 'failed';
@@ -458,49 +665,91 @@ export function initSkills(ctx = {}) {
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.state = 'failed'; showReads(); } });
-        apiClient.skillLifecycleQueue().then((data) => {
+        apiClient.skillLifecycleQueue({ signal: controller.signal }).then((data) => {
             if (!current()) return;
             const ok = Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
             optional.queue = ok ? 'ready' : 'failed';
-            if (ok) next.queue = data;
+            if (ok) {
+                const events = lifecycleEventsFromQueue(data);
+                next.queue = data;
+                next.failureTicks = tickFailures(events, earlierTicks, () => ++readTick);
+                next.visibleIds = visibleJobIds(events);
+                if (next.answeredFailures) next.answeredFailures = carryAnswers(next.answeredFailures, next.failureTicks);
+                // The ambiguity ids follow the queue's visible records, not its failed ones: a job still in flight is still listed.
+                if (next.nameLevelFailures) next.nameLevelFailures = carryAnswers(next.nameLevelFailures, next.visibleIds, writeNameLevelFailures);
+            }
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.queue = 'failed'; showReads(); } });
         if (!quiet && !snapshot) { status.dataset.tone = 'muted'; status.textContent = 'Loading installed skills…'; }
         try {
-            const primary = await fetchSkills();
+            const listingTick = ++readTick;
+            const primary = await withinRequestLifetime(fetchSkills, { signal: controller.signal });
             if (!current()) return;
+            next.listingTick = listingTick;
             next.rawSkills = primary.skills;
             next.live = primary.live;
+            next.deployment = primary.deployment;
             lastListingRead = Date.now();
+            listingReadState = 'idle';
+            if (pendingListingHint === hint) pendingListingHint = null;
         } catch (err) {
             if (!current()) return;
+            listingReadState = 'failed';
             emptyEl.hidden = true;
+            const reason = err?.name === 'StateReadEnded' && err.reason === 'expired' ? 'the request took too long' : err.message || err;
             status.dataset.tone = 'danger';
-            status.textContent = `Couldn’t refresh installed skills: ${err.message || err}.${snapshot ? ' Showing the previous list. Refresh to try again.' : ' Refresh to try again.'}`;
+            status.textContent = `Couldn’t refresh installed skills: ${reason}.${snapshot ? ' Showing the previous list. Refresh to try again.' : ' Refresh to try again.'}`;
+            // New hints get their one trailing read even if the primary stalled. An old, unanswered hint
+            // still retries at the slower failure cadence, not in a tight loop.
+            if (pendingListingHint !== hint) scheduleHintRead();
+            schedulePoll();
             return;
         }
         const firstPaint = !snapshot;
+        // Decisions already made carry over while no accepted queue read has dropped their job — from the failed marks for
+        // the answers, from the visible ones for the ambiguity, so a job still in flight is not forgotten before it can
+        // fail. A first snapshot starts from this tab's copy: a reload does not bring back a failure a listing once
+        // answered, nor move an attempt seen beside two folders onto the one left.
+        next.answeredFailures = carryAnswers(snapshot?.answeredFailures ?? readAnsweredFailures(), next.failureTicks);
+        next.nameLevelFailures = carryAnswers(snapshot?.nameLevelFailures ?? readNameLevelFailures(), next.visibleIds, writeNameLevelFailures);
         snapshot = next;
-        if (!quiet && !firstPaint) status.textContent = '';
-        if (firstPaint) status.textContent = '';
         paintInstalled({ replace: firstPaint });
         showReads();
+        scheduleHintRead();
     }
 
-    // Local lifecycle progress only (never GitHub): the queue while work runs, the
-    // listing now and then while a review runs outside the lane.
+    function scheduleHintRead() {
+        const canRead = () => visible && !destroyed && !document.hidden && listingReadState !== 'pending';
+        // The first hint owns the deadline; newer hints cannot supersede an active read.
+        if (!pendingListingHint || hintTimer || !canRead()) return;
+        hintTimer = setTimeout(() => {
+            hintTimer = 0;
+            if (canRead()) readInstalled({ quiet: true });
+        }, 300);
+    }
+
+    // Local progress only: pending work or a listing hint not yet covered by a successful read.
     function schedulePoll() {
         clearTimeout(pollTimer);
-        if (destroyed || !visible || !snapshot) return;
-        const working = inFlightCount(lifecycleEventsFromQueue(snapshot.queue)) > 0;
-        const reviewing = reviewingSkills.size > 0 || projected().some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
-        if (!working && !reviewing) return;
+        if (destroyed || !visible || document.hidden || listingReadState === 'pending' || (!snapshot && !pendingListingHint)) return;
+        const working = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)) > 0;
+        const listingTools = snapshot?.rawSkills?.some((skill) => (skill.mcp_servers || [])
+            .some((server) => server.configured && !server.listed && !server.error));
+        const rows = projected();
+        const reviewing = reviewingSkills.size > 0 || rows.some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
+        const exiting = snapshot?.rawSkills?.some((skill) => Object.keys(skill.retained_companions || {}).length);
+        const listed = new Map((snapshot?.rawSkills || []).map((skill) => [skill.name, skill]));
+        const facts = pageModuleFacts();
+        const confirming = rows.some((row) => awaitsNewerListing(row, listed.get(row.name), facts));
+        if (!pendingListingHint && !working && !reviewing && !listingTools && !exiting && !confirming) return;
+        const retrying = listingReadState === 'failed';
         pollTimer = setTimeout(async () => {
-            if (destroyed || !visible) return;
-            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working) await readInstalled({ quiet: true });
-            else schedulePoll();
-        }, WORK_POLL_MS);
+            if (destroyed || !visible || document.hidden) return;
+            if (retrying || pendingListingHint || working || listingTools || confirming || Date.now() - lastListingRead >= REVIEW_POLL_MS) {
+                await readInstalled({ quiet: true });
+            } else schedulePoll();
+        }, retrying ? REVIEW_POLL_MS : WORK_POLL_MS);
     }
 
     // ---- menus and the Official mark ------------------------------------------------------------
@@ -647,6 +896,8 @@ export function initSkills(ctx = {}) {
                 cmd: buildHealPrompt(skill),
                 task_constraint: { mode: 'normal', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
                 visible_task_id: `skill_repair_${name}`,
+                // The press is my human's request; the prompt above is the host's words, not theirs (#2778).
+                ui_control: { name: 'skill_repair' },
             });
             showToast(`${name}: Ouroboros is on it — see chat`, 'ok');
             emitSkillLifecycle('repair', name);
@@ -753,7 +1004,8 @@ export function initSkills(ctx = {}) {
     }
 
     function openFindings(name) {
-        const card = container.querySelector(`:scope > .skills-card[data-skill="${CSS.escape(name)}"]`);
+        // An attempt beside the folder of its name has no Details: the folder's card is the one that opens.
+        const card = container.querySelector(`:scope > .skills-card[data-skill="${CSS.escape(name)}"]:not([data-lifecycle-virtual])`);
         const details = card?.querySelector('.skills-details');
         if (!details) return;
         details.open = true;
@@ -767,29 +1019,56 @@ export function initSkills(ctx = {}) {
     }
 
     function openInstalledSheet(name, opener) {
-        const skill = installedByName()?.get(name);
-        if (!skill) return;
+        const card = opener && (opener.closest('.skills-card') || (activeMenu?.popover.contains(opener) && activeMenu.card));
+        const key = card ? cardRowKey(card) : name;
+        const skill = projected().find((row) => installedSkillRowKey(row) === key);
+        if (!skill || !opensDetail(skill)) return;
         const source = (cache.sourcesValue || []).find((row) => row.id === skill.install?.source?.id) || null;
         const catalogItem = catalogEntry(skill);
         const item = catalogItem || {
             id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
-            name, title: skillTitle(skill), description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
-            needs_keys: skill.grants?.requested_keys || [], official: Boolean(skill.install?.official), signals: null,
+            name, title: skillTitle(skill), description: skill.description || '', version: skill.version,
+            official: Boolean(skill.install?.official), signals: null,
             category: skill.category || [],
         };
         sheet?.close();
+        // What it can use is this loaded row's parsed manifest and grants, never the catalog's entry; a pending install, or
+        // a folder whose manifest was not read, declares nothing we may state.
+        const access = skill.lifecycle_virtual || manifestUnread(skill) ? null
+            : { permissions: skill.permissions || [], needs_keys: skill.grants?.requested_keys || [] };
         // The source's entry has the full text; a registry install has no entry to read back.
         const origin = skill.install?.source;
+        // A queue-only install's title may be replaced while its preview is open, so closing returns to the title this row
+        // key has then (shown, never a hidden card or another key's); the job's own id says when it stops being this one.
+        const pendingKey = skill.lifecycle_virtual ? installedSkillRowKey(skill) : '';
+        const job = pendingKey ? newestJobId(name) : '';
+        const titleOf = () => Array.from(container.querySelectorAll(':scope > .skills-card'))
+            .find((listed) => cardRowKey(listed) === pendingKey && !listed.hidden)?.querySelector('.skills-card-name') || null;
         sheet = openSkillDetailSheet({
-            item, installed: skill, source, returnFocus: opener,
+            item, installed: skill, source, returnFocus: pendingKey ? titleOf : opener, access,
             readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
         });
+        sheetPending = job ? { key: pendingKey, job } : null;
     }
 
     /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
     async function runInstalledAction(name, action, options = {}) {
+        if (action === 'toggle_contribution') {
+            const key = String(options.contributionKey || '');
+            if (!key || !contributions?.setHidden) throw new Error('Composer control is unavailable.');
+            const hidden = options.contributionHidden !== 'true';
+            await contributions.setHidden(key, hidden);
+            showToast(`${contributions.byKey(key)?.label || 'Composer control'} ${hidden ? 'hidden' : 'shown'}`, 'ok');
+            return false;
+        }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
-        if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
+        if (action === 'open_widgets') { void ctx.showPage?.('widgets'); return false; }
+        if (action === 'open_secrets') {
+            // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
+            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
+            return false;
+        }
+        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {
@@ -826,6 +1105,12 @@ export function initSkills(ctx = {}) {
         if (action === 'submit_hub') return publish(name);
         if (action === 'forget_publication') return forgetPublication(name);
         if (action === 'turn_on') return turnOn(name);
+        if (action === 'connect_tools') {
+            const result = await connectSkillTools(await currentSkill(name));
+            if (stillWorking(name, result)) return true;  // not confirmed yet: the card follows its job
+            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            return Boolean(result);
+        }
         if (action === 'grant') {
             const skill = await currentSkill(name);
             const keys = String(options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
@@ -885,19 +1170,25 @@ export function initSkills(ctx = {}) {
             showToast(`${name}: ${actionTarget.dataset.submitReason || 'publishing is not available now'}`, 'warn');
             return;
         }
+        // Disabling a focused button drops focus to the page in Chromium; the keyboard owner gets it back below.
+        const hadFocus = document.activeElement === actionTarget;
         actionTarget.disabled = true;
         let refresh = true;
         try {
             if (action === 'start_host_module') {
                 refresh = pageModuleFacts().startHeldModule(actionTarget.dataset.hostModuleKey || '') === true;
             } else {
-                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget }) !== false;
+                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget,
+                    contributionKey: actionTarget.dataset.contributionKey || '', contributionHidden: actionTarget.dataset.contributionHidden || '' }) !== false;
             }
         } catch (err) {
             if (err.cancelled) refresh = false;
             showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
         } finally {
             actionTarget.disabled = false;
+            if (hadFocus && actionTarget.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+                actionTarget.focus({ preventScroll: true });
+            }
             if (refresh) await readInstalled({ quiet: true });
         }
     };
@@ -968,7 +1259,7 @@ export function initSkills(ctx = {}) {
         pageModuleFacts,
         showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
         showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openBehaviorSettings: () => { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('behavior'); },
+        openSettings: (path, options = {}) => ctx.openSettings?.(path, options),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
@@ -981,7 +1272,7 @@ export function initSkills(ctx = {}) {
     async function showActive({ refresh = false } = {}) {
         if (activeTab === 'installed') return readInstalled({ quiet: Boolean(snapshot) });
         // Browse and Sources need the installed listing for every card's state.
-        const listing = snapshot ? Promise.resolve() : readInstalled();
+        const listing = snapshot && !pendingListingHint ? Promise.resolve() : readInstalled({ quiet: Boolean(snapshot) });
         if (activeTab === 'browse') await Promise.all([browse.show({ refresh }), listing]);
         else await Promise.all([sourcesView.show({ refresh }), listing]);
         if (!firstStartAsked) host.confirmFirstStart();
@@ -1001,7 +1292,7 @@ export function initSkills(ctx = {}) {
         onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
     });
     // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
+    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), { actions: updateAllBtn });
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;
@@ -1011,27 +1302,38 @@ export function initSkills(ctx = {}) {
             else if (activeTab === 'browse') await Promise.all([browse.refresh(), readInstalled({ quiet: true })]);
             else await sourcesView.refresh();
         } catch (err) {
-            showToast(`Skills view failed: ${err.message || err}`, 'danger');
+            if (!destroyed) showToast(`Skills view failed: ${err.message || err}`, 'danger');
         } finally {
-            refreshBtn.disabled = false;
-            refreshBtn.textContent = 'Refresh';
+            if (!destroyed) {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = 'Refresh';
+            }
         }
     };
     const onPageShown = (event) => {
         closeMenus();
         visible = event.detail?.page === 'skills';
-        if (!visible) { clearTimeout(pollTimer); sheet?.close(); return; }
+        if (!visible) { clearListingTimers(); sheet?.close(); return; }
         tabs.select(activeTab);
         store.sources(true).catch(() => null);
         showActive();
     };
-    let wsTimer = 0;
-    const onLifecycle = () => {
-        if (!visible) return;
-        clearTimeout(wsTimer);
-        wsTimer = setTimeout(() => readInstalled({ quiet: true }), 300);
+    const invalidateInstalled = () => {
+        if (destroyed) return;
+        // A successful read only consumes the hint it started with.
+        pendingListingHint = Symbol();
+        scheduleHintRead();
     };
-    const unsubscribe = typeof ctx.ws?.on === 'function' ? ctx.ws.on('extension_lifecycle', onLifecycle) : null;
+    const stopSync = typeof ctx.ws?.on === 'function' ? [
+        ctx.ws.on('extension_lifecycle', invalidateInstalled),
+        ctx.ws.on('extension_health_changed', invalidateInstalled),
+        ctx.ws.on('open', invalidateInstalled),  // a lost hint is recovered by re-reading, not replayed
+    ] : [];
+    const onVisibilityChange = () => {
+        if (document.hidden) clearListingTimers();
+        else schedulePoll();
+        invalidateInstalled();
+    };
 
     refreshBtn.addEventListener('click', onRefresh);
     updateAllBtn.addEventListener('click', updateAll);
@@ -1040,6 +1342,7 @@ export function initSkills(ctx = {}) {
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
     window.addEventListener('ouro:page-shown', onPageShown);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
     // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
@@ -1050,7 +1353,8 @@ export function initSkills(ctx = {}) {
         if (!skill && category) { selectTab('browse'); await browse?.showCategory(category); return; }
         if (!skill) { selectTab('browse'); await browse?.searchFor(query); return; }
         selectTab('installed');
-        const found = () => container.querySelector(`.skills-card[data-skill="${CSS.escape(skill)}"]`);
+        const entry = `.skills-card[data-skill="${CSS.escape(skill)}"]`;
+        const found = () => container.querySelector(`${entry}:not([data-lifecycle-virtual])`) || container.querySelector(entry);
         if (found()) return found().scrollIntoView({ block: 'nearest' });
         const observer = new MutationObserver(() => {
             if (!found()) return;
@@ -1063,18 +1367,20 @@ export function initSkills(ctx = {}) {
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    return { destroy() {
+    return { capture() {
+        const tab = activeTab;
+        return () => { if (activeTab !== tab) selectTab(tab); };
+    }, destroy() {
         destroyed = true;
-        renderGeneration += 1;
-        clearTimeout(pollTimer);
-        clearTimeout(wsTimer);
+        clearListingTimers();
+        listingReadController?.abort();
         closeMenus();
         sheet?.close();
         browse.destroy();
         sourcesView.destroy();
         tabs.destroy();
         disposeBar();
-        unsubscribe?.();
+        stopSync.forEach((off) => off?.());
         stopContributionFacts?.();
         stopHostFacts?.();
         refreshBtn.removeEventListener('click', onRefresh);
@@ -1084,6 +1390,7 @@ export function initSkills(ctx = {}) {
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
         window.removeEventListener('ouro:page-shown', onPageShown);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

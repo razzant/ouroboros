@@ -104,7 +104,7 @@ test('Save posts the values once with what the form showed, then empties the con
         assert.ok(posts[0].request_id);
         assert.equal(fx.host.children.length, 0, 'the form closed');
         assert.equal(fx.accepted.at(-1).state, 'answered');
-        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Saved to Settings: botToken\. Saving connects nothing and grants nothing\./);
+        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Saved to Settings: botToken\. Access and enablement are unchanged\./);
         assert.deepEqual(fx.card.querySelectorAll('chat-secret-reader').map((row) => row.textContent)[1],
             'mailer · disabled · needs TELEGRAM_BOT_TOKEN granted in Skills');
         assert.equal(q(fx.card, 'chat-secret-actions'), null, 'a settled card has no actions');
@@ -126,7 +126,7 @@ test('a set key is Replace with the enabled readers warned, never a silent Save'
         ok(fx).click();
         await turn();
         assert.deepEqual(fx.calls.at(-1).observed, { botToken: true });
-        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Replaced in Settings: botToken\./);
+        assert.match(q(fx.card, 'chat-secret-status').textContent, /^Replaced in Settings: botToken\. Enabled skills may use it at their next call; some keep the old value until disabled and re-enabled\./);
     } finally { fx.restore(); }
 });
 

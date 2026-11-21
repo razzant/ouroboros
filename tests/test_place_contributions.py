@@ -16,11 +16,17 @@ def test_place_has_own_contract_and_full_projection():
              "settings": "connection", "read_only": "provider", "source": {"route": "status", "refresh_s": 60}}
     clean, errors = validate_contributions(manifest([entry], kind="extension", permissions=["presence"]))
     assert not errors and clean[0]["wakes"] == entry["wakes"]
-    rows = project_contributions("mail", clean, "revision", tools=[{"name": "send", "effect": "message", "target": "to"}])
+    groups = [{"conversation": "cc", "effect": "write"}]
+    sends = {"when": {"path": "send"}, "target": "room", "touches": groups}
+    rows = project_contributions("mail", clean, "revision", tools=[
+        {"name": "send", "effect": "message", "target": "to", "touches": groups, "description": "not projected"},
+        {"name": "api", "effect": "write", "sends": sends}])
     assert rows[0]["provides"] == "place" and "runtime" not in rows[0] and "route_url" not in rows[0]
     assert rows[0]["source"]["url"] == "/api/extensions/mail/status"
     assert rows[0]["icon_spec"] == {"kind": "host", "name": "mail"}
-    assert rows[0]["tools"] == [{"name": "ext_6_r_mail_send", "effect": "message", "target": "to"}]
+    # Where each declared tool lands, its groups included, is what a client reads of the place's tools.
+    assert rows[0]["tools"] == [{"name": "ext_6_r_mail_send", "effect": "message", "target": "to", "touches": groups},
+                                {"name": "ext_6_r_mail_api", "effect": "write", "sends": sends}]
 
 
 @pytest.mark.parametrize("patch", [{"destination": "host"}, {"scope": "workspace"},

@@ -21,7 +21,7 @@ mid-production makes the next probe differ: one more production, never a stale b
              production read (a task's ``budget_drive_root``); ``usage`` the usage ledger's
              ``publication_marker`` of the same roots;
 ``dialogue`` one aggregate over the dialogue store's rooms (unread/activity facts, Main's revision);
-``bindings`` ``projects_registry.bindings_revision`` (bindings and registry files);
+``bindings`` ``projects_registry.bindings_revision`` (bindings and registry files: the census names Projects too);
 ``files``    the identities of ``state.json`` (and its last-good copy), ``settings.json`` and the
              evolution campaign; ``checkout`` the runtime checkout's identity;
 ``live``     the in-memory census inputs no revision covers: the direct turns (``_direct_turns_source``,
@@ -37,7 +37,7 @@ cannot be read is a value (its failure kind): the production reads it as unavail
 
 Process facts (uptime, workers, supervisor readiness, the boot document, served UI, runtime/context/
 safety modes, effort range) are assembled per request without I/O and spliced in front of the encoded
-body; ``task_bindings`` follows the request's ``bindings_since``. ``boot.jobs`` is the store's job rows
+body; ``task_bindings`` follows the request's ``bindings_since``, compared with the map's own digest (``map_revision``). ``boot.jobs`` is the store's job rows
 as the last production read them: the in-memory value ``/api/health`` serves without a store read.
 
 Display only: no mutation authority is derived from a publication (every door re-reads its own);
@@ -47,6 +47,7 @@ alone (the consciousness "due" wording, the rolling 24 h allowance) refreshes at
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import pathlib
@@ -80,6 +81,21 @@ def encode(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
 
 
+def wire_bindings(bindings: Any) -> Dict[str, Dict[str, Any]]:
+    """The bindings map as a reader receives it: each bound task's Project id and room, without the Project's name.
+    The server's own map keeps the name for the census rows that show it; a reader opens only the id, and a name in
+    every entry made each rename a new map for every reader and tied the map's revision to the registry."""
+    return {str(task): {key: value for key, value in row.items() if key != "project_name"}
+            for task, row in (bindings if isinstance(bindings, dict) else {}).items() if isinstance(row, dict)}
+
+
+def map_revision(bindings: Any) -> str:
+    """The revision a reader holds its ``task_bindings`` map by: a digest of the bytes it was sent. The map itself
+    names its revision, so it stands while those bytes would be the same, whatever else was written meanwhile (a
+    Project touched, the serving process restarted), and it moves exactly when a reader's map would differ."""
+    return hashlib.sha256(encode(bindings)).hexdigest()[:16]
+
+
 def response_body(publication: Publication, live: Dict[str, Any], *, bindings_unchanged: bool) -> bytes:
     """The response bytes: the request's bindings answer and the per-request process facts (``live``) in front of
     the publication's encoded fields. Both sides always hold fields and their keys never meet (``produced_fields``
@@ -101,8 +117,9 @@ def _failure(exc: BaseException) -> Tuple[str, str]:
 
 
 def _queue_revision() -> Tuple[Any, ...]:
-    """The queue's revision, the live ids, and each RUNNING row's model activity (an in-memory fact
-    the documents omit). Read without Q: ``list()`` copies a dict or list whole."""
+    """The queue's revision, the live ids, and each RUNNING row's model activity, sent attempt context and start
+    step (``turn_phase``, #2862: in-memory facts the documents omit). Read without Q: ``list()`` copies a dict or
+    list whole."""
     from supervisor import queue
     from supervisor.queue_publication import queue_revision
 
@@ -111,7 +128,10 @@ def _queue_revision() -> Tuple[Any, ...]:
     for task_id, meta in list(queue.RUNNING.items()):
         active = (meta.get("active_llm_call") or {}) if isinstance(meta, dict) else {}
         running.append((str(task_id), meta.get("attempt") if isinstance(meta, dict) else None,
-                        json.dumps(active.get("model_activity"), sort_keys=True, default=str)))
+                        json.dumps([active.get("model_activity"), meta.get("context_attempt") if isinstance(
+                            meta, dict) else None, meta.get("lead") if isinstance(meta, dict) else None,
+                            meta.get("_lead_request_id") if isinstance(meta, dict) else None], sort_keys=True, default=str),
+                        str(meta.get("turn_phase") or "") if isinstance(meta, dict) else ""))
     return (queue_revision(), tuple(pending), tuple(running))
 
 
@@ -136,14 +156,17 @@ def _usage_revision(root: str) -> Any:
 
 
 def _dialogue_revision(root: str) -> Any:
-    """Every room's revision, read revision, last row and activity, folded: each only grows."""
-    from ouroboros import dialogue_store
+    """Every room's revision, read revision, last row and activity, folded: each only grows; and the generation
+    and revision of the rooms' message times (``room_messages``), which dating the history moves alone."""
+    from ouroboros import dialogue_store, room_messages
 
     try:
         with dialogue_store.transaction(root, write=False) as conn:
             record = conn.execute("SELECT count(*), total(revision), total(read_revision), max(last_seq), "
                                   "max(activity_at) FROM rooms").fetchone()
-        return tuple(record)
+            dated = tuple(dialogue_store._meta(conn, key) for key in (room_messages.GENERATION_KEY,
+                                                                      room_messages.REVISION_KEY))
+        return tuple(record) + dated
     except Exception as exc:
         return _failure(exc)
 
@@ -427,9 +450,12 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "spent_calls": int(snap["breakdown"].get("physical_calls") or 0) if available else None,
         "subagents_mode": snap["subagents_mode"],
         "subagents_availability": snap["subagents_availability"],
+        "main_route": snap["main_route"],
+        "processing_tiers": snap.get("processing_tiers") or {"main": "", "default": ""},
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],
+        "project_messages_revision": snap.get("project_messages_revision"),
         "project_listable_count": snap.get("project_listable_count"),
         "project_chat_ids": snap["project_chat_ids"],
         "main_visible_revision": snap.get("main_visible_revision"),

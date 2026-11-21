@@ -27,29 +27,29 @@ test('promptCampaignObjective: cancel starts nothing, confirmed-empty starts the
     const cancelled = await promptCampaignObjective({
         dialogImpl: async () => ({ confirmed: false, value: 'ignored' }),
     });
-    assert.deepEqual(cancelled, { confirmed: false, objective: '' });
+    assert.deepEqual(cancelled, { confirmed: false, objective: '', entered: '' });
 
     // Confirmed-empty preserves the contract: /evolve on with no text lets the
     // backend pick its default autonomous objective.
     const empty = await promptCampaignObjective({
         dialogImpl: async () => ({ confirmed: true, value: '   ' }),
     });
-    assert.deepEqual(empty, { confirmed: true, objective: '' });
+    assert.deepEqual(empty, { confirmed: true, objective: '', entered: '   ' });
 
     const typed = await promptCampaignObjective({
         dialogImpl: async () => ({ confirmed: true, value: '  improve review latency  ' }),
     });
-    assert.deepEqual(typed, { confirmed: true, objective: 'improve review latency' });
+    assert.deepEqual(typed, { confirmed: true, objective: 'improve review latency', entered: '  improve review latency  ' });
 
     // A dialog that never resolves a shape (glitch) reads as cancel, not start.
     const glitch = await promptCampaignObjective({ dialogImpl: async () => undefined });
-    assert.deepEqual(glitch, { confirmed: false, objective: '' });
+    assert.deepEqual(glitch, { confirmed: false, objective: '', entered: '' });
 
     // A running campaign is asked for a new objective in place; its words say an empty one keeps the current one.
     const asked = [];
     const retarget = await promptCampaignObjective({ running: true,
         dialogImpl: async (options) => { asked.push(options); return { confirmed: true, value: ' faster history ' }; } });
-    assert.deepEqual(retarget, { confirmed: true, objective: 'faster history' });
+    assert.deepEqual(retarget, { confirmed: true, objective: 'faster history', entered: ' faster history ' });
     assert.deepEqual([asked[0].title, asked[0].confirmLabel, asked[0].input], ['New campaign objective', 'Set objective', true]);
     assert.match(asked[0].body, /continues with this objective\. Leave it empty to keep the current one\.$/);
 });
@@ -100,7 +100,7 @@ test('/review labels each enabled row the way Settings and the model name it, an
         readSettings: async () => REVIEW_SETTINGS,
     });
     assert.equal(fired, true);
-    assert.deepEqual(sent, [{ type: 'command', cmd: '/review r2' }]);
+    assert.deepEqual(sent, [{ type: 'command', cmd: '/review r2', ui_control: { name: 'deep_review' } }]);
     assert.equal(seen[0].input, true);
     assert.equal(seen[0].body, 'Who reviews the whole system?');
     // The ordinal is the card's ("Subagent N" counts switched-off rows too); twins
@@ -151,7 +151,7 @@ test('/review default sends the bare command (Main); cancel sends nothing', asyn
     assert.equal(await chooseAndSendReview({
         ws, readSettings, openConfirmDialog: async () => ({ confirmed: true, value: '' }),
     }), true);
-    assert.deepEqual(sent, [{ type: 'command', cmd: '/review' }]);
+    assert.deepEqual(sent, [{ type: 'command', cmd: '/review', ui_control: { name: 'deep_review' } }]);
     for (const resolution of [false, null, { confirmed: false, value: 'sol' }]) {
         assert.equal(await chooseAndSendReview({ ws, readSettings, openConfirmDialog: async () => resolution }), false);
     }

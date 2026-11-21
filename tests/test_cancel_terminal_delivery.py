@@ -332,7 +332,7 @@ def test_reaper_registers_the_salvage_before_task_done(qenv, monkeypatch):
             put=lambda evt: calls.append((str(evt.get("type")), str(evt.get("task_id")))),
         ),
     )
-    monkeypatch.setattr(workers_mod, "respawn_worker", lambda wid: None)
+    monkeypatch.setattr(workers_mod, "respawn_worker", lambda wid, **_kwargs: None)
     monkeypatch.setattr(
         qenv.q, "reconstruct_task_cost",
         lambda tid, fields=True, **_kw: {"cost_accounting_status": "available",

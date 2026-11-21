@@ -412,14 +412,15 @@ def test_preview_contract_twin_and_the_producer_agree():
                             contracts.MCPImportPreviewRequest) == []
 
 
-# The real Settings page markup and modules over the repo's DOM double, which parses nothing: this mounts their own
-# markup, so a renamed control fails here. It stops short of an engine, layout, CSS and the Save button's own handler
-# (settings.js collects these same fields into a larger body); tests/test_mcp_headers_browser.py is the rendered lane.
+# The real Settings › Tools page (mcp_settings.js, mounted the way the shell mounts it) over the repo's DOM double,
+# which parses nothing: this mounts the page's own markup, so a renamed control fails here. It stops short of an
+# engine, layout and CSS; tests/test_settings_tools_models_browser.py is the rendered lane.
 IMPORT_JOURNEY = r'''
 import assert from 'node:assert/strict';
 import { installDomDouble } from './web/tests/dom_double.js';
-import { applyMcpSettings, collectMcpSettings, initMcpSettings } from './web/modules/mcp_settings.js';
-import { renderSettingsPage } from './web/modules/settings_ui.js';
+import { collectMcpSettings } from './web/modules/mcp_settings.js';
+import { readSettings } from './web/modules/settings_controls.js';
+import { settingsPageFor } from './web/modules/settings_pages.js';
 
 const [base, documentText] = process.argv.slice(1);
 const { doc } = installDomDouble();
@@ -468,13 +469,15 @@ nodes.matches = function matchesWithIds(selector, scope) {
 };
 const page = doc.createElement('div');
 doc.body.appendChild(page);
-page.innerHTML = renderSettingsPage();
 
 const previews = [];
+const saves = [];  // every write of the settings the page made: its body and the server's answer
 const wire = globalThis.fetch;
-globalThis.fetch = (url, init) => {
+globalThis.fetch = async (url, init) => {
     if (String(url).endsWith('/api/mcp/import/preview')) previews.push(JSON.parse(init.body));
-    return wire(new URL(url, base), init);
+    const answer = await wire(new URL(url, base), init);
+    if (String(url).endsWith('/api/settings') && init?.method === 'POST') saves.push({ sent: JSON.parse(init.body), status: answer.status, body: await answer.clone().json() });
+    return answer;
 };
 const settle = async (ready) => {
     const deadline = Date.now() + 20_000;
@@ -484,9 +487,9 @@ const settle = async (ready) => {
     }
 };
 
-initMcpSettings();
-applyMcpSettings(await (await fetch('/api/settings')).json());
-doc.getElementById('btn-mcp-import').click();
+settingsPageFor('tools').mount(page, { path: 'tools', row: '', ctx: { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: 'tools' } } });
+await settle(() => page.querySelector('[data-tools-list]').children.length > 0);
+page.querySelector('[data-tools-action="tools:import"]').click();
 const dialog = doc.body.querySelector('.mcp-import-dialog');
 const field = dialog.querySelector('#mcp-import-text');
 field.value = documentText;
@@ -498,20 +501,26 @@ const apply = dialog.querySelector('[data-mcp-import-apply]');
 const facts = { preview_request: previews[0], status: status.textContent, apply_label: apply.textContent, apply_disabled: apply.disabled,
     entries: dialog.querySelectorAll('.mcp-import-entry').map((entry) => entry.textContent) };
 if (!apply.disabled) {
+    // Apply saves the chosen servers: one write of the list, then the list shows the new head, off.
     apply.click();
-    await settle(() => !doc.body.querySelector('.mcp-import-dialog'));
-    const card = doc.body.querySelector('[data-mcp-card]');
-    const enabled = card.querySelector('[data-mcp-field="enabled"]');
-    facts.enabled_after_apply = Boolean(enabled.checked);
+    await settle(() => !doc.body.querySelector('.mcp-import-dialog') && page.querySelector('[data-entry-id] [data-entry-switch]'));
+    const use = () => page.querySelector('[data-entry-id] [data-entry-switch]');
+    facts.enabled_after_apply = Boolean(use().checked);
     facts.draft = structuredClone(collectMcpSettings().MCP_SERVERS);
-    enabled.checked = true;
-    enabled.emit('input');
-    enabled.emit('change');
-    doc.getElementById('s-mcp-enabled').checked = true;
-    const saved = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(collectMcpSettings()) });
-    facts.save = { status: saved.status, body: await saved.json() };
-    applyMcpSettings(await (await fetch('/api/settings')).json());
+    facts.import_write = Object.keys(saves[0].sent).sort();
+    // The owner's two switches: the tool client's, then this server's. Each writes at once, its own key alone.
+    const client = page.querySelector('[data-setting-row="MCP_ENABLED"] [data-setting-control]');
+    client.checked = true;
+    client.emit('change');
+    await settle(() => saves.length === 2);
+    const head = use();
+    head.checked = true;
+    head.emit('change');
+    await settle(() => saves.length === 3 && use() && !use().disabled && use().checked);
+    facts.switch_writes = saves.slice(1).map((save) => Object.keys(save.sent).filter((key) => key !== 'if_unchanged'));
+    facts.guarded = saves.map((save) => Object.keys(save.sent.if_unchanged || {}));
+    facts.save = { status: saves.at(-1).status, body: saves.at(-1).body };
+    await readSettings();
     facts.reloaded = structuredClone(collectMcpSettings().MCP_SERVERS);
 }
 process.stdout.write(JSON.stringify(facts), () => process.exit(0));
@@ -519,7 +528,7 @@ process.stdout.write(JSON.stringify(facts), () => process.exit(0));
 
 
 def import_journey(document, tmp_path, settings_client, monkeypatch):  # noqa: F811
-    """Paste, Preview, Apply, Enable and Save in the real Settings modules, against the real routes on a real port."""
+    """Paste, Preview, Apply and the two switches on the real Settings › Tools page, against the real routes on a real port."""
     from ouroboros import config
     from ouroboros.gateway import mcp as mcp_api
 
@@ -567,16 +576,21 @@ def test_setup_document_becomes_a_listed_held_server_through_import_enable_and_s
     try:
         facts, on_disk = import_journey(document, tmp_path, settings_client, monkeypatch)
         assert facts["preview_request"] == {"text": document, "servers": []}  # the empty editor's own request
-        assert facts["status"] == "1 of 1 server can be applied." and facts["apply_label"] == "Apply 1 to draft"
+        assert facts["status"] == "1 of 1 server can be applied." and facts["apply_label"] == "Apply 1"
         shown = facts["entries"][0]
-        for fact in ("chrome_browser", "Add (disabled)", "Server ID chrome_browser", "Local process (stdio)", "2 arguments",
+        for fact in ("chrome_browser", "Add (off)", "Server ID chrome_browser", "Local process (stdio)", "2 arguments",
                      "task_session: a task’s calls share one running server process",
                      "browser_policy: that process gets a private local address and token"):
             assert fact in shown, (fact, shown)
         assert "Not imported" not in shown and command not in shown and str(script) not in shown
-        assert facts["enabled_after_apply"] is False  # new servers start disabled: Enable is the owner's step
+        assert facts["enabled_after_apply"] is False  # a new server starts off: its switch is the owner's step
         draft = facts["draft"][0]
         assert (draft["enabled"], draft["task_session"], draft["browser_policy"]) == (False, True, True)
+        # Apply wrote the list; each switch then wrote its own key alone. A list that has a saved value is written
+        # with the token of the read it changed (the first write of a list never saved has none to carry).
+        assert [key for key in facts["import_write"] if key != "if_unchanged"] == ["MCP_SERVERS"]
+        assert facts["switch_writes"] == [["MCP_ENABLED"], ["MCP_SERVERS"]]
+        assert facts["guarded"][1] == [] and facts["guarded"][2] == ["MCP_SERVERS"], facts["guarded"]
         assert facts["save"]["status"] == 200 and facts["save"]["body"]["status"] == "saved", facts["save"]
 
         row = on_disk["MCP_SERVERS"][0]

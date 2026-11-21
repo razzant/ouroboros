@@ -24,6 +24,17 @@ from tests.test_presence_cognitive_baseline import _ceiling
 from tests.test_presence_runner import _admission, _event, _terminal
 
 
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_only_an_unscheduled_place_turn_is_told_to_fold_what_it_read(tmp_path, scheduled):
+    text = build_presence_context_section(tmp_path, {"instructions": "Read the room.",
+                                                    "event": {"text": "A question."}}, scheduled=scheduled)
+    instruction = ("When you read words here and owe them nothing more, finish with a summary and fold_read: "
+                   "your other foci then read those words through it.")
+    assert (instruction in text) is (not scheduled)
+    if not scheduled:
+        assert "Use finish_task for the reply; delivery follows recorded facts. " + instruction in text
+
+
 QUESTION = "Which approach would you choose for our service?"
 CANCELLED = "We have already chosen; there is no open request now."
 

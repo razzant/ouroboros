@@ -33,7 +33,7 @@ ElementStub.prototype.dispatchEvent = function (event) {
 
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
-function fixture({ history = [], details = {}, continues = {}, chatId = 1 } = {}) {
+function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold = {}, fail = {}, historyGate = null } = {}) {
     const reads = [];
     const env = installDom(async (url, init = {}) => {
         const path = String(url);
@@ -41,6 +41,15 @@ function fixture({ history = [], details = {}, continues = {}, chatId = 1 } = {}
             return { ok: true, json: async () => continues[path.split('/').at(-2)] || { ok: false, error: 'not admitted' } };
         }
         if (path.startsWith('/api/tasks/')) reads.push(path.split('/').pop().split('?')[0]);
+        // A history read the test gates answers only when the gate opens: the instance's own first read (after its
+        // hydration window, a timer) and the test's own both wait, whatever the host's timer granularity.
+        if (path.startsWith('/api/chat/history') && historyGate) await historyGate;
+        // A read the test holds open answers only when the test releases it.
+        if (path.startsWith('/api/tasks/') && hold[path.split('/').pop().split('?')[0]]) await hold[path.split('/').pop().split('?')[0]];
+        // A read the test fails answers 500, which the strict read raises: a failed read, never an absent record.
+        if (path.startsWith('/api/tasks/') && fail[path.split('/').pop().split('?')[0]]) {
+            return { ok: false, status: 500, json: async () => ({ error: 'unavailable' }) };
+        }
         // `null` is a record the host does not have: its real answer, a 404.
         if (path.startsWith('/api/tasks/') && details[path.split('/').pop().split('?')[0]] === null) {
             return { ok: false, status: 404, json: async () => ({ error: 'task not found' }) };
@@ -91,7 +100,7 @@ test('a bound card becomes its work\'s portal in place: Project reference, the r
             active_chat_activities: [room({ last_line: 'Checking the third project.', last_line_at: '2026-10-10T12:05:00Z',
                 tool_calls: 41 })] });
         await settle();
-        assert.equal(f.card('w-1'), node, 'the SAME node, never a second card or an entry');
+        assert.ok(f.card('w-1') === node, 'the SAME node, never a second card or an entry');
         assert.equal(node.dataset.portal, '1');
         assert.equal(node.dataset.projectId, 'p-1');
         const door = reference(node);
@@ -103,7 +112,7 @@ test('a bound card becomes its work\'s portal in place: Project reference, the r
         assert.match(f.part('w-1', 'live-meta').innerHTML, /41 tool calls/);
         assert.match(f.part('w-1', 'live-meta').innerHTML, /updated /);
         assert.deepEqual(controls(f, 'w-1'), ['Stop…'], 'one action row of commands: Stop… while the room runs it (Reply is the row menu\'s)');
-        assert.equal(node.querySelector('[data-turn-into-project]'), null, 'a moved work no longer converts');
+        assert.ok(!node.querySelector('[data-turn-into-project]'), 'a moved work no longer converts');
         assert.equal(messages(f).filter((child) => child.classList.contains('project-handoff')).length, 0);
     } finally { f.close(); }
 });
@@ -346,7 +355,7 @@ test('a Continue made in the room: the successor\'s census row takes the work\'s
         details['w-1'] = failedDetail(continuedBy());
         f.state({ task_bindings: bindings, active_chat_activities: [] });
         await settle();
-        assert.equal(f.card('w-1-c1'), null, 'without the successor\'s own facts Main mints nothing');
+        assert.ok(!f.card('w-1-c1'), 'without the successor\'s own facts Main mints nothing');
         assert.equal(node.hidden, false, 'and the card stays as it was');
         assert.equal(f.part('w-1', 'live-phase').textContent, 'Failed');
         // The census that lists it arrives while Main is open.
@@ -372,7 +381,7 @@ test('continued later in the room: a new root in its Project makes the settled p
         f.state({ task_bindings: bindings, active_chat_activities: [other] });
         await settle();
         assert.equal(reads(), read + 1, 'a new root in its Project: the settled portal reads its own record');
-        assert.equal(f.card('w-9'), null, 'a root its record does not name is not its Continue');
+        assert.ok(!f.card('w-9'), 'a root its record does not name is not its Continue');
         assert.equal(node.hidden, false);
         f.state({ task_bindings: bindings, active_chat_activities: [other] });
         await settle();
@@ -416,6 +425,187 @@ test('after a Main reload the start row binds the work and its record names the 
     } finally { f.close(); }
 });
 
+test('after a Main reload whose census arrives before the history draws the card, that census still decides it', async () => {
+    // The page's state read can land before its history replay mounts the start row's card; the next census is a
+    // poll away, so the card drawn later meets the census already read (both directions: before and after the replay).
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    // The census is applied at once; the instance also reads its history by itself after its hydration window (a timer).
+    // On a host with a coarse timer (a Windows runner) that read landed inside `settle()`, before the check below and
+    // the test's own read. The gate holds every history read until the test opens it.
+    let open;
+    const historyGate = new Promise((resolve) => { open = resolve; });
+    const f = fixture({ history, historyGate, details: { 'w-1': failedDetail(continuedBy()) } });
+    try {
+        f.state({ task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [successorRow()] });
+        await settle();
+        assert.ok(!f.card('w-1'), 'no card before the history is read');
+        const read = f.instance.refreshHistory({ revision: 1 });
+        open();
+        await read;
+        await settle();
+        assertFollowed(f, f.card('w-1'));
+    } finally { open(); f.close(); }
+});
+
+test('a record read the reload started and Main left before its answer changes nothing away; the return reconciles', async () => {
+    // Quiet rooms (PR #2951): Main left while the replay's read of the moved work's record is in flight neither draws
+    // the answer nor reads again while away; shown again, it takes the state and follows the admitted link.
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    let release;
+    const hold = { 'w-1': new Promise((resolve) => { release = resolve; }) };
+    const f = fixture({ history, hold, details: { 'w-1': failedDetail(continuedBy()) } });
+    const census = { task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [successorRow()] };
+    try {
+        f.state(census);
+        await settle();
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        assert.ok(f.reads.includes('w-1'), 'the replayed card reads its record');
+        const asked = f.reads.length;
+        f.instance.leave();
+        delete hold['w-1'];
+        release();
+        await settle();
+        assert.ok(!f.card('w-1-c1'), 'nothing is drawn while Main is away');
+        assert.equal(f.card('w-1').hidden, false, 'the old card stays as it was left');
+        assert.equal(f.reads.length, asked, 'no new read while away');
+        f.instance.stay();
+        f.state(census);
+        await settle();
+        assertFollowed(f, f.card('w-1'));
+    } finally { f.close(); }
+});
+
+test('a census read before a disconnect never decides a later replay: the card stays unconfirmed until the next census', async () => {
+    // A reconnect reads the history again, and its answer can land before the post-open state read (which can also
+    // fail): the replay meets only a census read after the outage, so the card the outage parked stays unconfirmed.
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    const f = fixture({ history });
+    const census = { task_bindings: { 'w-1': { project_id: 'p-1', chat_id: 7 } }, projects: [{ id: 'p-1', name: 'Audit' }],
+        active_chat_activities: [room()] };
+    const phase = () => f.part('w-1', 'live-phase').dataset.phase;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        f.state(census);
+        await settle();
+        assert.equal(phase(), 'working', 'the census before the outage shows the work running');
+        f.emit('close');
+        await settle();
+        assert.equal(phase(), 'unknown', 'the outage parks the card as unconfirmed');
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(phase(), 'unknown', 'the replay after the outage does not bring the old census back');
+        f.state(census);
+        await settle();
+        assert.equal(phase(), 'working', 'the census read after the outage decides');
+    } finally { f.close(); }
+});
+
+test('a card first bound after a disconnect takes nothing from the census read before it', async () => {
+    // The census before the outage lists a work Main holds no card for; the replay after the reconnect draws its start
+    // row. Until a census read after the outage, the new card shows neither that room's line nor its Stop.
+    const history = [];
+    const started = { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-2', project_id: 'p-1',
+        project_name: 'Audit', task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started',
+        ts: '2026-10-10T12:00:00Z', history_id: 'h-2' };
+    const f = fixture({ history });
+    const census = { task_bindings: { 'w-2': { project_id: 'p-1', chat_id: 7 } }, projects: [{ id: 'p-1', name: 'Audit' }],
+        active_chat_activities: [room({ activity_id: 'w-2', last_line: 'Checking the third project.', cancelable: true })] };
+    try {
+        f.state(census);
+        await settle();
+        assert.ok(!f.card('w-2'), 'no card before its start row is read');
+        f.emit('close');
+        await settle();
+        history.push(started);
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(f.card('w-2')?.dataset.portal, '1', 'the replay binds the work\'s card');
+        assert.notEqual(f.part('w-2', 'live-activity').textContent, 'Checking the third project.',
+            'the room\'s line from before the outage is not drawn');
+        assert.ok(!controls(f, 'w-2').includes('Stop…'), 'no Stop from the census read before the outage');
+        f.state(census);
+        await settle();
+        assert.equal(f.part('w-2', 'live-activity').textContent, 'Checking the third project.', 'the next census decides');
+        assert.ok(controls(f, 'w-2').includes('Stop…'));
+    } finally { f.close(); }
+});
+
+test('a complete census read before a disconnect proves no work gone after it', async () => {
+    // A work started during the outage is absent from the complete census read before it. A replay after the close
+    // binds its card: the old census does not drop its line or send it to the missing-work read.
+    const history = [{ role: 'user', text: 'audit the projects', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+        history_id: 'h-1', row_address: 'row:1@h#1' }];
+    const f = fixture({ history });
+    const reads = () => f.reads.filter((id) => id === 'w-2').length;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        f.state({ active_chat_activities: [] });  // complete, and w-2 has not started yet
+        await settle();
+        f.emit('close');
+        await settle();
+        f.narrate('w-2', 'Started during the outage.');
+        await settle();
+        const before = reads();
+        history.push({ role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-2', project_id: 'p-1',
+            project_name: 'Audit', task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started',
+            ts: '2026-10-10T12:00:00Z', history_id: 'h-2' });
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(f.card('w-2')?.dataset.portal, '1', 'the replay binds the work\'s card');
+        assert.equal(reads(), before, 'no missing-work read: the old census proves no absence');
+    } finally { f.close(); }
+});
+
+test('a history replay retries no failed successor read; the next census does', async () => {
+    // A followed successor whose record read failed is read again at the next census (sync), never by a history read,
+    // whose answer may land while Main is away.
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    const f = fixture({ history, fail: { 'w-1-c1': true },
+        details: { 'w-1': failedDetail({ ...continuedBy(), wake_summary: 'The first attempt stopped here.' }) } });
+    const census = { task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [] };
+    const successorReads = () => f.reads.filter((id) => id === 'w-1-c1').length;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        f.state(census);
+        await settle();
+        assert.equal(successorReads(), 1, 'the admitted successor\'s record is read once, and that read fails');
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(successorReads(), 1, 'a history read does not read it again');
+        f.state(census);
+        await settle();
+        assert.equal(successorReads(), 2, 'the next census does');
+    } finally { f.close(); }
+});
+
 test('a bound claim stays pending: Retry Continue on the work\'s own card, nothing folds until the host admits it', async () => {
     const details = {};
     const f = fixture({ details });
@@ -426,7 +616,7 @@ test('a bound claim stays pending: Retry Continue on the work\'s own card, nothi
             f.state({ task_bindings: bindings, active_chat_activities: [successorRow()] });
             await settle();
         }
-        assert.equal(f.card('w-1-c1'), null, 'a bound claim mints no successor card');
+        assert.ok(!f.card('w-1-c1'), 'a bound claim mints no successor card');
         assert.equal(node.hidden, false, 'nor hides or replaces the work\'s card');
         assert.deepEqual(controls(f, 'w-1'), ['Retry Continue'], 'the claim shows as pending');
         details['w-1'] = failedDetail(continuedBy());
@@ -536,7 +726,7 @@ test('a Continue pressed on the work\'s own card is the same card there, live, w
             await pressed;
             await settle();
             if (!successorFirst) {
-                assert.equal(f.card('w-1-c1'), null);
+                assert.ok(!f.card('w-1-c1'), 'no successor card before the successor speaks');
                 assert.equal(node.hidden, false, 'nothing folds before the successor has a card');
                 successorFrame(f);
             }
@@ -641,7 +831,7 @@ test('a successor that finished before Main\'s census is the work\'s current epi
                 project_name: 'Audit', content: 'The audit is complete.', ts: '2026-10-10T12:42:30Z' });
             await settle();
             if (claim === 'bound' || successor === null) {
-                assert.equal(f.card('w-1-c1'), null, `${claim}/${successor ? 'record' : 'no record'}: no successor card`);
+                assert.ok(!f.card('w-1-c1'), `${claim}/${successor ? 'record' : 'no record'}: no successor card`);
                 assert.equal(node.hidden, false, 'the old card stays as it was');
                 assert.equal(f.part('w-1', 'live-phase').textContent, 'Failed');
                 assert.equal(f.reads.includes('w-1-c1'), claim !== 'bound', `${claim}: only an admitted claim reads its successor`);
@@ -736,7 +926,7 @@ test('W3: an unrelated work in the same Project, or a claim still bound, leaves 
             const after = { task_bindings: { ...bindings, [other]: { project_id: 'p-1', chat_id: 7 } }, active_chat_activities: [] };
             f.frame(lateFinal(other));
             for (let pass = 0; pass < 3; pass += 1) { f.state(after); await settle(); }
-            assert.equal(f.card(other), null, `${claim}: no second card for ${other}`);
+            assert.ok(!f.card(other), `${claim}: no second card for ${other}`);
             assert.equal(node.hidden, false, 'the old card stays');
             assert.equal(f.part('w-1', 'live-phase').textContent, 'Failed');
             assert.ok(reads() > read, 'the observation made the settled portal read its own record');

@@ -4,6 +4,11 @@ The answered-send observer owns baseline identity; the route owns its physical
 schema limit. This owner stages current contracts, checks history against the
 fitted candidate and commits the shared list only when compatible. It never
 retires reasoning or edits a recovered source: the send/checkpoint owners do so.
+
+Fitting keeps the names history called first; one still absent keeps the saved array and says why. Adoption updates the
+shared list, so the context is fitted again; saved actor-enabled names rejoin discovery's set, and a legacy record keeps
+the residency it was permitted. The notes follow the restore: a change lists +added/-removed/~changed names and traces
+both digests.
 """
 
 from __future__ import annotations
@@ -107,6 +112,7 @@ def _adopt_current_tools(tools: Any, state: dict, messages: list, mode: str, bef
     frozen[:] = fitted
     loaded.intersection_update(fresh)  # current policy forgets a revoked tool; a ceiling never forgets a choice
     ctx._route_left_out_tool_names = earlier | set(left_out)
+    from ouroboros.context_fit import extract_plain_text_from_content
     from ouroboros.usage_accounting import invalidate_task_cache_splits
     from ouroboros.loop_messages import _emit_checkpoint_event
 
@@ -118,9 +124,11 @@ def _adopt_current_tools(tools: Any, state: dict, messages: list, mode: str, bef
         "[SYSTEM NOTICE]\nThe tool set changed since this task's last request: "
         f"+added {', '.join(added) or 'none'}; −removed {', '.join(removed) or 'none'}; "
         f"~changed {', '.join(changed) or 'none'}.")})
-    if left_out:
-        messages.append({"role": "user", "content": route_tool_limit_notice(
-            ctx.active_model, limit, len(candidate), left_out, selectors=usable_selectors(tools, fitted))})
+    notice = left_out and route_tool_limit_notice(ctx.active_model, limit, len(candidate), left_out,
+                                                  selectors=usable_selectors(tools, fitted), schemas=candidate)
+    if notice and not any(notice in extract_plain_text_from_content(row.get("content"))
+                          for row in messages if row.get("role") == "user"):
+        messages.append({"role": "user", "content": notice})  # the same cut reads the same: once in the history
     fact = {"checkpoint_kind": "continuation_tools_changed", "from_tools_digest": before,
             "to_tools_digest": after, "added": added, "removed": removed, "changed": changed}
     trace = getattr(ctx, "_execution_trace", None)

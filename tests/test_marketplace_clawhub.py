@@ -148,3 +148,37 @@ def test_info_blank_slug_rejected():
 def test_info_rejects_traversal_slugs(bad_slug):
     with pytest.raises(ClawHubClientError, match="must not contain"):
         info(bad_slug)
+
+
+def _browse_url(monkeypatch, **kwargs) -> dict:
+    """The query GET packages receives for a browse (nothing leaves this process)."""
+    from urllib.parse import parse_qs, urlsplit
+
+    seen = {}
+
+    def fake_get(url, timeout):
+        seen.update(url=url)
+        return b'{"items": [], "nextCursor": "next"}', {}
+
+    monkeypatch.setattr(clawhub_mod, "_http_get", fake_get)
+    clawhub_mod.search("", registry_url="https://clawhub.ai", include_metadata=True, **kwargs)
+    return {key: values[0] for key, values in parse_qs(urlsplit(seen["url"]).query).items()}
+
+
+@pytest.mark.parametrize(("ours", "sent"), [("popular", "downloads"), ("downloads", "downloads"), ("installs", "downloads"),
+                                            ("updated", "updated"), ("recommended", "recommended")])
+def test_browse_sends_the_sort_the_registry_accepts(monkeypatch, ours, sent):
+    assert _browse_url(monkeypatch, sort=ours)["sort"] == sent
+
+
+@pytest.mark.parametrize("unsent", ["registry", "stars", "trending", "", "; drop"])
+def test_browse_sends_no_sort_for_the_legacy_default_or_a_value_the_registry_refuses(monkeypatch, unsent):
+    assert "sort" not in _browse_url(monkeypatch, sort=unsent)
+    assert "sort" not in _browse_url(monkeypatch)
+
+
+def test_a_text_search_sends_no_sort(monkeypatch):
+    seen = []
+    monkeypatch.setattr(clawhub_mod, "_http_get", lambda url, timeout: (seen.append(url), (b'{"results": []}', {}))[1])
+    clawhub_mod.search("weather", sort="popular", registry_url="https://clawhub.ai")
+    assert "/search?" in seen[0] and "sort=" not in seen[0]

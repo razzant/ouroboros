@@ -55,6 +55,7 @@
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
 import { getLogTaskGroupId, taskPresentation, taskReasonDetail, taskTerminalPhase } from './log_events.js';
+import { setRowMeta } from './ui_primitives.js';
 import { shellBridgeApi } from './ui_helpers.js';
 import { tr } from './i18n.js';
 
@@ -174,6 +175,7 @@ function conclusionBody(frame) {
 export function noticeTitle(systemType, source) {
     const author = text(source).trim();
     if (systemType === 'skill_notice') return author ? `Notice from ${author}` : 'Notice from a skill';
+    if (systemType === 'safety_notice') return 'Safety Supervisor';
     return `Reminder from ${author || 'Ouroboros'}`;
 }
 
@@ -291,7 +293,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
 
     // A message for the owner that nobody speaks NOW: no new category, the same
     // `important` toggle (DESIGN §9).
-    if (systemType === 'reminder' || systemType === 'skill_notice') {
+    if (systemType === 'reminder' || systemType === 'skill_notice' || systemType === 'safety_notice') {
         return {
             category: 'important',
             key: `important:${rowKey}`,
@@ -831,7 +833,7 @@ export function createNotifier({
                 permission: permission(),
                 storageAvailable,
             });
-            if (node.textContent !== next) node.textContent = next;
+            setRowMeta(node, next);  // the line of its Settings row
         }
         for (const node of root.querySelectorAll('[data-notify-attention-status]')) {
             const api = bridge();
@@ -848,7 +850,7 @@ export function createNotifier({
                 status: attentionStatus,
                 bridge: typeof api?.request_attention === 'function',
             });
-            if (node.textContent !== next) node.textContent = next;
+            setRowMeta(node, next);  // the line of its Settings row
         }
         for (const button of root.querySelectorAll('[data-notify-test]')) {
             button.disabled = !prefs.enabled;

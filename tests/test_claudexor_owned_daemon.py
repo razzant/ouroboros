@@ -11,7 +11,6 @@ import shlex
 import pytest
 
 from ouroboros import claudexor_daemon as owned
-from ouroboros import claudexor_harness_install as installer
 from tests._governance_docs_shared import architecture_text
 
 
@@ -270,6 +269,26 @@ def test_zero_readable_manifests_is_a_read_failure_not_an_empty_filter():
     ]) == set()
 
 
+def test_a_catalog_is_login_evidence_only_when_every_row_is_current():
+    """The catalog answers login eligibility only when every row is null or a
+    known mode; any gap (an empty list, a legacy row, a duplicate or missing
+    id, a row that is not an object) answers None, so the caller reads the
+    manifests instead of trusting a partial list (review, 2026-11-15)."""
+    from ouroboros.gateway.claudexor_accounts import _catalog_login_capable_harness_ids as login_set
+
+    current = [{"id": "codex", "setupLogin": {"mode": "in_app"}},
+               {"id": "cursor", "setupLogin": {"mode": "external_terminal"}},
+               {"id": "openrouter", "setupLogin": None}]
+    assert login_set({"harnesses": current}) == {"codex", "cursor"}
+    assert login_set({"harnesses": [{"id": "openrouter", "setupLogin": None}]}) == set()
+    for gaps in ([], current + [{"id": "codex", "setupLogin": {"mode": "in_app"}}],
+                 current + [{"id": "", "setupLogin": {"mode": "in_app"}}],
+                 current + [{"setupLogin": {"mode": "in_app"}}], current + ["not-a-row"],
+                 current + [{"id": "agy"}], current + [{"id": "agy", "setupLogin": "in_app"}]):
+        assert login_set({"harnesses": gaps}) is None, gaps
+    assert login_set({}) is None and login_set(None) is None
+
+
 def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     """The catalog projection AND named profile wrappers are filtered to
     login-capable harnesses; a transient manifest-read failure fails OPEN. An
@@ -334,6 +353,7 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
 
     payload = _status_payload(include_models=False)
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
+    assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
     assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak"]
     assert payload["profiles"]["harnessAccounts"] == [{"harness_id": "openrouter", "native_login_detected": True}]
 
@@ -346,6 +366,64 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     # Fail-open: a blip in the manifest read must not blank the panel.
     assert [h["id"] for h in payload["harnesses"]] == ["codex", "openrouter"]
     assert len(payload["profiles"]["profiles"]) == 2
+    assert payload["profiles"]["login_capable_harnesses"] is None
+
+    # A current catalog carries eligibility itself: `setupLogin` an object is a
+    # sign-in on this host, null is none, so the read never waits for the
+    # manifest sweep (`/v2/harnesses`, a doctor run of every harness).
+    manifest_reads = []
+
+    class CurrentGateway(FakeGateway):
+        def agent_capabilities(self):
+            return {"harnesses": [
+                {"id": "codex", "displayName": "Codex CLI", "status": "ok", "enabled": True,
+                 "setupLogin": {"mode": "in_app"}},
+                {"id": "cursor", "displayName": "Cursor", "status": "ok", "enabled": True,
+                 "setupLogin": {"mode": "external_terminal"}},
+                {"id": "claude", "displayName": "Claude Code", "status": "unavailable", "enabled": True,
+                 "setupLogin": {"mode": "in_app"}},
+                {"id": "openrouter", "displayName": "Raw API (openai)", "status": "degraded", "enabled": True,
+                 "setupLogin": None},
+            ]}
+
+        def harnesses(self):
+            manifest_reads.append(1)
+            return super().harnesses()
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", CurrentGateway)
+    payload = _status_payload(include_models=False)
+    assert manifest_reads == [], "a current catalog answers eligibility without the manifest sweep"
+    assert [h["id"] for h in payload["harnesses"]] == ["codex", "cursor", "claude"]
+    assert payload["profiles"]["login_capable_harnesses"] == ["claude", "codex", "cursor"]
+    assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak"]
+
+    # No row offers a sign-in: an authoritative empty set, never fail-open.
+    class NoLoginGateway(CurrentGateway):
+        def agent_capabilities(self):
+            return {"harnesses": [{**row, "setupLogin": None}
+                                  for row in super().agent_capabilities()["harnesses"]]}
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", NoLoginGateway)
+    payload = _status_payload(include_models=False)
+    assert manifest_reads == [] and payload["harnesses"] == [] and payload["profiles"]["profiles"] == []
+    assert payload["profiles"]["login_capable_harnesses"] == []
+
+    # A row that is not current evidence (an unknown mode, or a legacy row
+    # without the key among current ones) leaves the decision to the
+    # manifests, read once, exactly as before.
+    for gap in ({"setupLogin": {"mode": "future"}}, {}):
+        class GapGateway(CurrentGateway):
+            def agent_capabilities(self, gap=gap):
+                rows = super().agent_capabilities()["harnesses"]
+                rows[1] = {**{k: v for k, v in rows[1].items() if k != "setupLogin"}, **gap}
+                return {"harnesses": rows}
+
+        manifest_reads.clear()
+        monkeypatch.setattr(gw, "ClaudexorGateway", GapGateway)
+        payload = _status_payload(include_models=False)
+        assert manifest_reads == [1], gap
+        assert [h["id"] for h in payload["harnesses"]] == ["codex"]
+        assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
 
 
 def test_a_legacy_native_login_vouches_no_harness_past_a_readable_manifest(monkeypatch, tmp_path):
@@ -1646,300 +1724,85 @@ def _missing_cli_job(harness="cursor", job_id="setup-1"):
     }
 
 
-def _install_receipt(**updates):
-    receipt = {
-        "ok": True,
-        "dryRun": False,
-        "exitCode": 0,
-        "target": "local",
-        "harness": "cursor",
-        "command": "vendor install command",
-        "installLocation": "~/.local/bin",
-        "installedBinary": "/managed/claudexor/bin/cursor-agent",
-        "installedVersion": "1.2.3",
-        "pinnedVersion": None,
-        "verification": "unattended_unpinned",
-    }
-    receipt.update(updates)
-    return receipt
+def test_immediate_missing_cli_trigger_is_structural_and_pre_command():
+    from ouroboros.gateway.claudexor_accounts import _is_immediate_missing_cli_job
+
+    job = _missing_cli_job(harness="future-program")
+    assert _is_immediate_missing_cli_job(job, "future-program")
+    for mutation in ({"state": "failed"}, {"phase": "verifying"}, {"outcome": {"reason": "timed_out"}},
+                     {"command": "setup attach"}, {"authorization": {}}, {"nativeCommand": {}},
+                     {"harness": "another-program"}, {"action": "logout"}, {"jobId": ""}):
+        assert not _is_immediate_missing_cli_job({**job, **mutation}, "future-program")
+    job.pop("command")
+    assert not _is_immediate_missing_cli_job(job, "future-program")
+    assert not _is_immediate_missing_cli_job(None, "future-program")
 
 
-def test_immediate_missing_cli_trigger_requires_exact_job_and_engine(monkeypatch):
-    from types import SimpleNamespace
-
-    from ouroboros import claudexor_runtime as runtime
-    from ouroboros.claudexor_harness_install import is_immediate_missing_cli_job as _is_immediate_missing_cli_job
-
-    pin = SimpleNamespace(
-        version="3.4.0", build_sha="1" * 40, cli_entrypoint="claudexor.bundle.cjs")
-    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: SimpleNamespace(pin=pin))
-    gateway = SimpleNamespace(engine_version=pin.version, engine_build_sha=pin.build_sha)
-    job = _missing_cli_job()
-    assert _is_immediate_missing_cli_job(job, "cursor", gateway) is True
-
-    mutations = (
-        {"state": "failed"},
-        {"phase": "verifying"},
-        {"outcome": {"reason": "timed_out"}},
-        {"command": "claudexor setup attach setup-1"},
-        {"authorization": {}},
-        {"nativeCommand": {}},
-        {"harness": "codex"},
-        {"action": "logout"},
-        {"jobId": ""},
-    )
-    for mutation in mutations:
-        assert _is_immediate_missing_cli_job({**job, **mutation}, "cursor", gateway) is False
-    without_command = dict(job)
-    without_command.pop("command")
-    assert _is_immediate_missing_cli_job(without_command, "cursor", gateway) is False
-    gateway.engine_build_sha = "2" * 40
-    assert _is_immediate_missing_cli_job(job, "cursor", gateway) is False
-    pin.cli_entrypoint = None
-    gateway.engine_build_sha = pin.build_sha
-    assert _is_immediate_missing_cli_job(job, "cursor", gateway) is False
-
-
-@pytest.mark.parametrize("retry_job", [
-    {"jobId": "setup-2", "state": "queued"},
-    _missing_cli_job(job_id="setup-2"),
+@pytest.mark.parametrize("first_job", [
+    _missing_cli_job(), {**_missing_cli_job(), "state": "failed"},
+    {**_missing_cli_job(), "command": "already launched"},
 ])
-def test_login_installs_and_retries_exactly_once(monkeypatch, retry_job):
-    from types import SimpleNamespace
-
-    from ouroboros import claudexor_runtime as runtime
+@pytest.mark.parametrize("retry_job", [
+    {"jobId": "setup-2", "state": "queued"}, _missing_cli_job(job_id="setup-2"),
+])
+def test_login_uses_shared_install_only_for_first_missing_result(monkeypatch, first_job, retry_job):
+    from ouroboros import harness_maintenance as maintenance
     from ouroboros.gateway import claudexor_accounts as accounts
 
-    pin = SimpleNamespace(
-        version="3.4.0", build_sha="1" * 40, cli_entrypoint="claudexor.bundle.cjs")
-    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: SimpleNamespace(pin=pin))
     requests, installs = [], []
 
     class Gateway:
-        engine_version = pin.version
-        engine_build_sha = pin.build_sha
-
         def __enter__(self): return self
         def __exit__(self, *_args): return False
         def agent_capabilities(self):
             return {"harnesses": [{"id": "cursor", "setupLogin": None}]}
         def operations(self):
             pytest.fail("current null must not consult the legacy operations catalog")
-
         def setup_job_create(self, request):
             requests.append(dict(request))
-            return _missing_cli_job() if len(requests) == 1 else retry_job
+            return first_job if len(requests) == 1 else retry_job
 
     monkeypatch.setattr(owned, "ensure_owned_gateway", lambda: Gateway())
-    monkeypatch.setattr(installer, "install_missing_harness_cli", installs.append)
+    monkeypatch.setattr(maintenance, "install_for_connect", installs.append)
     answer = accounts._login_create({"harness": "cursor"})
-
-    assert installs == ["cursor"]
-    assert len(requests) == 2 and requests[0] == requests[1]
+    if first_job == _missing_cli_job():
+        assert installs == ["cursor"]
+        assert len(requests) == 2 and requests[0] == requests[1]
+        assert answer["job"] == retry_job
+    else:
+        assert not installs and len(requests) == 1
+        assert answer["job"] == first_job
     assert "transport" not in requests[0]
-    assert answer["job"] == retry_job
     assert answer["setup_login_source"] == "setup_job_admission"
 
 
-def test_install_success_receipt_is_strict_and_provenance_is_a_pair():
-    from ouroboros.claudexor_harness_install import _valid_install_success
-
-    assert _valid_install_success(_install_receipt(), "cursor") is True
-    assert _valid_install_success(_install_receipt(
-        installerSha256="a" * 64, installerByteLength=123), "cursor") is True
-    assert _valid_install_success(_install_receipt(
-        harness="codex", verification="release_verified", pinnedVersion="1.2.3",
-        installLocation="~/.claudexor/node/bin"), "codex") is True
-    assert _valid_install_success(_install_receipt(
-        harness="opencode", verification="deterministic_only", pinnedVersion="1.2.3",
-        installLocation="~/.claudexor/node/bin"), "opencode") is True
-
-    missing_binary = _install_receipt()
-    missing_binary.pop("installedBinary")
-    missing_version = _install_receipt()
-    missing_version.pop("installedVersion")
-    invalid = (
-        missing_binary,
-        missing_version,
-        _install_receipt(pinnedVersion="latest"),
-        _install_receipt(verification="release_verified"),
-        _install_receipt(installerSha256="a" * 64),
-        _install_receipt(installerSha256="A" * 64, installerByteLength=123),
-        _install_receipt(installerSha256="a" * 64, installerByteLength=0),
-        _install_receipt(installerSha256="a" * 64, installerByteLength=True),
-        _install_receipt(
-            verification="release_verified", pinnedVersion="1.2.3",
-            installerSha256="a" * 64, installerByteLength=123),
-        _install_receipt(code="unexpected"),
-        _install_receipt(refusal="unexpected"),
-        _install_receipt(message="unexpected"),
-        _install_receipt(verification="human_observed"),
-        _install_receipt(verification={}),
-        _install_receipt(exitCode=True),
-        _install_receipt(installedBinary="cursor-agent"),
-        _install_receipt(installedBinary=""),
-        _install_receipt(installedVersion=""),
-        _install_receipt(installedVersion="   "),
-        _install_receipt(installedVersion="v" * 257),
-    )
-    assert all(not _valid_install_success(receipt, "cursor") for receipt in invalid)
-
-
-def test_installer_invocation_is_exact_grouped_and_stdout_bounded(monkeypatch):
-    import io
-    import subprocess
-    from types import SimpleNamespace
-
-    from ouroboros import claudexor_runtime as runtime
-    from ouroboros import platform_layer
-
-    command = ["/exact/node", "/exact/closure/claudexor.bundle.cjs"]
-    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: SimpleNamespace(
-        ensure_cli_command=lambda: command))
-    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs", lambda: {
-        "start_new_session": True})
-    monkeypatch.setattr(platform_layer, "merge_hidden_kwargs", dict)
-    seen = {}
-
-    class Process:
-        returncode = 0
-
-        def poll(self):
-            return self.returncode
-
-        stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
-
-        def wait(self, timeout):
-            seen.setdefault("timeouts", []).append(timeout)
-            return 0
-
-    import ouroboros.tools.shell as shell
-    from ouroboros.claudexor_daemon import owned_config_dir
-    from ouroboros.tools import shell_process
-
-    def popen(argv, **kwargs):
-        seen["argv"], seen["kwargs"] = argv, kwargs
-        # Counted before Popen, never under the registry lock (round-2 finding, tracked_start): the
-        # lock-free Panic request and a begun stop see the start through its count and publication.
-        seen["lock_held_during_spawn"] = shell._subprocess_lock.locked()
-        seen["counted_during_spawn"] = shell_process._spawning_subprocesses
-        proc = Process()
-        from tests.test_tracked_tree_containment import fake_tree_read
-        fake_tree_read(monkeypatch, proc, remains=False)
-        return proc
-
-    monkeypatch.setattr(installer.subprocess, "Popen", popen)
-    installer.install_missing_harness_cli("cursor")
-    assert seen["argv"] == [
-        *command, "harness", "install", "cursor",
-        "--target", "local", "--yes", "--json",
-    ]
-    env = seen["kwargs"].pop("env")
-    assert seen["kwargs"] == {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.DEVNULL,
-        "start_new_session": True,
-    }
-    # The installer acts on the OWNED data plane, exactly like the daemon it
-    # repairs — never the operator's personal Claudexor home.
-    assert env["CLAUDEXOR_CONFIG_DIR"] == str(owned_config_dir())
-    assert "CLAUDEXOR_DAEMON_SOCK" not in env
-    assert "CLAUDEXOR_CONTROL_PORT" not in env
-    assert seen["lock_held_during_spawn"] is False and seen["counted_during_spawn"] == 1
-    output, state = bytearray(), {}
-    installer._drain_installer_stdout(
-        io.BytesIO(b"x" * (installer._HARNESS_INSTALL_STDOUT_LIMIT + 1)), output, state)
-    assert len(output) == installer._HARNESS_INSTALL_STDOUT_LIMIT
-    assert state == {"overflow": True}
-
-
-def test_installer_timeout_kills_the_process_tree(monkeypatch):
-    import io
-    import subprocess
-    from types import SimpleNamespace
-
-    from ouroboros import claudexor_runtime as runtime
+@pytest.mark.parametrize("code", ["harness_install_unverified", "harness_install_timeout", "daemon_unreachable"])
+def test_connect_never_retries_login_after_an_unproved_install(monkeypatch, code):
+    from ouroboros import harness_maintenance as maintenance
+    from ouroboros.gateway import claudexor_accounts as accounts
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros import platform_layer
 
-    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: SimpleNamespace(
-        ensure_cli_command=lambda: ["/exact/node", "/exact/cli.cjs"]))
-    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs", lambda: {})
-    monkeypatch.setattr(platform_layer, "merge_hidden_kwargs", dict)
-    waits = []
+    calls = []
 
-    class Process:
-        returncode = 0
+    class Gateway:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def agent_capabilities(self):
+            return {"harnesses": [{"id": "cursor", "setupLogin": None}]}
+        def setup_job_create(self, request):
+            calls.append("login")
+            return _missing_cli_job()
 
-        def poll(self):
-            return self.returncode
+    def refuse(harness):
+        calls.append(("install", harness))
+        raise ClaudexorUnavailable(code, "unproved install")
 
-        pid = 42
-        stdout = io.BytesIO()
-
-        def wait(self, timeout):
-            waits.append(timeout)
-            if len(waits) == 1:
-                raise subprocess.TimeoutExpired("installer", timeout)
-            return -9
-
-    proc = Process()
-    from tests.test_tracked_tree_containment import fake_tree_read
-    fake_tree_read(monkeypatch, proc, remains=False)
-    monkeypatch.setattr(installer.subprocess, "Popen", lambda *_a, **_kw: proc)
-    killed = []
-    import ouroboros.tools.shell as shell
-
-    monkeypatch.setattr(shell, "_kill_process_group", killed.append)
-    with pytest.raises(ClaudexorUnavailable) as excinfo:
-        installer.install_missing_harness_cli("cursor")
-    assert excinfo.value.code == "harness_install_timeout"
-    assert killed == [proc]
-    from ouroboros.config import get_claudexor_harness_install_timeout_sec
-
-    assert waits == [get_claudexor_harness_install_timeout_sec(), 10]
-    assert proc not in shell._active_subprocesses, "a timed-out installer must not stay tracked"
-
-
-def test_installer_child_is_panic_tracked_for_its_whole_run(monkeypatch):
-    """/panic kills only tools.shell-tracked subprocess trees before os._exit
-    (BIBLE: every subprocess tree stops immediately). The vendor installer must
-    therefore sit in that set exactly while it runs — the allowlisted raw Popen
-    is legitimate ONLY because of this registration."""
-    import io
-    from types import SimpleNamespace
-
-    from ouroboros import claudexor_runtime as runtime
-    from ouroboros import platform_layer
-    import ouroboros.tools.shell as shell
-
-    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: SimpleNamespace(
-        ensure_cli_command=lambda: ["/exact/node", "/exact/cli.cjs"]))
-    monkeypatch.setattr(platform_layer, "subprocess_new_group_kwargs", lambda: {})
-    monkeypatch.setattr(platform_layer, "merge_hidden_kwargs", dict)
-    observed = {}
-
-    class Process:
-        returncode = 0
-
-        def poll(self):
-            return self.returncode
-
-        pid = 43
-        stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
-
-        def wait(self, timeout):
-            observed["tracked_during_wait"] = self in shell._active_subprocesses
-            return 0
-
-    proc = Process()
-    from tests.test_tracked_tree_containment import fake_tree_read
-    fake_tree_read(monkeypatch, proc, remains=False)
-    monkeypatch.setattr(installer.subprocess, "Popen", lambda *_a, **_kw: proc)
-    installer.install_missing_harness_cli("cursor")
-    assert observed["tracked_during_wait"] is True, "panic sweep must see the live installer"
-    assert proc not in shell._active_subprocesses, "custody ends with the request"
+    monkeypatch.setattr(owned, "ensure_owned_gateway", lambda: Gateway())
+    monkeypatch.setattr(maintenance, "install_for_connect", refuse)
+    with pytest.raises(ClaudexorUnavailable) as failure:
+        accounts._login_create({"harness": "cursor"})
+    assert failure.value.code == code
+    assert calls == ["login", ("install", "cursor")]
 
 
 def _input_request(job_id: str, body: dict):
@@ -3140,13 +3003,16 @@ def test_spawn_env_never_leaves_an_empty_path_component(monkeypatch, tmp_path):
 
 
 def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_path):
-    """The four catalog/manifest/profile/quota GETs run CONCURRENTLY.
+    """The catalog, profile and quota GETs run CONCURRENTLY, and a current
+    catalog spares the read the manifest sweep altogether.
 
-    Each costs seconds daemon-side (it re-probes the coding-agent CLIs on every
-    read), so serialized they made the Providers panel wait for their SUM — ~23s
-    on a warm daemon, with nothing on screen (owner report, 2026-08-08).
+    Each can cost seconds daemon-side, so serialized they made the Providers
+    panel wait for their SUM — ~23s on a warm daemon, with nothing on screen
+    (owner report, 2026-08-08). The manifest read (`/v2/harnesses`) is a doctor
+    sweep of every harness, 2-4 s on a busy host, and the catalog's `setupLogin`
+    already answers login eligibility (2026-11-15).
 
-    The pin is a rendezvous, not a stopwatch: all four reads must meet at one
+    The pin is a rendezvous, not a stopwatch: the three reads must meet at one
     barrier before any returns, which only a genuine fan-out can do. Serialized
     code times out at the barrier instead of failing on a wall-clock margin no
     loaded CI machine can honor (review lens, 2026-08-08).
@@ -3156,7 +3022,8 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gw
 
-    rendezvous = threading.Barrier(4, timeout=10)
+    rendezvous = threading.Barrier(3, timeout=10)
+    manifest_reads = []
 
     class FakeDaemon:
         def status_dict(self):
@@ -3180,10 +3047,11 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
         def agent_capabilities(self):
             rendezvous.wait()
             return {"harnesses": [{"id": "codex", "displayName": "Codex CLI",
-                                   "status": "ok", "enabled": True}]}
+                                   "status": "ok", "enabled": True,
+                                   "setupLogin": {"mode": "in_app"}}]}
 
         def harnesses(self):
-            rendezvous.wait()
+            manifest_reads.append(1)
             return [{"id": "codex", "manifest": {"capability_profile": {"auth": {
                 "supported_sources": ["native_session"]}}}}]
 
@@ -3205,7 +3073,11 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
     payload = _status_payload(include_models=False)
 
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
-    assert payload["quota"] and payload["profiles"] == {"profiles": [], "harnessAccounts": [], "accountPools": []}
+    assert payload["quota"] and payload["profiles"] == {
+        "profiles": [], "harnessAccounts": [], "accountPools": [],
+        "login_capable_harnesses": ["codex"],
+    }
+    assert manifest_reads == [], "the status read never waited for the manifest sweep"
 
 
 def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refuses(monkeypatch, tmp_path):
@@ -3239,6 +3111,7 @@ def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refus
             raise ClaudexorUnavailable("daemon_unreachable", "gone mid-read")
 
         def harnesses(self):
+            manifest_reads.append(1)
             return []
 
         def credential_profiles(self):
@@ -3252,10 +3125,12 @@ def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refus
     monkeypatch.setattr(gw, "discover_daemon_at", lambda _path: object())
     monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
 
+    manifest_reads = []
     payload = _status_payload(include_models=False)
     assert (payload["daemon"]["state"], payload["reads"]["catalog"]) == ("running", "failed")
     assert payload["facets"]["catalog"] == {"observed_at": None, "stale": False, "error": "daemon_unreachable"}
     assert payload["harnesses"] == []
+    assert manifest_reads == [1], "a refused catalog leaves eligibility to one manifest read"
 
 
 def _reads_probe(monkeypatch, tmp_path, daemon_state, failing_facet="", malformed=None):
@@ -3372,22 +3247,48 @@ def test_status_payload_marks_facets_ok_when_the_daemon_answered(monkeypatch, tm
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
 
 
-def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, tmp_path):
-    """`include=models` asks the daemon for each harness's model list separately,
-    and one of those reads can refuse while the catalog itself landed. The row
-    carries `models_error` so the UI can say "not checked" instead of calling a
-    saved model undiscovered — a verdict about a search nobody ran. Nothing
-    pinned the field's emission, so dropping it left every suite green."""
+@pytest.mark.parametrize("route", ["accounts", "legacy"])
+def test_status_payload_asks_model_catalogs_together_and_discloses_a_refusal(monkeypatch, tmp_path, route):
+    """`include=models` asks each visible harness's model list in its own request,
+    and asks them together: a busy daemon answers every request late, so asked one
+    after another the read paid that wait once per harness. The pin is a
+    rendezvous, as in the fan-out test: the three reads must meet at one barrier,
+    which reads asked one after another never do. They are then released in
+    reverse catalog order, so rows filled by completion would usually come out
+    crossed; the barrier, not this order, is the guarantee. The hidden harness is
+    never asked. One read refuses while the catalog itself landed: its
+    row carries `models_error` so the UI can say "not checked" instead of calling
+    a saved model undiscovered, a verdict about a search nobody ran, and its
+    siblings keep their lists. Both the negotiated accounts view and the legacy
+    list take this path."""
+    import threading
+
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gw
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    visible = ["codex", "claude", "cursor"]
+    rendezvous = threading.Barrier(len(visible), timeout=10)
+    finished = {harness: threading.Event() for harness in visible}
+    asked = []
+
+    def answer(harness_id):
+        asked.append(harness_id)
+        rendezvous.wait()
+        try:
+            for later in visible[visible.index(harness_id) + 1:]:
+                assert finished[later].wait(10)
+            if harness_id == "claude":
+                raise ClaudexorUnavailable("daemon_unreachable", "model read refused")
+        finally:
+            finished[harness_id].set()
 
     class FakeDaemon:
         def status_dict(self):
             return {"state": "running"}
 
     class FakeGateway:
-        engine_version = "3.3.13"
+        engine_version = "6.1.2"
 
         def __init__(self, endpoint):
             pass
@@ -3401,16 +3302,18 @@ def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, 
         def handshake(self, **_kw):
             return {}
 
+        def operations(self):
+            if route == "legacy":
+                return []
+            return [{"method": "GET", "path": "/v2/harnesses/:id/models",
+                     "parameters": [{"name": "view", "location": "query", "enum": ["accounts"]}]}]
+
         def agent_capabilities(self):
-            return {"harnesses": [{"id": "codex", "displayName": "Codex CLI",
-                                   "status": "ok", "enabled": True}]}
-
-        def harnesses(self):
-            return [{"id": "codex", "manifest": {"capability_profile": {"auth": {
-                "supported_sources": ["native_session"]}}}}]
-
-        def harness_models(self, harness_id):
-            raise ClaudexorUnavailable("daemon_unreachable", "model read refused")
+            row = {"status": "ok", "enabled": True, "setupLogin": {"mode": "in_app"}}
+            return {"harnesses": [{**row, "id": "codex", "displayName": "Codex CLI"},
+                                  {**row, "id": "openrouter", "displayName": "OpenRouter", "setupLogin": None},
+                                  {**row, "id": "claude", "displayName": "Claude Code"},
+                                  {**row, "id": "cursor", "displayName": "Cursor"}]}
 
         def credential_profiles(self):
             return {"profiles": [], "harnessAccounts": [], "accountPools": []}
@@ -3418,20 +3321,43 @@ def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, 
         def quota_snapshots(self):
             return []
 
+        def harness_model_catalog(self, harness_id, *, view=None, credential_profile_id=None):
+            assert view == "accounts"
+            answer(harness_id)
+            return {"accounts": [{"credentialProfileId": f"{harness_id}-1", "availability": "available",
+                                  "catalog": {"source": "live", "models": [{"id": f"{harness_id}-model"}]}}]}
+
+        def harness_models(self, harness_id):
+            answer(harness_id)
+            return [{"id": f"{harness_id}-model"}]
+
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: FakeDaemon())
     monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(gw, "discover_daemon_at", lambda _path: object())
     monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
 
+    # Asked one after another, the first read waits for siblings that never
+    # start: the barrier breaks and the status read raises.
     payload = _status_payload(include_models=True)
 
-    row = payload["harnesses"][0]
-    assert row["models"] == []
-    assert row["models_error"] == "daemon_unreachable", (
+    assert sorted(asked) == sorted(visible), "the hidden harness is never asked"
+    assert [row["id"] for row in payload["harnesses"]] == visible
+    codex, claude, cursor = payload["harnesses"]
+    for row in (codex, cursor):
+        assert [model["id"] for model in row["models"]] == [f"{row['id']}-model"]
+        assert "models_error" not in row
+    if route == "accounts":
+        assert [model["credential_profile_id"] for model in codex["models"]] == ["codex-1"]
+        assert cursor["model_catalog"]["accounts"][0]["credentialProfileId"] == "cursor-1"
+    else:
+        assert "model_catalog" not in codex and "model_catalog" not in cursor
+    assert claude["models"] == []
+    assert claude["models_error"] == "daemon_unreachable", (
         "a refused model read is indistinguishable from a harness with no models"
     )
+    assert "model_catalog" not in claude
     # The CATALOG itself answered, so its facet stays authoritative.
-    assert payload["reads"]["catalog"] == "ok"
+    assert payload["reads"]["catalog"] == "ok" and payload["daemon"]["state"] == "running"
 
 
 @pytest.mark.parametrize("half", ["accounts_half_named", "accounts_half_native"])
@@ -3843,6 +3769,8 @@ def test_ensure_owned_gateway_reconciles_rotation_on_every_ensure(monkeypatch):
     ensure_owned_gateway, so the reconcile riding it covers both — including
     the attach paths the old spawn-only patch never reached."""
     from ouroboros.gateways import claudexor as gateway_mod
+    observed_ready = []
+    monkeypatch.setattr("ouroboros.harness_program_facts.engine_ready", lambda gateway: observed_ready.append(gateway.handshakes))
 
     endpoint = gateway_mod.DaemonEndpoint(host="127.0.0.1", port=45699, token="tok")
 
@@ -3878,6 +3806,7 @@ def test_ensure_owned_gateway_reconciles_rotation_on_every_ensure(monkeypatch):
     # Reconcile ran, ONCE, against the very gateway the caller receives —
     # and only AFTER the authenticated handshake (identity before writes).
     assert manager.reconciled == [gateway]
+    assert observed_ready == [1], "a successful ready event follows the authenticated handshake"
 
 
 def test_reconcile_is_best_effort_and_never_breaks_the_ensure(monkeypatch, tmp_path):

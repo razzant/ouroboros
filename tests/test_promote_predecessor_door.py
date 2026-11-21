@@ -24,21 +24,21 @@ def test_only_a_root_finalization_moves_the_projects_pointer(tmp_path):
     create_project(tmp_path, "racer", name="Racer")
     record_task_finalization(
         "racer", {"id": "racer-root", "root_task_id": "racer-root"},
-        objective="the root", kind="task", exec_status="completed", drive_root=tmp_path,
+        kind="task", exec_status="completed", drive_root=tmp_path,
     )
     assert get_project(tmp_path, "racer")["last_task_result_id"] == "racer-root"
 
     record_task_finalization(
         "racer", {"id": "racer-child", "parent_task_id": "racer-root",
                   "root_task_id": "racer-root", "delegation_role": "subagent"},
-        objective="helper work", kind="task", exec_status="completed", drive_root=tmp_path,
+        kind="task", exec_status="completed", drive_root=tmp_path,
     )
     assert get_project(tmp_path, "racer")["last_task_result_id"] == "racer-root"
 
     # The door calls a row a child by its parent OR by its role; so does the stamp.
     record_task_finalization(
         "racer", {"id": "racer-role-only", "root_task_id": "racer-root", "delegation_role": "subagent"},
-        objective="helper with no parent field", kind="task", exec_status="completed", drive_root=tmp_path,
+        kind="task", exec_status="completed", drive_root=tmp_path,
     )
     assert get_project(tmp_path, "racer")["last_task_result_id"] == "racer-root"
 

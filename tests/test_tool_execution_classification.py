@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
@@ -321,12 +323,12 @@ def test_loop_keeps_legacy_process_status_and_error_buckets(
         ),
         (
             ToolResult(
-                status="blocked",
+                status="ok",
                 code="ARTIFACT_OUTPUT_UNDECLARED",
-                text="⚠️ ARTIFACT_OUTPUT_UNDECLARED: declare outputs. exit_code=0",
+                text="exit_code=0\nSTDOUT:\nok\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files.",
                 meta={"exit_code": 0},
             ),
-            True,
+            False,  # a note on a finished command: no error, its own bucket kept
             "artifact_output_undeclared",
         ),
         (
@@ -394,6 +396,11 @@ def test_loop_keeps_legacy_process_status_and_error_buckets(
 
         assert row["is_error"] is expected_error
         assert row["result_meta"]["status"] == expected_status
+        # The journal row names the coarse bucket AND the exact published code (audit 08-11.11 item 6).
+        journal = json.loads((drive_logs / "tools.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        assert (journal["type"], journal["status"], journal["tool_result_code"]) == (
+            "tool_call", expected_status, typed.code)
+        assert journal["is_error"] is expected_error
         for key in (
             "exit_code",
             "signal",
@@ -619,27 +626,39 @@ def test_reviewed_mutator_soft_timeout_keeps_foreground_custody(tmp_path, monkey
 
 def test_timed_out_stateful_tool_retires_the_generation_and_closes_on_the_worker(monkeypatch, tmp_path):
     """The #409/#440 wiring: a stateful-tool timeout RETIRES the browser
-    generation immediately (the shared slot gets a fresh state; no cross-thread
-    Playwright calls), queues the close on the RETIRING executor so it runs on
-    the owning worker thread whenever the hung call settles (including the
-    already-settled race), retires the executor WITHOUT cancelling that queued
-    cleanup, and closes handles the worker created even AFTER the detach."""
+    generation immediately (the shared slot gets a fresh state; nothing is
+    closed on the caller's thread), queues the close on the RETIRING executor so
+    it runs after the hung call settles (including the already-settled race),
+    retires the executor WITHOUT cancelling that queued cleanup, and closes
+    handles the worker created even AFTER the detach — on the generation's own
+    session loop, whichever thread runs the queued cleanup."""
+    import asyncio
+    import threading
     from types import SimpleNamespace
     from contextvars import Context, ContextVar
 
     import ouroboros.loop_tool_execution as lte
     from ouroboros.tools.registry import BrowserState
+    from tests._browser_fakes import run_on
 
-    closed = []
-    page = SimpleNamespace(close=lambda: closed.append("page"))
-    context = SimpleNamespace(close=lambda: closed.append("context"))
-    chromium = SimpleNamespace(close=lambda: closed.append("browser"))
-    pw = SimpleNamespace(stop=lambda: closed.append("playwright"))
+    closed, close_threads = [], set()
+
+    def _closer(name):
+        async def close():
+            close_threads.add(threading.get_ident())
+            closed.append(name)
+        return close
+
+    page = SimpleNamespace(close=_closer("page"))
+    context = SimpleNamespace(close=_closer("context"))
+    chromium = SimpleNamespace(close=_closer("browser"))
+    pw = SimpleNamespace(stop=_closer("playwright"))
 
     bs = BrowserState()
+    run_on(bs, asyncio.sleep(0))  # the generation's session loop owns the handles below
+    loop_thread = bs._owner._thread
     bs.page, bs.browser, bs.pw_instance = page, chromium, pw
     setattr(bs, "_browser_context", context)
-    setattr(bs, "_thread_id", 1)
 
     # A real unfinished Future retains the settlement callback while the wait expires.
     from concurrent.futures import Future
@@ -713,7 +732,6 @@ def test_timed_out_stateful_tool_retires_the_generation_and_closes_on_the_worker
     assert isinstance(submitted.__self__, Context) and submitted.__name__ == "run"
     assert submitted.__self__.get(marker) == "owning-execution"
     from concurrent.futures import ThreadPoolExecutor
-    import threading
     worker_ids = []
     def on_worker(function, *values):
         worker_ids.append(threading.get_ident())
@@ -723,8 +741,8 @@ def test_timed_out_stateful_tool_retires_the_generation_and_closes_on_the_worker
         assert "BROWSER_SESSION_RETIRED" in refused["result"]
         hung.set_result(refused)
         assert closed == []
-        # Even a handle created AFTER detach belongs to the retiring worker.
-        late_page = SimpleNamespace(close=lambda: closed.append("late_page"))
+        # Even a handle created AFTER detach belongs to the retired generation.
+        late_page = SimpleNamespace(close=_closer("late_page"))
         bs.page = late_page
         worker.submit(on_worker, fn, *args).result(timeout=5)
         assert closed == ["late_page", "context", "browser", "playwright"]
@@ -734,6 +752,8 @@ def test_timed_out_stateful_tool_retires_the_generation_and_closes_on_the_worker
         worker.submit(on_worker, fn, *args).result(timeout=5)
     assert len(set(worker_ids)) == 1 and worker_ids[0] != threading.get_ident()
     assert closed == ["late_page", "context", "browser", "playwright"]
+    # Every close ran on the generation's own loop, which stopped with them.
+    assert close_threads == {loop_thread.ident} and not loop_thread.is_alive() and bs._cleanup_done
 
 
 

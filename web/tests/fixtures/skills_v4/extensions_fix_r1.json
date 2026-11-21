@@ -23,7 +23,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "trusted_source",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Installed unchanged from a source the owner trusts; no review is required for these exact bytes.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -109,7 +109,7 @@
         "stale": false,
         "executable_review": false,
         "blocking_reason": "review_pending",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is pending or did not produce an executable verdict.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -188,7 +188,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "self_check",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Ouroboros read this exact release and recorded why it may run.",
         "preflight_failed": false,
         "preflight_failed_stale": false
@@ -253,7 +253,7 @@
         "stale": false,
         "executable_review": true,
         "blocking_reason": "ready",
-        "review_enforcement": "blocking",
+        "review_enforcement": "advisory",
         "summary": "Review is executable: verdict clean.",
         "preflight_failed": false,
         "preflight_failed_stale": false

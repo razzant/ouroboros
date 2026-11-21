@@ -7,7 +7,7 @@ set -euo pipefail
 # PYTHON_STANDALONE_DEST=<dir> PYTHON_STANDALONE_INTERPRETER_ONLY=1 bash scripts/download_python_standalone.sh
 
 RELEASE="20261009"
-PY_VERSION="3.10.22"
+PY_VERSION="3.12.15"
 DEST="${PYTHON_STANDALONE_DEST:-python-standalone}"
 
 OS=$(uname -s)
@@ -16,10 +16,10 @@ ARCH=$(uname -m)
 if [ "$OS" = "Darwin" ]; then
     if [ "$ARCH" = "arm64" ]; then
         PLATFORM="aarch64-apple-darwin"
-        SHA256="056952e8ee266df0dc4e595a88a0d691efe0d6af7cd9e772b89e5efd276ead79"
+        SHA256="233f8e15255b3e1d1fd47ea5dd5230dfed803f371138e896e54d98c60ae19f6f"
     elif [ "$ARCH" = "x86_64" ]; then
         PLATFORM="x86_64-apple-darwin"
-        SHA256="7c579c3d9913a36b86a63772704cc08960de9b819b8915455218a536dbd4f3f2"
+        SHA256="fb3187d95334813b88940db0f1ca57b84cedfd552739c3a5771c3ea0e49988c9"
     else
         echo "Unsupported macOS architecture: $ARCH"
         exit 1
@@ -27,10 +27,10 @@ if [ "$OS" = "Darwin" ]; then
 elif [ "$OS" = "Linux" ]; then
     if [ "$ARCH" = "x86_64" ]; then
         PLATFORM="x86_64-unknown-linux-gnu"
-        SHA256="caa66b308e10f35b8114054df7d927903f971f631cfa3237b84c40d5d5f35549"
+        SHA256="ffa8f85f1b56e88b687f08d743d817015524b86a9365fd921243132b80f1a36d"
     elif [ "$ARCH" = "aarch64" ]; then
         PLATFORM="aarch64-unknown-linux-gnu"
-        SHA256="ecbe978a7ecbeb3a9aed67bb5d161180701513b4fa8101037b2a3f1ac11e96be"
+        SHA256="2e1ba0e7f22e01c534caebf7f09e7820322bc0d055271d3434af671e8400f96f"
     else
         echo "Unsupported Linux architecture: $ARCH"
         exit 1

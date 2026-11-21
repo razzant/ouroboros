@@ -124,6 +124,42 @@ def test_explicit_history_reads_older_records_beyond_five_and_reports_local_gap(
     assert gaps == [records[1]["record_id"]]
 
 
+@pytest.mark.parametrize("source_status", ["empty", "unavailable"])
+def test_history_keeps_a_byte_named_finding_after_index_rotation(tmp_path, monkeypatch, source_status):
+    raw_name = b"notes-\xff.txt"
+    name = raw_name.decode("utf-8", "surrogateescape")
+    reasons = [f"Résumé for {name}", r"Résumé for notes-\udcff.txt"]
+    note = rl.ReviewLedgerRecord(record_id="rl-byte-note", task_id="byte-review", surface="change",
+        rows=[{"seat_id": "reviewer", "status": "responded", "parts": ["change"],
+               "answers": {"change": {"status": "responded", "verdict": "PASS", "findings": [
+                   {"item": "Reviewed note", "reason": reason, "severity": "advisory"} for reason in reasons]}},
+               "source_refs": [{"role": "response", "status": source_status}]}],
+        verdict={"aggregate": "PASS", "degraded_reasons": [reasons[0]]})
+    expected = rl.write_record(tmp_path, note)
+    monkeypatch.setattr(rl, "INDEX_MAX_BYTES", 1)
+    newer = rl.write_record(tmp_path, _gate_record("byte-review"))
+    assert rl.record_path(tmp_path, newer["record_id"]).read_bytes() == (
+        json.dumps(newer, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    assert rl.load_record(tmp_path, note.record_id) == expected
+    [archive] = rl.ledger_dir(tmp_path).glob("index.*.jsonl")
+    index = archive if source_status == "empty" else rl.index_path(tmp_path)
+    [indexed] = [row for row in map(json.loads, index.read_text(encoding="utf-8").splitlines())
+                 if row["record_id"] == note.record_id]
+    assert indexed["verdict"]["degraded_reasons"] == [reasons[0]]
+    assert indexed["heavy_stripped"] == (source_status == "empty")
+    with client_for(tmp_path) as client:
+        first = client.get("/api/tasks/byte-review/reviews?limit=1").json()
+        assert first["next_offset"] == 1
+        response = client.get("/api/tasks/byte-review/reviews?limit=1&offset=1")
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    page = json.loads(response.content.decode("utf-8"))
+    [panel] = page["review_projection"]["panels"]
+    assert page["next_offset"] is None and panel["record_id"] == note.record_id
+    [actor] = panel["actors"]
+    assert [finding["reason"] for finding in actor["findings"]] == reasons
+    assert actor["findings"][0]["reason"].removeprefix("Résumé for ").encode("utf-8", "surrogateescape") == raw_name
+
+
 def test_changed_saved_source_fails_integrity_without_reading_arbitrary_path(tmp_path):
     record, source = saved_review(tmp_path)
     # Resolve only the legitimate source using the same artifact root binding.
@@ -165,9 +201,9 @@ def test_archive_uncertainty_does_not_create_reviews_on_an_unreviewed_task(tmp_p
     archived, _ = saved_review(tmp_path, "actually-reviewed")
     rl.index_path(tmp_path).rename(rl.ledger_dir(tmp_path) / "index.20261020T000000.jsonl")
     real_iter, opened = rl.iter_jsonl_objects, []
-    def read(path):
+    def read(path, **kwargs):  # the index reader also collects parse gaps (gap_reasons)
         opened.append(path.name)
-        return real_iter(path)
+        return real_iter(path, **kwargs)
     monkeypatch.setattr(rl, "iter_jsonl_objects", read)
     stored, event, history = _terminal(tmp_path, "never-reviewed")
     assert not stored.get("review_projection") and not event and not history.get("review_projection")
@@ -187,9 +223,9 @@ def test_history_page_stops_after_exact_task_rows_and_one_lookahead(tmp_path, mo
     child = _gate_record("child", root_task_id="page-owner")
     rl.write_record(tmp_path, child)
     real_iter = rl.iter_jsonl_objects
-    def read(path):
+    def read(path, **kwargs):  # the index reader also collects parse gaps (gap_reasons)
         assert path != archive, "page scanned history beyond the required lookahead"
-        return real_iter(path)
+        return real_iter(path, **kwargs)
     monkeypatch.setattr(rl, "iter_jsonl_objects", read)
     with client_for(tmp_path) as client:
         response = client.get("/api/tasks/page-owner/reviews?offset=1&limit=2")

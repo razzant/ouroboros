@@ -14,6 +14,7 @@ and WHERE its producers are, so neither half can drift without a failure.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import types
 
@@ -67,7 +68,7 @@ def test_every_row_declares_a_lane_and_telemetry_is_exactly_the_three_streams():
         "send_message", "send_photo", "send_document", "send_links", "send_quiz", "send_video",
         "typing_start", "task_done", "task_metrics", "schedule_subagent", "cancel_task", "owner_wait",
         "task_model_wait", "worker_quiescent", "restart_request", "cognitive_operation",
-        "main_llm_call_state", "external_wait_lease", "acceptance_fence", "budget_pause",
+        "main_llm_call_state", "work_lead", "acceptance_fence", "budget_pause",
         "budget_root_fence", "task_dispatch_resolved", "promote_chat_to_task", "steer_task",
         *_tier(TELEMETRY_ONLY),
     ):
@@ -219,3 +220,21 @@ def test_the_taxonomy_is_data_and_dispatches_nothing():
             imported.update(alias.name for alias in node.names)
     assert imported == {"__future__", "dataclasses", "typing"}
     assert event_taxonomy.disposition_for("nope") is None
+
+
+def test_a_crashing_handler_row_names_the_event_it_failed_on_without_its_content(tmp_path, monkeypatch):
+    """The handler-error row is attributable (the event's task ids and key names) and content-free
+    (no field values): the one row of 05–08.11 carried only ``repr(exc)``."""
+    written = []
+    ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path, append_jsonl=lambda path, row: written.append((path, row)))
+
+    def crash(_evt, _ctx):
+        raise RuntimeError("handler exploded")
+
+    monkeypatch.setitem(events.EVENT_HANDLERS, "probe_crash", crash)
+    events.dispatch_event({"type": "probe_crash", "task_id": "t1", "root_task_id": "r1", "text": "the owner's words"}, ctx)
+    [(path, row)] = written
+    assert path == tmp_path / "logs" / "supervisor.jsonl"
+    assert (row["type"], row["event_type"], row["task_id"], row["root_task_id"]) == ("worker_event_handler_error", "probe_crash", "t1", "r1")
+    assert "handler exploded" in row["error"] and "the owner's words" not in json.dumps(row)
+    assert set(row["event_keys"]) == {"type", "task_id", "root_task_id", "text"}

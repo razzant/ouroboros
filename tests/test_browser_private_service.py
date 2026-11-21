@@ -26,6 +26,7 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests._shared import configure_test_subagent
+from tests._browser_fakes import run_on
 
 
 @pytest.fixture(params=["chromium", "webkit"])
@@ -135,15 +136,14 @@ def test_granted_private_page_resources_actions_and_actual_control_identity(priv
     assert {("GET", "/style.css"), ("GET", "/app.js"), ("GET", "/icon.svg")} <= set(hits)
     assert "Clicked" in tools.execute("browser_action", {"action": "click", "selector": "#act"})
     assert json.loads(tools.execute("browser_action", {"action": "wait", "selector": "#result", "state": "visible"}))["status"] == "reached"
-    assert "Assigned service action succeeded" in ctx.browser_state.page.inner_text("#result")
+    assert "Assigned service action succeeded" in run_on(ctx.browser_state, ctx.browser_state.page.inner_text("#result"))
     assert ("POST", "/api/owner/context-mode") in hits
     denied_fetch = tools.execute("browser_action", {"action": "evaluate",
         "value": f"() => fetch({json.dumps(foreign_origin)}).then(() => 'unexpected').catch(() => 'denied')"})
     assert "origin_not_granted" in denied_fetch and not foreign_hits
     assert "origin_not_granted" in tools.execute("browse_page", {"url": foreign_origin, "engine": engine})
     assert not foreign_hits
-    # Real tasks own separate worker threads. This sequential test retires one
-    # actor before opening another Playwright Sync API loop on the same thread.
+    # One actor's session closes before the next actor opens its own.
     browser.cleanup_browser(ctx)
     assert "Private service ready" in browser._browse_page(root_ctx, foreign_origin, engine=engine)
     assert foreign_hits
@@ -173,7 +173,7 @@ def test_granted_private_page_resources_actions_and_actual_control_identity(priv
     with Image.open(io.BytesIO(raw)) as source, Image.open(io.BytesIO(prepared)) as received:
         assert source.size == (1920, 1080) and source.format == "PNG"
         assert received.size == (1600, 900) and received.format == "JPEG"
-        icon = ctx.browser_state.page.locator("img").bounding_box()
+        icon = run_on(ctx.browser_state, ctx.browser_state.page.locator("img").bounding_box())
         center = (round((icon["x"] + icon["width"] / 2) * 1600 / 1920),
                   round((icon["y"] + icon["height"] / 2) * 900 / 1080))
         assert all(abs(actual - expected) < 15 for actual, expected in zip(received.getpixel(center), (0, 128, 0)))

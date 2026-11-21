@@ -41,7 +41,8 @@ def network_server(tmp_path, request):
     if host:
         address = ipaddress.ip_address(host)
         assert not address.is_loopback and not address.is_unspecified and address.is_private
-    evidence = diagnostic_directory(tmp_path / 'evidence', 'widget-esm-' + request.node.callspec.params['engine'])
+    evidence = diagnostic_directory(tmp_path / 'evidence', 'widget-esm-' + request.node.callspec.params['engine'],
+                                    publish=True)
     source = Path(__file__).resolve().parents[1]
     with candidate_checkout(source, tmp_path / 'repo', origin_proof=True) as candidate:
         # The core's worker manager listens beneath TMPDIR: the launcher's short temp, else tmp_path/tmp.

@@ -17,7 +17,7 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 def _write(registry, **arguments):
     reply = registry.execute("knowledge_write", arguments)
     assert reply.startswith("✅"), reply
-    return json.loads(reply.split("\n", 1)[1])
+    return json.loads(reply.split("\n", 2)[1])
 
 
 @pytest.mark.parametrize("scope", ["global", "project:reader-check"])
@@ -32,7 +32,7 @@ def test_a_reader_reads_exact_previous_source_after_restore(tmp_path, scope):
     registry = ToolRegistry(repo_dir=Path.cwd(), drive_root=execution)
     registry.set_context(ctx)
     original = "---\r\ntype: note\r\nsummary: Earlier meaning\r\n---\r\n# Берег\r\nEarlier facts.\r\n"
-    created = _write(registry, topic="reader-source", scope=scope, content=original)
+    created = _write(registry, topic="reader-source", scope=scope, mode="overwrite", content=original)
     revision = created["knowledge_source"]["revision"]
     archived = _write(registry, topic="reader-source", scope=scope, mode="archive",
                       expected_revision=revision, reason="Retained in an ordinary linked overview.")
@@ -68,11 +68,11 @@ def test_a_canonical_reader_reads_previous_source_before_copyback(tmp_path, scop
     original = note.raw
     reply = transition(registry, note, mode)
     assert reply.startswith("✅"), reply
-    ref = json.loads(reply.split("\n", 1)[1])["knowledge_previous_source"]
+    ref = json.loads(reply.split("\n", 2)[1])["knowledge_previous_source"]
     # The actor's existing reader is still usable as soon as it gets the handle.
     exact = read_actor_source_bytes(ctx.drive_root, ctx.task_id, ref)
     _write(registry, topic=address.topic, scope=scope, mode="edit",
-           expected_revision=json.loads(reply.split("\n", 1)[1])["knowledge_source"]["revision"],
+           expected_revision=json.loads(reply.split("\n", 2)[1])["knowledge_source"]["revision"],
            old_str="Старый берег.", content="LATER CURRENT BODY")
     # A reader on the CANONICAL drive (the forked task has not copied back yet).
     canonical = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)

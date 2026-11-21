@@ -383,13 +383,17 @@ def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
     inject_relay(receiver, {"kind": "relay_entry", "text": "Please act on it.", "owner_rows": [answer],
                             "relay": relay_envelope("quoted", [owner_quote(tmp_path, answer)], chat_id=1),
                             "source_task_id": "teller"}, messages)
-    [row] = [row for row in receiver._owner_directives if row["source"] == "owner_mailbox"]
-    assert "Publish exactly this reply?" not in str(row["content"])
+    # A press without words is my human's act, never their words: typed so in the corpus and in the quote.
+    [row] = [row for row in receiver._owner_directives if row["source"] == "owner_press"]
+    assert row["content"] == "1. Publish it" and "Publish exactly this reply?" not in str(row["content"])
     assert row["reply_to"] == {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                                "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n"
                                        "(host record: my human pressed option 1)"}
-    words = next(str(m["content"]) for m in messages if "Owner words quoted verbatim" in str(m["content"]))
+    words = next(str(m["content"]) for m in messages if "Owner card press" in str(m["content"]))
     assert "[Host question frame]" in words and "Publish exactly this reply?" in words  # the model reads it too
+    assert ("\n(host record: my human pressed «1. Publish it» and wrote no words; the label is the text of task asker)"
+            "\n") in words and "\n1. Publish it\n" not in words
+    assert "The label «Publish it» is the text of task asker" in words
 
 
 def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_path, monkeypatch):
@@ -802,3 +806,425 @@ def test_cross_root_return_reference_survives_continue(tmp_path):
     assert _send_user_message(successor, "Done", reply_to_relay="return").startswith("OK:")
     [event] = successor.pending_events
     assert event["progress_meta"]["reply_to"]["snippet"] == "exact owner words"
+
+
+def _dispatch_ctx(tmp_path, task_id="asker"):
+    """A work's loop context as the agent builds one at dispatch: its dispatch metadata carries no held map."""
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    ctx, _limit = _loop_ctx(tmp_path, task_id)
+    ctx.budget_drive_root, ctx.task_metadata, ctx._loop_mailbox_seen_ids = tmp_path, {"root_task_id": task_id}, set()
+    ctx.current_chat_id, ctx.pending_events, ctx.drive_logs = 1, [], lambda: tmp_path / "logs"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    return ctx
+
+
+def test_a_new_dispatch_of_a_work_keeps_its_held_words_and_open_relays_on_its_record(tmp_path, monkeypatch):
+    """The work holds the owner's answer to its card and another work's relay quoting an owner row; both sit on its
+    record. It parks and resumes in a new dispatch of the same id: the agent builds the context first
+    (``build_runtime_section``: ``owner_quote_handles``), then the loop restores the continuation. The record must still
+    hold both rows and the open relay at the end, and a Continue of the work must inherit them: a first build that
+    replaced the record from the dispatch metadata alone emptied the quote handles of three works on 13 Nov."""
+    import json
+
+    from ouroboros import owner_wait
+    from ouroboros.context import build_runtime_section
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_relay import flush_held_state
+    from ouroboros.task_results import load_task_result
+    from ouroboros.working_checkpoint import flush_content_acks
+    from tests._context_shared import _make_health_env
+    from tests.test_question_answer_routing import answer, runtime
+
+    app, _bridge, _q, _task = runtime(tmp_path, monkeypatch)
+    row, relayed = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, row), [relayed])
+    assert not error
+    write_relay(tmp_path, "asker", relay_id="r1", note="Another work's note", quotes=quotes, chat_id=1,
+                teller_task_id="teller")
+    first = _dispatch_ctx(tmp_path)
+    assert answer(app).status_code == 200
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "asker", None, first._loop_mailbox_seen_ids,
+                             owner_ctx=first, defer_content_ack=True)
+    flush_content_acks(first)
+    held = set(first._held_owner_messages)
+    assert relayed in held and len(held) == 2 and "r1" in first._open_relays
+    assert set(load_task_result(tmp_path, "asker")["held_owner_messages"]) == held, "baseline: the durable copy"
+    saved = json.loads(json.dumps(owner_wait.continuation_state(first, [], {}, {}, 1, [], set())))  # the park's source
+
+    second = _dispatch_ctx(tmp_path)  # the same task id in a new dispatch: a fresh context, no held map in metadata
+    build_runtime_section(_make_health_env(tmp_path / "env"), {"id": "asker", "metadata": second.task_metadata},
+                          ctx=second)  # agent._prepare_task_context -> build_llm_messages, before the loop runs
+    at_build = load_task_result(tmp_path, "asker") or {}
+    assert set(at_build.get("held_owner_messages") or {}) == held and "r1" in (at_build.get("open_relays") or {})
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=second), saved, [], {}, {}, set())
+    assert set(second._held_owner_messages) == held and "r1" in second._open_relays, "memory is whole again"
+    flush_held_state(second)  # what the terminal save (working_checkpoint.save_terminal) adds
+
+    after = load_task_result(tmp_path, "asker") or {}
+    assert set(after.get("held_owner_messages") or {}) == held and "r1" in (after.get("open_relays") or {})
+    assert set(owner_sources(tmp_path, after, "asker")["held_owner_messages"]) == held, "a Continue inherits them"
+
+
+@pytest.mark.parametrize("parks", [False, True])
+def test_an_answered_relay_stays_closed_when_the_same_continue_successor_starts_again(tmp_path, monkeypatch, parks):
+    """A Continue successor inherits an open relay (``metadata.continuation.owner_sources``) and answers it, so the
+    relay leaves its map and its record. It then starts again under the same id (a cold resume or a restart): its own
+    present, empty map is its state, so the unchanged metadata does not reopen the relay; the quoted row stays held.
+    A start whose first read of the record fails does not replace it from the inherited view (``_settle_seed``), in
+    its own process or after it parks with that view and resumes (the continuation keeps the view partial)."""
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    row, handle = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, row), [handle])
+    assert not error
+    write_relay(tmp_path, "receiver", relay_id="return", note="context", quotes=quotes, chat_id=1,
+                teller_task_id="teller")
+    receiver = context(tmp_path); receiver.task_id = "receiver"
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "receiver", None, set(), owner_ctx=receiver)
+    sources = owner_sources(tmp_path, {"origin_message_text": "Work", "origin_message_ref": {},
+                                       "held_owner_messages": receiver._held_owner_messages,
+                                       "open_relays": receiver._open_relays,
+                                       "owner_mailbox": {"rows": [], "read_complete": True}}, "receiver")
+    assert "return" in sources["open_relays"]
+    write_task_result(tmp_path, "successor", "running")
+
+    def dispatch():
+        ctx = context(tmp_path)
+        ctx.task_id, ctx.task_metadata = "successor", {"continuation": {"owner_sources": sources}}
+        held_owner_messages(ctx)  # this dispatch's first context build
+        return ctx
+
+    first = dispatch()
+    assert "return" in first._open_relays
+    assert _send_user_message(first, "Done", reply_to_relay="return").startswith("OK:")
+    assert (load_task_result(tmp_path, "successor") or {}).get("open_relays") == {}, "answered on the record"
+    again = dispatch()
+    assert again._open_relays == {}, "not reopened from the unchanged metadata"
+    assert set(again._held_owner_messages) == set(first._held_owner_messages) and again._held_owner_messages
+
+    # The same start with the store too busy to read the record: its first build sees only the inherited view, so
+    # no write may replace the record from it; once a read lands the record keeps its rows and its closed relay.
+    from ouroboros import task_store
+    from ouroboros.owner_relay import flush_held_state, retain_owner_message
+    from ouroboros.store import StoreBusy
+
+    real_read, busy = task_store.read_document, {"on": True}
+
+    def read(root, task_id, **kwargs):
+        if busy["on"] and task_id == "successor":
+            raise StoreBusy("controlled busy read", reason="test")
+        return real_read(root, task_id, **kwargs)
+
+    monkeypatch.setattr(task_store, "read_document", read)
+    blind = dispatch()
+    assert "return" in blind._open_relays, "the inherited view only"
+    later = {"chat_id": 1, "direction": "in", "ts": "2026-10-02T00:00:00Z", "text": "later owner words",
+             "client_message_id": "owner-2", "attachments": []}
+    dialogue_store.append(tmp_path, "chat", later)
+    assert retain_owner_message(blind, later)
+    busy["on"] = False
+    record = load_task_result(tmp_path, "successor") or {}
+    assert record.get("open_relays") == {} and set(record["held_owner_messages"]) == set(first._held_owner_messages)
+    if parks:  # it parks with that partial view and resumes in a new dispatch that can read the record
+        import json
+
+        from ouroboros import owner_wait
+
+        saved = json.loads(json.dumps(owner_wait.continuation_state(blind, [], {}, {}, 1, [], set())))
+        blind = dispatch()
+        owner_wait.restore_continuation_state(SimpleNamespace(_ctx=blind), saved, [], {}, {}, set())
+    flush_held_state(blind)  # the terminal save: the record reads now
+    record = load_task_result(tmp_path, "successor") or {}
+    assert record.get("open_relays") == {} == blind._open_relays, "the answered relay stays closed"
+    assert set(record["held_owner_messages"]) == set(first._held_owner_messages) | set(blind._held_owner_messages)
+    assert len(record["held_owner_messages"]) == len(first._held_owner_messages) + 1, "the later row joins them"
+
+
+def test_running_work_content_contract_delivers_its_room_to_root_child_and_nanny(tmp_path, monkeypatch):
+    """Ingress -> addressed mailbox -> next drain -> every member, without cross-room broadcast.
+
+    The first-request contract lives in test_memory_view_content_contract. This is
+    the already-running half: real routing and drains, exact words and provenance,
+    append-only requests and a quiet repeat. Marks have a separate contract.
+    """
+    from copy import deepcopy
+
+    from ouroboros import server_owner_routing
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import create_project
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.registry import ToolContext
+    from supervisor import queue as supervisor_queue
+    from tests.test_project_routing_v664 import _ctx
+
+    room = create_project(tmp_path, "contract-running", name="Running compass")
+    other = create_project(tmp_path, "contract-unrelated", name="Unrelated orchard")
+    tasks = {
+        "root": {"id": "running-root", "root_task_id": "running-root", "delegation_role": "root"},
+        "child": {"id": "running-child", "parent_task_id": "running-root", "root_task_id": "running-root",
+                  "delegation_role": "subagent", "configured_subagent": {"id": "child", "route": {"kind": "api_model"}}},
+        "nanny": {"id": "running-nanny", "parent_task_id": "running-root", "root_task_id": "running-root",
+                  "delegation_role": "subagent", "configured_subagent": {"id": "nanny", "route": {"kind": "agent_session"}}},
+        "other": {"id": "unrelated-root", "root_task_id": "unrelated-root", "delegation_role": "root"},
+    }
+    actors, messages, seen = {}, {}, {}
+    prefix = [{"role": "system", "content": "Captured start view stays unchanged."},
+              {"role": "user", "content": "The original assignment."},
+              {"role": "assistant", "content": "I have started the work."}]
+    for role, task in tasks.items():
+        project = other if role == "other" else room
+        task.update(chat_id=project["chat_id"], project_id=project["id"], drive_root=str(tmp_path))
+        write_task_result(tmp_path, task["id"], "running", **{key: value for key, value in task.items() if key != "id"})
+        actors[role] = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"],
+                                  current_chat_id=task["chat_id"], project_id=task["project_id"], task_metadata=task)
+        messages[role], seen[role] = deepcopy(prefix), set()
+    running = {task["id"]: {"task": task, "started_at": 1.0} for task in tasks.values()}
+    host = _ctx(tmp_path, running=running, direct=lambda *_a, **_kw: pytest.fail("a sole room reader takes this message"))
+    monkeypatch.setattr(supervisor_queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(supervisor_queue, "ACCEPTANCE_FENCES", {})
+
+    def arrives(project, ident, text, stamp):
+        row = {"chat_id": project["chat_id"], "client_message_id": ident, "text": text,
+               "ts": stamp, "direction": "in"}
+        assert dialogue_store.append(tmp_path, "chat", row) is not None
+        server_owner_routing._route_owner_message(object(), host, {
+            "chat_id": row["chat_id"], "text": text, "log_text": text, "client_message_id": ident,
+            "origin_message_ref": build_owner_message_ref(chat_id=row["chat_id"], client_message_id=ident,
+                                                          ts=stamp, text=text),
+        })
+        return row
+
+    def drain(role):
+        _drain_incoming_messages(messages[role], queue.Queue(), tmp_path, tasks[role]["id"],
+                                 None, seen[role], owner_ctx=actors[role])
+        assert messages[role][:len(prefix)] == prefix
+        return "\n".join(message["content"] for message in messages[role][len(prefix):])
+
+    foreign = arrives(other, "late-orchard", "Leave the unrelated orchard open.", "2026-11-10T10:01:00+00:00")
+    assert "Leave the unrelated orchard open." in drain("other")  # ingress really delivered somewhere
+    for role in ("root", "child", "nanny"):
+        assert drain(role) == "" and not held_owner_messages(actors[role])
+    own = arrives(room, "late-compass", "  Keep north exactly here; do not rotate it.  ", "2026-11-10T10:02:00+00:00")
+    address = format_address(row_address(own))
+    root_text = drain("root")  # this very drain carries the row to the children
+    assert "[Message from my human]" in root_text and own["text"] in root_text
+    assert address in root_text  # the printed source address carries the exact room and timestamp
+    assert f"row:{room['chat_id']}@2026-11-10T10:02:00+00:00#" in root_text
+    for role in ("child", "nanny"):
+        text = drain(role)
+        assert (f"[Owner words quoted verbatim; 2026-11-10T10:02:00+00:00; Running compass; "
+                f"carried to this work by the host (reached this work); handle {address}]\n{own['text']}") in text
+    for role in ("root", "child", "nanny"):
+        text = "\n".join(message["content"] for message in messages[role])
+        assert text.count(own["text"]) == 1 and foreign["text"] not in text
+        held = held_owner_messages(actors[role])[address]
+        assert (held["text"], held["chat_id"], held["ts"]) == (own["text"], room["chat_id"], own["ts"])
+        before = deepcopy(messages[role])
+        drain(role)
+        assert messages[role] == before
+    assert own["text"] not in drain("other")
+
+
+@pytest.mark.parametrize("comment", ["", "  when the tide turns  "])
+def test_history_of_a_relay_preserves_the_act_or_exact_words(tmp_path, comment):
+    from ouroboros.dialogue_provenance import relation_text
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+
+    card = {"quiz_id": "tide-card", "state": "answered", "question": "Which chart?",
+            "options": ["Use the tide chart"], "answered_index": 0, "comment": comment}
+    row = {"type": "quiz_answer", "task_id": "chart-maker", "quiz": card, "chat_id": 1, "ts": "2040-02-11T12:00:00Z"}
+    quote = owner_quote(tmp_path, row)
+    relay = relay_envelope("chart-handoff", [quote], chat_id=1)
+    assert relay["text"] == (comment or "1. Use the tide chart")
+    frame = relation_text({"relay": relay})
+    assert quote["source"]["address"] in frame
+    if comment:
+        assert "Owner words quoted" in frame and frame.endswith("\n" + comment)
+    else:
+        assert "pressed" in frame and "Use the tide chart" in frame and "chart-maker" in frame
+        assert "Owner words quoted" not in frame
+
+
+def test_relay_puts_last_local_words_on_each_press_and_excludes_carried_words(tmp_path):
+    import queue
+    from ouroboros.answer_facts import last_own_words
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, write_relay
+
+    ctx = context(tmp_path)
+    local = {"source": "direct_incoming", "content": "Keep the blue bowl", "client_message_id": "local-blue",
+             "chat_id": "1", "ts": "2040-01-01T01:00:00Z"}
+    other = {**local, "client_message_id": "other-blue", "carried": True, "ts": "2040-01-02T01:00:00Z"}
+    ctx._owner_directives = [other]
+    assert last_own_words(ctx) == ""
+    ctx._owner_directives = [local, other]
+    line = last_own_words(ctx)
+    assert "local-blue" in line
+    card = {"quiz_id": "bowl", "state": "answered", "question": "Which bowl?", "options": ["Blue"], "answered_index": 0}
+    quotes = []
+    for index, comment in enumerate(("", "", "  here  ")):
+        row = {"type": "quiz_answer", "direction": "system", "source": "owner_quiz_answer", "task_id": "bowl-maker",
+               "quiz": {**card, "comment": comment}, "chat_id": 1, "ts": local["ts"], "client_message_id": f"bowl-{index}"}
+        quotes.append(owner_quote(tmp_path, row))
+    assert write_relay(tmp_path, ctx.task_id, relay_id="bowl-delivery", note="Read the cards",
+                       quotes=quotes, chat_id=1, teller_task_id="bowl-runner")[1]
+    messages = []
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    owner_rows = [m for m in messages if m.get("_host_context_kind") == "owner_words"]
+    assert [line in m["content"] for m in owner_rows] == [True, True, False]
+    assert all(line not in m["content"] for m in messages if m not in owner_rows)
+
+
+def test_a_carried_corpus_answer_keeps_its_card_without_a_room_row(tmp_path):
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay
+    from ouroboros.owner_words import answered_card_reply
+
+    ctx = context(tmp_path)
+    card = {"quiz_id": "reed-option", "question": "Which reed?", "options": ["Tall reed"],
+            "answered_index": 0}
+    target = answered_card_reply(card, "reed-maker")
+    ctx._owner_directives = [
+        {"source": "owner_press", "content": "1. Tall reed", "reply_to": target, "source_task_id": "reed-maker",
+         "quiz_id": "reed-option", "client_message_id": "reed-press", "chat_id": "1"},
+        {"source": "owner_mailbox", "content": "  before dusk  ", "client_message_id": "reed-text", "chat_id": "1"}]
+    child = _helper(tmp_path, "reed-reader")
+    frames = []
+    for _, _, quote, _, _ in _rows_to_carry(ctx, tmp_path):
+        entry, created = _carried_entry(tmp_path, tmp_path, child.task_id, quote, went_to=ctx.task_id)
+        assert created
+        inject_relay(child, entry, frames)
+    assert len(frames) == 2
+    press, words = (row["content"] for row in frames)
+    assert "Owner words quoted verbatim" not in press and "pressed" in press
+    assert "Which reed?" in press and "reed-maker" in press
+    assert "Owner words quoted verbatim" in words and words.endswith("  before dusk  ")
+    assert not getattr(child, "_owner_directives", None)
+
+
+def test_a_relay_built_before_act_labels_still_renders_a_press_as_a_press(tmp_path):
+    from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
+    from ouroboros.dialogue_provenance import relation_text
+
+    card = {"quiz_id": "paper-choice", "question": "Which paper?", "state": "answered",
+            "options": ["Green paper"], "answered_index": 0}
+    row = {"type": "quiz_answer", "source": "owner_quiz_answer", "direction": "system", "task_id": "paper-maker",
+           "quiz": card, "chat_id": 1, "ts": "2040-01-01T00:00:00Z"}
+    quote = owner_quote(tmp_path, row)
+    quote.pop("input_source", None)
+    envelope = relay_envelope("paper-mail", [quote], chat_id=1)
+    messages = []
+    ctx = context(tmp_path)
+    inject_relay(ctx, {"kind": "relay_entry", "relay": envelope, "source_task_id": "paper-courier",
+                       "owner_rows": [row], "text": "From the maker"}, messages)
+    assert "Owner card press" in messages[0]["content"] and "Owner words quoted verbatim" not in messages[0]["content"]
+    assert "paper-maker" in messages[0]["content"] and "pressed" in relation_text({"relay": envelope})
+    [act] = ctx._owner_directives
+    assert act["source_task_id"] == "paper-maker" and act["relayed_from_task_id"] == "paper-courier"
+
+
+@pytest.mark.parametrize("kind", ["press", "comment", "unavailable"])
+def test_reference_only_answer_uses_its_source_store_for_history_and_receipt(tmp_path, kind):
+    from ouroboros.dialogue_provenance import quote_words, relation_text
+    from ouroboros.owner_quiz import record_answered, record_asked
+    from ouroboros.owner_relay import inject_relay, owner_quote
+    from ouroboros.owner_words import owner_words_contain
+
+    source_root, asker, quiz = tmp_path / "source", "reed-desk", "reed-choice"
+    label, comment = "Use the reed map", "  after dusk  " if kind == "comment" else ""
+    # The recipient has a different card under the same task and quiz ids.
+    for root, value in ((tmp_path, "unrelated answer"), (source_root, comment)):
+        if root == source_root and kind == "unavailable":
+            continue
+        record_asked(root, asker, quiz_id=quiz, question="Which map?", options=[label])
+        record_answered(root, asker, quiz_id=quiz, option_index=0, comment=value, request_id="reed-answer")
+    row = {"direction": "in", "text": comment or "1. " + label, "chat_id": 1, "ts": "2040-01-01T03:00:00Z",
+           "client_message_id": "reed-late", "late_answer": {"task_id": asker, "quiz_id": quiz},
+           "_owner_source_root": str(source_root)}
+    quote = owner_quote(tmp_path, row)
+    entry, created = write_relay(tmp_path, "reed-reader", relay_id="reed-relay", note="Read the choice",
+                                 quotes=[quote], teller_task_id="reed-teller", chat_id=1)
+    assert created
+    history = relation_text({"relay": entry["relay"]})
+    ctx, frames = context(tmp_path), []
+    inject_relay(ctx, entry, frames)
+    [received] = ctx._owner_directives
+    assert quote_words(row, source_root) == comment
+    assert not owner_words_contain(ctx, label) and not owner_words_contain(ctx, "unrelated answer")
+    assert ("Owner words quoted" in history) == bool(comment)
+    expected = {"press": "owner_press", "comment": "owner_mailbox", "unavailable": "owner_card_input"}[kind]
+    assert received["source"] == quote["input_source"] == expected
+    if kind != "unavailable":
+        assert received["content"] == row["text"] and received["reply_to"]["address"] == "quiz reed-choice of task reed-desk"
+        assert "Which map?" in quote["question_frame"] and "Which map?" in frames[0]["content"]
+
+
+def test_a_lost_submission_stays_an_input_through_carriage_and_onward_relay(tmp_path):
+    from ouroboros.loop_messages import owner_input_revision, owner_reply_owed
+    from ouroboros.owner_mailbox import KIND_CARD_INPUT, write_owner_message
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay, owner_quote
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+
+    ctx = context(tmp_path)
+    assert write_owner_message(tmp_path, "An old card frame", ctx.task_id, kind=KIND_CARD_INPUT,
+                               msg_id="card_input:card_0123456789abcdef:elm")
+    _drain_incoming_messages([], queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    [lost] = ctx._owner_directives
+    words = lost["content"]
+    assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx) and not owner_words_contain(ctx, words)
+    child = _helper(tmp_path, "elm-reader")
+    [(_, _, quote, _, _)] = _rows_to_carry(ctx, tmp_path)
+    entry, created = _carried_entry(tmp_path, tmp_path, child.task_id, quote, went_to=ctx.task_id)
+    assert created
+    frames = []
+    inject_relay(child, entry, frames)
+    assert "Owner card input" in frames[0]["content"] and "Owner words quoted" not in frames[0]["content"]
+    receiver = context(tmp_path)
+    held = next(iter(held_owner_messages(child).values()))
+    from ouroboros.dialogue_provenance import quote_words
+    assert quote_words(held, tmp_path) == ""
+    ordinary, _ = source(tmp_path)
+    onward, created = write_relay(tmp_path, "elm-receiver", relay_id="elm-onward", note="Two inputs",
+                                  quotes=[owner_quote(tmp_path, held), owner_quote(tmp_path, ordinary)],
+                                  teller_task_id=child.task_id, chat_id=1)
+    assert created
+    inject_relay(receiver, onward, [])
+    assert receiver._owner_directives[0]["source"] == "owner_card_input"
+    assert not owner_words_contain(receiver, words) and not cited_owner_basis(receiver, words)[0]
+    assert owner_words_contain(receiver, ordinary["text"])
+
+
+@pytest.mark.parametrize("first_available", [False, True], ids=["gap-first", "answer-first"])
+@pytest.mark.parametrize("comment", ["", "  after moonrise  "], ids=["press", "comment"])
+def test_reference_only_relay_quotes_one_read_of_the_askers_store(tmp_path, monkeypatch, first_available, comment):
+    from ouroboros import owner_quiz
+    from ouroboros.dialogue_provenance import relation_text
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+
+    source_drive, asker, quiz = tmp_path / "elm-room", "elm-desk", "reed-map"
+    label, question = "File the reed map", "Which map?"
+    owner_quiz.record_asked(source_drive, asker, quiz_id=quiz, question=question, options=[label])
+    owner_quiz.record_answered(source_drive, asker, quiz_id=quiz, option_index=0, comment=comment, request_id="elm-answer")
+    row = {"direction": "in", "chat_id": 3, "client_message_id": "elm-late", "text": comment or "1. " + label,
+           "late_answer": {"task_id": asker, "quiz_id": quiz}, "_owner_source_root": str(source_drive)}
+    original, reads = owner_quiz.quiz_states, []
+
+    def alternating(drive, task):
+        reads.append((str(drive), task))
+        return original(drive, task) if (len(reads) == 1) == first_available else {}
+
+    monkeypatch.setattr(owner_quiz, "quiz_states", alternating)
+    quote = owner_quote(tmp_path / "recipient", row)
+    history = relation_text({"relay": relay_envelope("reed-relay", [quote], chat_id=3)})
+    if first_available:
+        assert quote["input_source"] == ("owner_mailbox" if comment else "owner_press")
+        assert quote["text"] == row["text"] and question in quote["question_frame"]
+        assert ("Owner words quoted" in history) is bool(comment)
+        assert (comment or label) in history
+    else:
+        assert quote["input_source"] == "owner_card_input" and "question_frame" not in quote
+        assert "accepted answer is unavailable" in quote["text"] and quote["text"] in history
+        assert "Owner words quoted" not in history
+    assert reads == [(str(source_drive), asker)]

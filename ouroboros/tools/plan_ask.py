@@ -1,9 +1,8 @@
 """The paid act of ``plan_task``: one ask to the council over the plan record.
 
 Composition (DESIGN §3): the default council is the review pool, which already
-falls back to Main for a valid empty pool; Blocking widens a body plan's first ask
-to every marked reviewer, while Advisory requires a counted seat and a reason to narrow;
-a mind-named enabled catalog row outside the pool is a participant whose
+falls back to Main for a valid empty pool; a body plan's first ask outside Cyber Pro
+requires a counted seat and a reason to narrow; a mind-named enabled catalog row outside the pool is a participant whose
 objections are answered but never hold; children the mind schedules are not
 catalog rows and cannot be named. Each participant receives its own host-built
 delivery (``plan_packet``; what it is told is selected by ``plan_delivery``): the
@@ -198,7 +197,7 @@ def _pool_slots(reviewer_effort: str) -> List[Any]:
 
 def resolve_participants(ask: Any, *, first_body_ask: bool, reviewer_effort: str = "",
                          reason: str = "") -> tuple[List[Participant], Dict[str, Any]]:
-    """Use the shared composer; only Blocking tops up the first own-body ask."""
+    """Use the shared composer; the first own-body ask keeps the counted floor."""
     from ouroboros.reviewer_slot_config import PanelCompositionError, compose_review_panel
 
     try:
@@ -208,20 +207,9 @@ def resolve_participants(ask: Any, *, first_body_ask: bool, reviewer_effort: str
     except PanelCompositionError as exc:
         detail = str(exc).replace("REVIEWER_UNKNOWN:", "PARTICIPANT_UNKNOWN:", 1)
         raise PlanAskRefused("TOOL_ARG_ERROR", f"ERROR: PLAN_{detail} Nothing was written.") from exc
-    requested = set(panel.facts["reviewers_requested"])
-    widened = bool(panel.facts["widened_from"])
-    # Resolve handles before deciding which counted participants the host added.
-    from ouroboros.reviewer_slot_config import catalog_review_row
-    for name in tuple(requested):
-        try:
-            requested.add(catalog_review_row(None, name).slot_id)
-        except ValueError:
-            pass  # Main and test-provided pool seats already use their stored id.
-    seats = sorted(panel.seats, key=lambda seat: seat.slot.slot_id not in requested) if widened else panel.seats
     return ([Participant(replace(seat.slot, role_hint="plan reviewer", timeout_sec=PLAN_REVIEW_SLOT_TIMEOUT_SEC,
-                                max_tokens=PLAN_REVIEW_MAX_TOKENS, default_temperature=0.2), owner_marked=not seat.additional,
-                         host_added=widened and not seat.additional and seat.slot.slot_id not in requested)
-             for seat in seats], panel.facts)
+                                max_tokens=PLAN_REVIEW_MAX_TOKENS, default_temperature=0.2), owner_marked=not seat.additional)
+             for seat in panel.seats], panel.facts)
 
 
 def first_body_ask(record: Mapping[str, Any], revision: Optional[Mapping[str, Any]], *, body: bool = False) -> bool:
@@ -295,7 +283,7 @@ def _task_objective(ctx: Any) -> str:
     return objective
 
 
-def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, enforcement: str, by_retrieval: bool) -> str:
+def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, by_retrieval: bool) -> str:
     from ouroboros.context_layout import design_navigation
     from ouroboros.tools.review_checklist import load_checklist_section
 
@@ -309,7 +297,7 @@ def stable_prompt(ctx: Any, *, body: bool, system_root: pathlib.Path, enforcemen
     design_map = (design_navigation(_governance_text(system_root, "docs/DESIGN.md") or None,
                                     source=str(pathlib.Path(system_root) / "docs/DESIGN.md")) if body else None)
     return plan_packet.build_stable_prompt(
-        checklist_section=checklist, body=body, enforcement=enforcement,
+        checklist_section=checklist, body=body,
         bible_text=bible or None, architecture_text=architecture or None,
         bible_locator=str(pathlib.Path(system_root) / "BIBLE.md"),
         architecture_locator=str(pathlib.Path(system_root) / "docs" / "ARCHITECTURE.md"),
@@ -388,7 +376,6 @@ class PreparedAsk:
     reviewer_effort: str
     body: bool
     body_first_ask: bool
-    enforcement: str
     system_root: pathlib.Path
     active_root: pathlib.Path
     panel: Dict[str, Any] = field(default_factory=dict)
@@ -402,7 +389,6 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     ``revision=None`` is a reading of the request before any plan: no paths are declared, so its body
     fact is the task's own declaration (``plan_is_body`` with no paths)."""
     from ouroboros import body_candidate
-    from ouroboros.config import get_review_enforcement
     from ouroboros.owner_words import objective_author_text
     from ouroboros.tools.plan_dialogue import attach_own_dialogue, dialogue_slot_inputs, render_dialogue, session_input_limits
     from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
@@ -420,7 +406,6 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
         raise PlanAskRefused("CAPABILITY_UNAVAILABLE", "ERROR: PLAN_ASK_SKIPPED_DEADLINE: " + deadline + " Nothing was written.")
     ask_id = plan_record.next_ask_id(record)
     retry_key = f"plan_ask:{task_id}:{ask_id}"
-    enforcement = str(get_review_enforcement() or "")
     slots = effective_plan_slots([p.slot for p in participants])
     by_seat = {str(s.slot_id): s for s in slots}
     for participant in participants:
@@ -429,8 +414,8 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     manifest = attach_own_dialogue(ctx, state_root, manifest, f"plan-ask-{task_id}-{ask_id}", persist=True)
     dialogue_section, snapshot_section = render_dialogue(manifest)  # rows before the plan, capture facts after
     try:
-        system_prompt = stable_prompt(ctx, body=body, system_root=system_root, enforcement=enforcement, by_retrieval=False)
-        session_prompt = stable_prompt(ctx, body=body, system_root=system_root, enforcement=enforcement, by_retrieval=True)
+        system_prompt = stable_prompt(ctx, body=body, system_root=system_root, by_retrieval=False)
+        session_prompt = stable_prompt(ctx, body=body, system_root=system_root, by_retrieval=True)
     except plan_packet.PlanPacketError as exc:
         raise PlanAskRefused("TOOL_ERROR", f"ERROR: PLAN_ASK_PACK_INCOMPLETE: {exc}. Nothing was written.") from exc
     contents, session_tasks, slot_messages, session_threads, continued = {}, {}, {}, {}, {}
@@ -504,7 +489,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
         system_prompt=system_prompt, session_prompt=session_prompt, contents=contents, session_tasks=session_tasks,
         delivery=merged, session_threads=session_threads, continued=continued, manifest=manifest, message=message,
         attach=list(attach or []), reviewer_effort=str(reviewer_effort or ""), body=body, body_first_ask=body_first,
-        enforcement=enforcement, system_root=system_root, active_root=active_root, panel=panel)
+        system_root=system_root, active_root=active_root, panel=panel)
 
 
 # ------------------------------------------------------------------ dispatch

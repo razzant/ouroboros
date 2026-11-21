@@ -8,16 +8,41 @@ asks) sends one UTF-8 JSON line per TCP connection and gets one line back:
 
 - ``{"armed": true, "token": T}`` → ``{"armed": true}`` while the session is live,
   else ``{"armed": false, "block": reason}``: the guard is acknowledged before any
-  page action.
+  page action. A session whose task owns its calls adds ``"capabilities":
+  {"embedded_resources": true}``: an ``EmbeddedResource`` blob it returns becomes a task
+  artifact (``mcp_result_images``). That is support of the format, not a promise that
+  storing succeeds; a host without the field (or a session without a task) keeps the
+  older reply, and a server reads absence as no support.
 - ``{"action": "evaluate", "url": U?, "token": T}`` → ``{"block": ""}`` or a reason:
   ``browser_policy.browser_script_block_reason``, then the URL decision for a
   non-empty ``U``.
 - ``{"url", "method", "post_data", "resource_type"?, "body_present"?, "token"}`` →
   ``{"block": browser_policy.browser_request_block_reason(...)}`` for every routed
   request, the agent's or the human's in the shared tab.
+- ``{"action": "file_intake", "files": [{"path": P, "root": R?, "bucket": B?, "skill_name": S?}, ...],
+  "token": T}`` → ``{"block": "", "files": [{"path", "name", "size", "sha256"}, ...]}`` or a reason:
+  local files chosen for a page's file input. Each entry is admitted by
+  ``core_file_tools.read_admission``, ``read_file``'s resource admission (profile, Presence
+  resource ceiling, runtime-data and protected paths) of its symlink-resolved target, with ``read_file``'s
+  root inference (an absolute path selects the root holding it, else ``active_workspace``) and its
+  own optional selectors (``bucket``/``skill_name`` of a ``skill_payload`` file, ``""`` when absent);
+  each must open no-follow as a regular file through the store's raw reader as ``read_file`` reads
+  (``ConfinedDirectory.open_for_read`` of a folder held for search alone: a WAL index refused unopened, no
+  descriptor closed under this process's SQLite locks; an absent packed checkpoint written back first, as
+  ``read_file`` does), a managed work path through ``read_file``'s own ``work_domain.read_bytes`` (never a
+  service open of its spelling). Intake does not invoke the ``read_file`` tool or inherit its
+  availability; the calling MCP tool retains its own dispatch checks. At most ``FILE_INTAKE_FILES``
+  files and ``FILE_INTAKE_BYTES`` (20 MiB) together are selected, a growing file only to that bound.
+  Restoring a packed source happens first and may read and write the whole member, even when the
+  selection then exceeds the bound. Selected bytes are retained by ``store_actor_source_bytes``
+  and answered by absolute ``path``, original basename ``name`` (the selected spelling's),
+  ``size`` and ``sha256``, never inline. Any refusal, or the session closing meanwhile,
+  answers no file at all; bytes already retained stay, unanswered, under their digest name.
+  Upload copies share task-source retention and packing, with no per-upload cleanup: at most
+  20 MiB of distinct source bytes are added per question; identical digest names are reused.
 
 Every decision reads the session's bound ToolContext with the actor facts
-``tools/browser.py`` passes for its own route (restricted profile, effective mode);
+``tools/browser_session.py`` passes for its own route (restricted profile, effective mode);
 no predicate is copied here or into JavaScript. The client treats anything but the
 exact allowance as a block. Decisions run on this listener's worker threads, never
 on the MCP SDK event loop, so DNS inside the policy cannot stall the session's
@@ -36,17 +61,20 @@ before page actions, here over portable loopback TCP and without its tool table 
 from __future__ import annotations
 
 import contextvars
+import errno
 import hmac
 import json
 import logging
+import pathlib
 import secrets
 import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+from ouroboros import work_domain
 from ouroboros.config import (
     MCP_BROWSER_GUARD_LINE_BYTES, MCP_BROWSER_GUARD_PENDING, MCP_BROWSER_GUARD_READ_SEC, MCP_BROWSER_GUARD_WORKERS,
 )
@@ -58,6 +86,10 @@ TOKEN_ENV = "OUROBOROS_BROWSER_GUARD_TOKEN"
 GUARD_ENV_NAMES = frozenset({ADDRESS_ENV, TOKEN_ENV})  # host-owned: a saved server config may not set them
 _CLOSED = "BROWSER_SESSION_CLOSED: the task's MCP session is closing"
 _FULL = "BROWSER_POLICY_UNAVAILABLE: too many browser-policy questions are already waiting"
+_INTAKE = "BROWSER_FILE_INTAKE_BLOCKED"
+FILE_INTAKE_FILES = 16  # files one file_intake question may select
+FILE_INTAKE_BYTES = 20 * 1024 * 1024  # their bytes together, held in memory until every one is retained
+_SELECTORS = ("root", "bucket", "skill_name")  # read_file's own optional target selectors, passed as it passes them
 
 
 class BrowserGuard:
@@ -163,7 +195,11 @@ class BrowserGuard:
             reason = _CLOSED
         elif arming:
             self.armed = True
-            return {"armed": True}
+            return {"armed": True, **self._capabilities()}
+        elif facts.get("action") == "file_intake":
+            reason, files = self._file_intake(facts.get("files"))
+            if not reason and not self._closing.is_set():  # every file retained while the session lived
+                return {"block": "", "files": files}
         elif "action" in facts:
             reason = (self._script_reason(facts.get("url")) if facts.get("action") == "evaluate"
                       else "BROWSER_POLICY_UNAVAILABLE: unknown guard action")
@@ -172,6 +208,19 @@ class BrowserGuard:
         if self._closing.is_set():  # the session ended while this decision ran
             reason = _CLOSED
         return {"armed": False, "block": reason} if arming else {"block": reason}
+
+    def _capabilities(self) -> Dict[str, Any]:
+        """What this host does with the session's results, for a server choosing its result format: an embedded
+        resource blob becomes a registered artifact of the owning task (``mcp_result_images``). Only a session
+        whose task owns its calls says so; storing the bytes may still fail (a named gap in that result)."""
+        try:
+            from ouroboros.mcp_result_images import _owner
+
+            owned = _owner(self._ctx) is not None
+        except Exception:  # an unreadable owner claims nothing; the guard itself stays armed
+            log.warning("MCP browser guard could not read its session's task owner", exc_info=True)
+            owned = False
+        return {"capabilities": {"embedded_resources": True}} if owned else {}
 
     def _actor(self) -> tuple:
         from ouroboros import browser_policy
@@ -213,6 +262,129 @@ class BrowserGuard:
         except Exception:
             log.warning("MCP browser guard could not read a request's target identity", exc_info=True)
             return "BROWSER_POLICY_UNAVAILABLE: runtime service identity could not be read"
+
+    def _file_intake(self, files: Any) -> tuple:
+        """``(block, retained)``: every selected file read within the bounds, then all retained, or none answered."""
+        from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
+        from ouroboros.task_results import validate_task_id
+        from ouroboros.tool_access import canonical_data_root
+
+        if not isinstance(files, list) or not 0 < len(files) <= FILE_INTAKE_FILES or any(
+                not isinstance(entry, dict) or set(entry) - {"path", *_SELECTORS}
+                or not isinstance(entry.get("path"), str) or not entry["path"].strip() or "\x00" in entry["path"]
+                or any(not isinstance(entry.get(key, ""), str) for key in _SELECTORS)
+                for entry in files):
+            return (f"{_INTAKE}: files is 1 to {FILE_INTAKE_FILES} {{path, root?, bucket?, skill_name?}} objects "
+                    "with a nonempty path"), None
+        try:
+            task_id, store = validate_task_id(getattr(self._ctx, "task_id", None)), canonical_data_root(self._ctx)
+        except Exception:
+            return f"{_INTAKE}: no task owns this browser session to retain the files", None
+        selected, left = [], FILE_INTAKE_BYTES
+        for number, entry in enumerate(files, 1):
+            if self._closing.is_set():
+                return _CLOSED, None
+            refusal, name, data = self._intake_read(entry, left)
+            if refusal:
+                return f"{_INTAKE}: file {number} of {len(files)} {refusal}", None
+            selected.append((name, data))
+            left -= len(data)
+        retained = []
+        try:
+            for name, data in selected:
+                if self._closing.is_set():
+                    return _CLOSED, None
+                ref = store_actor_source_bytes(store, task_id, category="tool_results", source_id="browser_upload",
+                                               data=data, extension=pathlib.PurePath(name).suffix[1:])
+                retained.append({"path": str(task_artifact_dir_path(store, task_id) / ref["path"]), "name": name,
+                                 "size": ref["size"], "sha256": ref["sha256"]})
+        except Exception as exc:
+            log.warning("MCP browser guard could not retain selected upload files", exc_info=True)
+            return f"{_INTAKE}: the selected files could not be retained ({type(exc).__name__})", None
+        return "", retained
+
+    def _intake_read(self, entry: Dict[str, str], left: int) -> tuple:
+        """One resource-admitted entry: at most ``left`` selected bytes, after any whole-member pack restore."""
+        from ouroboros.store import WalIndexRefused
+        from ouroboros.tools.core_file_tools import read_admission
+        from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+
+        path = entry["path"]
+        try:
+            root = entry.get("root") or _root_containing_absolute_path(self._ctx, "read_file", path) or "active_workspace"
+            _root, binding, refusal = read_admission(self._ctx, root, path, bucket=entry.get("bucket", ""),
+                                                     skill_name=entry.get("skill_name", ""))
+        except Exception as exc:
+            log.warning("MCP browser guard could not admit a selected upload file", exc_info=True)
+            return f"could not be admitted ({type(exc).__name__})", "", b""
+        if refusal is not None:  # read_file's own words: a ToolResult's text, or a protected path's final text
+            return f"is refused: {str(getattr(refusal, 'text', refusal)).removeprefix('⚠️ ')}", "", b""
+        target = binding.target_path
+        name = pathlib.PurePath(path).name
+        name = name if name not in ("", ".", "..") else target.name
+        if work_domain.is_work(target):  # admitted by spelling: read as read_file reads it, never service-side
+            return self._work_read(target, name, left)
+        try:
+            if target.is_dir():
+                return "is a folder; select each file in it", "", b""
+            try:
+                data = self._plain_read(target, left)
+            except FileNotFoundError:
+                from ouroboros.evidence_packs import materialize_path
+                try:  # a packed checkpoint handle is written back beside its name first, as read_file does
+                    restored = materialize_path(target)
+                except Exception as exc:  # noqa: BLE001 - a damaged pack restores nothing; the file stays absent
+                    log.warning("MCP browser guard could not restore a packed upload file", exc_info=True)
+                    return f"could not be restored from its evidence pack ({type(exc).__name__})", "", b""
+                if restored is None:
+                    raise
+                data = self._plain_read(target, left)
+        except FileNotFoundError:
+            return "does not exist", "", b""
+        except WalIndexRefused:
+            return "is a SQLite WAL index, never read as a file", "", b""
+        except OSError as exc:
+            if exc.errno is None:  # the opened descriptor is no regular file (``ConfinedDirectory.open``)
+                return "is not a regular file", "", b""
+            return f"cannot be read ({type(exc).__name__}: {exc.strerror or 'unreadable'})", "", b""
+        if data is None or len(data) > left:
+            return f"exceeds the {FILE_INTAKE_BYTES} bytes the selection may hold together", "", b""
+        return "", name, data
+
+    @staticmethod
+    def _plain_read(target: pathlib.Path, left: int) -> Optional[bytes]:
+        """At most ``left + 1`` bytes of a resolved non-work file, ``None`` when it is larger than ``left``. A link
+        swapped in as the final component fails and a FIFO never blocks. Read as read_file reads (the store's raw
+        reader): a WAL index is refused unopened and every other file is read through this process's shared
+        descriptor, whose close drops no lock of its SQLite connections. Its folder is held for search alone, as
+        read_file's path read crosses one it may not list (``--x``)."""
+        from ouroboros.confined_files import ConfinedDirectory
+
+        with ConfinedDirectory(target.parent, search_only=True) as directory:
+            handle, observed = directory.open_for_read(target.name)
+            with handle:
+                if observed.st_size > left:
+                    return None
+                return handle.read(left + 1)  # a file growing while read still stops at the bound
+
+    @staticmethod
+    def _work_read(target: pathlib.Path, name: str, left: int) -> tuple:
+        """A managed work file's bytes through ``read_file``'s own reader (``work_domain.read_bytes``): its folders
+        descended from the mapping's root with no link followed, a link on its way the work domain's own read in
+        its container; the service never opens the pathname, which an employee's folder link could steer."""
+        try:
+            data = work_domain.read_bytes(target, limit=left + 1)
+        except IsADirectoryError:
+            return "is a folder; select each file in it", "", b""
+        except FileNotFoundError:
+            return "does not exist", "", b""
+        except OSError as exc:
+            if exc.errno == errno.EINVAL:
+                return "is not a regular file", "", b""
+            return f"cannot be read ({type(exc).__name__}: {exc.strerror or 'unreadable'})", "", b""
+        if len(data) > left:
+            return f"exceeds the {FILE_INTAKE_BYTES} bytes the selection may hold together", "", b""
+        return "", name, data
 
 
 def _send(connection: socket.socket, answer: Dict[str, Any], timeout: float) -> None:

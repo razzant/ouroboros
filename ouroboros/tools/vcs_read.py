@@ -29,23 +29,25 @@ READ_DESCRIPTION = (
 
 _CONTENT_ACTIONS = frozenset({"show", "file", "blame"})
 _ACTIONS = frozenset({"status", "diff", "log", "show", "file", "blame", "refs", "rev_parse", "merge_base", "identity"})
+_PATH_ACTIONS = frozenset({"status", "diff", "log", "show", "file", "blame"})
+_PAIR_ACTIONS = frozenset({"merge_base", "diff"})  # the two that compare revisions: base/head, never ref
+_NO_REF_ACTIONS = frozenset({"merge_base", "identity", "status", "diff"})
+_REVISION_ACTIONS = frozenset({"log", "show", "file", "blame", "rev_parse"})  # ref names their revision
+_SUMMARY_ACTIONS = frozenset({"diff", "show"})  # stat / name_only summarize a comparison or a commit
 _CAPTURE_BYTES = 1024 * 1024
+_CAPTURE_STDERR_BYTES = 64 * 1024
 _CONFIG_LOCATIONS = frozenset({"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"})
 
 
-def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
-    """Capture one local Git read with the inherited Git environment and helpers disabled.
-
-    The user and system config stay read, from the same locations status and diff
-    use: their filters, excludes, autocrlf and safe.directory decide what "clean" means.
-    """
+def _read_git_command(args: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Local, non-interactive object reads; deny transports even on Git predating GIT_NO_LAZY_FETCH."""
     from ouroboros.git_observation import host_git_env
 
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("GIT_") or key in _CONFIG_LOCATIONS}
     env.update({
         "LC_ALL": "C", "LANG": "C", "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0",
     })
     cmd = [
@@ -54,6 +56,21 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
         "-c", f"core.hooksPath={os.devnull}",
         "-c", "log.showSignature=false",
     ]
+    return [*cmd, *args], host_git_env(env)
+
+
+def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    """Capture one local Git read with the inherited Git environment and helpers disabled.
+
+    The user and system config stay read, from the same locations status and diff
+    use: their filters, excludes, autocrlf and safe.directory decide what "clean" means.
+    """
+    from ouroboros import work_domain
+
+    cmd, env = _read_git_command(args)
+    if work_domain.is_work(repo):  # its config, links and objects are the work domain's: read there, flags kept
+        return _capture_work_git(repo, cmd, env)
+
     # Drain both pipes concurrently, retaining only bounded prefixes. A large
     # object never first accumulates in communicate()/capture_output memory.
     def drain(stream, limit):
@@ -63,10 +80,10 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
             prefix.extend(chunk[:max(0, limit - len(prefix))])
         return bytes(prefix), total - len(prefix)
 
-    with subprocess.Popen([*cmd, *args], cwd=repo, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, env=host_git_env(env)) as process, ThreadPoolExecutor(max_workers=2) as pool:
+    with subprocess.Popen(cmd, cwd=repo, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, env=env) as process, ThreadPoolExecutor(max_workers=2) as pool:
         stdout = pool.submit(drain, process.stdout, _CAPTURE_BYTES)
-        stderr = pool.submit(drain, process.stderr, 65536)
+        stderr = pool.submit(drain, process.stderr, _CAPTURE_STDERR_BYTES)
         try:
             process.wait(timeout=GIT_READ_CAPTURE_TIMEOUT_SEC)
         except subprocess.TimeoutExpired:
@@ -74,9 +91,31 @@ def _capture_read_git(repo: pathlib.Path, args: list[str]) -> subprocess.Complet
             process.wait()
             raise
         out, omitted = stdout.result()
-        err, _ = stderr.result()
+        err, err_omitted = stderr.result()
     completed = subprocess.CompletedProcess(cmd, process.returncode, out, err)
     completed.stdout_omitted = omitted
+    completed.stderr_omitted = err_omitted
+    return completed
+
+
+def _capture_work_git(repo: pathlib.Path, cmd: list[str], env: dict) -> subprocess.CompletedProcess[bytes]:
+    """``_capture_read_git`` for a work repository: the same command and flags run as the work domain
+    (``work_domain.run``), streamed into service temporaries so only the same bounded prefixes are kept."""
+    import tempfile
+
+    from ouroboros import work_domain
+
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        done = work_domain.run(cmd, cwd=str(repo), env=env, stdout=out, stderr=err,
+                               timeout=GIT_READ_CAPTURE_TIMEOUT_SEC)
+        total = out.seek(0, os.SEEK_END)
+        err_total = err.seek(0, os.SEEK_END)
+        out.seek(0)
+        err.seek(0)
+        prefix, diagnostics = out.read(_CAPTURE_BYTES), err.read(_CAPTURE_STDERR_BYTES)
+        completed = subprocess.CompletedProcess(cmd, done.returncode, prefix, diagnostics)
+    completed.stdout_omitted = total - len(prefix)
+    completed.stderr_omitted = err_total - len(diagnostics)
     return completed
 
 
@@ -97,10 +136,45 @@ def _run_read_git(repo: pathlib.Path, args: list[str], *, preserve_output: bool 
     return text
 
 
-def _object(repo: pathlib.Path, ref: str, kind: str) -> str:
+def _exact_oid(repo: pathlib.Path, args: list[str], *, ambiguity: bool = False) -> str:
+    """One Git lookup read as exact bytes: complete output and diagnostics, exit 0, no ambiguous-refname
+    warning when ``ambiguity`` (Git itself reports it; every other diagnostic never blocks), then one
+    full object id and its single terminator."""
+    captured = _capture_read_git(repo, args)
+    if getattr(captured, "stdout_omitted", 0) or getattr(captured, "stderr_omitted", 0):
+        raise RuntimeError("Git revision output or diagnostics were truncated")
+    if captured.returncode or (ambiguity and any(
+        line.startswith(b"warning: refname ") and line.removesuffix(b"\r").endswith(b" is ambiguous.")
+        for line in captured.stderr.split(b"\n")
+    )):
+        raise _git_failure(captured)
+    stdout = captured.stdout
+    if not stdout.endswith(b"\n"):
+        raise ValueError("Git did not resolve one exact object")
+    oid = stdout.removesuffix(b"\r\n" if stdout.endswith(b"\r\n") else b"\n").decode("ascii", "replace")
+    if len(oid) not in (40, 64) or any(c not in "0123456789abcdef" for c in oid):
+        raise ValueError("Git did not resolve one exact object")
+    return oid
+
+
+def _object(repo: pathlib.Path, ref: str, kind: str, *, field: str = "ref", reject_warnings: bool = False) -> str:
     if not ref.strip() or "\x00" in ref or "\n" in ref:
-        raise ValueError("ref must be a nonempty local Git revision")
-    oid = _run_read_git(repo, ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{{kind}}}"])
+        raise ValueError(f"{field} must be a nonempty local Git revision")
+    try:
+        if reject_warnings:
+            # The revision is looked up once as written, in whatever grammar Git reads it, with
+            # core.warnAmbiguousRefs forced on so Git itself reports an ambiguous short ref; only the full
+            # id it names (immutable, never user text) is then typed. No peel operator joins user input.
+            check = ["rev-parse", "--verify", "--end-of-options"]
+            named = _exact_oid(repo, ["-c", "core.warnAmbiguousRefs=true", *check, ref], ambiguity=True)
+            return _exact_oid(repo, [*check, f"{named}^{{{kind}}}"])
+        oid = _run_read_git(repo, ["rev-parse", "--verify", "--end-of-options", f"{ref}^{{{kind}}}"])
+    except RuntimeError as exc:
+        # Which argument did not resolve and where to look, with the observed diagnostic: an absent,
+        # ambiguous or other-typed object and an unsafe repository read alike from the outside.
+        article = "an" if kind[:1] in "aeiou" else "a"
+        raise RuntimeError(f"{field}={ref!r} did not resolve to {article} {kind} here (git: {exc}); nothing was read; "
+                           "list revisions with action=refs or action=log") from exc
     if len(oid) not in (40, 64) or any(c not in "0123456789abcdef" for c in oid):
         raise ValueError("Git did not resolve one exact object")
     return oid
@@ -216,6 +290,56 @@ def _identity(repo: pathlib.Path) -> str:
     }, ensure_ascii=False, sort_keys=True)
 
 
+def _argument_problems(action: str, *, path: str, ref: object, base: object, head: object, staged: bool, stat: bool,
+                       name_only: bool, max_count: object, max_chars: object) -> list[str]:
+    """Every constraint one call violates, each naming field, value and repair (DEVELOPMENT "LLM-first
+    affordances"): one phrase for all of them was retried unchanged.
+    Only what the call says about itself is judged here; Git's answers stay Git's."""
+    problems = []
+    if action not in _ACTIONS:
+        return [f"action={action!r}: use one of {', '.join(sorted(_ACTIONS))}"]
+
+    def given(value: object) -> bool:  # presence, not truthiness: False, 0.0, [] and {} were said, not omitted
+        return value is not None and value != ""
+    if not isinstance(max_count, int) or not 1 <= max_count <= 200:
+        problems.append(f"max_count={max_count!r}: an integer from 1 to 200 (the number of commits log reads)")
+    if not isinstance(max_chars, int) or max_chars < 0:
+        problems.append(f"max_chars={max_chars!r}: 0 (no limit) or a positive integer")
+    if path and action not in _PATH_ACTIONS:
+        problems.append(f"path={path!r} applies to {', '.join(sorted(_PATH_ACTIONS))}; action={action} takes no path")
+    if action in {"file", "blame"} and not path:
+        problems.append(f"action={action} requires path (the file's repository-relative path)")
+    if (given(base) or given(head)) and action not in _PAIR_ACTIONS:
+        named = ", ".join(f"{name}={value!r}" for name, value in (("base", base), ("head", head)) if given(value))
+        repair = (f"for action={action} name the revision with ref" if action in _REVISION_ACTIONS
+                  else "action=refs filters with ref=refs/..." if action == "refs"
+                  else f"action={action} takes no revision; omit base and head")
+        problems.append(f"{named}: base and head apply to diff and merge_base; {repair}")
+    if action == "merge_base" and not (given(base) and given(head)):
+        problems.append("action=merge_base requires both base and head")
+    if action == "diff" and given(head) and (not given(base) or staged):
+        problems.append(f"head={head!r} compares two trees: diff needs base beside it and staged=false")
+    for name, value, actions in (("staged", staged, {"diff"}), ("stat", stat, _SUMMARY_ACTIONS),
+                                 ("name_only", name_only, _SUMMARY_ACTIONS)):
+        if value and action not in actions:
+            problems.append(f"{name}=true applies only to {' and '.join(sorted(actions))}; for action={action} omit {name}")
+    if given(ref) and action in _NO_REF_ACTIONS:
+        repair = f"{action} takes base and head" if action in _PAIR_ACTIONS else "omit ref"
+        problems.append(f"ref={ref!r} does not apply to action={action}; {repair}")
+    elif given(ref) and action == "refs" and (not isinstance(ref, str) or not ref.startswith("refs/")
+                                       or any(c in ref for c in "\x00\n\r :*?[\\")):
+        problems.append(f"ref={ref!r}: for action=refs the filter is a literal refs/ prefix, e.g. refs/heads/")
+    taken = {"ref": action in _REVISION_ACTIONS, "base": action in _PAIR_ACTIONS, "head": action in _PAIR_ACTIONS}
+    for name, value in (("ref", ref), ("base", base), ("head", head)):
+        if not taken[name] or not given(value):
+            continue
+        if not isinstance(value, str):
+            problems.append(f"{name}={value!r}: a local Git revision, written as text")
+        elif not value.strip() or "\x00" in value or "\n" in value:
+            problems.append(f"{name}={value!r}: a nonempty local Git revision")
+    return problems
+
+
 def _vcs_read(
     ctx,
     action: str,
@@ -233,15 +357,13 @@ def _vcs_read(
     """Read Git objects using only the prepared repository and path binding."""
     max_count, max_chars = (int(value) if isinstance(value, str) and value.strip().isdigit() else value
                             for value in (max_count, max_chars))
-    if (action not in _ACTIONS or not isinstance(max_count, int)
-            or not isinstance(max_chars, int) or not 1 <= max_count <= 200 or max_chars < 0
-            or (path and action not in {"status", "diff", "log", "show", "file", "blame"})
-            or ((base or head) and action not in {"merge_base", "diff"})
-            or ((staged or stat or name_only) and action != "diff")
-            or (ref and action in {"merge_base", "identity", "status", "diff"})):
+    ref, base, head = (str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+                       for value in (ref, base, head))
+    if problems := _argument_problems(action, path=path, ref=ref, base=base, head=head, staged=staged, stat=stat,
+                                      name_only=name_only, max_count=max_count, max_chars=max_chars):
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
-            text="⚠️ TOOL_ARG_ERROR (vcs_read): invalid action, limit, or argument for this action.",
+            text="⚠️ TOOL_ARG_ERROR (vcs_read): " + "; ".join(problems) + ". Nothing was read.",
             meta={"operation_outcome": "completed_no_effect"},
         ))
     try:
@@ -284,7 +406,9 @@ def _vcs_read(
                     cmd.extend(["--", f":(literal){literal}"])
                 output = _run_read_git(repo, cmd)
             elif action == "show":
-                cmd = ["show", "--no-ext-diff", "--no-textconv", "--no-color", "--format=fuller", _object(repo, ref or "HEAD", "commit")]
+                summary = ["--name-only"] if name_only else ["--stat"] if stat else []
+                cmd = ["show", "--no-ext-diff", "--no-textconv", "--no-color", "--format=fuller", *summary,
+                       _object(repo, ref or "HEAD", "commit")]
                 if literal:
                     cmd.extend(["--", f":(literal){literal}"])
                 output = _run_read_git(repo, cmd)
@@ -293,14 +417,13 @@ def _vcs_read(
                 output = _run_read_git(repo, ["cat-file", "blob", f"{_object(repo, ref or 'HEAD', 'commit')}:{literal}"], preserve_output=True)
             elif action == "blame":
                 output = _run_read_git(repo, ["blame", "--no-ext-diff", "--no-textconv", _object(repo, ref or "HEAD", "commit"), "--", literal])
-            elif action == "refs":
-                if ref and (not ref.startswith("refs/") or any(c in ref for c in "\x00\n\r :*?[\\")):
-                    raise ValueError("refs filter must be a literal refs/ prefix")
+            elif action == "refs":  # the filter's shape was judged with the other arguments above
                 output = _run_read_git(repo, ["for-each-ref", "--format=%(refname) %(objectname) %(objecttype)", *( [ref] if ref else [] )])
             elif action == "rev_parse":
                 output = _object(repo, ref or "HEAD", "object")
             else:
-                output = _run_read_git(repo, ["merge-base", _object(repo, base, "commit"), _object(repo, head, "commit")])
+                output = _run_read_git(repo, ["merge-base", _object(repo, base, "commit", field="base"),
+                                              _object(repo, head, "commit", field="head")])
         from ouroboros.tools.git_vcs_ops import _limit_git_output, _vcs_result
 
         return _publish_tool_result(ctx, ToolResult(
@@ -330,9 +453,9 @@ def get_tools():
                     "description": "Local revision (default HEAD), or a literal refs/ prefix for refs."},
             "base": {"type": "string", "default": "", "description": "First revision for merge_base, or diff base resolved once to a tree."},
             "head": {"type": "string", "default": "", "description": "Second revision for merge_base or diff; diff requires base and staged=false."},
-            "staged": {"type": "boolean", "default": False, "description": "Diff the index (--staged)."},
-            "stat": {"type": "boolean", "default": False, "description": "Diff summary (--stat)."},
-            "name_only": {"type": "boolean", "default": False, "description": "Diff file names only; takes precedence over stat."},
+            "staged": {"type": "boolean", "default": False, "description": "Diff the index (--staged); diff only."},
+            "stat": {"type": "boolean", "default": False, "description": "Changed-file summary (--stat) of a diff or a shown commit."},
+            "name_only": {"type": "boolean", "default": False, "description": "Changed file names only, for diff or show; takes precedence over stat."},
             "max_count": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20,
                           "description": "Maximum commits returned by log."},
             "max_chars": {"type": "integer", "minimum": 0, "default": 0,

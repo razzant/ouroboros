@@ -572,8 +572,10 @@ def test_legacy_lifecycle_ordering(
             events.append("telegram_client_closed")
 
     class FakeMenu:
+        bot = "7"  # the getMe identity a verified manager carries
+
         def __init__(self, _token: str, chat_id: int, _state: Path, *, client: Any,
-                     api_root: str | None = None) -> None:
+                     api_root: str | None = None, bot: str = "") -> None:
             assert chat_id == 12345 and isinstance(client, FakeTelegramClient)
 
         async def verify_private_owner(self) -> str:
@@ -698,6 +700,8 @@ def test_disable_stops_sidecar_restores_menu_once_and_returns_to_idle(
         async def aclose(self) -> None: pass
 
     class Menu:
+        bot = "7"
+
         async def restore(self, **_kwargs: Any) -> bool:
             calls["menu_restore"] += 1
             return True
@@ -740,7 +744,7 @@ def test_disable_stops_sidecar_restores_menu_once_and_returns_to_idle(
     monkeypatch.setattr(companion, "TelegramSettingsObserver", SettingsObserver)
     monkeypatch.setattr(companion.httpx, "AsyncClient", lambda **_kwargs: Client())
     monkeypatch.setattr(companion, "_wait_for_owner", wait_owner)
-    monkeypatch.setattr(companion, "_prior_owner_reconciliation", lambda *_args: (False, None))
+    monkeypatch.setattr(companion, "_prior_owner_reconciliation", lambda *_args: _async_value((False, None)))
     monkeypatch.setattr(companion, "_wait_for_cloudflared", lambda *_args, **_kwargs: _async_value(state / "cloudflared"))
     monkeypatch.setattr(companion, "_wait_for_core_and_owner", lambda *_args, **_kwargs: _async_value(True))
     monkeypatch.setattr(companion, "TelegramProxySidecar", Sidecar)

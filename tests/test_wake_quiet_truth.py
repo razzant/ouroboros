@@ -71,7 +71,7 @@ def test_owner_send_flag_records_only_accepted_deliveries(tmp_path, monkeypatch,
     from ouroboros import presence_owner_contact
 
     ctx = SimpleNamespace(current_chat_id=1, task_id="wake", task_metadata={}, drive_logs=lambda: tmp_path)
-    monkeypatch.setattr(control_runtime, "_main_notice_refusal", lambda *a: "")
+    monkeypatch.setattr(control_runtime, "_main_notice_refusal", lambda *a, **k: "")
     monkeypatch.setattr(presence_owner_contact, "contact_origin", lambda *a: {"task_id": "wake"})
 
     def deliver(*a, **kw):

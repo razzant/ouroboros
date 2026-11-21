@@ -1,16 +1,18 @@
 """Containment verification for ONE delegated run (extracted from tools/delegate.py
 for the module-size gate — same logic, same names, no behavioural change).
 
-The nanny asks the ENGINE's own artifacts what a delegated run actually ran under
+The host asks the ENGINE's own artifacts what a delegated run actually ran under
 — the applied access profile and the applied scoped HOME — and compares them with
 what the host's authority entitled the child to. A recorded WIDER profile or an
-unexcused operator-home landing is a containment breach the nanny cancels on; an
+unexcused operator-home landing is a containment breach the body cancels on
+(``hold_to_grant``, every run it observes; the windowed wait keeps its own); an
 absent fact stays absence ("unproven"), reported by the evidence reader instead of
 enforced as a fault.
 """
 
 from __future__ import annotations
 
+import logging
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -18,6 +20,7 @@ from typing import Any, Dict, Optional
 from ouroboros import delegate_custody as custody
 from ouroboros.utils import resolve_path_allow_missing
 
+log = logging.getLogger(__name__)
 _TERMINAL_STATES = custody.TERMINAL_STATES
 
 # Ordering, not a set: honest verification needs to tell "narrower than asked" (fine)
@@ -166,6 +169,49 @@ def _home_isolation_breach(detail: Dict[str, Any]) -> Optional[_Breach]:
                  "harness_home_isolated": attempt.home_isolated},
             )
     return None
+
+
+def halt_breached(drive_root: Any, gateway: Any, entry: Any, breach: _Breach) -> str:
+    """Stop a run the engine did not contain as asked, through the ONE cancel path (its four typed
+    outcomes) and the incident writer an unverified cancel uses, so the breach stays a CRITICAL health
+    invariant until a terminal receipt resolves it. Returns the cancel outcome."""
+    try:
+        cancelled = custody.cancel_and_verify(drive_root, gateway, entry, breach.code)
+    except Exception:
+        log.warning("Failed to cancel an uncontained delegated run %s", entry.run_id, exc_info=True)
+        cancelled = {"outcome": custody.CANCEL_CONTAINMENT_FAULT}
+    custody.record_containment_fault(drive_root, entry, breach.code, breach.detail, fault=breach.code, **breach.facts)
+    return str(cancelled.get("outcome") or custody.CANCEL_CONTAINMENT_FAULT)
+
+
+def granted_shape(entry: Any) -> Any:
+    """The GRANTED run shape, replayed from the run's start row (access, mode, isolation, the delegated
+    HOME marker and the investigation authority): what every check of a held run holds it to."""
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+    from ouroboros.subagents import DelegatedRunShape
+
+    return DelegatedRunShape(access=entry.access, mode=entry.mode, isolation=entry.isolation,
+                             delegated=entry.delegated,
+                             investigation=entry.authority_source == INVESTIGATION_AUTHORITY)
+
+
+def hold_to_grant(drive_root: Any, gateway: Any, entry: Any, detail: Dict[str, Any]) -> bool:
+    """The rights floor the body keeps on every run it observes (pool-capacity D3): what the engine
+    enforced, read from a detail, against the grant recorded on the run's start row. A breach stops the
+    run once (its open incident names it); the nanny reads the breach with the terminal. A row without a
+    recorded grant (written before the shape rode the start row) has nothing to hold the run to here: the
+    waiting nanny's live derivation keeps it. Whether it stopped the run; a check that cannot be read is logged."""
+    from ouroboros.tools.delegate_terminal_evidence import _containment_breach
+
+    try:
+        breach = _containment_breach(detail, granted_shape(entry)) if entry.access else None
+        if breach is None or (entry.containment_fault or {}).get("reason") == breach.code:
+            return False
+        halt_breached(drive_root, gateway, entry, breach)
+    except Exception:
+        log.warning("Rights floor of delegated run %s unread this beat", entry.run_id, exc_info=True)
+        return False
+    return True
 
 
 def home_nested_under_operator_home(detail: Dict[str, Any]) -> bool:

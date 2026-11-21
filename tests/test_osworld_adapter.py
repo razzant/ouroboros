@@ -292,9 +292,9 @@ def test_preflight_verifies_server_scaffold_settings(tmp_path, monkeypatch):
     assert not result["ok"]
     assert "OUROBOROS_RUNTIME_MODE" in joined and "OUROBOROS_SAFETY_MODE" in joined
     assert "OUROBOROS_MAX_WORKERS" in joined and "OUROBOROS_MODEL" in joined
-    # Adversarial review r2 #6: the blocking review lane is part of the scaffold gate,
-    # and so is the benchmark's declared result-review mode (#1731, O4).
-    assert "OUROBOROS_REVIEW_ENFORCEMENT" in joined and "OUROBOROS_TASK_REVIEW_MODE" in joined
+    # The benchmark's declared result-review mode is part of the scaffold gate (#1731, O4); the retired
+    # review-enforcement key is not (the adapter reads the verdict itself).
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in joined and "OUROBOROS_TASK_REVIEW_MODE" in joined
 
     # matching server -> ok; mismatch + explicit ablation flag -> ok but recorded
     matching.update({"OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SAFETY_MODE": "light",

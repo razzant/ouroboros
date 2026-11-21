@@ -1,7 +1,10 @@
 // The settled task card's one seam: its Files row (result_files.js) and its
-// Continue action (task_continue.js) follow the same settled task detail.
+// Continue action (task_continue.js) follow the same settled task detail; the
+// work's review-gate field (review_gate_card.js) follows every detail, live ones too.
+// A replayed history row settles its card from the terminal facts it froze (historicalTerminalFacts).
 
 import { syncResultFilesItem } from './result_files.js';
+import { syncReviewGateItem } from './review_gate_card.js';
 import { positiveTaskTerminalFact } from './chat_activity.js';
 import { isTerminalTaskDetail } from './log_events.js';
 import { syncContinueAction } from './task_continue.js';
@@ -17,7 +20,8 @@ export function closingLine(record, title = record?.titleEl?.textContent || reco
 /** @returns {boolean} whether the card's timeline items changed (the Files row) */
 export function syncSettledItems(record, detail, options) {
     syncContinueAction(record, detail, options);  // a late offer read writes through the caller's viewport seam
-    return syncResultFilesItem(record, detail);
+    const gate = syncReviewGateItem(record, detail);
+    return syncResultFilesItem(record, detail) || gate;
 }
 
 /** The task's own terminal detail or a new attempt replaces its sentence; history stamps only settle status. */
@@ -35,4 +39,13 @@ export function syncClosingSentence(record, detail) {
         record.wakeSummary = sentence;
     }
     return Boolean(words);
+}
+
+/** The terminal facts a replayed history row froze for its card (chat.js `historicalTerminals`, settled through
+ *  `noteTaskDetails`): its durable terminal, the current outcome's phase, and the sentence, name, schedule and place
+ *  the settled card reads. */
+export function historicalTerminalFacts(row) {
+    return { ...row.historical_terminal, ...(row.current_outcome && { phase: row.current_outcome.outcome_phase }),
+        wake_summary: row.wake_summary, suggested_name: row.suggested_name, schedule_name: row.schedule_name,
+        place_origin: row.place_origin };
 }

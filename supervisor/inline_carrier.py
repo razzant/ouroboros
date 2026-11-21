@@ -233,7 +233,7 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
     agent.owner_wait_callback = partial(worker_owner_wait, wid, in_q, out_q)
     if realtime_turn is not None:
         agent._realtime_turn = realtime_turn
-    dispatched = dict(task)
+    dispatched = {**task, "_phase_generation": str(meta.get("phase_generation") or "")}
     if meta.get("fresh_identity"):
         dispatched["_fresh_identity"] = True
     registry = get_direct_activity_registry()

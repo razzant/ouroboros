@@ -16,14 +16,11 @@ from typing import Any, Dict, List
 
 log = logging.getLogger(__name__)
 
-# The nanny finalization-nudge stamp (B3, owner decision 3A): written by the
-# WORKER at the loop's injection seam through ``delegate_custody.emit`` — only
-# when the composed reminder was NON-EMPTY (the ctx `_nanny_finalization_injected`
-# flag is set even on suppression, so it can never be the signal). Task-scoped
-# (no run_id — the run-custody replay skips it by design); the type keeps the
-# ``delegate_run`` prefix so the custody scan prefilter still yields it. Defined
-# HERE, beside its one reader, because ``delegate_custody`` sits exactly at its
-# module-size ceiling.
+# The nanny finalization-nudge stamp (B3, owner decision 3A): the row the worker wrote when the finish door
+# returned a nanny's answer with a reminder. Nothing writes it since audit 11.11, item 18 (12.11.2026): the
+# door no longer returns a nanny's answer. Rows already recorded keep this reader
+# (``nanny_nudge_recorded``, a gateway evidence field; absence means no stamp). Task-scoped, ``delegate_run``
+# prefix so the custody scan prefilter yields it.
 NANNY_NUDGE_STAMP = "delegate_run_nanny_nudge_injected"
 
 # A delegate_start attempt the substrate REFUSED before any invocation was
@@ -56,23 +53,6 @@ def record_start_blocked(ctx: Any, task_id: str, reason: str) -> None:
             "task_id": str(task_id or ""), "reason": str(reason or "")})
     except Exception:
         log.debug("start-blocked row failed", exc_info=True)
-
-
-def record_nanny_nudge_stamp(ctx: Any, task_id: str, nanny_code: str) -> None:
-    """Durably stamp "the finalization nudge was really injected" for this task.
-
-    Synchronous same-process append on the CANONICAL (budget) root — the same
-    root ``task_execution_evidence`` reads back at the completion seam, so the
-    fact needs no supervisor round-trip and no O(history) side scan. Fail-soft:
-    a stamp that cannot land loses only the completion-seam disclosure.
-    """
-    try:
-        from ouroboros import delegate_custody as custody
-
-        custody.emit(custody.custody_root(ctx), NANNY_NUDGE_STAMP, {
-            "task_id": str(task_id or ""), "nanny_code": str(nanny_code or "")})
-    except Exception:
-        log.debug("nanny nudge stamp failed", exc_info=True)
 
 
 def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
@@ -166,6 +146,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     # custody rows (the same SSOT used by wait/apply) so a restart cannot turn a
     # prompt-only claim into ``harness_used``.
     source_unresolved = 0
+    source_unverified: set = set()
     if partial_work_order_seen:
         for entry in runs.values():
             if not entry.settled or entry.review_owned:
@@ -173,6 +154,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
             if custody.work_order_source_verification(entry).get("status") == "cannot_verify":
                 source_unresolved += 1
                 succeeded.discard(entry.run_id)
+                source_unverified.add(entry.run_id)
                 if "source_incomplete" not in failure_states:
                     failure_states.append("source_incomplete")
     from ouroboros.delegate_bootstrap_identity import read_identity
@@ -183,8 +165,20 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
         initial_run = next((run for run in runs.values() if initial and run.invocation_id == initial["invocation_id"]), None)
         if initial:
             fate = custody.invocation_record(drive_root, initial["invocation_id"]) or {}
+            # The bound row's engine terminal observation states a KNOWN first-attempt failure even
+            # before settlement; a success still waits for settlement (display witness only).
+            state = (initial_run.terminal_state if initial_run and (initial_run.settled
+                     or (initial_run.terminal_state and initial_run.terminal_state != "succeeded"))
+                     else str(fate.get("state") or "unknown"))
+            if state == "succeeded" and initial_run is not None and initial_run.run_id in source_unverified:
+                # The process settled as a success, but the canonical brief's coverage
+                # was never confirmed (the run is discarded from ``succeeded`` above).
+                # A typed third state for the first factual display: never a plain
+                # "succeeded" (a false outright success) and never "failed" (unverified
+                # work does not rename the physical outcome).
+                state = "succeeded_source_unverified"
             initial = {**initial, "run_id": initial_run.run_id if initial_run else str(fate.get("run_id") or ""),
-                       "state": initial_run.terminal_state if initial_run and initial_run.settled else str(fate.get("state") or "unknown")}
+                       "state": state}
         obligations = unsettled_start_ids(drive_root, task_id)
     except Exception:
         initial, obligations = {"state": "unknown"}, {"status": "unknown"}
@@ -192,6 +186,9 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     return {
         # A settled row whose started row fell out of the log is still a run that ran.
         "delegated_runs_started": len(started | settled),
+        # The FIRST attempt's typed fact: its state is the display witness's single
+        # source ("succeeded_source_unverified" = settled as a success with the
+        # work-order coverage never confirmed; readers never show it as succeeded).
         "initial_execution": initial,
         "delegated_obligations": obligations,
         "delegated_runs_settled": len(settled),
@@ -231,5 +228,5 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     }
 
 
-__all__ = ["NANNY_NUDGE_STAMP", "START_BLOCKED", "record_nanny_nudge_stamp",
+__all__ = ["NANNY_NUDGE_STAMP", "START_BLOCKED",
            "record_start_blocked", "task_execution_evidence"]

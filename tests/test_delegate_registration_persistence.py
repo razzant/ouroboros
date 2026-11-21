@@ -116,10 +116,8 @@ def test_registration_survives_settlement(tmp_path):
 
 
 def test_pending_recovery_retains_the_marker(tmp_path):
-    """The issue's second regression: a pending invocation keeps the marker,
-    and the definite-refusal retire path skips a persistent registration."""
+    """A pending invocation keeps its persistent-registration marker through replay."""
     dc = custody
-    gateway = _Gateway()
     dc.emit(tmp_path, dc.START_REQUESTED, {
         "invocation_id": "inv-1", "task_id": "t-p", "route": "r",
         "project_id": "prj-user", "project_owned": True,
@@ -131,17 +129,6 @@ def test_pending_recovery_retains_the_marker(tmp_path):
     rows = pending_invocations(tmp_path)
     mine = [r for r in rows if r["invocation_id"] == "inv-1"]
     assert mine and mine[0]["project_persistent"] is True
-
-    record = dict(mine[0])
-    assert dc._retire_recovered_registration(gateway, record) is False
-    assert gateway.removals == [], "a persistent registration is never deleted on refusal"
-
-    # A plain owned (non-persistent) record still retires — the guard is
-    # narrow, not a blanket skip.
-    plain = dict(record)
-    plain["project_persistent"] = False
-    dc._retire_recovered_registration(gateway, plain)
-    assert gateway.removals == ["prj-user"]
 
 
 def test_pending_start_does_not_block_an_independent_invocation(tmp_path):
@@ -267,10 +254,6 @@ def test_pre_marker_record_falls_back_to_the_stored_request(tmp_path):
     custody_record = dc.invocation_record(tmp_path, "inv-legacy")
     assert "project_persistent" not in custody_record
     assert record_persistent(custody_record) is True
-
-    gateway = _Gateway()
-    assert dc._retire_recovered_registration(gateway, record) is False
-    assert gateway.removals == [], "legacy stable registration survives recovery refusal"
 
     # Direct predicate table (authoritative key beats derivation).
     assert record_persistent({"project_persistent": False, "request": stable_request}) is False

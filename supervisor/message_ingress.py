@@ -157,6 +157,32 @@ def delivery_facts(row: dict, chat_id: int) -> dict:
     return {}
 
 
+# --- a pressed control: the press is my human's, the command it composed is not -----------------
+
+def ui_control_fact(raw: Any, *, pressed_at: str = "", command: str = "", owner_text: bool = True) -> Optional[Dict[str, str]]:
+    """The producer's mark that a host-drawn control composed this command (``ui_control``), or None.
+
+    Stamped only by the producer that composed the text (a Web button, a Telegram inline button), so typed
+    chat and CLI commands keep being my human's words. ``name`` says which control; ``owner_text`` is what
+    my human typed into it, exactly (an Evolution objective): the press and those words are theirs, the
+    command around them is the host's, so they ride only a slash ``command`` the host executes, and only through a
+    door that allows them (``owner_text=False``: a skill's control speaks for no one). A malformed mark raises
+    ``ValueError``: a producer's bug is refused, never logged as typed words.
+    """
+    if raw is None:
+        return None
+    name = raw.get("name") if isinstance(raw, dict) else None
+    text = raw.get("owner_text", "") if isinstance(raw, dict) else ""
+    if not isinstance(name, str) or not name.strip() or len(name) > 64 or not isinstance(text, str):
+        raise ValueError("ui_control must be {name: <control, at most 64 characters>, owner_text?: <string>}")
+    if text.strip() and not owner_text:
+        raise ValueError("ui_control.owner_text is not accepted here: a control's press carries no owner words")
+    if text.strip() and not str(command or "").lstrip().startswith("/"):
+        raise ValueError("ui_control.owner_text rides only a slash command the host executes")
+    return {"name": name.strip(), **({"owner_text": text} if text.strip() else {}),
+            **({"pressed_at": pressed_at} if pressed_at else {})}
+
+
 # --- the canonical chat writers ----------------------------------------------------------------
 
 def _chat_record(
@@ -249,6 +275,9 @@ def _chat_record(
             record["system_type"] = str(meta.get("system_type") or "")
         if isinstance(meta.get("host_fact"), dict) and meta["host_fact"].get("kind") == "call_open":
             record["host_fact"] = dict(meta["host_fact"])
+        if isinstance(meta.get("ui_control"), dict) and meta["ui_control"].get("name"):
+            # The control my human typed these words into (``ui_control_fact``): a fact about the message.
+            record["ui_control"] = {"name": str(meta["ui_control"]["name"])}
         if isinstance(meta.get("execution_transport"), dict):
             record["execution_transport"] = dict(meta["execution_transport"])
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
@@ -261,6 +290,10 @@ def _chat_record(
             record["reply_to_relay"] = str(meta["reply_to_relay"])
         if isinstance(meta.get("presence_contact"), dict):
             record["presence_contact"] = dict(meta["presence_contact"])
+        if meta.get("card_press"):
+            from ouroboros.card_store import late_press_ref
+            if press := late_press_ref(meta["card_press"]):
+                record["card_press"] = press
         if meta.get("late_answer"):
             from ouroboros.owner_quiz import late_answer_ref
             accepted_answer = late_answer_ref(meta["late_answer"])
@@ -276,7 +309,7 @@ def _chat_record(
         if "narration" in meta:
             record["narration"] = bool(meta["narration"])
         if record_type in ("project_started", "project_handoff", "project_completion_summary"):
-            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes", "wake_summary"):
+            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes", "wake_summary", "place_origin"):
                 if key in meta:
                     record[key] = meta[key]
         if meta.get("delivery_id"):
@@ -383,15 +416,17 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str, *, feed: boo
 
 def _shown_elsewhere(root: Any, record: dict, feed: bool) -> Dict[str, Any]:
     """The append facts of a row some Project also shows (``room_appearances.write_facts``): its
-    derived index keys and, for work speech and private Presence contact (a question too), the
-    revision stamp and the other rooms it feeds, so one message is unread where it is shown."""
+    derived index keys, those rooms (a message dates them too) and, for work speech and private
+    Presence contact (a question too), the revision stamp and the other rooms it feeds, so one
+    message is unread where it is shown."""
     from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_dialogue import WORK_SPEECH_ELSEWHERE_TYPES
     from ouroboros.room_appearances import write_facts
 
     keys, shown = write_facts(root, record)
     speech = record.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(record)
-    return {"appearances": keys, **({"room_revisions": True, "also_feed": shown} if speech and feed else {})}
+    return {"appearances": keys, **({"shown_in": shown} if shown else {}),
+            **({"room_revisions": True, "also_feed": shown} if speech and feed else {})}
 
 
 def accept_chat(chat_id: int, user_id: int, text: str, *, dispatch: Optional[Dict[str, Any]] = None,
@@ -464,7 +499,11 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     chat_id = int(message["chat_id"])
     message_id = str(message["client_message_id"])
     source = str(message["source"])
-    logged = text.strip() or str(message.get("image_caption") or "").strip() or attachment_placeholder(
+    from ouroboros.card_store import late_press_ref
+    task_metadata = message.get("task_metadata") or {}
+    press = late_press_ref(task_metadata.get("card_press"))
+    late_answer = late_answer_ref(task_metadata.get("late_answer"))
+    logged = (text if press or late_answer else text.strip()) or str(message.get("image_caption") or "").strip() or attachment_placeholder(
         message.get("image_base64"), message.get("task_metadata")
     )
     if not logged:
@@ -474,7 +513,6 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
-    late_answer = late_answer_ref((message.get("task_metadata") or {}).get("late_answer"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
     with _INGRESS_LOCK:
@@ -488,7 +526,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                     client_message_id=message_id, sender_label=str(message.get("sender_label") or ""),
                     transport=message.get("transport"), drive_root=root,
                     message_meta={"attachments": refs, "text_placeholder": placeholder, "reply_to": reply,
-                                  **({"late_answer": late_answer} if late_answer else {}),
+                                  **({"late_answer": late_answer} if late_answer else {}), **({"card_press": press} if press else {}),
                                   "execution_transport": (message.get("task_metadata") or {}).get("execution_transport")},
                     dispatch=obligation(name, text, message))
             finally:
@@ -503,6 +541,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             # The row an earlier delivery landed (or the race lost by a hair): rejoin it, or take its owed dispatch.
             rejoin_or_refuse(row, source, logged, refs, reply,
                             execution_transport=(message.get("task_metadata") or {}).get("execution_transport"))
+            if saved_press := late_press_ref(row.get("card_press")):
+                message["task_metadata"] = {**(message.get("task_metadata") or {}), "card_press": saved_press}
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}
@@ -587,6 +627,13 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         return None
     else:
         metadata = message.get("task_metadata") or {}
+        control = metadata.get("ui_control") if isinstance(metadata, dict) and isinstance(metadata.get("ui_control"), dict) else None
+        if control is not None and not str(control.get("owner_text") or "").strip():
+            # A press composed every word here: no row speaks as my human; the command's own System reply
+            # (``command_reply``) or the work it starts is the one receipt.
+            return None
+        if control is not None:
+            text = str(control["owner_text"])  # exactly what my human typed into the control, not its command
         # no words or caption from the sender: TEXT is the host's placeholder
         placeholder = not str(message.get("text") or "").strip() and not str(message.get("image_caption") or "").strip()
         from ouroboros.chat_references import ingress_reply
@@ -602,7 +649,8 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             client_surface=(metadata.get("client_surface") if isinstance(metadata, dict)
                             and isinstance(metadata.get("client_surface"), dict) else None),
             message_meta={"attachments": metadata.get("chat_attachments") if isinstance(metadata, dict) else None,
-                          "text_placeholder": placeholder, "reply_to": reply},
+                          "text_placeholder": placeholder, "reply_to": reply,
+                          **({"ui_control": control} if control is not None else {})},
         )
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=client_message_id, ts=ts, text=text)
     from ouroboros.chat_references import projection_fields

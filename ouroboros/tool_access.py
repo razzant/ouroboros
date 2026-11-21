@@ -658,6 +658,7 @@ def _resolve_target_in_selected_base(
     path: str,
     operation: Operation,
     alias: bool = True,
+    literal: bool = False,
 ) -> pathlib.Path:
     """Resolve one target inside an already-selected physical base; ``alias=False`` returns the address a READ
     asked for, without the re-anchors that open a capture or source where its writer kept it."""
@@ -669,9 +670,16 @@ def _resolve_target_in_selected_base(
             allow_protected_descendants=operation in {"list", "search"},
             operation=operation,
         )
-    resolved_base = pathlib.Path(base_path).resolve(strict=False)
+    from ouroboros.work_domain import settle  # a work root keeps its spelling: the container resolves it
+
+    resolved_base = settle(base_path)
     path_text = str(path or ".")
-    if root == "runtime_data":
+    if literal:  # An exact Git operand, not a file tool's convenient display spelling.
+        entry = pathlib.Path(path_text)
+        if ".." in entry.parts:
+            raise ValueError("literal repository path must not contain '..'")
+        path_text = str(resolved_base / entry)
+    elif root == "runtime_data":
         path_text = normalize_runtime_data_path(resolved_base, path_text)
     elif root in {"active_workspace", "system_repo"}:
         path_text = normalize_root_relative(resolved_base, path_text)
@@ -688,9 +696,11 @@ def _resolve_target_in_selected_base(
         # A foreign Windows absolute spelling has no native anchor on POSIX;
         # joining it to cwd would invent a different physical file.
         if candidate.anchor:
-            candidate = (resolved_base / candidate).resolve(strict=False)
+            candidate = settle(resolved_base / candidate)
             try:
                 path_text = candidate.relative_to(resolved_base).as_posix()
+                if literal:
+                    return candidate  # no basename, whitespace or separator rewriting
             except ValueError:
                 if operation in _READ_OPS:
                     # READ aliases preserve inherited physical roots and orphan custody.
@@ -727,12 +737,19 @@ def _resolve_target_in_selected_base(
                 return retained
         if anchored is not None:
             return anchored
-    resolved = (resolved_base / safe_relpath(path_text)).resolve(strict=False)
+    resolved = settle(resolved_base / safe_relpath(path_text))
     try:
         resolved.relative_to(resolved_base)
     except ValueError as exc:
         raise ValueError(f"path escapes {resolved_base}") from exc
     return _lineage_source_target(ctx, root, resolved) if alias and root == "runtime_data" and operation in _READ_OPS else resolved
+
+
+def _settle(path: Any) -> pathlib.Path:
+    """A binding's path: resolved as before, except a work path, which keeps its spelling (``work_domain.settle``)."""
+    from ouroboros.work_domain import settle
+
+    return settle(path)
 
 
 def build_resolved_resource_binding(
@@ -744,8 +761,13 @@ def build_resolved_resource_binding(
     bucket: str = "",
     skill_name: str = "",
     process_cwd: str | None = None,
+    literal: bool = False,
 ) -> ResolvedResourceBinding:
-    """Resolve policy, physical base, and target exactly once for one call."""
+    """Resolve policy, base and target. ``literal`` is for host-bound Git operands, not public tool args."""
+
+    if literal and (process_cwd is not None or root not in {"active_workspace", "system_repo"}
+                    or operation not in {"read", "vcs"}):
+        raise ValueError("literal binding needs a repository read root")
 
     if process_cwd is not None:
         selected_root, base, target, source, selected_name, _allowed = _select_process_target(
@@ -760,8 +782,8 @@ def build_resolved_resource_binding(
             profile=active_tool_profile(ctx),
             root=selected_root,
             operation=operation,
-            base_path=pathlib.Path(base).resolve(strict=False),
-            target_path=pathlib.Path(target).resolve(strict=False),
+            base_path=_settle(base),
+            target_path=_settle(target),
             source=source,
             skill_name=selected_name,
             state_drive_root=canonical_data_root(ctx),
@@ -876,6 +898,7 @@ def build_resolved_resource_binding(
         base_path=base,
         path=path,
         operation=operation,
+        literal=literal,
     )
     asked = (_resolve_target_in_selected_base(ctx, root=normalized, base_path=base, path=path, operation=operation,
                                               alias=False)
@@ -896,13 +919,13 @@ def build_resolved_resource_binding(
         container = (lineage_read_base(ctx, normalized, target)
                      or inherited_read_base(ctx, normalized, target))
     if container is not None:
-        logical_base_path = pathlib.Path(base).resolve(strict=False)
+        logical_base_path = _settle(base)
         base = container
     return ResolvedResourceBinding(
         profile=profile,
         root=normalized,
         operation=operation,
-        base_path=pathlib.Path(base).resolve(strict=False),
+        base_path=_settle(base),
         target_path=target,
         source=source,
         skill_name=selected_name,

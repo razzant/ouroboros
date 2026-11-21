@@ -338,16 +338,34 @@ def test_empty_light_slot_inherits_main_routing_even_when_models_match(monkeypat
     local-only install whose Main happens to equal the shipped Light default must
     still route the Light lane locally — it is running Main, not the Light slot."""
     from ouroboros.config import SETTINGS_DEFAULTS
-    from ouroboros.subagents import _use_local_for_lane
 
     shared = SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]
     saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=shared, OUROBOROS_MODEL_LIGHT="",  # a saved blank Light
                    USE_LOCAL_MAIN=True, USE_LOCAL_LIGHT=False)
 
-    assert _use_local_for_lane("light", shared) is True
+    assert subagents.resolve_subagent_lane("light").use_local_model is True
     # A slot the owner really configured still governs itself.
     saved_settings(monkeypatch, None, OUROBOROS_MODEL_LIGHT=shared)
-    assert _use_local_for_lane("light", shared) is False
+    assert subagents.resolve_subagent_lane("light").use_local_model is False
+
+
+@pytest.mark.parametrize("main_local, box, lane, local", [
+    (False, True, "light", True),    # the box sends the empty slot to the local runtime: Light's own lane
+    (False, False, "main", False),   # unticked: it is Main's route, and the record says Main
+    (True, False, "main", True),     # a local Main: the empty slot follows it, box or no box
+    (True, True, "main", True),
+])
+def test_an_empty_light_lane_follows_its_own_box_and_never_records_a_local_child_as_main(
+        monkeypatch, tmp_path, main_local, box, lane, local):
+    """What moves memory consolidation and Light helpers (route_choice.following_route): under a cloud Main an
+    empty Light with its box ticked runs on the local runtime and is recorded as Light's lane, since calling that
+    child «main» would claim the cloud model; in every other case it is Main's own route."""
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL="vendor/main", OUROBOROS_MODEL_LIGHT="",
+                   USE_LOCAL_MAIN=main_local, USE_LOCAL_LIGHT=box)
+
+    resolved = subagents.resolve_subagent_lane("light")
+
+    assert (resolved.effective_lane, resolved.model, resolved.use_local_model) == (lane, "vendor/main", local)
 
 
 def _scheduling_ctx(tmp_path, *, parent_deadline: str = "", parent_lane: str = ""):
@@ -1308,7 +1326,20 @@ def test_a_require_lane_refusal_states_the_facts_not_the_lane_default(tmp_path):
     # The facts it does hold, and a REACHABLE remedy: "ask for the lane explicitly"
     # is not one when the install has no such slot, so the constraint has to give.
     assert "'heavy'" in refusal.detail and "'auto'" in refusal.detail and "'main'" in refusal.detail
-    assert "override_delegation_constraint('c1')" in refusal.detail
+    # The remedy is the call that changes the outcome: model_lane is refused beside the required
+    # subagent_id (subagent_selector_conflict), so it is never advised; the release names its
+    # emitter when the row has one (two authors of one id otherwise refuse the release), and an
+    # emitter's rationale is added after the lanes, never in their place.
+    assert refusal.detail.endswith(
+        "override_delegation_constraint(constraint_id='c1', reason=…) releases it where your tools include it.")
+    assert "model_lane" not in refusal.detail
+    reasoned = effective_delegation_budget(
+        {}, unresolved_constraints=[{"task_id": "kid7", "payload": {**row["payload"], "rationale": "needs a stronger lane"}}],
+        role="critic", requested_lane="auto", intended_lane="main")
+    assert reasoned.detail == (
+        "Unresolved delegation constraint 'c1' from task 'kid7' requires lane 'heavy' (requested 'auto', intended "
+        "'main'). Its reason: needs a stronger lane. override_delegation_constraint(constraint_id='c1', "
+        "constraint_task_id='kid7', reason=…) releases it where your tools include it.")
 
     # An omitted lane that INHERITS the required one is admitted: the gate reads the
     # same predicate the resolution does, so it cannot disagree with it about `auto`.

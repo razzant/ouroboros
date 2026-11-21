@@ -160,9 +160,9 @@ def test_benchmark_manifest_model_slots_cover_runtime_model_settings():
     from devtools.benchmarks.common.manifests import MODEL_SLOT_KEYS
     from ouroboros.config import SETTINGS_DEFAULTS
 
-    # These match the OUROBOROS_MODEL* prefix but are a concurrency CAP / slot-wait
-    # CEILING, not model-id slots, so they are not part of the model-slot manifest.
-    _non_model_slot = {"OUROBOROS_MODEL_MAX_CONCURRENCY", "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"}
+    # This matches the OUROBOROS_MODEL* prefix but is a concurrency CAP, not a model-id
+    # slot, so it is not part of the model-slot manifest.
+    _non_model_slot = {"OUROBOROS_MODEL_MAX_CONCURRENCY"}
     relevant = {
         key
         for key in SETTINGS_DEFAULTS
@@ -354,8 +354,10 @@ def test_gaia_adapter_wires_settings_and_solver(tmp_path):
     assert env["OUROBOROS_DATA_DIR"].startswith(str(tmp_path))
     assert env["OUROBOROS_MODEL"] == "google/gemini-2.5-pro"
     assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == "openai/gpt-5.5"
-    # The review pool rides the roster (test_benchmark_available_subagents pins its seats).
-    assert "OUROBOROS_SUBAGENTS" in env and "OUROBOROS_SCOPE_REVIEW_MODELS" not in env
+    # The review pool rides the roster (test_benchmark_available_subagents pins its seats) in the
+    # settings file the server reads, never an environment copy of it.
+    assert "OUROBOROS_SUBAGENTS" not in env and "OUROBOROS_SCOPE_REVIEW_MODELS" not in env
+    assert json.loads(json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_SUBAGENTS"])["items"]
     assert env["OUROBOROS_TASK_REVIEW_MODE"] == "required"
     assert env.get("CLAUDE_CODE_MODEL") != "google/gemini-2.5-pro"
     assert env["GAIA_OUROBOROS_URL"].startswith("http://127.0.0.1:")

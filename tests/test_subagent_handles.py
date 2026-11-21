@@ -237,7 +237,7 @@ def test_a_bound_start_is_not_unbound_by_switching_its_row_off(tmp_path, monkeyp
     snapshot, _ = runtime.select_subagent_snapshot(_settings(row), subagent_id="primary-builder")
     # The live row has since been re-pointed (another handle) AND switched off.
     live = _settings({**row, "effort": "high", "enabled": False})
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: live)
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: live)
     monkeypatch.setattr(runtime, "effective_runtime_subagent_settings", dict)
 
     def _start(selector):
@@ -290,7 +290,7 @@ def _post_settings(monkeypatch, body, stored=None):
         return {**SETTINGS_DEFAULTS, **saved}
 
     def _fake_write(payload, *, allow_elevation=False, allow_context_lowering=False,
-                    authored_keys=(), boundary=None):
+                    authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         saved.clear()
         saved.update(payload)
         if boundary is not None:
@@ -450,7 +450,7 @@ def test_an_actor_first_start_accepts_its_own_handle_and_stored_id_and_refuses_a
 
     rows = (_session("primary-builder", effort="xhigh"), _session("other", target="cursor=kimi-k3-high"))
     settings = _settings(*rows)
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: settings)
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: settings)
     monkeypatch.setattr(runtime, "effective_runtime_subagent_settings", dict)
     snapshot, _ = runtime.select_subagent_snapshot(settings, subagent_id="primary-builder")
 
@@ -468,7 +468,7 @@ def test_an_actor_first_start_accepts_its_own_handle_and_stored_id_and_refuses_a
         assert _start(selected) == "empty_prompt"  # each live row is eligible; independent work needs a prompt
         assert _start(selected, retry=True) == "retry_selector_conflict"
     assert _start("no-such-row") == "unknown_subagent_id"
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: _settings(rows[1]))
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: _settings(rows[1]))
     assert _start("codex=gpt-6-astra/xhigh") == "unknown_subagent_id"
     assert _start("cursor=kimi-k3-high") == "empty_prompt"
 

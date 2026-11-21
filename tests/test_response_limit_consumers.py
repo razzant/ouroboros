@@ -239,7 +239,7 @@ def test_a_maximum_applied_while_stopped_holds_after_the_model_starts(transport,
         monkeypatch.setenv(key, value)
     manager = local_model.LocalModelManager()  # the real manager; nothing serves yet
     monkeypatch.setattr(local_model, "get_manager", lambda *_a, **_k: manager)
-    monkeypatch.setattr(gateway, "load_settings", lambda: {"OUROBOROS_MODEL": "local-label", "USE_LOCAL_MAIN": "true"})
+    monkeypatch.setattr(gateway, "settings_read_view", lambda: ({"OUROBOROS_MODEL": "local-label", "USE_LOCAL_MAIN": "true"}, {}))
     monkeypatch.setattr(gateway, "_owner_audit", lambda *a: None)
     app = Starlette(routes=[Route("/api/settings", gateway.api_settings_get),
                             Route("/api/owner/capability-ack", gateway.api_acknowledge_capability, methods=["POST"])])
@@ -367,7 +367,7 @@ def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, m
                 "observedAt": "2000-01-01T00:00:00Z" if expired else ce.utc_now_iso(), "provenance": "fixture",
                 "models": [{"id": "exact-model", "maxOutputTokens": 4096}]}
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
-    monkeypatch.setattr(gateway, "load_settings", lambda: {"OUROBOROS_MODEL": model})
+    monkeypatch.setattr(gateway, "settings_read_view", lambda: ({"OUROBOROS_MODEL": model}, {}))
     monkeypatch.setattr(gateway, "_owner_audit", lambda *a: None)
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     app = Starlette(routes=[Route("/api/settings", gateway.api_settings_get),

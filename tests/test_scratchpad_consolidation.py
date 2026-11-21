@@ -79,3 +79,17 @@ def test_consolidation_route_empty_light_inherits_local_main(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     assert mod._consolidation_route() == ("local-main", True)
+
+
+@pytest.mark.parametrize("box, route", [("true", ("cloud-main", True)), ("false", ("cloud-main", False))])
+def test_consolidation_route_empty_light_under_a_cloud_main_follows_its_own_box(monkeypatch, box, route):
+    """Owner, 15.11: an empty Light follows its own local box for every call. Ticked under a cloud Main, memory
+    consolidation runs on the local runtime; unticked it is Main's cloud route."""
+    mod = _get_consolidator()
+    monkeypatch.setenv("OUROBOROS_MODEL", "cloud-main")
+    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "false")
+    monkeypatch.setenv("USE_LOCAL_LIGHT", box)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-a-secret")
+
+    assert mod._consolidation_route() == route

@@ -63,11 +63,11 @@ def test_declared_direct_start_sends_the_normalized_contract_authority(tmp_path,
 def test_registered_direct_start_with_declared_selection_starts(tmp_path, monkeypatch):
     """The registered tool path (subagent_id → configured session) starts a declared leaf
     through work-order preparation and the gateway, like any shared start."""
-    from ouroboros import config, safety
+    from ouroboros import safety
     from ouroboros.gateways import claudexor as gateway
     from ouroboros.tools.registry import ToolRegistry
 
-    monkeypatch.setattr(config, "runtime_settings", lambda: {
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: {
         "OUROBOROS_SUBAGENTS": {"enabled": True, "items": [{
             "subagent_id": "session", "recommended_use": "Inspect the source.",
             "route": {"kind": "agent_session", "target_id": "some-route=weak"},

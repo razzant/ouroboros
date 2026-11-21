@@ -69,7 +69,7 @@ def resolve_owner_source(ctx: Any, source: Any) -> dict[str, Any]:
             return {}
         return {"kind": kind, "task_id": task_id, "quiz_id": row["quiz_id"],
                 "request_id": row["request_id"], "ts": row.get("answered_at"), "text": late_answer_owner_text(row),
-                "question_frame": recorded_answer_frame(row)}
+                "question_frame": recorded_answer_frame(row, asker=task_id, reader=task_id)}  # its own card
     if kind == "mailbox":
         from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries
 

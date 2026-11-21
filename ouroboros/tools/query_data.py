@@ -2,29 +2,38 @@
 
 Selectors use dotted keys, [n] and [*]; wildcards preserve array nesting. JSONL
 filters select whole records before tail and projection. A bounded tail window
-discloses incomplete scanning. Store documents and multi-id bundles are canonical
-JSON reconstructions; single file/blob records retain their original bytes.
+discloses incomplete scanning; a rotated log's tail continues into its newest archive
+segments within the same input budget and names them (``source.rotation``). Store
+documents and multi-id bundles are canonical JSON reconstructions; single file/blob
+records retain their original bytes. A selected queue snapshot is measured after
+select: its shared values are expanded in memory, never canonicalized whole.
 
 Every result names its data plane: ``caller`` (the task's drive), ``child`` (an
 owned descendant's drive, selected through the caller's lineage), ``canonical``
 (the installation owner) or a native reviewer's pinned ``native_pin``, which never
-resolves to live data. The owner's default queue files, its money ledger and the
-owner fallback of a blob read need the same actor's existing resource read
-admission of each exact loose or pack file; tool availability is separate. Refusal grants nothing. Task documents, review
+resolves to live data; ``plane=canonical`` selects the installation's own logs (a
+fork's drive keeps its own). The owner's default queue files, its money ledger, those
+logs and the owner fallback of a blob read need the same actor's existing resource
+read admission of each exact file opened (loose, pack or log segment); tool
+availability is separate. Refusal grants nothing. Task documents, review
 records, skill state and retained runs are read from the owner's state without
 that check.
 """
 from __future__ import annotations
 
 from collections import deque
+import io
 import json
+import os
 from pathlib import Path
 import re
 
 from ouroboros import query_data_sql as sql, store
+from ouroboros.knowledge_versions import is_claim_commit
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.utils import json_dumps_utf8
 
 _FILES = {"review_ledger": "state/review_ledger/{id}.json", "advisory_review": "state/advisory_review.json",
           "queue_snapshot": "state/queue_snapshot.json", "queue_dispatch": "state/queue_dispatch.json",
@@ -34,8 +43,8 @@ _FILES = {"review_ledger": "state/review_ledger/{id}.json", "advisory_review": "
           "storage": "state/storage_measurement.json",  # the last two finished counts (installation-wide) + removers + disk
           "knowledge_history": "memory/knowledge_history.jsonl",  # global knowledge writes, bodies left out
           "update_letter": "state/update_letter.json",  # the description with its whole range qualification
-          "update_material": "state/update_material.json",  # the offered range's commits, rows and read recipe
-          **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "chat", "store_sites")}}
+          "update_material": "state/update_material.json",  # the retained range's commits, rows and read recipe
+          **{name + "_log": f"logs/{name}.jsonl" for name in ("supervisor", "events", "tools", "store_sites")}}
 _ID_KINDS = {"task_result", "run", "review_ledger", "skill_state", "verification_receipts"}
 # op=blob reads the observability CAS by digest. The digest in a task-source handle's name is that file's own
 # hash, read through the source's reader; a miss names that reader instead of another plane (BIBLE P1).
@@ -44,11 +53,12 @@ _BLOB_KIND_HINT = ("; op=blob reads observability CAS blobs only. A digest in a 
                    "result names, memory_read(source_ref={kind, root, path, size, sha256, task_id})")
 # ``context_snapshot``: the skill's current declared context snapshot, the address its outdated note names.
 _STATES = ("review", "review_job", "health", "enabled", "deps", "grants", "context_snapshot")
-# A knowledge history row holds the complete version it published and, unless it names an
-# earlier row, the one it replaced, so the ordinary 8 MiB log window would cover hours of
-# writes; this read budget covers far more of them.
+# A knowledge history row may hold whole versions of the note (older rows always do), so the
+# ordinary 8 MiB log window would cover hours of writes; this read budget covers far more of them.
 _HISTORY_SCAN_BYTES = 256 * 1024 * 1024
-_HISTORY_BODY_FIELDS = ("old_content", "new_content")
+# The note texts a row carries: whole versions, and a change row's removed and added texts (its
+# ``base`` stays, an address). Left out before filtering and before the input budget is spent.
+_HISTORY_BODY_FIELDS = ("old_content", "new_content", "change")
 _SELECTOR = re.compile(r"(?:[^.\[\]]+|\[(?:\d+|\*)\])(?:\.[^.\[\]]+|\[(?:\d+|\*)\])*")
 
 
@@ -62,7 +72,9 @@ class SelectorError(ValueError):
 
 
 def _canonical(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """Sorted compact JSON as UTF-8 bytes. A stored value may name a file by POSIX bytes that are not UTF-8:
+    ``json_dumps_utf8`` escapes them inside the JSON value, where a plain dump would fail the whole encode."""
+    return json_dumps_utf8(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def selected_bytes(value) -> int:
@@ -75,6 +87,11 @@ def _name(value):
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) or value in {".", ".."}:
         raise ValueError("IDs and artifact names must be plain names, without path components")
     return value
+
+
+def _lines_kind(kind):
+    """Whether a kind's records are JSONL rows (read by op=jsonl) rather than one JSON document (op=json)."""
+    return kind.endswith("_log") or kind in {"verification_receipts", "knowledge_history"}
 
 
 def _arg(name, value):
@@ -214,6 +231,16 @@ def _plane_path(ctx, plane, root, relative, local):
     return path
 
 
+def _holds_a_sidecar(directory):
+    """Whether one evidence-pack sidecar is published in ``directory``: the listing stops at the first,
+    so a history-sized packs directory is never read whole (a glob would list it all first)."""
+    try:
+        with os.scandir(directory) as entries:
+            return any(entry.name.endswith(".members.json") and not entry.name.startswith(".") for entry in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def _child_root(ctx, canonical, child):
     from ouroboros.task_custody import own_child_drives
     caller = _name(ctx.task_id)
@@ -236,9 +263,12 @@ def _jsonl(path, where, tail, cap, subject):
     rows, consumed, partial = deque(maxlen=tail or None), 0, False
     whole = bytearray() if not where and not tail else None
     with path.open("rb") as stream:
-        if tail and path.stat().st_size > cap:
-            stream.seek(-cap, 2)
-            stream.readline(cap + 1)  # discard the possibly partial leading record
+        live = os.fstat(stream.fileno())
+        if tail and live.st_size > cap:
+            stream.seek(live.st_size - cap - 1)
+            # Probe the boundary byte; the scan window itself is still at most cap bytes.
+            if stream.read(1) != b"\n":
+                stream.readline(cap + 1)  # only a genuinely partial leading record
             partial = True
         while line := stream.readline(cap - consumed + 1):
             consumed += len(line)
@@ -256,7 +286,7 @@ def _jsonl(path, where, tail, cap, subject):
                 continue
             rows.append((line, value))
     raw = bytes(whole) if whole is not None else b"".join(row[0] for row in rows)
-    return raw, [row[1] for row in rows], partial, consumed
+    return raw, [row[1] for row in rows], partial, consumed, (live.st_dev, live.st_ino)
 
 
 def _matches(value, where):
@@ -269,22 +299,129 @@ def _matches(value, where):
     return isinstance(field, (str, list, dict)) and where["value"] in field
 
 
-def _knowledge_history(path, where, tail):
-    """The newest ``tail`` matching knowledge writes, each without its two note bodies.
+def _archive_start(path, live, listed, admit, gaps):
+    """Resolve the already-read generation without opening newer archive payloads."""
+    try:
+        current = path.stat()
+        if (current.st_dev, current.st_ino) == live:
+            return 0
+    except OSError:
+        pass  # Rotation can be between rename and creation of the next live file.
+    for position, member in enumerate(listed):
+        try:
+            stat = admit(member).stat()
+        except PermissionError:
+            gaps.add("refused_source")
+            break
+        except OSError:
+            gaps.add("unreadable_source")
+            break
+        if (stat.st_dev, stat.st_ino) == live:
+            return position + 1
+    gaps.add("live_generation_unresolved")
+    return None
+
+
+def _older_segments(path, live, where, need, budget, admit):
+    """The rotated side of a log its live read did not cover: ``(rows, consumed, clipped, facts)``.
+
+    ``rotate_jsonl_log_if_needed`` moves the live file to ``archive/<stem>_<stamp>.jsonl``. While
+    ``need`` matching rows are missing and ``budget`` bytes remain, the newest segments are read
+    through ``admit``; ``need=0`` (a tail=0 read) opens none. The window stays contiguous: a refused
+    or unreadable segment ends it rather than leaving a hole, an exhausted budget reads a segment's
+    newest bytes (``clipped``), and the live file itself, rotated during the read (``live`` is its
+    handle's device and inode), bounds which segments are older. After rotation only metadata is
+    read until that generation is found; unresolved identity returns the live rows with a gap.
+    A malformed row or a torn last line of a closed
+    segment is skipped and named in ``gaps``; the live file stays strict. ``facts`` is ``None`` for
+    a log that never rotated, else the files read, oldest first, the listed segments left unopened
+    (``None`` when the archive could not be listed) and the gaps.
+    """
+    from ouroboros.jsonl_tail import remembered_listing
+
+    gaps, chunks, read, consumed, clipped, position = set(), [], [], 0, False, 0
+    listed = remembered_listing(path)(path.parent.parent / "archive", path.stem, gaps)
+    position = _archive_start(path, live, listed, admit, gaps)  # check live AFTER the listing
+    if position is None:
+        return [], 0, True, {"segments": [f"{path.parent.name}/{path.name}"],
+                             "unopened": None, "gaps": sorted(gaps)}
+    if not listed and not gaps:
+        return [], 0, False, None
+    unlisted = bool(gaps)  # only the listing has met a gap so far
+    while position < len(listed) and need > 0 and consumed < budget:
+        try:
+            segment = admit(listed[position])
+        except PermissionError:
+            gaps.add("refused_source")
+            break
+        try:
+            with segment.open("rb") as stream:
+                stat = os.fstat(stream.fileno())
+                same, left = (stat.st_dev, stat.st_ino) == live, budget - consumed
+                partial_first = False
+                if not same and stat.st_size > left:
+                    stream.seek(stat.st_size - left - 1)
+                    partial_first = stream.read(1) != b"\n"  # boundary probe, outside the scan window
+                    clipped = True
+                data = b"" if same else stream.read(min(stat.st_size, left))
+        except OSError:
+            gaps.add("unreadable_source")
+            break
+        position += 1
+        if same:
+            continue
+        consumed += len(data)
+        if partial_first:
+            data = data[data.find(b"\n") + 1:] if b"\n" in data else b""
+        found = deque(maxlen=need)
+        for line in io.BytesIO(data):  # JSONL rows end at LF
+            if not line.strip():
+                continue
+            if not line.endswith(b"\n"):
+                gaps.add("torn_archive_line")
+                continue
+            try:
+                value = json.loads(line)
+            except (ValueError, RecursionError):
+                gaps.add("malformed_jsonl")
+                continue
+            if not where or _matches(value, where):
+                found.append((line, value))
+        chunks.append(found)
+        read.append(f"archive/{listed[position - 1].name}")
+        need -= len(found)
+    facts = {"segments": [*reversed(read), f"{path.parent.name}/{path.name}"],
+             "unopened": None if unlisted else len(listed) - position, "gaps": sorted(gaps)}
+    return [row for chunk in reversed(chunks) for row in chunk], consumed, clipped, facts
+
+
+def _knowledge_history(path, where, tail, gaps=None):
+    """The newest ``tail`` matching knowledge writes, each without its note texts (``_HISTORY_BODY_FIELDS``).
 
     Facts a row lacks stay absent (old rows carry no publication stamp); the current
     text is ``knowledge_read``. A window past the read budget is said as truncated.
+    A line that is not JSON is skipped and counted in ``gaps`` with the byte offset of
+    the first; the rows after it are still read.
     """
-    rows, partial = deque(maxlen=tail or None), False
+    rows, partial, offset = deque(maxlen=tail or None), False, 0
     with path.open("rb") as stream:
         if path.stat().st_size > _HISTORY_SCAN_BYTES:
-            stream.seek(-_HISTORY_SCAN_BYTES, 2)
-            stream.readline()  # discard the possibly partial leading record
+            offset = stream.seek(-_HISTORY_SCAN_BYTES, 2)
+            offset += len(stream.readline())  # discard the possibly partial leading record
             partial = True
         for line in stream:
+            at, offset = offset, offset + len(line)
             if not line.strip():
                 continue
-            value = json.loads(line)
+            try:
+                value = json.loads(line)
+            except (ValueError, RecursionError):
+                if gaps is not None:
+                    gaps["malformed_lines"] = gaps.get("malformed_lines", 0) + 1
+                    gaps.setdefault("first_malformed_offset", at)
+                continue
+            if is_claim_commit(value):
+                continue
             if isinstance(value, dict):
                 for field in _HISTORY_BODY_FIELDS:
                     value.pop(field, None)
@@ -310,7 +447,11 @@ def _retained_run(canonical, identity, child):
     return read_actor_source_bytes(canonical, child, {key: source.get(key) for key in ("kind", "root", "path", "size", "sha256")})
 
 
-def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, canonical=None):
+def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, canonical=None, *,
+            admit=None, rotation=None, selected=False, gaps=None):
+    """One identity's ``(raw, value, rebuilt, clipped, consumed, owned)``. A log's ``rotation`` dict
+    receives its archive facts (``admit`` opens each segment); ``selected`` leaves a shared queue
+    snapshot uncanonicalized for its selection; ``gaps`` receives knowledge history's skipped lines."""
     if kind == "task_result":
         if not _path(ctx, root, store.STORE_REL).is_file():
             raise FileNotFoundError("task store is unavailable in the selected data root")
@@ -344,10 +485,18 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
     path = _path(ctx, root, relative)
     subject = f"{kind} {identity}".strip()
     if kind == "knowledge_history":
-        raw, value, partial, consumed = _knowledge_history(path, where, tail)
+        raw, value, partial, consumed = _knowledge_history(path, where, tail, gaps)
         return raw, value, True, partial, consumed, False
     if op == "jsonl":
-        raw, value, partial, consumed = _jsonl(path, where, tail, cap, subject)
+        raw, value, partial, consumed, live = _jsonl(path, where, tail, cap, subject)
+        if rotation is not None and not partial and (not tail or len(value) < tail):
+            older, spent, clipped, facts = _older_segments(path, live, where, tail - len(value) if tail else 0,
+                                                           cap - consumed, admit)
+            if facts is not None:  # rows the request may lack lie beyond an unopened or clipped segment
+                rotation.update(facts)
+                raw, value = b"".join(row[0] for row in older) + raw, [row[1] for row in older] + value
+                consumed += spent
+                partial = clipped or ((not tail or len(value) < tail) and facts["unopened"] != 0)
         return raw, value, False, partial, consumed, False
     try:
         with path.open("rb") as stream:
@@ -371,24 +520,45 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
     from ouroboros.queue_observation import SHARED_KEY, expand_shared
 
     if kind == "queue_snapshot" and SHARED_KEY in value:  # replicated task values are published once; the agent reads whole rows
-        value = expand_shared(value)
+        value = expand_shared(value)  # a shared value stays one object however often its rows name it
+        if selected:  # the selection, not the whole expansion, is canonicalized and measured (max_bytes)
+            return raw, value, True, False, len(raw), False
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
     return raw, value, False, False, len(raw), False
 
 
 def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", ids=None,
-                child_task_id="", state_file="review_job", sha256="", blob_kind="json", select="",
+                child_task_id="", plane="", state_file="review_job", sha256="", blob_kind="json", select="",
                 filter=None, tail=100, max_rows=100, max_bytes=65536, snapshot=None,
                 timeout_sec=1, save_as="", format="json", view_head_chars=None, view_tail_chars=None) -> str:
     from ouroboros.artifacts import store_task_artifact_bytes
     from ouroboros.tool_access import canonical_data_root
+    from ouroboros.evidence_packs import EvidenceUnavailable
     from ouroboros.observability import read_blob_ref
 
-    result, plane = {}, ""
+    # ``plane`` names the plane a result was read from; ``requested_plane`` is the caller's selector.
+    result, requested_plane, plane, missing, notes = {}, plane or "", "", "", []
     try:
         if op not in {"sql", "json", "jsonl", "blob"}:
             raise ValueError(f"{_arg('op', op)}: use sql, json, jsonl or blob")
+        jsonl_only = [_arg(name, value) for name, value, used in (("filter", filter, filter is not None),
+                                                                  ("tail", tail, tail != 100)) if used]
+        # Every kind has exactly one reader of json/jsonl, so naming the other one has one meaning: it is read
+        # with the kind's reader, disclosed in ``notes``. jsonl's filter or tail on a JSON kind asks for rows that
+        # kind does not have: refused here, before the filter's own checks, so the repair is one call.
+        if op in {"json", "jsonl"} and isinstance(kind, str) and (kind in _FILES or kind == "task_result"):
+            legal = "jsonl" if _lines_kind(kind) else "json"
+            if op != legal and legal == "json" and jsonl_only:
+                raise ValueError(f"kind={kind} requires op=json; {', '.join(jsonl_only)} "
+                                 f"{'applies' if len(jsonl_only) == 1 else 'apply'} only to op=jsonl: "
+                                 f"send op=\"json\" without {'it' if len(jsonl_only) == 1 else 'them'}")
+            if op != legal:
+                rows = ("" if legal == "json" or type(tail) is not int else
+                        "; tail=0 reads its rows from the start" if tail == 0 else
+                        f"; tail={tail} limits the read to its last {tail} rows")
+                notes.append(f"op={op!r} read as op={legal!r}: kind={kind} is read only by op={legal}{rows}")
+                op = legal
         if format not in {"json", "text"}:
             raise ValueError(f"{_arg('format', format)}: use json or text")
         for name, value, low, high in (("max_bytes", max_bytes, 256, sql.MAX_BYTES), ("max_rows", max_rows, 1, 10000),
@@ -408,6 +578,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
         for selector in (select, filter["field"] if filter else ""):
             if selector and (not isinstance(selector, str) or len(selector) > 512 or not _SELECTOR.fullmatch(selector)):
                 raise ValueError("select/filter fields accept dotted keys, [n] and [*]")
+        if requested_plane not in ("", "canonical"):
+            raise ValueError(f"{_arg('plane', requested_plane)}: use canonical (the installation's log) or omit it")
         # Another operation's or kind's parameter is refused only when it asks for something;
         # its default value takes the omitted path.
         rows = {"jsonl": "tail", "sql": "max_rows"}.get(op)
@@ -418,7 +590,9 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 ("op=json or op=jsonl", op in {"json", "jsonl"}, (("kind", kind, bool(kind)), ("ids", ids, ids is not None))),
                 ("op=blob", op == "blob", (("sha256", sha256, bool(sha256)), ("blob_kind", blob_kind, blob_kind != "json"))),
                 ("op=jsonl", op == "jsonl", (("tail", tail, tail != 100),)),
-                ("kind=skill_state", kind == "skill_state", (("state_file", state_file, state_file != "review_job"),))):
+                ("kind=skill_state", kind == "skill_state", (("state_file", state_file, state_file != "review_job"),)),
+                ("a kind=*_log", isinstance(kind, str) and kind.endswith("_log"),
+                 (("plane", requested_plane, bool(requested_plane)),))):
             named = [(name, value) for name, value, used in given if used]
             if named and not applies:
                 hint = f"; {rows} bounds rows for op={op}" if rows and {"tail", "max_rows"} & {n for n, _ in named} else ""
@@ -428,6 +602,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             raise ValueError(f"{kind} is installation-wide; it has no child selector")
         if kind == "knowledge_history" and child_task_id:
             raise ValueError("knowledge_history is the installation's global knowledge; it has no child selector")
+        if requested_plane and child_task_id:
+            raise ValueError("plane=canonical reads the installation's log and child_task_id an owned child's; give one")
         native = (ctx.task_metadata or {}).get("native_data_root")
         canonical, owner = Path(native or canonical_data_root(ctx)).resolve(), "native_pin" if native else "canonical"
         caller = root = Path(ctx.drive_root).resolve()
@@ -452,21 +628,25 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             if db == "money" and not child_task_id and root != canonical:  # one ledger, the owner's (USAGE_STORE §4)
                 root, plane = canonical, owner
             path = _plane_path(ctx, plane, root, sql.database_path(root, db).relative_to(root), local)
-            absent = not any(path.parent.glob("*.members.json")) if db == "packs" else not path.is_file()
+            absent = not _holds_a_sidecar(path.parent) if db == "packs" else not path.is_file()
             if absent:
                 result = {"status": "unavailable", "code": "no_packs" if db == "packs" else "not_found", "source": {"db": db}}
             else:
                 source.update(db=db, query=query, snapshot=use_snapshot)
                 result = sql.run_sql(ctx, root, db=db, query=query, max_rows=max_rows, max_bytes=max_bytes,
                                      snapshot=use_snapshot, timeout_sec=timeout_sec)
+                if result.get("code") == "query_failed" and result.get("phase") == "sql":
+                    # Every failed statement carries the way to learn the real schema, whatever failed in
+                    # it: a fact of the class, read from the typed phase, never from SQLite's message.
+                    result["schema"] = sql.schema_hint(db)
             value = result.get("data")
             raw, reconstructed = _canonical(value), True
         elif op == "blob":
             if not re.fullmatch(r"[0-9a-f]{64}", sha256) or blob_kind not in {"json", "txt", "bin"}:
                 raise ValueError("blob requires a lowercase sha256 and blob_kind=json|txt|bin")
             # Local (caller or selected child) bytes first; the owner plane only when they are proven
-            # absent there, never after a denied or corrupt read. Each loose or pack file opened stays
-            # in its plane; an owner-plane file is itself admitted, not the digest's logical name.
+            # absent there, never after a denied, corrupt or not-yet-locatable read. Each loose or pack file
+            # opened stays in its plane; an owner-plane file is itself admitted, not the digest's logical name.
             missed = []
             for plane, plane_root in [(plane, root), *([(owner, canonical)] if canonical != root else [])]:
                 try:
@@ -478,18 +658,23 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                     missed.append(plane)
                 except PermissionError as exc:
                     raise PermissionError("".join(f"blob not found in the {p} plane; " for p in missed) + str(exc)) from None
+                except EvidenceUnavailable as exc:  # where the bytes lie is unknown now; the address stays good
+                    result = {"status": "unavailable", "code": "evidence_unavailable", "reason": exc.reason,
+                              "message": f"{exc}; the same call may be asked again", "source": source}
+                    break
             else:
                 raise FileNotFoundError("blob not found in the " + " or ".join(missed) + " plane" + _BLOB_KIND_HINT)
-            value = json.loads(raw) if blob_kind == "json" else {"hex": raw.hex()} if blob_kind == "bin" else raw.decode("utf-8")
             source.update(sha256=sha256, blob_kind=blob_kind)
+            if not result:
+                value = json.loads(raw) if blob_kind == "json" else {"hex": raw.hex()} if blob_kind == "bin" else raw.decode("utf-8")
         else:
+            if kind == "chat_log":  # the kind that advertised logs/chat.jsonl, frozen at the dialogue-store cutover
+                raise ValueError('kind="chat_log": logs/chat.jsonl is frozen since the dialogue store cutover and holds '
+                                 'no current conversation; read it with chat_history or memory_read(rows=true, room_id=...)')
             if kind not in _FILES and kind != "task_result":
                 raise ValueError(f"{_arg('kind', kind)}: op={op} needs one of task_result, {', '.join(_FILES)}")
             if state_file not in _STATES:
                 raise ValueError(f"{_arg('state_file', state_file)}: use one of {', '.join(_STATES)}")
-            is_lines = kind.endswith("_log") or kind in {"verification_receipts", "knowledge_history"}
-            if (op == "jsonl") != is_lines:
-                raise ValueError(f"kind={kind} requires op=" + ("jsonl" if is_lines else "json"))
             identities = ids if ids is not None else ([ctx.task_id] if kind == "verification_receipts" else [""])
             if not isinstance(identities, list) or not 1 <= len(identities) <= 32:
                 raise ValueError("ids must be an array of 1..32 identities")
@@ -501,24 +686,31 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 raise ValueError("ids must be unique")
             if kind in {"task_result", "review_ledger", "skill_state"}:
                 root, plane = canonical, owner
-            elif kind in {"queue_snapshot", "queue_dispatch"} and not child_task_id:
-                # The installation queue lives with its owner; child_task_id keeps child-local meaning.
+            elif (kind in {"queue_snapshot", "queue_dispatch"} and not child_task_id or requested_plane
+                  or kind in {"storage", "knowledge_history", "update_letter", "update_material"}):
+                # The installation queue lives with its owner; child_task_id keeps child-local meaning,
+                # and plane=canonical reads the installation's log instead of the caller drive's own.
                 root, plane = canonical, owner
                 _plane_path(ctx, plane, root, _FILES[kind], caller)
-            elif kind in {"storage", "knowledge_history", "update_letter", "update_material"}:
-                root, plane = canonical, owner
-                _plane_path(ctx, plane, root, _FILES[kind], caller)
+            elif kind.endswith("_log") and not child_task_id and caller != canonical:
+                missing = "; plane='canonical' reads the installation's log"  # a fork keeps its own logs
+            local = caller if plane == owner else root  # a file off this drive needs the actor's read admission
             values, remaining, retained = {}, sql.MAX_BYTES, 0
+            rotation = {} if kind.endswith("_log") else None
+            gaps = {} if kind == "knowledge_history" else None
             for identity in identities:
                 raw, value, rebuilt, clipped, consumed, owned = _record(
                     ctx, root, kind, identity, _name(child_task_id or ctx.task_id) if kind == "run" else "",
-                    state_file, op, filter, tail, remaining, canonical)
+                    state_file, op, filter, tail, remaining, canonical, rotation=rotation, selected=bool(select),
+                    admit=lambda physical: _plane_path(ctx, plane, root, physical, local), gaps=gaps)
                 retained += owned
                 if consumed > remaining:  # history rows and a rebuilt task document are measured only here
-                    history = kind == "knowledge_history"
+                    history = kind == "knowledge_history"  # a selected queue snapshot is measured after select
                     raise _over_input(f"{kind} {identity}".strip() + (" without note bodies" if history else " as canonical JSON"),
-                                      consumed, remaining,
-                                      "keep fewer rows with tail or filter; select applies only after this check" if history else "")
+                                      consumed, remaining, {
+                                          "knowledge_history": "keep fewer rows with tail or filter; select applies only after this check",
+                                          "queue_snapshot": "select the part you need: a selection is expanded and measured alone",
+                                      }.get(kind, ""))
                 remaining -= consumed
                 if select:
                     value = _select(value, select)
@@ -532,6 +724,10 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
                 value, reconstructed = values, True
                 raw = _canonical(value)
             source.update(kind=kind, ids=identities, state_file=state_file if kind == "skill_state" else None)
+            if rotation:  # the log's rotated archive: segments read, oldest first, those left unopened, gaps
+                source["rotation"] = rotation
+            if gaps:  # knowledge history lines that are not JSON: how many, and where the first one starts
+                source["gaps"] = gaps
         if not result or result["status"] == "ok":
             if select:
                 if op in {"sql", "blob"}:
@@ -563,9 +759,11 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
     except (ValueError, TypeError, KeyError, IndexError, OSError, RuntimeError, RecursionError) as exc:
         code = "access_denied" if isinstance(exc, PermissionError) else "not_found" if isinstance(exc, FileNotFoundError) else "query_failed"
         result = dict(status="blocked" if code == "access_denied" else "unavailable" if code == "not_found" else "error",
-                      code=code, message=str(exc))
+                      code=code, message=str(exc) + (missing if code == "not_found" else ""))
     if plane and result["status"] != "ok":  # a refusal or gap names the plane it concerns, like a result
         result.setdefault("plane", plane)
+    if notes:
+        result["notes"] = notes
     text = _canonical(result).decode("utf-8")
     code = {"ok": "OK", "error": "TOOL_ERROR", "blocked": "ACCESS_BLOCKED", "unavailable": "CAPABILITY_UNAVAILABLE"}[result["status"]]
     return _publish_tool_result(ctx, ToolResult(status=result["status"], code=code, text=text))
@@ -585,7 +783,8 @@ def get_tools():
         "format=text saves one selected string exactly. Complete tool output is retained before any delivery cut. "
         "kind=knowledge_history lists global knowledge writes (when, topic, mode, writer, focus, task, summary, sizes, "
         "change delta) without the note bodies, about 1 KB a row (raise max_bytes or lower tail); knowledge_read gives the current text. "
-        "Results name their data plane; the owner's default queue files, money ledger and blob fallback need the caller's existing read of each file."),
+        "Results name their data plane; the owner's default queue files, money ledger, blob fallback and plane=canonical "
+        "logs need the caller's existing read of each file."),
         "parameters": {"type": "object", "required": ["op"], "properties": {
             "op": {"enum": ["sql", "json", "jsonl", "blob"], "type": "string"},
             "db": {"enum": ["current", "money", "packs"], "type": "string", "default": "current",
@@ -595,22 +794,26 @@ def get_tools():
             "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32,
                     "description": "Task, run, review-record or skill names; one returns its value, several return an ID map."},
             "child_task_id": {"type": "string", "description": "Owned descendant's execution drive; default caller drive. Task documents/ledger/skills and the default queue files use the installation owner's state."},
+            "plane": {"type": "string", "enum": ["canonical"], "description": (
+                "*_log kinds only: the installation's log instead of this drive's, with its archive segments and "
+                "the caller's existing read of each file; omit for this drive's or child_task_id's log.")},
             "state_file": {"type": "string", "enum": list(_STATES), "default": "review_job", "description": "kind=skill_state only."},
             "sha256": {"type": "string", "description": "Blob SHA-256; the host locates loose or packed bytes, locally first, then the owner's when absent and readable."},
             "blob_kind": {"type": "string", "enum": ["json", "txt", "bin"], "default": "json", "description": "op=blob only."},
-            "select": {"type": "string", "description": "Dotted keys, [n], [*], e.g. primary_output.text or [*].tool. Applied per ID after filter/tail."},
+            "select": {"type": "string", "description": "Dotted keys, [n], [*], e.g. primary_output.text or [*].tool. Applied per ID after filter/tail, through a queue_snapshot's shared values."},
             "filter": {"type": "object", "required": ["field", "op", "value"], "additionalProperties": False,
                        "description": "op=jsonl only; keeps whole rows before tail.",
                        "properties": {"field": {"type": "string"}, "op": {"type": "string", "enum": ["eq", "contains"]}, "value": {}}},
             "tail": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100,
-                     "description": "JSONL: last matching rows; 0 reads from start. An 8 MiB scan window shared by ids (256 MiB for knowledge_history) reports scan_truncated."},
+                     "description": "JSONL: last matching rows; 0 reads from start. An 8 MiB scan window shared by ids (256 MiB for knowledge_history) reports scan_truncated. "
+                                    "A *_log tail continues into its newest archive segments; source.rotation names them, the unopened rest and gaps."},
             "max_rows": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100, "description": (
                 "op=sql only: rows returned before truncated=true. Another op accepts only the default 100, "
                 "as if omitted; op=jsonl bounds rows with tail.")},
             "max_bytes": {"type": "integer", "minimum": 256, "maximum": sql.MAX_BYTES, "default": 65536, "description": (
                 "Output budget after select/filter/tail (canonical JSON counts); op=sql stops fetching rows at it "
                 f"(truncated=true) before select. The fixed {sql.MAX_BYTES >> 20} MiB input budget, shared by ids, "
-                "is separate and precedes select.")},
+                "is separate and precedes select; a selected queue_snapshot spends only its file there.")},
             "snapshot": {"type": "boolean", "default": False, "description": "SQL: opt in to a checked disposable snapshot; default false for every db. Copy/check share the operation budget."},
             "timeout_sec": {"type": "number", "exclusiveMinimum": 0, "maximum": 10, "default": 1,
                             "description": "SQL operation seconds across acquisition/copy/check/query, not per phase. Executor startup/cleanup is separately bounded."},

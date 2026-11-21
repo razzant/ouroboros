@@ -258,6 +258,29 @@ def test_absent_and_unchanged_tracked_outputs_are_judged_after_the_run(project, 
     assert untouched.code == "ARTIFACT_OUTPUT_ERROR" and "unchanged repo output tracked.txt" in untouched.text
 
 
+def test_registered_outputs_are_production_whatever_their_size_and_a_missing_one_is_not(project):
+    """For the result review's Required floor (8 Nov 2026 follow-up): an empty output the command created is a
+    registered deliverable like any other; an existing output declared and captured for the first time is one too
+    (#2916), although its bytes did not change; an output the command never created is only intent."""
+    from ouroboros.tools.review_result import produced_material, required_material
+
+    registry, active, _outside = project
+    ctx, site = registry._ctx, active / "site"
+    (site / "existing.txt").write_bytes(b"already here\n")  # these bytes: Windows text mode would write CRLF
+    missing = _run(registry, "run_command", site, ["missing.txt"])
+    assert missing.code == "ARTIFACT_OUTPUT_ERROR" and not (site / "missing.txt").exists(), missing.text
+    trace = {"tool_calls": [_trace_item("run_command", {"outputs": ["missing.txt"]}, missing)]}
+    assert produced_material(ctx)["files"] == [] and required_material(ctx, trace, "Done.") == ""
+    for name, lines in (("empty.txt", ["Path('empty.txt').write_bytes(b'')"]), ("existing.txt", [])):
+        result = _run(registry, "run_command", site, [name], *lines)
+        assert result.code == "OK" and _registered(registry, result.text) == {
+            (site / name).resolve(): b"" if name == "empty.txt" else b"already here\n"}, result.text
+        trace["tool_calls"].append(_trace_item("run_command", {"outputs": [name]}, result))
+    assert sorted((item["size"], item["kind"]) for item in produced_material(ctx)["files"]) == [
+        (0, "artifact"), (13, "artifact")]
+    assert required_material(ctx, trace, "Done.") == "observed_production"
+
+
 def test_a_link_swapped_during_the_run_is_refused_at_registration(project, tmp_path):
     registry, active, outside = project
     _directory_link(tmp_path / "probe", outside)  # the command below creates the same kind of link
@@ -382,9 +405,19 @@ def test_an_absent_output_and_a_readable_one_need_no_disclosure(project):
     (active / "site" / "kept.txt").write_text("same")
     seen = []
     registry._ctx.emit_progress_fn = seen.append
-    result = _run(registry, "run_command", active / "site", ["kept.txt", "fresh.txt"], "Path('fresh.txt').write_text('new')")
+    outputs = ["kept.txt", "fresh.txt"]
+    result = _run(registry, "run_command", active / "site", outputs, "Path('fresh.txt').write_text('new')")
     assert result.code == "OK" and "output baseline unavailable" not in result.text, result.text
-    assert "unchanged output (cosmetic): kept.txt" in result.text and not any("baseline" in row for row in seen)
+    # Readable and unchanged, kept.txt is captured as found: a declared deliverable needs no change.
+    assert re.search(r"registered output \S*kept\.txt -> artifact_store:kept\.txt .*\(existing output, captured as found\)",
+                     result.text), result.text
+    repeat = _run(registry, "run_script", active / "site", outputs, "Path('fresh.txt').write_text('new')")
+    assert repeat.code == "OK" and repeat.meta.get("artifact_registered") is not True, repeat.text
+    assert "ARTIFACT_OUTPUT_NOTE" in repeat.text and "unchanged output (cosmetic): fresh.txt" in repeat.text
+    mixed = _run(registry, "run_command", active / "site", outputs, "Path('fresh.txt').write_text('newer')")
+    assert mixed.code == "OK" and mixed.meta.get("artifact_registered") is True, mixed.text
+    assert "unchanged output (cosmetic): kept.txt" in mixed.text and "ARTIFACT_OUTPUTS" in mixed.text
+    assert not any("baseline" in row for row in seen)
 
 
 @posix_permissions
@@ -598,3 +631,28 @@ def test_late_output_resolution_failure_preserves_completed_command(project, mon
     assert "COMMAND_COMPLETED" in result.text and "exit_code=0" in result.text
     assert "output could not be resolved" in result.text and "controlled late resolution failure" in result.text
     assert (active / "site" / "marker.txt").exists()
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script"])
+def test_a_failed_command_registers_only_the_outputs_it_demonstrably_made(project, tool):
+    """A nonzero exit stays the failure; a declared output this run created or changed is its partial result,
+    registered and observed (``artifact_registered``). An output it never created, or left unchanged, is only noted:
+    a declaration alone is intent, never production (owner, 8 Nov 2026)."""
+    from ouroboros.artifacts import collect_task_artifact_records
+
+    registry, active, _outside = project
+    (active / "kept.txt").write_text("before\n", encoding="utf-8")
+    outputs = ["made.txt", "kept.txt", "never.txt"]
+    result = _run(registry, tool, active, outputs, "Path('made.txt').write_text('partial')", "raise SystemExit(3)")
+    assert result.code == "SHELL_EXIT_ERROR" and result.meta.get("artifact_registered") is True
+    assert "not created by the failed command: never.txt" in result.text
+    assert "unchanged by the failed command, not registered: kept.txt" in result.text
+    ctx = registry._ctx
+    assert [pathlib.Path(row["source_path"]).name for row in collect_task_artifact_records(ctx.drive_root, ctx.task_id)
+            if row.get("source_path")] == ["made.txt"]
+    row = _trace_item(tool, {"outputs": outputs}, result)
+    assert row["is_error"] is True and row["artifact_registered"] is True, "still the failure, and observed"
+
+    nothing = _run(registry, tool, active, ["absent.txt"], "raise SystemExit(4)")
+    assert nothing.code == "SHELL_EXIT_ERROR" and not nothing.meta.get("artifact_registered")
+    assert "not created by the failed command: absent.txt" in nothing.text

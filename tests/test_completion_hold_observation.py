@@ -47,6 +47,17 @@ def tool_call(name, call_id="work"):
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
 
 
+def act(name, **arguments):
+    """One assistant round calling ``name`` with ``arguments``."""
+    return {"role": "assistant", "content": None, "tool_calls": [{
+        "id": name, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
+
+
+def write_round():
+    """A round that changes the result (a reviewable write) and leaves it unexamined."""
+    return act("write_file", path="report.md", content="Report")
+
+
 def holds(root):
     """The completion_held rows of the events log under ``root`` (absent file: none)."""
     path = root / "logs" / "events.jsonl"
@@ -94,12 +105,16 @@ def turn(tmp_path, monkeypatch):
     return runner(tmp_path, monkeypatch)
 
 
-def hold_first_delivery(monkeypatch):
-    """A result-review double that holds the first delivery once, naming no cause."""
+def hold_first_delivery(monkeypatch, *, cause="blocking_refusal"):
+    """A result-review double that holds the first delivery once. By default a blocking hold, a debt that arms
+    selection; another ``cause`` is an outcome shown once, a one-shot fact (``delivery_facts``)."""
     seen = []
 
-    def review(_ctx, content, _trace, _hold):
+    def review(ctx, content, _trace, hold):
         seen.append(content)
+        if len(seen) == 1:
+            ctx._completion_hold_cause = cause
+            hold(f"[Result review] {cause}.")
         return len(seen) == 1
 
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
@@ -155,16 +170,13 @@ def test_a_refused_acceptance_subject_is_named_without_its_prose(turn):
 
 @pytest.mark.parametrize("origin", ["selection", "prose"])
 def test_a_real_nudge_hold_names_its_nudge_for_a_selection_and_for_prose(turn, origin):
-    from ouroboros.outcomes import append_verification_receipt
-
-    append_verification_receipt(turn.root, "author-task", {"status": "fail", "check": "pytest", "returncode": 1})
     first = finish("Answer") if origin == "selection" else {"content": "Answer"}
-    text, _usage, trace = turn.run([first, finish("Answer")])
+    text, _usage, trace = turn.run([write_round(), first, finish("Answer")])
 
-    assert text == "Answer" and len(turn.calls) == 2
+    assert text == "Answer" and len(turn.calls) == 3
     assert not trace.get("completion_refusals"), "a selection held after acceptance was not refused"
     [row] = holds(turn.root)
-    assert facts(row) == (1, origin, "finalization_nudge", "verification_red", sha("Answer"))
+    assert facts(row) == (2, origin, "finalization_nudge", "pre_delivery_notice", sha("Answer"))
     assert row["candidate_revision"] == 1
 
 
@@ -281,7 +293,7 @@ def test_a_later_hold_names_the_current_candidate_never_an_earlier_held_response
 
     assert text == interim and seen == ["Report", interim] and len(turn.calls) == 4
     assert [facts(row) for row in holds(turn.root)] == [
-        (1, "prose", "result_review", None, sha("Report")),
+        (1, "prose", "result_review", "blocking_refusal", sha("Report")),
         (2, "prose", "selection_required", None, sha("Report")),
         (3, "selection", "selection_refused", "selection_unavailable", sha("Report")),
     ]
@@ -309,12 +321,11 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
         monkeypatch.setattr(loop, "_enforce_plan_gate", once(True, False))
     elif reason == "subagent_handoff":
         monkeypatch.setattr(loop, "_compute_subagent_handoff", once("A child finished.", ""))
-    elif reason == "child_absorption":
-        monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", once("continue", None))
     elif reason == "focus_reply_refused":
         monkeypatch.setattr("ouroboros.place_reply.prepare_focus_reply", once((False, "[SYSTEM NOTICE] Not here."), (True, "")))
-    elif reason == "admission_seal":
-        answer, origin, script = "Partial", "selection", [finish("Partial", action="stop", rationale="Unfinished")]
+    elif reason == "admission_seal":  # a held stop is selected again only by a later model round
+        answer, origin = "Partial", "selection"
+        script = [finish("Partial", action="stop", rationale="Unfinished")] * 2
         monkeypatch.setattr("ouroboros.loop_delivery._seal_admission_before_delivery", once(False, True))
     else:
         turn.registry._ctx.owner_message_admission_lock = threading.Lock()
@@ -331,6 +342,23 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
 
     assert text == answer and len(turn.calls) == len(script)
     assert [facts(row) for row in holds(turn.root)] == [(1, origin, reason, None, sha(answer))]
+
+
+def test_a_refused_stop_reply_waits_for_a_later_model_round(turn, monkeypatch):
+    """A stop whose reply the place's check refuses is held, never republished by the host (CAD group, 04.11
+    20:57:04 → 20:57:34): nothing is offered again until the next model round selects the stop, and that round's
+    identical stop is delivered."""
+    offered = []
+
+    def prepare(_ctx, _text, quiet=False):
+        offered.append(len(turn.calls))  # how many model rounds had run when the reply was offered
+        return (False, "[SYSTEM NOTICE] Not here.") if len(offered) == 1 else (True, "")
+
+    monkeypatch.setattr("ouroboros.place_reply.prepare_focus_reply", prepare)
+    text, _usage, _trace = turn.run([finish("Partial", action="stop", rationale="Unfinished")] * 2)
+    assert text == "Partial" and len(turn.calls) == 2
+    assert offered == [1, 2]
+    assert [facts(row) for row in holds(turn.root)] == [(1, "selection", "focus_reply_refused", None, sha("Partial"))]
 
 
 @pytest.mark.parametrize("standing", ["addressed", "context"])
@@ -465,7 +493,7 @@ def test_ordinary_work_finishes_and_suppressed_nudges_write_no_hold(turn, script
         turn.registry.override_handler("update_scratchpad", lambda _ctx, **kw: "written")
         responses[0]["tool_calls"].insert(0, {"id": "note", "type": "function", "function": {
             "name": "update_scratchpad", "arguments": json.dumps({"content": "Next: the docs"})}})
-    if script == "suppressed_nanny_nudge":
+    if script == "suppressed_nanny_nudge":  # a nanny finishing by its own calls: no open run, no child, no effect
         turn.registry._ctx._nanny_route_dispatched = True
         turn.registry._ctx.task_contract = {"disabled_tools": ["delegate_start"]}
 
@@ -473,8 +501,6 @@ def test_ordinary_work_finishes_and_suppressed_nudges_write_no_hold(turn, script
 
     assert len(turn.calls) == len(responses) and text
     assert not trace.get("completion_refusals")
-    if script == "suppressed_nanny_nudge":
-        assert turn.registry._ctx._nanny_finalization_injected is True, "the nanny branch ran and was suppressed"
     assert holds(turn.root) == []
 
 
@@ -566,18 +592,21 @@ def test_a_split_child_hold_survives_its_drive_removal_in_both_canonical_readers
 
 @pytest.mark.parametrize("failure", ["emitter_raises", "events_log_unwritable"])
 def test_an_unrecorded_hold_plays_out_exactly_as_a_recorded_one(tmp_path, monkeypatch, caplog, failure):
-    from ouroboros.outcomes import append_verification_receipt
-
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    # A nudge holds the draft; interim prose is then no selection; a stale selector is refused.
-    script = [{"content": "Draft"}, {"content": "Interim."}, finish(answer_sha256="0" * 64), finish("Final")]
+    # The pre-delivery notice holds the draft (a written result nothing examined); a stale selector is refused,
+    # which arms selection, so interim prose is then no selection.
+    script = [write_round(), {"content": "Draft"}, finish(answer_sha256="0" * 64), {"content": "Interim."},
+              finish("Final")]
     recorded_root, failing_root = tmp_path / "recorded", tmp_path / "failing"
-    for root in (recorded_root, failing_root):
-        append_verification_receipt(root, "author-task", {"status": "fail", "check": "pytest", "returncode": 1})
+
+    def written(_ctx, *, _resolved_binding=None, **_kwargs):  # the same tool row in both runs
+        return "written"
+
     recorded = runner(recorded_root, monkeypatch)
+    recorded.registry.override_handler("write_file", written)
     expected = recorded.run(list(script))
     assert [row["reason"] for row in holds(recorded_root)] == [
-        "finalization_nudge", "selection_required", "selection_refused"]
+        "finalization_nudge", "selection_refused", "selection_required"]
 
     if failure == "emitter_raises":
         real = loop._emit_checkpoint_event
@@ -591,10 +620,11 @@ def test_an_unrecorded_hold_plays_out_exactly_as_a_recorded_one(tmp_path, monkey
     else:
         (failing_root / "logs" / "events.jsonl").mkdir(parents=True)  # no row can be appended there
     failing = runner(failing_root, monkeypatch)
+    failing.registry.override_handler("write_file", written)
     with caplog.at_level(logging.WARNING):
         observed = failing.run(list(script))
 
-    assert observed[0] == expected[0] == "Final" and len(failing.calls) == len(recorded.calls) == 4
+    assert observed[0] == expected[0] == "Final" and len(failing.calls) == len(recorded.calls) == 5
     assert observed[2]["completion_refusals"] == expected[2]["completion_refusals"]
     assert authored(failing.calls) == authored(recorded.calls), "the same model requests, round for round"
     disclosed = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
@@ -609,8 +639,6 @@ def test_an_unrecorded_hold_plays_out_exactly_as_a_recorded_one(tmp_path, monkey
 # --- The producers name their causes -------------------------------------------------------------
 
 def _nudge_case(case, tmp_path, monkeypatch):
-    from ouroboros.outcomes import append_verification_receipt
-
     ctx = SimpleNamespace(drive_root=tmp_path, task_contract={}, task_metadata={})
     trace = {"reasoning_notes": [], "tool_calls": []}
     content = "done"
@@ -620,24 +648,15 @@ def _nudge_case(case, tmp_path, monkeypatch):
         ctx._authoring_handover = {"tool_calls_at_handover": 1, "from_model": "a", "to_model": "b"}
     elif case == "skill_not_finalized":
         monkeypatch.setattr(loop, "_skill_finalization_message", lambda *_a, **_k: "⚠️ SKILL_NOT_FINALIZED: x")
-    elif case == "verification_red":
-        append_verification_receipt(tmp_path, "t", {"status": "fail", "check": "pytest", "returncode": 1})
-    elif case == "verification_masked":
-        append_verification_receipt(tmp_path, "t", {"status": "pass", "criterion_id": "c1", "check": "make t | tail",
-                                                    "check_exit_masking": True})
-    elif case == "criterion_agent_defined":
-        append_verification_receipt(tmp_path, "t", {"status": "pass", "check": "pytest",
-                                                    "criterion_source": "agent_defined"})
-    elif case == "verification_absent":
-        trace["tool_calls"] = [{"tool": "commit_reviewed", "status": "ok"}]
+    elif case == "pre_delivery_notice":  # a written result nothing examined since
+        trace["tool_calls"] = [{"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}]
     elif case == "final_answer_marker":
         ctx.task_contract = {"answer_protocol": "final_answer_line"}
         trace["tool_calls"] = [{"tool": "read_file", "status": "ok"}]
     return SimpleNamespace(_ctx=ctx), trace, content
 
 
-@pytest.mark.parametrize("case", ["verification_masked",
-                                  "criterion_agent_defined", "verification_absent"])
+@pytest.mark.parametrize("case", ["pre_delivery_notice"])
 def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch, case):
     tools, trace, content = _nudge_case(case, tmp_path, monkeypatch)
     assert loop._maybe_inject_finalization_nudges(tools, tmp_path, "t", trace, content, [], lambda *_: None) is True
@@ -647,65 +666,191 @@ def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch,
     assert _hold_cause(tools._ctx) == case and _hold_cause(tools._ctx) == "", "read once"
 
 
-@pytest.mark.parametrize("code", ["NANNY_DELEGATED_RUN_PENDING", "NANNY_DELEGATED_RUN_FAILED",
-                                  "CONFIGURED_ACTOR_INCOMPLETE"])
-def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
-    from tests.test_nanny_finalization_nudge import _custody_drive, _emit_settled, _emit_started, _tools
+def _check(code, tag="a"):
+    """A recorded command check exiting ``code``; another ``tag`` is another check."""
+    import sys
 
-    drive, task_id = _custody_drive(tmp_path), "child-1"
-    ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False, drive_root=drive,
-                          event_queue=None, drive_logs=drive / "logs", task_contract={}, task_metadata={})
-    if code != "CONFIGURED_ACTOR_INCOMPLETE":
-        _emit_started(drive, "run-1", task_id)
-    if code == "NANNY_DELEGATED_RUN_FAILED":
-        _emit_settled(drive, "run-1", task_id, "failed")
-    if code == "CONFIGURED_ACTOR_INCOMPLETE":
-        task_id = ctx.task_id = "actor-1"
-        ctx.task_metadata = {"budget_drive_root": str(drive)}
-        ctx._configured_actor_bootstrap = {"route_available": True, "exact_start_pending": True, "physical_started": False,
-                                           "zero_run_receipt_recorded": False, "selected_subagent_id": "session-a"}
-    tools = _tools(ctx, ["delegate_start", "delegate_wait", "verify_and_record"])
-    trace = {"reasoning_notes": [], "tool_calls": []}
-
-    assert loop._maybe_inject_finalization_nudges(tools, drive, task_id, trace, "done", [], lambda *_: None) is True
-
-    rows = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    [nudge] = [row for row in rows if row.get("checkpoint_kind") == "nanny_finalization_nudge"]
-    assert ctx._completion_hold_cause == nudge["nanny_code"] == code
+    return act("verify_and_record", contract_kind="explicit_command",
+               check=[sys.executable, "-c", f"raise SystemExit({code})  # {tag}"])
 
 
-def test_a_real_nanny_hold_names_its_code_through_the_loop(turn):
-    # A configured session actor finalizing by its own calls, with no leaf run and no typed zero-run decision.
-    turn.registry._ctx._nanny_route_dispatched = True
-    turn.registry._ctx._configured_actor_bootstrap = {
-        "route_available": True, "exact_start_pending": True, "physical_started": False,
-        "zero_run_receipt_recorded": False, "selected_subagent_id": "session-a"}
-    answer = "Done by my own calls."
-    text, _usage, _trace = turn.run([{"content": answer}, finish(answer)])
-
-    assert text == answer and len(turn.calls) == 2
-    assert [facts(row) for row in holds(turn.root)] == [
-        (1, "prose", "finalization_nudge", "CONFIGURED_ACTOR_INCOMPLETE", sha(answer))]
-    assert any(str(row.get("content")).startswith("[SYSTEM REMINDER]\n⚠️ CONFIGURED_ACTOR_INCOMPLETE:")
-               for row in turn.calls[-1])
+def _declared():
+    return act("verify_and_record", contract_kind="no_visible_machine_contract", check="read it through")
 
 
-def test_a_suppressed_nudge_names_no_cause(tmp_path):
-    ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False, drive_root=tmp_path)
-    tools = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["read_file"])  # the delegate verbs are hidden
-    trace = {"reasoning_notes": [], "tool_calls": []}
-    assert loop._maybe_inject_finalization_nudges(tools, tmp_path, "t", trace, "done", [], lambda *_: None) is False
-    assert ctx._nanny_finalization_injected is True and not hasattr(ctx, "_completion_hold_cause")
+def _missing():
+    return act("verify_and_record", contract_kind="artifact_observation", artifact_paths=["nowhere.md"])
 
 
-@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pass"])
+# After the write: the rounds up to the delivered answer (built per run); the door's holds in order; whether the
+# record keeps ``receipt_absent``; how many checks passed after the red one the record keeps (None: it keeps none).
+_DOOR_CASES = {
+    "nothing": (lambda: [finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, None),
+    "declared": (lambda: [_declared(), finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, None),
+    "result_review": (lambda: [act("review_change", subject="result"), finish("Answer")], [], False, None),
+    "green_check": (lambda: [_check(0), finish("Answer")], [], False, None),
+    "red_check": (lambda: [_check(1), finish("Answer"), finish("Answer")], ["red_check_notice"], False, 0),
+    "red_then_declared": (lambda: [_check(1), _declared(), finish("Answer"), finish("Answer")],
+                          ["red_check_notice"], False, 0),
+    "red_then_other_green": (lambda: [_check(1), _check(0, "b"), finish("Answer")], [], False, 1),
+    "red_then_stop": (lambda: [_check(1), finish("Answer", action="stop", rationale="Unfinished")], [], False, 0),
+    # One door, one return: the red check is said once, in the unexamined result's "Recorded about it".
+    "red_then_write": (lambda: [_check(1), act("write_file", path="report.md", content="Report 2"), finish("Answer"),
+                                finish("Answer")], ["pre_delivery_notice"], True, 0),
+    "missing_after_write": (lambda: [_missing(), finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, 0),
+    # Each part returns once, in either order: the edit after the red notice leaves the result unexamined.
+    "red_notice_then_write": (lambda: [_check(1), finish("Answer"), act("write_file", path="report.md", content="Report 2"),
+                                       finish("Answer"), finish("Answer")], ["red_check_notice", "pre_delivery_notice"], True, 0),
+    # A check that fails after the first notice is news: the second return, and the last (owner 15.11).
+    "notice_then_red": (lambda: [finish("Answer"), _missing(), finish("Answer"), _missing(), finish("Answer")],
+                        ["pre_delivery_notice", "red_check_notice"], True, 0),
+}
+
+
+@pytest.mark.parametrize("case", list(_DOOR_CASES))
+def test_the_finish_door_returns_an_unexamined_result_and_a_red_last_check_once_each(turn, monkeypatch, case):
+    """The finish door states two facts, each once per execution, and the next finish is accepted. A written result
+    nothing examined since its last change (audit 11.11, item 18): an executed check, a red one too, or a result
+    review asked for after the last change examined it, while a declaration that nothing is machine-checkable examines
+    nothing. A last recorded check that did not pass with none passed since (owner 15.11: on a failure, a chance to
+    correct it): a command or a path observation; a later pass of any check, an author stop and no check at all
+    leave the door silent, and a declaration after the failure does not. The record keeps the red check either way,
+    with how many checks passed after it."""
+    from ouroboros.outcomes import apply_receipt_absent_flag, derive_loop_outcome
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))  # the check runs, unjudged
+    rounds, held, unexamined, passed_after = _DOOR_CASES[case]
+    rounds = rounds()
+    if case == "result_review":  # the request is what the record reads; its panel does not run here
+        turn.registry.override_handler("review_change", lambda _ctx, **_kw: json.dumps({"status": "requested"}))
+    script = [write_round(), *rounds]
+
+    text, usage, trace = turn.run(script)
+
+    assert text == "Answer" and len(turn.calls) == len(script), "every scripted round ran, and the last one delivered"
+    assert [(row["reason"], row["subreason"]) for row in holds(turn.root)] == [("finalization_nudge", cause) for cause in held]
+    reminders = [row["content"] for row in turn.calls[-1] if str(row.get("content") or "").startswith("[SYSTEM REMINDER]")]
+    said = sum(text.count("the last recorded check did not pass") for text in reminders)  # the door's own statement
+    in_record_line = case in {"red_then_write", "missing_after_write", "red_notice_then_write"}
+    assert said == ("red_check_notice" in held) + in_record_line, reminders
+    if case == "red_check":  # the cause, and the sentence the owner's details will carry
+        assert "exit code 1), and none" not in reminders[0] and "The last recorded check did not pass (exit code 1)" in reminders[0]
+    if case == "missing_after_write":  # the host's own words for a check that ran no command, never dressed as one
+        assert "did not pass (path observation — missing: nowhere.md (resolved as " in reminders[0]
+        assert str(turn.root / "nowhere.md") + ")), and none has passed since" in reminders[0], "where the host looked"
+    outcome = derive_loop_outcome(text, usage, trace)
+    apply_receipt_absent_flag(outcome, trace, turn.root, "author-task")
+    objective = outcome["outcome_axes"]["objective"]
+    warnings = objective.get("warnings") or []
+    assert ("receipt_absent" in warnings) is unexamined, warnings
+    assert ("verification_red_unreconciled" in warnings) is (passed_after is not None), warnings
+    assert (objective.get("verification_red") or {}).get("passed_after") == passed_after and "check" not in (
+        objective.get("verification_red") or {}), "the task row keeps the fact, the receipt keeps the command"
+
+
+def test_a_root_under_required_is_told_its_red_last_check_before_the_review(tmp_path, monkeypatch):
+    """Required reviews a root's result at delivery, so the door leaves the unexamined result to that review; the
+    red last check is told there too, before the paid wave: the review cannot pass a check for its author."""
+    from ouroboros.loop_nudges import _pre_delivery_notice
+
+    tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: "required")
+    monkeypatch.setattr("ouroboros.tools.review_result.required_root_wave", lambda _ctx: True)
+    red = [{"status": "fail", "contract_kind": "explicit_command", "check": "pytest -q", "returncode": 1}]
+
+    assert _pre_delivery_notice(tools, tmp_path, "t", trace, []) == "", "the unexamined result is the review's"
+    notice = _pre_delivery_notice(tools, tmp_path, "t", trace, red)
+    assert "the last recorded check did not pass" in notice and "`pytest -q` — exit code 1" in notice
+    assert "has examined this result" not in notice and "review_change" not in notice
+
+
+def test_only_a_current_bound_result_review_examines_the_result():
+    """A bound result review speaks for the subject it was bound to. The next delivery candidate supersedes it (a
+    change after it is unexamined again), a run of an earlier version stands beside the delivered bytes as that
+    version's, and a $0 refusal examined nothing; the exact subject delivered again is current again."""
+    from ouroboros.outcomes import result_unexamined
+    from ouroboros.tools.review_result import _bind_review_run, supersede_result_runs
+
+    def record(aggregate="PASS"):
+        return {"record_id": "r1", "verdict": {"aggregate": aggregate}, "subject": {"diff_sha": "s1"}}
+
+    write = {"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}
+    trace = {"tool_calls": [dict(write)], "review_runs": []}
+    run = _bind_review_run(trace, record(), "s1", "advisory")
+    assert result_unexamined(trace) is False, "bound to this result"
+    trace["tool_calls"].append(dict(write))
+    supersede_result_runs(trace, "candidate-2")  # the next door's candidate, before its notice
+    assert result_unexamined(trace) is True, "the result changed after the binding"
+    _bind_review_run(trace, record(), "s2", "advisory", earlier_revision=True)
+    assert run["earlier_revision"] and result_unexamined(trace) is True, "an earlier version's review"
+    _bind_review_run(trace, record(), "s1", "advisory")
+    assert result_unexamined(trace) is False, "the exact subject it reviewed is delivered again"
+    trace["review_runs"] = [{"surface": "result", "aggregate": "NOT_DISPATCHED"}]
+    assert result_unexamined(trace) is True, "a refusal dispatched no reviewer"
+
+
+def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_path, monkeypatch):
+    """The notice comes once for the task, not once per process: a continuation (an owner wait, a restart, a budget
+    pause) saves both shown parts of the notice (the facts and the red last check) and the handed-off child results
+    with the other delivery facts, so the resumed execution shows none again. A new turn on a reused context starts
+    its own notice, and a first notice saved before any check failed leaves the red check its one return."""
+    from ouroboros import owner_wait
+    from ouroboros.loop import _reset_turn_state
+    from ouroboros.loop_nudges import _claim_pre_delivery_notice
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: "auto")
+    trace = {"reasoning_notes": [], "tool_calls": [{"tool": "write_file", "status": "ok", "args": {"path": "r.md"}}]}
+    red = [{"status": "fail", "contract_kind": "explicit_command", "check": "pytest -q", "returncode": 1}]
+    ctx, limit = _loop_ctx(tmp_path, "t")
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=ctx), tmp_path, "t", trace, red), "the first door shows it"
+    ctx._subagent_handoff_shown = ["child-1:abc"]
+    saved = json.loads(json.dumps(owner_wait.continuation_state(ctx, limit.messages, {}, {}, 3, [], set()), default=str))
+    unsaved, _ = _loop_ctx(tmp_path, "t")
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=unsaved), tmp_path, "t", trace, red), "nothing carried it"
+    resumed, _ = _loop_ctx(tmp_path, "t")
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=resumed), saved, [], {}, {}, set())
+    assert resumed._pre_delivery_noticed and resumed._red_check_noticed, "both parts were told before the pause"
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, red) == ""
+    assert resumed._subagent_handoff_shown == ["child-1:abc"], "the handed-off results stay handed off"
+    _reset_turn_state(resumed)
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, red), "a new turn's answer"
+    early, limit = _loop_ctx(tmp_path, "t")  # the first notice came before any check failed
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=early), tmp_path, "t", trace, []) and not early._red_check_noticed
+    saved = json.loads(json.dumps(owner_wait.continuation_state(early, limit.messages, {}, {}, 3, [], set()), default=str))
+    later, _ = _loop_ctx(tmp_path, "t")
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=later), saved, [], {}, {}, set())
+    assert "the last recorded check did not pass" in _claim_pre_delivery_notice(SimpleNamespace(_ctx=later), tmp_path, "t", trace, red)
+    assert later._completion_hold_cause == "red_check_notice" and later._red_check_noticed
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=later), tmp_path, "t", trace, red) == "", "and once"
+
+
+@pytest.mark.parametrize("mode", ["auto", "off", "auto_without_review_tool"])
+def test_the_notice_offers_a_result_review_only_where_this_actor_can_ask_for_one(tmp_path, monkeypatch, mode):
+    """Task review Off refuses every result review (``review_result.refuse_when_off``), and an actor whose tools
+    lack ``review_change`` cannot call it: there the notice offers the check and the honest delivery only; under
+    Auto, with the tool, it also offers the review call."""
+    from ouroboros.loop_nudges import _pre_delivery_notice
+
+    tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: mode.split("_")[0])
+    if mode == "auto_without_review_tool":
+        tools.available_tools = lambda: ["write_file", "verify_and_record", "finish_task"]
+    notice = _pre_delivery_notice(tools, tmp_path, "t", trace, [])
+    assert notice.startswith("Before delivery: no recorded check (verify_and_record) or result review has examined")
+    assert ('review_change with subject="result"' in notice) is (mode == "auto")
+    assert ("off on this install" in notice) is (mode == "off")
+    assert "verify_and_record runs the check" in notice and "or deliver it as it is" in notice
+
+
+@pytest.mark.parametrize("cause", ["findings", "pass"])
 def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, cause):
     import ouroboros.review_substrate as substrate
     import ouroboros.tools.review_change as review_change_mod
     from ouroboros.tools.review_result import result_review_at_delivery
     from tests.test_result_review import CRITICAL, _floor_ctx, _produced_answer_protocol, _seam
 
-    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement="blocking" if cause == "blocking_refusal" else "advisory")
+    ctx = _floor_ctx(tmp_path, monkeypatch)
     _produced_answer_protocol(monkeypatch)
     sends, shown, trace = [], [], {"tool_calls": []}
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot",
@@ -713,11 +858,6 @@ def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, caus
     if cause == "pending":
         monkeypatch.setattr(review_change_mod, "run_review_change",
                             lambda ctx, **kwargs: {"state": "pending", "record_id": "rl-running"})
-    if cause == "blocking_refusal":
-        monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
-        assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True  # its FAIL
-        assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True  # refused, shown
-        assert ctx._completion_hold_cause == "findings"
     if cause == "earlier_request":
         assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True  # its PASS, first
         ctx._completion_hold_cause = ""  # the delivery owner reads each cause once
@@ -725,7 +865,7 @@ def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, caus
         assert ctx._completion_hold_cause == "", "a delivery names no hold cause"
         ctx._owner_directives = [*(getattr(ctx, "_owner_directives", None) or []),
                                  {"source": "owner_mailbox", "content": "Give it in kilometres.", "msg_id": "m-2"}]
-    answer = "FINAL ANSWER: 3" if cause == "blocking_refusal" else "FINAL ANSWER: 2"
+    answer = "FINAL ANSWER: 2"
     ctx._completion_hold_cause = ""
 
     assert result_review_at_delivery(ctx, answer, trace, shown.append) is True
@@ -755,3 +895,261 @@ def test_a_real_result_review_hold_reaches_the_row_through_the_real_loop(tmp_pat
     [row] = holds(ctx.drive_root)
     assert facts(row) == (1, "prose", "result_review", "findings", sha(answer))
     assert getattr(ctx, "_completion_hold_cause", "") == "", "the delivery owner read the cause once"
+
+
+# Prose completion after one-shot delivery facts (Nano regression).
+def _repeating(text, times=6):
+    return [{"role": "assistant", "content": text} for _ in range(times)]
+
+
+def test_prose_without_finish_task_ends_a_turn_that_did_no_reviewable_work(turn):
+    text, _usage, _trace = turn.run([act("list_files", path="."), *_repeating("Two files are there.")])
+    assert text == "Two files are there." and len(turn.calls) == 2
+    assert holds(turn.root) == []
+
+
+def test_a_report_repeated_after_the_pre_delivery_notice_is_delivered(turn):
+    report = "Wrote report.md: the result is 200."
+    text, _usage, _trace = turn.run([write_round(), *_repeating(report)])
+    assert text == report
+    assert len(turn.calls) == 3  # the work, the answer the notice returned, the same answer delivered
+    assert [facts(row) for row in holds(turn.root)] == [
+        (2, "prose", "finalization_nudge", "pre_delivery_notice", sha(report))]
+    assert "Your next answer is not returned for these facts." in str(turn.calls[2])
+    assert "Your next answer is delivered as written, so make it the whole answer." in str(turn.calls[2])
+    assert "You chose silence" not in str(turn.calls[2])  # a spoken answer hears nothing about silence
+    assert "No completion selection was made" not in str(turn.calls[2])  # no selection is demanded of prose
+
+
+def test_a_parent_answering_after_its_childs_result_ends_its_turn(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    write_task_result(tmp_path, "child1", STATUS_COMPLETED, parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="helper", result="29 * 31 = 899")
+    parent = runner(tmp_path, monkeypatch, task_id="parent1")
+    text, _usage, _trace = parent.run([finish("The helper returned 898."), *_repeating("The helper returned 899.")])
+    assert text.startswith("The helper returned 899.")
+    assert len(parent.calls) == 2  # the held selection with the child's result shown, then the corrected answer
+    assert [row["reason"] for row in holds(tmp_path)] == ["subagent_handoff"]
+    assert "[SUBAGENT_RESULTS" in str(parent.calls[1]) and "899" in str(parent.calls[1])
+    assert "Your next answer is delivered as written" in str(parent.calls[1])
+
+
+def _plan_gate_once(monkeypatch):
+    """A real debt's double: the plan gate holds the first answer once (an open plan item), then lets it pass."""
+    import ouroboros.loop as loop
+
+    seen = []
+
+    def gate(_content, messages, _tools, _trace, _emit):
+        seen.append(1)
+        if len(seen) == 1:
+            messages.append({"role": "user", "content": "[PLAN_GATE] An accepted plan item is still open."})
+            return True
+        return False
+
+    monkeypatch.setattr(loop, "_enforce_plan_gate", gate)
+
+
+def test_an_armed_control_episode_still_requires_a_selection(turn, monkeypatch):
+    """Owed selection stays owed: once a real debt (here the plan gate) armed control, prose is held as before."""
+    _plan_gate_once(monkeypatch)
+    text, _usage, _trace = turn.run([{"content": "Report"}, {"content": "Report again"},
+                                     finish(answer_sha256=sha("Report again"))])
+    assert text == "Report again" and len(turn.calls) == 3
+    assert [row["reason"] for row in holds(turn.root)] == ["plan_gate", "selection_required"]
+    assert "Your next answer is delivered as written" not in str(turn.calls)
+
+
+def _shown(monkeypatch):
+    """Every text the loop shows the person as an interim message (``_emit_round_progress``), in order."""
+    import ouroboros.loop as loop
+
+    shown, real = [], loop._emit_round_progress
+
+    def capture(content, msg, emit, trace):
+        if isinstance(content, str) and content.strip():  # a tool round without words shows no text
+            shown.append(content)
+        return real(content, msg, emit, trace)
+
+    monkeypatch.setattr(loop, "_emit_round_progress", capture)
+    return shown
+
+
+def test_a_short_answer_after_the_facts_does_not_hide_the_full_one(turn, monkeypatch):
+    """The model wrote a full report, the notice returned it once, the model answered "see above": the person sees
+    the report first, then the short line. The host never judges which answer is longer."""
+    shown = _shown(monkeypatch)
+    full, short = "Full report: wrote report.md, the check returned 200, all details.", "Done, see above."
+    text, _usage, _trace = turn.run([write_round(), {"content": full}, {"content": short}])
+    assert text == short and len(turn.calls) == 3
+    assert shown == [full]  # shown once, before the final
+
+
+def test_a_parent_reads_the_report_its_childs_short_final_replaced(turn, monkeypatch):
+    """Panel 7 (Opus): the room saw the report, the parent reads only the child's result. The child's result keeps the
+    displaced report apart from its final's bytes; the parent's handoff names it in one line, and the named call reads
+    it whole."""
+    import re
+
+    from ouroboros.task_finalization import build_completion_observations
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_status import format_subagent_absorption_message
+
+    monkeypatch.setattr("ouroboros.skill_readiness.acceptance_skill_lifecycle", lambda *_a, **_k: [])
+    full, short = "Full report: wrote report.md, the check returned 200, every detail of it.", "Done, see above."
+    text, _usage, trace = turn.run([write_round(), {"content": full}, {"content": short}])
+    assert text == short
+    child = {"id": "author-task", "budget_drive_root": str(turn.root)}
+    write_task_result(turn.root, "author-task", "completed", result=short, parent_task_id="parent-task",
+                      root_task_id="parent-task", delegation_role="subagent",
+                      completion_observations=build_completion_observations(turn.root, child, trace))
+    row = load_task_result(turn.root, "author-task")
+    assert row["result"] == short  # the final's bytes are the final's alone
+
+    handoff = format_subagent_absorption_message([row], parent_task_id="parent-task")
+    [line] = [line for line in handoff.splitlines() if "that later answers replaced" in line]
+    assert "1 answer(s)" in line and f"{len(full)} chars: get_task_result(" in line
+    call = re.search(r"get_task_result\((\{.*\})\)", line)
+    source = json.loads(turn.registry.execute("get_task_result", json.loads(call.group(1))))["completion_source"]
+    # the named call reads the displaced answer alone, as the source spells it, never the whole source
+    assert source["text"] == json.dumps(full, ensure_ascii=False)
+
+
+def test_two_one_shot_facts_in_a_row_keep_both_displaced_answers_for_the_parent(turn, monkeypatch):
+    """Review 8 (Astra, critical): a full report A, the pre-delivery notice, a red check, "the report is above" B, the
+    red-check notice, "Done" C. Each displaced answer is kept whole and in order; the parent's line names a range for
+    each, and each range reads its answer character for character."""
+    import re
+
+    from ouroboros.task_finalization import build_completion_observations
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_status import format_subagent_absorption_message
+
+    monkeypatch.setattr("ouroboros.skill_readiness.acceptance_skill_lifecycle", lambda *_a, **_k: [])
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    full = "Подробный отчёт 🐍: результаты 12345, \"кавычки\" и все данные."
+    short, final = "Отчёт приведён выше.", "Готово."
+    text, _usage, trace = turn.run([write_round(), {"content": full}, _missing(), {"content": short},
+                                    {"content": final}])
+    assert text == final and trace["displaced_answer"] == [full, short]
+    observations = build_completion_observations(turn.root, {"id": "author-task"}, trace, final_text=text)
+    write_task_result(turn.root, "author-task", "completed", result=final, parent_task_id="parent-task",
+                      root_task_id="parent-task", delegation_role="subagent", completion_observations=observations)
+    [line] = [line for line in format_subagent_absorption_message(
+        [load_task_result(turn.root, "author-task")], parent_task_id="parent-task").splitlines() if "replaced" in line]
+    calls = [json.loads(found) for found in re.findall(r"get_task_result\((\{.*?\})\)", line)]
+    read = [json.loads(json.loads(turn.registry.execute("get_task_result", call))["completion_source"]["text"])
+            for call in calls]
+    assert "2 answer(s)" in line and read == [full, short]
+
+
+def test_the_parents_line_names_three_ranges_and_an_unwritten_copy_as_unavailable():
+    from ouroboros.task_finalization import displaced_answer_note
+
+    answers = [{"chars": n, "source_range": [10 * n, 10 * n + 5]} for n in range(1, 6)]
+    stored = {"completion_observations": {"displaced_answer": {"count": 5, "answers": answers},
+              "source_status": "available", "source_ref": {"reader": {"tool": "get_task_result",
+              "arguments": {"task_id": "c", "include_completion_source": True}}}}}
+    line = displaced_answer_note(stored)
+    assert line.count("get_task_result(") == 3 and "2 more" in line and "displaced_answer.answers" in line
+    unwritten = {"completion_observations": {"displaced_answer": {"count": 5, "answers": answers},
+                 "source_status": "unavailable"}}
+    assert "5 answer(s)" in displaced_answer_note(unwritten) and "unavailable" in displaced_answer_note(unwritten)
+    assert displaced_answer_note({"completion_observations": {"source_status": "available"}}) == ""
+
+
+@pytest.mark.parametrize("second", ["same", "longer"])
+def test_a_repeated_or_extended_answer_is_shown_once(turn, monkeypatch, second):
+    shown = _shown(monkeypatch)
+    full = "Full report: wrote report.md, the check returned 200."
+    final = full if second == "same" else full + "\n\nAlso: nothing else changed."
+    text, _usage, _trace = turn.run([write_round(), {"content": full}, {"content": final}])
+    assert text == final and shown == []  # the final contains the held text: it is shown once, as the final
+
+
+def test_a_non_blocking_result_review_shown_once_does_not_hold_prose_again(turn, monkeypatch):
+    """Auto/Advisory: a result review's outcome is shown once; a model that only ever answers in prose ends its turn."""
+
+    hold_first_delivery(monkeypatch, cause="findings")
+    text, _usage, _trace = turn.run([{"content": "Report"}, *_repeating("Report")])
+    assert text == "Report" and len(turn.calls) == 2
+    assert [row["reason"] for row in holds(turn.root)] == ["result_review"]
+
+
+def test_work_after_the_facts_leaves_the_next_prose_a_fresh_answer(turn):
+    """Evidence changed after the facts (more work after the held answer): the next prose binds the new evidence
+    as a fresh answer instead of a selection only finish_task could make."""
+    report = "Wrote report.md: the result is 200."
+    text, _usage, _trace = turn.run([write_round(), {"content": report},
+                                     act("write_file", path="report.md", content="Report, checked"),
+                                     *_repeating(report)])
+    assert text == report and len(turn.calls) == 4  # work, answer (facts shown), more work, the answer delivered
+    assert [(row["reason"], row["subreason"]) for row in holds(turn.root)] == [
+        ("finalization_nudge", "pre_delivery_notice")]
+
+
+@pytest.mark.parametrize("replacement", ["short", "same", "extended"])
+def test_explicit_finish_preserves_the_report_returned_by_facts(turn, monkeypatch, replacement):
+    shown = _shown(monkeypatch)
+    full = "Full report: wrote report.md, checked 200, all details."
+    final = {"short": "Done, see above.", "same": full, "extended": full + " More detail."}[replacement]
+    text, _usage, _trace = turn.run([write_round(), {"content": full}, finish(final)])
+    assert text == final and len(turn.calls) == 3
+    assert shown == ([full] if replacement == "short" else [])
+
+
+@pytest.mark.parametrize("work_again", [False, True])
+def test_old_hash_after_work_requires_one_informed_reselection(turn, work_again):
+    report = "Wrote report.md: the result is 200."
+    script = [write_round(), {"content": report},
+              act("write_file", path="report.md", content="Result is 201"),
+              finish(answer_sha256=sha(report))]
+    if work_again:
+        script += [act("write_file", path="report.md", content="Result is 202"),
+                   finish(answer_sha256=sha(report))]
+    script += [finish(answer_sha256=sha(report))]
+    text, _usage, _trace = turn.run(script)
+    assert text == report and len(turn.calls) == len(script)
+    assert [row["reason"] for row in holds(turn.root)] == [
+        "finalization_nudge", *(["evidence_changed"] * (2 if work_again else 1))]
+    assert _trace["delivery_candidate"]["evidence_current"] is True
+    # Review 8 (GLM): the explicit final publishes "candidate", as upstream's replacement did; a restore reads it as an
+    # answer to deliver (owner_wait), while "selected" would arm control and ask the author to select again.
+    assert _trace["delivery_candidate"]["finalization_control"] == "candidate"
+
+
+def test_child_completion_is_refreshed_while_selection_is_owed(tmp_path, monkeypatch):
+    """A parent must see a finished child even when its prose cannot finish the turn."""
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    write_task_result(tmp_path, "child1", "running", parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="helper")
+    parent = runner(tmp_path, monkeypatch, task_id="parent1")
+    # The first answer shows the running child; a later real debt arms selection.
+    hold_first_delivery(monkeypatch)
+
+    def child_finishes():
+        assert "STILL RUNNING" in str(parent.calls[-1])
+        assert parent.registry._ctx._delivery_candidate.control_episode_seen
+        write_task_result(tmp_path, "child1", "completed", result="child result: 899")
+        return {"role": "assistant", "content": "The child is still running."}
+
+    def observe_refresh():
+        assert "child result: 899" in str(parent.calls[-1])
+        assert parent.registry._ctx._delivery_control_required
+        assert parent.registry._ctx._delivery_candidate.control_episode_seen
+        # Unchanged child facts do not return a second time or discharge selection.
+        return {"role": "assistant", "content": "I have read the child's result."}
+
+    text, _usage, _trace = parent.run([
+        finish("Waiting for my helper."), {"role": "assistant", "content": "Still waiting."},
+        child_finishes, observe_refresh, finish("The helper returned 899."),
+    ])
+    assert text.startswith("The helper returned 899.") and len(parent.calls) == 5
+    assert [row["reason"] for row in holds(tmp_path)] == [
+        "subagent_handoff", "result_review", "subagent_handoff", "selection_required"]
+    assert sum("child result: 899" in str(row.get("content", ""))
+               for row in parent.calls[-1]) == 1

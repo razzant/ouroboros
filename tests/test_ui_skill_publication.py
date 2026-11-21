@@ -73,7 +73,7 @@ def test_skills_card_geometry_tracks_card_width_and_keeps_grant_on_card(direct_s
                     facts = card.evaluate('''card => {
                         const rect = card.getBoundingClientRect();
                         const title = card.querySelector('.skills-card-title').getBoundingClientRect();
-                        const actions = [...card.querySelectorAll('.skills-switch, .skills-card-menu-trigger, .skills-tray-actions button')]
+                        const actions = [...card.querySelectorAll('.ui-switch, .skills-card-menu-trigger, .skills-tray-actions button')]
                             .map(control => ({text:control.textContent.trim(), x:control.getBoundingClientRect().x,
                                 right:control.getBoundingClientRect().right}));
                         return {card:rect.width, title:title.width, x:rect.x, right:rect.right, actions,

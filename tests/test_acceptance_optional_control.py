@@ -3,8 +3,8 @@
 While a retained answer waits for Main's explicit completion (delivery control
 armed), prose and historical control objects never select bytes; ``finish_task``
 selects them, records the ``pending_review`` choice and acknowledges the owner
-source. The choice is offered only while a result review of the answer is still
-running and enforcement does not block (``review_result.pending_review_choice_offered``).
+source. The choice is offered while a result review of the answer is still running
+(``review_result.pending_review_choice_offered``), whatever the retired enforcement key says.
 The task-acceptance wait these tests once entered through is gone; a result
 review still running is the state that now offers the choice.
 """
@@ -48,7 +48,7 @@ def _held(tmp_path):
 def test_answer_choice_preserves_the_pending_review_wait_policy(tmp_path, monkeypatch, enforcement, mode, answer):
     from ouroboros.tools.review_result import pending_review_choice_offered
 
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)  # retired: read by nothing
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     registry, ctx, trace, candidate = _held(tmp_path)
     revised = ANSWER + " Budget: $12.\nThe complete timeline is two weeks."
@@ -59,21 +59,19 @@ def test_answer_choice_preserves_the_pending_review_wait_policy(tmp_path, monkey
     else:
         selected = ({"answer": revised} if answer == "replace"
                     else {"answer_sha256": candidate.content_sha256})
-        if answer == "finish":
-            selected["pending_review"] = "finish"
+        if answer == "finish":  # a reasoned exception: finish_task refuses it without a rationale
+            selected.update(pending_review="finish", rationale="The owner needs this answer before the reviewers end.")
         assert _select(registry, ctx, trace, **selected)
         assert registry._ctx._delivery_candidate.full_text == (revised if answer == "replace" else ANSWER)
     choice = getattr(registry._ctx, "_acceptance_pending_review_choice", "") or "wait"
     assert choice == ("finish" if answer == "finish" else "wait")
     # The host waits for the running review unless the choice is offered AND Main chose finish.
     waits = not (pending_review_choice_offered(registry._ctx) and choice == "finish")
-    assert waits is ((enforcement == "blocking" and mode != "cyber_pro") or answer != "finish")
+    assert waits is (answer != "finish")
     assert registry._ctx._result_review_pending == RUNNING_REVIEW
     assert candidate.control_episode_seen is True
     assert "Interim prose is activity, not a new completion selection" in str(ctx.messages)
-    assert ("Pending critics: choose pending_review=wait" in str(ctx.messages)) is (
-        enforcement == "advisory" or mode == "cyber_pro"
-    )
+    assert "Pending critics: choose pending_review=wait" in str(ctx.messages)
 
 
 @pytest.mark.parametrize("raw", [
@@ -97,6 +95,16 @@ def test_explicit_selection_after_a_malformed_old_control(tmp_path, monkeypatch)
     assert _select(registry, ctx, trace, answer=revised)
     assert registry._ctx._delivery_candidate.full_text == revised
     assert not candidate.degraded
+    assert registry._ctx._acceptance_pending_review_choice == "wait"
+
+
+def test_the_wait_default_lives_in_finish_delivery_not_in_the_schema(tmp_path):
+    """The schema names no JSON default, so a stop reads no wait into it; a finish that omits the choice still
+    waits for its running result review (``consume_completion_request``)."""
+    registry, ctx, trace, candidate = _held(tmp_path)
+    choice = registry.get_schema_by_name("finish_task")["function"]["parameters"]["properties"]["pending_review"]
+    assert "default" not in choice and "wait (the default)" in choice["description"]
+    assert _select(registry, ctx, trace, answer_sha256=candidate.content_sha256)
     assert registry._ctx._acceptance_pending_review_choice == "wait"
 
 

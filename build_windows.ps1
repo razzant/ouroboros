@@ -36,28 +36,18 @@ if (-not (Test-Path "python-standalone\python.exe")) {
     Write-Host "Run first: powershell -ExecutionPolicy Bypass -File scripts/download_python_standalone.ps1"
     exit 1
 }
-
-# Bundle the official Node.js runtime so node-runtime skills work out of the box.
-if (-not (Test-Path "node-standalone\node.exe")) {
-    Write-Host "--- Downloading bundled Node.js runtime ---"
-    Invoke-NativeChecked "Node.js runtime download" {
-        powershell -ExecutionPolicy Bypass -File scripts/download_node_standalone.ps1
-    }
+# A python-standalone left from an earlier pin would ship again: check it before installing anything.
+Invoke-NativeChecked "Build Python check" {
+    & "python-standalone\python.exe" scripts/check_python_build.py
 }
 
-Write-Host "--- Installing launcher dependencies ---"
-$BuildRequirements = Join-Path ([IO.Path]::GetTempPath()) "ouroboros-build-requirements-$PID.txt"
-Invoke-NativeChecked "Build dependency export" {
-    uv export --locked --no-dev --extra browser --extra desktop --extra build `
-        --no-emit-project --no-hashes --no-annotate --output-file $BuildRequirements
+# Bundle the official Node.js runtime the Claudexor pin names, so node-runtime skills work out of the box;
+# always re-verified, and the build's own Playwright CLI runs on it.
+Write-Host "--- Verifying and staging the pinned Node.js runtime ---"
+Invoke-NativeChecked "Node.js runtime download" {
+    powershell -ExecutionPolicy Bypass -File scripts/download_node_standalone.ps1
 }
-try {
-    Invoke-NativeChecked "Launcher dependency installation" {
-        uv pip install --python python -q -r $BuildRequirements
-    }
-} finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $BuildRequirements
-}
+$env:PLAYWRIGHT_NODEJS_PATH = (Resolve-Path "node-standalone\node.exe").Path
 
 if (-not (Test-Path "ripgrep-standalone\rg.exe")) {
     Write-Host "--- Downloading bundled ripgrep runtime ---"
@@ -98,6 +88,23 @@ Invoke-NativeChecked "Claudexor runtime seed fetch" {
 if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
 if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
 
+# PyInstaller freezes the launcher with a venv of the interpreter the app ships, as build_linux.sh
+# does, so the frozen launcher and the embedded server run one pinned Python.
+Write-Host "--- Installing launcher dependencies ---"
+$BuildVenv = "build\windows-pyinstaller-venv"
+Invoke-NativeChecked "Launcher build environment" {
+    & "python-standalone\python.exe" -m venv $BuildVenv
+}
+$BuildPython = Join-Path $BuildVenv "Scripts\python.exe"
+$BuildRequirements = Join-Path $BuildVenv "build-requirements.txt"
+Invoke-NativeChecked "Build dependency export" {
+    uv export --locked --no-dev --extra browser --extra desktop --extra build `
+        --no-emit-project --no-hashes --no-annotate --output-file $BuildRequirements
+}
+Invoke-NativeChecked "Launcher dependency installation" {
+    uv pip install --python $BuildPython -q -r $BuildRequirements
+}
+
 $env:PYINSTALLER_CONFIG_DIR = Join-Path (Get-Location) ".pyinstaller-cache"
 New-Item -ItemType Directory -Force -Path $env:PYINSTALLER_CONFIG_DIR | Out-Null
 
@@ -121,13 +128,18 @@ Invoke-NativeChecked "Managed repo bundle build" {
 
 Write-Host "--- Running PyInstaller ---"
 Invoke-NativeChecked "PyInstaller build" {
-    python -m PyInstaller Ouroboros.spec --clean --noconfirm
+    & $BuildPython -m PyInstaller Ouroboros.spec --clean --noconfirm
 }
 
 Write-Host "--- Installing packaged CLI wrappers ---"
 New-Item -ItemType Directory -Force -Path "dist\Ouroboros\bin" | Out-Null
 Copy-Item "packaging\cli\ouroboros.cmd" "dist\Ouroboros\bin\ouroboros.cmd" -Force
 Copy-Item "packaging\cli\install-ouroboros-cli.cmd" "dist\Ouroboros\bin\install-ouroboros-cli.cmd" -Force
+
+Write-Host "--- Giving every bundled Playwright driver the pinned Node ---"
+Invoke-NativeChecked "Playwright driver Node replacement" {
+    & "python-standalone\python.exe" scripts/download_node_standalone.py --replace-playwright dist\Ouroboros
+}
 
 # WA6 parity: precompile bytecode instead of deleting it. Windows has no codesign
 # seal, so this is purely for start-speed + consistency with the macOS build (where

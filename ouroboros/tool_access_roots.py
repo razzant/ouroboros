@@ -226,7 +226,9 @@ def resource_root_path(
         candidate = active() if callable(active) else (project_room_lens_dir(ctx) or folderless_scratch_dir(ctx))
         if candidate is None or candidate.__class__.__module__.startswith("unittest.mock"):
             candidate = getattr(ctx, "repo_dir")
-        return pathlib.Path(candidate).resolve(strict=False)
+        from ouroboros.work_domain import settle  # a work workspace keeps its spelling: the container resolves it
+
+        return settle(candidate)
     if root == "system_repo":
         return pathlib.Path(getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir")).resolve(strict=False)
     if root == "runtime_data":

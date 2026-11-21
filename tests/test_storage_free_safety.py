@@ -161,6 +161,61 @@ def test_a_file_changed_after_a_good_capture_stays(copies):
     assert _prune(copies)["removed"] == 0 and (path / "work.txt").read_text(encoding="utf-8") == "later\n"
 
 
+def test_a_copy_kept_for_unheld_work_is_proven_again_only_when_that_path_or_its_result_changes(copies, monkeypatch):
+    """The custody pass's keep of a copy for a path no capture holds needs no new proof (Git runs, the result read
+    twice, a replay of the capture) while that path and the task's result stand as they stood: either changing
+    reopens it, and the copy goes once nothing unsaved is left. Its retirement drops the evidence."""
+    from ouroboros import copy_capture_proof as proof, worktree_removal
+
+    monkeypatch.setattr(proof, "_KEPT_UNHELD", {})
+    handle = _copy(copies)
+    path = Path(handle.path)
+    (path / "work.txt").write_text("saved\n", encoding="utf-8")
+    assert _capture(copies, handle)["status"] == "ready_with_changes"
+    late = path / "late.txt"
+    late.write_text("no capture holds this\n", encoding="utf-8")
+    proofs, real = [], proof.plain_copy_verdict
+    monkeypatch.setattr(proof, "plain_copy_verdict", lambda row, data_dir=None: proofs.append(row) or real(row, data_dir))
+    assert _prune(copies)["removed"] == 0 and len(proofs) == 1
+    assert _prune(copies)["removed"] == 0 and len(proofs) == 1, "nothing it was kept for changed: no new proof"
+    seed_result(copies[0], "finished", document("finished", "completed"))
+    assert _prune(copies)["removed"] == 0 and len(proofs) == 2, "a written result reopens the proof"
+    late.unlink()
+    assert _prune(copies)["removed"] == 1 and not path.exists() and len(proofs) == 3, "its unheld path went: it goes"
+    proof._KEPT_UNHELD[str(path)] = (os.getpid(), "finished", "late.txt", None, None)
+    worktree_removal.retired({"path": str(path)}, copies[0])
+    assert str(path) not in proof._KEPT_UNHELD, "a retired copy keeps no evidence"
+
+
+def test_an_owner_kept_copy_is_never_remembered_so_each_pass_names_the_owners_keep(copies, monkeypatch):
+    """An ordinary keep of unheld work is remembered; a copy the owner keeps is not, even after a proof (a Storage
+    preview) found its unsaved work, so each pass's keep gate goes on naming ``owner_keep``."""
+    from ouroboros import copy_capture_proof as proof, owner_keep
+
+    monkeypatch.setattr(proof, "_KEPT_UNHELD", {})
+    handle = _copy(copies)
+    path = Path(handle.path)
+    (path / "work.txt").write_text("saved\n", encoding="utf-8")
+    assert _capture(copies, handle)["status"] == "ready_with_changes"
+    (path / "late.txt").write_text("no capture holds this\n", encoding="utf-8")
+    record = sw._record_at(handle.path, copies[0])
+    assert proof.plain_copy_verdict(record, copies[0])["reason"] == proof.CAPTURE_UNPROVEN
+    assert str(path) in proof._KEPT_UNHELD, "an ordinary keep of unheld work is remembered"
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(proof, "_task_stamp", lambda _row, _data_dir: None)
+        assert not proof.kept_as_before(record, copies[0]) and str(path) in proof._KEPT_UNHELD, \
+            "an unreadable signature proves as before and keeps the memory"
+    assert proof.kept_as_before(record, copies[0]), "a readable unchanged one keeps as before"
+    owner_keep.set_owner_keep(copies[0], "finished", keep=True, source={"basis": "test"})
+    assert proof.plain_copy_verdict(record, copies[0])["reason"] == proof.CAPTURE_UNPROVEN
+    assert str(path) not in proof._KEPT_UNHELD, "the owner's keep is not"
+    for _ in range(2):
+        reasons: dict = {}
+        assert sw.prune_orphans(data_dir=copies[0], worktree_root=copies[2], retention_days=0, live=lambda _task: False,
+                                reasons=reasons)["removed"] == 0
+        assert reasons == {handle.path: owner_keep.OWNER_KEEP}, "each pass names the owner's keep"
+
+
 @_NO_EXEC_BIT
 def test_a_mode_changed_after_a_good_capture_stays(copies):
     handle = _copy(copies)
@@ -475,38 +530,44 @@ def test_registered_checkout_never_reads_an_unreadable_record_as_no_record(copie
     assert sw.registered_checkout(copies[2] / "elsewhere", copies[0]) is False
 
 
-def test_the_preview_imports_nothing_and_reports_nothing(copies):
+def test_the_preview_imports_nothing_reports_nothing_and_never_parses_the_legacy_registry(copies, monkeypatch):
     root, _repo, wtroot = copies
-    _unreadable_record_copy(copies)  # the provisioning itself imports: the legacy file arrives after it
+    _unreadable_record_copy(copies)
     known = wtroot / "known"
     known.mkdir(parents=True)
     legacy = sw._legacy_registry_path(root)
     legacy.write_text(json.dumps({"worktrees": [{"path": str(known), "task_id": "known", "branch": ""}]}), encoding="utf-8")
-    sw._imported_roots.discard(str(root))
     sw._reported_unreadable.clear()
     before = tree_state(root, mtimes=True)
     before_legacy = legacy.read_bytes()
-    view = _preview(_owner({"known": False, "finished": False}), root, root.parent)
+    with monkeypatch.context() as working:
+        working.setattr(sw, "_legacy_entries", lambda _raw: pytest.fail("the preview parsed the legacy registry"))
+        view = _preview(_owner({"known": False, "finished": False}), root, root.parent)
     assert tree_state(root, mtimes=True) == before
     assert legacy.read_bytes() == before_legacy and not (root / "logs" / "events.jsonl").exists()
     assert not any(sw._records_dir(root).glob(".legacy-import*"))
-    assert _group(view, "lost_copies")["count"] == 0, "a row of the legacy file still names its folder"
+    assert _group(view, "lost_copies")["count"] == 0, "a folder the waiting legacy file may name is not offered"
 
     from ouroboros.private_copy_read import checkout_registration
 
-    assert checkout_registration(known, root) == "registered" and legacy.is_file()
+    assert checkout_registration(known, root) == "absent", "a registration is the copy's own record, nothing else"
+    sw.import_legacy_registry(root)  # the startup import
+    assert checkout_registration(known, root) == "registered" and not legacy.exists()
+    assert _group(_preview(_owner({"known": False, "finished": False}), root, root.parent), "lost_copies")["count"] == 0
 
 
-def test_a_malformed_legacy_registry_stays_and_its_folders_stay_offered_as_unregistered(copies):
+def test_a_malformed_legacy_registry_is_archived_at_startup_and_its_folders_are_then_offered_as_unregistered(copies):
     root, _repo, wtroot = copies
     folder = wtroot / "dlg_old-task_0123456789abcdef"
     folder.mkdir(parents=True)
     legacy = sw._legacy_registry_path(root)
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text("{torn", encoding="utf-8")
-    sw._imported_roots.discard(str(root))
-    view = _preview(_owner({"old-task": False}), root, root.parent)
-    assert _group(view, "lost_copies")["count"] == 1 and legacy.read_text(encoding="utf-8") == "{torn"
+    waiting = _preview(_owner({"old-task": False}), root, root.parent)
+    assert _group(waiting, "lost_copies")["count"] == 0 and legacy.read_text(encoding="utf-8") == "{torn"
+    receipt = sw.import_legacy_registry(root)
+    assert (root / receipt["kept"]).read_text(encoding="utf-8") == "{torn" and not legacy.exists()
+    assert _group(_preview(_owner({"old-task": False}), root, root.parent), "lost_copies")["count"] == 1
 
 
 # ---- a body candidate: a name the patch rules leave out proves nothing either ---------------

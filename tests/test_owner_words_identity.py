@@ -484,3 +484,21 @@ def test_cited_owner_basis_accepts_only_my_humans_bytes_that_reached_this_run():
         assert basis is None and error.startswith("owner_words were not found verbatim"), words
     assert ow.cited_owner_basis(ctx, "") == (None, "") and ow.cited_owner_basis(SimpleNamespace(), "x")[0] is None
     assert ow.PLACE_CONFIRMED not in ow.OWNER_SOURCES and "place_owner" in ow.OWNER_SOURCES
+
+
+def test_form_citations_join_only_the_same_submission_and_one_recorded_field():
+    target = {"card_id": "card_0123456789abcdef", "submitted_values": {"from": "elm grove", "to": "reed bed"}}
+    original = {"source": "owner_mailbox", "msg_id": "elm-submission", "source_task_id": "elm-desk",
+                "content": "elm grove\nreed bed", "reply_to": target}
+    cite = {**original, "basis": "cited", "cited": "grove"}
+    for conflict in ({"cited": "grove\nreed"}, {"source": "initial_user"}, {"source_task_id": "reed-desk"},
+                     {"content": "elm grove"}, {"reply_to": {**target, "card_id": "card_fedcba9876543210"}},
+                     {"reply_to": {**target, "submitted_values": {"single": original["content"]}}}):
+        assert ow.merged_corpus([original], [{**cite, **conflict}]) == [original]
+    assert ow.merged_corpus([original], [cite]) == [cite]
+    other = {**cite, "msg_id": "second-elm-submission"}
+    assert ow.merged_corpus([original], [other]) == [original, other]
+    addressed = {**original, "client_message_id": "elm-inbox", "chat_id": "7"}
+    assert ow.merged_corpus([addressed], [{**addressed, **other}]) == [addressed]
+    anonymous = {**original, "msg_id": ""}
+    assert ow.merged_corpus([anonymous], [{**cite, "msg_id": ""}]) == [anonymous]

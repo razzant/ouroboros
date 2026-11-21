@@ -48,7 +48,8 @@ export function readCardBody(cardId, revision = 0, read = (url) => fetchJson(url
     return promise;
 }
 
-function readAppText(url, sha256) {
+/** An app card's HTML (`GET /api/cards/{id}/app`, the `app.url` of its body), read once per app bytes. */
+export function readAppText(url, sha256) {
     if (!appTexts.has(sha256)) {
         appTexts.set(sha256, apiFetch(url, { cache: 'no-store' }).then((response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -113,7 +114,9 @@ const button = (label, data) => `<button type="button" class="btn btn-default bt
 
 /**
  * One room's card rows. `frameNode(msg, node)` wraps a node in an Ouroboros bubble (sender, time, row address);
- * `decorate(bubble, msg, text)` gives it Copy (the fallback text) and Reply; `composer()` is the room's composer, whose
+ * `decorate(bubble, msg, text, describe)` gives it Copy (the fallback text), Reply and Share, which reads the card as
+ * `describe()` answers it now (`{id, revision, title, words, node}`, null once the row is released or drawn again);
+ * `composer()` is the room's composer, whose
  * draft an app's submit and "Make it a skill" fill; `onDomWrite(write)` keeps the reading position; `holds` is the
  * start ledger and `settleMs` its settle second (a test seam).
  */
@@ -444,7 +447,9 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         node.addEventListener('click', (event) => onClick(record, event));
         records.set(id, record);
         byBubble.set(bubble, record);
-        decorate(bubble, msg, fallback);
+        const describe = () => (!destroyed && records.get(id) === record
+            ? { id, revision: record.revision, title: record.title, words: record.fallback, node: record.body } : null);
+        decorate(bubble, msg, fallback, describe);
         load(record, record.revision);
         return bubble;
     }

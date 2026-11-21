@@ -144,4 +144,4 @@ def test_the_descriptions_name_the_reader_without_changing_the_shapes():
 
     finish = _tool_schema(control, "finish_task")["parameters"]
     assert finish["required"] == ["action"]
-    assert "owner reads it as the stop's cause on the task row" in finish["properties"]["rationale"]["description"]
+    assert "The owner reads it on the task row" in finish["properties"]["rationale"]["description"]

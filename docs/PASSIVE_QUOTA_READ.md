@@ -56,6 +56,35 @@ object-list `profiles` (rows need `profile.harness_id` / `profile.profile_id`, a
 unread. Its rows without `accountPools`: `account_model_unsupported`, not malformed.
 An unread roster is never authoritative removal or an empty account set.
 
+Full Accounts adds `profiles.login_capable_harnesses`: login-eligible IDs (the
+catalog's `setupLogin`, or the manifests when the catalog is not current evidence),
+or `null` for its unread fail-open. The shared browser retains this
+policy when projecting raw passive rows, independently of catalog membership and
+read completion order. Before the first full policy, raw rows wait; legacy full
+answers retain fail-open behavior. The passive endpoint's envelope stays unchanged.
+
+Confirmed account PATCH/DELETE orders the engine call and its local confirmation
+under one mutation lock. Reads never take that lock or run network work under the
+status-memory lock. A read crossing confirmation omits its old account answer
+(`reads.accounts=not_read`, `unified_accounts=false`), without discarding quota.
+Full status may serve its corrected held roster as stale; passive status keeps
+its existing empty/unread shape. The fence runs after shared-Future consumption
+and again after the HTTP handler's thread await. Its ordering counters are private
+to the serving process: no browser revision persists across a server restart.
+
+Full status remembers each successful facet under its own observation time and
+request order, with catalog memory separate for the models variant. A later
+completion from an earlier read cannot replace a newer held facet. Its stamp is
+the facet's completion, not the slowest diagnostic's completion. These are host
+read times; engine quota/resource observation timestamps remain unchanged.
+Optional `resources` keep their own request order, in this memory and in the browser
+merge alike. An explicit list (empty too) observes them, and so does the absence
+negotiated from a read operations catalog; an answered quota read whose operations
+catalog was unread could not negotiate them and observed none, so it neither erases
+the last observed list nor outranks an earlier read's own. Beside rows served as
+`reads.quota=not_read` the list comes from a read at least as new as the answering
+one (the browser owns it in ticket order); beside a failed read it is the last one, stale.
+
 Quota requires object-list `snapshots`; present `absences` and `resources` must
 also be object lists. Constraint freshness is all-or-none: if any constraint has
 `freshness`, every snapshot has an object-list `constraints` and every constraint
@@ -69,8 +98,9 @@ Safe errors: `daemon_not_discovered`, `daemon_descriptor_unreadable`,
 `daemon_descriptor_incomplete`, `daemon_token_unreadable`,
 `daemon_endpoint_not_loopback`, `daemon_unreachable`, `malformed_response`,
 `account_model_unsupported`, `protocol_incompatible`, `daemon_recovery_only`,
-`observation_read_timeout`, `read_refused`, `read_failed`. One `claudexor_passive_quota_read` INFO record logs
-only verdicts, safe errors and timings, not exception text, paths or bodies.
+`observation_read_timeout`, `read_refused`, `read_failed`. A `claudexor_passive_quota_read` record logs
+only verdicts, safe errors and timings, not exception text, paths or bodies: at INFO when the verdicts or
+errors change and otherwise once a minute (the dated sample `engine_facts` reads), at DEBUG for the polls between.
 
 ## Exact configured actor
 
@@ -140,6 +170,28 @@ cadence, not cumulative context cost. Actual emission frequency is unknown;
 token price was not measured.
 
 ## Limits and checks
+
+`POST /api/claudexor/quota/refresh` is an owner act: the engine refreshes ordinary
+limits itself, so no client asks providers in the background. A request joins an
+identical one still in flight for the same owned home and exact target (body-less
+full included) and never reuses a completed attempt or failure. `refresh_attempt`
+carries the host attempt's original `started_at`/`completed_at` and per-response
+`reused` (joined). A joined attempt began earlier: it never fences newer passive
+reads or retires failed reset readback; full and exact replies merge per-subject
+observation clocks and resource-facet clocks. Full and exact-target requests remain
+separate: an older engine's full success cannot satisfy its unsupported
+exact-target operation. Reset/receipt operations are never cached or retried here.
+A reset's readback closes only on a new attempt begun after its receipt with fresh windows and
+`resets` for that account: an authoritative absence keeps `Reset requested · usage not updated`
+and its stored request (display only).
+
+The browser keeps two orders apart (`claudexor_observation_reads.js`). A row write and a
+Refresh's or receipt's own reading fence the status reads begun before them; only an answered
+read dates a facet, so a write, refused or confirmed, never turns a lost status request's
+last-known roster current. One account's reading speaks for that account, from its completion
+until a quota answer or a lost status request begun after it; a status request lost earlier
+retires nothing, and a joined attempt neither adds nor removes a reading. A Refresh of every
+account also dates the quota facet, never the roster.
 
 Accounts and quota reads are independent, not one atomic engine snapshot.
 Successful transport does not refresh observations. Display each constraint's

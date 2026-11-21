@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings
 from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
@@ -75,17 +76,65 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
         assert metrics["gap"] == pytest.approx(12, abs=0.5), metrics
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
-    paint = header.evaluate("""el => ({mask:getComputedStyle(el).maskImage,
-        overflow:getComputedStyle(el).overflow, background:getComputedStyle(el).backgroundColor,
-        before:getComputedStyle(el,'::before').content})""")
+    edge = """el => { const s = getComputedStyle(el), b = getComputedStyle(el, '::before'), a = getComputedStyle(el, '::after');
+        return {mask: s.maskImage, overflow: s.overflow, background: s.backgroundColor, bar: el.getBoundingClientRect().height,
+            darkening: b.backgroundImage, blur: b.backdropFilter, fade: b.maskImage, reach: parseFloat(b.height),
+            events: b.pointerEvents, strip: a.pointerEvents, stripHeight: parseFloat(a.height),
+            dark: document.documentElement.dataset.theme !== 'light'}; }"""
+    paint = header.evaluate(edge)
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    # The full-width fade gave way to individually backed capsules (#2193); menus still escape the bar.
-    assert paint["background"] == "rgba(0, 0, 0, 0)" and paint["before"] in ("none", "normal"), paint
+    # Mask the decorative layer, never the bar or its menu. These reads check CSS, not rendered pixels.
+    assert paint["background"] == "rgba(0, 0, 0, 0)", paint
+    assert "linear-gradient" in paint["darkening"] and "0.72" in paint["darkening"], paint
+    assert "blur(12px)" in paint["blur"] and "linear-gradient" in paint["fade"] and paint["events"] == "none", paint
+    # Both gradients end transparent toward the transcript; 180deg is the default (omitted in computed CSS).
+    clear_end = ", rgba(0, 0, 0, 0) 100%)"
+    assert paint["fade"].startswith(("linear-gradient(rgb(", "linear-gradient(180deg,")) and paint["fade"].endswith(clear_end), paint
+    assert "0.5" in paint["fade"] and "0.14" in paint["fade"], paint
+    # The edge reaches one compact length below the bar on every layout, the desk included. This history read left
+    # Main's note under the bar: a later sibling at the bar's own level, it paints over the edge as the capsules do,
+    # so its words stay sharp.
+    reach = 32
+    assert paint["reach"] == pytest.approx(paint["bar"] + reach, abs=1), paint
+    # The transcript's first row clears the bar and its edge (style.css --chat-top-reserve), not only the bar and note.
+    feed_top = page.locator("#chat-messages").evaluate("el => parseFloat(getComputedStyle(el).paddingTop)")
+    assert feed_top >= paint["bar"] + reach - 1, (feed_top, paint)
+    assert page.locator("#page-chat > .chat-page-note > *").count() and page.locator("#page-chat > .chat-page-note").is_visible()
+    order = page.evaluate("""() => { const bar = document.querySelector('#page-chat > .chat-page-header');
+        const note = document.querySelector('#page-chat > .chat-page-note');
+        return {after: Boolean(bar.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
+            bar: Number(getComputedStyle(bar).zIndex), note: Number(getComputedStyle(note).zIndex)}; }""")
+    assert order["after"] and order["note"] >= order["bar"], order
+    # The desktop window's title-band strip keeps the bar's ::after (style.css :root[data-window-chrome]): the edge
+    # never takes its box, and the strip still takes presses for the title bar.
+    page.evaluate("document.documentElement.dataset.windowChrome = 'integrated'")
+    chrome = header.evaluate(edge)
+    page.evaluate("delete document.documentElement.dataset.windowChrome")
+    assert chrome["reach"] == pytest.approx(chrome["bar"] + reach, abs=1), chrome
+    assert "blur" in chrome["blur"], chrome
+    assert chrome["strip"] == "auto" and chrome["events"] == "none", chrome
+    # The composer's edge mirrors the bar's: the same authored tail from below, a 12 px blur, and no press taken.
+    composer = page.locator("#chat-input-area").evaluate(
+        "el => { const b = getComputedStyle(el, '::before');"
+        " return {content: b.content, mask: b.maskImage, blur: b.backdropFilter, events: b.pointerEvents}; }")
+    assert composer["content"] == '""' and composer["events"] == "none", composer
+    assert composer["mask"].startswith("linear-gradient(0deg,") and composer["mask"].endswith(clear_end), composer
+    assert "blur(12px)" in composer["blur"] and "0.5" in composer["mask"] and "0.14" in composer["mask"], composer
+    # With the keyboard up the top edge ends with the bar and the composer draws no edge at all (style.css).
+    page.evaluate("document.body.classList.add('keyboard-open')")
+    keyboard = header.evaluate(edge)
+    composer_gone = page.locator("#chat-input-area").evaluate("el => getComputedStyle(el, '::before').content")
+    page.evaluate("document.body.classList.remove('keyboard-open')")
+    assert keyboard["reach"] == pytest.approx(keyboard["bar"], abs=1), keyboard
+    assert composer_gone == "none", composer_gone
     backing = header.locator('.app-page-title-row').evaluate("""el => {
         const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
         return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
     }""")
-    assert backing["alpha"] >= 0.98 and "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    # On a dark room the capsules are the composer chips' glass, a light veil over a blur (owner 15.11, 17.11 3A);
+    # light keeps them white as the composer's.
+    assert "blur" in backing["blur"] and backing["shadow"] != "none", backing
+    assert (backing["alpha"] < 0.2) if paint["dark"] else (backing["alpha"] >= 0.98), backing
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=0")
     setup_browser.capture(page, f"shell-chat-actions-{width}")
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=160")
@@ -205,38 +254,43 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
     page.wait_for_function("!document.querySelector('body > .chat-photo-menu')", timeout=5_000)
 
 
-def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscription_ui):
+def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription_ui):
+    # What the footer's Restart was is a line of Ouroboros's card on the Settings home, with its one action.
+    subscription_ui["settings"]["_meta"]["restart_state"] = {
+        "restart_required": True, "restart_keys": ["OUROBOROS_SKILLS_REPO_PATH"], "restart_source_unknown_keys": [],
+        "local_model": {"pending_keys": ["LOCAL_MODEL_PORT"]}}
     page = open_app(subscription_ui, "/#settings")
-    page.wait_for_selector("#btn-save-settings")
-    # Exercise the existing footer's geometry in each meaningful controller state.
-    # Domain save/validation transitions belong to the forms track's separate flows.
-    states = [
-        ("clean", "", False, False), ("dirty", "Unsaved changes", False, False),
-        ("saving", "Saving…", True, False),
-        ("error", "Error: Could not save your settings. Your edits are still available.", False, False),
-        ("restart", "Saved. Restart required before the new runtime settings take effect.", False, True),
-    ]
+    card = page.locator("#page-settings [data-settings-card]")
+
+    def show_card():
+        # Two panes hold the card in the pane of the list's Ouroboros row, one press away; one column keeps it atop
+        # the list (settings.js placeOverview, DESIGN "Settings"), and no page is opened over it here. Which of the two
+        # stands is set by Settings' resize observer once the new width is laid out, so the row is read a frame later.
+        page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+        overview = page.locator("#page-settings [data-settings-overview-row]")
+        if overview.is_visible() and overview.get_attribute("aria-current") != "page":
+            overview.click()
+        card.locator('[data-needs="restart"]').wait_for(state="visible")
+
+    show_card()
     for width in [640, 641, 760, 768, 980, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
             setup_browser.wait_drawer_closed(page)
         for sidebar in [220, 280]:
             page.evaluate("value => document.documentElement.style.setProperty('--sidebar-width',value+'px')", sidebar)
-            for name, message, busy, restart in states:
-                page.evaluate("""s => {
-                    document.querySelector('#settings-status').textContent=s.message;
-                    document.querySelector('.settings-footer').dataset.draft=s.name==='dirty'?'dirty':'clean';
-                    document.querySelector('#btn-save-settings').disabled=s.busy;
-                    document.querySelector('#btn-restart-now').hidden=!s.restart;
-                }""", {"name": name, "message": message, "busy": busy, "restart": restart})
-                for selector in ["#btn-reload-settings", "#btn-save-settings"] + (["#btn-restart-now"] if restart else []):
-                    box = hit_box(page.locator(selector))
-                    valid = box["reachable"] and box["x"] >= 0 and box["right"] <= width + 1 and box["bottom"] <= 600
-                    if not valid:
-                        setup_browser.capture(page, f"shell-footer-failure-{width}-{sidebar}-{name}")
-                    assert valid, json.dumps([width, sidebar, name, selector, box])
-                if sidebar == 280 and name in {"dirty", "restart"}:
-                    setup_browser.capture(page, f"shell-footer-{width}-{name}")
+            show_card()
+            # Every line the card lists is on screen with its action: the restart and the local model.
+            actions = card.locator("[data-needs]:visible [data-need-action]")
+            assert actions.count() >= 2, [width, sidebar, actions.count()]
+            for index in range(actions.count()):
+                box = hit_box(actions.nth(index))
+                valid = box["reachable"] and box["x"] >= 0 and box["right"] <= width + 1 and box["bottom"] <= 600
+                if not valid:
+                    setup_browser.capture(page, f"shell-card-failure-{width}-{sidebar}-{index}")
+                assert valid, json.dumps([width, sidebar, index, box])
+            if sidebar == 280:
+                setup_browser.capture(page, f"shell-card-{width}")
 
 
 def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_inside(subscription_ui):
@@ -260,33 +314,60 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     page.wait_for_selector(".nav-project-row")
     sidebar = page.locator("#primary-sidebar")
     scrollers = """el => [...el.querySelectorAll('*')].filter(e =>
-        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.className)"""
+        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.id || e.className)"""
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
-    # Three zones (DESIGN "Shell"): a window this short cannot hold the pinned zones, so the column itself is the
-    # ONE scroller with Main sticky at its top, and the Projects list shows every row in flow (no inner scroller).
-    assert set(sidebar.evaluate(scrollers)) == set(), sidebar.evaluate(scrollers)
-    assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), "the column is the fallback scroller"
-    top_before = main_top()
-    sidebar.evaluate("el => { el.scrollTop = el.scrollHeight; }")
-    page.wait_for_timeout(100)
-    assert abs(main_top() - top_before) <= 1, "Main stays pinned while the column scrolls"
-    nav = page.locator('[data-nav-page="settings"]')
-    assert hit_box(nav)["reachable"]
-    setup_browser.capture(page, "shell-sidebar-short-bottom")
+    scroll_to = lambda at: sidebar.evaluate("(el, at) => { el.scrollTop = at; return el.scrollTop; }", at)
+    # Three zones (DESIGN "Shell", "Navigation"): a window this short cannot hold them, so the column itself is the
+    # ONE scroller, the Projects list shows every row in flow (no inner scroller) and the sections stay on the bottom
+    # edge. Where the card, one Project row and the sections still fit between the two bars, Main is pinned at the
+    # top (400 px); a column shorter still lets the card scroll away with the list, one scroll up, since two pinned
+    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489). Each step waits for
+    # the window to have its size and for two frames, in which the bars' observer (layout.js) has measured it; a page
+    # that draws no frame for 5 s fails there, by a timer.
+    frames = lambda: page.evaluate("""() => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('no two frames within 5 s')), 5000);
+        requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+    })""")
+    settings_reachable = lambda: hit_box(page.locator('[data-nav-page="settings"]'))["reachable"]
+    for height, pinned in [(320, False), (400, True)]:
+        page.set_viewport_size({"width": 844, "height": height})
+        page.wait_for_function("h => window.innerHeight === h", arg=height)
+        frames()
+        assert set(sidebar.evaluate(scrollers)) == set(), (height, sidebar.evaluate(scrollers))
+        assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), ("the column is the fallback scroller", height)
+        scroll_to(0)
+        frames()
+        assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        top_before = main_top()
+        scrolled = scroll_to(10 ** 6)
+        frames()
+        moved = top_before - main_top()
+        assert scrolled > 1, ("the column scrolled", height, scrolled)
+        if pinned:
+            assert abs(moved) <= 1, ("Main stays pinned while the column scrolls", height, moved)
+        else:
+            assert abs(moved - scrolled) <= 1, ("the card is the list's top there", height, moved, scrolled)
+        assert settings_reachable(), ("the sections stay on the edge at its bottom", height)
+        setup_browser.capture(page, f"shell-sidebar-short-bottom-{height}")
+        scroll_to(0)
+        frames()
+        assert abs(main_top() - top_before) <= 1, ("Main is back at the top", height)
     # A window tall enough for the zones: the Projects list is the ONE scroller and the column does not scroll.
     page.set_viewport_size({"width": 1280, "height": 720})
-    page.wait_for_timeout(200)
+    page.wait_for_function("h => window.innerHeight === h", arg=720)
+    frames()
     assert set(sidebar.evaluate(scrollers)) == {"nav-projects-list"}, sidebar.evaluate(scrollers)
     assert not sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1")
     top_before = main_top()
     page.locator("#nav-projects-list").evaluate("el => { el.scrollTop = el.scrollHeight; }")
-    page.wait_for_timeout(100)
+    frames()
     assert abs(main_top() - top_before) <= 1, "Main never scrolls away"
     assert hit_box(page.locator('[data-nav-page="settings"]'))["reachable"]
     page.set_viewport_size({"width": 844, "height": 320})
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="costs"]').click()
-    page.wait_for_function("document.querySelector('#cost-known-limit').textContent==='$25.00 of $200.00'")
+    page.wait_for_function(  # a whole-dollar limit reads in whole dollars (DESIGN "A limit's card")
+        "document.querySelector('#cost-spent').textContent==='$25' && document.querySelector('#cost-of').textContent==='of $200'")
     for width in [390, 641, 768, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
@@ -310,46 +391,50 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
-    from playwright.sync_api import expect
-
-    page = open_app(subscription_ui, '/#settings')
-    page.locator('[data-settings-tab="advanced"]').click()
+    """A tool server's page (Settings › Tools › a server): every field is the shared control under its own label, an
+    edit changes that field alone, and the environment's JSON is judged by the form before any Save."""
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
                     auth_token='***', auth_header='Authorization', custom_option='retained'),
                dict(id='local', name='Local server', transport='stdio', command='npx', args=['-y','server'],
                     env={'PORT':'8080'}, env_from_settings={'TOKEN':'TOKEN_KEY'})]
-    page.evaluate('''async servers=>{
-        const mcp=await import('/static/modules/mcp_settings.js');
-        mcp.applyMcpSettings({MCP_ENABLED:true,MCP_SERVERS:servers,MCP_TOOL_TIMEOUT_SEC:60});
-        window.mcpProof=mcp;
-    }''', servers)
-    cards=page.locator('[data-mcp-card]')
-    assert cards.count()==2
-    for control in cards.locator('[data-mcp-field]:not([type="checkbox"])').all():
-        assert 'ui-control' in control.get_attribute('class')
-        assert control.get_attribute('aria-label').startswith('MCP server ')
-        assert control.evaluate('el=>Array.from(el.labels||[]).length') == 1
-    for edit in cards.locator('[data-mcp-edit]').all():  # a saved server is a row; its form opens behind Edit
-        assert not edit.evaluate('details=>details.open')
-        edit.locator(':scope > summary').click()
-        expect(edit).to_have_attribute('open', '')
-    page.get_by_label('MCP server 1: Server URL', exact=True).fill('https://edited.test/mcp')
-    draft=page.evaluate('mcpProof.collectMcpSettings()')
+    subscription_ui['settings']['MCP_SERVERS'] = servers
+    page = open_app(subscription_ui, '/#settings')
+    module = "(await import('/static/modules/mcp_settings.js'))"
+
+    def server_page(entry):
+        level = open_settings(page, f'tools/{entry}')
+        card = level.locator('[data-mcp-card]')
+        card.locator('[data-editor-save]').wait_for(state='visible')
+        card.locator('[data-mcp-more] > summary').click()
+        controls = card.locator('[data-mcp-field]:not([type="checkbox"])').all()
+        assert len(controls) >= 5, entry
+        for control in controls:
+            assert 'ui-control' in control.get_attribute('class')
+            assert control.evaluate('el=>Array.from(el.labels||[]).length') == 1
+        return level
+
+    level = server_page('web')
+    level.get_by_label('Address', exact=True).fill('https://edited.test/mcp')
+    draft=page.evaluate(f'async () => {module}.collectMcpSettings()')
     assert draft['MCP_SERVERS'][0]['url']=='https://edited.test/mcp'
     assert draft['MCP_SERVERS'][0]['auth_token']=='***'
     assert draft['MCP_SERVERS'][0]['custom_option']=='retained'
     assert draft['MCP_SERVERS'][1]['args']==['-y','server']
     assert draft['MCP_SERVERS'][1]['env_from_settings']=={'TOKEN':'TOKEN_KEY'}
-    assert page.evaluate('mcpProof.validateMcpSettings().length') == 0
-    field = page.get_by_label('MCP server 2: Environment (JSON, optional)', exact=True)
+    refused = f'async () => {module}.validateMcpSettings().map(e=>e.input.dataset.mcpField)'
+    assert page.evaluate(refused) == []
+    level = server_page('local')
+    cards = level.locator('[data-mcp-card]')
+    field = level.get_by_label('Environment (JSON)', exact=True)
     for invalid in ['{unfinished', '[]', '5', '{"PORT":8080}', '{"":"value"}']:
         field.fill(invalid)
-        assert page.evaluate('mcpProof.validateMcpSettings().map(e=>e.input.dataset.mcpField)') == ['env']
+        assert page.evaluate(refused) == ['env']
         assert field.input_value() == invalid
     field.fill('null')
-    assert page.evaluate('mcpProof.validateMcpSettings().length') == 0  # backend accepts omitted maps
+    assert page.evaluate(refused) == []  # backend accepts omitted maps
     field.fill('{"PORT":"8080"}')
-    assert page.evaluate('mcpProof.validateMcpSettings().length') == 0
+    assert page.evaluate(refused) == []
+    assert not [path for path, _body in subscription_ui['posts'] if path == '/api/settings'], 'no edit saves by itself'
     capture = setup_browser.capture
     cards.first.scroll_into_view_if_needed()
     capture(page,'shell-mcp-shared-fields')
@@ -373,11 +458,13 @@ PILL_LANDING_JS = """async qid => {
     let last = null;
     for (let quiet = 0; quiet < 2;) { await frame(); quiet = feed.scrollTop === last ? quiet + 1 : 0; last = feed.scrollTop; }
     const page = document.querySelector('#page-chat');
-    const header = page.querySelector('.chat-page-header').getBoundingClientRect();
+    const bar = page.querySelector('.chat-page-header'), header = bar.getBoundingClientRect();
     const toolbar = page.querySelector('.chat-toolbar-row').getBoundingClientRect();
     const card = feed.querySelector(`.chat-quiz-card[data-quiz-id="${qid}"]`);
     const box = card.closest('.chat-bubble').getBoundingClientRect();
-    const top = Math.max(feed.getBoundingClientRect().top, header.bottom);
+    // Below the header and its frosted edge (style.css "A room's edges"), where every landing in the room clears.
+    const edge = parseFloat(getComputedStyle(bar).getPropertyValue('--edge-reach')) || 0;
+    const top = Math.max(feed.getBoundingClientRect().top, header.bottom + edge);
     return {below_header: Math.round(box.top - top), above_composer: Math.round(toolbar.top - box.top),
             scroll_top: feed.scrollTop, focused: document.activeElement === card.querySelector('.chat-quiz-question')};
 }"""
@@ -1038,5 +1125,5 @@ def test_evolution_start_says_a_refused_send_and_returns_focus(subscription_ui):
     toast = page.locator('.toast', has_text='Could not send /evolve on: Complete provider setup')
     toast.wait_for()
     page.wait_for_function('() => document.activeElement === document.getElementById("evo-start")')
-    assert held[0].request.post_data_json == {'cmd': '/evolve on'}
+    assert held[0].request.post_data_json == {'cmd': '/evolve on', 'ui_control': {'name': 'evolution_start'}}
     setup_browser.capture(page, 'evolution-start-refused')

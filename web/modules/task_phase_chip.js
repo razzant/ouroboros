@@ -1,5 +1,5 @@
 import { isTerminalTaskDetail, taskPresentation, taskTerminalSummary } from './log_events.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, tx } from './i18n.js';
 import { waitFacts } from './question_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
@@ -142,7 +142,7 @@ export function modelActivityPresentation(activity) {
 // of its work (`work.owner`) or the owner's System message about this task (`ownerMove`).
 export function taskActivityPresentation({ phase = 'working', outcome = '', ended = false,
     finalizing = false, ownerWait = '', modelWaiting = false, modelOwnerAction = false, resumeAction = false,
-    ownerMove = false, hold = '', pauseCause = '', stopPolicy = '', finishingReviews = false, modelActivity = null,
+    ownerMove = false, hold = '', pauseCause = '', pauseReason = '', stopPolicy = '', finishingReviews = false, modelActivity = null,
     workView = null, work = null, quietEffective = false } = {}) {
     if (ended) return outcomeView(outcome, quietEffective);
     const theirs = Boolean(ownerMove || work?.owner);
@@ -164,7 +164,7 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     else if (['budget_paused', 'budget_pausing'].includes(phase)) {
         // The chip says the word; what holds it, a hold and the reviews a settled Pause lets finish are its quieter
         // second fact.
-        const beside = [CAUSE_SENTENCES[pauseCause]?.() || '', hold,
+        const beside = [pauseCause === 'authority' && pauseReason ? tx(pauseReason) : CAUSE_SENTENCES[pauseCause]?.() || '', hold,
             phase === 'budget_paused' && finishingReviews ? reviewsFinishing() : ''].filter(Boolean);
         // A cold sleep wakes by itself: it waits, it is not paused.
         const mark = phase === 'budget_paused' && pauseCause === 'sleep' ? 'still' : CENSUS_MARKS[phase];
@@ -185,10 +185,12 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     else if (phase === 'thinking') current = phaseView('working', CHIP.thinking(), 'working', live('thinking'));
     else if (phase === 'working') current = phaseView('working', CHIP.working(), 'working', live('working'));
     else current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
-    current = withOwner(current, theirs);
+    // Only its work's turn makes the owner's move: its words say what waits there (work_status.turnAmber).
+    const said = !current.owner && !ownerMove && work?.owner && work.note ? { ownerNote: work.note } : {};
+    current = { ...withOwner(current, theirs), ...said };
     // The outcome owns the chip; the work still running is its quieter second fact, and the owner's move keeps its dot.
     if (finalizing && outcome) return { ...outcomeView(outcome), secondary: [current.text, current.secondary]
-        .filter(Boolean).join(' · '), waiting: current.waiting, owner: current.owner };
+        .filter(Boolean).join(' · '), waiting: current.waiting, owner: current.owner, ...said };
     return current;
 }
 
@@ -217,7 +219,7 @@ export function censusTaskPhase(activity, detail = null, connected = true, { wai
         phase: connected && activity && !activity._activityUnconfirmed ? activity.phase || 'unknown' : 'unknown',
         ownerWait: activityWaitPhase(activity || {}), modelWaiting: waiting, modelOwnerAction: waiting && ownerAction,
         resumeAction: activity?.can_resume === true && activity?.pause_cause !== 'owner',
-        hold: activity?.project_admission_hold?.label || '', pauseCause: activity?.pause_cause || '',
+        hold: activity?.project_admission_hold?.label || '', pauseCause: activity?.pause_cause || '', pauseReason: activity?.pause_reason || '',
         finishingReviews: Boolean(activity?.finishing_reviews),
         modelActivity: activity?.model_activity,
     });
@@ -239,7 +241,7 @@ function recordPhase(record = {}, terminalPhase = 'done') {
         // The census's explicit Resume (main_waiting's rule): the owner's own Pause is not the owner's move.
         resumeAction: record.canResume === true && record.pauseCause !== 'owner',
         ownerMove: Boolean(record.ownerMove), hold: record.projectHold,
-        pauseCause: record.pauseCause, stopPolicy: record.cancelPendingPolicy,
+        pauseCause: record.pauseCause, pauseReason: record.pauseReason, stopPolicy: record.cancelPendingPolicy,
         finishingReviews: Boolean(record.finishingReviews),
         modelActivity: record.modelActivity, workView: record.workView, work: record.workLook,
     });
@@ -258,7 +260,8 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
 
 // The look a chip's view carries to its painter (and to a work-list row that says a card's words).
 function chipLook(view) {
-    return { mark: view.mark, tone: view.tone, owner: Boolean(view.owner), ...(view.outcome ? { outcome: view.outcome } : {}) };
+    return { mark: view.mark, tone: view.tone, owner: Boolean(view.owner), ...(view.outcome ? { outcome: view.outcome } : {}),
+        ...(view.owner && view.ownerNote ? { ownerNote: view.ownerNote } : {}) };
 }
 
 /**
@@ -279,6 +282,7 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     const cause = ['budget_paused', 'budget_pausing'].includes(parked) ? String(activity.pause_cause || '') : '';
     record.parkedPhase = parked;
     record.pauseCause = cause;
+    record.pauseReason = cause ? activity.pause_reason || '' : '';
     record.censusPhase = phase;
     record.canResume = activity.can_resume === true;  // a Resume only the owner gives, unless their own Pause holds it
     record.modelActivity = activity.model_activity || null;
@@ -339,7 +343,7 @@ export function paintTaskPhase(phaseEl, view, secondaryEl = null, isSubagent = f
     const secondaryText = String(view.secondary || '');
     // The owner's move is said in words too, unless the word already says it: the mark is decorative.
     const said = `${activeText} ${secondaryText}`.includes(CHIP.ownerWait());
-    const ownerNote = view.owner && !said ? tr('work.amber.action', 'Something here waits for you') : '';
+    const ownerNote = view.owner && !said ? view.ownerNote || tr('work.amber.action', 'Something here waits for you') : '';
     const activeLabel = `${isSubagent ? 'Subagent' : 'Task'} status: ${activeText}`
         + (secondaryText ? `, ${secondaryText}` : '') + (ownerNote ? ` · ${ownerNote}` : '');
     const secondaryChanged = paintPhaseSecondary(secondaryEl, secondaryText, phaseEl.hidden);

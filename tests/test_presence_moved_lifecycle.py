@@ -592,6 +592,169 @@ def test_a_continuation_the_owner_or_a_restart_authorized_still_carries_with_no_
     assert load_task_result(root, tid)["status"] == "running"
 
 
+def _phase_frames(frames):
+    return [frame for frame in frames if frame.get("type") == "direct_turn_phase"]
+
+
+def _model_frames(turn, tid):
+    """A turn's first Main call, started and seen going out: the loop sends these only after the turn's re-entry."""
+    turn.put({"type": "main_llm_call_state", "task_id": tid, "llm_call_id": "c1", "phase": "started"})
+    turn.put({"type": "main_llm_call_state", "task_id": tid, "llm_call_id": "c1", "phase": "observed",
+              "model_activity": {"phase": "awaiting_response"}})
+
+
+def _through_a_project_slot(root, task, frames, put=None):
+    """The real worker body, its endpoint and start-phase observer, on project slot 91 (never that slot's own agent)."""
+    from supervisor.worker_process import run_worker_task
+
+    run_worker_task(SimpleNamespace(_event_queue=None, owner_wait_callback=None), task, wid=91,
+                    out_q=SimpleNamespace(put=put or frames.append), repo_dir=str(root), drive_root=str(root))
+
+
+@pytest.mark.parametrize("refusal", ["crash_retry", "unmoved", "no_row", "unreadable_row"])
+def test_a_saved_turn_the_carrier_refuses_claims_no_start_phase(root, monkeypatch, refusal):
+    """#2862, the refused half of the pair below: the same worker body and observer as an admitted turn. The carrier's
+    own gate comes before any agent, so no context or model frame exists, and no ``started`` of the worker's stands in."""
+    from ouroboros import presence_runner
+    from ouroboros.presence_events import PresenceTurnError
+    from ouroboros.store import StoreBusy
+
+    monkeypatch.setattr("ouroboros.agent.make_agent", lambda **_k: pytest.fail("a refused turn builds no agent"))
+    _seed, built = _seed_and_built(root)
+    if refusal != "no_row":
+        _boot_window_row(root, built["id"], built, move=refusal != "unmoved")
+    task = {**built, "drive_root": str(root), "_attempt": 2, "_phase_generation": "gen-new",
+            "_working_recovery": {"cause": "worker_crash" if refusal == "crash_retry" else "owner_restart"}}
+    frames = []
+    if refusal == "unreadable_row":
+        def unreadable(*_args, **_kwargs):
+            raise StoreBusy("task store acquisition timed out", reason="contention")
+
+        with monkeypatch.context() as outage, pytest.raises(PresenceTurnError):
+            outage.setattr(presence_runner, "load_task_result", unreadable)
+            _through_a_project_slot(root, task, frames)
+        assert frames == []
+    else:
+        _through_a_project_slot(root, task, frames)
+        [settled] = [frame for frame in frames if frame.get("type") == "presence_turn_settled"]
+        assert settled["error"]["code"] == "presence_attempt_outcome_unknown"
+    assert _phase_frames(frames) == []
+
+
+@pytest.mark.parametrize("prepare", [{"quiet": True, "reply_expected": False}, None], ids=["on_its_carrier", "on_a_slot"])
+def test_a_host_turn_that_fails_its_readmission_claims_no_start_phase(root, monkeypatch, prepare):
+    """The Host's turn re-admits from durable facts in its carrier; this root holds no binding, so it is refused there."""
+    monkeypatch.setattr("ouroboros.agent.make_agent", lambda **_k: pytest.fail("a refused turn builds no agent"))
+    seed, _built = _seed_and_built(root)
+    frames = []
+    _through_a_project_slot(root, {**seed, "drive_root": str(root), "_phase_generation": "gen-new",
+                                   **({"_conversation_prepare": prepare} if prepare else {})}, frames)
+    [settled] = [frame for frame in frames if frame.get("type") == "presence_turn_settled"]
+    assert settled["error"] and settled["result"] is None
+    assert _phase_frames(frames) == []
+
+
+@pytest.mark.parametrize("grant", [
+    {"_budget_pause_resume": {"grant_id": "g", "pause_id": "p"}}, {"_owner_wait_resume": {"restart_transaction_id": "tx"}},
+    {"budget_resumed_at": "2026-11-03T00:00:00+00:00", "_attempt": 1},
+], ids=["owner_resume", "restart_wait", "unstarted_resume"])
+def test_a_readmitted_saved_turn_reports_its_own_start_phases_to_its_row_and_work_line(root, monkeypatch, grant):
+    """#2862, the admitted half, on the order a real agent sends: its context is built before the loop's first step
+    takes the conversation (``presence_carrier.reenter``), its model call after it. The first frame is that first
+    context fact, each names this attempt, slot and dispatch, and each lands on the row the census words the work from."""
+    from ouroboros import presence_carrier
+    from ouroboros.task_results import write_task_result
+    from supervisor import conversation_lane, workers
+    from tests.test_presence_project_activity import _row, _state, _work
+
+    _seed, built = _seed_and_built(root)
+    tid = built["id"]
+    write_task_result(root, tid, "running", metadata=built["metadata"], chat_id=built["chat_id"], _is_direct_chat=True,
+                      source="presence", task_contract=built["task_contract"], result="Task is running.")
+    _move(root, tid, PROJECT)
+    task = {**built, "drive_root": str(root), "_attempt": 2, "_phase_generation": "gen-new", **grant}
+    attempt = task["_attempt"]
+    row = workers.RUNNING[tid] = {"task": task, "worker_id": 91, "attempt": attempt, "phase_generation": "gen-new"}
+    supervisor = SimpleNamespace(RUNNING=workers.RUNNING)
+    # The execution before this Resume kept the attempt and the slot; only the generation tells its late frame apart.
+    conversation_lane.handle_direct_turn_phase({"task_id": tid, "task_attempt": attempt, "worker_id": 91, "execution_id": "old",
+                                                "phase_generation": "gen-old", "phase": "dispatched"}, supervisor)
+    assert "turn_phase" not in row
+    frames, seen = [], {}
+
+    def put(frame):
+        frames.append(frame)
+        if frame.get("type") == "direct_turn_phase":
+            conversation_lane.handle_direct_turn_phase(frame, supervisor)
+
+    def line():
+        census, works, _complete = _state(root)
+        work = _work(works, tid)
+        return _row(census, tid).get("carrier"), row.get("turn_phase"), work["call"], [r["code"] for r in work["because"]]
+
+    class Author:
+        def __init__(self, turn):
+            self.turn = turn
+
+        def handle_task(self, task):
+            seen["before_its_agent"] = _phase_frames(frames)
+            for kind in ("task_started", "context_building_started"):
+                self.turn.put({"type": "log_event", "data": {"type": kind, "task_id": tid}})
+            seen["building"] = line()
+            self.turn.put({"type": "log_event", "data": {"type": "context_building_finished", "task_id": tid}})
+            ctx = SimpleNamespace(task_id=tid, task_metadata=task["metadata"],
+                                  model_wait_context=SimpleNamespace(control_reason=lambda: None))
+            state = presence_carrier.reenter(ctx)
+            seen["held"] = bool(state and state.lease.held())
+            _model_frames(self.turn, tid)
+            write_task_result(root, tid, "completed", metadata=task["metadata"], result="Done.", terminal_origin="model_final")
+            return [{"type": "presence_result", "outcome": "message", "text": "Done.", "work_ref": ""},
+                    {"type": "task_done", "task_id": tid, "status": "completed"}]
+
+    monkeypatch.setattr("ouroboros.agent.make_agent", lambda **kwargs: Author(kwargs["event_queue"]))
+    _through_a_project_slot(root, task, frames, put=put)
+    phases = _phase_frames(frames)
+    assert seen["before_its_agent"] == [] and seen["held"] is True
+    assert seen["building"] == ("worker", "context_building", "preparing", ["turn_context_building"])
+    assert phases == [{"type": "direct_turn_phase", "task_id": tid, "task_attempt": attempt, "worker_id": 91,
+                       "phase_generation": "gen-new", "execution_id": phases[0]["execution_id"], "phase": phase}
+                      for phase in ("context_building", "context_built", "requested", "dispatched")]
+    assert row["turn_phase"] == "dispatched" and row["turn_execution"] == phases[0]["execution_id"]
+
+
+def test_a_host_turn_on_its_carrier_reports_its_start_phases_from_its_first_context_frame(root, monkeypatch):
+    """The admitted half of a Host turn, whose carrier (``CarrierTurn``) publishes through the same producer."""
+    from ouroboros import presence_admission
+    from ouroboros.task_results import write_task_result
+
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **_kw: _admission())
+    seed, _built = _seed_and_built(root)
+    tid, frames, seen = seed["id"], [], {}
+
+    class Author:
+        owner_wait_callback = None
+
+        def __init__(self, turn):
+            self.turn = turn
+
+        def handle_task(self, task):
+            seen["before_its_agent"] = _phase_frames(frames)
+            for kind in ("context_building_started", "context_building_finished"):
+                self.turn.put({"type": "log_event", "data": {"type": kind, "task_id": tid}})
+            _model_frames(self.turn, tid)
+            write_task_result(root, tid, "completed", metadata=task["metadata"], result="Hi", terminal_origin="model_final")
+            return [{"type": "presence_result", "outcome": "message", "text": "Hi", "work_ref": ""}]
+
+    monkeypatch.setattr("ouroboros.agent.make_agent", lambda **kwargs: Author(kwargs["event_queue"]))
+    _through_a_project_slot(root, {**seed, "drive_root": str(root), "_attempt": 3, "_phase_generation": "gen-fresh",
+                                   "_conversation_prepare": {"quiet": True, "reply_expected": False}}, frames)
+    phases = _phase_frames(frames)
+    assert seen["before_its_agent"] == []
+    assert [(p["phase"], p["task_attempt"], p["worker_id"], p["phase_generation"]) for p in phases] == [
+        (phase, 3, 91, "gen-fresh") for phase in ("context_building", "context_built", "requested", "dispatched")]
+    assert len({p["execution_id"] for p in phases}) == 1
+
+
 def test_the_real_warm_pause_producer_leaves_a_paused_work_the_owner_can_resume(harness, monkeypatch):
     """The actual warm park (a held critic) under the normal carried census: Paused work offers Resume and Stop, never Pause,
     and its row still says it is the moved text work a Restart returns."""

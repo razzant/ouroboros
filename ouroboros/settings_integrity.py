@@ -34,6 +34,8 @@ class TaskSettingsSnapshot:
     settings: Mapping
     environ: Mapping
     actor_scope: tuple[Path, Mapping] | None = None
+    # Original task projection, before the first private cognition overlay.
+    projected_environ: Mapping | None = None
 
 
 def _next_task_setting(key: str) -> bool:
@@ -51,9 +53,9 @@ def _projected_keys() -> set[str]:
 
 
 # The values this process tree projected (``config.apply_settings_to_env``) for the keys whose absence takes a
-# proposal — the model slots and the never-configured factory catalog — handed down with the environment: a read
-# of a key the document does not set tells this tree's own echo from an operator's variable, so an absent slot
-# keeps following the configured access and an absent catalog its factory (owner 2A).
+# proposal — the model slots; the never-configured factory catalog rides no environment any more — handed down
+# with it: a read of a key the document does not set tells this tree's own echo from an operator's variable, so an
+# absent slot keeps following the configured access and an absent catalog its factory (owner 2A).
 PROJECTED_PROPOSALS_ENV = "OUROBOROS_PROJECTED_PROPOSALS"
 
 
@@ -98,6 +100,9 @@ def note_proposal_projection(environ, before: Mapping) -> None:
     except where it kept or respelled an operator's own variable (``operator_variables`` of ``before``): our echo
     must never turn the operator's choice into a proposal the next read replaces.
 
+    A proposal key no projection exports any more (the catalog: ``SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``) keeps no echo:
+    an earlier mirror leaves ``environ`` only while its value matches our echo or recorded projection digest.
+
     Every other projected value is ours by digest (``PROJECTED_SETTINGS_ENV``) when this projection wrote it, when
     it is what the settings document itself sets (a launcher or an earlier release may have mirrored it there with
     no record), or when an earlier projection's record already held it; any other variable stays the operator's."""
@@ -105,16 +110,21 @@ def note_proposal_projection(environ, before: Mapping) -> None:
     from ouroboros.server_runtime import MODEL_SLOT_KEYS
     from ouroboros.settings_defaults import settings_env_keys
 
-    keys = (*MODEL_SLOT_KEYS, SUBAGENTS_SETTING)
+    keys, exported = (*MODEL_SLOT_KEYS, SUBAGENTS_SETTING), set(settings_env_keys())
     echo, operator = projected_proposals(environ), operator_variables(before, keys)
+    ours = projected_settings(before)
     for key in keys:
         after = environ.get(key)
+        if key not in exported and after is not None and (
+                after == echo.get(key) or ours.get(key) == _value_digest(after)):
+            environ.pop(key)
+            after = None
         if after is None or key in operator or (after == before.get(key) and after != echo.get(key)):
             echo.pop(key, None)
         else:
             echo[key] = after
     environ[PROJECTED_PROPOSALS_ENV] = json.dumps(echo, sort_keys=True)
-    ours, document, record = projected_settings(before), _document_keys(), {}
+    document, record = _document_keys(), {}
     for key in settings_env_keys():
         value = environ.get(key)
         if value is None:
@@ -156,17 +166,19 @@ def runtime_setting(key: str, default=None):
     """Environment-shaped runtime read; absence in the snapshot stays absent.
 
     A route key (``route_choice.ROUTE_SETTING_KEYS``: model slots, accounts, provider keys) reads the
-    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot."""
+    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot.
+    A deployment policy's managed key reads as the policy lets it, whatever the view held."""
+    from ouroboros.deployment_policy import effective_value
     from ouroboros.route_choice import ROUTE_SETTING_KEYS, live_setting
 
     if key in ROUTE_SETTING_KEYS:
         served, value = live_setting(key, default)
         if served:
-            return value
+            return effective_value(key, value)
     snapshot = _TASK_SETTINGS.get()
     if snapshot is not None and _next_task_setting(key):
-        return snapshot.environ.get(key, default)
-    return os.environ.get(key, default)
+        return effective_value(key, snapshot.environ.get(key, default))
+    return effective_value(key, os.environ.get(key, default))
 
 
 def runtime_environ() -> dict[str, str]:
@@ -187,9 +199,11 @@ def runtime_environ() -> dict[str, str]:
                     env.pop(key, None)
                 else:
                     env[key] = snapshot.environ[key]
+    from ouroboros.deployment_policy import effective_environ
     from ouroboros.route_choice import live_environ_overlay
 
     live_environ_overlay(env)  # a model call in a child (vision) uses the current model and key, never a cleared one
+    effective_environ(env)
     return env
 
 
@@ -224,8 +238,10 @@ def _with_cognition(snapshot: TaskSettingsSnapshot, cognition: Mapping) -> TaskS
     values = cognition_overrides(cognition)
     values.pop("OUROBOROS_SUBAGENTS_MODE")  # this axis is live, never restored from an actor snapshot
     values["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = cognition.get("context_mode_auto_low", "false")
+    projected = snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ
     return replace(snapshot, settings=MappingProxyType({**snapshot.settings, **values}),
-                   environ=MappingProxyType({**snapshot.environ, **values}))
+                   environ=MappingProxyType({**snapshot.environ, **values}),
+                   projected_environ=projected)
 
 
 def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
@@ -403,30 +419,62 @@ def skill_environ() -> dict:
         with SETTINGS_ENV_LOCK:
             source = dict(os.environ)
     else:
-        source = dict(snapshot.environ)
+        source = dict(snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ)
     ours = projected_settings(source)
     return {key: value for key, value in source.items() if key not in ours or ours[key] != _value_digest(value)}
 
 
-def skill_settings(settings_reader=None) -> dict:
+def skill_settings(settings_reader=None, *, strict: bool = False) -> dict:
     """What a skill reads: the settings document as it reads now, in a task or not (owner choice A, #1122).
 
-    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment and the
-    funded-credential disclosure of its handlers; grants and the manifest allowlist filter it afterwards; the
+    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment, the
+    funded-credential disclosure of its handlers and an explicit ``env_from_settings`` selection of commands,
+    scripts, verification and services; grants and the manifest allowlist filter a skill's view afterwards; the
     task's review reads keep its snapshot while its model, account and key reads share this view
     (``route_choice``, ``runtime_settings``). The loader lets the
     environment stand in for a key the document leaves unset, and a long-lived process still holds what earlier
     projections mirrored there — this task's start, an earlier task's, the server's it inherited — so a key the owner
     cleared or deleted since would come back. The read overlays ``skill_environ`` instead: our mirrored values never
-    stand in, an operator's own variable still does. Nothing here touches the process environment."""
+    stand in, an operator's own variable still does. Nothing here touches the process environment.
+
+    ``strict`` keeps these semantics but raises ``SettingsDocumentUnknown`` for a present document that cannot be
+    read as one object, where the default read falls back to defaults. A reader that reads the document says so by
+    accepting ``strict`` as ``config.load_settings`` does (an out-of-process child's reader, with its operator
+    overlay, does too); one that does not (a fixed snapshot: a catalog's declared inputs, a test) has no document
+    to be unknown and reads as given."""
     from ouroboros import config
 
+    reader = settings_reader or config.load_settings
     with settings_read_environ(skill_environ()):
-        return dict((settings_reader or config.load_settings)() or {})
+        return dict((reader(strict=True) if strict and _reads_strictly(reader) else reader()) or {})
+
+
+def _reads_strictly(reader) -> bool:
+    import inspect
+
+    try:
+        return "strict" in inspect.signature(reader).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def selection_settings(*, settings_reader=None) -> dict:
+    """Current effective Settings for an explicit process selection (#2915).
+
+    Reuse the mirror-safe skill reader and the existing route overlay, without
+    restoring task values. Defaults and operator variables keep their precedence;
+    missing effective keys stay missing. Selection authority belongs to the caller.
+    """
+    from ouroboros.deployment_policy import effective_settings
+    from ouroboros.route_choice import live_settings_overlay
+
+    settings = skill_settings(settings_reader)
+    live_settings_overlay(settings)
+    return effective_settings(settings)
 
 
 def runtime_settings(*, settings_reader=None) -> dict:
-    """Runtime document view; owner writers continue using config.load_settings."""
+    """Task document view; explicit process refs instead read selection_settings."""
     from ouroboros import config
 
     settings = dict((settings_reader or config.load_settings)() or {})
@@ -439,9 +487,31 @@ def runtime_settings(*, settings_reader=None) -> dict:
                 settings.pop(key, None)
             else:
                 settings[key] = copy.deepcopy(snapshot.settings[key])
+    from ouroboros.deployment_policy import effective_settings
     from ouroboros.route_choice import live_settings_overlay
 
     live_settings_overlay(settings)  # route keys read the document as it is now (route_choice)
+    return effective_settings(settings)  # an old snapshot never widens what the deployment manages
+
+
+def runtime_catalog_settings(*, settings_reader=None) -> dict:
+    """``runtime_settings`` for a reader of the subagent catalog, which rides no environment
+    (``SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``): the task's catalog where its snapshot holds one, else the document read
+    strictly — a present document that cannot be read is ``SettingsDocumentUnknown``, for each reader to say in its
+    terms, never defaults that read as a factory, empty or Main-only pool. A snapshot holds none after a failed
+    task-start reload with no earlier catalog to keep (``subagent_runtime.apply_task_start_settings_or_disclose``)."""
+    from ouroboros import config
+    from ouroboros.configured_subagents import SUBAGENTS_SETTING
+
+    snapshot = _TASK_SETTINGS.get()
+    if snapshot is not None and SUBAGENTS_SETTING in snapshot.settings:
+        return runtime_settings(settings_reader=settings_reader)
+    reader = settings_reader or config.load_settings
+    live = reader(strict=True) if _reads_strictly(reader) else reader()
+    settings = runtime_settings(settings_reader=lambda: live)
+    # Recover only the missing catalog; the task's other next-task choices stay frozen.
+    if SUBAGENTS_SETTING in live:
+        settings[SUBAGENTS_SETTING] = copy.deepcopy(live[SUBAGENTS_SETTING])
     return settings
 
 
@@ -528,6 +598,50 @@ def read_settings_json_verified(settings_path: Path, *, behind_writer: bool = Fa
         if expected_settings_sha256():
             raise SettingsIntegrityError("settings snapshot is unreadable") from exc
         return _read_behind_the_writer(settings_path) if behind_writer else None
+
+
+class SettingsDocumentUnknown(RuntimeError):
+    """A present settings document could not be read as one JSON object: its values are unknown, not absent."""
+
+
+def read_settings_json_strict(settings_path: Path, *, behind_writer: bool = False) -> dict | None:
+    """``read_settings_json_verified`` that tells absent from unknown: ``None`` only for a file that does not exist;
+    an unreadable, undecodable or non-object document (JSON ``null`` included) raises ``SettingsDocumentUnknown``
+    after the same single read behind the writer's lock. A pin keeps its typed ``SettingsIntegrityError``."""
+    pinned = bool(expected_settings_sha256())
+    if pinned:
+        value = read_settings_json_verified(settings_path)  # under a pin an absent file is already typed
+    else:
+        try:
+            with settings_path.open("rb") as handle:
+                raw = handle.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if behind_writer:
+                return _strict_behind_the_writer(settings_path)
+            raise SettingsDocumentUnknown("settings document is unreadable") from exc
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if behind_writer:
+                return _strict_behind_the_writer(settings_path)
+            raise SettingsDocumentUnknown("settings document is not valid JSON") from exc
+    if not isinstance(value, dict):
+        if behind_writer and not pinned:
+            return _strict_behind_the_writer(settings_path)
+        raise SettingsDocumentUnknown("settings document is not an object")
+    return value
+
+
+def _strict_behind_the_writer(settings_path: Path) -> dict | None:
+    from ouroboros import config
+
+    fd = config._acquire_settings_lock()
+    try:
+        return read_settings_json_strict(settings_path)
+    finally:
+        config._release_settings_lock(fd)
 
 
 def _read_behind_the_writer(settings_path: Path):

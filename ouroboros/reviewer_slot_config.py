@@ -30,7 +30,7 @@ from __future__ import annotations
 import contextlib as _contextlib
 import contextvars as _contextvars
 import json
-from ouroboros.settings_integrity import runtime_environ
+from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
 from ouroboros.model_slots import resolve_processing_preference
 import pathlib
 import threading
@@ -167,9 +167,17 @@ def _catalog_row_slot(row: Any, settings: Any, *, where: str = "") -> Configured
 
 def _catalog_settings(snapshot: Any = None) -> Any:
     """The settings plane the pool reads: an explicit settings snapshot (a task's,
-    a save handler's incoming document, a benchmark container's), else the
-    applied runtime environment."""
-    return snapshot if snapshot is not None else runtime_environ()
+    a save handler's incoming document, a benchmark container's), else the task's
+    catalog or the document (``runtime_catalog_settings``). A document that cannot
+    be read is the typed catalog failure, never an empty pool reviewed by Main."""
+    if snapshot is not None:
+        return snapshot
+    from ouroboros.configured_subagents import SUBAGENTS_SETTING
+
+    try:
+        return runtime_catalog_settings()
+    except SettingsDocumentUnknown as exc:
+        raise ValueError(f"{SUBAGENTS_SETTING} is unknown: {exc}") from exc
 
 
 def _parse_catalog(settings: Any) -> Any:
@@ -326,28 +334,35 @@ class ComposedPanel:
                             for slot, parts, extra in self.seats for part in parts))
 
 
-def review_strictness(enforcement: Optional[str] = None, mode: Optional[str] = None) -> str:
-    """Effective authority, independent of the runtime mode's other capabilities."""
-    from ouroboros.config import get_review_enforcement, get_runtime_mode
+def review_strictness(mode: Optional[str] = None) -> str:
+    """The panel rule in force: ``cyber_pro`` composes freely, ``advisory`` keeps the counted floor."""
+    from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
-    return ("cyber_pro" if mode_has_unrestricted_agency(mode if mode is not None else get_runtime_mode())
-            else enforcement if enforcement is not None else get_review_enforcement())
+    return "cyber_pro" if mode_has_unrestricted_agency(mode if mode is not None else get_runtime_mode()) else "advisory"
 
 
-def review_cost_facts(cost: Any, *, route: str = "", model: str = "") -> Dict[str, Any]:
-    """Measured money, subscription delivery or unknown; never estimate a receipt."""
+def review_cost_facts(cost: Any, *, route: str = "", model: str = "", observed: Any = None) -> Dict[str, Any]:
+    """Measured money, subscription delivery or unknown; never estimate a receipt.
+
+    ``route``/``model`` are the requested row. ``observed`` is the route the attempt was witnessed
+    on (an execution row's or a ledger seat's ``effective``): once it names a session, a model or a
+    provider, that route decides the kind, so money measured on another provider is never filed
+    under the requested subscription. The amount never decides the route."""
     from ouroboros.provider_models import provider_for_model
 
-    subscription = route == ROUTE_KIND_SESSION or provider_for_model(model) == "claudexor"
+    provider = ""
+    seen = observed if isinstance(observed, dict) and observed.get("route") else {}
+    if str(seen.get("route") or "").split(":", 1)[0] == ROUTE_KIND_SESSION or seen.get("model") or seen.get("provider"):
+        route, model, provider = str(seen["route"]).split(":", 1)[0], str(seen.get("model") or ""), str(seen.get("provider") or "")
+    subscription = route == ROUTE_KIND_SESSION or (provider or provider_for_model(model)) == "claudexor"
     known = isinstance(cost, (int, float)) and not isinstance(cost, bool)
     return {"cost_usd": cost if known else None,
             "cost_kind": "subscription" if subscription else "measured" if known else "unknown"}
 
 
-# Surfaces whose counted floor is the owner's strictness: Blocking widens a named
-# subset to every ticked reviewer; Advisory refuses that narrowing without a reason.
-# ``result_required`` is the host fact "this is a Required root result wave"
+# Surfaces with a counted floor outside Cyber Pro: a named subset needs at least one
+# ticked reviewer and a reason when it narrows the pool. ``result_required`` is the host fact "this is a Required root result wave"
 # (``review_result.required_root_wave``), never a model argument. Auto, a child and
 # Cyber Pro stay on ``result`` / free composition. ``chosen_by`` is the caller's.
 _COUNTED_FLOOR_SURFACES = frozenset({"own_body", "skill", "plan_first", "result_required"})
@@ -358,13 +373,14 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
                          pool: Optional[Sequence[Any]] = None, reviewer_effort: str = "",
                          coupling_only: Sequence[str] = (), chosen_by: str = "ouroboros",
                          reason_field: str = "reason") -> ComposedPanel:
-    """Compose one frozen wave. Blocking widens only the counted-floor surfaces.
+    """Compose one frozen wave; the counted-floor surfaces keep the reason rule.
 
     Those are body, skill, a first body-plan ask, and a Required root result wave.
-    Advisory narrowing on the same surfaces requires a reason; an adviser neither
+    Narrowing on them outside Cyber Pro requires a reason; an adviser neither
     satisfies the counted minimum nor acquires authority from its delivery. Optional
     plan follow-ups, preflight, Auto/child result waves and Cyber Pro keep named-row
-    composition. Omission selects the pool, including its disclosed Main fallback.
+    composition; only Cyber Pro may seat advisers alone (a wave with no counted
+    verdict). Omission selects the pool, including its disclosed Main fallback.
     ``chosen_by`` is whatever the caller records (the host floor passes ``host``).
     The caller retains these facts on retries.
     """
@@ -397,15 +413,14 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
     named = list({slot.slot_id: slot for slot in map(resolve, reviewers)}.values())
     requested = {slot.slot_id for slot in named}
     counted = requested & by_id.keys()
-    widens = strictness == "blocking" and surface in _COUNTED_FLOOR_SURFACES
     narrowed = surface != "preflight" and bool(named) and counted != by_id.keys()
     counted_hint = "name main (the empty pool's counted seat)" if main_alone else "name at least one reviewer from the review pool"
-    if strictness == "advisory" and narrowed and surface in _COUNTED_FLOOR_SURFACES:
+    if strictness != "cyber_pro" and narrowed and surface in _COUNTED_FLOOR_SURFACES:
         if not counted:
             raise PanelCompositionError(f"REVIEW_PANEL_EMPTY: {counted_hint}; advisers are heard, not counted. No review was dispatched ($0).")
         if not str(reason).strip():
-            raise PanelCompositionError(f"REVIEW_PANEL_REASON_REQUIRED: an Advisory panel with fewer than all ticked reviewers requires a reason. Supply {reason_field} or omit reviewers to ask the whole pool. No review was dispatched ($0).")
-    selected = ordered if not named or widens else [slot for slot in named if slot.slot_id in by_id]
+            raise PanelCompositionError(f"REVIEW_PANEL_REASON_REQUIRED: a panel with fewer than all ticked reviewers requires a reason. Supply {reason_field} or omit reviewers to ask the whole pool. No review was dispatched ($0).")
+    selected = ordered if not named else [slot for slot in named if slot.slot_id in by_id]
     seats = [PoolSeat(slot, tuple(seat_parts(slot))) for slot in selected]
     seats.extend(PoolSeat(slot, tuple(seat_parts(slot)), surface != "preflight")
                  for slot in named if slot.slot_id not in by_id)
@@ -416,7 +431,8 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
             ignored.append(name)
         else:
             seats.append(PoolSeat(slot, tuple(seat_parts(slot, coupling_only=True)), True))
-    if not any(not seat.additional for seat in seats) and surface not in {"plan", "plan_first"}:
+    counted_seated = any(not seat.additional for seat in seats)
+    if not counted_seated and surface not in {"plan", "plan_first"} and strictness != "cyber_pro":
         raise PanelCompositionError(f"REVIEW_PANEL_EMPTY: {counted_hint}; an added critic never satisfies quorum. No review was dispatched ($0).")
     if len(seats) > MAX_CONFIGURED_SUBAGENTS:
         raise PanelCompositionError(f"REVIEW_PANEL_TOO_LARGE: a wave seats at most {MAX_CONFIGURED_SUBAGENTS} reviewers (this call asks {len(seats)}).")
@@ -425,11 +441,10 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
         "pool": [{"seat_id": slot.slot_id, "model": slot.model, "effort": slot.effort,
                   "delivery": "retrieving" if slot.retrieves else "packet",
                   "route": str(getattr(slot.route, "value", slot.route))} for slot in configured if not main_alone],
-        "pool_empty": main_alone, "main_self_review": main_alone,
+        "pool_empty": main_alone, "main_self_review": main_alone and counted_seated,
         "chosen_by": chosen_by, "strictness": strictness, "reason": str(reason),
-        "composition": "full_pool" if not named or widens else "composed",
-        "widened_from": list(reviewers) if widens and narrowed else [],
-        "reviewers_subset_ignored": widens and narrowed, "reason_missing": narrowed and not str(reason).strip() and not widens,
+        "composition": "full_pool" if not named else "composed",
+        "reason_missing": narrowed and not str(reason).strip(),
         "reviewers_requested": list(reviewers), "coupling_only": list(coupling_only), "coupling_only_ignored": ignored,
         "additional": [seat.slot.slot_id for seat in seats if seat.additional], "not_reached": [],
         "assigned": [seat.slot.slot_id for seat in seats if not seat.additional],
@@ -487,7 +502,11 @@ def reviewer_slot_config_error() -> str:
     fix is seen immediately."""
     from ouroboros.configured_subagents import SUBAGENTS_SETTING
 
-    return review_pool_state(_catalog_settings().get(SUBAGENTS_SETTING))["error"]
+    try:
+        settings = _catalog_settings()
+    except ValueError as exc:  # the settings document could not be read: the pool is unknown
+        return str(exc)
+    return review_pool_state(settings.get(SUBAGENTS_SETTING))["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +712,7 @@ def row_effort_source(row: ConfiguredReviewerSlot) -> str:
 # ---------------------------------------------------------------------------
 
 LAST_EXECUTION_FILENAME = "reviewer_slot_last_execution.json"
-_LAST_EXECUTION_CAP = 64  # the pool is ≤ MAX_CONFIGURED_SUBAGENTS (26) rows; the cap only bounds junk growth
+_LAST_EXECUTION_CAP = 64  # the pool is ≤ MAX_CONFIGURED_SUBAGENTS rows; the cap only bounds junk growth
 
 
 def _last_execution_path() -> "pathlib.Path":
@@ -721,21 +740,28 @@ def reviewer_slot_execution_rows(surface: str, actors: Any, slots_by_id: Dict[st
     The wave that ran these actors keeps the returned rows as ITS facts; the shared
     projection written by :func:`record_reviewer_slot_executions` may be overwritten by
     another surface's later run of the same seat."""
-    from ouroboros.review_substrate import TYPED_FAILURE_FACT_KEYS
-    from ouroboros.tools.review_response import _reported_cost
+    from ouroboros.review_records import TYPED_FAILURE_FACT_KEYS, reported_review_cost
     from ouroboros.utils import utc_now_iso
+
+    from ouroboros.review_execution_projection import api_review_dispatch_evidence
 
     rows: Dict[str, Dict[str, Any]] = {}
     for actor in actors or []:
         slot = slots_by_id.get(getattr(actor, "slot_id", ""))
         if slot is None:
             continue
-        if str(getattr(actor, "operation_state", "") or "") == "pending_dispatch":
+        operation_state = getattr(actor, "operation_state", "")
+        if operation_state == "pending_dispatch":
             continue  # released at the dispatch barrier: still running, recorded when it settles
         usage = dict(getattr(actor, "usage", {}) or {})
         route_kind = str(getattr(getattr(slot, "route", None), "value", "") or "api_chat")
         delegated_route = str(usage.get("delegated_route") or "")
         session = route_kind == "agent_session" or bool(delegated_route)
+        # Explicit refusal (with or without a billing receipt) is not an execution, on either
+        # route: Settings' projection shows no applied identity for a session nobody sent.
+        # Absence of legacy evidence keeps the prior reading; a dispatched session is unchanged.
+        dispatched = (operation_state != "not_dispatched"
+                      and (session or api_review_dispatch_evidence(usage, operation_state=operation_state) is not False))
         effective: Dict[str, Any] = {
             # For a session the harness resolves route/model on its side; for
             # api_chat what was sent is what ran.
@@ -743,9 +769,10 @@ def reviewer_slot_execution_rows(surface: str, actors: Any, slots_by_id: Dict[st
                       else route_kind),
             # APPLIED honesty: a session whose telemetry disclosed no resolved
             # model shows ABSENCE — the requested model must never be dressed
-            # up as the applied one. An api row's sent model IS its applied one.
-            "model": (str(usage.get("resolved_model") or "") if session
-                      else str(getattr(slot, "model", "") or "")),
+            # up as the applied one. An api row names the model its own reply
+            # was served on (a route the model wait switched to included); a
+            # reply that names none keeps the sent one.
+            "model": str(usage.get("resolved_model") or ("" if session else getattr(slot, "model", "")) or ""),
             # No scalar "effort": keep host-send evidence and the engine's
             # sourced report separate from the requested row below.
             "verdict_method": str(usage.get("verdict_method") or ""),
@@ -769,6 +796,17 @@ def reviewer_slot_execution_rows(surface: str, actors: Any, slots_by_id: Dict[st
             effective["profile_id"] = str(usage["applied_profile"])
         if usage.get("applied_access"):
             effective["access"] = str(usage["applied_access"])
+        if not session and usage.get("provider"):
+            effective["provider"] = str(usage["provider"])  # the provider that reply was served by
+        if not session and getattr(actor, "status", "") == "error" and usage.get("physical_dispatch_observed") is True:
+            if "resolved_model" in usage:
+                effective["model"] = usage["resolved_model"] or ""
+            if "provider" in usage:
+                effective["provider"] = usage["provider"]  # None is an observed gap, not the requested route
+        if not dispatched:
+            # Nothing was witnessed sending: no route, model, verdict or account to
+            # claim. ``requested`` below keeps the configured row intact.
+            effective = {"route": "", "model": ""}
         row: Dict[str, Any] = {
             "ts": utc_now_iso(),
             "surface": str(surface or ""),
@@ -792,7 +830,8 @@ def reviewer_slot_execution_rows(surface: str, actors: Any, slots_by_id: Dict[st
             **({"effort": dict(usage["effort"])} if isinstance(usage.get("effort"), dict) else {}),
             "capability_delta": usage.get("capability_delta") or [],
             "status": str(getattr(actor, "status", "") or ""),
-            **review_cost_facts(_reported_cost(usage, None), route=route_kind, model=str(getattr(slot, "model", "") or "")),
+            **review_cost_facts(reported_review_cost(usage), route=route_kind, model=str(getattr(slot, "model", "") or ""),
+                                observed=effective),
             **({"review_record_id": str(record_id)} if record_id else {}),
         }
         # B1: typed failure facts, present only when the substrate carried them
@@ -804,6 +843,36 @@ def reviewer_slot_execution_rows(surface: str, actors: Any, slots_by_id: Dict[st
                 row[key] = value
         rows[str(actor.slot_id)] = row
     return rows
+
+
+def collected_slot_execution(seat: Dict[str, Any], raw: Dict[str, Any], *, surface: str = "",
+                             record_id: str = "") -> Dict[str, Dict[str, Any]]:
+    """The execution row of ONE collected operation, for the ledger seat it settles late
+    (``review_ledger.settle_from_collected``): built from the usage that same operation saved
+    (``raw["usage"]``) and the seat's own requested row, never from the shared projection, which
+    another wave of the same seat may have rewritten. Empty when that usage proves no execution:
+    a seat never sent or of unknown outcome gains no route. The legacy receipt fallback reads a
+    cost or a reservation id alone as a send; this collected path never does — typed dispatch
+    evidence proves the send, and so does a legacy reply naming the route it was served on (a
+    session's delegated route, a resolved model or provider), never a configured default or a price."""
+    from types import SimpleNamespace
+
+    from ouroboros.review_execution_projection import api_review_dispatch_evidence
+
+    usage, state = raw.get("usage"), str(raw.get("operation_state") or "")
+    sent = api_review_dispatch_evidence(usage, operation_state=state) if isinstance(usage, dict) else False
+    if sent is None:
+        sent = bool(str(usage.get("delegated_route") or "") or str(usage.get("resolved_model") or usage.get("provider") or ""))
+    if sent is not True:
+        return {}
+    requested = seat.get("requested") if isinstance(seat.get("requested"), dict) else {}
+    seat_id = str(seat.get("seat_id") or "")
+    slot = SimpleNamespace(route=SimpleNamespace(value=str(requested.get("route") or ROUTE_KIND_API)),
+                           session_profile=str(requested.get("profile") or ""),
+                           **{key: str(requested.get(key) or "") for key in (
+                               "model", "effort", "session_target", "subagent_id", "processing_preference")})
+    actor = SimpleNamespace(slot_id=seat_id, operation_state=state, usage=usage, status=str(raw.get("status") or ""))
+    return reviewer_slot_execution_rows(surface, [actor], {seat_id: slot}, record_id=record_id)
 
 
 def record_reviewer_slot_executions(surface: str, actors: Any, slots_by_id: Dict[str, Any], *,
@@ -918,7 +987,7 @@ __all__ = [
     "row_plan_retrieves",
     "triad_delivery_slots",
     # «Выполняется как».
-    "bind_reviewer_slot_record_id",
+    "bind_reviewer_slot_record_id", "collected_slot_execution",
     "record_reviewer_slot_executions", "reviewer_slot_execution_rows",
     "reviewer_slot_last_executions",
 ]

@@ -215,10 +215,14 @@ def test_extract_video_frames_visible_where_media_siblings_are_visible():
         ACTING_SUBAGENT_TOOL_NAMES,
         CORE_TOOL_NAMES,
         LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
+        ROUTE_TAIL_TOOL_NAMES,
     )
 
-    for tool_set in (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES):
+    for tool_set in (LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES):
         assert {"ocr_pdf", "youtube_transcript", "extract_video_frames"} <= tool_set
+    assert {"ocr_pdf", "extract_pdf_text"} <= CORE_TOOL_NAMES  # the document readers stay always sent
+    # On a route that cannot carry every schema the two one-off media helpers wait together in its tail.
+    assert {"youtube_transcript", "extract_video_frames"} <= ROUTE_TAIL_TOOL_NAMES - CORE_TOOL_NAMES
 
 
 def test_extract_video_frames_visible_to_workspace_tasks(tmp_path):
@@ -254,7 +258,7 @@ def test_run_shell_list_cmd_works(tmp_path):
     ctx = MagicMock(spec=ToolContext)
     ctx.repo_dir = tmp_path
     ctx.drive_logs.return_value = tmp_path
-    result = _run_shell(ctx, ["echo", "hello"])
+    result = _run_shell(ctx, [sys.executable, "-c", "print('hello')"])
     assert "hello" in result
 
 
@@ -680,23 +684,126 @@ def test_escalate_is_available_wherever_planning_runs():
                (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES))
 
 
-def test_enable_tools_answers_a_skill_name_with_its_namespace_tools():
-    """A call asked for screenshots, saw "ext_19_r_unix_computer_use: 24 tools" in the overview and
-    asked enable_tools for "unix_computer_use": the skill's name, not a tool's. The miss now names the
-    namespace and its callable tools by the exact naming rule; an unrelated miss stays a plain miss."""
+def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
+    """The 27.10 call enabled 7 of 24 desktop tools one name at a time and told the owner the rest did not
+    exist. A skill's name (or its extension namespace) now loads each of its tools exactly as naming it alone
+    would: the request's tools change once, a withheld tool is counted and never named, resident schemas
+    answer "already loaded", and a skill that is not live or a stray name loads nothing. An MCP server with
+    tools, then a tool, then a policy-hidden tool, then the exact namespace keep their answer before a
+    same-named skill; a skill called mcp_<slug> loads when no such server has tools."""
+    from ouroboros import extension_loader
     from ouroboros.extension_surface_names import extension_surface_name
+    from ouroboros.tools import extension_dispatch
     from ouroboros.tools import tool_discovery as td
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    names = [extension_surface_name("unix_computer_use", short) for short in ("screenshot", "click")]
+    def register(skill, *shorts):
+        made = [extension_surface_name(skill, short) for short in shorts]
+        for name in made:
+            monkeypatch.setitem(extension_loader._tools, name, {
+                "name": name, "handler": lambda ctx, **kwargs: "ok", "description": f"{name} tool",
+                "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": skill})
+        return made
 
-    class Registry:
-        def callable_rows(self, namespace=""):
-            rows = [{"name": name} for name in [*names, "read_file"]]
-            return [row for row in rows if not namespace or td.tool_namespace(row["name"]) == namespace]
-
+    names = register("unix_computer_use", "screenshot", "click", "key", "type_text", "scroll")
     namespace = td.tool_namespace(names[0])
-    lines = td._named_namespace_guidance(Registry(), ["unix_computer_use"], discovery=True)
-    assert lines[0] == f"unix_computer_use names the namespace {namespace}, not one tool; enable its tools by their names."
-    assert any(names[0] in line for line in lines) and any(names[1] in line for line in lines)
-    assert td._named_namespace_guidance(Registry(), [namespace], discovery=True)[0].startswith(f"{namespace} names")
-    assert td._named_namespace_guidance(Registry(), ["definitely_not_a_tool", "read"], discovery=True) == []
+    dead = register("dead_skill", "probe")
+    mcp_named = register("mcp_probe", "ping")
+    shadow = register(namespace, "other")  # a skill named after another skill's exact namespace
+    hidden_twin = register("write_file", "ghost")  # a skill named after a policy-hidden built-in
+    register("broken_skill", "probe")
+    observed = []
+
+    def is_live(skill, *_a, **_k):
+        observed.append(skill)
+        if skill == "broken_skill":  # an unreadable review record (skill_loader raises on a non-object panel)
+            raise ValueError("panel is not an object")
+        return skill != "dead_skill"
+
+    monkeypatch.setattr(extension_loader, "is_extension_live", is_live)
+    adoptions = []
+    monkeypatch.setattr(extension_dispatch, "_adopt_extension_generation", lambda ctx: adoptions.append(ctx) or {})
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_contract = {"disabled_tools": [names[4], "write_file"]}
+    registry.set_context(ctx)
+    fresh = lambda: [registry.get_schema_by_name("read_file")]  # noqa: E731
+    resident, enabled = fresh(), set()
+
+    out = td.enable_tools(registry, ctx, "unix_computer_use", resident, enabled)
+    loaded = sorted(names[:4])
+    assert [s["function"]["name"] for s in resident[1:]] == loaded and enabled == set(loaded)
+    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out and len(adoptions) == 1
+    # One family observation for the skill, then each member's own single-name check (the withheld one stops
+    # at its contract before liveness): 1 + 4, where one observation per family row would make 5 + 4.
+    assert observed.count("unix_computer_use") == 1 + len(loaded), observed
+    assert "unix_computer_use — 1 of its 5 tools are not callable in this task (names withheld)" in out
+    assert names[4] not in out
+    # Every member resolves exactly as when named alone: the withheld one is refused, the others load.
+    assert td._load_set(registry, [names[4]])[0] == {}
+    assert set(td._load_set(registry, names[:4])[0]) == set(loaded)
+
+    again = td.enable_tools(registry, ctx, namespace, resident, enabled)
+    assert "Already loaded: " in again and "Call schemas loaded" not in again and len(resident) == 5
+    assert shadow[0] not in again and len(td._load_set(registry, [namespace])[0]) == 4
+
+    one = fresh()
+    single = td.enable_tools(registry, ctx, names[1], one, set())
+    assert [s["function"]["name"] for s in one] == ["read_file", names[1]] and "(all" not in single
+
+    for missing in ("dead_skill", "windows_computer_use", "definitely_not_a_tool"):
+        untouched = fresh()
+        refusal = td.enable_tools(registry, ctx, missing, untouched, set())
+        assert f"❌ Not found: {missing}." in refusal and "only while that skill is enabled" in refusal
+        assert "Hidden by policy" not in refusal and dead[0] not in refusal and len(untouched) == 1
+
+    by_mcp_name = fresh()
+    assert "mcp_probe (all 1 tools)" in td.enable_tools(registry, ctx, "mcp_probe", by_mcp_name, set())
+    assert [s["function"]["name"] for s in by_mcp_name[1:]] == mcp_named
+
+    twin = fresh()
+    refusal = td.enable_tools(registry, ctx, "write_file", twin, set())
+    assert "write_file — disabled by this task's contract" in refusal and hidden_twin[0] not in refusal
+    assert len(twin) == 1
+
+    # A liveness read that raises makes that skill not live; the other names of the call still load, and the
+    # whole call adopts the published generation once.
+    adoptions.clear()
+    mixed = fresh()
+    answer = td.enable_tools(registry, ctx, f"broken_skill, {names[1]}, no_such_a, no_such_b", mixed, set())
+    assert [s["function"]["name"] for s in mixed[1:]] == [names[1]] and "Not found: broken_skill" in answer
+    assert len(adoptions) == 1
+
+    # A retained Presence ceiling refuses any name outside its grants, tool or not. The same grants load the
+    # granted tools by the skill's name and by a tool's own name; a refused built-in keeps its own refusal.
+    import ouroboros.presence_authority as authority
+
+    grants = {"enable_tools", names[0], names[1]}
+    monkeypatch.setattr(authority, "presence_ceiling_from_context", lambda _ctx: object())
+    monkeypatch.setattr(authority, "presence_ceiling_allows_tool", lambda _ceiling, tool: tool in grants)
+    by_skill, by_tool = [], []
+    family = td.enable_tools(registry, ctx, "unix_computer_use", by_skill, set())
+    assert [s["function"]["name"] for s in by_skill] == sorted(names[:2]) and "unix_computer_use (all 2 tools)" in family
+    td.enable_tools(registry, ctx, names[0], by_tool, set())
+    assert [s["function"]["name"] for s in by_tool] == [names[0]]
+    ceiling = td.enable_tools(registry, ctx, "read_file", [], set())
+    assert "read_file — outside this presence task's positive capability ceiling" in ceiling
+
+
+def test_every_catalog_that_names_extract_pdf_text_names_read_archive():
+    """The two local file readers share every class; the one deliberate difference is the round-one core set,
+    which read_archive leaves for on-demand loading (read_file's binary refusal names it)."""
+    import ouroboros.tool_capabilities as caps
+    import ouroboros.consciousness_authority as authority
+    import ouroboros.safety as safety
+    import ouroboros.tools.registry_guards as guards
+
+    catalogs = {f"{module.__name__}.{name}": value
+                for module in (caps, authority, safety, guards) for name, value in vars(module).items()
+                if isinstance(value, (frozenset, set, tuple, list, dict)) and "extract_pdf_text" in value}
+    assert {"ouroboros.tool_capabilities.CORE_TOOL_NAMES", "ouroboros.tool_capabilities.ACTING_SUBAGENT_TOOL_NAMES",
+            "ouroboros.tool_capabilities.LOCAL_READONLY_SUBAGENT_TOOL_NAMES"} <= set(catalogs)
+    missing = [name for name, value in catalogs.items()
+               if name != "ouroboros.tool_capabilities.CORE_TOOL_NAMES" and "read_archive" not in value]
+    assert not missing, missing
+    assert "read_archive" not in caps.CORE_TOOL_NAMES

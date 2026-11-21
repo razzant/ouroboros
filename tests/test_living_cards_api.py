@@ -165,10 +165,10 @@ def test_a_press_reaches_the_live_author_as_card_input_once(tmp_path, decide):
                                "delivery": "delivered", "card_id": card["card_id"], "revision": 1}
     [entry] = _mail(tmp_path)
     assert entry["kind"] == KIND_CARD_INPUT and entry["msg_id"] == f"card_input:{card['card_id']}:r1"
-    assert entry["text"].startswith(f"[Card input] The owner pressed «Dates» on your card «Flights» (card {card['card_id']}).")
+    assert entry["text"].startswith(f"[Card input] The owner pressed «Submit» on your card «Flights» (card {card['card_id']}).")
     assert json.loads(entry["text"].split("Values:\n", 1)[1]) == {"from": "Mon", "to": "Fri"}
     [stored] = load_card(tmp_path, card["card_id"])["submissions"]
-    assert stored["delivered"] == "delivered" and stored["label"] == "Dates"
+    assert stored["delivered"] == "delivered" and stored["label"] == "Submit" and stored["form_title"] == "Dates"
     state = [f for f in decide.frames if f.get("type") == "card_state"][-1]
     assert state["submissions_summary"][0]["delivery"] == "delivered"
 
@@ -283,8 +283,9 @@ def test_an_owed_press_retried_after_a_replace_reaches_the_author_it_was_pressed
     retried = decide({"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:dates"})
     assert retried.status_code == 200 and retried.json()["duplicate"] is True and retried.json()["delivery"] == "delivered"
     [entry] = _mail(tmp_path, "task-1")
-    assert "«Dates» on your card «Flights»" in entry["text"] and json.loads(entry["text"].split("Values:\n", 1)[1]) == {"from": "Mon"}
-    assert all("«Dates»" not in row["text"] for row in _mail(tmp_path, "task-2")), "never the replacing task's"
+    assert "«Submit» on your card «Flights»" in entry["text"] and "Form: Dates." in entry["text"]
+    assert json.loads(entry["text"].split("Values:\n", 1)[1]) == {"from": "Mon"}
+    assert _mail(tmp_path, "task-2") == []
 
 
 def test_a_once_press_that_lost_to_an_owed_winner_says_so(tmp_path, decide):
@@ -304,7 +305,7 @@ def test_the_summary_names_each_press_by_its_request(tmp_path, decide):
     assert decide({"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
                    "values": {"from": "Mon"}}).status_code == 202
     [entry] = submissions_summary(load_card(tmp_path, card["card_id"]))
-    assert entry == {"action_id": "dates", "label": "Dates", "at": entry["at"], "delivery": "owed", "request_id": "r1"}
+    assert entry == {"action_id": "dates", "label": "Submit", "at": entry["at"], "delivery": "owed", "request_id": "r1"}
 
 
 def test_an_undeliverable_press_stays_owed_and_a_retry_delivers_it(tmp_path, decide):
@@ -354,7 +355,9 @@ def test_a_paused_authors_press_waits_in_its_mailbox_until_it_reads_it(tmp_path,
     events = queue.Queue()
     ctx = SimpleNamespace(task_id="asker", task_metadata={}, drive_root=tmp_path, budget_drive_root=tmp_path)
     _drain_incoming_messages([], queue.Queue(), tmp_path, "asker", events, set(), owner_ctx=ctx)
-    assert [row["content"] for row in ctx._owner_directives][-1].startswith("[Card input] The owner pressed «Book it»")
+    [pressed] = ctx._owner_directives
+    assert (pressed["source"], pressed["content"]) == ("owner_press", "Book it")
+    assert pressed["reply_to"]["card_id"] == card["card_id"]
     [read] = [event for event in list(events.queue) if event.get("card_ack")]
     assert "reason_code" not in submissions_summary(load_card(tmp_path, card["card_id"]))[0]
     frames = []
@@ -433,4 +436,261 @@ def test_card_input_is_owner_input_for_the_drain_the_wake_and_custody(tmp_path):
     ctx = SimpleNamespace()
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, "task-1", None, set(), owner_ctx=ctx)
     assert any(frame in str(message.get("content")) for message in messages)
-    assert ctx._owner_directives[-1]["source"] == "owner_mailbox"
+    assert ctx._owner_directives[-1]["source"] == "owner_card_input"  # a legacy input with no recoverable submission
+    from ouroboros.loop_messages import owner_input_revision
+    from ouroboros.owner_words import owner_words_contain
+    assert owner_input_revision(ctx) == 1 and not owner_words_contain(ctx, "Book it")
+
+
+@pytest.mark.parametrize("action, values", [("book", None), ("dates", {"from": "  moonrise  "})])
+def test_the_living_card_drain_records_the_choice_or_supplied_values(tmp_path, decide, action, values):
+    import queue
+    from types import SimpleNamespace
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.loop_messages import owner_input_revision, owner_reply_owed
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+
+    card = _component_card(tmp_path)
+    response = decide({"request_id": "moon-press", "revision": 1, "decision_id": f"card:{card['card_id']}:{action}",
+                       **({"values": values} if values is not None else {})})
+    assert response.json()["delivery"] == "delivered"
+    ctx = SimpleNamespace(task_id="task-1", drive_root=tmp_path)
+    messages = []
+    # A reviewer or a child can read this mailbox before the serving loop acknowledges the entry.
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.owner_words import task_owner_words
+    [entry] = _mail(tmp_path, ctx.task_id)
+    [unread] = _accept_owner_directives(SimpleNamespace(), tmp_path, ctx.task_id)
+    field, _ = task_owner_words(tmp_path, ctx.task_id, task={})
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    [row] = ctx._owner_directives
+    label = "Book it" if values is None else "Dates"
+    assert label in messages[0]["content"] and owner_input_revision(ctx) == 1 and owner_reply_owed(ctx)
+    assert not owner_words_contain(ctx, label) and not owner_words_contain(ctx, "Card input")
+    assert row["source"] == ("owner_press" if values is None else "owner_mailbox")
+    if values:
+        assert row["content"] == values["from"] and owner_words_contain(ctx, values["from"])
+    else:
+        assert cited_owner_basis(ctx, label)[0]["source"] == "owner_press"
+    sources = owner_sources(tmp_path, {"origin_message_text": "Open the chart", "origin_message_ref": {}}, ctx.task_id)
+    recovered = owner_corpus_rows(sources)[-1]
+    assert (recovered["content"], recovered["source"]) == (row["content"], row["source"])
+
+    # A pre-snapshot mailbox can resolve the stored submission. A pre-fix capture of its exact frame
+    # is the same addressed input. Different bytes at that identity still refuse Continue.
+    from ouroboros.answer_facts import living_card_input
+    legacy = dict(entry)
+    legacy.pop("card_press")
+    assert living_card_input(legacy, tmp_path)["content"] == row["content"]
+    saved = {"source": "owner_mailbox", "content": entry["text"], "msg_id": entry["msg_id"]}
+    prior = {"origin_message_text": "Open the chart", "origin_message_ref": {},
+             "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": [saved]}}}
+    assert not owner_sources(tmp_path, prior, ctx.task_id)["gaps"]
+    saved["content"] += " Different frame."
+    assert "owner_message_identity_conflict" in owner_sources(tmp_path, prior, ctx.task_id)["gaps"]
+    assert (unread["source"], unread["content"], unread["reply_to"]) == (row["source"], row["content"], row["reply_to"])
+    assert field[0]["source"] == row["source"] and label in field[1]["text"]
+    assert field[0]["text"] == values["from"] if values else "pressed" in field[0]["text"]
+
+
+@pytest.mark.parametrize("action, values", [("book", None), ("dates", {"from": "  after moonrise  "})])
+def test_forwarded_card_keeps_its_bubble_and_opens_a_typed_head(tmp_path, decide, action, values):
+    from types import SimpleNamespace
+    from ouroboros.answer_facts import row_source
+    from ouroboros.dialogue_provenance import quote_words
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision, owner_reply_owed
+    from ouroboros.owner_words import carried_owner_corpus, owner_words_contain
+    from supervisor.message_ingress import accepted_chat_message
+
+    card = _component_card(tmp_path)
+    decide.state["live"] = False
+    response = decide({"request_id": "eclipse", "revision": 1, "decision_id": f"card:{card['card_id']}:{action}",
+                       **({"values": values} if values else {})})
+    assert response.json()["delivery"] == "forwarded"
+    queued = decide.bridge._inbox.get_nowait()
+    bubble = "Dates\nfrom: " + values["from"] if values else "Book it"
+    assert queued["text"] == bubble
+    row = accepted_chat_message(tmp_path, 1, queued["client_message_id"])
+    assert row["text"] == bubble
+    source = "owner_mailbox" if values else "owner_press"
+    assert row_source(row, "owner_mailbox") == source
+    assert quote_words(row) == (values["from"] if values else "")
+    metadata = {**queued["task_metadata"], "origin_message_ref": {"chat_id": 1, "client_message_id": queued["client_message_id"]},
+                "origin_message_text": bubble}
+    ctx = SimpleNamespace(task_metadata=metadata, drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "[Card input]"}])
+    assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx)
+    [opening] = carried_owner_corpus(ctx, bubble)
+    assert (opening["source"], opening["content"]) == (source, values["from"] if values else "Book it")
+    assert not owner_words_contain(ctx, "Dates" if values else "Book it")
+
+    from ouroboros.owner_words import task_owner_words
+    from ouroboros.project_dialogue import build_owner_message_ref
+    reference = build_owner_message_ref(chat_id=1, client_message_id=row["client_message_id"], ts=row["ts"], text=bubble)
+    field, _ = task_owner_words(tmp_path, "observatory", task={"origin_message_ref": reference, "origin_message_text": bubble})
+    assert field[0]["source"] == source
+    assert field[0]["text"] == values["from"] if values else "pressed" in field[0]["text"]
+    assert field[1]["ref"] == opening["reply_to"]["address"]
+
+    # The original card reference on older rows has no submitted values by value. The source store still has them.
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_relay import inject_relay, owner_quote, write_relay
+    old = {**row, "card_press": {k: v for k, v in row["card_press"].items() if k != "submission"}}
+    quote = owner_quote(tmp_path, old)
+    assert (quote["input_source"], quote["text"]) == (source, opening["content"])
+    frames = []
+    reader = SimpleNamespace(task_id="lunar-reader", drive_root=tmp_path)
+    relay, created = write_relay(tmp_path, reader.task_id, relay_id="lunar-mail", chat_id=1, quotes=[quote],
+                                 teller_task_id="lunar-courier", note="The submission")
+    assert created
+    inject_relay(reader, relay, frames)
+    assert reader._owner_directives[0]["content"] == opening["content"]
+    assert opening["reply_to"]["text"] in frames[0]["content"] and opening["content"] in frames[0]["content"]
+    if not values:
+        assert "Owner card press" in frames[0]["content"]
+    recovered = owner_sources(tmp_path, {"origin_message_text": "Read the chart", "origin_message_ref": {}}, reader.task_id)
+    later = owner_corpus_rows(recovered)[-1]
+    assert (later["source"], later["content"], later["reply_to"]) == (source, opening["content"], opening["reply_to"])
+
+
+def test_continue_normalizes_only_the_exact_forwarded_form_bubble(tmp_path, decide, monkeypatch):
+    import sys
+
+    # This API witness runs on its own, with the Continue suite unavailable.
+    monkeypatch.setitem(sys.modules, "tests.test_owner_continue", None)
+    from ouroboros.owner_mailbox import write_owner_message
+    from supervisor.continuation_admission import admit_continuation
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._owner_continue_helpers import NONCE, _interrupted
+
+    card = _component_card(tmp_path)
+    decide.state["live"] = False
+    values = {"from": "  first date  ", "to": "  last date  "}
+    assert decide({"request_id": "fern-form", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
+                   "values": values}).json()["delivery"] == "forwarded"
+    queued = decide.bridge._inbox.get_nowait()
+    ref = dict(queued["task_metadata"]["card_press"])
+    ref.pop("submission")
+    bubble = queued["text"].strip()
+    assert write_owner_message(tmp_path, bubble, "fern-reader", msg_id="fern-forward", card_press=ref)
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    def interrupt(capture):
+        _interrupted(tmp_path, task_id="fern-reader", review_evidence={"task_inputs": {
+            "owner_requirements_and_decisions": [{"source": "owner_mailbox", "content": capture, "msg_id": "fern-forward"}]}})
+    interrupt(bubble + " changed")
+    refused = admit_continuation("fern-reader", action_nonce=NONCE)
+    assert refused["gaps"] == ["owner_message_identity_conflict"] and not workers.PENDING
+    interrupt(bubble)
+    accepted = admit_continuation("fern-reader", action_nonce=NONCE)
+    assert accepted.get("ok"), accepted
+    [successor] = workers.PENDING
+    [form] = [r for r in successor["metadata"]["owner_corpus"] if r.get("msg_id") == "fern-forward"]
+    assert form["source"] == "owner_mailbox" and form["content"] == "\n".join(values.values())
+    assert form["reply_to"]["card_id"] == card["card_id"]
+
+
+@pytest.mark.parametrize("component, caption, heading, bubble", [
+    ({"type": "form", "title": "Cedar dates", "fields": [{"name": "from"}]}, "Submit", "Cedar dates", "Cedar dates"),
+    ({"type": "form", "label": "Cedar dates", "submit_label": "  File dates  ", "fields": [{"name": "from"}]},
+     "  File dates  ", "Cedar dates", "  File dates  "),
+    ({"type": "action", "label": "  Choose the cedar route  "}, "  Choose the cedar route  ", "", "  Choose the cedar route  "),
+])
+def test_only_the_complete_drawn_caption_proves_a_wordless_press(tmp_path, decide, component, caption, heading, bubble):
+    from types import SimpleNamespace
+
+    from ouroboros.card_store import load_card, write_card
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+
+    card = write_card(tmp_path, chat_id=1, task_id="cedar-desk", title="Cedar options", fallback_text="Choose",
+                      kind="components", body={"components": [{**component, "submit": {"id": "cedar"}}]})
+    decide.state["live"] = False
+    assert decide({"request_id": "cedar-choice", "revision": 1, "decision_id": f"card:{card['card_id']}:cedar"}).json()["delivery"] == "forwarded"
+    event = decide.bridge._inbox.get_nowait()
+    assert event["text"] == bubble
+    [stored] = load_card(tmp_path, card["card_id"])["submissions"]
+    assert stored["label"] == caption
+    meta = {**event["task_metadata"], "origin_message_ref": {"chat_id": 1, "client_message_id": event["client_message_id"]},
+            "origin_message_text": bubble}
+    ctx = SimpleNamespace(task_metadata=meta, drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": bubble}])
+    [act] = ctx._owner_directives
+    assert owner_input_revision(ctx) == 1 and act["reply_to"]["pressed_label"] == caption
+    if heading:
+        assert heading in act["reply_to"]["text"] and not cited_owner_basis(ctx, heading)[0]
+    assert not owner_words_contain(ctx, caption)
+    assert cited_owner_basis(ctx, caption)[0]["source"] == "owner_press"
+    assert cited_owner_basis(ctx, caption.strip()[1:])[0] is None
+
+
+def test_form_fields_keep_their_word_boundaries_in_the_corpus_and_its_copies(tmp_path, decide):
+    import queue
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_words import carried_owner_corpus, cited_owner_basis, owner_words_contain
+
+    card = _component_card(tmp_path)
+    values = {"from": "  at\nmoonrise", "to": "sunset  "}
+    assert decide({"request_id": "elm-fields", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
+                   "values": values}).json()["delivery"] == "delivered"
+    ctx = SimpleNamespace(task_id="task-1", drive_root=tmp_path)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    assert owner_input_revision(ctx) == 1
+    [original] = ctx._owner_directives
+    assert original["content"] == "\n".join(values.values())
+    def check(focus):
+        assert not owner_words_contain(focus, "moonrise\nsunset")
+        assert cited_owner_basis(focus, "moonrise\nsunset")[0] is None
+        for value in values.values():
+            assert owner_words_contain(focus, value) and cited_owner_basis(focus, value)[0]
+    check(ctx)
+    from ouroboros.owner_relay import _rows_to_carry, inject_relay, write_relay
+    [(_, _, quote, _, _)] = _rows_to_carry(ctx, tmp_path)
+    entry, created = write_relay(tmp_path, "elm-reader", relay_id="elm-fields", note="Read the dates",
+                                 quotes=[quote], teller_task_id=ctx.task_id, chat_id=1)
+    assert created
+    receiver = SimpleNamespace(task_id="elm-reader", drive_root=tmp_path)
+    inject_relay(receiver, entry, [])
+    check(receiver)
+    recovered = owner_corpus_rows(owner_sources(tmp_path, {"origin_message_text": "Read the dates"}, ctx.task_id))
+    for rows in (recovered, carried_owner_corpus(ctx), [cited_owner_basis(ctx, "moonrise")[0]]):
+        seed = SimpleNamespace(task_metadata={"objective_author": {"kind": "task"}, "owner_corpus": rows})
+        _initialize_owner_directives(seed, [{"role": "user", "content": "Read the calendar"}])
+        check(seed)
+
+
+def test_start_task_seeds_one_cited_form_submission(tmp_path, decide, monkeypatch):
+    import queue
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.tools import control_routing
+    from ouroboros.tools.registry import ToolContext
+
+    card = _component_card(tmp_path)
+    values = {"from": "at moonrise", "to": "sunset"}
+    assert decide({"request_id": "elm-start", "revision": 1, "decision_id": f"card:{card['card_id']}:dates",
+                   "values": values}).json()["delivery"] == "delivered"
+    ctx = ToolContext(repo_dir=Path.cwd(), drive_root=tmp_path, task_metadata={})
+    ctx.task_id, ctx.current_chat_id = "task-1", 1
+    _drain_incoming_messages([], queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _, evt: (events.append(evt) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _: "")
+    control_routing._start_task(ctx, "Read the elm dates", title="Elm dates", owner_words="moonrise\nsunset")
+    assert not events
+    control_routing._start_task(ctx, "Read the elm dates", title="Elm dates", owner_words="moonrise")
+    [event] = events
+    successor = SimpleNamespace(task_metadata=event)
+    _initialize_owner_directives(successor, [{"role": "user", "content": "Read the elm dates"}])
+    for rows in (event["owner_corpus"], successor._owner_directives):
+        [row] = rows
+        assert (row["msg_id"], row["basis"], row["cited"]) == (ctx._owner_directives[0]["msg_id"], "cited", "moonrise")
+        assert row["reply_to"]["submitted_values"] == values

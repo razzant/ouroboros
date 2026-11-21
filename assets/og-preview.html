@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- The social card of ouroboros-agent.ai (1200x630): the source of assets/og-preview.png.
+     Render it from the repository root with Playwright's Chromium at a 1200x630 viewport:
+       python -m playwright screenshot --viewport-size "1200,630" "file://$PWD/assets/og-preview.html" assets/og-preview.png
+     Then set the ?v= of every og:image and twitter:image tag to the first ten hex digits of the file's sha256
+     and rebuild the site; tests/test_public_site_metadata.py holds every page to that hash. -->
+<html lang="en"><head><meta charset="utf-8"><title>Ouroboros social card</title><style>
+@font-face { font-family: Inter; src: url(../site/public/fonts/Inter-Black.woff2) format("woff2"); font-weight: 900; }
+@font-face { font-family: Inter; src: url(../site/public/fonts/Inter-SemiBold.woff2) format("woff2"); font-weight: 600; }
+html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; background: #0b0b0c; color: #fff; font-family: Inter, -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+.wrap { position: relative; width: 1200px; height: 630px; padding: 56px 64px; box-sizing: border-box; }
+.brand { display: flex; align-items: center; gap: 16px; font-weight: 600; font-size: 28px; letter-spacing: -.02em; }
+.brand img { width: 52px; height: 52px; border-radius: 14px; }
+h1 { margin: 50px 0 0; font-weight: 900; font-size: 92px; line-height: .9; letter-spacing: -.05em; }
+h1 .red { color: #e0263c; }
+.foot { position: absolute; left: 64px; bottom: 48px; display: flex; gap: 18px; white-space: nowrap; font-size: 20px; font-weight: 600; color: rgba(255, 255, 255, .66); }
+.shot { position: absolute; right: -360px; bottom: -350px; width: 680px; border-radius: 14px; overflow: hidden; box-shadow: 0 30px 90px rgba(0, 0, 0, .6); transform: rotate(-6deg); }
+.shot img { width: 100%; display: block; }
+</style></head><body><div class="wrap">
+<div class="brand"><img src="icon_1024.png" alt="">Ouroboros · open source</div>
+<h1>An AI agent<br>on your computer.<br><span class="red">It rewrites its own code.</span></h1>
+<div class="foot"><span>Swarms Codex, Claude Code, Cursor, Antigravity</span><span>·</span><span>Talks to you by voice</span></div>
+<div class="shot"><img src="og-preview-shot.webp" alt=""></div>
+</div></body></html>

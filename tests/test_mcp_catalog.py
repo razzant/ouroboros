@@ -29,7 +29,11 @@ def settings(**overrides):
 
 def install_settings(monkeypatch, value):
     config.SETTINGS_PATH.write_text(json.dumps(value))
+    # Import before patching: lazy skill binding must not retain this fixture's lambda after teardown.
+    from ouroboros.tools import skill_exec
+
     monkeypatch.setattr(config, "load_settings", lambda: value)
+    monkeypatch.setattr(skill_exec, "load_settings", config.load_settings)
 
 
 def listing(*names):
@@ -71,7 +75,7 @@ def test_publication_seeds_identical_rows_without_transport(monkeypatch):
     reader = publisher()
     reader._async_list_tools = Mock(side_effect=AssertionError("worker listed"))
     assert reader.list_tools_for_registry() == writer.list_tools_for_registry()
-    reader.reload_catalogs()
+    reader.rebind()
     reader._async_list_tools.assert_not_called()
     assert envelope["_schema_version"] == 1
     assert envelope["server_id"] == "demo"
@@ -91,13 +95,13 @@ def test_published_annotation_hints_reach_every_process(monkeypatch):
     reader.list_tools_for_registry()
     fact = tool_effects.effect_of(name, is_mcp=True)
     assert fact.annotations == {"readOnlyHint": True, "destructiveHint": False}
-    assert fact.effect == "write" and not fact.declared  # hints never grant authority
+    assert (fact.effect, fact.declared) == ("read", True)  # the configured server's readOnlyHint is a declared read
     async def plain(cfg, timeout):
         return listing("read")
     writer._async_list_tools = plain
     assert writer.refresh_server("demo")["published"]
     tool_effects._MCP_ANNOTATIONS["demo"] = {name: {"readOnlyHint": True}}  # the worker's stale memory
-    reader.reload_catalogs()
+    reader.rebind()
     assert tool_effects.effect_of(name, is_mcp=True).annotations == {}
 
 
@@ -137,7 +141,7 @@ def test_secret_literal_omissions_survive_catalog_adoption_and_failed_relisting(
     assert "MCP_SCHEMA_OPTIONAL_DROPPED" in json.dumps(reader.status_payload())
     assert secret not in mcp_catalog.catalog_path("demo").read_text()
     assert fail(writer)["ok"] is False
-    reader.reload_catalogs()
+    reader.rebind()
     assert names(reader) == ["mcp_demo__bad", "mcp_demo__good"]
     assert "MCP_SCHEMA_OPTIONAL_DROPPED" in json.dumps(reader.catalog_notices())
     assert secret not in mcp_catalog.catalog_path("demo").read_text()
@@ -462,7 +466,7 @@ def test_write_failure_keeps_local_listing_but_never_claims_publication(monkeypa
     monkeypatch.setattr(mcp_catalog, "publish", Mock(side_effect=OSError("disk full")))
     result = writer.refresh_server("demo")
     assert result["ok"] and not result["published"] and "disk full" in result["publication_error"]
-    writer.reload_catalogs()
+    writer.rebind()
     assert names(writer) == ["mcp_demo__new"]
     assert mcp_catalog.catalog_path("demo").read_bytes() == before
     assert names(publisher()) == ["mcp_demo__ping"]
@@ -484,8 +488,8 @@ def test_stat_cache_does_not_reparse_unchanged_files(monkeypatch):
     original = json.loads
     spy = Mock(wraps=original)
     monkeypatch.setattr(mcp_catalog.json, "loads", spy)
-    reader.reload_catalogs()
-    reader.reload_catalogs()
+    reader.rebind()
+    reader.rebind()
     spy.assert_not_called()
 
 

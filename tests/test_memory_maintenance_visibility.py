@@ -178,13 +178,13 @@ def test_a_merge_never_lets_an_earlier_stamp_masquerade_as_the_final_call():
 
 def test_a_direct_turn_stamps_itself_and_its_observed_route_when_the_loop_recorded_one(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="turn-1")
-    assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/a", "Plain observation.")
+    assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/a", "Plain observation.", mode="overwrite")
     first = _history(tmp_path)[-1]
     assert (first["writer"], first["route"], first["task_id"]) == ("turn", store.UNKNOWN_STAMP, "turn-1")
 
     # The loop records what answered its last round on every lane, not only Claudexor.
     ctx._accumulated_usage = {"_observed_route": {"provider": "openrouter", "model": "openai/gpt-x"}}
-    assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/b", "Another observation.")
+    assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/b", "Another observation.", mode="overwrite")
     second = _history(tmp_path)[-1]
     assert second["writer"] == "turn" and second["route"] == {"provider": "openrouter", "model": "openai/gpt-x"}
 

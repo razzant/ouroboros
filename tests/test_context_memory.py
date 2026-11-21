@@ -22,7 +22,7 @@ def test_the_open_conversation_starts_after_the_legacy_frontier(tmp_path):
     shared.append(memory.drive_root / "logs" / "chat.jsonl",
                   shared.msg("2026-09-03T00:10:00+00:00", "agent traffic after", chat_id=-5))
     _a, identity, changing, _cap = blocks(env, memory, {"id": "tmain", "chat_id": 1})
-    room = section(changing, "## This room (Main)")
+    room = section(changing, "## This room (Main [chat_id=1])")
     assert "] next please" in room and "] and more" in room  # after the frontier: verbatim
     # All retold records are whole in the common story; the room keeps its open conversation.
     story = section(identity, "## My story")
@@ -43,7 +43,7 @@ def test_main_holds_every_other_conversation_and_a_project_task_its_own_room(tmp
     block = section(main, "## Other conversations")
     assert f"### {alpha}" in block and f"### Project Beta [chat_id={rooms['beta']}]" in block
     assert "] alpha again" in block and "] beta again" in block
-    assert "] next please" in section(main, "## This room (Main)") and "] next please" not in block
+    assert "] next please" in section(main, "## This room (Main [chat_id=1])") and "] next please" not in block
 
     _a, identity, bound, _cap = blocks(env, memory, {"id": "bound", "chat_id": 1})  # bound to alpha, written in Main
     room = section(bound, f"## This room ({alpha})")
@@ -67,7 +67,7 @@ def test_low_mode_keeps_the_open_conversation_verbatim(tmp_path, monkeypatch):
     shared.append(memory.drive_root / "logs" / "chat.jsonl", *fresh)
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "low")
     _a, _b, changing, cap = blocks(env, memory, {"id": "tmain", "chat_id": 1})
-    room = section(changing, "## This room (Main)")
+    room = section(changing, "## This room (Main [chat_id=1])")
     assert all(f"] fresh-{i}\n" in room + "\n" for i in range(305))
     assert cap["memory_view"]["floor"]["mode"] == "low"
     assert not {"F2", "F6w", "F7"} & set(cap["memory_view"]["floor"]["steps"])  # nor my other conversations' words

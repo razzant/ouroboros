@@ -5,7 +5,9 @@ One call runs the check AND attests the result, so it replaces the run the agent
 would have done anyway (≈ zero extra rounds). The contract KIND is agent-declared
 (LLM-first, P5 — the host never infers from prose whether a machine-checkable
 contract exists); the host only executes and attests what it can. Receipts feed
-the verification ledger and suppress the receipt_absent transparency flag.
+the verification ledger; an executed check after the result's last change examines it
+(``outcomes.result_unexamined``), while a declaration or a confirmed path is recorded as
+what it is and leaves the receipt_absent detail standing.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from ouroboros.tools.process_facts import (
     record_runtime_selection, selected_process_environment,
 )
 from ouroboros.tools.shell_process import CommandStopped, command_start_refusal, command_timeout_for_call, turn_stop_reader
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import path_for_prose, utc_now_iso
 
 # Durable receipt evidence is bounded but the truncation is DISCLOSED (BIBLE P1, never
 # silent); the tool-result preview is bounded separately for transport.
@@ -141,6 +143,17 @@ _ZERO_RUN_DECISIONS = ZERO_RUN_WRITE_DECISIONS
 # artifact_paths[1]) after the optional check — the golden-file / migration-parity
 # shape — recording a bounded hexdump of the first divergence in the receipt.
 _EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals", "bytes_equal")
+
+
+def _missing_check_refusal(kind: str, check: Any) -> str:
+    """A run kind sent without a command: what arrived, a ready call, the kinds that need none."""
+    received = "this call sent none" if check is None else f"check={repr(check)[:120]} holds no command"
+    return (
+        f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check`, and {received}. "
+        'Send the command the host should run, e.g. check=["pytest","-q"] or check="pytest -q"; with no '
+        "command to run use contract_kind=artifact_observation (artifact_paths) or "
+        "no_visible_machine_contract. Nothing ran; no receipt was written."
+    )
 
 
 def _expected_matches(out: str, expected: str, mode: str) -> bool:
@@ -265,16 +278,14 @@ def _within_readonly_orchestrator_root(ctx: ToolContext, candidate: pathlib.Path
 
 
 def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | None, str]:
-    """SSOT confinement for a declared artifact path. The RESOLVED path (whether the input
-    was absolute or relative) must stay inside the active workspace, OR a read-only
-    orchestrator root (subagent_projects / deliverables — existence observation of a child's
-    deliverable), else clear the user_files guards (control-plane/secret and outside-home
-    refused) — so a relative `../../etc/passwd` cannot probe arbitrary host files. Returns
-    (candidate, refused_reason): candidate is the resolved host path; refused_reason is
-    non-empty when refused; both falsy for empty input. Used by _observe_artifacts."""
+    """SSOT confinement for a declared artifact path. The RESOLVED path (absolute or relative) must stay inside the active
+    workspace, OR a read-only orchestrator root (subagent_projects / deliverables — existence observation of a child's
+    deliverable), else clear the user_files guards (control-plane/secret and outside-home refused) — so a relative
+    `../../etc/passwd` cannot probe arbitrary host files. Returns (candidate, refused_reason): the resolved host path, and
+    a non-empty reason when refused; both falsy only for the empty string, because whitespace is part of a name."""
     from ouroboros.tool_access import path_is_relative_to, user_files_path_block_reason
 
-    text = str(raw or "").strip()
+    text = str(raw or "")
     if not text:
         return None, ""
     active = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
@@ -284,7 +295,8 @@ def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | N
     if within_active or _within_readonly_orchestrator_root(ctx, candidate):
         return candidate, ""
     if user_files_path_block_reason(ctx, candidate):
-        return None, f"path refused (outside workspace / control-plane): {text}"
+        # Prose for the call's result text: `path_for_prose` keeps a POSIX byte name exact and encodable.
+        return None, f"path refused (outside workspace / control-plane): {path_for_prose(text)}"
     return candidate, ""
 
 
@@ -302,9 +314,11 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
             return "refused_out_of_scope", refused
         if candidate is None:
             continue
-        seen.append(str(raw or "").strip())
-        if not candidate.exists():
-            missing.append(str(raw or "").strip())
+        name = path_for_prose(str(raw))  # the same prose rule, for the spelling that was looked up
+        seen.append(name)
+        if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
+            missing.append(name if pathlib.Path(raw).is_absolute()
+                           else f"{name} (resolved as {path_for_prose(str(candidate))})")
     if not seen:
         return "fail", "no artifact_paths given"
     if missing:
@@ -358,13 +372,16 @@ def _compare_files_bytes_equal(
     files (artifact_paths[0] vs [1]) — the golden-file/migration-parity shape a weaker
     substring check silently under-verifies. Runs on the SAME surface as the check
     (executor `cmp` in-container when the cwd is executor-mapped, host chunked read
-    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block).
+    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block) and reach both
+    surfaces exactly as declared — a name's edge whitespace belongs to it, so no trimmed sibling is
+    ever compared behind it (the receipt attests the name that was asked for).
     Returns (equal, detail); detail carries a BOUNDED hexdump around the first
     divergence so the receipt shows WHERE the bytes differ, never whole files.
     ``equal`` is None when no byte verdict was reached (a refused operand, a missing
     file, cmp without an exit status or outside its 0/1 verdicts): still a FAIL, never
     a claim that the bytes differ (#1585)."""
-    a_raw, b_raw = str(artifact_paths[0]).strip(), str(artifact_paths[1]).strip()
+    a_raw, b_raw = artifact_paths
+    a_name, b_name = path_for_prose(a_raw), path_for_prose(b_raw)
     refusal = _bytes_equal_confinement_block(ctx, a_raw, b_raw, use_executor=use_executor)
     if refusal:
         return None, refusal
@@ -379,10 +396,10 @@ def _compare_files_bytes_equal(
         try:
             rc = int(rc_raw)
         except (TypeError, ValueError):
-            return None, f"bytes_equal: executor cmp returned no exit status for {a_raw} vs {b_raw}"
+            return None, f"bytes_equal: executor cmp returned no exit status for {a_name} vs {b_name}"
         out = redact_process_data((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
         if rc == 0:
-            return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
+            return True, f"bytes_equal: {a_name} == {b_name} (executor cmp)"
         if rc != 1:
             # cmp semantics: 0=equal, 1=differ, >1=trouble (missing file, missing cmp
             # binary =127; a signal-killed cmp is no verdict either). Still a FAIL, but the
@@ -390,16 +407,16 @@ def _compare_files_bytes_equal(
             # byte divergence (triad r3).
             return None, (
                 f"bytes_equal infra error (cmp exit {rc}, not a byte verdict) "
-                f"({a_raw} vs {b_raw}): {out[:400] or 'no output'}"
+                f"({a_name} vs {b_name}): {out[:400] or 'no output'}"
             )
-        return False, f"bytes differ ({a_raw} vs {b_raw}): {out[:400] or 'cmp exit ' + str(rc)}"
+        return False, f"bytes differ ({a_name} vs {b_name}): {out[:400] or 'cmp exit ' + str(rc)}"
 
     def _resolve(text: str) -> pathlib.Path:
         p = pathlib.Path(text)
         return (p if p.is_absolute() else pathlib.Path(work_dir) / text).resolve(strict=False)
 
     a_path, b_path = _resolve(a_raw), _resolve(b_raw)
-    for label, path in ((a_raw, a_path), (b_raw, b_path)):
+    for label, path in ((a_name, a_path), (b_name, b_path)):
         if not path.is_file():
             return None, f"bytes_equal: file not found: {label}"
     a_size, b_size = a_path.stat().st_size, b_path.stat().st_size
@@ -421,7 +438,7 @@ def _compare_files_bytes_equal(
                 break
             offset += len(ca)
     if first_diff < 0 and a_size == b_size:
-        return True, f"bytes_equal: {a_raw} == {b_raw} ({a_size} bytes)"
+        return True, f"bytes_equal: {a_name} == {b_name} ({a_size} bytes)"
     if first_diff < 0:
         first_diff = min(a_size, b_size)
     window_start = max(0, first_diff - 16)
@@ -436,8 +453,8 @@ def _compare_files_bytes_equal(
 
     return False, (
         f"bytes differ at offset {first_diff} (sizes {a_size} vs {b_size}).\n"
-        f"{a_raw} @{window_start}: {_hexwin(a_path)}\n"
-        f"{b_raw} @{window_start}: {_hexwin(b_path)}"
+        f"{a_name} @{window_start}: {_hexwin(a_path)}\n"
+        f"{b_name} @{window_start}: {_hexwin(b_path)}"
     )
 
 
@@ -453,10 +470,7 @@ def _probe_artifact_lifecycle(
     lifecycle: list[dict] = []
     missing_after: list[str] = []
     surface = "executor" if use_executor else "host"
-    for raw in list(artifact_paths or [])[:20]:
-        text = str(raw or "").strip()
-        if not text:
-            continue
+    for text in artifact_paths[:20]:
         exists: bool | None = None
         check_surface = surface
         try:
@@ -501,9 +515,9 @@ def _probe_artifact_lifecycle(
                         check_surface = "unavailable"
         except Exception:  # noqa: BLE001 — probe is advisory; never break the receipt
             exists, check_surface = None, "unavailable"
-        lifecycle.append({"path": text[:300], "exists_after": exists, "check_surface": check_surface})
+        lifecycle.append({"path": text, "exists_after": exists, "check_surface": check_surface})
         if exists is False:
-            missing_after.append(text[:300])
+            missing_after.append(text)
     return lifecycle, missing_after
 
 
@@ -534,7 +548,7 @@ def _record_delegation_zero_run(
     ).strip().lower()
     if decision not in _ZERO_RUN_DECISIONS:
         return (
-            "⚠️ TOOL_ARG_ERROR (verify_and_record): zero_run_decision must be one of "
+            f"⚠️ TOOL_ARG_ERROR (verify_and_record): zero_run_decision={decision!r} must be one of "
             f"{', '.join(_ZERO_RUN_DECISIONS)}."
         )
     basis = " ".join(str(
@@ -607,7 +621,7 @@ def _record_delegation_zero_run(
         return (
             "⚠️ TOOL_ERROR (verify_and_record): zero_run_custody_unknown: "
             "the host could not atomically prove empty custody and claim the "
-            f"zero-run decision; no receipt was written ({type(exc).__name__})."
+            f"zero-run decision; no receipt was written ({type(exc).__name__}: {exc})."
         )
     if not written:
         return (
@@ -638,14 +652,16 @@ def _verify_and_record(
     **kwargs,
 ) -> str:
     expected_match = kwargs.get("expected_match", "substring")
-    artifact_paths = kwargs.get("artifact_paths")
+    # Only the empty string names nothing; spaces are part of the operand.
+    raw_paths = kwargs.get("artifact_paths")
+    artifact_paths = [p for p in raw_paths if isinstance(p, str) and p] if isinstance(raw_paths, (list, tuple)) else []
     criterion_source = kwargs.get("criterion_source", "")
     criterion_basis = kwargs.get("criterion_basis", "")
     bucket = str(kwargs.get("bucket") or "")
     skill_name = str(kwargs.get("skill_name") or "")
     kind = str(contract_kind or "").strip()
     if kind not in _CONTRACT_KINDS:
-        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind must be one of {', '.join(_CONTRACT_KINDS)}."
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind!r} must be one of {', '.join(_CONTRACT_KINDS)}."
     if active_tool_profile(ctx) == "local_readonly_subagent":
         # Read-only actor-first sessions need a host-owned zero-run disclosure,
         # not the general command/artifact verification surface.  Keep the
@@ -663,7 +679,7 @@ def _verify_and_record(
             )
     match_mode = str(expected_match or "substring").strip().lower() or "substring"
     if match_mode not in _EXPECTED_MATCH_KINDS:
-        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match={match_mode!r} must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
     if match_mode == "bytes_equal" and kind not in _RUN_KINDS:
         # Silently accepting-and-ignoring the comparison would fake a stronger
         # verification than actually ran (adversarial r1 soft finding).
@@ -710,7 +726,7 @@ def _verify_and_record(
     # v6.54.4 criterion provenance (FLAG-ONLY, status never changes): where did
     # this success criterion come from — stated by the task, or synthesized by
     # the agent? agent_defined receipts surface to the acceptance reviewer and
-    # feed a one-shot advisory nudge (mirrors the masked-verification pattern).
+    # in the record (the call's own result says it when the check runs).
     # Default agent_defined: an UNDECLARED provenance must not read as task-stated.
     _source = str(criterion_source or "").strip().lower()
     receipt["criterion_source"] = _source if _source in ("task_stated", "agent_defined") else "agent_defined"
@@ -721,11 +737,8 @@ def _verify_and_record(
     if kind in _RUN_KINDS:
         argv = _normalize_check(check)
         if not argv:
-            return (
-                f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check` "
-                "(the verification command as argv list or a shell one-liner string)."
-            )
-        if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
+            return _missing_check_refusal(kind, check)
+        if match_mode == "bytes_equal" and len(artifact_paths) != 2:
             return (
                 "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
                 "artifact_paths=[<file_a>, <file_b>] — exactly two files to compare byte-for-byte "
@@ -843,9 +856,8 @@ def _verify_and_record(
         if match_mode == "bytes_equal":
             # v6.60.0: after the check, the VERDICT is the byte-parity of the two
             # declared files (golden-file shape); the check's own exit still gates.
-            _paths2 = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
             matched, _cmp_detail = _compare_files_bytes_equal(
-                ctx, _paths2, pathlib.Path(work_dir), use_executor=use_executor
+                ctx, artifact_paths, pathlib.Path(work_dir), use_executor=use_executor
             )
             out = (out + "\n\n[bytes_equal] " + _cmp_detail).strip()
         else:
@@ -869,16 +881,15 @@ def _verify_and_record(
         # C: after-only artifact-lifecycle FLAG (status unchanged — flag-only). If the agent
         # declared artifact_paths, record whether each still exists after the check, probed via
         # the SAME surface as the check, so a build-then-delete is visible to the advisory reviewer.
-        _decl = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        if _decl:
-            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, _decl, pathlib.Path(work_dir), use_executor=use_executor)
+        if artifact_paths:
+            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, artifact_paths, pathlib.Path(work_dir), use_executor=use_executor)
             if _lifecycle:
                 receipt["artifact_lifecycle"] = _lifecycle
             if _missing_after:
                 receipt["artifacts_missing_after"] = _missing_after
         # Exit-masking sensor (v6.52.2, FLAG-ONLY — status unchanged): record when the check's own
         # shell pipeline can launder the real exit code (e.g. `... | tail`, `|| true`). Surfaced to
-        # the advisory reviewer + a one-shot nudge so a PASS over a masked check is reconsidered.
+        # the advisory reviewer and in this call's own result, so a PASS over a masked check is reconsidered.
         _masked, _mask_reasons = _check_has_exit_masking(argv)
         if _masked:
             receipt["check_exit_masking"] = True
@@ -897,15 +908,12 @@ def _verify_and_record(
         ), receipt, compared=compared, detail=_cmp_detail if match_mode == "bytes_equal" else "")
 
     if kind == "artifact_observation":
-        paths = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        obs_status, detail = _observe_artifacts(ctx, paths)
-        # 20 paths stored; _outcome_receipts' identity carries the omitted count and full-set hash.
-        receipt.update({"status": obs_status, "paths": paths[:20], "summary": detail})
+        obs_status, detail = _observe_artifacts(ctx, artifact_paths)
+        receipt.update({"status": obs_status, "paths": artifact_paths, "summary": detail})
         if not append_verification_receipt(drive_root, task_id, redact_process_data(receipt)):
             return _receipt_custody_failure(kind, f"{obs_status}: {detail}")
-        # refused_out_of_scope is a POLICY block, not a verification failure — surface it
-        # honestly (not a red FAIL) so a deliverable outside the observable roots doesn't
-        # force the agent to declare no_visible_machine_contract (v6.57.0).
+        # refused_out_of_scope is a POLICY block, not a verification failure — surface it honestly (not a red FAIL) so a
+        # deliverable outside the observable roots doesn't force the agent to declare no_visible_machine_contract (v6.57.0).
         if obs_status == "refused_out_of_scope":
             return (
                 "verify_and_record [artifact_observation] REFUSED_OUT_OF_SCOPE: "
@@ -941,9 +949,8 @@ def get_tools() -> List[ToolEntry]:
                 "no_visible_machine_contract records your best proxy and risk for review when no machine "
                 "check exists; delegation_zero_run records an incomplete/unknown decision for configured "
                 "session actors whose physical leaf never started (zero_run_decision + zero_run_basis). "
-                "A receipt suppresses receipt_absent on a clean turn. Verify ONLY against PUBLIC task "
-                "instructions, embedded examples, installed oracles and your independent checks. NEVER "
-                "read hidden /tests/, solution.sh or copied verifier code, or look up the answer online."
+                "Verify against the task's own statement "
+                "and materials, your human's words, installed oracles and your independent checks."
             ),
             "parameters": {"type": "object", "properties": {
                 "contract_kind": {"type": "string", "enum": list(_CONTRACT_KINDS), "description": "Declare how the deliverable is verifiable; the host never guesses."},

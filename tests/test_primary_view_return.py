@@ -16,6 +16,7 @@ import pytest
 
 from ouroboros import config, context, fallback_cooldown, loop, model_wait
 from ouroboros import memory_floor as floor
+from ouroboros.capability_evidence import utc_now_iso
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 from ouroboros.primary_route_observation import hold_selection, record_round_route_result
 from ouroboros.tools.registry import ToolRegistry
@@ -30,8 +31,8 @@ def routes(monkeypatch):
     """Each model's own window, as the route evidence states it."""
     monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: (
         {"model": task["model"], "provider": "openrouter", "base_url": "", "use_local": False},
-        SimpleNamespace(status="confirmed", stale=False, window_tokens=WINDOWS[task["model"]],
-                        route_fp=f"{task['model']}-route")))
+        SimpleNamespace(status="confirmed", stale=False, window_tokens=WINDOWS[task["model"]], source="local_health",
+                        route_fp=f"{task['model']}-route", ts=utc_now_iso())))  # one dated buffer total, reserve whole
 
 
 def _registry(tmp_path):
@@ -117,7 +118,8 @@ def _windows_by(monkeypatch, key, windows):
     """Route evidence whose window follows one task field: the model, or the role whose account serves it."""
     monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: (
         {"model": task["model"], "provider": "openrouter", "base_url": "", "use_local": False},
-        SimpleNamespace(status="confirmed", stale=False, window_tokens=windows[task[key]], route_fp=task[key])))
+        SimpleNamespace(status="confirmed", stale=False, window_tokens=windows[task[key]], source="local_health",
+                        route_fp=task[key], ts=utc_now_iso())))
 
 
 def _primary_on(model, tmp_path, monkeypatch):

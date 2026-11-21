@@ -451,14 +451,12 @@ def test_a_fresh_dispatch_resets_every_economics_mark():
     ctx = _nanny_ctx(
         _nanny_metered_progress={"round": 30, "cost": 9.0},
         _nanny_delegate_baseline={"round": 5, "cost": 1.0},
-        _nanny_finalization_injected=True,
     )
     reset_nanny_economics_marks(ctx, route_dispatched=True)
     fresh = SimpleNamespace()
     reset_nanny_economics_marks(fresh, route_dispatched=True)
     assert not hasattr(fresh, "_nanny_reminder_mark")  # #1748: the reminder and its cursor are gone
     assert ctx._nanny_route_dispatched is True
-    assert ctx._nanny_finalization_injected is False
     assert _nanny_metered_since_delegate_activity(ctx) == (0, None)  # nothing observed yet: unknown, not $0
     assert "no delegate_start/schedule_subagent call yet; since task start 0 own rounds" in nanny_burn_fact(ctx)
     # And a non-harness dispatch resets the route latch off.
@@ -496,7 +494,6 @@ def test_succeeded_run_with_a_big_metered_tail_buys_no_overrun_round(tmp_path):
     drive = _custody_drive(tmp_path)
     _succeeded_run(drive)
     ctx = _nanny_ctx(
-        _nanny_finalization_injected=False,
         _nanny_metered_progress={"round": 30, "cost": 9.0},
         _nanny_delegate_baseline={"round": 5, "cost": 1.0},
         drive_root=drive,

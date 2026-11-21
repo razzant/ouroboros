@@ -262,6 +262,13 @@ def test_definite_refusal_reaches_the_zero_dollar_terminal_without_a_model_round
     import ouroboros.subagent_runtime as runtime
     from tests.test_model_slot_role_model import _enqueue_through_supervisor
 
+    # The agent's tool registry below can be the first importer of two modules that bind patched
+    # names by value: ``tools.delegate`` re-exports ``exact_start`` and ``harness_maintenance``
+    # imports ``ensure_owned_gateway``. Import them before the doubles, or a double imported
+    # there outlives this test and later tests in the process run it (#2850).
+    import ouroboros.harness_maintenance  # noqa: F401
+    import ouroboros.tools.delegate  # noqa: F401
+
     monkeypatch.setenv("OUROBOROS_MODEL", "provider::main")
     monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda self: None)
     monkeypatch.setattr("ouroboros.agent.build_llm_messages", lambda **kwargs: ([], {}))
@@ -346,7 +353,6 @@ def test_unreadable_custody_projects_unknown_not_clean(tmp_path, monkeypatch, fa
     from ouroboros.subagent_bootstrap import (
         actor_first_terminal_projection,
         actor_first_unresolved_fact,
-        configured_actor_finalization_message,
     )
 
     if failure == "marker":
@@ -368,14 +374,6 @@ def test_unreadable_custody_projects_unknown_not_clean(tmp_path, monkeypatch, fa
     }
     # No invented counts: unknown means the log may hold a settled run.
     assert "delegated_runs_started" not in fact
-
-    message = configured_actor_finalization_message(
-        ctx, task_id="actor-started", fallback_root=tmp_path,
-    )
-    assert "CONFIGURED_ACTOR_UNKNOWN" in message
-    # Unknown-safe guidance: never a fresh-start recipe over unreadable custody.
-    assert "Start the exact assigned session now" not in message
-    assert "delegate_wait" in message
 
     projected, usage_out, _trace = actor_first_terminal_projection(
         ctx, {"id": "actor-started"}, {}, {}, tmp_path,
@@ -404,6 +402,35 @@ def test_failure_state_truncation_is_disclosed(tmp_path, monkeypatch):
     assert fact["status"] == "incomplete"
     assert len(fact["delegated_run_failure_states"]) == 12
     assert fact["failure_states_omitted"] == 1
+
+
+def test_all_failed_producer_binds_the_interrupted_first_attempt(tmp_path):
+    # R2 (Astra): the parity fixture pre-sets the fact; this drives the REAL producer —
+    # actual custody rows for an interrupted first run and a failed later run — and
+    # asserts the all-failed aggregate binds the first attempt's own typed state, so
+    # the sentence key and the card line read the producer's output, not a hand-set field.
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_bootstrap_identity import claim_initial_invocation
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.subagent_bootstrap import actor_first_unresolved_fact
+    from ouroboros.tool_error_words import first_attempt_cause_key
+
+    ctx = SimpleNamespace(task_id="actor-interrupted", drive_root=tmp_path, budget_drive_root=tmp_path,
+                          _configured_actor_bootstrap={"physical_started": True}, task_metadata={})
+    with custody.actor_decision_lock(tmp_path, "actor-interrupted"):
+        assert not claim_initial_invocation(tmp_path, "actor-interrupted", {"invocation_id": "initial"})
+    for name, state in (("initial", "interrupted"), ("later", "failed")):
+        assert custody.record_started(tmp_path, custody.RunCustody(
+            task_id="actor-interrupted", run_id=name, invocation_id=name))
+        assert custody.emit(tmp_path, custody.SETTLED, {"task_id": "actor-interrupted", "run_id": name, "state": state})
+    fact = actor_first_unresolved_fact(ctx, task_id="actor-interrupted", drive_root=tmp_path)
+    assert fact["status"] == "incomplete" and fact["reason"] == "delegated_runs_failed_without_success"
+    assert fact["initial_execution"]["state"] == "interrupted"
+    assert fact["initial_execution"]["run_id"] == "initial"
+    assert first_attempt_cause_key({"actor_first_terminal": fact}) == "configured_actor_first_interrupted"
+    record = {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {
+        "status": "degraded", "reason_code": "configured_actor_incomplete", "actor_first_terminal": fact}}}
+    assert _completion_verdict(record, {}) == "First coding attempt interrupted."
 
 
 def test_precustody_refusals_leave_a_durable_start_blocked_row(tmp_path):

@@ -19,7 +19,7 @@ def test_a_wake_holds_the_block_a_main_turn_holds_and_running_work_names_its_own
     wake, text = _view(tmp_path, {"id": "wake001", "usage_category": "consciousness"})
     # A wake is one turn beside its whole memory, as a Main turn is: one eighth of work room each (owner, 29.10).
     assert wake.spec.other_conversations and wake.spec.work_room_levels == 1 and main.spec.work_room_levels == 1
-    assert _section(text, "## This room (Main)") == _section(main_text, "## This room (Main)")
+    assert _section(text, "## This room (Main [chat_id=1])") == _section(main_text, "## This room (Main [chat_id=1])")
     block = _section(text, "## Other conversations")
     assert block == _section(main_text, "## Other conversations")
     alpha = _section(block, f"### Project Alpha [chat_id={rooms['alpha']}]")
@@ -38,8 +38,10 @@ def test_164_conversations_fold_to_their_lines_and_last_to_one_bounded_count_und
     assert whole.count("\n### Project room ") == 164 and whole.count("What this project is.") == 164
     level = mf.fit_memory_view(snap, {"margin": 200, "physical": 200, "budget": None})
     small = mv.render_room(snap, level)
-    assert dict(level.steps)["F6g"] == 164 and dict(level.steps)["F6a"] == 1
-    assert "164 conversations by count (the window's last rung): 164 open rooms;" in small
+    # Each group yields to its emergency line first, then the common count takes conversations one by one (plan
+    # commit 2, step 7): here all 164, which still print as one bounded count line with its catalogue reader.
+    assert dict(level.steps)["F6g"] == 164 and dict(level.steps)["F6a"] == 164 and "unread" not in dict(level.addressed)["F6a"]
+    assert small.count("conversations by count") == 1 and "164 conversations by count: 164 open rooms;" in small
     assert "memory_read(room_id='*', start=0)" in small and len(small) < 1_500 and "What this project is." not in small
     roomy = mf.fit_memory_view(snap, {"margin": 1_000_000, "physical": 1_000_000, "budget": None})
     assert not roomy.addressed and mv.render_room(snap, roomy) == whole

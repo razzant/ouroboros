@@ -47,7 +47,11 @@ def test_deno_network_false_also_prevents_static_import_fetch(tmp_path, monkeypa
     ('node', 'setInterval(()=>{},1000);'),
     ('go', 'package main\nfunc main(){for {}}\n'),
 ])
-def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path, monkeypatch, runtime, body):
+def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path, monkeypatch, request, runtime, body):
+    if runtime == 'node':
+        # A node skill waits for the pin's exact Node, which no default-lane run prepares: the PATH Node becomes that
+        # exact bundle for this test only (skips without a runnable PATH Node), so the strict path really runs.
+        request.getfixturevalue('pinned_path_node')
     if not skill_exec._resolve_runtime_binary(runtime)[0]:
         pytest.skip(f'{runtime} runtime unavailable')
     ctx, _, script = installed_script(tmp_path, monkeypatch, runtime=runtime, body=body)

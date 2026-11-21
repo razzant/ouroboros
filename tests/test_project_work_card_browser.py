@@ -26,7 +26,7 @@ const ws={ws:{readyState:1},on(type,fn){const rows=handlers.get(type)||[];rows.p
 window.emit=(type,row)=>(handlers.get(type)||[]).forEach(fn=>fn(row));
 window.connection=value=>{connected=value;window.emit(value?'open':'close');};
 window.chat=createChatInstance({ws,state:{activePage:'chat',projectChatIds:new Set([7,8]),unreadCount:0},
-    updateUnreadBadge(){},openSettingsTab(){},openDashboardTab(){},chatId:1,
+    updateUnreadBadge(){},openSettings(){},openDashboardTab(){},chatId:1,
     mountEl:document.getElementById('content'),stateSnapshots:{begin:()=>({generation:1,requestedAt:Date.now()}),
     gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,
     apply(request,data){window.chat?.hydrateStateSnapshot(data);}}});

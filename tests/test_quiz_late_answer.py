@@ -19,6 +19,7 @@ import json
 import pytest
 
 from ouroboros.owner_quiz import (
+    LATE_ANSWER_ROUTE_FACT,
     STATE_ANSWERED,
     quiz_states,
     reconcile_terminal,
@@ -398,6 +399,7 @@ def test_the_drained_late_answer_gives_the_model_the_rebuilt_frame_while_the_row
     assert "Question was: Which db for the pilot?" in delivered
     assert ("The owner answered in their own words without choosing an offered option. "
             "Verbatim: neither -- use duckdb") in delivered
+    assert delivered.count(LATE_ANSWER_ROUTE_FACT) == 1  # at delivery the host states its own route
     [directive] = [row for row in ctx._owner_directives if row["source"] == "owner_mailbox"]
     assert directive["content"] == "neither -- use duckdb"
     # The steer relay's delivery fact stays the owner's own message.
@@ -443,7 +445,7 @@ def test_an_unreadable_card_is_disclosed_with_the_owners_words(tmp_path):
     delivered = str(messages[-1]["content"])
     assert "[Late answer to a question asked by task task-gone, which is not reading]\n2. postgres\n" in delivered
     assert "answers quiz q9; that card could not be read" in delivered
-    assert "[Owner quiz answer]" not in delivered
+    assert "[Owner quiz answer]" not in delivered and delivered.count(LATE_ANSWER_ROUTE_FACT) == 1
 
 
 def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monkeypatch):
@@ -473,8 +475,7 @@ def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monke
     assert agent.task["text"].startswith(LATE_HEAD.format("task-1") + "\n[Owner quiz answer] quiz q1")
     assert LATE_HEAD.format("task-1") in content
     assert f"answered {block['answered_at']}" in content
-    assert "The owner chose option 2: postgres" in content
-    assert "Owner comment (verbatim): prod parity" in content
+    assert "The owner pressed option 2 («postgres», the text of task task-1) and wrote: prod parity" in content
 
     plain = _Agent()
     carried_turn(monkeypatch, tmp_path, plain, 1, "prod parity", None, task_metadata={"client_message_id": "m-2"})
@@ -523,9 +524,12 @@ def test_a_late_answer_bypasses_an_unrelated_project_reader(tmp_path, monkeypatc
     [context] = drain_owner_entries(tmp_path, "pending-root", set())
     assert context["msg_id"].startswith("relay:carry-context:") and "late_answer" not in context
     assert context["host_carried"] == {"went_to": ROUTED_BY_HEAD}
+    assert LATE_ANSWER_ROUTE_FACT not in str(context)  # the room's other root hears my human's words only
     assert len(heads) == 1
     metadata = heads[0][1]["task_metadata"]
     _assert_host_snapshot(metadata["late_answer"], "task-1", "q1")
+    from ouroboros.owner_quiz import late_answer_model_text
+    assert LATE_ANSWER_ROUTE_FACT in late_answer_model_text(tmp_path, metadata["late_answer"], "prod parity")
 
 
 def _late_answer_head(head_id, asker, chat_id, *, project_id="", started=1000.0, accepting=True):

@@ -8,7 +8,8 @@ exception and produce the same normalized shape as the `.json` sibling of the sa
 
 Layout: `<route>/<model>/<case>_stream.sse` and, where the same request was also sent
 non-streaming, `<case>_nonstream.json`. `route` is the transport family (`openrouter`,
-`openai` Chat Completions, `anthropic` native Messages), never a vendor-specific rule.
+`openai` Chat Completions, `openai-responses` direct Responses, `anthropic` native Messages),
+never a vendor-specific rule.
 
 How they were recorded: a plain `curl -N`-shaped POST (`urllib.request`, no SDK) of the
 Chat Completions / Messages request with `"stream": true` (plus
@@ -31,6 +32,14 @@ One exception: `claude-opus-5.5/twoblock_stream.sse` comes from a real task's re
 every text and tool-argument value is filler of the same length (keys kept) and ids are
 fixture ids; frames, indices, signature prefixes and usage are as recorded.
 
+`openai-responses` was recorded on 2026-11-17 through the OpenAI SDK by the candidate's own client
+(`store: false`, no `include`): the stream's raw SSE bytes, and each non-stream reply and the next
+request's `input` as the SDK returned and sent them (`reasoning_replay.json` holds one
+image -> reasoning + call -> result -> final exchange). There every `resp_`/`rs_`/`fc_`/`msg_`/`call_`
+id is replaced by one consistent fixture id across the files, and every `encrypted_content` and SSE
+`obfuscation` value loses its bytes (a fixture token, filler of the same length); text, arguments,
+usage and the synthetic image are as recorded.
+
 Fixture pairs are separate live requests, so parity is structural (message keys, tool
 names, argument key sets, `reasoning_details` type sequence and per-record key sets,
 finish reason, usage keys), never exact text.
@@ -52,3 +61,5 @@ what differs is the request knob (or simply the reply the model chose to give on
 | `custom_stream` (+ `custom_nonstream`) | openai / gpt-5.6-terra | `tools[0].type = "custom"` with the runtime's `_CUSTOM_FORMAT` | a custom-tool call |
 | `function_none_stream` | openai / gpt-5.6-terra | `reasoning_effort: "none"` | two function calls, no reasoning |
 | `native_stream` (+ `native_nonstream`) | anthropic / claude-sonnet-5 (Messages) | `thinking: {"type": "adaptive"}` | thinking + text + two `tool_use` blocks |
+| `tool_stream` (+ `tool_nonstream`) | openai-responses / gpt-6.1-terra | `tool_choice: "required"`, `lookup(word)` | typed events; one `function_call`, no reasoning item on that run |
+| `reasoning_replay` | openai-responses / gpt-6.1-terra, gpt-6.1-sol | image, `reasoning: {"effort": "high"}` | encrypted reasoning + call, replayed whole before the result; a completed final |

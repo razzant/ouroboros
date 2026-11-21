@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row
 from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
@@ -176,19 +177,22 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
                 "ok": True, "status": "saved", "saved": True, "warnings": ["First warning", "Second warning"], "next_task_changed": True}))
 
         page.route('**/api/settings', save)
+        # A Settings row saves itself and its result line says the server's warnings in words, no glyph.
         page.locator('[data-nav-page="settings"]').click()
-        page.locator('#btn-save-settings').click()
-        status = page.locator('#settings-status')
-        page.wait_for_function("document.querySelector('#settings-status').textContent.includes('Warnings:')")
-        assert '. Warnings: First warning | Second warning' in status.inner_text()
-        assert status.get_attribute('data-tone') == 'warn'
+        open_settings(page, 'computer/advanced')
+        line = commit_row(page, 'OUROBOROS_MAX_WORKERS', 7)
+        assert line.startswith('Saved') and 'First warning Second warning' in line, line
+        result = setting_row(page, 'OUROBOROS_MAX_WORKERS').locator('[data-setting-result]')
+        assert result.get_attribute('data-tone') == 'warn'
         page.screenshot(path=str(evidence / 'settings-warning.png'))
         page.locator('[data-nav-page="dashboard"]').click()
         page.locator('[data-dashboard-tab="costs"]').click()
-        page.locator('#btn-save-budget').click()
-        status = page.locator('#budget-save-status')
-        page.wait_for_function("document.querySelector('#budget-save-status').textContent.includes('Warnings:')")
-        assert ' Warnings: First warning | Second warning' in status.inner_text()
+        # A Costs limit saves itself when its field is left; its row says the server's warnings in words.
+        page.locator('#setting-TOTAL_BUDGET').fill('321')
+        page.locator('#setting-TOTAL_BUDGET').press('Tab')
+        status = page.locator('#setting-TOTAL_BUDGET-result')
+        page.wait_for_function("document.querySelector('#setting-TOTAL_BUDGET-result').textContent.includes('First warning')")
+        assert status.inner_text().startswith('Saved') and 'First warning Second warning' in status.inner_text()
         assert status.get_attribute('data-tone') == 'warn'
         assert len(writes) == 2, writes
         page.screenshot(path=str(evidence / 'costs-warning.png'))

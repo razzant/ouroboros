@@ -171,7 +171,7 @@ def test_exact_hit_rechecks_saved_settings_before_safety_or_dispatch(world, monk
     wire = mcp_client.make_tool_name("canvas", CANVAS[0])
     observed = []
 
-    def disable_mcp():
+    def disable_mcp(**_kwargs):
         observed.append(True)
         manager.reconfigure({"MCP_ENABLED": False, "MCP_SERVERS": []})
 
@@ -194,7 +194,7 @@ def test_valid_hit_rechecks_timeout_before_the_loop_outer_deadline(world, monkey
     wire = mcp_client.make_tool_name("canvas", CANVAS[0])
     calls = []
 
-    def update_timeout():
+    def update_timeout(**_kwargs):
         calls.append(True)
         manager._tool_timeout_sec = 600
 
@@ -331,7 +331,7 @@ def test_unknown_health_disabled_server_and_unknown_server_stay_distinct(world):
     assert "ConnectionError: upstream refused" in down.text and "exists is unknown" in down.text
     off = registry.execute_result("mcp_off__dormant", {})
     assert (off.status, off.code) == ("unavailable", "MCP_UNAVAILABLE")
-    assert off.text.startswith("⚠️ MCP_DISABLED: MCP server 'off' is disabled in Settings → Advanced;")
+    assert off.text.startswith("⚠️ MCP_DISABLED: MCP server 'off' is disabled in Settings → Tools;")
     nowhere = registry.execute_result("mcp_nowhere__op", {})
     assert (nowhere.status, nowhere.code) == ("error", "UNKNOWN_TOOL")
     assert "the tool catalog of any configured MCP server" in nowhere.text

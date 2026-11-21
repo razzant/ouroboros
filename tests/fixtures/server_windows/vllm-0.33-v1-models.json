@@ -1,0 +1,1 @@
+{"object": "list", "data": [{"id": "Qwen/Qwen3.5-9B", "object": "model", "created": 1794771813, "owned_by": "vllm", "root": "Qwen/Qwen3.5-9B", "parent": null, "max_model_len": 80000, "permission": []}]}

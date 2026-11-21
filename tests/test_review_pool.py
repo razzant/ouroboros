@@ -122,7 +122,8 @@ def test_catalog_review_row_names_any_enabled_row_by_handle_or_stored_id(clean_e
         rsc.catalog_review_row(None, "ghost")
     clean_env.delenv(SUBAGENTS_SETTING)
     with pytest.raises(ValueError, match="not configured"):
-        rsc.catalog_review_row(None, "critic")
+        rsc.catalog_review_row({}, "critic")  # an explicit absent catalog, not the document's factory proposal
+    assert [seat.slot_id for seat in rsc.review_pool_slots(snapshot={})] == ["main"]
 
 
 def test_a_marked_session_row_without_a_concrete_harness_is_a_typed_refusal(clean_env):
@@ -170,10 +171,10 @@ def test_a_malformed_catalog_raises_on_every_pool_reader_never_a_default_panel(c
 # --- an empty pool: the Main model reviews alone (owner decision B) ------------------------
 
 
-@pytest.mark.parametrize("catalog", ["unmarked", "switched_off", "absent"])
-def test_an_empty_valid_pool_is_one_main_seat_that_reads_and_answers_both_parts(clean_env, catalog):
-    """No enabled marked row (rows unmarked, the marked row switched off, no rows, no
-    catalog) is ONE seat on every pool reader: ``main``, the direct Main row on Main's own
+@pytest.mark.parametrize("catalog", ["unmarked", "switched_off", "no_rows"])
+def test_an_empty_valid_pool_is_one_main_seat_that_reads_and_answers_both_parts(install, clean_env, catalog):
+    """No enabled marked row (rows unmarked, the marked row switched off, an explicitly
+    empty list) is ONE seat on every pool reader: ``main``, the direct Main row on Main's own
     model, a native reading seat asked both parts and carrying the caller's slot properties.
     The catalog's own facts stay: ``review_pool_state`` is ``empty``, ``review_pool_rows`` is
     empty, and nothing is an error."""
@@ -183,9 +184,8 @@ def test_an_empty_valid_pool_is_one_main_seat_that_reads_and_answers_both_parts(
     clean_env.setenv("OUROBOROS_MODEL", "openai/gpt-5.6-sol")
     raw = {"unmarked": _roster(_row("helper", "m/helper", marked=False)),
            "switched_off": _roster(_row("off", "m/off", enabled=False)),
-           "no_rows": _roster(), "absent": None}[catalog]
-    if raw is not None:
-        clean_env.setenv(SUBAGENTS_SETTING, raw)
+           "no_rows": _roster()}[catalog]
+    _write(install, {SUBAGENTS_SETTING: raw, "OUROBOROS_MODEL": "openai/gpt-5.6-sol"})
 
     [seat] = rsc.review_pool_slots(role_hint="plan reviewer", timeout_sec=7)
     assert (seat.slot_id, seat.subagent_id, seat.model) == ("main", "", "openai/gpt-5.6-sol")
@@ -326,8 +326,9 @@ def test_a_marked_pool_a_composed_wave_and_a_malformed_catalog_never_take_the_ma
 
 def test_the_surfaces_read_the_main_seat_from_the_one_builder(clean_env):
     """Plan review and the author's ``review_change`` wave read that same one seat: the wave
-    seats it as the frozen whole pool (both parts, counted). Blocking adds Main to an
-    adviser-only request; Advisory/Cyber Pro require it to be named. The
+    seats it as the frozen whole pool (both parts, counted). An adviser-only request
+    names no counted seat: refused outside Cyber Pro, never widened; Cyber Pro hears the adviser
+    alone, Main unseated (no self-review). The
     ``/review`` row and the empty pool's seat are one function, re-exported where it lived."""
     from ouroboros import deep_self_review
     from ouroboros.tools import plan_review_runtime
@@ -337,17 +338,17 @@ def test_the_surfaces_read_the_main_seat_from_the_one_builder(clean_env):
     clean_env.setenv(SUBAGENTS_SETTING, _roster(_row("scout", "openai/scout-model", marked=False)))
     [plan_seat] = plan_review_runtime.plan_review_slots()
     assert (plan_seat.slot_id, plan_seat.max_tokens) == ("main", plan_review_runtime.PLAN_REVIEW_MAX_TOKENS)
-    for strictness in ("blocking", "advisory", "cyber_pro"):
+    for strictness in ("advisory", "cyber_pro"):
         panel = compose_panel(parse_request({"root": "system_repo", "subject": "index"}),
                               body=True, strictness=strictness)
         assert [(slot.slot_id, parts, extra) for slot, parts, extra in panel.seats] == [("main", ("change", "coupling"), False)]
         assert panel.override is True and panel.facts["composition"] == "full_pool"
         assert panel.facts["pool_empty"] is True and panel.facts["main_self_review"] is True
         request = parse_request({"root": "system_repo", "subject": "index", "reviewers": ["scout"]})
-        if strictness == "blocking":
-            widened = compose_panel(request, body=True, strictness=strictness)
-            assert widened.facts["assigned"] == ["main"] and widened.additional == ("scout",)
-            assert widened.facts["widened_from"] == ["scout"]
+        if strictness == "cyber_pro":
+            alone = compose_panel(request, body=True, strictness=strictness)
+            assert (alone.facts["assigned"], alone.additional) == ([], ("scout",))
+            assert (alone.facts["pool_empty"], alone.facts["main_self_review"]) == (True, False)
         else:
             with pytest.raises(ReviewChangeArgumentError, match="name main"):
                 compose_panel(request, body=True, strictness=strictness)
@@ -561,9 +562,36 @@ def test_w1_the_gate_vectors_carry_a_composed_seats_own_parts_and_the_added_bit(
 
 def test_the_commit_review_ceiling_is_the_catalog_ceiling():
     from ouroboros.tools.review import MAX_MODELS
+    from ouroboros.tools.review_multi_model import CONCURRENCY_LIMIT
     from ouroboros.tools.review_multi_model import MAX_MODELS as POOL_MAX
 
-    assert MAX_MODELS == POOL_MAX == MAX_CONFIGURED_SUBAGENTS == 26
+    assert MAX_MODELS == POOL_MAX == MAX_CONFIGURED_SUBAGENTS == 50
+    assert CONCURRENCY_LIMIT == 5, "how many seats run at once is its own limit"
+
+
+def test_a_wave_seats_a_whole_fifty_row_pool_and_refuses_a_fifty_first_seat(clean_env):
+    """A full catalog of marked rows is one wave in catalog order: two rows of one model stay two seats, and the
+    vectors stay aligned to the last seat (a 64-character id, a session route). The 51st seat is reachable only
+    beside an empty pool (Main plus every row named as an adviser); it is refused before anything is sent."""
+    clean_env.setenv("OUROBOROS_MODEL", "openai/gpt-5.6-sol")
+    last = {"subagent_id": "z" * 64, "recommended_use": "Последний.", "effort": "high", "review_eligible": True,
+            "route": dict(_SESSION, target_id="codex=gpt-last")}
+    rows = [_row(f"r{i}", "openai/shared" if i < 2 else f"openai/m-{i}") for i in range(MAX_CONFIGURED_SUBAGENTS - 1)]
+    clean_env.setenv(SUBAGENTS_SETTING, _roster(*rows, last))
+    panel = rsc.compose_review_panel(surface="change")
+    assert [seat.slot.slot_id for seat in panel.seats] == [row["subagent_id"] for row in (*rows, last)]
+    assert panel.facts["seats"] == MAX_CONFIGURED_SUBAGENTS and panel.additional == ()
+    with rsc.composed_review_pool(panel.seats):
+        plan = rsc.commit_triad_delivery()
+    assert {len(vector) for vector in plan.values() if isinstance(vector, list)} == {MAX_CONFIGURED_SUBAGENTS}
+    assert plan["models"][:2] == ["openai/shared"] * 2 and plan["slot_ids"][-1] == "z" * 64
+    assert (plan["routes"][-1], plan["session_targets"][-1]) == (ReviewRouteKind.AGENT_SESSION, "codex=gpt-last")
+    clean_env.setenv(SUBAGENTS_SETTING, _roster(*(dict(row, review_eligible=False) for row in (*rows, last))))
+    names = ["main", *(row["subagent_id"] for row in (*rows, last))]
+    assert len(rsc.compose_review_panel(names[:-1], surface="change").seats) == MAX_CONFIGURED_SUBAGENTS
+    with pytest.raises(rsc.PanelCompositionError, match=r"REVIEW_PANEL_TOO_LARGE: a wave seats at most 50 reviewers "
+                                                        r"\(this call asks 51\)"):
+        rsc.compose_review_panel(names, surface="change")
 
 
 # --- the wait card's persistent choice names a catalog row -----------------------------

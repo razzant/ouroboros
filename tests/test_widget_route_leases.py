@@ -745,3 +745,99 @@ def test_short_ui_route_stays_behind_the_boundary(tmp_path, monkeypatch):
         stranger.close()
         native.close()
         clean_extension_runtime_state()
+
+
+# --- Publication readiness outside the table's lock (route leases) -------------------------------------------------
+
+
+class _Stream:
+    """What route_skill attaches to a lease: ending the lease cancels it."""
+
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def _hold_probe(monkeypatch, answer=None):
+    """The next readiness probe the lease table makes waits for ``release`` (and answers ``answer`` when given)."""
+    from ouroboros.gateway import widget_assets
+
+    real = widget_assets.widget_publication_ready
+    gate = SimpleNamespace(entered=threading.Event(), release=threading.Event(), pending=[True])
+
+    def probe(skill, generation, drive_root):
+        held = bool(gate.pending) and gate.pending.pop()
+        if held:
+            gate.entered.set()
+            assert gate.release.wait(10), "the test never released the held probe"
+        ready = real(skill, generation, drive_root)
+        return answer if held and answer is not None else ready
+
+    monkeypatch.setattr(widget_assets, "widget_publication_ready", probe)
+    return gate
+
+
+def _in_worker(fn, *args):
+    result = {}
+    thread = threading.Thread(target=lambda: result.setdefault("value", fn(*args)), daemon=True)
+    thread.start()
+    return thread, result
+
+
+def test_route_skill_holds_the_lock_only_around_its_bookkeeping(env, monkeypatch):
+    lease = _lease(env.owner, "page")
+    leases = env.gate.widget_assets
+    held = _hold_probe(monkeypatch)
+    stream = _Stream()
+    thread, result = _in_worker(leases.route_skill, lease["token"], stream)
+    try:
+        assert held.entered.wait(10)
+        assert leases._lock.acquire(timeout=1), "route_skill holds the table lock during its probe"
+        leases._lock.release()
+        assert lease["token"] not in leases._streams, "the stream is attached only after the probe"
+    finally:
+        held.release.set()
+        thread.join(10)
+    assert result["value"] == NAME and stream in leases._streams[lease["token"]]
+
+
+def test_stop_while_a_route_read_waits_in_its_probe_has_the_last_word(env, monkeypatch):
+    """Stop ends the token while a resource request waits in its probe: the late request attaches nothing and reads
+    nothing, and the token is never re-established."""
+    lease = _lease(env.owner, "page")
+    leases = env.gate.widget_assets
+    owner = leases._leases[lease["token"]].owner
+    held = _hold_probe(monkeypatch)
+    stream = _Stream()
+    thread, result = _in_worker(leases.route_skill, lease["token"], stream)
+    try:
+        assert held.entered.wait(10)
+        leases.revoke(owner, lease["token"])
+    finally:
+        held.release.set()
+        thread.join(10)
+    assert result["value"] is None and lease["token"] not in leases._streams
+    assert _reopen(env.owner, lease, "page").status_code == 410
+    assert env.stranger.get(lease["base_url"] + "echo").status_code == 404
+
+
+def test_a_late_not_ready_answer_never_ends_a_route_lease_re_established_meanwhile(env, monkeypatch):
+    """A resource request's probe answers "not ready" late, after the parent re-established the lease under the same
+    URL: that request fails, the re-established lease stays and the frame's next read goes through."""
+    lease = _lease(env.owner, "page")
+    leases = env.gate.widget_assets
+    held = _hold_probe(monkeypatch, answer=False)
+    thread, result = _in_worker(leases.route_skill, lease["token"], _Stream())
+    try:
+        assert held.entered.wait(10)
+        before = leases._leases[lease["token"]]
+        assert _reopen(env.owner, lease, "page").status_code == 200
+        assert leases._leases[lease["token"]] is not before
+    finally:
+        held.release.set()
+        thread.join(10)
+    assert result["value"] is None
+    assert lease["token"] in leases._leases
+    assert env.stranger.get(lease["base_url"] + "echo").status_code == 200

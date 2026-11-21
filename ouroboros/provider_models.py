@@ -47,6 +47,9 @@ ZAI_PLAN_ENDPOINTS: dict[str, str] = {
     "coding": "https://api.z.ai/api/coding/paas/v4",
 }
 ZAI_DEFAULT_PLAN = "payg"
+# An OpenAI connection's API (``api_surface``): its wire profile name per choice. A never-chosen one is
+# Chat Completions, the API every saved and environment-only connection ran (``openai_api_surface``).
+OPENAI_API_SURFACES: dict[str, str] = {"chat_completions": "chat.completions", "responses": "responses"}
 
 
 def resolve_zai_base_url(plan: str = "") -> str:
@@ -120,6 +123,21 @@ def normalize_minimax_reasoning_effort(model: str, value: str) -> str:
     return MINIMAX_FLASH_EFFORT_ALIASES.get(value, value) if model == MINIMAX_FLASH_MODEL else value
 
 
+# Direct Anthropic models whose Messages API refuses thinking={"type": "disabled"} and names
+# another off state. Sonnet 5.5 400s on "disabled"; "between_tools" turns off up-front
+# thinking, and its progress notes between tool calls return as signed thinking blocks
+# (build-with-claude/thinking, read 2026-11-16; a direct send the same day answered that
+# 400). Other ids have no vouched alternate here: they keep "disabled" and their existing
+# repair. request_wire_contract.payload_effort reads each value back as "none".
+# Evidence and re-check policy: DEVELOPMENT "External facts".
+ANTHROPIC_THINKING_OFF_TYPES = {"claude-sonnet-5-5": "between_tools"}
+
+
+def anthropic_thinking_off_type(model: str) -> str:
+    """The native thinking type that carries a requested ``none`` for one exact direct model."""
+    return ANTHROPIC_THINKING_OFF_TYPES.get(str(model or "").strip(), "disabled")
+
+
 @dataclass(frozen=True)
 class KindSpec:
     """One API connection kind: its label, its fields in order as ``(row_field,
@@ -140,7 +158,7 @@ class KindSpec:
 # owner-facing order (OpenRouter first: an unprefixed model id routes through it).
 PROVIDER_KINDS: dict[str, KindSpec] = {
     "openrouter": KindSpec("OpenRouter", (("api_key", "OPENROUTER_API_KEY", True),)),
-    "openai": KindSpec("OpenAI", (("api_key", "OPENAI_API_KEY", True),)),
+    "openai": KindSpec("OpenAI", (("api_key", "OPENAI_API_KEY", True), ("api_surface", "OPENAI_API_SURFACE", False))),
     "anthropic": KindSpec("Anthropic", (("api_key", "ANTHROPIC_API_KEY", True),)),
     "deepseek": KindSpec("DeepSeek", (("api_key", "DEEPSEEK_API_KEY", True),)),
     "zai": KindSpec("Z.ai (GLM)", (("api_key", "ZAI_API_KEY", True), ("plan", "ZAI_PLAN", False))),
@@ -569,10 +587,16 @@ OPENAI_DIRECT_DEFAULTS = {
     # api.openai.com, `gpt-5.6-sol-pro` on /v1/chat/completions -> 404; the pro
     # reasoning mode exists only on /v1/responses as `reasoning.mode="pro"` (200),
     # and passing `reasoning` to /v1/chat/completions -> 400 "Unknown parameter".
-    # Every LLM call in llm.py is a chat.completions call, so an owner's pinned
-    # `-pro` slug lands here too (deep_self_review.deep_review_route).
+    # No send of ours carries `reasoning.mode`, so an owner's pinned `-pro` slug
+    # lands here too (deep_self_review.deep_review_route).
     "deep_self_review": "openai::gpt-5.6-sol",
 }
+# An OpenAI connection explicitly on Responses (``api_surface``; a never-chosen one runs Chat and keeps the
+# table above): GPT-6.1 tools work only there (reasoning guide and model pages, 16.11.2026). Deep review takes
+# plain Sol 6.1, whose official page states the 1,050,000-token window that review sizes against.
+OPENAI_RESPONSES_DIRECT_DEFAULTS = {**OPENAI_DIRECT_DEFAULTS, "main": "openai::gpt-6.1-terra",
+                                    "light": "openai::gpt-6-luna", "fallback": "openai::gpt-6.1-sol",
+                                    "deep_self_review": "openai::gpt-6.1-sol"}
 
 CLOUDRU_DIRECT_DEFAULTS = {
     "main": "cloudru::zai-org/GLM-4.7",
@@ -619,8 +643,10 @@ ZAI_DIRECT_DEFAULTS = {
 DEEPSEEK_DIRECT_DEFAULTS = {
     "main": "deepseek::deepseek-v4-pro",
     "heavy": "",
-    "light": "deepseek::deepseek-v4-flash",
-    "fallback": "deepseek::deepseek-v4-flash",
+    # The official current Flash alias (api-docs.deepseek.com/quick_start/pricing, read 2026-11-16: serves
+    # DeepSeek-V4.1-Flash-1017); a saved deepseek-v4-flash stays as written and keeps being accepted.
+    "light": "deepseek::deepseek-flash",
+    "fallback": "deepseek::deepseek-flash",
     # DeepSeek documents a FIRM 1M context on every v4 model (api-docs
     # 2026-08: "1M context, 384K max output" with no guaranteed-minimum
     # caveat), so the slot follows the OpenAI/Anthropic fill pattern rather
@@ -636,8 +662,8 @@ DEEPSEEK_DIRECT_DEFAULTS = {
 ANTHROPIC_DIRECT_DEFAULTS = {
     "main": "anthropic::claude-opus-5-5",
     "heavy": "",
-    "light": "anthropic::claude-sonnet-5",
-    "fallback": "anthropic::claude-sonnet-5",
+    "light": "anthropic::claude-sonnet-5-5",
+    "fallback": "anthropic::claude-sonnet-5-5",
     # Deep self-review is a real slot with a SHIPPED default; without a
     # per-provider value a direct-only install keeps an unreachable
     # OpenRouter-form id it has no credential for (v6.82.0).
@@ -748,6 +774,27 @@ def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
     return direct[0] if len(direct) == 1 else ""
 
 
+def proposal_connection(kind: str, settings: Mapping[str, Any] | None = None) -> str | None:
+    """The connection of ``kind`` an automatic proposal names (#2969): '' — the built-in one —
+    when it serves or none of the kind does, else the only named one that serves; None when
+    several named ones serve and the built-in does not: the owner chooses, nothing is guessed."""
+    from ouroboros.provider_connections import configured_connections
+
+    names = [name for served, name in configured_connections(settings) if served == kind]
+    if not names or "" in names:
+        return ""
+    return names[0] if len(names) == 1 else None
+
+
+def route_on_connection(model: str, kind: str, name: str) -> str:
+    """A route of ``kind``'s built-in connection (``openai::m``, a bare OpenRouter id) spelled on
+    its named connection ``name`` (``openai@name::m``); any other route, or ``name`` '', as written."""
+    route = parse_model_route(model)
+    if not name or route.kind != kind or route.connection or not route.valid:
+        return model
+    return f"{connection_id(kind, name)}::{route.model}"
+
+
 # The settings whose presence decides whether a built-in connection is configured (and
 # the named connections): credentials by presence only, never their values.
 READINESS_SETTING_KEYS: frozenset[str] = frozenset({
@@ -803,11 +850,21 @@ def capability_base_url(model: str, settings: Mapping[str, Any] | None = None) -
 
 
 _KIND_CHOICES = {("minimax", "region"): (MINIMAX_REGION_ENDPOINTS, "global_en or cn_zh"),
-                 ("zai", "plan"): (ZAI_PLAN_ENDPOINTS, "payg or coding")}
+                 ("zai", "plan"): (ZAI_PLAN_ENDPOINTS, "payg or coding"),
+                 ("openai", "api_surface"): (OPENAI_API_SURFACES, "chat_completions or responses")}
+
+
+def openai_api_surface(value: Any) -> str:
+    """An OpenAI connection's API: '' (never chosen) is the Chat Completions it always ran; a closed choice
+    as written; anything else raises ``ValueError``, never a surface guessed from a model or a fallback."""
+    text = str(value or "").strip().lower() or "chat_completions"
+    if text not in OPENAI_API_SURFACES:
+        raise ValueError(f"OpenAI API surface must be chat_completions or responses, not {str(value)!r}")
+    return text
 
 
 def choice_error(kind: str, field: str, value: Any) -> str:
-    """Why ``value`` is not one of a kind field's closed choices (MiniMax region, Z.ai plan), or ''."""
+    """Why ``value`` is not one of a kind field's closed choices (MiniMax region, Z.ai plan, OpenAI API), or ''."""
     choices = _KIND_CHOICES.get((kind, field))
     text = str(value or "").strip().lower()
     return f"must be {choices[1]}" if choices and text and text not in choices[0] else ""
@@ -839,16 +896,21 @@ def compute_direct_review_seats(
 ) -> list[tuple[str, str]]:
     """The same panel as ``(role, model)`` seats, one per declared role: ``role`` is the owner slot a
     seat runs (``main``, or ``light`` for a Light of this provider), '' where the provider's shipped
-    Light stands in."""
+    Light stands in, on Main's connection (a named Main's key pays for its whole panel)."""
     if provider not in DIRECT_PROVIDER_DEFAULTS:
         return []
-    provider_prefix = f"{provider}::"
+
+    def of_provider(model: str) -> bool:
+        route = parse_model_route(model)
+        return route.valid and route.kind == provider
+
     main = migrate_model_value(provider, main_model)
-    if not main.startswith(provider_prefix):
+    if not of_provider(main):
         return []
     light = migrate_model_value(provider, light_model) if light_model else ""
-    default_light = migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get("light", ""))
-    seats = {"main": ("main", main), "light": ("light", light) if light.startswith(provider_prefix)
+    default_light = route_on_connection(migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get(
+        "light", "")), provider, parse_model_route(main).connection)
+    seats = {"main": ("main", main), "light": ("light", light) if of_provider(light)
              else ("", default_light) if default_light else ("main", main)}
     roles = DIRECT_PROVIDER_REVIEW_ROLES.get(provider, ("main", "light", "light"))
     return [seats.get(role, seats["main"]) for role in roles]

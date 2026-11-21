@@ -93,6 +93,13 @@ def _send_card(plugin, tmp_path, monkeypatch, *, wait_for_answer=False):
     return api
 
 
+def _card_messages(built):
+    """What the owner's chat received from the clients one card's send built: (messages, keyboard messages).
+    The event client sends the card; the card's lifecycle client, built right after it to read a settled
+    state the card may already hold (``telegram_quiz.apply_retained_fact``), sends nothing of its own."""
+    return [row for client in built for row in client.sent], [row for client in built for row in client.panels]
+
+
 def _run_poller(plugin, api, monkeypatch, posts, *, reply=(200, {"ok": True, "state": "answered"})):
     async def fake_post(_api, path, body):
         posts.append((path, body))
@@ -140,11 +147,12 @@ def test_open_question_is_a_plain_message_with_a_reply_address(tmp_path, monkeyp
     _settings(tmp_path)
     monkeypatch.setattr(plugin, "TelegramClient", Client)
     api = Api(tmp_path)
+    before = len(_LAST_CLIENT)
     asyncio.run(plugin._make_quiz(api)({**_EVENT, "options": [], "wait_for_answer": True}))
-    first = _LAST_CLIENT[-1]
-    assert first.panels == []
-    assert first.sent == [(42, "Question: Which db?\nWaiting for your answer; Stop and the task deadline still apply."
-                                "\nReply to this message with your answer.")]
+    sent, panels = _card_messages(_LAST_CLIENT[before:])
+    assert panels == []
+    assert sent == [(42, "Question: Which db?\nWaiting for your answer; Stop and the task deadline still apply."
+                         "\nReply to this message with your answer.")]
     record = plugin.telegram_quiz.quiz_for_message(api, "", 42, 1)
     assert record and record["options"] == []
     Client.updates = [{"update_id": 100, "message": {
@@ -186,8 +194,9 @@ def test_tapped_option_reaches_the_decision_ingress_and_settles_the_card(tmp_pat
 @pytest.mark.parametrize(("answer_path", "required"), [("callback", True), ("reply", False)])
 def test_settled_quiz_drops_only_required_wait_copy(tmp_path, monkeypatch, required, answer_path):
     plugin = _load_plugin()
+    before = len(_LAST_CLIENT)
     api = _send_card(plugin, tmp_path, monkeypatch, wait_for_answer=required)
-    assert ("Waiting for your answer" in _LAST_CLIENT[-1].panels[0][1]) is required
+    assert ("Waiting for your answer" in _card_messages(_LAST_CLIENT[before:])[1][0][1]) is required
     token = plugin.telegram_quiz.mint_token("task-1", "q1")
     if answer_path == "callback":
         Client.updates = [{"update_id": 70, "callback_query": {
@@ -299,7 +308,9 @@ def test_late_or_unknown_answers_are_toasted_honestly(tmp_path, monkeypatch):
          "✅ Answer recorded · delivery pending. The task had already finished.",
          "\nAnswer recorded · delivery pending"),
     ):
-        api = _send_card(plugin, tmp_path, monkeypatch)
+        fresh = tmp_path / f"card-{update_id}"  # its own state: sent again, the same card would keep its answer
+        fresh.mkdir()
+        api = _send_card(plugin, fresh, monkeypatch)
         Client.updates = [_callback(update_id, f"qz:{token}:1")]
         _run_poller(plugin, api, monkeypatch, [], reply=(200, reply))
         last = _LAST_CLIENT[-1]
@@ -639,6 +650,11 @@ def test_record_without_details_from_an_older_skill_still_answers(tmp_path, monk
                 reply=(200, {"ok": True, "state": "answered", "answered_index": 0}))
     assert posts[0][1]["option_index"] == 0
     assert _LAST_CLIENT[-1].edits[0][2].endswith("\nAnswered: 1. sqlite")
+
+
+    # The duplicate record may carry a fresh transport id, but its settled
+    # lifecycle facts must survive; the plugin's card-lock guard prevents a
+    # second card from being sent in the real consumer path.
 
 
 class _CardClient:

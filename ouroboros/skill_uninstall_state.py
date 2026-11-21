@@ -60,9 +60,13 @@ def delete_local_skill(
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import discover_skills
 
-    def refuse(error: str, status: int = 403) -> Dict[str, Any]:
-        return {"ok": False, "error": error, "status_code": status}
+    def refuse(error: str, status: int = 403, **facts: Any) -> Dict[str, Any]:
+        return {"ok": False, "error": error, "status_code": status, **facts}
 
+    from ouroboros.deployment_extensions import change_refusal
+
+    if managed := change_refusal(loaded.name, "delete"):  # before any unload or file change
+        return refuse(managed, code="managed_by_deployment")
     requested_root = payload_root or f"skills/external/{loaded.name}"
     parts = pathlib.PurePosixPath(requested_root).parts
     if len(parts) != 3 or parts[:2] != ("skills", "external"):

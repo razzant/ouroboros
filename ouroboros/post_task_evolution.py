@@ -235,12 +235,14 @@ def _pending_result_review_tasks(drive_root: pathlib.Path) -> set:
     ledger's hot index (a row count can never exceed the index's byte bound)."""
     try:
         from ouroboros import review_ledger as ledger
+        from ouroboros.review_ledger import advisers_only
 
         rows = ledger.recent_records(drive_root, limit=ledger.INDEX_MAX_BYTES, hot_only=True, surface="result")
     except Exception:
         log.debug("Review ledger unreadable for the closed-objectives digest", exc_info=True)
         return set()
-    return {str(row.get("task_id") or "") for row in rows if row.get("state") == ledger.STATE_PENDING}
+    return {str(row.get("task_id") or "") for row in rows
+            if row.get("state") == ledger.STATE_PENDING and not advisers_only(row)}
 
 
 def _active_campaign_objective() -> str:

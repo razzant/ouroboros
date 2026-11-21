@@ -25,8 +25,9 @@ import pytest
 import ouroboros.loop as loop_mod
 import ouroboros.loop_llm_call as call_mod
 import ouroboros.loop_transport as loop_transport
-from ouroboros import usage_accounting as ua
+from ouroboros import loop_output_exhaustion as recovery, usage_accounting as ua
 from ouroboros.loop import _output_exhausted_notice, run_llm_loop
+from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, refusal_words
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros._usage_response import output_exhaustion_facts, reported_reasoning_tokens, response_finish_reason
 from ouroboros.loop_llm_call import (
@@ -105,7 +106,7 @@ def no_sleep(monkeypatch):
 
 def _events(drive_logs, kind):
     path = drive_logs / "events.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
     return [row for row in rows if row.get("type") == kind]
 
 
@@ -261,6 +262,156 @@ def test_a_provider_content_refusal_is_typed_sent_once_and_carries_its_lineage(t
         "provider_policy_refusal"]
 
 
+REFUSAL_WORDS = "the provider's content filter stopping this request (no content returned)"
+
+
+def test_a_content_refusal_speaks_in_its_own_words_and_its_round_keeps_them(tmp_path, no_sleep, monkeypatch):
+    """The kind's one sentence is about the wire and this request, never a verdict on a model or the work. The
+    recorded wire's ``delta.refusal`` becomes the owner-facing provider sentence, its event's and its round's, and
+    the feed row quotes it; with no usage chunk its money stays unknown. A refusal that carried no sentence stamps
+    none, so no earlier words speak for it."""
+    import ouroboros.pricing as pricing
+    from tests.test_llm_wire_corpus import WIRE, _assemble, _normalized
+
+    assert loop_transport._FAILURE_KIND_WORDS["content_filter"] == REFUSAL_WORDS
+    monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *_a, **_kw: None)  # no price lookup
+    wire = WIRE / "openrouter/claude-fable-5/refusal_stream_v2.sse"
+    body, receipt = _assemble(wire, 0)
+    msg, usage = _normalized(wire, {**body, "_stream_receipt": receipt})
+    sentence, totals = " ".join(msg["refusal"].split()), {}
+    assert sentence.startswith("This request was blocked") and "prompt_tokens" not in usage
+    assert _call(_ScriptedLLM((msg, usage)), tmp_path, totals)[0] is None
+
+    assert totals["_last_llm_provider_message"] == sentence  # before: none, stamped from the blank body error
+    [row] = _events(tmp_path, "provider_content_refusal")
+    assert row["provider_message"] == sentence and "refusal_category" not in row
+    [kept] = totals[ROUND_REFUSALS_KEY]
+    assert (kept["round"], kept["provider_message"], kept["response_provider"], kept["cost"]) == (
+        1, sentence, usage["response_provider"], None)
+    assert loop_transport.fallback_reason_text(totals, "openai/gpt-5.5") == (
+        f' after {REFUSAL_WORDS} on openai/gpt-5.5. The provider said: "{sentence}"')
+    bare = ({"role": "assistant", "content": ""}, {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+    assert _call(_ScriptedLLM(bare), tmp_path, totals)[0] is None
+    assert "_last_llm_provider_message" not in totals and "provider_message" not in totals[ROUND_REFUSALS_KEY][-1]
+    assert loop_transport.fallback_reason_text(totals, "openai/gpt-5.5") == f" after {REFUSAL_WORDS} on openai/gpt-5.5."
+
+
+def test_a_native_refusal_keeps_its_category_and_explanation(monkeypatch):
+    """The native Messages lane keeps ``stop_details`` as a call fact the refusal's words read; a null category is
+    left out (the row then says it was not given), and a reply without ``stop_details`` carries no words."""
+    from ouroboros.llm import LLMClient
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    client = LLMClient()
+    target = client._resolve_remote_target("anthropic::claude-sonnet-4-6")
+    for category, named in (("cyber", {"refusal_category": "cyber"}), (None, {})):
+        msg, usage = client._normalize_anthropic_response({
+            "content": [], "stop_reason": "refusal", "usage": {"input_tokens": 9, "output_tokens": 0},
+            "stop_details": {"type": "refusal", "category": category, "explanation": "Flagged  as cyber."}}, target)
+        assert _classify_empty_response(usage, msg) == ("provider_content_refusal", False, True)
+        assert refusal_words(usage, msg) == {"provider_message": "Flagged as cyber.", **named}
+    msg, usage = client._normalize_anthropic_response(
+        {"content": [], "stop_reason": "refusal", "usage": {"input_tokens": 9, "output_tokens": 0}}, target)
+    assert "stop_details" not in usage and refusal_words(usage, msg) == {}
+
+
+@pytest.mark.parametrize("refused", [True, False])
+def test_a_round_ending_on_a_content_refusal_names_it_and_never_an_outage(tmp_path, no_sleep, monkeypatch, refused):
+    """No configured route to ask: the refusal's one feed row states it with its provider's words (no "Fallback",
+    nothing "trying"), and the forced final's prompt and the terminal notice name it in the kind's words with its
+    route, adding no act. A round ended by another failure is told in its provider's own sentence, never as an
+    outage the host did not establish, and gets no such row."""
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    failed = (({"role": "assistant", "content": "", "refusal": "Blocked here."},
+               {"prompt_tokens": 5, "response_finish_reason": "content_filter"}) if refused else
+              ({"role": "assistant", "content": ""},
+               {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Rejected."}}))
+    llm, notes = _ScriptedLLM(failed, ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1})), []
+    _result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, notes))
+
+    model = llm.requests[0]["model"]
+    [prompt] = [row["content"] for row in llm.requests[-1]["messages"] if "[PROVIDER_UNAVAILABLE]" in str(row.get("content"))]
+    rows = [note for note in notes if "No usable reply" in note]
+    met = f" This round's failed asks: {REFUSAL_WORDS} on {model} once."
+    assert llm.calls == 2 and ROUND_REFUSALS_KEY not in usage
+    assert not any("Fallback" in note or "trying" in note for note in notes)
+    if refused:
+        assert f"[PROVIDER_UNAVAILABLE] No route returned a usable response.{met} The task is being INTERRUPTED" in prompt
+        assert "outage" not in prompt and "outage" not in usage["terminal_provider_notice"]
+        assert usage["terminal_provider_notice"].endswith(met)
+        assert rows == [f'⚠️ No usable reply after {REFUSAL_WORDS} on {model}. The provider said: "Blocked here."']
+    else:
+        assert ('No route returned a usable response. The provider said: "Rejected." The task is being INTERRUPTED, not'
+                in prompt and "outage" not in prompt and "failed asks" not in prompt and rows == [])
+
+
+BODY_ERROR = ({"role": "assistant", "content": ""},
+              {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Rejected."}})
+REFUSAL = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
+           {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+FORCED_ERROR = ({"role": "assistant", "content": ""},
+                {"prompt_tokens": 5, "provider_error": {"kind": "provider_error", "code": 400, "message": "Forced call failed."}})
+
+
+@pytest.mark.parametrize("forced", ["refused", "answers", "fails"])
+def test_a_forced_call_stopped_by_the_filter_leaves_the_owner_the_notice_that_names_it(
+        tmp_path, no_sleep, monkeypatch, forced):
+    """The host's words for a round nobody answered are composed before the forced final's own call. When that call
+    meets the content filter, the owner reads the notice recomputed with it, and the published answer is that same
+    text: one text that names the refusal, never the words written before it. A forced call that answers keeps its
+    own words; one that fails in a round with no content refusal leaves the owner the words that named the round's
+    own failure, as before."""
+    import hashlib
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    summary = ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1})
+    llm = _ScriptedLLM(BODY_ERROR, {"refused": REFUSAL, "answers": summary, "fails": FORCED_ERROR}[forced])
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+
+    model, notice = llm.requests[0]["model"], usage["terminal_provider_notice"]
+    assert llm.calls == 2 and ROUND_REFUSALS_KEY not in usage
+    if forced == "answers":
+        assert result == "summary" and REFUSAL_WORDS not in notice
+        return
+    if forced == "fails":  # before: the owner's text was replaced by the notice quoting only the forced call
+        assert '"Rejected."' in result and "Forced call failed." not in result and "Forced call failed." in notice
+        assert usage["terminal_origin"] == "host_notice" and REFUSAL_WORDS not in result + notice
+        assert trace["delivery_candidate"]["content_sha256"] == hashlib.sha256(result.encode("utf-8")).hexdigest()
+        return
+    words = loop_transport._failure_words(next(row["failure_code"] for row in usage["llm_call_refs"]))
+    assert notice.endswith(f" This round's failed asks: {words} on {model} once; {REFUSAL_WORDS} on {model} once.")
+    assert result == notice and usage["terminal_origin"] == "host_notice"  # before: the words without the refusal
+    sha = hashlib.sha256(notice.encode("utf-8")).hexdigest()
+    assert trace["delivery_candidate"]["content_sha256"] == trace["forced_finalization"]["candidate_sha256"] == sha
+
+
+def test_a_later_rounds_end_names_its_own_failures_never_an_earlier_rounds_refusal(tmp_path, no_sleep, monkeypatch):
+    """Round 1: the primary's content refusal, and the adopted spare's reply spends its length limit (no answer).
+    Round 2: the spare answers with a tool call. Round 3: the spare, the walk's primary and the forced final's call
+    return a body error. Round 3's forced-final prompt and terminal text are round 3's own: its body error's
+    sentence, no outage claimed. Round 1's refusal is never told as this round's (before: it was, and round 3's errors
+    were left out); its unanswered record is dropped at round 2's request, which carries no row of it."""
+    tools = ({"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {
+        "name": "chat_history", "arguments": "{}"}}]}, {"prompt_tokens": 1})
+    llm, result, usage, _trace = _walk_loop(tmp_path, monkeypatch, REFUSAL, _incident_reply(0), tools, BODY_ERROR,
+                                            BODY_ERROR, BODY_ERROR)
+
+    primary = llm.requests[0]["model"]
+    assert [request["model"] for request in llm.requests[:5]] == [primary] + ["other/model"] * 3 + [primary]
+    assert llm.calls == 6 and [row["round"] for row in usage["llm_call_refs"]
+                               if row.get("failure_code") == "content_filter"] == [1]
+    [prompt] = [row["content"] for row in llm.requests[-1]["messages"] if "[PROVIDER_UNAVAILABLE]" in str(row.get("content"))]
+    notice = usage["terminal_provider_notice"]
+    assert 'The provider said: "Rejected."' in prompt and "outage" not in prompt and "Rejected." in notice and result == notice
+    for text in (prompt, notice):
+        assert REFUSAL_WORDS not in text and "failed asks" not in text and "Blocked here." not in text
+    assert not any("[ROUTE FACTS] This round's asks" in str(row.get("content")) for request in llm.requests
+                   for row in request["messages"])
+    assert ROUND_REFUSALS_KEY not in usage
+
+
 # ------------------------------------------------------------------ the next ordinary round (T10)
 
 HOST_FACT = "[SYSTEM NOTICE]\nThe provider ended your previous reply on its length limit"
@@ -394,7 +545,7 @@ def test_an_owner_terminal_names_output_exhaustion_not_a_provider_failure():
     assert "classified the failure as a provider failure." in unknown
 
 
-def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachable=None):
+def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachable=None, notes=None):
     """The real loop with the real configured-route walk (a route switch keeps the captured core)."""
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", fallbacks)
@@ -411,7 +562,7 @@ def _walk_loop(tmp_path, monkeypatch, *script, fallbacks="other/model", reachabl
 
     monkeypatch.setattr(loop_mod, "_rebind_context_fit_plan", rebind)
     llm = _ScriptedLLM(*script)
-    kwargs = _loop_kwargs(tmp_path, llm, [])
+    kwargs = _loop_kwargs(tmp_path, llm, [] if notes is None else notes)
     kwargs["tools"]._ctx.context_fit_plan = _plan(preferred="max", window=1_000_000, known=True)
     return (llm, *run_llm_loop(**kwargs))
 
@@ -457,3 +608,262 @@ def test_an_exhausted_candidate_after_an_unknown_primary_keeps_its_wait_and_its_
     assert llm.requests[-1]["messages"] != llm.requests[-2]["messages"]
     assert "entered" in [row.get("phase") for row in _events(tmp_path, "network_wait")]
     assert "_pending_transport_outcome" not in usage  # the usable reply closed the unknown record
+
+
+@pytest.mark.parametrize("cooling", [True, False])
+def test_a_refusal_whose_configured_routes_all_cool_gets_its_own_row_once(tmp_path, no_sleep, monkeypatch, cooling):
+    """The real walk with its one configured route cooling asks nobody: the refusal's own feed row, once, with no
+    "Fallback" claim. When that route is asked, the walk's own rows name the refusal as before and none is added."""
+    from ouroboros import fallback_cooldown
+    from tests.test_completion_selection import finish
+
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: cooling)
+    refusal = ({"role": "assistant", "content": "", "refusal": "Blocked here."},
+               {"prompt_tokens": 5, "response_finish_reason": "content_filter"})
+    tools = ({"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {
+        "name": "chat_history", "arguments": "{}"}}]}, {"prompt_tokens": 1})
+    done = (finish("done"), {"prompt_tokens": 1})
+    notes = []
+    llm, result, _usage, _trace = _walk_loop(tmp_path, monkeypatch, *((refusal, done) if cooling else (refusal, tools, done)),
+                                             notes=notes)
+    primary, rows = llm.requests[0]["model"], [note for note in notes if note.startswith("⚠️ No usable reply")]
+    assert result == "done"
+    if cooling:
+        assert [request["model"] for request in llm.requests] == [primary, primary]  # the forced final, nobody else
+        assert rows == [f'⚠️ No usable reply after {REFUSAL_WORDS} on {primary}. The provider said: "Blocked here."']
+        assert not any("Fallback" in note or "trying" in note for note in notes)
+    else:
+        assert rows == [] and llm.requests[1]["model"] == "other/model"
+        assert any(note.startswith("⚡ Fallback: trying other/model") and "Blocked here." in note for note in notes)
+
+
+# ------------------------------------------------------------------ text a typed finish cut (#1472)
+
+CUT_TEXT = "The probe finished: both files were read and the first count is 12, while the second"
+
+
+def _finished(source, finish, text=CUT_TEXT):
+    """A usable reply whose finish arrives where its lane writes it: usage (OpenAI family, Claudexor, local,
+    GigaChat) or the native Anthropic message's ``stop_reason``; ``none`` carries no finish fact."""
+    msg, usage = {"role": "assistant", "content": text}, {"prompt_tokens": 9, "completion_tokens": 4096, "cost": 0.0}
+    if source == "usage":
+        usage["response_finish_reason"] = finish
+    elif source == "message":
+        msg["stop_reason"] = finish
+    return msg, usage
+
+
+@pytest.mark.parametrize("shape", ["task", "main"])
+@pytest.mark.parametrize(("source", "finish"), [("usage", "length"), ("usage", "tool_calls"), ("usage", "function_call"),
+                                                  ("message", "max_tokens"), ("message", "tool_use")])
+def test_text_a_typed_finish_cut_gets_one_informed_turn_on_every_lane(tmp_path, loop_env, no_sleep, source, finish, shape):
+    """Each lane's typed finish makes callless text no final: the next ORDINARY round on the same route reads
+    the kept words and one host fact, and its answer is the final; no route is walked (``loop_env``). ``main``
+    is only the loop's Main shape (``is_direct_chat``): Main admission and delivery are not run here."""
+    llm = _ScriptedLLM(_finished(source, finish), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    if shape == "main":
+        kwargs["tools"]._ctx.is_direct_chat, kwargs["tools"]._ctx.current_chat_id = True, 1
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert result == "done" and llm.calls == 2
+    first, second = (request["messages"] for request in llm.requests)
+    assert second[:len(first)] == first  # appended: the cut request stays a prefix of the next
+    kept = second.index({"role": "assistant", "content": CUT_TEXT})
+    assert f"(finish_reason={finish})" in second[kept + 1]["content"] and second[kept + 1]["role"] == "user"
+    assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1, 2]
+    assert "forced_finalization" not in trace and recovery.UNFINISHED_KEY not in usage
+
+
+@pytest.mark.parametrize(("source", "finish"), [("usage", "stop"), ("message", "end_turn"), ("usage", None),
+                                                  ("none", None), ("usage", "content_filter")])
+def test_other_finishes_leave_text_the_plain_final(tmp_path, loop_env, no_sleep, source, finish):
+    """Negative control: only the output-limit and tool-call finishes mark a cut. Stop, end_turn, a null or absent
+    finish and any other typed finish leave the text the round's final, as before: one call, no host fact."""
+    llm = _ScriptedLLM(_finished(source, finish))
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert (result, llm.calls) == (CUT_TEXT, 1)
+    assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
+
+
+# ------------------------------------------------------------------ provider-stated usability (Responses terminals)
+
+COMMENTARY = {"response_finish_reason": "commentary", "response_status": "completed"}
+
+
+def _reply(text, facts, **message):
+    return {"role": "assistant", "content": text, **message}, {"prompt_tokens": 9, "completion_tokens": 7, "cost": 0.0,
+                                                               **facts}
+
+
+def test_completed_commentary_continues_ordinary_rounds_until_the_final(tmp_path, loop_env, no_sleep):
+    """Healthy intermediate progress is no cut and no episode: each commentary is kept as written (a progress
+    update, no host notice, no cap) and the next send is an ordinary round; two in a row reach the final."""
+    llm, notes = _ScriptedLLM(_reply("Reading the files first.", COMMENTARY), _reply("Still comparing.", COMMENTARY),
+                              OK_RESPONSE), []
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, notes))
+    assert result == "done" and llm.calls == 3
+    third = llm.requests[2]["messages"]
+    kept = [row["content"] for row in third if row.get("role") == "assistant"]
+    assert kept == ["Reading the files first.", "Still comparing."]
+    assert not [row for row in third if row.get("role") == "user" and "[SYSTEM NOTICE]" in str(row.get("content"))]
+    assert llm.requests[1]["messages"][:len(llm.requests[0]["messages"])] == llm.requests[0]["messages"]
+    assert {"Reading the files first.", "Still comparing."} <= {str(note).strip() for note in notes}
+    assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace
+    assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1, 2, 3]
+
+
+
+def test_an_owner_stop_after_commentary_ends_the_turn_with_no_further_call(tmp_path, loop_env, no_sleep):
+    """Commentary continues as an ordinary round, so the round top's existing controls still decide first: the
+    owner's Stop arriving after a commentary ends the turn at that boundary with zero further model calls and no
+    tool — the commentary stays a kept progress update, never the delivered answer, and no cut episode opens."""
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+
+    class _StopAfterCommentary(_ScriptedLLM):
+        def chat(self, **kwargs):
+            reply = super().chat(**kwargs)
+            if self.calls == 1:  # the owner presses Stop while the commentary round is answering
+                assert write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, "t-exhaust-loop",
+                                           kind=KIND_FINALIZE_NOW)
+            return reply
+
+    from ouroboros.outcomes import derive_loop_outcome
+
+    words = "Reading the files first.\nFINAL ANSWER: draft"  # a marker inside progress is no answer
+    llm, notes = _StopAfterCommentary(_reply(words, COMMENTARY), OK_RESPONSE), []
+    kwargs = _loop_kwargs(tmp_path, llm, notes)
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert llm.calls == 1 and "Reading the files first." not in str(result)
+    assert usage["reason_code"] == REASON_OWNER_REQUESTED_FINALIZATION and kwargs["tools"]._ctx._skip_post_task_synthesis
+    assert {"role": "assistant", "content": words} in kwargs["tools"]._ctx.messages
+    assert words in {str(note).strip() for note in notes}
+    assert "best_valid_final_answer" not in trace and derive_loop_outcome(result, usage, trace)["final_answer"] == ""
+    assert recovery.UNFINISHED_KEY not in usage and recovery.KEY not in usage
+    assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1]  # the stopped boundary bought no round
+
+
+@pytest.mark.parametrize(("facts", "latched"), [
+    (COMMENTARY, ""),
+    ({"response_finish_reason": "max_output_tokens", "response_status": "incomplete"}, ""),
+    ({"response_finish_reason": "length"}, ""),
+    ({"response_finish_reason": "stop", "response_status": "completed"}, "draft"),  # an ordinary final still latches
+])
+def test_only_a_reply_eligible_as_a_final_latches_its_marker(tmp_path, loop_env, no_sleep, facts, latched):
+    """The FINAL ANSWER latch is what a deadline, a budget end or a Stop publishes when the last text names none
+    (``outcomes.selected_final_answer``, ``loop_budget``): a commentary or a cut keeps its words as progress and
+    latches nothing, so a later marker-less final publishes no draft; a completed final latches as before."""
+    from ouroboros.outcomes import derive_loop_outcome
+
+    llm = _ScriptedLLM(_reply("Checked the inputs.\nFINAL ANSWER: draft", facts), OK_RESPONSE)
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert (trace.get("best_valid_final_answer") or "") == latched
+    if latched:
+        assert llm.calls == 1 and derive_loop_outcome(result, usage, trace)["final_answer"] == latched
+    else:
+        assert (result, llm.calls) == ("done", 2) and derive_loop_outcome(result, usage, trace)["final_answer"] == ""
+
+
+@pytest.mark.parametrize(("boundary", "reason"), [("deadline", "deadline_local"), ("budget", "budget_exhausted")])
+def test_a_commentary_marker_is_no_answer_at_a_deadline_or_a_budget_end(tmp_path, loop_env, no_sleep, monkeypatch,
+                                                                       boundary, reason):
+    """The rails that publish the latch with no further send: the task deadline passes while a completed commentary
+    carrying a FINAL ANSWER line answers (``_forced_final_answer``'s elapsed window), or money refuses the next
+    dispatch before it is sent (``_handle_budget_exceeded``, whose latched fallback once returned the draft). Either
+    ends the work on that one provider send, and neither its result, the selected answer nor the latch holds it."""
+    import datetime
+
+    import ouroboros.usage_accounting as accounting
+    from ouroboros.outcomes import derive_loop_outcome, selected_final_answer
+
+    words = "Reading the files first.\nFINAL ANSWER: draft"
+    kwargs = _loop_kwargs(tmp_path, None, [])
+    tool_ctx = kwargs["tools"]._ctx
+
+    class _Boundary(_ScriptedLLM):
+        refused = 0
+
+        def chat(self, **chat_kwargs):
+            if self.calls and boundary == "budget":  # admission refuses the next dispatch: nothing is sent
+                self.refused += 1
+                raise accounting.BudgetExceeded("root budget closed", limit_scope="root", root_task_id="t-exhaust-loop")
+            reply = super().chat(**chat_kwargs)
+            if boundary == "deadline":  # the deadline passes while this commentary round is answering
+                passed = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)
+                tool_ctx.task_metadata = {**tool_ctx.task_metadata, "deadline_at": passed.isoformat()}
+            return reply
+
+    # The ledger's own fact that the commentary was a physical send (the scripted client writes none), as the
+    # budget rail's existing tests state it; with none, a refused first dispatch is replay-safe and raises instead.
+    monkeypatch.setattr(accounting, "usage_breakdown", lambda *_a, **_k: {"physical_calls": 1, "integrity_degraded": False})
+    llm = kwargs["llm"] = _Boundary(_reply(words, COMMENTARY), OK_RESPONSE)
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert llm.calls == 1 and llm.refused == (boundary == "budget") and usage["reason_code"] == reason
+    assert {"role": "assistant", "content": words} in tool_ctx.messages  # kept as progress, never delivered
+    assert "draft" not in str(result) and "best_valid_final_answer" not in trace
+    assert selected_final_answer(result, trace) == "" and derive_loop_outcome(result, usage, trace)["final_answer"] == ""
+
+
+@pytest.mark.parametrize("reason", ["max_messages", "steered", None])
+def test_an_unsuitable_incomplete_terminal_with_text_or_a_call_is_never_a_result(tmp_path, loop_env, no_sleep, reason):
+    """``status=incomplete`` for a reason other than the output limit makes neither its text (valid JSON here) nor
+    its call a result: it reads as a reply without usable output, so the round's ordinary retry asks again and
+    nothing of it is delivered, kept or executed."""
+    unusable = _reply('{"verdict": "PASS"}', {"response_finish_reason": reason, "response_status": "incomplete"},
+                      tool_calls=[{"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}])
+    llm = _ScriptedLLM(unusable, OK_RESPONSE)
+    result, _usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert result == "done" and llm.calls == 2
+    assert all(row.get("role") not in {"assistant", "tool"} for row in llm.requests[1]["messages"])
+    events = _events(tmp_path, "llm_empty_response") + _events(tmp_path, "provider_incomplete_response")
+    assert [row["finish_reason"] for row in events] == [reason]
+
+
+def test_an_incomplete_content_filter_with_text_is_the_providers_refusal(tmp_path, no_sleep, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "")
+    cut = _reply('{"verdict": "PASS"}', {"response_finish_reason": "content_filter", "response_status": "incomplete"})
+    llm = _ScriptedLLM(cut, ({"role": "assistant", "content": "summary"}, {"prompt_tokens": 1}))
+    result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert "PASS" not in str(result) and "PASS" not in json.dumps(llm.requests[-1]["messages"])
+    assert [row["finish_reason"] for row in _events(tmp_path, "provider_content_refusal")] == ["content_filter"]
+    assert usage["terminal_provider_notice"]  # the round ended on the provider's refusal, said as such
+
+
+@pytest.mark.parametrize("preamble", [False, True])
+def test_a_completed_responses_refusal_is_the_providers_refusal_sent_once(tmp_path, no_sleep, preamble):
+    """A completed Response carrying the model's typed refusal, alone or after a commentary preamble, reaches the
+    round as the provider's content refusal through the real adapter: one send, its own event in its own words,
+    never a retried empty reply nor intermediate progress."""
+    from tests.test_openai_responses import REFUSAL, _body, _message, _normalize
+
+    msg, usage = _normalize(_body(*([_message("Let me look first.", "commentary")] if preamble else []), REFUSAL))
+    llm, totals = _ScriptedLLM((msg, usage), OK_RESPONSE), {}
+    assert _call(llm, tmp_path, totals)[0] is None
+    assert llm.calls == 1 and no_sleep == [] and _events(tmp_path, "llm_empty_response") == []
+    [row] = _events(tmp_path, "provider_content_refusal")
+    assert (row["finish_reason"], row["provider_message"]) == ("refusal", REFUSAL["content"][0]["refusal"])
+    assert totals["_last_llm_error_kind"] == "content_filter" and totals["reason_code"] == "provider_content_refusal"
+
+
+def test_an_output_limit_incomplete_keeps_the_existing_cut_recovery(tmp_path, loop_env, no_sleep):
+    cut = _reply(CUT_TEXT, {"response_finish_reason": "max_output_tokens", "response_status": "incomplete"})
+    llm = _ScriptedLLM(cut, OK_RESPONSE)
+    result, usage, _trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert result == "done" and llm.calls == 2
+    second = llm.requests[1]["messages"]
+    kept = second.index({"role": "assistant", "content": CUT_TEXT})
+    assert "(finish_reason=max_output_tokens)" in second[kept + 1]["content"]
+
+
+def test_forced_finals_read_intermediate_and_unusable_terminals_as_incomplete():
+    from ouroboros.loop_llm_call import forced_response_is_incomplete
+
+    assert forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "commentary"})
+    assert forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "steered",
+                                          "response_status": "incomplete"})
+    assert not forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "stop",
+                                              "response_status": "completed"})
+    assert not forced_response_is_incomplete({"finish_reason_present": True, "finish_reason": "max_output_tokens",
+                                              "response_status": "incomplete"}, completion_request=True)

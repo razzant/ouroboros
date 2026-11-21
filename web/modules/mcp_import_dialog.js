@@ -1,4 +1,4 @@
-/** Import an MCP client file into the MCP Settings draft: preview, select, apply to the draft, never save. */
+/** Import an MCP client file into the tool servers of Settings: preview, select, then Apply saves the chosen ones. */
 import { previewMcpImport } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindDialogFocus } from './ui_interactions.js';
@@ -44,7 +44,7 @@ function headerLines(entry) {
 /** One previewed entry: names, counts and origins, never credential values, paths or queries. */
 function renderEntry(entry, number, { checked, draftUrl }) {
     const blocked = !entry.action;
-    const chip = blocked ? ['danger', 'Not applied'] : entry.action === 'add' ? ['ok', 'Add (disabled)'] : ['muted', 'Update'];
+    const chip = blocked ? ['danger', 'Not applied'] : entry.action === 'add' ? ['ok', 'Add (off)'] : ['muted', 'Update'];
     const target = endpoint(entry.patch?.url);
     const where = entry.transport === 'stdio'
         ? (entry.arg_count ? `${entry.arg_count} argument${entry.arg_count === 1 ? '' : 's'}` : '')
@@ -98,11 +98,10 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
                 </div>
                 <div class="marketplace-modal-body">
                     <p class="settings-section-copy">Paste a document with a top-level <code>mcpServers</code> or <code>servers</code> object.
-                        Preview shows what would change; choose the servers to apply. Apply changes only this Settings draft, and
-                        Save stores it. Preview and Apply never connect or start anything; after Apply, Test checks a server's
-                        draft before you save. New servers start disabled. An existing server keeps its ID, enabled state,
-                        allowed tools and every field the document does not name; a <code>headers</code> object replaces its
-                        whole header list.</p>
+                        Preview shows what would change; choose the servers to apply. Apply saves the chosen servers.
+                        Preview and Apply never connect or start anything; Test on a server's page checks it. New servers
+                        start off. An existing server keeps its ID, its switch, its allowed tools and every field the document
+                        does not name; a <code>headers</code> object replaces its whole header list.</p>
                     <div class="form-field ui-field">
                         <label for="mcp-import-text">mcp.json content</label>
                         <textarea class="ui-control" id="mcp-import-text" rows="10" spellcheck="false" autocomplete="off"
@@ -114,7 +113,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
                 <div class="marketplace-modal-actions">
                     <button type="button" class="btn btn-default" data-mcp-import-cancel>Cancel</button>
                     <button type="button" class="btn btn-default" data-mcp-import-preview-btn>Preview</button>
-                    <button type="button" class="btn" data-primary data-mcp-import-apply disabled>Apply to draft</button>
+                    <button type="button" class="btn" data-primary data-mcp-import-apply disabled>Apply</button>
                 </div>
             </div>`;
         const q = (selector) => backdrop.querySelector(selector);
@@ -139,7 +138,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
         const syncApply = () => {
             const count = chosen().length;
             apply.disabled = !count;
-            apply.textContent = count ? `Apply ${count} to draft` : 'Apply to draft';
+            apply.textContent = count ? `Apply ${count}` : 'Apply';
         };
         const invalidate = () => {
             controller?.abort(); controller = null;
@@ -205,7 +204,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
             if (!preview) return;
             if (draftFreshness() !== preview.fingerprint) {
                 invalidate();
-                setStatus('The MCP draft changed after this preview. Preview again before applying.', 'warn');
+                setStatus('The servers changed after this preview. Preview again before applying.', 'warn');
                 return;
             }
             const entries = chosen();

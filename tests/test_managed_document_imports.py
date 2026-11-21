@@ -27,6 +27,7 @@ from ouroboros.delegate_documents import (
     DOCUMENT_IMPORT_OBSERVED, DOCUMENT_IMPORT_REQUESTED, DOCUMENT_IMPORT_SENDING, MAX_PREVIOUS_RECORDS,
     attach_selected_documents, carried_receipts, task_document_imports,
 )
+from ouroboros.delegate_pending import store_facts
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from tests._delegated_transport_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 from tests.test_delegate_documents import (  # noqa: F401
@@ -268,19 +269,31 @@ def test_a_released_key_answers_finished_and_only_an_explicit_new_import_begins_
     assert own != key and list(_owed(managed.root, "t-kid")) == [own]
 
 
-def test_an_accepted_start_replayed_by_retry_of_is_served_after_the_release_without_any_import(managed):
+def _lost_start(managed, monkeypatch, *, before_store_identity):
+    """A real start the engine accepted while its reply was lost. A row from before store identity lacks its facts,
+    which the real writer omits here for this one start; only such a row may still be re-sent to a named store."""
     managed.engine.faults = [("run", "lose")]
-    pending = _start(managed.ctx, attachment_paths=["attachments/brief.md"])["pending_invocation_id"]
+    write = custody.record_start_requested
+    with monkeypatch.context() as patch:
+        if before_store_identity:
+            patch.setattr(custody, "record_start_requested", lambda drive, **row: write(
+                drive, **{name: value for name, value in row.items() if name not in store_facts({})}))
+        return _start(managed.ctx, attachment_paths=["attachments/brief.md"])["pending_invocation_id"]
+
+
+def test_an_accepted_start_replayed_by_retry_of_is_served_after_the_release_without_any_import(managed, monkeypatch):
+    pending = _lost_start(managed, monkeypatch, before_store_identity=True)
     managed.engine.released["res_1"] = RELEASED_AT
     imports = len(managed.engine.of("import"))
     replayed = _start(managed.ctx, retry_of=pending)  # the same START key and body: the original operation
     assert replayed["status"] == "started" and replayed["idempotent_recovery"] is True, replayed
+    first, second = managed.engine.of("run")
+    assert first[1:] == second[1:], "the recorded key and bytes"
     assert len(managed.engine.of("import")) == imports
 
 
-def test_a_retry_whose_command_the_engine_pruned_meets_the_release_typed_and_imports_nothing(managed):
-    managed.engine.faults = [("run", "lose")]
-    pending = _start(managed.ctx, attachment_paths=["attachments/brief.md"])["pending_invocation_id"]
+def test_a_retry_whose_command_the_engine_pruned_meets_the_release_typed_and_imports_nothing(managed, monkeypatch):
+    pending = _lost_start(managed, monkeypatch, before_store_identity=True)
     managed.engine.released["res_1"] = RELEASED_AT
     managed.engine.runs.clear()  # command retention pruned it: the same body is a new reference now
     imports = len(managed.engine.of("import"))
@@ -288,6 +301,23 @@ def test_a_retry_whose_command_the_engine_pruned_meets_the_release_typed_and_imp
     refused = _start(managed.ctx, retry_of=pending)
     assert refused["reason"] == "resource_released" and refused["status"] == "refused", refused
     assert len(managed.engine.of("import")) == imports and managed.engine.of("put") == puts
+    assert not managed.engine.runs, "the released reference started nothing"
+
+
+@pytest.mark.parametrize("pruned", [False, True])
+def test_a_lost_start_whose_store_is_unproven_is_not_resent_after_the_release(managed, monkeypatch, pruned):
+    """Today's row: no receipt proves which store admitted it, so the engine is asked neither for the run nor for
+    the release's refusal, and the outcome stays unknown."""
+    pending = _lost_start(managed, monkeypatch, before_store_identity=False)
+    managed.engine.released["res_1"] = RELEASED_AT
+    if pruned:
+        managed.engine.runs.clear()
+    sent = copy.deepcopy([managed.engine.of(kind) for kind in ("run", "import", "put")])
+    refused = _start(managed.ctx, retry_of=pending)
+    assert (refused["status"], refused["reason"]) == ("refused", "invocation_store_unproven"), refused
+    assert not refused.get("definitely_unrun"), refused
+    assert [managed.engine.of(kind) for kind in ("run", "import", "put")] == sent
+    assert custody.invocation_record(managed.ctx.drive_root, pending)["state"] == "pending"
 
 
 def test_the_release_transport_sends_the_exact_body_and_the_catalog_row_is_matched_exactly():

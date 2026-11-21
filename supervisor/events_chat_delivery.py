@@ -806,10 +806,10 @@ def _handle_send_quiz(evt: Dict[str, Any], ctx: Any) -> None:
         )
         if not ok:
             record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "publication_send_failed")
-            _log_error(ctx, "send_quiz_error", chat_id=chat_id, error=err)
+            _log_error(ctx, "send_quiz_error", task_id=tid, quiz_id=qid, chat_id=chat_id, error=err)
     except Exception as exc:
         record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "publication_write_failed")
-        _log_error(ctx, "send_quiz_event_error", error=repr(exc))
+        _log_error(ctx, "send_quiz_event_error", task_id=tid, quiz_id=qid, error=repr(exc))
 
 
 @_on_consumer
@@ -877,6 +877,13 @@ def _handle_send_quiz_state(evt: Dict[str, Any], ctx: Any) -> None:
                     return
                 mark_quiz_history_written(ctx.DRIVE_ROOT, tid, qid, receipt="mailbox_at")
         if chat_id is None:
+            if reason == "publication_address_unknown":  # the import's verdict may owe its note nowhere
+                from ouroboros import obligations
+                from ouroboros.startup_migrations import retire_closures_owed_nowhere
+
+                key = f"question:{tid}:{qid}"
+                if verdict := obligations.members(ctx.DRIVE_ROOT, "unknowns").get(key):
+                    retire_closures_owed_nowhere(ctx.DRIVE_ROOT, {key: verdict})  # after the letter stage above
             return
         block = mark_discharged(ctx.DRIVE_ROOT, tid, qid) or block
         ctx.bridge.send_quiz_state(quiz_id=qid, task_id=tid, state="closed", chat_id=chat_id,

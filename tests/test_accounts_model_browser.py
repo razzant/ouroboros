@@ -15,8 +15,9 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from tests.settings_browser_helpers import open_settings
 
-from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # noqa: F401  (fixture)
+from tests.test_subscription_setup_browser import status_answer, subscription_ui as subscription_ui  # noqa: F401  (fixture)
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 pytestmark = [pytest.mark.ui_browser]
@@ -153,17 +154,10 @@ def _evidence(name: str) -> Path | None:
     return path
 
 
-def _open_accounts(page, url, width):
-    # The isolated server has no engine for the vendor-CLI maintenance panel; its
-    # empty inventory keeps that unrelated panel out of these frames.
+def _open_accounts(page, url, width, family="claude"):
     page.route("**/api/claudexor/maintenance/harnesses**", _fulfill({"harnesses": []}))
     page.goto(url, wait_until="domcontentloaded")
-    if width < 980:
-        page.click("[data-mobile-nav-toggle]")
-        page.wait_for_selector("#primary-sidebar.open")
-    page.click('[data-nav-page="settings"]')
-    page.wait_for_selector(".settings-shell")
-    page.click('[data-settings-tab="providers"]')
+    open_settings(page, f"accounts/{family}")
     page.wait_for_selector("#harness-accounts-groups .agent-family-card")
 
 
@@ -172,11 +166,11 @@ def _shoot(page, name, width, height):
     if first is None:
         return
     page.screenshot(path=str(first), animations="disabled")
-    page.set_viewport_size({"width": width, "height": 2400})  # the sticky Save bar sits below the subject
+    page.set_viewport_size({"width": width, "height": 2400})
     page.wait_for_timeout(250)
     box = page.evaluate("""() => {
         const a = document.querySelector('.agents-service').getBoundingClientRect();
-        const b = document.querySelector('#harness-accounts-section').getBoundingClientRect();
+        const b = document.querySelector('[data-settings-page]:not([hidden])').getBoundingClientRect();
         return {x: Math.max(0, Math.min(a.left, b.left) - 8), y: Math.max(0, a.top - 8),
                 width: Math.max(a.right, b.right) - Math.min(a.left, b.left) + 16, height: b.bottom - a.top + 16};
     }""")
@@ -236,7 +230,7 @@ def test_accounts_render_every_account_model_state_and_recover_on_refresh(direct
                         page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
                         page.add_init_script(f"Date.now = () => Date.parse({json.dumps(NOW)});"
                                              f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)});")
-                        page.route("**/api/claudexor/status**", _fulfill(payload))
+                        page.route("**/api/claudexor/status**", lambda route: status_answer(route, payload))
                         _open_accounts(page, direct_server_with_data["url"], width)
                         banner = page.locator("#agents-service-banner")
                         page.wait_for_function("() => !document.querySelector('#agents-service-banner')"
@@ -247,14 +241,16 @@ def test_accounts_render_every_account_model_state_and_recover_on_refresh(direct
                             assert banner.get_attribute("data-tone") == "warn"
                             assert groups.locator(".harness-account-row").count() == 0
                             assert groups.locator("[data-family-add], [data-harness-login], [data-next-up]").count() == 0
-                            assert groups.inner_text().count(NOT_LISTED) == 3
+                            assert groups.inner_text().count(NOT_LISTED) == 1
                         elif name == "failed":
                             assert "could not be read" in banner.inner_text()
-                            assert groups.locator("[data-family-add]").count() == 3  # Connect stays reachable
+                            assert groups.locator("[data-family-add]").count() == 1  # Connect stays reachable
                         elif name == "empty":
                             assert banner.inner_text().startswith("Claudexor ready")
-                            assert [b.inner_text() for b in groups.locator("[data-family-add]").all()] == ["Connect"] * 3
+                            assert [b.inner_text() for b in groups.locator("[data-family-add]").all()] == ["Connect"]
                         elif name == "unprofiled":
+                            open_settings(page, "accounts")
+                            open_settings(page, "accounts/codex")
                             codex = groups.locator('.harness-account-row[data-profile="codex-default"]')
                             assert "Usage unavailable" in codex.inner_text()
                             assert "harness-exhausted" not in (codex.get_attribute("class") or "")
@@ -272,17 +268,17 @@ def test_accounts_render_every_account_model_state_and_recover_on_refresh(direct
             page = browser.new_page(viewport={"width": 1110, "height": 750})
             current = {"payload": payloads["legacy"]}
             page.add_init_script(f"Date.now = () => Date.parse({json.dumps(NOW)});")
-            page.route("**/api/claudexor/status**", lambda route: route.fulfill(json=current["payload"]))
+            page.route("**/api/claudexor/status**", lambda route: status_answer(route, current["payload"]))
             page.route("**/api/claudexor/quota/refresh", lambda route: route.fulfill(
                 json={"snapshots": SCENES["modern"]["quota"], "absences": []}))
-            _open_accounts(page, direct_server_with_data["url"], 1110)
+            _open_accounts(page, direct_server_with_data["url"], 1110, "codex")
             page.wait_for_function("(text) => document.querySelector('#agents-service-banner').textContent === text",
                                    arg=UNSUPPORTED_TEXT)
             current["payload"] = payloads["modern"]
             page.click("#btn-harness-refresh")
             page.wait_for_selector('.harness-account-row[data-profile="codex-default"]')
             assert page.locator("#agents-service-banner").inner_text().startswith("Claudexor ready")
-            assert page.locator("#harness-accounts-groups [data-family-add]").count() == 3
+            assert page.locator("#harness-accounts-groups [data-family-add]").count() == 1
             page.close()
         finally:
             browser.close()
@@ -309,7 +305,7 @@ def test_an_empty_family_login_confirms_only_the_engine_resolved_row(direct_serv
             for after, expected in ((sibling, "unconfirmed"), (resolved, "success")):
                 page = browser.new_page(viewport={"width": 1110, "height": 750})
                 state = {"status": empty, "creates": []}
-                page.route("**/api/claudexor/status**", lambda route: route.fulfill(json=state["status"]))
+                page.route("**/api/claudexor/status**", lambda route: status_answer(route, state["status"]))
 
                 page.route("**/api/claudexor/login**", _login_transport(state, after))
                 _open_accounts(page, direct_server_with_data["url"], 1110)

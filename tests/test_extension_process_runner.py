@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import pathlib
 import sys
 import time
@@ -589,6 +590,108 @@ def test_isolated_dependency_extension_oversized_child_result_is_capped(tmp_path
         dispatch_extension_tool_subprocess(tool, ctx, {})
 
 
+@pytest.mark.parametrize("success", [True, False], ids=["report", "exception"])
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("extra", [-1, 0, 1])
+def test_child_result_cap_and_stop_are_independent(tmp_path, monkeypatch, success, stopped, extra):
+    from contextlib import nullcontext
+    from io import BytesIO
+
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    latch = {"reason": "cancelled", "note": "Stop is in force for this task", "refusals": 1}
+    field = "result" if success else "error"
+    outcome = {"ok": success, field: json.dumps({STEP_STOP: latch})}
+    size = runner._RESULT_CAP + extra
+    room = size - len(json.dumps(outcome, ensure_ascii=False).encode("utf-8"))
+    outcome[field] += "é" * (room // 2) + "a" * (room % 2)
+    assert len(json.dumps(outcome, ensure_ascii=False).encode("utf-8")) == size
+
+    path = tmp_path / "result.json"
+    payload = {"mode": "tool", "result_path": str(path)}
+    runner._write_child_result(payload, outcome, step_stop=latch if stopped else None)
+    proc = SimpleNamespace(returncode=0, poll=lambda: 0, stdout=BytesIO(), stderr=BytesIO())
+    child = SimpleNamespace(proc=proc, result_path=path, started_ts=time.monotonic())
+    monkeypatch.setattr(runner, "_child_process", lambda *args, **kw: nullcontext(child))
+    monkeypatch.setattr(runner, "_publish_child_facts", lambda *args, **kw: None)
+    seen = []
+    opts = dict(skill_dir=tmp_path, drive_root=tmp_path, repo_dir=tmp_path, env={}, timeout_sec=1, on_result=seen.append)
+    expected = dict(outcome) if extra <= 0 else {"ok": False, "error": "extension child protocol result exceeded safety cap"}
+    if stopped:
+        expected[STEP_STOP] = latch
+    if expected["ok"]:
+        assert runner._run_child(payload, **opts) == expected
+    else:
+        with pytest.raises(runner.ExtensionProcessError) as exc:
+            runner._run_child(payload, **opts)
+        assert exc.value.failure_kind == "error" and str(exc.value) == expected["error"]
+    assert seen == [expected]
+
+
+def test_small_tool_result_uses_the_same_stop_allowance_on_write_and_read(tmp_path, monkeypatch):
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    path = tmp_path / "result.json"
+    payload = {"mode": "tool", "result_path": str(path)}
+    result = {"ok": True, "result": "done"}
+    latch = {"reason": "cancelled", "refusals": 1}
+    envelope = {**result, STEP_STOP: latch}
+    extra = len(runner._protocol_json(envelope)) - len(runner._protocol_json(result))
+    monkeypatch.setattr(runner, "_STEP_STOP_CAP", extra)
+    runner._write_child_result(payload, result, step_stop=latch)
+    assert runner._read_child_result(path, tool_call=True) == envelope
+    monkeypatch.setattr(runner, "_STEP_STOP_CAP", extra - 1)
+    with pytest.raises(runner.ExtensionProcessError, match="exceeded safety cap"):
+        runner._read_child_result(path, tool_call=True)
+    with pytest.raises(runner.ExtensionProcessError, match="exceeded safety cap"):
+        runner._write_child_result(payload, result, step_stop=latch)
+
+
+@pytest.mark.parametrize("mode", ["tool", "catalog", "ws"])
+def test_reader_enforces_payload_limit_independently_of_writer(tmp_path, mode):
+    from ouroboros import extension_process_runner as runner
+    from ouroboros.extension_plugin_api import STEP_STOP
+
+    path = tmp_path / "result.json"
+    ordinary = {"ok": True, "result": ""}
+    room = runner._RESULT_CAP - len(json.dumps(ordinary).encode("utf-8"))
+    ordinary["result"] = "x" * (room + 1)
+    path.write_text(json.dumps(ordinary), encoding="utf-8")
+    with pytest.raises(runner.ExtensionProcessError, match="result exceeded safety cap"):
+        runner._read_child_result(path, tool_call=mode == "tool")
+
+    latch = {"reason": "cancelled", "refusals": 1}
+    path.write_text(json.dumps({**ordinary, STEP_STOP: latch}), encoding="utf-8")
+    if mode == "tool":
+        assert runner._read_child_result(path, tool_call=True) == {
+            "ok": False, "error": "extension child protocol result exceeded safety cap", STEP_STOP: latch}
+    else:
+        with pytest.raises(runner.ExtensionProcessError, match="result exceeded safety cap"):
+            runner._read_child_result(path, tool_call=False)
+
+
+def test_child_deadline_keeps_its_timeout_before_any_result_handoff(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from io import BytesIO
+
+    from ouroboros import extension_process_runner as runner
+
+    proc = SimpleNamespace(poll=lambda: None, stdout=BytesIO(), stderr=BytesIO())
+    child = SimpleNamespace(proc=proc, result_path=tmp_path / "absent.json", started_ts=1.0)
+    monkeypatch.setattr(runner, "_child_process", lambda *args, **kw: nullcontext(child))
+    monkeypatch.setattr(runner, "_kill_process_group", lambda process: None)
+    monkeypatch.setattr(runner, "_publish_child_facts", lambda *args, **kw: None)
+    clock = iter([1.0, 2.0])
+    monkeypatch.setattr(runner, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    seen = []
+    with pytest.raises(runner.ExtensionProcessError, match="timed out") as exc:
+        runner._run_child({"mode": "tool"}, skill_dir=tmp_path, drive_root=tmp_path, repo_dir=tmp_path,
+                          env={}, timeout_sec=1, on_result=seen.append)
+    assert exc.value.failure_kind == "timeout" and seen == []
+
+
 def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tree(tmp_path):
     import concurrent.futures
     from ouroboros.tools.registry import ToolRegistry
@@ -659,6 +762,113 @@ def test_isolated_dependency_extension_child_inherits_runtime_mode(tmp_path, mon
     assert tool is not None
     ctx = ToolContext(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
     assert dispatch_extension_tool_subprocess(tool, ctx, {}) == "light"
+
+
+_BOUND_CHILD_PLUGIN = (
+    "def _say(ctx, text='hi'):\n"
+    "    return f'old:{text}'\n"
+    "def register(api):\n"
+    "    api.register_tool('say', _say, description='say', schema={})\n"
+)
+
+
+def _review_current_payload(drive_root, loaded):
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
+
+    current = find_skill(drive_root, loaded.name, repo_path=str(loaded.skill_dir.parent))
+    save_review_state(drive_root, loaded.name, SkillReviewState(status="pass", content_hash=current.content_hash))
+    return current
+
+
+@pytest.mark.parametrize("between", ["update", "unchanged", "disable", "peer_conflict"])
+def test_an_out_of_process_call_runs_only_the_payload_its_host_bound(tmp_path, monkeypatch, between):
+    """A reviewed update can reach the disk after every host check and before the child reads it. The real child
+    refuses it typed, before any handler, instead of running the replacement under the bound call; an unchanged
+    payload runs, and a disable landing in that window is refused by the child's own load gate. So is an enabled
+    peer's equal-size conflicting edit with a restored mtime, though the host already holds its old text (#1217):
+    the child reads its peers fresh and is given no host facts."""
+    from ouroboros import extension_process_runner as runner
+    from ouroboros import skill_peer_inventory
+    from ouroboros.skill_loader import save_enabled
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._extension_loader_shared import _write_ext_skill
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "bound_child", _BOUND_CHILD_PLUGIN, permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - dummy_pkg\n")
+    _mark_isolated_deps_installed(drive_root, loaded)
+    peer = repo_root / "peer_child" / "SKILL.md"
+    if between == "peer_conflict":
+        _write_ext_skill(repo_root, "peer_child", plugin_body="def register(api):\n    pass\n", permissions=["tool"],
+                         extra_frontmatter='conflicts: ["other_child"]\n')
+        save_enabled(drive_root, "peer_child", True)
+    assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root) is None
+    tool_name = extension_loader.extension_surface_name("bound_child", "say")
+    assert extension_loader.get_tool(tool_name)["out_of_process"] is True
+    real_run_child = runner._run_child
+    landed = []
+
+    def after_host_checks(payload, **kwargs):  # liveness, guards and Safety passed; the child has not started
+        if between == "update":
+            (loaded.skill_dir / "plugin.py").write_text(_BOUND_CHILD_PLUGIN.replace("old:", "new:"), encoding="utf-8")
+            _review_current_payload(drive_root, loaded)
+        elif between == "disable":
+            save_enabled(drive_root, loaded.name, False)
+        elif between == "peer_conflict":
+            assert any(text == peer.read_text(encoding="utf-8") for held in skill_peer_inventory._HELD_FACTS.values()
+                       for location, (text, _facts) in held.items() if location.name == "peer_child")
+            stat, raw = peer.stat(), peer.read_bytes()
+            changed = raw.replace(b"other_child", b"bound_child")
+            assert changed != raw and len(changed) == len(raw)
+            peer.write_bytes(changed)
+            os.utime(peer, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            landed.append(between)
+        return real_run_child(payload, **kwargs)
+
+    monkeypatch.setattr(runner, "_run_child", after_host_checks)
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {"work_kind": "owner"}
+
+    result = registry.execute_result(tool_name, {"text": "hi"})
+
+    if between == "unchanged":
+        assert result.status == "ok" and _payload(result.text) == "old:hi", result
+        return
+    assert not _payload(result.text).startswith(("old:", "new:")), "a handler ran"
+    if between == "update":
+        assert (result.status, result.code) == ("unavailable", "EXTENSION_UNAVAILABLE"), result
+        assert "changed after this call was bound" in result.text
+    elif between == "peer_conflict":
+        assert landed == [between] and result.status == "error" and "conflict" in result.text, result
+    else:
+        assert result.status == "error" and "disabled" in result.text, result
+
+
+def test_a_child_load_checks_the_publication_it_loaded_not_only_what_it_discovered(tmp_path, monkeypatch):
+    """Discovery can hash the bound payload and then read a review saved for its replacement: the load passes review
+    on the new bytes, so only the loaded publication's own hash shows that the bound payload is gone."""
+    from dataclasses import replace
+
+    from ouroboros import extension_process_runner as runner
+    from ouroboros import skill_loader
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "late_change", _BOUND_CHILD_PLUGIN, permissions=["tool"])
+    bound = loaded.content_hash
+    (loaded.skill_dir / "plugin.py").write_text(_BOUND_CHILD_PLUGIN.replace("old:", "new:"), encoding="utf-8")
+    _review_current_payload(drive_root, loaded)
+    real_discover = skill_loader.discover_skill_identity
+    monkeypatch.setattr(skill_loader, "discover_skill_identity", lambda *a, **k: [
+        replace(found, content_hash=bound) for found in real_discover(*a, **k)])
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: {})
+
+    with pytest.raises(runner.ExtensionProcessError) as refused:
+        runner._load_child_extension(loaded.name, drive_root, pathlib.Path(__file__).resolve().parents[1],
+                                     repo_root, expected_content_hash=bound)
+
+    assert refused.value.failure_kind == runner.PAYLOAD_REPLACED, refused.value
+    extension_loader.unload_extension(loaded.name)  # the child's own exit path; then the unbound load is fine
+    runner._load_child_extension(loaded.name, drive_root, pathlib.Path(__file__).resolve().parents[1], repo_root)
 
 
 def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp_path):
@@ -882,3 +1092,184 @@ def test_child_route_request_carries_the_dispatched_method(tmp_path, method):
         pathlib.Path(__file__).resolve().parents[1],
     ))
     assert request.method == (method.upper() or "GET")
+
+
+_CONTEXT_PROBE = '''
+import hashlib, json
+from ouroboros.tool_access import active_tool_profile
+
+def _probe(ctx, fail=False, **kwargs):
+    if fail:
+        raise RuntimeError('synthetic-handler-failure')
+    digest = lambda value: hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+    try:
+        ctx.repo_path('../outside')
+    except Exception as exc:
+        outside = type(exc).__name__
+    else:
+        outside = 'allowed'
+    return json.dumps({'metadata': digest(ctx.task_metadata), 'contract': digest(ctx.task_contract),
+                       'profile': active_tool_profile(ctx), 'outside': outside,
+                       'source': ctx.task_metadata.get('presence', {}).get('event', {}).get('source_event_id')})
+
+def register(api):
+    api.register_tool('probe', _probe, description='Synthetic context probe', schema={})
+'''
+
+
+def _context_probe_registry(tmp_path):
+    from ouroboros.tools.registry import ToolRegistry
+
+    loaded, _repo_root, drive_root = _prepare_extension(
+        tmp_path, 'context_probe', _CONTEXT_PROBE, permissions=['tool'],
+        extra_frontmatter='dependencies:\n  - dummy_pkg\ntools:\n  - name: probe\n    effect: read\n',
+    )
+    _add_fake_native_dep(loaded)
+    _mark_isolated_deps_installed(drive_root, loaded)
+    assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root) is None
+    name = extension_loader.extension_surface_name(loaded.name, 'probe')
+    assert extension_loader.get_tool(name)['out_of_process'] is True
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner', 'presence': {'event': {'source_event_id': 'synthetic-event'}}}
+    return registry, name, drive_root / 'state' / 'skills' / loaded.name / 'extension_calls'
+
+
+@pytest.mark.parametrize('large_part', ['metadata', 'contract', 'mirrored_contract'])
+def test_extension_child_receives_large_context_without_losing_fields(tmp_path, large_part):
+    """The real registry/child boundary keeps both dictionaries, including unknown keys and late conditions."""
+    import hashlib
+    from ouroboros.extension_process_runner import _json_safe
+    from ouroboros.contracts.task_contract import attach_task_contract
+
+    registry, name, calls_dir = _context_probe_registry(tmp_path)
+    ctx = registry._ctx
+    tail = '  keep this late condition\n'
+    if large_part == 'mirrored_contract':
+        task = attach_task_contract({'text': 'x' * 600_000 + tail, 'metadata': ctx.task_metadata})
+        ctx.task_metadata, ctx.task_contract = task['metadata'], task['task_contract']
+    else:
+        # Each dictionary alone exceeds the byte limit, so deduplication is not a repair.
+        target = ctx.task_metadata if large_part == 'metadata' else ctx.task_contract
+        target.update({'unknown_nested': {'body': '界' * 400_000, 'last': tail}, 'objective': tail})
+    ctx.task_metadata['json_values'] = {7: [None, True], 'tuple': ('x', 'y')}
+    # Compare the established JSON representation, including JSON's string-key coercion.
+    def digest(value):
+        wire_value = json.loads(json.dumps(_json_safe(value), ensure_ascii=False))
+        return hashlib.sha256(json.dumps(wire_value, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+    result = registry.execute_result(name, {})
+
+    assert result.status == 'ok' and result.meta.get('physical_dispatch'), result.text
+    received = json.loads(_payload(result.text))
+    assert received['metadata'] == digest(ctx.task_metadata)
+    assert received['contract'] == digest(ctx.task_contract)
+    assert received['source'] == 'synthetic-event'
+    assert not list(calls_dir.iterdir())
+
+
+def test_large_extension_context_keeps_child_profile_and_path_bounds(tmp_path):
+    from ouroboros.extension_process_runner import dispatch_extension_tool_subprocess
+
+    registry, name, calls_dir = _context_probe_registry(tmp_path)
+    ctx = registry._ctx
+    ctx.task_metadata.update({'delegation_role': 'subagent', 'tool_profile': 'local_readonly_subagent',
+                              'unknown_nested': {'body': '界' * 400_000}})
+    # Direct dispatch here isolates the child consumer; registry refusals are checked below.
+    received = json.loads(dispatch_extension_tool_subprocess(extension_loader.get_tool(name), ctx, {}))
+    assert received['profile'] == 'local_readonly_subagent'
+    assert received['outside'] != 'allowed'
+    assert not list(calls_dir.iterdir())
+
+
+def test_large_extension_context_keeps_error_provenance_and_cleanup(tmp_path):
+    registry, name, calls_dir = _context_probe_registry(tmp_path)
+    registry._ctx.task_metadata['large'] = '界' * 400_000
+    result = registry.execute_result(name, {'fail': True})
+    assert result.status == 'error' and result.meta.get('physical_dispatch'), result.text
+    assert 'synthetic-handler-failure' in result.text
+    assert not list(calls_dir.iterdir())
+
+
+@pytest.mark.parametrize('field', ['blob', 'ctx'])
+def test_extension_oversized_arguments_are_not_host_context(tmp_path, field):
+    registry, name, calls_dir = _context_probe_registry(tmp_path)
+    registry._ctx.task_metadata['large'] = '界' * 400_000
+    result = registry.execute_result(name, {field: 'x' * (1024 * 1024 + 1)})
+    assert result.code == 'EXTENSION_ERROR' and not result.meta.get('physical_dispatch'), result.text
+    assert 'input exceeded safety cap' in result.text
+    assert not list(calls_dir.iterdir())
+
+
+@pytest.mark.parametrize('mode', ['tool', 'route', 'ws', 'catalog'])
+@pytest.mark.parametrize('extra_bytes', [0, 1])
+def test_extension_input_limit_counts_utf8_envelope_bytes(tmp_path, monkeypatch, mode, extra_bytes):
+    """Exact cap/one-byte-over via the staging owner; only tool-mode top-level ctx is exempt."""
+    from ouroboros import extension_process_runner as runner
+
+    monkeypatch.setattr(runner.uuid, 'uuid4', lambda: SimpleNamespace(hex='a' * 32))
+    calls_dir = tmp_path / 'state' / 'skills' / 'boundary' / 'extension_calls'
+    payload = {'mode': mode, 'skill_name': 'boundary', 'args': {'ctx': ''},
+               'ctx': {'text': '界' * (400_000 if mode == 'tool' else 1)},
+               'result_path': str(calls_dir / ('a' * 32 + '.result.json'))}
+    counted = {k: v for k, v in payload.items() if k != 'ctx'} if mode == 'tool' else payload
+    remaining = runner._INPUT_CAP - len(json.dumps(counted, ensure_ascii=False).encode('utf-8'))
+    payload['args']['ctx'] = 'é' * (remaining // 2) + 'x' * (remaining % 2 + extra_bytes)
+    spawned = []
+
+    def refuse_spawn(*args, **kwargs):
+        spawned.append(True)
+        staged = json.loads((calls_dir / ('a' * 32 + '.json')).read_text(encoding='utf-8'))
+        assert staged == payload
+        raise OSError('synthetic-spawn-refusal')
+
+    monkeypatch.setattr(runner.subprocess, 'Popen', refuse_spawn)
+    expected = 'input exceeded safety cap' if extra_bytes else 'synthetic-spawn-refusal'
+    with pytest.raises((runner.ExtensionProcessError, OSError), match=expected) as caught:
+        with runner._child_process(payload, skill_dir=tmp_path, drive_root=tmp_path, repo_dir=tmp_path, env={}):
+            pytest.fail('spawn double must refuse')
+    assert spawned == ([] if extra_bytes else [True])
+    assert not runner.extension_child_was_spawned(caught.value)
+    assert not list(calls_dir.iterdir())
+
+
+@pytest.mark.parametrize('restriction', ['disabled', 'network'])
+def test_large_context_does_not_bypass_host_extension_restrictions(tmp_path, monkeypatch, restriction):
+    from ouroboros import extension_process_runner as runner
+
+    registry, name, _calls_dir = _context_probe_registry(tmp_path)
+    registry._ctx.task_metadata['large'] = '界' * 400_000
+    if restriction == 'disabled':
+        registry._ctx.task_contract['disabled_tools'] = [name]
+    else:
+        registry._ctx.task_contract['allowed_resources'] = {'network': False}
+    monkeypatch.setattr(runner, 'dispatch_extension_tool_subprocess',
+                        lambda *a, **k: pytest.fail('host restriction must precede subprocess'))
+    result = registry.execute_result(name, {})
+    assert result.status in {'blocked', 'unavailable'}, result
+    assert not result.meta.get('physical_dispatch')
+
+
+def test_extension_input_write_failure_cleans_partial_file(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    import errno
+    from ouroboros import extension_process_runner as runner
+
+    registry, name, calls_dir = _context_probe_registry(tmp_path)
+    real_fdopen = runner.os.fdopen
+
+    @contextmanager
+    def failing_fdopen(fd, *args, **kwargs):
+        with real_fdopen(fd, *args, **kwargs) as fh:
+            def partial_write(data):
+                fh.write(data[:32])
+                fh.flush()
+                raise OSError(errno.ENOSPC, 'synthetic disk full')
+            yield SimpleNamespace(write=partial_write)
+
+    monkeypatch.setattr(runner.os, 'fdopen', failing_fdopen)
+    monkeypatch.setattr(runner.subprocess, 'Popen',
+                        lambda *a, **k: pytest.fail('failed staging must not spawn'))
+    result = registry.execute_result(name, {})
+    assert result.status == 'error' and not result.meta.get('physical_dispatch'), result.text
+    assert 'synthetic disk full' in result.text
+    assert not list(calls_dir.iterdir())

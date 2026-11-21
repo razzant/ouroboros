@@ -20,7 +20,7 @@ import {
  */
 export function sourceHealthHtml(source, health) {
     if (source.kind === 'builtin') return '';  // it ships with the app: nothing is read
-    if (!health?.state) return source.kind === 'registry' ? statusHtml('searched when you search', 'muted') : statusHtml('not read yet', 'muted');
+    if (!health?.state) return source.kind === 'registry' ? statusHtml('read when chosen or searched', 'muted') : statusHtml('not read yet', 'muted');
     const age = relativeAge(health.last_read_at);
     if (health.state === 'reading' || (health.refreshing && health.state !== 'error')) {
         return statusHtml(age ? `reading… (list from ${escapeHtml(age)})` : 'reading…', 'muted', { work: true });
@@ -29,7 +29,7 @@ export function sourceHealthHtml(source, health) {
         const shown = health.state === 'ready' && age ? ` — showing the list from ${escapeHtml(age)}` : '';
         return `${statusHtml(`couldn’t be read: ${escapeHtml(health.error || 'no answer')}${shown}`, 'warn')} ${buttonHtml('Try again', { tone: 'ghost', attrs: `data-source-action="refresh" data-source-id="${escapeHtml(source.id)}"` })}`;
     }
-    if (source.kind === 'registry' || health.state === 'search') return statusHtml('searched when you search', 'muted');
+    if (source.kind === 'registry' || health.state === 'search') return statusHtml('read when chosen or searched', 'muted');
     return statusHtml(age ? `read ${escapeHtml(age)}` : 'read', 'muted');
 }
 
@@ -77,7 +77,7 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
 /**
  * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, sourceSuggestions(): rows,
  *   catalog({refresh}), installedSkills(): rows|null, reloadAll(): Promise, toast(msg, tone), showMadeHere(),
- *   openBehaviorSettings() }.
+ *   openSettings(path, options) }.
  */
 export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     let sources = [];
@@ -100,6 +100,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
 
     function render() {
         if (destroyed) return;
+        const active = document.activeElement;
+        const focused = pane.contains(active) ? active?.closest('[data-source-action], [data-source-menu]') : null;
         const items = itemsBySource();
         const health = healthById();
         const madeHere = (host.installedSkills() || []).filter((row) => !row.install && ['external', 'self_authored'].includes(String(row.source || ''))).length;
@@ -118,8 +120,15 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
             </section>
             <div class="skills-sources-foot">
                 <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
-                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="behavior">Settings → Behavior ›</button></p>
+                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="auto_grant">Permissions and checks ›</button></p>
+                <p>The skills folder on this computer and the ClawHub address: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="skill_sources">Skill sources ›</button></p>
             </div>`;
+        // A return can focus its door while the read is pending. Preserve that current control, not an old one.
+        if (focused) {
+            const target = [...pane.querySelectorAll('[data-source-action], [data-source-menu]')].find((node) =>
+                ['sourceAction', 'sourceId', 'sourceMenu'].every((key) => node.dataset[key] === focused.dataset[key]));
+            (target || pane.querySelector('[data-source-action="add"]'))?.focus({ preventScroll: true });
+        }
     }
 
     async function load({ refresh = false } = {}) {
@@ -218,7 +227,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 if (added) await afterChange(`${added.name || 'The source'} added. Its skills are in Browse.`);
             } else if (action === 'first_start') await confirmFirstStart();
             else if (action === 'made_here') host.showMadeHere();
-            else if (action === 'behavior') host.openBehaviorSettings();
+            else if (action === 'auto_grant') host.openSettings('permissions', { row: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS' });
+            else if (action === 'skill_sources') host.openSettings('skill-sources');
             else if (source) await run(action, source);
         } catch (err) {
             host.toast(err?.message || String(err), 'danger');

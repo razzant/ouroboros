@@ -34,6 +34,8 @@ def _drive_commit(tmp_path: pathlib.Path, head_branch: str):
         captured.append(" ".join(map(str, cmd)))
         if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
             return head_branch + "\n"   # "HEAD" => detached; a branch name => on-branch
+        if cmd == ["git", "rev-parse", "--git-path", "MERGE_HEAD"]:
+            return ".git/MERGE_HEAD"
         if cmd[:2] == ["git", "rev-parse"]:
             return "deadbeefdeadbeef\n"
         if cmd[:2] == ["git", "status"]:
@@ -72,11 +74,13 @@ def test_detached_head_force_moves_with_B_and_never_orphans(tmp_path):
         "the detached-reconcile flag must flow into the stage cycle (for the GIT_LOST diagnostic)"
 
 
-def test_on_branch_uses_unambiguous_checkout_no_force_move(tmp_path):
-    checkout_cmds, stage_kwargs = _drive_commit(tmp_path, head_branch="ouroboros")  # on-branch
-    assert "git checkout --no-guess ouroboros --" in checkout_cmds, \
-        f"on-branch must select the local branch without path or remote guessing; got {checkout_cmds}"
-    assert not any("-B" in c for c in checkout_cmds), \
-        f"on-branch must NOT force-move; got {checkout_cmds}"
-    assert not stage_kwargs.get("came_from_detached_checkout"), \
-        "on-branch must NOT set the detached-reconcile flag"
+def test_on_branch_proceeds_without_checkout_or_force_move(tmp_path):
+    checkout_cmds, stage_kwargs = _drive_commit(tmp_path, head_branch="ouroboros")
+    assert checkout_cmds == [], f"same-branch checkout would drop merge state: {checkout_cmds}"
+    assert stage_kwargs.get("came_from_detached_checkout") is False
+
+
+def test_other_branch_uses_unambiguous_checkout_no_force_move(tmp_path):
+    checkout_cmds, stage_kwargs = _drive_commit(tmp_path, head_branch="feature")
+    assert checkout_cmds == ["git checkout --no-guess ouroboros --"]
+    assert stage_kwargs.get("came_from_detached_checkout") is False

@@ -295,6 +295,17 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
             reason = "preflight_failed"
         elif loaded.review.status == "blockers":
             reason = "review_blockers"
+    from ouroboros.deployment_extensions import change_refusal
+
+    if managed := change_refusal(name, "rollback"):  # before the unload and the restore: the pinned bytes stay
+        log.warning("Pending update of %s was not rolled back (%s): %s", name, reason, managed)
+        try:  # its review still decides whether these bytes run, as liveness decides for any package
+            from ouroboros.extension_loader import reconcile_extension
+
+            reconcile_extension(name, drive_root, load_settings)
+        except Exception:
+            log.warning("Kept update of %s needs extension reconciliation", name, exc_info=True)
+        return {"status": "refused", "reason": reason, "code": "managed_by_deployment", "error": managed}
     try:
         from ouroboros.extension_loader import unload_extension
 

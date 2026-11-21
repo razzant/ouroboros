@@ -10,7 +10,6 @@ outline operations keep their eager inventory (an explicit residual, witnessed b
 """
 from __future__ import annotations
 
-import subprocess
 from collections import Counter
 from types import SimpleNamespace
 
@@ -22,13 +21,12 @@ from ouroboros import code_occurrences as occ
 from ouroboros.tools import query_code as qc
 from ouroboros.tools.query_code import _query_code
 from ouroboros.tools.registry import ToolContext
+from tests._workspace_git import git_repository
 
 
 @pytest.fixture
 def project(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True)
     return repo, ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
 
 

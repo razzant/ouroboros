@@ -433,12 +433,22 @@ def test_terminal_frame_field_rides_the_history_replay_allowlist():
     assert "actual_substrate" in _PROGRESS_META_FIELDS
 
 
-def test_run_timing_reads_the_started_row(tmp_path):
+@pytest.mark.parametrize("origin", [None, "2000-01-01T00:00:00+00:00", ""])
+def test_run_timing_reads_the_started_row(tmp_path, origin):
     drive = _drive(tmp_path)
-    _emit_started(drive, "run-1")
+    entry = custody.RunCustody(run_id="run-1", task_id="child-1", window_started_at=origin)
+    assert custody.record_started(drive, entry, shape={"max_seconds": 300})
     started_ts, max_seconds = custody.run_timing(drive, "run-1")
     assert started_ts  # the emit stamped ts
     assert max_seconds == 300
+    assert custody.run_timing(drive, "run-1", window=True) == (started_ts if origin is None else origin, 300)
+    # A late original receipt omits recovery's origin. The first fact, including explicit unknown,
+    # survives republication and a fresh durable read; old/ordinary records keep the publication clock.
+    assert custody.record_started(drive, custody.RunCustody(run_id="run-1", task_id="child-1"),
+                                   shape={"max_seconds": 300})
+    custody._CUSTODY.clear()
+    expected = custody.run_timing(drive, "run-1")[0] if origin is None else origin
+    assert custody.run_timing(drive, "run-1", window=True) == (expected, 300)
     assert custody.run_timing(drive, "run-unknown") == ("", 0)
 
 
@@ -469,15 +479,14 @@ class TestEvidenceReadHonesty:
         from ouroboros.store import STORE_REL
 
         (tmp_path / STORE_REL).mkdir(parents=True)
-        ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False,
-                              drive_root=tmp_path)
+        ctx = SimpleNamespace(_nanny_route_dispatched=True, drive_root=tmp_path)
         tools = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["delegate_start"])
         msgs: list = []
         assert _maybe_inject_finalization_nudges(
             tools, tmp_path, "t1",
             {"reasoning_notes": [], "tool_calls": []}, "done", msgs, lambda *_: None,
-        ) is False
-        assert not any("NANNY" in m.get("content", "") for m in msgs)
+        ) is False, "unreadable custody states no open run: no notice line from a guess"
+        assert msgs == []
 
 
 class TestTerminalFrameDelivery:
@@ -591,6 +600,19 @@ class TestTerminalFrameDelivery:
         text, meta = self._dispatch_text(tmp_path, monkeypatch, **terminal_facts)
         assert text == "⚠️ Subagent child-1 finished with warnings (publication-auditor)."
         assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
+
+    @pytest.mark.parametrize("debt", [["run-1"], []])
+    def test_the_terminal_frame_carries_the_rows_debt_list_an_empty_one_included(
+            self, tmp_path, monkeypatch, debt):
+        """The frame a card replays from states the list the row held at its terminal; an explicit ``[]`` travels as
+        ``[]`` (a stored custody stamp is not live debt), so history can later replace either with the current list."""
+        _text, meta = self._dispatch_text(tmp_path, monkeypatch, delegated_runs_unreconciled=debt)
+        assert meta["delegated_runs_unreconciled"] == debt
+        assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
+
+    def test_a_row_with_no_debt_list_puts_none_on_its_terminal_frame(self, tmp_path, monkeypatch):
+        _text, meta = self._dispatch_text(tmp_path, monkeypatch)
+        assert "delegated_runs_unreconciled" not in meta, "no list is no proof of reconciliation"
 
     def test_panel_chat_zero_receives_the_terminal_evidence_frame(
             self, tmp_path, monkeypatch):

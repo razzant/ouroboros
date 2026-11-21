@@ -189,8 +189,9 @@ def test_the_live_frame_and_its_retained_source_keep_the_executors_exact_words(t
     daemon.revealed = 1
     ctx = _ctx(tmp_path, [])
     _agent_obj, frames = _agent(ctx)
-    delegate_progress.emit(ctx, "run-1", SimpleNamespace(seq=3, events=[], events_omitted=0),
-                           entry=SimpleNamespace(task_id="child", run_id="run-1"), gateway=_gateway(daemon), after_seq=0)
+    from tests.test_delegated_activity import _followed
+
+    _followed(ctx, daemon)
     activity = frames.get_nowait()["progress_meta"]["delegated_activity"]
     assert delegated_activity_meta(activity, task_id="child") == activity
     assert [part["text"] for part in activity["parts"]] == words and "technical" not in activity
@@ -212,6 +213,8 @@ def test_a_new_process_replays_retained_separated_ranges_in_order_and_once(tmp_p
     first = [_harness(seq, "message", text=_forged(sep)) for seq, sep in enumerate(SEPARATORS, 1)]
     _retain(ctx, first)
     _retain(ctx, [_harness(4, "tool_call", tool={"name": "Read"}), _harness(5, "message", text="plain words")])
+    delegate_progress.emit_retained(SimpleNamespace(task_id="child", drive_root=tmp_path), "run-1")
+    assert delegate_activity._memo("child", "run-1").pending is None, "a delivery without a channel reads nothing"
     delegate_progress.emit_retained(ctx, "run-1")  # a fresh memo: only the retained sources remain
     activities = [meta["delegated_activity"] for _text, meta in emitted]
     assert [(a["after_seq"], a["through_seq"]) for a in activities] == [(0, 3), (3, 5)], \
@@ -242,14 +245,14 @@ def test_a_blank_retained_record_is_malformed_never_skipped(tmp_path):
         "an empty record between records is malformed source, neither dropped nor acknowledged"
 
 
-def test_a_later_wait_replays_retained_separated_words_through_terminal_delivery(tmp_path, monkeypatch):
+def test_a_terminal_delivery_replays_retained_separated_words_no_follow_frame_carried(tmp_path, monkeypatch):
     from ouroboros.tools import delegate
     from tests._delegated_transport_shared import _nanny_ctx
+    from tests.test_delegated_activity import _followed
 
     words = [_forged("\u2028"), _forged("\u0085")]
     daemon = _LiteralDaemon([[_harness(1, "message", text=words[0])],
                              [_harness(2, "message", text=words[1]), _run_event(3, "run.completed")]])
-    gateway = _gateway(daemon)
     ctx = _nanny_ctx(tmp_path, task_id="child")
     ctx.task_attempt = 0
     _agent_obj, frames = _agent(ctx)
@@ -264,19 +267,15 @@ def test_a_later_wait_replays_retained_separated_words_through_terminal_delivery
     monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
                                                                 model="m", access="readonly"))
     monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        assert json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, since_seq=0,
-                                                  gateway=gateway))["status"] == "terminal"
-        assert frames.empty()
-        channel["open"] = True
-        delegate_activity.reset_process_memo()
-        requests = list(daemon.requests)
-        assert json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, gateway=gateway))["status"] == "terminal"
-        assert daemon.requests == requests, "the replay reads only the retained source"
-    activity, = [frame["progress_meta"]["delegated_activity"]
-                 for frame in (frames.get_nowait() for _ in range(frames.qsize())) if frame["type"] == "send_message"]
-    assert (activity["after_seq"], activity["through_seq"]) == (0, 3)
-    assert [part["text"] for part in activity["parts"]] == words
+    gateway = _followed(ctx, daemon)  # retained, never handed over
+    assert json.loads(delegate._read_run(ctx, "run-1", 0, gateway=gateway))["status"] == "terminal"
+    assert frames.empty()
+    channel["open"] = True
+    delegate_activity.reset_process_memo()
+    requests = list(daemon.requests)
+    assert json.loads(delegate._read_run(ctx, "run-1", gateway=gateway))["status"] == "terminal"
+    assert daemon.requests == requests, "the replay reads only the retained source"
+    activities = [frame["progress_meta"]["delegated_activity"]
+                  for frame in (frames.get_nowait() for _ in range(frames.qsize())) if frame["type"] == "send_message"]
+    assert (activities[0]["after_seq"], activities[-1]["through_seq"]) == (0, 3)
+    assert [part["text"] for activity in activities for part in activity["parts"]] == words

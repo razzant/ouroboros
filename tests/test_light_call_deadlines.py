@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -111,8 +112,8 @@ def test_preparation_expiry_prevents_a_physical_send(call_env, monkeypatch, cons
 
 @pytest.mark.parametrize("consumer", ["naming", "translation"])
 def test_slot_wait_spends_the_same_deadline(call_env, monkeypatch, consumer):
-    # Hold the actual per-route slot; its queue and expiry check remain production code.
-    monkeypatch.setattr(model_concurrency, "_max_slot_wait_sec", lambda: 12)
+    # Hold the actual per-route slot; its queue and expiry check remain production code. The caller's deadline is the
+    # wait's only bound: the queue has no clock of its own.
     with model_concurrency.model_call_slot("unseen-light", route=call_env.route):
         refused(call_env, consumer)
     assert call_env.now[0] == pytest.approx(110)
@@ -351,17 +352,115 @@ def test_managed_naming_checks_preparation_before_model_create(call_env, monkeyp
         assert ledger_rows(call_env.root)[-1]["state"] == "settled"
 
 
-def test_managed_translation_keeps_existing_unsupported_format_refusal(call_env, monkeypatch):
-    from ouroboros import llm_claudexor as transport
-    from tests.test_llm_claudexor import MODEL
+TRANSLATION = json.dumps({"translations": [{"id": 0, "text": "Настройки"}]}, ensure_ascii=False)
 
+
+def run_batch(call_env, monkeypatch):
+    """One string the page could not translate goes through the real generator: its batch facts and broadcasts."""
+    from ouroboros import i18n_memory as memory
+
+    frames = []
+    monkeypatch.setattr(ui_translation, "_broadcast", frames.append)
+    memory.update_memory(call_env.root, "ru", lambda doc: None, create=True)
+    memory.record_missing(call_env.root, "ru", [{"key": "Settings", "context": {"role": "button"}}])
+    return ui_translation.translate_batch(call_env.root, "ru", client=call_env.client), frames
+
+
+def translated_batch(call_env, monkeypatch, model):
+    """The batch is written as a generated entry, broadcast once, nothing left waiting."""
+    from ouroboros import i18n_memory as memory
+
+    facts, frames = run_batch(call_env, monkeypatch)
+    assert facts == {"taken": 1, "applied": 1, "requeued": 0, "dropped": 0, "error": ""}
+    entry = memory.load_memory(call_env.root, "ru")["entries"]["Settings"]
+    assert (entry["text"], entry["provenance"], entry["model"]) == ("Настройки", "generated", model)
+    assert memory.pending_count(call_env.root, "ru") == 0 and [frame["applied"] for frame in frames] == [1]
+
+
+def managed_gateway(call_env, monkeypatch, outcome="completed", problem=None, **message):
+    """The managed Claudexor lane (a subscription model in the Light slot) answers the batch with ``TRANSLATION``,
+    ending as the engine's ``outcome`` and ``problem`` say, with extra fields on the reply's ``message``."""
+    from ouroboros import llm_claudexor as transport
+    from tests.test_llm_claudexor import MODEL, Gateway, result
+
+    answer = result(outcome=outcome, cash=0, knowledge="exact", problem=problem)
+    answer["message"].pop("tool_calls")
+    answer["message"].update(content=TRANSLATION, **message)
+    gateway = Gateway(results=[answer])
+    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **kwargs: gateway)
     monkeypatch.setattr(call_env.client, "_resolve_remote_target", LLMClient()._resolve_remote_target)
     monkeypatch.setattr(ui_translation, "_light_route", lambda: (MODEL, False, True))
-    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **kwargs: pytest.fail("must not create"))
-    with pytest.raises(transport.ClaudexorModelError, match="response_format") as caught:
-        invoke(call_env, "translation")
-    assert caught.value.code == "unsupported_parameter"
-    assert not ledger_rows(call_env.root)
+    return gateway
+
+
+def test_managed_translation_writes_its_batch_through_one_operation(call_env, monkeypatch):
+    """A Light slot on a subscription model translates. The batch used to ask for a JSON mode this transport
+    refuses before any operation (``unsupported_parameter``): every string stayed waiting, none was ready. The
+    completed operation's message ends ``stop``, and its visible translation is kept."""
+    from ouroboros import i18n_memory as memory
+    from tests.test_llm_claudexor import MODEL
+
+    gateway = managed_gateway(call_env, monkeypatch, finish_reason="stop")
+    translated_batch(call_env, monkeypatch, MODEL)
+    collected_once(call_env, gateway)
+    payload = gateway.uploads[0][0]  # the bytes the engine received, as _request serialized them
+    assert (payload["source"], payload["model"], payload["options"]["cacheKey"]) == (
+        "codex", "exact-model", "ui_translation:ru")
+    assert "response_format" not in payload and "responseFormat" not in payload["options"]
+    # The engine received the generator's own request, whatever it says: target language, string and its context.
+    batch = [{"id": 0, "text": "Settings", "plural": False, "context": {"role": "button"}}]
+    assert [(message["role"], message["content"]) for message in payload["messages"]] == [
+        ("system", ui_translation._profile_prefix(memory.load_memory(call_env.root, "ru"), "ru")),
+        ("user", ui_translation._batch_request(batch))]
+    row = ledger_rows(call_env.root)[-1]
+    assert (row["category"], row["cost_usd"], row["cost_final"]) == ("ui_translation", 0, True)
+
+
+@pytest.mark.parametrize(("reason", "message", "error"), [
+    pytest.param("content_filter", {"finish_reason": "stop"}, "UnusableReplyError", id="incomplete"),
+    pytest.param("max_output_tokens", {"finish_reason": "stop"}, "output_truncated", id="output_limit"),
+])
+def test_managed_translation_leaves_an_incomplete_operation_waiting(call_env, monkeypatch, reason, message, error):
+    """The engine ended the operation ``incomplete`` on a batch that reads as complete, its nested message saying
+    ``stop``: the operation's own fact stands. The output limit is the generator's own cut, a batch asked again
+    smaller; for any other reason the reply is no final answer. Either way the string waits with no attempt spent,
+    and the operation stays accounted."""
+    from ouroboros import i18n_memory as memory
+
+    problem = {"code": "response_incomplete", "message": "ended early", "context": {"reason": reason}}
+    gateway = managed_gateway(call_env, monkeypatch, "incomplete", problem, **message)
+    facts, frames = run_batch(call_env, monkeypatch)
+    assert (facts["applied"], facts["requeued"], facts["dropped"]) == (0, 1, 0) and facts["error"].startswith(error)
+    assert memory.load_memory(call_env.root, "ru")["entries"] == {} and not frames
+    assert not dict(memory.take_pending(call_env.root, "ru", 10))["Settings"].get("attempts")
+    collected_once(call_env, gateway)
+
+
+@pytest.mark.parametrize("answer", [
+    pytest.param(f"```json\n{TRANSLATION}\n```", id="fenced_text"),
+    pytest.param([{"type": "reasoning", "text": TRANSLATION.replace("Настройки", "ЛОЖЬ")},
+                  {"type": "text", "text": TRANSLATION}], id="typed_parts"),
+    # A Gemini thought holding a valid answer of its own, then the real one split over a part without a type and an
+    # ``output_text`` part (``tests/test_narration_display.py`` pins the thought-then-untyped shape for the loop).
+    pytest.param([{"thought": True, "text": TRANSLATION.replace("Настройки", "ЛОЖЬ")},
+                  {"text": TRANSLATION[: len(TRANSLATION) // 2]},
+                  {"type": "output_text", "text": TRANSLATION[len(TRANSLATION) // 2:]}], id="gemini_parts"),
+])
+def test_portable_translation_asks_for_no_json_mode_and_reads_its_answer_from_text(call_env, monkeypatch, answer):
+    """On a route that carries ``response_format`` the batch still sends none: the answer is read from the reply's
+    text, whether the endpoint sends it as a string or as parts (typed, untyped or ``output_text``) the lane hands
+    over as they came."""
+    def endpoint(**kwargs):
+        call_env.sends.append(kwargs)
+        return AssembledResponse({"id": "fixture-generation", "choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": answer}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.25}})
+
+    call_env.sdk.chat.completions.create = endpoint
+    translated_batch(call_env, monkeypatch, "openai-compatible::unseen-light")
+    assert len(call_env.sends) == 1 and "response_format" not in call_env.sends[0]
+    assert [(row["state"], row["category"], row["cost_usd"]) for row in ledger_rows(call_env.root)] == [
+        ("settled", "ui_translation", 0.25)]
 
 
 def test_relative_socket_timeout_alone_still_creates_no_operation_deadline(call_env, monkeypatch):
@@ -419,11 +518,10 @@ def test_place_reply_safety_check_ends_by_the_task_deadline_safety_already_uses(
 def test_verdict_extraction_keeps_its_finalization_reserve_after_preparation_or_a_slot_wait(
         call_env, monkeypatch, elapsed):
     """Extraction refuses inside deadline − grace and projects its timeout from it, once, before the send."""
-    from ouroboros import config
     from ouroboros import review_verdict_extraction as extraction
 
     timeouts = no_proxy_timeouts(monkeypatch)
-    monkeypatch.setattr(config, "get_light_model", lambda: "openai-compatible::unseen-light")
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: ("openai-compatible::unseen-light", False))
     with ua.usage_scope(ua.UsageScope(drive_root=call_env.root, task_id="review", root_task_id="review")), \
             model_wait.calendar_scope(at(300)), \
             spend_until(call_env, monkeypatch, elapsed, 110) as started:  # review custody's raw request deadline
@@ -458,12 +556,12 @@ def test_vision_caption_keeps_its_reserve_after_image_preparation_or_a_slot_wait
 def light_extraction(call_env, monkeypatch, *, until, owner=True, cancel=False):
     """The review substrate's real verdict extraction, as a review inside a task calls it: its window is the
     review deadline less the grace, 300 − 120 = 180, and its preparation runs to ``until``."""
-    from ouroboros import cancel_intents, config
+    from ouroboros import cancel_intents
     from ouroboros.task_results import write_task_result
 
     write_task_result(call_env.root, "review", "running", root_task_id="review")  # the owner's Pause authority
     timeouts = no_proxy_timeouts(monkeypatch, content="[]")
-    monkeypatch.setattr(config, "get_light_model", lambda: "openai-compatible::unseen-light")
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: ("openai-compatible::unseen-light", False))
     spend_preparation(call_env, monkeypatch, until)
     task = {"id": "review", "root_task_id": "review", "deadline_at": at(300)}
     waiter = (model_wait.task_model_wait_scope(task=task, drive_root=call_env.root, event_queue=None,
@@ -645,11 +743,10 @@ def test_a_caption_window_spent_before_its_create_still_sends_nothing(call_env, 
 def test_an_accepted_verdict_extraction_outlives_its_own_window(call_env, monkeypatch):
     """The same class: the review deadline 300 less the 120 s grace admits the managed extraction at 100; it
     finishes at 250, before the review's own deadline, on its one operation."""
-    from ouroboros import config
     from tests.test_llm_claudexor import MODEL
 
     gateway = accepted_operation(call_env, monkeypatch, done_at=250)
-    monkeypatch.setattr(config, "get_light_model", lambda: MODEL)
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda _role: (MODEL, False))
     with task_wait_owner(call_env, "review"):
         review_verdict_extraction.canonicalize_session_verdict(
             "The change looks fine; I found nothing to fix.", conformance_passed=False,

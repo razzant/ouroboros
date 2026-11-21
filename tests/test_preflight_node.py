@@ -132,22 +132,50 @@ def test_missing_node_is_a_typed_hard_block_when_the_lane_is_active(tmp_path, mo
 
     assert result is not None and result["files"] == 1
     assert "PREFLIGHT_NODE_MISSING" in result["error"]
-    # The remediation must name the provisioning script that actually exists.
-    assert "scripts/download_node_standalone.sh" in result["error"]
-    assert (REPO_ROOT / "scripts" / "download_node_standalone.sh").is_file()
+    # The remediation must name the provisioning script that actually exists, and the order the lane resolves in.
+    assert "python scripts/download_node_standalone.py" in result["error"]
+    assert (REPO_ROOT / "scripts" / "download_node_standalone.py").is_file()
+    assert "reviewed pinned Node first" in result["error"] and "on PATH, which it names" in result["error"]
 
 
-def test_unprobeable_node_is_a_typed_hard_block(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pin", ["planned", "unreadable", "none"])
+def test_unprobeable_node_is_a_typed_hard_block(tmp_path, monkeypatch, pin):
     """A node that exists but cannot answer `--version` (the Homebrew-SIGKILL
-    class) blocks with the MISSING label rather than being run blind."""
+    class) blocks with the MISSING label rather than being run blind.
+    R7 (Fable): the gate's lane is an acting consumer of the pin's Node; with no
+    usable Node it asks once for the pin's to be prepared (single-flight, never
+    a wait), and only where the pin plans one for this host."""
+    from ouroboros import server_boot
+
     worktree = _worktree(tmp_path, {"web/tests/x.test.js": _PASSING_TEST})
     monkeypatch.setattr(pn, "resolve_node", lambda: "/fake/node")
     monkeypatch.setattr(pn, "probe_node_version", lambda path: "")
+    monkeypatch.setattr(pn, "pinned_node_wait", lambda: {"planned": (True, "/planned/node"), "unreadable": (True, ""),
+                                                        "none": (False, "")}[pin])
+    asked = []
+    monkeypatch.setattr(server_boot, "request_pinned_node", lambda root=None: asked.append(root))
 
     result = pn.run_node_tests(worktree, tmp_path / "t", 60, 8000)
 
     assert "PREFLIGHT_NODE_MISSING" in result["error"]
     assert "/fake/node" in result["error"]
+    assert asked == ([None] if pin == "planned" else [])
+
+
+def test_a_node_that_runs_never_asks_for_the_pins_preparation(tmp_path, monkeypatch):
+    """The falsifying control: a lane Node that answers `--version` (here too old, so nothing runs) asks for nothing."""
+    from ouroboros import server_boot
+
+    worktree = _worktree(tmp_path, {"web/tests/x.test.js": _PASSING_TEST})
+    monkeypatch.setattr(pn, "resolve_node", lambda: "/fake/node")
+    monkeypatch.setattr(pn, "probe_node_version", lambda path: "18.19.1")
+    monkeypatch.setattr(pn, "pinned_node_wait", lambda: (True, "/planned/node"))
+    asked = []
+    monkeypatch.setattr(server_boot, "request_pinned_node", lambda root=None: asked.append(root))
+
+    result = pn.run_node_tests(worktree, tmp_path / "t", 60, 8000)
+
+    assert "PREFLIGHT_NODE_TOO_OLD" in result["error"] and asked == []
 
 
 def test_too_old_node_is_a_typed_hard_block(tmp_path, monkeypatch):
@@ -333,16 +361,19 @@ def _gate_repo(tmp_path: pathlib.Path) -> pathlib.Path:
     return repo
 
 
-def _stub_pytest_passes(monkeypatch, calls):
+def _stub_pytest_passes(monkeypatch, calls, nodes=None):
     """Neutralise the pytest side so these tests are about the node lane only
-    (same seams tests/test_preflight_runner.py's `stub_passes` documents)."""
+    (same seams tests/test_preflight_runner.py's `stub_passes` documents); ``nodes`` collects each
+    pass's carried Node."""
     from ouroboros import preflight_runner as pr
 
     monkeypatch.setattr(pr, "_verify_preflight_plugins", lambda *a, **k: [])
     monkeypatch.setattr(pr, "observed_worker_ids", lambda *a, **k: {"gw0", "gw1"})
 
-    def _fake_pass(agent_python, worktree, temp_root, args, timeout):
+    def _fake_pass(agent_python, worktree, temp_root, args, timeout, node=None):
         calls.append(list(args))
+        if nodes is not None:
+            nodes.append(node)
         return (0, "", "")
 
     monkeypatch.setattr(pr, "_execute_pytest_pass", _fake_pass)
@@ -383,6 +414,25 @@ def test_gate_runs_node_then_both_pytest_passes_when_green(tmp_path, monkeypatch
 
     assert pr.run_hermetic_pytest(repo, timeout=120) is None
     assert len(calls) == 2, "both pytest passes must still run after a green node lane"
+
+
+def test_the_pytest_passes_run_the_node_the_lane_ran_and_none_without_a_lane(tmp_path, monkeypatch):
+    """The lane's Node is carried to both passes, so a test's own `node` children run it, never another Node only
+    named for the environment; with no lane (no web tests) nothing is carried and nothing is resolved by running."""
+    from ouroboros import preflight_runner as pr
+
+    nodes = []
+    _stub_pytest_passes(monkeypatch, [], nodes)
+    lane_node = str(tmp_path / "lane-bin" / "node")  # absolute on every OS (`/lane` is `D:\\lane` on Windows); never run
+    ran = {"files": 1, "node": lane_node, "returncode": 0, "error": None, "reap_error": "", "execution": "executed"}
+    for name, lane, carried in (("lane", ran, lane_node), ("inactive", None, None)):
+        nodes.clear()
+        monkeypatch.setattr(pr, "run_node_tests", lambda *_a, lane=lane: lane)
+        (tmp_path / name).mkdir()
+        assert pr.run_hermetic_pytest(_gate_repo(tmp_path / name), timeout=120) is None
+        assert nodes == [carried, carried]
+    env = pr._preflight_env(tmp_path / "gate", tmp_path / "gate" / "repo", create=False, workers=1, node=lane_node)
+    assert env["PATH"].split(os.pathsep)[0] == os.path.dirname(lane_node)  # named first, not run to decide
 
 
 # ── Orchestration: the gate runs the lane on the CANDIDATE tree ───────

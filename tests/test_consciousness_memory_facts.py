@@ -78,7 +78,7 @@ def test_records_after_the_accepted_sequence_are_lines_under_their_own_header(tm
                                                       ["correction", correction.record["id"]],
                                                       ["decision", decision.record["id"]]]
     assert listed[0].endswith(f"memory_read(node_id='{sealed['id']}')") and "by mind (root, task t1)" in listed[0]
-    assert "seals 2 rows" in listed[0] and f"draft {draft['id']} in room 1, by helper (fallback_page)" in listed[1]
+    assert "seals 2 rows" in listed[0] and f"draft {draft['id']} in room 1, by helper (fallback_page; helper draft, not lived)" in listed[1]
     assert listed[2].endswith(f"target memory_read(node_id='{sealed['id']}')")
     assert "rejects the draft" in listed[3] and listed[3].endswith(f"target memory_read(node_id='{draft['id']}')")
     assert "by mind (consciousness, task wake-1)" in listed[3]

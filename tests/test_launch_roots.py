@@ -396,6 +396,9 @@ def test_a_first_session_that_ends_before_setup_leaves_the_root_new(layout, tmp_
     (data / "settings.json").write_text("{}", encoding="utf-8")  # the provider is removed again
     _serve_and_quit(layout, data, "providerless-again", logs)
     third = {**_initialization_facts(data), "snapshot_kept": snapshot.read_bytes() == kept}
+    # No ordinary test downloads Node (Opus R2: these boots fetched node-v24.22.3, 52 MB plus a 133 MB generation, into
+    # this root): a real server.py's boot step only selects, and OUROBOROS_PYTEST_ACTIVE=1 starts no preparation.
+    assert not [*(data / "state" / "cx").glob("node/*"), *(data / "state" / "cx").glob("cache/node-*")]
     recorded = str(pathlib.Path("state") / "queue_snapshot.json")
     initialized = {"witness": ["ok", "complete", "first_boot", launch_roots.APP_ROOT_BASIS], "state": True,
                    "history": ["present", recorded], "basis": [launch_roots.APP_ROOT_BASIS, "witness"], "refused": []}

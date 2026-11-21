@@ -448,11 +448,9 @@ def retained_tool_custody(root: Any, task_id: str, row: dict, *, excluding: str 
                 or claim_still_owns_effect(root, claim)):
             blockers.append({"kind": "tool_handoff", "task_id": task_id, "operation": claim,
                              "operation_id": operation_id, **tool_handoff_reason(claim)})
-    from ouroboros.merge_receipts import effect_is_definite
-    for receipt in row.get("merge_receipts") or []:
-        if receipt.get("launch_operation_ids") and not effect_is_definite(receipt):
-            blockers.append({"kind": "merge_operation", "task_id": task_id,
-                             "receipt_id": receipt.get("receipt_id")})
+    from ouroboros.merge_receipts import held_receipts
+    blockers += [{"kind": "merge_operation", "task_id": task_id, "receipt_id": receipt.get("receipt_id"),
+                  "reason": why} for receipt, why in held_receipts(row)]
     return blockers
 
 

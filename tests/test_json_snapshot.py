@@ -114,3 +114,19 @@ def test_an_unreadable_file_is_never_remembered(tmp_path, monkeypatch):
 def test_an_absent_file_is_none_on_both_paths(tmp_path):
     assert utils.json_snapshot(tmp_path / "missing.json") is None
     assert utils.json_snapshot(tmp_path / "missing.json", strict=True) is None
+
+
+def test_a_descriptor_and_its_path_report_one_identity(tmp_path):
+    """CPython 3.12+ on Windows gives ``os.fstat`` the change time as ``st_ctime`` and ``os.stat`` the creation time:
+    the key takes the stamp both report there, while POSIX keeps its inode change time."""
+    from types import SimpleNamespace
+    descriptor, path = SimpleNamespace(st_ctime_ns=2, st_birthtime_ns=1), SimpleNamespace(st_ctime_ns=1, st_birthtime_ns=1)
+    assert utils.change_stamp_ns(descriptor, windows=True) == utils.change_stamp_ns(path, windows=True) == 1
+    assert utils.change_stamp_ns(SimpleNamespace(st_ctime_ns=5), windows=True) == 5  # 3.10: creation time, no birthtime
+    assert utils.change_stamp_ns(descriptor, windows=False) == 2
+    target = tmp_path / "state.json"
+    target.write_bytes(b"{}")
+    with target.open("ab") as handle:
+        handle.write(b" ")  # a write after creation moves the Windows change time away from the creation time
+    with target.open("rb") as handle:
+        assert utils.file_identity(os.fstat(handle.fileno())) == utils.file_identity(os.stat(target))

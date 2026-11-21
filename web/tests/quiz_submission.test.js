@@ -128,7 +128,7 @@ test('the feedback follows the answer it describes: Forget first and quiet, the 
         const card = fx.decision.buildQuizCard(WS_MSG);
         const box = card.querySelector('.chat-quiz-comment-box');
         const feedback = card.querySelector('.chat-quiz-feedback');
-        // One frame holds the words and Send; the field is named and grows through the composer's sizing.
+        // The wrapper keeps the words and Send together; the visible field is named and grows through the composer's sizing.
         assert.deepEqual(box.children.map((node) => node.className), ['chat-quiz-comment', 'chat-quiz-send ui-hit-area']);
         assert.equal(field(card).getAttribute('aria-label'), 'Your answer');
         assert.ok(['content', 'fit'].includes(field(card).dataset.sizing));

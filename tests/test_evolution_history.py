@@ -22,7 +22,7 @@ def _commit(repo, message, when, files):
     for name, text in files.items():
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8", newline="\n")  # the declared bytes on every OS
     _git(repo, "add", "-A")
     stamp = {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
     _git(repo, "commit", "-q", "-m", message, env=stamp)
@@ -133,7 +133,8 @@ def test_the_installation_series_keep_their_own_units_and_gaps(repo, tmp_path):
     assert install["scratchpad"]["latest"]["chars"] == 40
 
 
-def test_the_saved_copy_answers_at_once_while_a_refresh_runs_and_a_failure_keeps_it(repo, tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["refresh", "prepared_stdin"])
+def test_the_saved_copy_answers_at_once_while_a_refresh_runs_and_a_failure_keeps_it(repo, tmp_path, monkeypatch, failure):
     data = tmp_path / "data"
     owner = eh.EvolutionHistory()
     gate = threading.Event()
@@ -154,15 +155,27 @@ def test_the_saved_copy_answers_at_once_while_a_refresh_runs_and_a_failure_keeps
     assert saved["refresh"]["state"] == "idle" and len(saved["versions"]) == 4
 
     _git(repo, "tag", "-a", "v2.0.0", "-m", "Ouroboros v2.0.0")
-    monkeypatch.setattr(eh, "refresh", lambda *a: (_ for _ in ()).throw(RuntimeError("disk full")))
+    if failure == "refresh":
+        monkeypatch.setattr(eh, "refresh", lambda *a: (_ for _ in ()).throw(RuntimeError("disk full")))
+    else:
+        # The new tag names an already measured commit: its README enrichment is
+        # outside the per-commit try, so a failed batch keeps the saved snapshot.
+        from supervisor import git_ops
+        temporary = git_ops.tempfile.TemporaryFile
+        monkeypatch.setattr(git_ops.tempfile, "TemporaryFile",
+                            lambda **kw: (_ for _ in ()).throw(OSError("disk full")))
+    snapshot_bytes = (data / eh.SNAPSHOT_REL).read_bytes()
     assert owner.projection(str(repo), str(data))["refresh"]["state"] == "running"
     owner.join(10)
     failed = owner.projection(str(repo), str(data))
     assert failed["refresh"]["state"] == "failed" and "disk full" in failed["refresh"]["error"]
     assert failed["versions"] == saved["versions"], "the previous copy stays on screen"
+    assert (data / eh.SNAPSHOT_REL).read_bytes() == snapshot_bytes
     owner.join(10)
     assert owner.projection(str(repo), str(data))["refresh"]["state"] == "failed", "the same tags are not retried by themselves"
     monkeypatch.setattr(eh, "refresh", real)
+    if failure == "prepared_stdin":
+        monkeypatch.setattr(git_ops.tempfile, "TemporaryFile", temporary)
     assert owner.projection(str(repo), str(data), force=True)["refresh"]["state"] == "running"
     owner.join(10)
     assert len(owner.projection(str(repo), str(data))["versions"]) == 5
@@ -376,3 +389,26 @@ def test_the_checkpoints_follow_their_journal_and_never_remember_an_unreadable_o
     assert owner.checkpoints(str(data)) == [], "unreadable: nothing known this time"
     assert [row["task_id"] for row in owner.checkpoints(str(data))] == ["evo-8"], \
         "the same unchanged journal is read again, never remembered as empty"
+
+
+def test_history_long_batch_reads_exact_objects_through_regular_stdin(repo, monkeypatch):
+    import stat
+    from ouroboros.tools import shell_process
+
+    real_start, sources = shell_process.contained_popen, []
+    names = ["HEAD:a.py"] * 16000 + ["HEAD:BIBLE.md", "HEAD:absent"]
+    request = "".join(name + "\n" for name in names).encode()
+
+    def start(factory, cmd, **kwargs):
+        if cmd[-2:] == ["cat-file", "--batch"]:
+            source = kwargs["stdin"]
+            sources.append(source)
+            assert stat.S_ISREG(os.fstat(source.fileno()).st_mode) and source.tell() == 0
+            assert source.read() == request
+            source.seek(0)
+        return real_start(factory, cmd, **kwargs)
+
+    monkeypatch.setattr(shell_process, "contained_popen", start)
+    assert eh._cat_file(str(repo), names) == {"HEAD:a.py": b"one\n", "HEAD:BIBLE.md": b"b" * 2048,
+                                           "HEAD:absent": None}
+    assert len(sources) == 1 and sources[0].closed

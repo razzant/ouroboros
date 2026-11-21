@@ -105,11 +105,11 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 /* (0,5,0) outranks the light theme's connection colours (0,4,0): the tone below owns the word's ink. */
 :root .rw-trigger[data-tone] .status-badge.status-badge { color: inherit; }
 /* Tones (one producer, work_status.roomStatusView): crimson is live work, amber only the owner's own question, green
-   the room at rest; a pause, an access wait, a hold, starting and reconnecting are neutral facts. The mark after the
+   the room at rest; a pause, an access wait, a hold, starting, updating and reconnecting are neutral facts. The mark after the
    word takes the word's ink. */
 .rw-trigger[data-tone="live"] { color: var(--accent-light); }
 .rw-trigger[data-tone="wait"] { color: var(--status-warn-fg); }
-.rw-trigger:is([data-tone="queued"], [data-tone="held"], [data-tone="starting"]) { color: var(--text-meta); }
+.rw-trigger:is([data-tone="queued"], [data-tone="held"], [data-tone="starting"], [data-tone="updating"]) { color: var(--text-meta); }
 .rw-trigger[data-tone="unknown"] { color: var(--status-neutral-fg); }
 .rw-trigger[data-tone="online"] { color: var(--status-ok-fg); }
 /* A start that failed is the failure's word beside its red dot (host_starting_status.js), and the control stays
@@ -187,7 +187,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
    lie flat here, the budget saying its name and its amount, and an empty slot takes no room. */
 .rw-extras { display: flex; flex-direction: column; gap: 2px; padding: 0 var(--space-2) var(--space-3); }
 .rw-extras:empty { display: none; }
-.rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control {
+.rw-extras > :is(.chat-header-btn, .chat-budget-pill, .cx-chip).ui-chrome-control {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3);
     width: 100%; height: auto; min-height: var(--touch-target-min); padding: 0 var(--space-3);
     border-radius: var(--radius-inner); background: transparent; box-shadow: none;
@@ -195,13 +195,21 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     color: var(--text-primary); font-size: var(--type-body); font-weight: 400; text-align: start;
 }
 @media (hover: hover) {
-    .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control:hover { background: var(--rw-hover); }
+    .rw-extras > :is(.chat-header-btn, .chat-budget-pill, .cx-chip).ui-chrome-control:hover { background: var(--rw-hover); }
 }
+/* In Telegram's shared row the consciousness chip is one of these rows too (room_work.js placeChip), before Restart and
+   the budget: its name, then its next wake and its mark at the row's end; the brain stays the bar's. */
+.cx-chip-label { display: none; }
+.rw-extras > .cx-chip .cx-chip-label { display: inline; margin-inline-end: auto; }
+.rw-extras > .cx-chip .cx-chip-glyph { display: none; }
+.rw-extras > .cx-chip .cx-chip-word:not([hidden]) { display: inline; color: var(--text-meta); }
+/* A word's whole width, read for one moment in the same task (room_work.js cuts): nothing paints between. */
+.rw-measure-whole { min-width: max-content !important; }
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }
-/* The Project status bar keeps the room's history note; without one it takes no room. */
-.chat-panel-statusbar:not(:has(> :not([hidden]))) { display: none; }
+/* The Project status bar keeps the room's history note; without one it takes no room (`:empty`, see style.css). */
+.chat-panel-statusbar:empty { display: none; }
 
 /* ---- the list and its rows ------------------------------------------------------------------------- */
 /* A Project's list starts with the room's whole name, which its one-line title may cut: a section title, wrapping as

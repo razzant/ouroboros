@@ -459,3 +459,93 @@ def test_the_daily_allowance_decides_on_known_spend(data_root, monkeypatch, sett
     assert window["status"] == status and window["remaining_usd"] == pytest.approx(remaining)
     assert window["settled_usd"] == pytest.approx(cost)
     assert window["accounted_usd"] == pytest.approx(cost + (unresolved or 0.0))
+
+
+# --- when room returns: the display's forecast ------------------------------------------------
+#
+# The forecast answers with the window's own rules: each row leaves at min(its time + 24 h, its root's newest
+# category row + 48 h), the edges inclusive, the one reducer's rounding deciding. Every case below checks the
+# forecast against the window itself on both sides of its instant, so the two cannot drift apart.
+
+
+def _frees_exactly_after(root, instant):
+    """The real verdict is still exhausted AT the instant and available just after it."""
+    assert allowance.allowance_window(root, now=instant)["status"] == allowance.STATUS_EXHAUSTED
+    assert allowance.allowance_window(root, now=instant + 0.001)["status"] == allowance.STATUS_AVAILABLE
+
+
+def test_room_returns_when_enough_old_spend_leaves_and_the_real_window_agrees(data_root, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "3")
+    _wake(data_root, monkeypatch, T0 - 20 * HOUR, 2.0)
+    _wake(data_root, monkeypatch, T0 - 2 * HOUR, 1.5, task_id="wake-2")
+    window = allowance.allowance_window(data_root, now=T0, forecast=True)
+    assert window["status"] == "exhausted"
+    assert window["room_after"] == _iso(T0 + 4 * HOUR) and window["window_changes_at"] == T0 + 4 * HOUR
+    _frees_exactly_after(data_root, T0 + 4 * HOUR)
+
+
+def test_a_later_leaving_row_decides_when_one_old_row_is_not_enough(data_root, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "3")
+    _wake(data_root, monkeypatch, T0 - 20 * HOUR, 0.5)
+    _wake(data_root, monkeypatch, T0 - 10 * HOUR, 2.0, task_id="wake-2")
+    _wake(data_root, monkeypatch, T0 - 1 * HOUR, 1.5, task_id="wake-3")
+    window = allowance.allowance_window(data_root, now=T0, forecast=True)
+    # The first leaving row ($0.50) still leaves $3.50 counted; room needs the $2 row to go as well.
+    assert window["window_changes_at"] == T0 + 4 * HOUR
+    assert window["room_after"] == _iso(T0 + 14 * HOUR)
+    _frees_exactly_after(data_root, T0 + 14 * HOUR)
+
+
+def test_a_root_horizon_ends_a_descendants_row_before_its_own_24_hours(data_root, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "4")
+    # The started root's own category row is 30 h old; a later review row of its tree carries another category.
+    _started(data_root, monkeypatch, T0 - 30 * HOUR, 1.0)
+    _started(data_root, monkeypatch, T0 - 1 * HOUR, 5.0, task_id="c-root-review", category="review")
+    window = allowance.allowance_window(data_root, now=T0, forecast=True)
+    assert window["status"] == "exhausted" and window["settled_usd"] == pytest.approx(5.0)
+    # Its own 24 h would end at T0 + 23 h; the root stops being discovered after T0 - 30 h + 48 h.
+    assert window["room_after"] == _iso(T0 + 18 * HOUR)
+    _frees_exactly_after(data_root, T0 + 18 * HOUR)
+
+
+def test_rows_leaving_together_and_the_reducers_rounding_decide_like_the_window(data_root, monkeypatch):
+    # Known spend is the reducer's six-decimal total: three $0.0000004 rows count as $0.000001, two of them too.
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "0.000001")
+    _wake(data_root, monkeypatch, T0 - 23 * HOUR, 0.0000004)
+    _wake(data_root, monkeypatch, T0 - 23 * HOUR, 0.0000004, task_id="wake-tied")
+    _wake(data_root, monkeypatch, T0 - 22 * HOUR, 0.0000004, task_id="wake-3")
+    window = allowance.allowance_window(data_root, now=T0, forecast=True)
+    assert window["status"] == "exhausted"
+    # The two tied rows leave together at T0 + 1 h: $0.0000004 left rounds to $0.00 (a float sum would say the
+    # first single row's exit already freed room; the reducer's own total never passes through that state).
+    assert window["room_after"] == _iso(T0 + HOUR)
+    _frees_exactly_after(data_root, T0 + HOUR)
+
+
+@pytest.mark.parametrize("case", ["available", "zero", "degraded", "admission"])
+def test_the_forecast_is_withheld_where_it_would_not_be_true(data_root, monkeypatch, case):
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", {"available": "20", "zero": "0"}.get(case, "1"))
+    _wake(data_root, monkeypatch, T0 - 2 * HOUR, 1.5)
+    if case == "degraded":
+        monkeypatch.setattr(usage_store, "integrity_degraded", lambda _root: True)
+    window = allowance.allowance_window(data_root, now=T0, forecast=case != "admission")
+    if case == "admission":  # an admission's read is unchanged: no forecast, no horizon query
+        assert "room_after" not in window and "window_changes_at" not in window
+        return
+    assert window["room_after"] is None
+    assert window["window_changes_at"] == T0 + 22 * HOUR  # the cache's end stays known
+    assert window["status"] == ("available" if case == "available" else "exhausted")
+
+
+def test_open_rows_are_counted_apart_from_unpriced_ones(data_root, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "20")
+    _wake(data_root, monkeypatch, T0 - 3 * HOUR, 1.0)
+    _at(monkeypatch, T0 - HOUR)
+    sent = ua.reserve_attempt(_request(data_root, reservation_usd=4.0, task_id="wake-1", root_task_id="wake-1",
+                                       category="consciousness"))
+    ua.mark_dispatched(sent)
+    _subscription(data_root, monkeypatch, T0 - HOUR, session="sess-unknown", spend=None)
+    window = allowance.allowance_window(data_root, now=T0)
+    # The call in flight can still settle (open, its bound known); the session ended without a price (unknown, closed).
+    assert window["accounting_open_rows"] == 1 and window["unknown_unmetered"] == 1 and window["non_final_rows"] == 2
+    assert window["settled_usd"] == pytest.approx(1.0)

@@ -7,23 +7,25 @@ import pytest
 from ouroboros import model_sleep
 from ouroboros.task_results import write_task_result
 from ouroboros.tools import control_task_results as tasks
+from tests._run_wait_shared import wake_now
 from tests.test_delegate_wake_truthful_facts import _ctx
 
 
 @pytest.mark.parametrize("ready", [False, True])
-def test_supervised_wait_reads_shared_terminal_custody_without_fabricating_a_success(tmp_path, monkeypatch, ready):
-    from ouroboros import delegate_supervision as supervision
-
+def test_a_wake_reads_shared_terminal_custody_without_fabricating_a_success(tmp_path, monkeypatch, ready):
+    """One read per wake: a quiet read beside a terminal the custody holds is that terminal's fact
+    (``terminal_custody``), never a success, and a quiet read with none stays what it read."""
     ctx, calls = _ctx(tmp_path), []
     monkeypatch.setattr(model_sleep, "_owned_runs", lambda *_a, **_kw: {
-        "run": SimpleNamespace(settled=ready, terminal_state="failed" if ready else "running", review_owned=False)})
+        "run": SimpleNamespace(settled=ready, terminal_state="failed" if ready else "running", review_owned=False,
+                               pending_interaction_ids=[], interaction_source={})})
 
     def observe(*_a, **_kw):
         calls.append(True)
-        return json.dumps({"status": "no_progress" if len(calls) == 1 else "needs_input", "run_id": "run"})
-    result = json.loads(supervision.supervised_wait(ctx, "run", wait_once=observe).text)
-    assert len(calls) == (1 if ready else 2)
-    assert result["status"] == ("terminal_custody" if ready else "needs_input")
+        return json.dumps({"status": "no_progress", "run_id": "run"})
+    result = json.loads(wake_now(ctx, "run", wait_once=observe).text)
+    assert len(calls) == 1
+    assert result["status"] == ("terminal_custody" if ready else "no_progress")
     if ready:
         assert result["terminal_facts"][0]["id"] == "run:run"
         assert result["terminal_facts"][0]["state"] == "failed"
@@ -59,8 +61,7 @@ def test_public_task_wait_calls_the_shared_predicate_and_keeps_timeout(tmp_path,
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_supervised_control_preempts_terminal_peeks(tmp_path, monkeypatch, cancel):
-    from ouroboros import delegate_supervision as supervision
+def test_a_wake_control_preempts_terminal_peeks(tmp_path, monkeypatch, cancel):
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.owner_mailbox import write_owner_message
 
@@ -74,6 +75,6 @@ def test_supervised_control_preempts_terminal_peeks(tmp_path, monkeypatch, cance
     def observe(*_a, **_kw):
         assert not cancel, "cancellation must preempt transport"
         return json.dumps({"status": "no_progress", "run_id": "run"})
-    result = json.loads(supervision.supervised_wait(ctx, "run", wait_once=observe).text)
+    result = json.loads(wake_now(ctx, "run", wait_once=observe).text)
     assert any(event.get("type") == "cancellation_intent" if cancel else event.get("kind") == "finalize_now"
                for event in result["wake_events"])

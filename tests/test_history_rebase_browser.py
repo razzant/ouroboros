@@ -5,7 +5,7 @@ import pytest
 
 from tests.test_history_bookmark_browser import _GAP, _bookmark_reconnect, _retained_room, _stage_file
 from tests.test_chat_history_paging_browser import (
-    _append, _assert_at_newest, _open, _open_project, _step, _idle, _screenshot, _FRAMES, _result,
+    MAIN, _append, _assert_at_newest, _open, _open_project, _step, _idle, _screenshot, _FRAMES, _result,
 )
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_history_continuity_browser import _FAULT, _bookmark_place
@@ -203,10 +203,12 @@ def test_a_visible_receipt_line_keeps_its_node_when_the_newest_window_moves_past
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_newest(direct_server_with_data, browser_engine, tmp_path):
-    """Read pages back, a room opened again while its newest page is still loading: a failed Send keeps
+def test_send_while_a_room_opened_cold_loads_keeps_a_failed_draft_and_stays_at_the_newest(direct_server_with_data, browser_engine, tmp_path):
+    """Read pages back, a room opened cold while its newest page is still loading: a failed Send keeps
     the draft and the file, and the room lands at its newest message; an accepted Send's echo is the
-    newest row and the late read cannot pull the reader away from it (owner decision 2026-10-05)."""
+    newest row and the late read cannot pull the reader away from it (owner decision 2026-10-05). A return
+    within the page session finds a kept room as left (owner 2026-11-03), so the cold opening follows a
+    reload, the only end of a visited room (web/modules/room_retire.js)."""
     from playwright.sync_api import sync_playwright
 
     project = _retained_room(direct_server_with_data['data_dir'], 'send-place', 1200)
@@ -221,13 +223,15 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
             feed = _open_project(page, project)
             target = page.locator(f'{feed} [data-client-message-id="send-place-650"]')
 
-            def reopen_held(read_back):
+            def open_cold_held(read_back):
                 if read_back:
                     for _ in range(3):
                         _step(page, feed, automatic=True)
                     _bookmark_place(page, target, 80)
                 page.locator('#project-panel-close').click()
-                page.locator(feed).wait_for(state='detached')  # a new instance owes the held newest read
+                page.reload(wait_until='domcontentloaded', timeout=30_000)  # a new instance owes the held newest read
+                page.wait_for_function('() => window.__testSockets?.some(s => s.readyState === WebSocket.OPEN)')
+                _idle(page, MAIN)
                 page.evaluate('id => { window.__holdRoom = {chatId: id, released: new Promise(r => { window.__releaseRoom = r; })}; }', cid)
                 _click_project(page, project)
                 page.wait_for_function(held, arg=cid)
@@ -238,7 +242,7 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
                 _idle(page, feed)
                 page.evaluate(_FRAMES)
 
-            reopen_held(read_back=True)
+            open_cold_held(read_back=True)
             page.route('**/api/chat/upload', lambda route: route.fulfill(
                 status=500, content_type='application/json', body='{"ok": false, "error": "controlled upload failure"}'))
             _stage_file(page)
@@ -254,7 +258,7 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
             page.unroute('**/api/chat/upload')
             page.locator('#project-panel .attach-remove').click()
             page.locator(composer).fill('')
-            reopen_held(read_back=False)
+            open_cold_held(read_back=False)
             page.evaluate(_KEEP_CHAT_FRAMES)
             page.locator(composer).fill('SENT_WHILE_THE_ROOM_LOADS')
             page.locator(composer).press('Enter')
@@ -271,7 +275,7 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_unavailable_recent_in_a_shallow_room_reopens_following_the_present(direct_server_with_data, browser_engine, tmp_path):
-    """A recent read that could not be loaded, ↓ with the present loaded: the retained room reopens live."""
+    """A shallow retained window still owes a failed catch-up; after repair, a failed reopen keeps its following."""
     from playwright.sync_api import sync_playwright
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
@@ -300,15 +304,32 @@ def test_unavailable_recent_in_a_shallow_room_reopens_following_the_present(dire
             page.evaluate(_FRAMES)
             before = page.evaluate('() => window.__historyReads.length')
             page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
+            page.wait_for_function(f'n => ({since})(n).some(r => r.done)', arg=[before, cid])
             page.evaluate(_FRAMES)
+            assert page.locator(feed).evaluate(_GAP) <= 8, '↓ reaches retained messages even when catch-up fails'
+            assert page.locator('#project-panel-body .chat-scroll-bottom-btn').is_visible(), 'Retry stays reachable at the retained bottom'
+            assert page.locator('#project-panel-body .chat-scroll-bottom-btn').get_attribute('aria-label') == 'Retry loading latest messages'
+            failed = page.evaluate(since, [before, cid])
+            assert len(failed) == 1 and failed[0].get('error'), failed
+            page.evaluate('() => { window.__continuityFault = null; }')
+            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
+            _idle(page, feed)
             page.evaluate(_FRAMES)
-            assert page.evaluate(since, [before, cid]) == [], 'the loaded present needs no read'
             assert page.locator(feed).evaluate(_GAP) <= 8
 
             page.locator('#project-panel-close').click()
             page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state='attached')
             assert page.locator('.chat-instance-panel[data-pending-work="1"]').count() == 1
+            page.evaluate("id => { window.__continuityFault = {chatId: id, fail: 'recent'}; }", cid)
+            before = page.evaluate('() => window.__historyReads.length')
             _click_project(page, project)
+            # CSS-visible off-screen is not a shown room. A failed read opens the panel at its loading bound;
+            # WebKit can clamp the hidden feed before that entrance, so assert the consumer after it is exposed.
+            page.wait_for_function("""() => {
+                const panel = document.getElementById('project-panel');
+                return panel.classList.contains('open')
+                    && !panel.getAnimations().some(a => a.pending || a.playState === 'running');
+            }""")
             page.evaluate(_FRAMES)
             _emit_ws_frame(page, {'type': 'chat', 'chat_id': cid, 'role': 'assistant',
                                   'content': 'LIVE_REPLY_AFTER_SHALLOW_REOPEN', 'ts': '2026-09-27T22:00:00Z'})

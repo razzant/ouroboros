@@ -17,9 +17,10 @@ inputs:
       The interpreter the environment is built on: setup-python, or shipped — the
       python-build-standalone release the desktop packages bundle, fetched by the same
       pinned and checksummed scripts/download_python_standalone.* the builds use. Test
-      jobs take shipped, so they run the SQLite (and with it the store's journal mode, WAL)
-      that fresh installs run; quick-test and journal-persist keep setup-python's, whose
-      PERSIST is what an install updated in place keeps running.
+      jobs take shipped, so they run the Python and SQLite (and with it the store's journal
+      mode, WAL) that fresh installs run; quick-test and journal-persist keep setup-python's
+      3.10: the interpreter, Pillow line and PERSIST journal an older app updated in place
+      keeps running. Builds freeze their launcher from a venv of python-standalone itself.
     required: false
     default: setup-python
 

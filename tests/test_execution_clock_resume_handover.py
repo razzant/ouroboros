@@ -196,6 +196,7 @@ def _loop_once(host, monkeypatch, task, *, plan, events=None, cut=None, expect=P
 def _fresh_plan(monkeypatch):
     """Main and fallback share one model on different accounts; every new worker starts on Main."""
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a", "fallback": ["account-b"]}))
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=route-fixture-model")  # Main is that one model
     return replace(_plan(), model="claudexor::codex=route-fixture-model")
 
 

@@ -431,10 +431,11 @@ def test_delivered_documents_open_in_the_reader_live_and_after_reload(direct_ser
 
 PROJECT_FILES = {"room-brief.md": BRIEF.encode(), "room-notes.txt": NOTES.encode()}
 
+# A room left is kept away (room_retire.js, DESIGN §10): still in the page inside its hidden room, nothing of it shown.
 LEFT_BEHIND = """room => ({
     readers: document.querySelectorAll('dialog.document-reader').length,
     open_dialogs: document.querySelectorAll('dialog[open]').length,
-    room: Boolean(document.querySelector(room)),
+    room_kept_away: Boolean(document.querySelector(room)?.closest('[hidden]')),
     focus_connected: !document.activeElement || document.activeElement.isConnected,
 })"""
 
@@ -474,8 +475,8 @@ def _release(page, held):
 
 @pytest.mark.ui_browser
 def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
-    """A Project room's delivered documents read live and after a reload; leaving the room
-    destroys its chat, which aborts a pending read and removes an open reader, and the room
+    """A Project room's delivered documents read live and after a reload; leaving the room puts
+    it away (kept, hidden), which aborts a pending read and removes an open reader, and the room
     reopens to a working reader. Leaving goes through the app's own `ouro:open-project`
     navigation (what a Project reference does): a modal reader makes the panel's own Close inert."""
     from playwright.sync_api import sync_playwright
@@ -561,7 +562,7 @@ def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_ser
             page.locator(f'#pchat-{other["id"]}-messages').wait_for(state="visible", timeout=30_000)
             assert _await_abort(page, failed, artifact["room-notes.txt"]), "leaving the room aborted the pending read"
             assert page.evaluate(LEFT_BEHIND, feed) == {
-                "readers": 0, "open_dialogs": 0, "room": False, "focus_connected": True}
+                "readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
             _release(page, held)
             # Nothing modal is left over the app: the room now shown takes a click at once.
             page.locator(f'[id="pchat-{other["id"]}-input"]').click(timeout=5_000)
@@ -577,7 +578,7 @@ def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_ser
             page.evaluate(OPEN_ROOM, other)
             page.locator(f'#pchat-{other["id"]}-messages').wait_for(state="visible", timeout=30_000)
             assert page.evaluate(LEFT_BEHIND, feed) == {
-                "readers": 0, "open_dialogs": 0, "room": False, "focus_connected": True}
+                "readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
             page.locator(f'[id="pchat-{other["id"]}-input"]').click(timeout=5_000)
         finally:
             chromium.close()
@@ -607,11 +608,13 @@ def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_ser
             page.locator(f'#pchat-{other["id"]}-messages').wait_for(state="visible", timeout=30_000)
             assert _await_abort(page, failed, artifact["room-notes.txt"])
             assert page.evaluate(LEFT_BEHIND, feed) == {
-                "readers": 0, "open_dialogs": 0, "room": False, "focus_connected": True}
+                "readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
             _release(page, held)
-            # On a phone the other room covers Main's menu: close it, then reopen the room.
+            # The other room was opened by a reference from this one, a jump: closing it returns here (the jump's
+            # return, docs/DESIGN.md "Layers and dismissal"), and the room reopens its reader.
             page.locator("#project-panel-close").click()
-            feed = _enter_room(page, room)
+            page.locator(feed).wait_for(state="visible", timeout=30_000)
+            assert page.evaluate("() => window.__ouroLayers.ids()") == ["project"]
             state = _open(page, "room-notes.txt", ready=".document-reader-source", feed=feed)
             assert state["source"] == NOTES
             _close_with_escape(page)
@@ -957,11 +960,14 @@ def test_reader_in_a_translated_ui_and_copy_without_async_clipboard(direct_serve
                 big = page.evaluate(COPY_STATE)
                 assert not big["highlighted"] and len(big["code_text"]) > 32768, len(big["code_text"])
                 # Keyboard activation from a scrolled document exercises both
-                # actual focus restoration and a nonzero viewport position.
+                # actual focus restoration and a nonzero viewport position. The
+                # owner scrolls with the focus kept on Copy: focus the keyboard
+                # can see comes clear of the reader's fade when it lands
+                # (scroll_fade.js), so the scroll comes after it.
                 page.evaluate("""() => {
                     const dialog = document.querySelector('dialog.document-reader');
-                    dialog.querySelector('.document-reader-body').scrollTop = 100;
                     dialog.querySelector('.md-code-copy').focus({preventScroll: true});
+                    dialog.querySelector('.document-reader-body').scrollTop = 100;
                 }""")
                 page.keyboard.press("Enter")
                 page.wait_for_function("() => document.querySelector('dialog.document-reader .md-code-copy').textContent === 'Скопировано'")

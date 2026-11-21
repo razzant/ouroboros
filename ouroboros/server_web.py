@@ -15,9 +15,13 @@ import importlib.util
 import logging
 import os
 import pathlib
+import zlib
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+import anyio.to_thread
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.middleware import Middleware
 from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
@@ -32,6 +36,11 @@ UI_OWNER_MARKER = '<meta name="ouroboros-ui-owner" content="core">'
 APPEARANCE_SCOPE_META = "ouroboros-appearance-scope"
 TELEGRAM_MINIAPP_HEADER = "X-Ouroboros-Telegram-MiniApp"
 _NO_STORE = {"Cache-Control": "no-store"}
+BUILTIN_STATIC_CACHE = b"private, no-cache, must-revalidate"
+_GZIP_TYPES = frozenset({"application/json", "text/javascript", "application/javascript", "text/css", "text/plain",
+                         "image/svg+xml"})
+_GZIP_MIN_BYTES = 1024
+_GZIP_THREAD_BYTES = 128 * 1024
 _NO_MAIN_UI_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Ouroboros</title></head>
 <body><h1>No main interface is served here</h1>
@@ -73,23 +82,119 @@ def read_author_kit_assets(repo_dir: pathlib.Path) -> dict[str, str]:
 
 
 class NoCacheStaticFiles:
-    """Wrap StaticFiles to add Cache-Control: no-cache headers."""
+    """Wrap StaticFiles so every answer is revalidated (ETag, 304) before reuse.
 
-    def __init__(self, **kwargs):
+    The builtin tree says ``private`` too: the Telegram proxy keeps exactly that answer and turns
+    any other into ``no-store``, so a selected directory's files are never kept on the phone."""
+
+    def __init__(self, *, cache_control: bytes = b"no-cache, must-revalidate", **kwargs):
         self._app = StaticFiles(**kwargs)
+        self._cache_control = cache_control
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             async def send_with_no_cache(message):
                 if message["type"] == "http.response.start":
                     headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
-                    headers.append((b"cache-control", b"no-cache, must-revalidate"))
+                    headers.append((b"cache-control", self._cache_control))
                     message = {**message, "headers": headers}
                 await send(message)
 
             await self._app(scope, receive, send_with_no_cache)
         else:
             await self._app(scope, receive, send)
+
+
+def _accepts_gzip(headers: Headers) -> bool:
+    """A ``gzip`` token in any ``Accept-Encoding`` line, any case, whose weight is not zero (RFC 9110 12.5.3)."""
+    for item in ",".join(headers.getlist("accept-encoding")).split(","):
+        name, _, params = item.partition(";")
+        if name.strip().lower() == "gzip":
+            pairs = (param.partition("=") for param in params.split(";"))
+            weight = next((value for key, _, value in pairs if key.strip().lower() == "q"), "1")
+            try:
+                if float(weight) > 0:
+                    return True
+            except ValueError:
+                pass  # an unreadable weight refuses this token; a later one may still accept
+    return False
+
+
+class GzipText:
+    """gzip a GET's 200 text answer of 1 KiB or more for a client that accepts it, as nginx does: the
+    compressed variant's ETag turns weak (a 304 answering that weak form repeats it) and its ``Accept-Ranges``
+    goes, and every 200 of such a type and every 304 says ``Vary: Accept-Encoding``. HEAD, sockets, event streams and other types, downloads
+    (``Content-Disposition``), encoded bodies and stored files outside the interface's own trees (an answer
+    offering ``Accept-Ranges``) pass untouched. A declared length decides the threshold, else the first
+    chunk; a streamed body is flushed per chunk, so compression never holds back what was sent."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "GET":
+            await self.app(scope, receive, send)
+            return
+        request = Headers(scope=scope)
+        wants = _accepts_gzip(request)
+        validators = {tag.strip() for tag in ",".join(request.getlist("if-none-match")).split(",")}
+        interface_file = str(scope.get("path") or "").startswith(tuple(p + "/" for p in ServedUI.STATIC_PREFIXES))
+        start: dict | None = None
+        gzip: Any = None
+
+        async def deflate(data: bytes, last: bool) -> bytes:
+            def run() -> bytes:
+                return gzip.compress(data) + gzip.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
+            return await anyio.to_thread.run_sync(run) if len(data) > _GZIP_THREAD_BYTES else run()
+
+        async def send_gzip(message):
+            nonlocal start, gzip
+            kind = message["type"]
+            if kind == "http.response.start":
+                headers = Headers(raw=message["headers"])
+                eligible = (message["status"] == 200 and "content-encoding" not in headers
+                            and "content-disposition" not in headers
+                            and (interface_file or "accept-ranges" not in headers)
+                            and headers.get("content-type", "").partition(";")[0].strip().lower() in _GZIP_TYPES)
+                if eligible or message["status"] == 304:
+                    # Edited as a copy, never the response object's own header list.
+                    edit = MutableHeaders(raw=list(message["headers"]))
+                    edit.add_vary_header("Accept-Encoding")
+                    message = {**message, "headers": edit.raw}
+                    etag = edit.get("etag", "")
+                    if message["status"] == 304 and etag[:2] != "W/" and "W/" + etag in validators:
+                        edit["ETag"] = "W/" + etag  # the stored gzip variant is revalidated by its own weak form
+                    length = headers.get("content-length", "")
+                    if eligible and wants and not (length.isdigit() and int(length) < _GZIP_MIN_BYTES):
+                        start = message  # held until the first body: a single message gets its own length
+                        return
+            elif kind == "http.response.pathsend" and start is not None:
+                start, held = None, start
+                await send(held)
+            elif kind == "http.response.body" and gzip is not None:
+                message = {**message, "body": await deflate(message.get("body", b""), not message.get("more_body"))}
+            elif kind == "http.response.body" and start is not None:
+                body, more = message.get("body", b""), message.get("more_body", False)
+                start, held = None, start
+                edit = MutableHeaders(raw=held["headers"])
+                if "content-length" in edit or len(body) >= _GZIP_MIN_BYTES:
+                    gzip = zlib.compressobj(6, zlib.DEFLATED, 31)
+                    edit["Content-Encoding"] = "gzip"
+                    del edit["Content-Length"]
+                    del edit["Accept-Ranges"]
+                    etag = edit.get("etag", "")
+                    if etag and not etag.startswith("W/"):
+                        edit["ETag"] = "W/" + etag
+                    message = {**message, "body": await deflate(body, not more)}
+                    if not more:
+                        edit["Content-Length"] = str(len(message["body"]))
+                await send(held)
+            await send(message)
+
+        await self.app(scope, receive, send_gzip)
+
+
+TEXT_COMPRESSION = [Middleware(GzipText)]
 
 
 def appearance_scope(drive_root: Any) -> str:
@@ -208,7 +313,7 @@ class ServedUI:
         self.repo_dir = pathlib.Path(repo_dir)
         self.builtin_dir = resolve_web_dir(self.repo_dir)
         self.builtin_dir.mkdir(parents=True, exist_ok=True)
-        self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir))
+        self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir), cache_control=BUILTIN_STATIC_CACHE)
         self._builtin_page = make_index_page(self.builtin_dir, head=lambda request: self.appearance_meta(request.headers))
         self._current = _Generation(UiSelection("builtin", self.builtin_dir), self._builtin_static)
 
@@ -228,12 +333,16 @@ class ServedUI:
         scope = appearance_scope(current.drive_root)
         return f'<meta name="{APPEARANCE_SCOPE_META}" content="{scope}">' if scope else ""
 
+    # The interface's own file trees, the only stored files ``GzipText`` compresses.
+    STATIC_PREFIXES = ("/onboarding/static", "/static")
+
     def mounts(self) -> list[Mount]:
         """Public selected login assets, builtin recovery resources, then selected main assets."""
+        onboarding, main = self.STATIC_PREFIXES
         return [
             Mount("/auth", app=self.auth_assets, name="auth_assets"),
-            Mount("/onboarding/static", app=self._builtin_static, name="onboarding_static"),
-            Mount("/static", app=self.static, name="static"),
+            Mount(onboarding, app=self._builtin_static, name="onboarding_static"),
+            Mount(main, app=self.static, name="static"),
         ]
 
     def apply(self, app: Any, settings: Mapping[str, Any]) -> UiSelection:

@@ -137,7 +137,6 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("current_sha", None)
     st.setdefault("last_owner_message_at", "")
     st.setdefault("last_evolution_task_at", "")
-    st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
     # Durable owner-stop sentinel: set True by the owner-stop sites, cleared by an
     # owner-authorized start (/evolve start or the owner-directed toggle_evolution(True)
@@ -179,10 +178,10 @@ RECOVERY_KEY = "_recovery"
 STATE_READ_KEY = "_state_read"  # projection-only read quality; never persisted
 CONTROL_KEYS = (
     "evolution_mode_enabled", "evolution_owner_stopped", "evolution_stop_source",
-    "post_task_autostop", "bg_consciousness_enabled",
+    "post_task_autostop", "bg_consciousness_enabled", "bg_consciousness_stop_source",
     "owner_id", "owner_chat_id", "owner_external_id", "owner_external_chat_id",
 )
-OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop"})
+OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source"})
 CURRENT_QUALITIES = frozenset({"current", "recovered"})
 
 
@@ -499,14 +498,14 @@ def update_state(mutator, *, confirm: Tuple[str, ...] = (), lock_timeout_sec: fl
 def _set_aside_copies_older_than_a_reset(witness: Any) -> None:
     """An owner Reset's ``pending`` witness is the owner's explicit fresh start: a state
     copy of another identity (a writer that raced the Reset's delete) is moved aside
-    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK."""
-    w_status, record = witness.read_witness(DRIVE_ROOT)
-    if not (w_status == "ok" and record.get("phase") == "pending" and record.get("origin") == "owner_reset"):
+    under a new name — never adopted as current, never deleted. Caller holds STATE_LOCK.
+    Which copies is the witness module's decision, so setup's ``first_state_pending`` reads the same one."""
+    identity, stamp = witness.pending_reset_identity(DRIVE_ROOT), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    if identity is None:
         return
-    identity, stamp = str(record.get("initialization_id") or ""), time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     for path in (STATE_PATH, STATE_LAST_GOOD_PATH):
         status, obj, _raw, detail = _read_json_file(path)
-        if status == "missing" or (status == "ok" and obj.get("initialization_id") == identity):
+        if not witness.reset_sets_aside(status, obj, identity):
             continue
         if status == "unreadable":
             raise StateUnavailable("primary_unreadable", detail)
@@ -559,7 +558,7 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
                     raise StateUnavailable(str(decision.get("reason") or "refused"),
                                            str(decision.get("detail") or ""))
                 created = str(decision["initialization_id"])
-                st = ensure_state_defaults({"initialization_id": created})
+                st = ensure_state_defaults(witness.first_state(DRIVE_ROOT, created))
             if not created:
                 try:
                     st["initialization_id"] = witness.prepare_adoption(DRIVE_ROOT, st)
@@ -1281,6 +1280,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
     busy_count = sum(1 for w in workers_dict.values() if getattr(w, 'busy_task_id', None) is not None)
     lines.append(f"workers: {len(workers_dict)} (busy: {busy_count})")
     lines.append(f"pending: {len(pending_list)}")
+    from supervisor.pool_admission import status_words  # why queued work may wait for a new process
+    lines.extend(filter(None, [status_words()]))
     lines.append(f"running: {len(running_dict)}")
     if pending_list:
         preview = []

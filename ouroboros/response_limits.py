@@ -25,6 +25,8 @@ class ResponseLimit:
 # Dispatch reaches one fixed endpoint for these providers (llm_routing); Claudexor's
 # URL is a locality fact. A configured base URL there identifies nothing.
 SINGLE_ENDPOINT_PROVIDERS = frozenset({"openai", "anthropic", "deepseek", "openrouter", "claudexor"})
+# The source suffix of a record a failed metadata read wrote: no statement (``capability_evidence._later_statement``).
+FAILED_READ = "metadata read failed"
 
 
 def positive_limit(value: Any) -> int:
@@ -146,7 +148,8 @@ def record_response_ack(drive_root, *, provider, model, base_url="", options=Non
 
 
 def resolve_response_limit(drive_root, *, provider, model, base_url="", options=None,
-                           allow_fetch=False, api_key=None) -> ResponseLimit:
+                           allow_fetch=False, api_key=None, read_failed=False, observed=None) -> ResponseLimit:
+    """``observed``: the limit the caller's own metadata read just stated, which a second read could only repeat."""
     from ouroboros.capability_evidence import (_read, _age_seconds,
         _CONFIRMED_TTL_SEC, _FAILED_TTL_SEC, _openai_compatible_metadata_window, _claudexor_metadata_evidence)
 
@@ -155,6 +158,9 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
     ack = data.get("response_acks", {}).get(fp)
     if ack:
         return ResponseLimit(**ack)
+    if observed:
+        ttl = _CONFIRMED_TTL_SEC if observed.get("max_output_tokens") else _FAILED_TTL_SEC
+        return ResponseLimit(**{**observed, "stale": _age_seconds(observed.get("observed_at", "")) > ttl})
     cached = data.get("response_limits", {}).get(fp)
     if cached:
         ttl = _CONFIRMED_TTL_SEC if cached.get("max_output_tokens") else _FAILED_TTL_SEC
@@ -164,7 +170,9 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
     if allow_fetch and _age_seconds(failed_refresh.get("observed_at", "")) > _FAILED_TTL_SEC:
         read = "no maximum observed for this route"
         try:
-            if provider in {"openai-compatible", "minimax"}:
+            if read_failed:  # this probe's own catalog read failed: it answers here too, never read a second time
+                read = FAILED_READ
+            elif provider in {"openai-compatible", "minimax"}:
                 _openai_compatible_metadata_window(model, base_url, True, api_key, provider=provider,
                                                   evidence_root=drive_root)
             elif provider == "openrouter":
@@ -174,7 +182,7 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
                 # unless the process's read of it just failed: that failure answers this reader too.
                 LLMClient._fetch_openrouter_capabilities()
                 if LLMClient.metadata_fetch_attempted_and_failed():
-                    read = "metadata read failed"
+                    read = FAILED_READ
             elif provider == "claudexor":
                 ev = _claudexor_metadata_evidence(model, base_url, None, options, evidence_root=drive_root)
                 if ev.account_fingerprint:
@@ -184,7 +192,7 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
             else:
                 read = ""  # No metadata source for this provider: nothing was read.
         except Exception:
-            read = "metadata read failed"  # No inferred maximum after a failed metadata read.
+            read = FAILED_READ  # No inferred maximum after a failed metadata read.
         cached = _read(drive_root).get("response_limits", {}).get(fp)
         absent = not cached or (not cached.get("max_output_tokens")
                                 and _age_seconds(cached.get("observed_at", "")) > _FAILED_TTL_SEC)
@@ -209,9 +217,10 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
 def response_limit_for_target(target: dict) -> ResponseLimit:
     from ouroboros.capability_evidence import canonical_evidence_root
 
-    return resolve_response_limit(canonical_evidence_root(), provider=target.get("provider", ""),
-        model=target.get("requested_model") or target.get("usage_model") or target.get("model") or target.get("resolved_model", ""),
-        base_url=target.get("base_url", ""), options=target.get("capability_options"))
+    identity = target.get("capability_route") or {}
+    return resolve_response_limit(canonical_evidence_root(), provider=identity.get("provider", target.get("provider", "")),
+        model=identity.get("model") or target.get("requested_model") or target.get("usage_model") or target.get("model") or target.get("resolved_model", ""),
+        base_url=identity.get("dispatch_base_url", target.get("base_url", "")), options=target.get("capability_options"))
 
 
 def dispatch_target(model: str, settings: Any = None) -> dict:
@@ -221,7 +230,36 @@ def dispatch_target(model: str, settings: Any = None) -> dict:
     return resolve_target(model, settings)
 
 
-def _dispatch_route(route: dict) -> tuple:
+def bind_context_route(route: dict, settings: dict) -> None:
+    """Capture Main's executable target once, before metadata and observation lookup."""
+    from ouroboros.context_window import route_observation_scope
+    from ouroboros.llm_attempt import ConnectionUnavailable
+
+    try:
+        target = None if route["use_local"] else dispatch_target(route["model"], settings)
+    except ConnectionUnavailable:
+        target = None  # no executable route; retain its unknown observation scope
+    route["_resolved_target"] = target
+    if target is not None:
+        route["base_url"] = target["capability_route"]["base_url"]
+    route["window_observation_fp"] = route_observation_scope(route, settings, target=target)
+
+
+def probe_context_route(drive_root, route: dict, *, task: dict, **options):
+    """Read Main's window and response ceiling on the target captured for this plan."""
+    from ouroboros.capability_evidence import probe
+    from ouroboros.server_window import private_host
+
+    target = route.get("_resolved_target")
+    refresh_server = bool(task.get("route_start_read")) and (
+        route["use_local"] or route["provider"] == "openai-compatible" and private_host(route["base_url"]))
+    return probe(drive_root, **{key: route[key] for key in ("provider", "model", "base_url", "use_local")},
+        options=route["options"] or None, target=target,
+        force=refresh_server or bool(task.get("route_read_again")),  # the horizon guard's repeat of its own failed early read
+        **({"api_key": target.get("api_key", "")} if target is not None else {}), **options)
+
+
+def _dispatch_route(route: dict, *, target: dict | None = None) -> tuple:
     """Provider, endpoint and key of the send a window route plans for.
 
     A configured endpoint is the one its send uses; an unset one (a legacy or default
@@ -232,6 +270,10 @@ def _dispatch_route(route: dict) -> tuple:
     provider, base_url, key = route["provider"], str(route.get("base_url") or ""), route.get("api_key")
     if provider == "local" or route.get("use_local"):
         return "local", "", key
+    if target is not None:
+        identity = target.get("capability_route") or {}
+        return (identity.get("provider", target.get("provider", provider)),
+                identity.get("dispatch_base_url", target.get("base_url", "")), target.get("api_key"))
     try:
         target = dispatch_target(route["model"])
     except (ValueError, ConnectionUnavailable):
@@ -241,15 +283,18 @@ def _dispatch_route(route: dict) -> tuple:
     return provider, base_url, key if key is not None else target.get("api_key")
 
 
-def probe_response_limit(drive_root, evidence, route: dict) -> ResponseLimit:
-    """The output fact beside a window probe, bound to the endpoint its send reaches."""
-    provider, base_url, api_key = _dispatch_route(route)
+def probe_response_limit(drive_root, evidence, route: dict, *, read_failed: bool = False,
+                         read: dict | None = None, target: dict | None = None) -> ResponseLimit:
+    """The output fact beside a window probe, bound to the endpoint its send reaches: that probe's own catalog read
+    answers it (``read``), or is named as failed (``read_failed``), instead of a second read."""
+    provider, base_url, api_key = _dispatch_route(route, target=target)
     options = dict(route.get("options") or {})
     if provider == "claudexor" and evidence.account_fingerprint:
         options.update(source_id=evidence.source_id, credential_profile_id=evidence.credential_profile_id,
                        account_fingerprint=evidence.account_fingerprint)
     return resolve_response_limit(drive_root, provider=provider, model=route["model"], base_url=base_url,
-        options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key)
+        options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key, read_failed=read_failed,
+        observed=read or None)
 
 
 def response_limit_preview(drive_root, route: dict, *, account="", settings=None, role="main", window=None) -> dict:
@@ -291,26 +336,33 @@ def response_limit_preview(drive_root, route: dict, *, account="", settings=None
             reserve = local_context_limits(reserve)[1]
         reserve = ResponseLimit(**response).ceiling(reserve)
     scope = route_observation_scope({**window_route, "use_local": bool(route.get("use_local"))}, settings)
-    record = resolve_window(evidence, reserve, root=drive_root, observation_fp=scope,
+    record = resolve_window(evidence, reserve, root=drive_root, observation_fp=scope, publish=False,
                             bound=provider != "claudexor" or bool(account))
     window_route.pop("use_local", None)
     return {"route": {**route, "provider": provider, "base_url": base_url, "options": options or None},
-            "response_limit": response, "window": window_projection(record),
+            "response_limit": response, "window": window_projection(record, under_way=role == "main"),
             "window_route": {**window_route, "route_fp": evidence.route_fp},
             "window_ack": bool(data.get("owner_acks", {}).get(evidence.route_fp))}
 
 
 def response_allowance(model: str, requested: int, *, use_local=False, model_role="", credential_profile_id=None,
-                       model_route=None, allow_fetch=False) -> int:
+                       model_route=None, allow_fetch=False, capability_route=None) -> int:
     from ouroboros.capability_evidence import canonical_evidence_root, model_account_options
 
+    if use_local is None and capability_route:
+        use_local = False  # the carried reviewer target was resolved on the remote lane
     if use_local is None:
         from ouroboros.provider_models import review_model_uses_local
         use_local = review_model_uses_local(model)
     from ouroboros.llm_attempt import ConnectionUnavailable
 
     try:
-        target = {"provider": "local", "model": model, "base_url": ""} if use_local else dispatch_target(model)
+        if capability_route and not use_local:
+            model = capability_route["model"]
+            target = {"provider": capability_route["provider"], "model": model,
+                      "base_url": capability_route["dispatch_base_url"]}
+        else:
+            target = {"provider": "local", "model": model, "base_url": ""} if use_local else dispatch_target(model)
     except (ValueError, ConnectionUnavailable):
         return requested  # A malformed identity or a refused connection has no known maximum.
     provider = target.get("provider", "")

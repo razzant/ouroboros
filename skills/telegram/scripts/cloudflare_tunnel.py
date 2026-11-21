@@ -4,7 +4,9 @@ The public API is deliberately small:
 
 * ``ensure_cloudflared(state_dir)`` installs or verifies the pinned binary.
 * ``QuickTunnel(binary, state_dir, sidecar_port)`` starts a Quick Tunnel whose
-  origin is constructed internally as ``http://127.0.0.1:<sidecar_port>``.
+  origin is constructed internally as ``http://127.0.0.1:<sidecar_port>``. A run
+  Cloudflare refused with HTTP 429 fails as ``CreationRateLimited``.
+* ``CreationPacing`` is one process's wait before its next tunnel request.
 
 No caller-supplied origin is accepted.  The module never consults ``PATH``, a
 package manager, a Cloudflare account, or an existing cloudflared config.
@@ -32,7 +34,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from platform_support import (
     IS_WINDOWS,
@@ -59,7 +61,7 @@ _LOG_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'<>\\]+", re.IGNORECASE)
 _LOG_CREDENTIAL_RE = re.compile(
     r"(?i)([\"']?[a-z0-9_.-]*(?:token|secret|password|authorization|cookie|"
     r"api[_-]?key|credential)[a-z0-9_.-]*[\"']?\s*[:=]\s*)"
-    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;}\r\n]+)"
+    r"(?:\"[^\"\r\n]*(?:\"|$)|'[^'\r\n]*(?:'|$)|[^,;}\r\n]+)"  # an open quote runs to the end of the text
 )
 _QUICK_HOST_RE = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com"
@@ -68,10 +70,57 @@ _VERSION_RE = re.compile(
     rf"cloudflared version {re.escape(CLOUDFLARED_VERSION)}"
     rf"(?: \(built [^\r\n]{{1,96}}\))?\r?\n?\Z"
 )
+_CONSOLE_RECORD_RE = re.compile(r"\d{4}-\d\d-\d\dT\S+ (?:TRC|DBG|INF|WRN|ERR|FTL|PNC|\?\?\?) ")  # _CreationAnswer
+_ANSWER_RECORD_RE = re.compile(r"\d{4}-\d\d-\d\dT\S+ ERR Error unmarshaling QuickTunnel response: ")
+_OWN_FIELDS_RE = re.compile(
+    r' error=(?:"(?:[^"\\]|\\.)*"|[^\s"\\]+) status_code=(?:"(\d{3})(?: (?:[^"\\]|\\.)*)?"|(\d{3}))$'
+)
+CREATION_LIMIT_FIRST_SEC = 3600
+CREATION_LIMIT_REPEAT_SEC = 5400
 
 
 class CloudflaredError(RuntimeError):
     """A bootstrap, validation, or tunnel lifecycle failure."""
+
+
+class CreationRateLimited(CloudflaredError):
+    """Cloudflare answered this run's tunnel request with HTTP 429: it created no tunnel."""
+
+
+class CreationPacing:
+    """When this process may next ask Cloudflare for a Quick Tunnel after a confirmed creation limit.
+
+    One object lives as long as the companion process, across Off/On, an owner change and a sidecar
+    restart; a new process (a restart, an Update, a replaced token) starts without it. cloudflared shows
+    no Retry-After (PR #3533 reported 1906-3262 s from Cloudflare on 2026-11-14), so the windows are
+    fixed: the first limit waits ``CREATION_LIMIT_FIRST_SEC``, each further one before a URL is allocated
+    ``CREATION_LIMIT_REPEAT_SEC``, and ``limits`` names that class (1, then 2). Status publishes the wall-clock
+    deadline as the planned time, and the monotonic clock ends the wait too: a wall clock set back cannot lengthen
+    it (the request then precedes the time shown), nor can a sleeping computer, while one set forward may allow
+    one early request. Neither end proves Cloudflare reset its limit.
+    """
+
+    def __init__(self, *, wall: Callable[[], float] = time.time,
+                 monotonic: Callable[[], float] = time.monotonic) -> None:
+        self._wall, self._monotonic = wall, monotonic
+        self.limits = 0
+        self.until_epoch = 0
+        self._until_monotonic = 0.0
+
+    def limit_confirmed(self) -> None:
+        self.limits = min(self.limits + 1, 2)
+        delay = CREATION_LIMIT_FIRST_SEC if self.limits == 1 else CREATION_LIMIT_REPEAT_SEC
+        self.until_epoch = int(self._wall() + delay)
+        self._until_monotonic = self._monotonic() + delay
+
+    def url_allocated(self) -> None:
+        self.limits, self.until_epoch, self._until_monotonic = 0, 0, 0.0
+
+    def remaining(self) -> float:
+        """Seconds before the next request may go out; zero once either clock reaches the deadline."""
+        if not self.until_epoch:
+            return 0.0
+        return max(0.0, min(self.until_epoch - self._wall(), self._until_monotonic - self._monotonic()))
 
 
 @dataclass(frozen=True)
@@ -511,20 +560,68 @@ def _quick_tunnel_url(text: str) -> str | None:
 
 
 def _safe_log_detail(text: str, maximum: int = 180) -> str:
-    """Return one bounded cloudflared line without URLs or credential values."""
+    """Return one bounded cloudflared line without URLs or credential values.
 
-    lines = [
-        " ".join(line.split())
-        for line in str(text or "").splitlines()
-        if line.strip()
-    ]
+    The patterns, quadratic in a line's length, read only its first ``2 * maximum`` characters: a quoted value
+    the cut leaves open is redacted to the cut, and a cut line ends with "…" even when its redaction is short."""
+    lines = [" ".join(line.split()) for line in str(text or "").splitlines() if line.strip()]
     if not lines:
         return ""
-    detail = _LOG_URL_RE.sub("[url]", lines[-1])
-    detail = _LOG_CREDENTIAL_RE.sub(r"\1[redacted]", detail)
-    if len(detail) <= maximum:
+    head = lines[-1][: 2 * maximum]
+    detail = _LOG_CREDENTIAL_RE.sub(r"\1[redacted]", _LOG_URL_RE.sub("[url]", head))
+    if len(detail) <= maximum and head == lines[-1]:
         return detail
     return detail[: maximum - 1] + "…"
+
+
+class _CreationAnswer:
+    """The HTTP status cloudflared logged for an answer to its tunnel request that is not JSON.
+
+    Pinned 2026.7.2 (cmd/cloudflared/tunnel/quick_tunnel.go) writes it as one zerolog console record: the
+    message with the answer body raw, so it may span lines, then the record's own fields at the end of its
+    last line, ``error=`` first and ``status_code=`` after it, each value on one line, quoted where needed.
+    A JSON answer logs no record. It runs to the next console record (an RFC 3339 time, a level) or the end
+    of the stream, and only its last line ending with exactly those two fields gives its status: 429 text in
+    the body, a later record or a record without its fields gives none. A body line shaped as a console
+    record would end it early, and a body line ending with both fields, if the real ones never came, would
+    stand for them; only the tunnel service, answering over HTTPS, writes that body. Read as the stream
+    arrives, before the bounded log can evict it, each line kept only as its first 256 and last 1024 characters.
+    """
+
+    def __init__(self) -> None:
+        self.status = ""  # the first record's own status, once that record has ended
+        self._head, self._tail, self._own, self._open = "", "", "", False
+
+    def feed(self, text: str) -> None:
+        for index, part in enumerate(text.split("\n")):
+            if index:
+                self._line()
+            self._head += part[: 256 - len(self._head)]
+            self._tail = (self._tail + part)[-1024:]
+
+    def finish(self) -> None:
+        """The end of the stream ends the last line, even without its newline, and an open record."""
+        if self._head or self._tail:
+            self._line()
+        self._close()
+
+    def now(self) -> str:
+        """The decided status, or what the open record shows so far; "" when it has none."""
+        return self.status or (self._own if self._open else "")
+
+    def _line(self) -> None:
+        head, tail = self._head, self._tail.rstrip("\r")
+        self._head = self._tail = ""
+        if _CONSOLE_RECORD_RE.match(head):
+            self._close()
+            self._open = bool(_ANSWER_RECORD_RE.match(head))
+        if self._open and (fields := _OWN_FIELDS_RE.search(tail)):
+            self._own = fields.group(1) or fields.group(2)
+
+    def _close(self) -> None:
+        if self._open and not self.status:
+            self.status = self._own
+        self._open, self._own = False, ""
 
 
 class _BoundedLog:
@@ -532,12 +629,14 @@ class _BoundedLog:
         self.maximum = maximum
         self._data = bytearray()
         self._scan_tail = ""
+        self.answer = _CreationAnswer()
 
     def add(self, chunk: bytes) -> str | None:
         self._data.extend(chunk)
         if len(self._data) > self.maximum:
             del self._data[: len(self._data) - self.maximum]
         decoded = chunk.decode("utf-8", "replace")
+        self.answer.feed(decoded)
         scan = (self._scan_tail + decoded)[-16384:]
         self._scan_tail = scan
         return _quick_tunnel_url(scan)
@@ -772,6 +871,7 @@ class QuickTunnel:
             url = log.add(chunk)
             if url and self._url_future is not None and not self._url_future.done():
                 self._url_future.set_result(url)
+        log.answer.finish()
 
     async def _watch_process(self) -> None:
         assert self._process is not None
@@ -782,11 +882,15 @@ class QuickTunnel:
             detail = _safe_log_detail(self.stderr_tail) or _safe_log_detail(self.stdout_tail)
             suffix = f" Last output: {detail}" if detail else ""
             self._url_future.set_exception(
-                CloudflaredError(
-                    f"Cloudflared exited before publishing a URL (exit {returncode}).{suffix}"
-                )
+                self._failure(f"Cloudflared exited before publishing a URL (exit {returncode}).{suffix}")
             )
         await asyncio.to_thread(self._cleanup_home)
+
+    def _failure(self, message: str) -> CloudflaredError:
+        """A run that published no URL: a creation limit once its own stream showed Cloudflare's 429."""
+        if "429" in (self._stdout_log.answer.now(), self._stderr_log.answer.now()):
+            return CreationRateLimited(f"Cloudflare refused a new Quick Tunnel with HTTP 429. {message}")
+        return CloudflaredError(message)
 
     @staticmethod
     def _consume_future_exception(future: asyncio.Future[str]) -> None:
@@ -827,7 +931,7 @@ class QuickTunnel:
         try:
             return await asyncio.wait_for(asyncio.shield(self._url_future), float(timeout_sec))
         except asyncio.TimeoutError as exc:
-            raise CloudflaredError("Timed out waiting for the Cloudflare Quick Tunnel URL.") from exc
+            raise self._failure("Timed out waiting for the Cloudflare Quick Tunnel URL.") from exc
 
     async def wait(self) -> int:
         """Wait for cloudflared to exit and return its process exit code."""
@@ -886,6 +990,8 @@ class QuickTunnel:
 __all__ = [
     "CLOUDFLARED_VERSION",
     "CloudflaredError",
+    "CreationPacing",
+    "CreationRateLimited",
     "QuickTunnel",
     "ensure_cloudflared",
 ]

@@ -179,8 +179,14 @@ def context(tmp_path):
 
 @pytest.fixture
 def hand_over(native_guard, tmp_path, monkeypatch):
-    """``exec_source_launcher`` with every effect recorded in ``calls``; ``os._exit`` raises ``Exited``."""
-    calls = []
+    """``exec_source_launcher`` with every effect recorded in ``calls`` (and its thread in ``threads``);
+    ``os._exit`` raises ``Exited``."""
+    calls, threads = [], []
+
+    def note(step, result=None):
+        calls.append(step)
+        threads.append((step if isinstance(step, str) else step[0], threading.current_thread().name))
+        return result
     import contextlib
 
     # Keep the console/argv contract tests independent of native handle creation.
@@ -189,19 +195,19 @@ def hand_over(native_guard, tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap_module, "source_launcher_importable", lambda *a, **kw: True)
 
     def run(argv, *, windows, frozen=False, acquired=True, spawn_error=None, console_clients=0,
-            cancelled=lambda: False):
+            cancelled=lambda: False, macos=False, windowed=None, on_release=lambda: None):
         def popen(args, **kwargs):
             if spawn_error:
-                calls.append("refused")
+                note("refused")
                 raise spawn_error
-            calls.append(("popen", args, kwargs))
+            note(("popen", args, kwargs))
             return types.SimpleNamespace(pid=9990001)
 
         def execve(executable, args, env):
             if spawn_error:
-                calls.append("refused")
+                note("refused")
                 raise spawn_error
-            calls.append(("exec", executable, args, env))
+            note(("exec", executable, args, env))
             raise Handover()  # an image replacement never returns
 
         def leave(code):
@@ -220,13 +226,14 @@ def hand_over(native_guard, tmp_path, monkeypatch):
         ctx = context(tmp_path)
         run.log = ctx.log
         bootstrap_module.exec_source_launcher(
-            ctx, argv, release_lock=lambda: calls.append("release"),
-            acquire_lock=lambda: calls.append("acquire") or acquired,
-            before_release=lambda: calls.append("remove icon"), on_failure=lambda: calls.append("restore shell"),
-            desktop="--no-ui" not in argv, macos=False, cancelled=cancelled)
+            ctx, argv, release_lock=lambda: (note("release"), on_release()),
+            acquire_lock=lambda: note("acquire", acquired),
+            before_release=lambda: note("remove icon"), on_failure=lambda: note("restore shell"),
+            desktop="--no-ui" not in argv, macos=macos, cancelled=cancelled,
+            **({"windowed": windowed} if windowed is not None else {}))
         return ctx
 
-    run.calls = calls
+    run.calls, run.threads = calls, threads
     return run
 
 
@@ -288,6 +295,108 @@ def test_posix_replaces_the_process_image_with_the_marked_environment(hand_over)
     assert release == "release" and kind == "exec" and executable == args[0]
     assert args[2:] == ["--no-ui", "--seed-bundle", "/opt/ouroboros/seed"], "a seed copy's argv, unchanged"
     assert env[MARK] == "1"
+
+
+class MainThread:
+    """A warm macOS shell's barrier as the caller sees it: ``final`` runs on another thread (the main one) or never;
+    its exception is raised back in the caller, where the recovery runs."""
+
+    def __init__(self, calls, *, confirmed=True):
+        self.calls, self.confirmed = calls, confirmed
+
+    def __call__(self, final, cancelled):
+        self.calls.append("windows confirmed" if self.confirmed else "windows unconfirmed")
+        if not self.confirmed:
+            return False
+        caught = []
+
+        def turn():
+            try:
+                final()
+            except BaseException as error:
+                caught.append(error)
+
+        main = threading.Thread(target=turn, name="main")
+        main.start()
+        main.join(5)
+        if caught:
+            raise caught[0]
+        return True
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_a_warm_macos_window_hands_over_only_through_its_main_thread_barrier(hand_over, confirmed):
+    """Teardown and exec wait for the windows; an unconfirmed full screen keeps this shell exactly as it was."""
+    try:
+        hand_over(["--launch-intent", "owner"], windows=False, macos=True, windowed=MainThread(hand_over.calls,
+                                                                                           confirmed=confirmed))
+    except Handover:
+        pass
+    steps = [call if isinstance(call, str) else call[0] for call in hand_over.calls]
+    assert steps == (["windows confirmed", "remove icon", "release", "exec"] if confirmed
+                     else ["windows unconfirmed"]), "never an icon, lock or process change before the windows agree"
+
+
+@pytest.mark.parametrize("argv,windows,macos", [(["--no-ui"], False, True), ([], True, True), ([], False, False)],
+                         ids=["external UI", "Windows", "Linux desktop"])
+def test_the_window_barrier_is_only_a_macos_desktop_shells(hand_over, argv, windows, macos):
+    try:
+        hand_over(argv, windows=windows, macos=macos, windowed=MainThread(hand_over.calls))
+    except (Handover, Exited):
+        pass
+    assert "windows confirmed" not in hand_over.calls and "remove icon" in hand_over.calls
+
+
+@pytest.mark.parametrize("acquired", [True, False])
+def test_an_exec_refused_on_the_main_thread_is_recovered_on_the_worker(hand_over, acquired):
+    """The main thread never retakes the lock or restores the indicator, which may wait: its failure comes back."""
+    worker, confirmed = threading.current_thread().name, []
+    try:
+        hand_over([], windows=False, macos=True, acquired=acquired, spawn_error=PermissionError(13, "denied"),
+                  windowed=MainThread(confirmed))
+    except Exited as exited:
+        assert not acquired and exited.code == 1, "the lock's new owner runs; this one exits"
+    else:
+        assert acquired
+    assert confirmed == ["windows confirmed"]
+    assert hand_over.threads == [("remove icon", "main"), ("release", "main"), ("refused", "main"),
+                                 ("acquire", worker)] + ([("restore shell", worker)] if acquired else [])
+    assert ("error", "The checkout's launcher did not start", True) in hand_over.log.lines
+
+
+def test_a_stop_while_the_windows_leave_full_screen_tears_nothing_down(hand_over):
+    """Panic or Quit during the animation: the main thread's turn finds the Stop before the icon or lock."""
+    stopped = threading.Event()
+
+    def windowed(final, cancelled):
+        stopped.set()  # the stop arrives while the window is still leaving full screen
+        return MainThread(hand_over.calls)(final, cancelled)
+
+    hand_over([], windows=False, macos=True, windowed=windowed, cancelled=stopped.is_set)
+    assert hand_over.calls == ["windows confirmed"], "no icon, unlock, exec or restore"
+
+
+def test_the_window_barrier_reads_the_callers_stop_before_asking_any_window_to_leave(hand_over):
+    """The barrier gets the caller's own ``cancelled``: a Stop it reads in a main-thread turn refuses before any window
+    is asked to leave full screen (``launcher_window_chrome._step``)."""
+    stopped, given = threading.Event(), []
+
+    def windowed(final, cancelled):
+        given.append(cancelled)
+        stopped.set()
+        return not cancelled() and MainThread(hand_over.calls)(final, cancelled)
+
+    hand_over([], windows=False, macos=True, windowed=windowed, cancelled=stopped.is_set)
+    assert given == [stopped.is_set] and hand_over.calls == [], "refused: no icon, unlock, exec or restore"
+
+
+@pytest.mark.parametrize("barrier", [False, True], ids=["inline", "main thread"])
+def test_panics_claim_after_unlock_refuses_the_exec_before_shutdown_is_latched(hand_over, barrier):
+    """``request_panic`` claims the handoff before it latches shutdown: the check before exec reads that claim."""
+    hand_over([], windows=False, macos=barrier, windowed=MainThread(hand_over.calls) if barrier else None,
+              on_release=lambda: bootstrap_module.source_handoff.claim_stop())
+    assert hand_over.calls == ["windows confirmed"] * barrier + ["remove icon", "release", "acquire",
+                                                                 "restore shell"], "no exec over Panic's claim"
 
 
 @pytest.mark.parametrize(("when", "windows"), [("before teardown", True), ("after unlock", False)])

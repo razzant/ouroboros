@@ -51,15 +51,8 @@ completed and otherwise-stopped members are never revived; a root's Resume
 only makes its own budget-paused descendants ELIGIBLE — the model selects
 each one explicitly through the same task control (Q9).
 
-A direct owner-chat turn pauses the SAME way and under the SAME task id: the
-live direct actor ends (its registry entry is released as on any other ending,
-so no second live actor ever exists for that id), its ``budget_pause`` event
-carries the turn's own task record with its ``_is_direct_chat`` lane fact, and
-the supervisor parks that record in the existing PENDING carrier under the
-same ``_budget_pause`` marker. The existing Resume endpoint grants it and a
-pooled worker continues the checkpointed cognition cold — origin, workspace,
-attempt, accounting and the opaque acceptance identities travel in the
-checkpoint; browser and service handles are never resurrected. Only a turn
+A direct turn's source-backed row keeps its parkable task envelope before the
+executor leaves. Restore can recover it even if no queue snapshot saw it. Only a turn
 with no task id or no durable root is excluded, and loudly
 (``resource_limit.exact_pause_unavailable``).
 
@@ -361,7 +354,7 @@ def pending_tool_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
 from ouroboros.external_runs import (  # noqa: E402,F401 -- the pause's historical import surface
     EXTERNAL_RUNNING, EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED, EXTERNAL_STOP_UNKNOWN,
     STOP_POLICIES, STOP_POLICY_ALL, STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED,
-    episode_fields, observe_task_runs, owner_pause_runs, task_owned_runs_open,
+    episode_fields, held_run_line, observe_task_runs, owner_pause_runs, passed_reviews_notice, task_owned_runs_open,
 )
 
 
@@ -474,7 +467,7 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
         retained_wait = ({"owner_wait": {**expected_owner_wait, "state": "retained"}}
                          if expected_owner_wait is not None else {})
         from ouroboros.pause_notices import notice_fields
-        notice = (notice_fields(current, root, task_id, str(row.get("pause_id") or ""), str(row.get("reason")))
+        notice = (notice_fields(current, root, task_id, str(row.get("pause_id") or ""), str(row.get("reason")), cause=row.get("cause"))
                   if row.get("state") == STATE_PAUSED and row.get("reason") in {"budget", REASON_AUTHORITY}
                   and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
         from ouroboros.model_detach import detached_fields
@@ -486,22 +479,39 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     return dict(row)
 
 
+def saved_budget_pause(result: dict) -> dict:
+    """Recover the cause from a legacy host-issued message on its own rail."""
+    pause = result.get("budget_pause")
+    row = dict(pause) if isinstance(pause, dict) else {}
+    text, rail = str(row.get("reason_text") or ""), row.get("rail")
+    if row.get("reason") != REASON_AUTHORITY or row.get("cause"):
+        return row
+    cause = ""
+    if rail == RAIL_CONTROL_AUTHORITY:
+        if text.startswith("root budget fence authority unavailable: "):
+            cause = "dispatch_fence_unreadable"
+        elif text.startswith(("invalid root budget fence authority: ", "invalid root budget fence row: ")):
+            cause = "dispatch_fence_invalid"
+        elif text.startswith("control authority unreadable: "):
+            saved = text.partition(": ")[2]
+            if saved.partition(":")[0] in {"owner_pause_authority_unreadable", "owner_launch_authority_unavailable"}:
+                cause = saved
+    elif rail == RAIL_BILLING_AUTHORITY and text.startswith("billing group authority unavailable for root ") and text.endswith(")"):
+        saved = text.partition(" (unreadable: ")[2][:-1]
+        if saved.partition(":")[0] in {"read_failed", "malformed_binding", "start_custody_unreadable"}:
+            cause = saved
+    if cause:
+        row.update(cause=cause, auto_resume=True, resume_policy="authority_readable")
+    return row
+
+
 def budget_pause_row(root: Any, task_id: str) -> Dict[str, Any]:
     from ouroboros.store_hot_facts import controls
-
-    row = controls(root, str(task_id))
-    pause = row.get("budget_pause")
-    return dict(pause) if isinstance(pause, dict) else {}
+    return saved_budget_pause(controls(root, str(task_id)))
 
 
 def death_returns_to_pause(row: Dict[str, Any], attempt: Any) -> bool:
-    """A live pause of this very attempt whose grant, if any, nothing consumed.
-
-    The window of ``worker_health._complete_exact_budget_pause_after_death``
-    (#1196, F4): a worker death here returns the SAME task id to its exact pause
-    (or that recovery decides the death itself), so the worker records no
-    terminal of its own for a ``handle_task`` exception inside it.
-    """
+    """Worker health recovers this attempt's live unconsumed pause instead of completing the task."""
     grant = row.get("grant") if isinstance(row.get("grant"), dict) else {}
     return bool(str(row.get("state") or "") in LIVE_PAUSE_STATES
                 and int(row["task_attempt"]) == int(attempt) and not grant.get("consumed_at"))
@@ -529,8 +539,8 @@ class ColdSleepWritersUnsettled(ValueError):
     """A fresh cold-sleep census still has writers; no source write failed."""
 
 
-class ColdSleepDependencyBlocked(ValueError):
-    """The proposed sleep fence prevents a selected queued dependency running."""
+class ColdDetachBlocked(ValueError):
+    """A background handoff's final census still finds work: it stays awake instead of holding."""
 
 
 def _hold_row(reason: str, *, exc: Optional[BaseException] = None,
@@ -616,20 +626,17 @@ def _publish_hold(ctx: Any, row: Dict[str, Any]) -> None:
 
 def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: str, scope: str,
                             reason_text: str, root_task_id: str,
-                            local: Dict[str, Any]) -> Dict[str, Any]:
+                            local: Dict[str, Any], context_view: tuple | None = None) -> Dict[str, Any]:
     """Observe external custody, store the ONE continuation source, build the row."""
     from ouroboros.owner_wait import continuation_state, store_continuation_source
 
-    if rail == RAIL_MODEL_SLEEP:
+    if rail == RAIL_MODEL_SLEEP:  # its own work only: a sleep never fences or waits for its tree's members
+        from ouroboros.model_detach import is_detach
         from ouroboros.model_sleep import cold_blockers
 
-        blockers = cold_blockers(ctx, allow_transfer=True)
-        from ouroboros.model_detach import is_detach
-        if blockers and (is_detach(getattr(ctx, "_model_sleep", None))
-                         or any(blocker.get("kind") == "queued_member" for blocker in blockers)):
-            raise ColdSleepDependencyBlocked(f"selected queued dependency: {blockers}")
-        if blockers:
-            raise ColdSleepWritersUnsettled(f"{HOLD_COLD_WRITERS_UNSETTLED}: {blockers}")
+        if blockers := cold_blockers(ctx, allow_transfer=True):  # a handoff stays awake; a sleep holds
+            raise (ColdDetachBlocked if is_detach(getattr(ctx, "_model_sleep", None)) else ColdSleepWritersUnsettled)(
+                f"{HOLD_COLD_WRITERS_UNSETTLED}: {blockers}")
     # Owner Q8, loop side: resolve THIS context's custody root, then share the
     # one observer body with the grant. A root that cannot be resolved is the
     # same typed ``custody_read=failed`` fact as an unreadable store.
@@ -669,7 +676,7 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
                                       "_best_effort_extracted", "budget_pause_hold", "_llm_round_started")}
     state = {
         **continuation_state(ctx, messages, trace, usage_for_state, limit_ctx.round_idx,
-                             list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ())),
+                             list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ()), context_view=context_view),
         "pause_id": pause_id, "reason": reason, "rail": rail, "scope": scope,
         "resume_point": point, "external_runs": external, "local_producers": local,
     }
@@ -739,14 +746,13 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
 
 
 def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
-                  root_task_id: str = "") -> None:
+                  root_task_id: str = "", context_view: tuple | None = None, cause: str = "") -> None:
     """Fence, save and unwind only after producer quiescence and a stored source.
 
     Unsettled producers/ambiguous transfer retain the worker and typed pausing hold;
     no paid wrap-up or durable pause is invented. Stop/Panic/deadline/cancel end it.
     Ineligibility or a definite authority-rail save failure returns unavailable;
-    other save failures hold. A cold sleep blocking its selected queued dependency
-    withdraws its exact seed and stays awake instead.
+    other save failures hold. A background handoff whose final census finds work stays awake.
     """
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
     if ctx is None or rail not in RAILS:
@@ -804,13 +810,18 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     setattr(ctx, "_budget_pause_generation", generation)
     # Durable "pausing" FIRST (before any wait), so a death while the task is
     # still settling meets the crash-retry fence instead of a replay.
-    seed = {"pause_id": pause_id, "state": STATE_PAUSING,
+    carrier = getattr(getattr(ctx, "model_wait_context", None), "task", None)
+    envelope = ({"park_task": parkable_direct_task(carrier)} if isinstance(carrier, dict)
+                and carrier.get("id") == task_id and (carrier.get("_is_direct_chat") or carrier.get("_presence_turn")) else {})
+    if cause and authority:
+        envelope.update(cause=cause, auto_resume=True, resume_policy="authority_readable")
+    seed = { "pause_id": pause_id, "state": STATE_PAUSING,
             "reason": _RAIL_REASONS.get(rail, "budget"), "rail": rail,
             "pause_generation": generation,
             "scope": str(scope or "global"), "task_attempt": int(ctx.task_attempt or 1),
             "source_ref": None, "started_at": getattr(ctx, "task_started_at", None),
             "pausing_since": time.time(), "exact_continuation": True,
-            "replay_safe": False, "auto_resume": False}
+            "replay_safe": False, "auto_resume": False, **envelope}
     hold: Dict[str, Any] = {}
     prepared: Optional[Dict[str, Any]] = None
     published, opened, interrupted = "", False, None
@@ -866,7 +877,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                     if prepared is None:
                         prepared = _exact_continuation_row(
                             limit_ctx, ctx, pause_id=pause_id, rail=rail, scope=scope,
-                            reason_text=reason_text, root_task_id=root_task_id, local=local)
+                            reason_text=reason_text, root_task_id=root_task_id, local=local, context_view=context_view)
+                        prepared.update(envelope)
                     # A publication that failed is retried with the SAME prepared
                     # snapshot: its custody stop requests and its stored source are
                     # one observation, not one per poll.
@@ -885,10 +897,10 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         set_budget_pause(root, task_id, prepared, expected_pause_id=pause_id)
                         row = prepared
                     break
-                except ColdSleepDependencyBlocked as exc:
+                except ColdDetachBlocked as exc:
                     try:
                         set_budget_pause(root, task_id, {**seed, "state": STATE_ABANDONED,
-                            "abandon_reason": "cold_sleep_dependency_blocked", "abandoned_at": time.time()},
+                            "abandon_reason": "cold_detach_blocked", "abandoned_at": time.time()},
                             expected_pause_id=pause_id, expected_state=STATE_PAUSING)
                     except Exception as write_error:
                         hold = _hold_row(HOLD_PAUSE_RECORD_UNWRITABLE, exc=write_error)
@@ -896,9 +908,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         end_dispatch_fence(task_id)
                         ctx._budget_pausing, ctx._model_sleep = False, None
                         usage.pop("budget_pause_hold", None)
-                        limit_ctx.messages.append({"role": "user", "content": (
-                            "[SYSTEM NOTICE]\nCold sleep was not taken: " + str(exc)
-                            + ". Sleep warm to let the selected child run; no child was cancelled.")})
+                        limit_ctx.messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nThe background "
+                            f"handoff was not taken: {exc}. You stay awake; wait for that work or stop it first."})
                         return
                 except ColdSleepWritersUnsettled as exc:
                     hold = _hold_row(HOLD_COLD_WRITERS_UNSETTLED, exc=exc)
@@ -1111,11 +1122,7 @@ STATUS_PAUSED_EXACT = "paused_exact_continuation"
 
 
 def exact_pause_marker(row: Dict[str, Any], *, default_root: str = "") -> Dict[str, Any]:
-    """The queue's ``_budget_pause`` marker projected from the DURABLE pause row.
-
-    The row on the task result is the source of truth; the marker is its
-    locator inside the queue (and the worker event's ``resource_limit``).
-    """
+    """Project the queue and worker locator from the durable pause."""
     return {
         "status": STATUS_PAUSED_EXACT,
         "scope": str(row.get("scope") or "global"),
@@ -1123,11 +1130,10 @@ def exact_pause_marker(row: Dict[str, Any], *, default_root: str = "") -> Dict[s
         "physical_calls": row.get("physical_calls"),
         "replay_safe": False,
         "exact_continuation": True,
-        "auto_resume": False,
-        "resume_policy": RESUME_POLICY,
+        "auto_resume": bool(row.get("auto_resume")),
+        "resume_policy": str(row.get("resume_policy") or RESUME_POLICY),
         "rail": str(row.get("rail") or ""),
-        # Which pause this is (``budget`` or the owner's) and, for the owner's,
-        # whether its sent work had settled: the Resume and the UI read it.
+        **({"cause": row["cause"]} if row.get("cause") else {}),
         "reason": str(row.get("reason") or "budget"),
         **({"settlement": row["settlement"]} if row.get("settlement") else {}),
         **({"sleep": row["sleep"]} if isinstance(row.get("sleep"), dict) else {}),
@@ -1150,25 +1156,11 @@ BUDGET_HOLD_KEY = "_budget_pause_hold"
 
 
 def budget_fence_selected(task: Any, fence: Any) -> bool:
-    """Whether THIS row carries an explicit selection recorded against THIS fence.
-
-    A root's admission latch keeps a whole tree out of the queue and off the
-    money gate (``usage_accounting`` reads this predicate from queue_dispatch.json). The
-    owner (or, under the root's live grant, the model) may select ONE member
-    without lifting the latch for its siblings: the selection names the fence
-    generation it was granted against, so a later fence — a root that paused
-    again — is never pre-released by an older selection (#1196, owner Q9).
-
-    The exact Resume handoff, when present, decides alone (an older selection
-    never rescues it): an ``explicit_resume`` grant naming its pause, its grant
-    and this fence, issued by the owner or under a named root grant generation.
-    Sleep readiness is never money. A row paused again, a stale consumed carrier
-    or an active hold is not selected. Consumption does not spend the selection:
-    single use forbids consuming the continuation twice, not the resumed worker's
-    later sends. Dispatch still rechecks the live root grant
-    (``events_budget.budget_resume_dispatch_allowed``).
-    """
-    from ouroboros.work_stop import continuation_refusal, hold_fact
+    """A monetary latch selects one member against its current fence identity. An exact
+    handoff takes precedence and requires an explicit grant. A pause, hold or stale
+    handoff blocks selection. Consumption keeps later sends eligible. Dispatch rechecks
+    the live root grant in events_budget.budget_resume_dispatch_allowed."""
+    from ouroboros.work_stop import continuation_refusal, direct_selection, hold_fact
 
     fence_id = str((fence or {}).get("fence_id") or "") if isinstance(fence, dict) else ""
     if (not isinstance(task, dict) or not fence_id or isinstance(task.get("_budget_pause"), dict)
@@ -1179,7 +1171,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
         return bool(str(handoff.get("pause_id") or "").strip() and str(handoff.get("grant_id") or "").strip()
                     and handoff.get("authority") == "explicit_resume"
                     and str(handoff.get("root_fence_id") or "") == fence_id
-                    and (handoff.get("selected_by") == "owner"
+                    and (direct_selection(handoff)
                          or str(handoff.get("root_grant_id") or "").strip()
                          and int(handoff.get("root_resume_generation") or 0) > 0))
     selection = task.get("_resume_selection")
@@ -1189,11 +1181,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
 # --- resume (loop side) -----------------------------------------------------------------
 
 def load_budget_pause(ctx: Any, handoff: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Consume ONE granted resume: the row must carry this exact single-use grant.
-
-    Refuses (raises) a missing or corrupt source, a spent or foreign grant and
-    an attempt mismatch: a stale snapshot must never revive a continuation.
-    """
+    """Consume this attempt's exact grant once. A missing source, mismatched identity or spent grant refuses."""
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 
@@ -1334,18 +1322,13 @@ def _reopen_owner_fence(ctx: Any, usage: Dict[str, Any], *, fence_id: str = "", 
 def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], grant: Dict[str, Any],
                        refresh: Dict[str, Any], messages: list) -> None:
     """The resumed model's first facts: UNKNOWN host rows and how it continued, or its wake."""
-    # Prefer the grant-time re-observation over the checkpoint's pause-time copy;
-    # label its age so fresh evidence never appears stale (or vice versa).
     fresh_observation = row.get("external_runs") if isinstance(row.get("external_runs"), dict) else None
     external_observation = fresh_observation if fresh_observation is not None else (
         state.get("external_runs") or {})
     external_basis = ("re-observed at this Resume" if fresh_observation is not None
                       else "as recorded at the pause, NOT re-observed")
     external = external_observation.get("runs") or []
-    external_lines = "".join(
-        f"\n- run {run.get('run_id')}: {run.get('state')} (stop outcome: {run.get('stop_outcome') or 'n/a'})"
-        for run in external if isinstance(run, dict)
-    ) or "\n- none"
+    external_lines = "".join(held_run_line(run) for run in external if isinstance(run, dict)) or "\n- none"
     if owner_runs := owner_pause_runs(ctx, row, external_observation):  # an owner Pause's participants (#1562)
         external_basis, external_lines = "its participants, read now", "\n" + owner_runs
     pending = pending_tool_call_ids(messages)
@@ -1367,9 +1350,15 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         if owner_runs:  # the owner's Pause stopped or observed these runs while it slept
             messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nWhile you slept the Pause stopped or observed "
                              "these delegated runs (current custody; engine facts are evidence, never a grant):\n" + owner_runs})
+        elif not row.get("external_custody") and (passed := passed_reviews_notice(external_observation)):
+            messages.append({"role": "user", "content": passed})
         return
-    kind = {REASON_OWNER: "Pause", REASON_AUTHORITY: f"technical pause ({str(row.get('rail')).replace('_', ' ')})"}.get(
-        str(row.get("reason") or ""), "budget pause")
+    kind = "Pause" if row.get("reason") == REASON_OWNER else "budget pause"
+    if row.get("reason") == REASON_AUTHORITY:
+        from ouroboros.pause_notices import authority_subject
+        subject = authority_subject(row.get("cause"))
+        detail = f"it could not read {subject}" if subject else str(row.get("reason_text") or "saved decision unreadable")
+        kind = f"technical pause ({detail})"
     held = ""
     if refresh.get("reason") == "producer_allowance_not_expanded" and refresh.get("ceiling_usd") is not None:
         # Said, not implied: Resume keeps the allowance the task was launched with.
@@ -1382,9 +1371,11 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     from ouroboros.owner_wait import owner_pause_resume_notice
     if row.get("retained_owner_wait_id") and state.get("owner_pause"):
         messages.append(owner_pause_resume_notice(ctx, state, "owner_input", cold=True))
+    # Only an automatic return has its own words; a grant saved before grants named their authority was a Resume.
+    resumed_by = {"authority_readable": "the saved check succeeded", "sleep_readiness": "its wake condition was met"}.get(
+        grant.get("authority"), model_sleep.resumer_words(grant.get("by")) or "an explicit Resume")
     messages.append({"role": "user", "content": (
-        f"[SYSTEM NOTICE]\nThis task continued from its {kind} after "
-        f"{model_sleep.resumer_words(grant.get('by')) or 'an explicit Resume'} "
+        f"[SYSTEM NOTICE]\nThis task continued from its {kind} after {resumed_by} "
         f"(paused {ctx._budget_paused_sec:.0f}s; rail: {row.get('rail')}; planning threshold "
         f"{'refreshed to $%.2f' % refresh['ceiling_usd'] if refresh.get('refreshed') else 'not refreshed: ' + str(refresh.get('reason'))}"
         f"{' (' + str(refresh['ceiling_basis']) + ')' if refresh.get('ceiling_basis') else ''}{held}). "

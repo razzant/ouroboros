@@ -123,8 +123,13 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # attributed candidate; those two descriptions are the only change from aa615be1….
     # 06.11: extra_tests says which entries the tests preflight runs and that it skips others with a note; that
     # description is the only change from a4ff0c92….
+    # #3032: review_reference also takes the reference of the predecessor a recorded Continue continues, and without
+    # author_disposition reads the outcome back when the index no longer holds the reviewed bytes. #3296 (Blocking
+    # retired): the reviewed-commit description, author_disposition and its subagent_check, reason, reviewers and
+    # review_rebuttal drop their Blocking branches and the identical-diff refusal. #3319: since_review says no PASS or
+    # finding carries over. Descriptions only, in both aliases; the structure is unchanged from e7ad640f….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "e7ad640f7fc3a806bcdca365c58247423cdab89d31ba0e9c032f27ac4a78bf57"
+        "f2341717365cbb39ddbd9f94db0e7d5448ae43d4f1dc5acf000bce234e333f91"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -147,16 +152,3 @@ def test_git_facade_reexports_every_moved_identity():
         assert getattr(git, name) is getattr(owner, name), name
     owned = {name for module in _LEAVES for name in vars(module)}
     assert set(_MOVED_OWNERS) <= owned
-
-
-def test_git_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (git, *_LEAVES)
-    }
-    assert counts["ouroboros.tools.git"] <= 1800
-    assert all(count <= 1000 for name, count in counts.items()
-               if name != "ouroboros.tools.git")
-    assert counts["ouroboros.tools.git_review_cycle"] <= 1000

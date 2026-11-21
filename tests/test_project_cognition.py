@@ -105,7 +105,7 @@ def test_main_changes_seed_unopened_legacy_projects_before_new_default(room_sett
     assert read_cognition(root, "old-a") == read_cognition(root, "old-b") == previous
     stored = json.loads((root / "state/projects.json").read_text(encoding="utf-8"))
     assert all(row["cognition"] == previous for row in stored["projects"])
-    assert projects.create_project(root, "new")["cognition"] == read_cognition(root)
+    assert projects.create_project(root, "new")["cognition"] == {**read_cognition(root), "context_mode": "max"}
 
 
 def test_reconcile_and_registry_recovery_retain_the_copied_cognition(room_settings):
@@ -182,14 +182,17 @@ def test_settings_path_owns_legacy_migration_even_when_data_dir_differs(room_set
     assert (root / "state/projects.json").read_bytes() == untouched
 
 
-def test_creation_seeds_legacy_rows_with_the_same_owner_low_as_the_new_room(room_settings):
+def test_a_new_room_starts_in_max_while_legacy_rows_keep_mains_low(room_settings):
+    """Owner 15.11.2026 (3A): a new room starts in Max and never copies Main's Context; Effort and Subagents still copy
+    Main. Rows that followed Main before rooms kept their own (legacy) are frozen with what Main has."""
     root, client = room_settings
     assert client.post("/api/owner/context-mode", json={"mode": "low"}).status_code == 200
     _legacy_rows(root, "legacy-low")
     expected = read_cognition(root)
     assert expected["context_mode"] == "low"
-    created = projects.create_project(root, "new-low")
-    assert created["cognition"] == read_cognition(root, "legacy-low") == expected
+    created = projects.create_project(root, "new-room")
+    assert read_cognition(root, "legacy-low") == expected
+    assert created["cognition"] == {**expected, "context_mode": "max"} == read_cognition(root, "new-room")
 
 
 @pytest.mark.parametrize("disk,env,expected", [

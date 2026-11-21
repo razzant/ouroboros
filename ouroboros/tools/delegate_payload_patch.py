@@ -495,6 +495,21 @@ def integrate_payload_patch(ctx: ToolContext, **params: Any) -> str:
         release_exclusive_file_lock(path, fd)
 
 
+def _payload_apply_target(ctx: ToolContext, entry: _RunCustody, rid: str):
+    """Fresh payload authority, then the administrator's write rule, at the actual apply door.
+
+    Private drafting/capture is not installation. No-change and rejection need no write authority.
+    """
+    from ouroboros.deployment_extensions import payload_write_refusal
+
+    target, binding, refusal = _di()._rebind_payload_reference(
+        ctx, entry.resource_ref, entry.target_root, tool="integrate_delegated_patch", context=f"run_id={rid}")
+    if refusal:
+        return target, binding, refusal.text  # the family native result projected into integration's string ABI
+    managed = payload_write_refusal(target, data_root=binding.state_drive_root)
+    return target, binding, f"⚠️ MANAGED_BY_DEPLOYMENT: {managed}" if managed else ""
+
+
 def _integrate_payload_patch(
     ctx: ToolContext, *, drive: pathlib.Path, entry: _RunCustody, rid: str,
     decision: str, reason: str, cap_dir: pathlib.Path,
@@ -514,7 +529,6 @@ def _integrate_payload_patch(
     post-apply hash mismatch — QUEUES the existing extension reconcile request
     (receipt says queued, never reconciled).
     """
-    import subprocess
 
     from ouroboros.headless import (
         ARTIFACT_STATUS_READY_NO_CHANGES,
@@ -591,14 +605,9 @@ def _integrate_payload_patch(
         return (f"⚠️ INTEGRATE_PATCH_CORRUPT: sha256 mismatch for run {rid}; "
                 "refusing to apply.")
 
-    target, binding, rebind_refusal = _di()._rebind_payload_reference(
-        ctx, entry.resource_ref, entry.target_root,
-        tool="integrate_delegated_patch", context=f"run_id={rid}")
+    target, binding, rebind_refusal = _payload_apply_target(ctx, entry, rid)
     if rebind_refusal:
-        # The family boundary: this rebind helper is shared with the
-        # external-executor verbs, which speak the native result; the patch
-        # integration tool keeps its own string ABI, so the refusal projects here.
-        return rebind_refusal.text
+        return rebind_refusal
     from ouroboros.subagent_worktrees import isolated_git_env
 
     # NO-REPOSITORY mode for BOTH git invocations below (the touched-path reader
@@ -690,8 +699,9 @@ def _integrate_payload_patch(
     # Index-free apply with cwd = the LIVE payload (R1 item 3, probed): no .git,
     # no index, no staging is created in the live payload. Atomic on failure.
     # Config-isolated and repository-free (see the git_env comment above).
-    proc = subprocess.run(["git", "apply", str(patch_path)], cwd=str(target),
-                          capture_output=True, text=True, env=git_env)
+    from ouroboros.tools.patch_staging import git_apply  # a payload in a work checkout applies as the work domain
+
+    proc = git_apply(target, patch_path, [], text=True, env=git_env)
     if proc.returncode != 0:
         custody.record_patch_apply_resolved(drive, entry, reason="apply_failed")
         stderr = (proc.stderr or proc.stdout or "").strip()

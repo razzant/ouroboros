@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextvars
 import gzip
 import hashlib
+import heapq
 import json
 import os
 import pathlib
@@ -22,7 +23,8 @@ from collections import deque
 from contextlib import contextmanager
 from typing import Any
 
-from ouroboros import evidence_packs as packs
+from ouroboros import evidence_packs as packs, store
+from ouroboros.utils import file_identity
 
 _WALK = contextvars.ContextVar("immutable_source_retention", default=None)
 # The maintenance job whose row keeps the promotion retry's durable observations (``RetentionMemo``).
@@ -102,12 +104,20 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
 def read_retained_task_source(root, task_id, ref, *, anchor=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.saved_state_retirement import retired_message
 
+    tried = []
     for source_root, owner in _source_locations(root, task_id, anchor=anchor):
+        tried.append((source_root, owner))
         try:  # loose or packed at this placement; damage is explicit, absence tries the next one
             return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor)
         except FileNotFoundError:
             continue
+    name = pathlib.PurePosixPath(str(ref["path"])).name
+    for source_root, owner in tried:  # a retired saved state's record says when and why it went (its work ended or moved on) and where its content is
+        note = retired_message(source_root, owner, name)
+        if note:
+            raise FileNotFoundError(f"actor source unavailable: {note}")
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
 
 
@@ -153,21 +163,25 @@ def source_handle_digest(relative) -> str:
 
 
 def retained_actor_source_read_target(root, task_id, relative):
-    """Placement alias for an advertised immutable source read, not write authority."""
+    """Placement alias for an advertised immutable source read, not write authority. A name gone everywhere that one
+    location's record says was retired answers with that location, so the miss there names the record."""
     from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.saved_state_retirement import retired_message
 
     digest = source_handle_digest(relative)
     if not digest:
         return None
+    retired = None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
         if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
+            retired = retired or (path if retired_message(source_root, owner, pathlib.PurePosixPath(relative).name) else None)
             continue  # a packed handle is written back beside its name first
         ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
                "size": path.stat().st_size, "sha256": digest}
         read_actor_source_bytes(source_root, owner, ref)
         return path.resolve(strict=True)
-    return None
+    return retired
 
 
 def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:
@@ -178,10 +192,6 @@ def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:
         raise ValueError("observability manifest version has no valid sha256")
     return {"path": str(pathlib.Path(root) / "observability" / "blobs" / f"{digest}.txt.gz"),
             "sha256": digest, "kind": "txt", "encoding": "gzip"}
-
-
-def read_manifest_version(root: pathlib.Path, digest: str) -> bytes:
-    return packs.blob_bytes(root, manifest_version_ref(root, digest))  # loose or packed, sha-verified
 
 
 def _check_open():
@@ -251,7 +261,7 @@ def _path_fact(path):
     """Cheap repair evidence includes in-place writes, not only directory changes."""
     try:
         stat = path.lstat()
-        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode)
+        return (*file_identity(stat), stat.st_mode)  # the stamp a descriptor's failed_stamp shares
     except OSError as exc:
         return (type(exc).__name__, exc.errno)
 
@@ -405,6 +415,21 @@ def log_retention_change(parent, task_id, result, *, memo, stop=None):
         pass  # A failed diagnostic append is attempted again; custody stays in the result.
 
 
+def _vouches(read, data, node) -> bool:
+    """Whether the bytes ``read``'s own read verified also verify ``node``'s claims, so reading it would only repeat
+    that check: the same task source, or a blob of the same sha256 and kind at a size its ref allows. One (pack,
+    offset) alone is not enough: an empty member starts where the next one does, and a carrier may claim another
+    size."""
+    if node["kind"] == "source":
+        return node["task_id"] == read["task_id"] and all(
+            str(node["ref"].get(key)) == str(read["ref"].get(key)) for key in ("root", "path", "sha256", "size"))
+    try:
+        sha256, kind, size = packs.blob_ref_fields(node["ref"])
+    except ValueError:
+        return False
+    return (sha256, kind) == packs.blob_ref_fields(read["ref"])[:2] and size in (-1, len(data[0]))
+
+
 class RetentionWalk:
     """One operation's compact, role/owner/destination-bound reference work."""
 
@@ -414,6 +439,72 @@ class RetentionWalk:
         self.queue = deque()
         self.discovering = False
         self.current_node = None
+        # (sha256, kind) whose PARENT bytes this walk decoded and matched; canonical objects are immutable and
+        # outlive it (a loose name goes only once a verified pack holds its bytes). Never child bytes, a
+        # returned root, an index row or a failed check.
+        self.parent_proven: set[tuple[str, str]] = set()
+        # An xz stream only reads forward, so packed members decode in ascending (pack, offset): N members cost one
+        # pass, not one rewind each. ``sweep`` is the current pass; what is discovered behind it waits for the next.
+        self.sweep: list[tuple] = []
+        self.next_sweep: list[tuple] = []
+        self.swept_to: tuple = ()
+        self.after_packed: deque = deque()  # loose blobs in queue order: a view's skeleton follows its packed parts
+
+    def _position(self, node):
+        """The ``(pack, offset)`` this node decodes first, ``()`` when a loose copy answers. The parent is asked first:
+        a member it packed is decoded by the destination's proof even when the read takes a loose copy beside the
+        producer. Only an ordering hint: ``_read_source`` still resolves and verifies. A root that cannot answer now
+        (``read_position`` never waits for a catalog) leaves the question to the next one; when none answers, the node
+        keeps its queue order."""
+        ref, kind = node["ref"], node["kind"]
+        for root in dict.fromkeys((self.parent, self.child)):
+            try:
+                position = (packs.read_position(root, task_id=node["task_id"], rel_path=ref["path"]) if kind == "source"
+                            else packs.read_position(root, sha256=ref["sha256"], kind=ref["kind"],
+                                                     task_id=node["task_id"]))
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if position is not None:
+                return position
+        return ()
+
+    @staticmethod
+    def _blob_place(root, ref):
+        """Where ``root`` answers for a blob: ``(path, True)`` for its loose copy (else the exact locator inside a
+        retained root) or a view's skeleton placement, ``(path, False)`` for the address only its packs can answer."""
+        from ouroboros import observability as obs
+
+        try:  # this root's loose copy, else the exact locator inside a retained root
+            return obs._blob_ref_path(root, ref), True
+        except FileNotFoundError:  # nothing loose: a view's skeleton placement, else a pack member
+            placement = packs.shared_placement_path(root, ref["sha256"])
+            if ref["kind"] == "json" and placement.is_file():
+                return placement, True  # promoted as the placement; its parts travel through the manifest
+            return root / "observability" / "blobs" / f"{ref['sha256']}.{ref['kind']}.gz", False
+
+    def _next_node(self):
+        """``(node, position)``: manifests and loose sources in queue order, packed members ascending, loose blobs
+        last."""
+        while self.queue:
+            node = self.queue.popleft()
+            position = () if node["kind"] == "manifest" else self._position(node)
+            if position:
+                entry = (position, len(self.nodes), id(node), node)
+                if position >= self.swept_to:
+                    heapq.heappush(self.sweep, entry)
+                else:
+                    self.next_sweep.append(entry)
+            elif node["kind"] == "blob":
+                self.after_packed.append(node)
+            else:
+                return node, ()
+        if not self.sweep and self.next_sweep:
+            self.sweep, self.next_sweep, self.swept_to = self.next_sweep, [], ()
+            heapq.heapify(self.sweep)
+        if self.sweep:
+            self.swept_to, _, _, node = heapq.heappop(self.sweep)
+            return node, self.swept_to
+        return (self.after_packed.popleft(), ()) if self.after_packed else (None, ())
 
     def reference(self, ref, task_id, carrier="metadata", *, first=False):
         from ouroboros import observability as obs
@@ -445,8 +536,11 @@ class RetentionWalk:
 
         ref, task = node["ref"], node["task_id"]
         kind = node["kind"]
-        failures = []
-        # A valid canonical version wins, then the producer's retained version.
+        failures, places = [], []
+        # A valid canonical version wins, then the producer's retained version. A blob is read in two phases, each
+        # canonical first: every root's loose copy or view skeleton, then the roots only their packs answer for, so
+        # bytes beside their producer never wait behind another root's catalog (any copy verifies by its sha256;
+        # only the parent's own bytes prove the destination, ``_blob``).
         for root in dict.fromkeys((self.parent, self.child)):
             try:
                 if kind == "source":
@@ -454,25 +548,16 @@ class RetentionWalk:
                     # a carrier's ``read`` is presentation for the model, never checked here.
                     return artifacts.read_actor_source_bytes(root, task, ref), root
                 if kind == "manifest":
-                    manifest = obs.read_call_manifest_ref(root, ref, task_id=task)
-                    try:
-                        path = obs._ref_path(root, ref, pathlib.Path("calls") / task / f"{ref['call_id']}.json")
-                        raw = path.read_bytes()
-                        if hashlib.sha256(raw).hexdigest() != ref["sha256"]:
-                            raise ValueError("different manifest version")
-                    except (OSError, ValueError):
-                        raw = read_manifest_version(root, ref["sha256"])
-                    return (raw, manifest), root
-                try:  # this root's loose copy, else the exact locator inside a retained root
-                    path = obs._blob_ref_path(root, ref)
-                except FileNotFoundError:  # nothing loose: a view's skeleton placement, else a pack member
-                    path = root / "observability" / "blobs" / f"{ref['sha256']}.{ref['kind']}.gz"
-                    placement = packs.shared_placement_path(root, ref["sha256"])
-                    if ref["kind"] == "json" and placement.is_file():
-                        path = placement  # promoted as the placement; its parts travel through the manifest
+                    return obs.read_call_manifest_ref(root, ref, task_id=task, with_raw=True), root
+                places.append((root, *self._blob_place(root, ref)))
+            except (OSError, ValueError, KeyError, TypeError, EOFError, zlib.error) as exc:
+                failures.append(exc)
+        for root, path, _loose in sorted(places, key=lambda place: not place[2]):
+            try:
                 # Bytes and placement come from the SAME root, so a corrupt canonical copy is
                 # repaired from the child placement instead of being read through it.
-                return (packs.blob_bytes(pathlib.Path(*path.parts[:-3]), {**ref, "path": ""}), path), root
+                return (packs.blob_bytes(pathlib.Path(*path.parts[:-3]), {**ref, "path": ""}, task_id=task),
+                        path), root
             except (OSError, ValueError, KeyError, TypeError, EOFError, zlib.error) as exc:
                 failures.append(exc)
 
@@ -516,9 +601,13 @@ class RetentionWalk:
         try:
             destination = artifacts.task_artifact_dir_path(self.parent, task) / ref["path"]
             if not destination.exists():
-                source = artifacts.task_artifact_dir_path(self.child, task) / ref["path"]
+                directory = artifacts.task_artifact_dir_path(self.child, task)
+                source = directory / ref["path"]
                 try:
-                    if artifacts.read_actor_source_bytes(self.child, task, ref) == raw:
+                    # Only the child's own loose file, compared byte for byte, is linked: a pack member or a
+                    # retained fallback has no inode to share (the verified bytes are copied below).
+                    if (not source.is_symlink() and source.resolve().is_relative_to(directory.resolve())
+                            and source.read_bytes() == raw):
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         _check_open()
                         os.link(source, destination)
@@ -553,12 +642,21 @@ class RetentionWalk:
         target = self.parent / "observability" / "blobs" / source_path.name
         placement = target.name.endswith(packs.SHARED_PLACEMENT_SUFFIX)
         _check_open()
+        def parent_whole():  # one reconstruction reads a part its skeleton names twice once
+            # A probe never waits: a catalog that cannot answer now proves nothing, so the bytes are carried and
+            # read back from the parent.
+            with packs.part_cache_scope(), store.acquisition_budget(0):
+                whole = packs.blob_bytes(self.parent, {**ref, "path": ""}, task_id=task)
+                if carrier == "response_ref" and ref["kind"] == "json":  # the parent's own part, for the views after it
+                    packs.remember_part(self.parent, ref["sha256"], whole)
+                return whole == raw
+
         def verified_destination():
             from ouroboros.task_custody import PublicationClosed
 
             if placement:  # a skeleton verifies only as the whole it splices to, from this parent's parts
                 try:
-                    return packs.blob_bytes(self.parent, {**ref, "path": ""}) == raw
+                    return parent_whole()
                 except (OSError, ValueError, EOFError, zlib.error):
                     return False
             digest, size = hashlib.sha256(), 0
@@ -572,16 +670,27 @@ class RetentionWalk:
                 raise
             except (OSError, EOFError, zlib.error):
                 try:  # the parent itself may hold these bytes as a pack member (never a child placement)
-                    return packs.blob_bytes(self.parent, {**ref, "path": ""}) == raw
+                    return parent_whole()
                 except (OSError, ValueError, EOFError, zlib.error):
                     return False
             return digest.hexdigest() == ref["sha256"] and size == int(ref["size"])
 
+        def held(*, fresh=False):
+            """This walk's parent proof, else a decode (always after a write); a packed member read
+            again rewinds its xz stream, so a verdict stands until this node writes."""
+            if not fresh and (ref["sha256"], ref["kind"]) in self.parent_proven:
+                return True
+            verified = verified_destination()
+            if verified:
+                self.parent_proven.add((ref["sha256"], ref["kind"]))
+            return verified
+
         if source_path.resolve() != target.resolve():
             target.parent.mkdir(parents=True, exist_ok=True)
-            if placement and not verified_destination():
-                self._carry_parts(source_path)
-            if not verified_destination():
+            verified = held()
+            if placement and not verified and self._carry_parts(source_path, task):
+                verified = held(fresh=True)
+            if not verified:
                 temporary = target.with_name(f".{target.name}.tmp.{uuid.uuid4().hex}")
                 try:
                     try:
@@ -597,28 +706,36 @@ class RetentionWalk:
                     replace_atomic(temporary, target)
                 finally:
                     temporary.unlink(missing_ok=True)
-            if not verified_destination():
+                verified = held(fresh=True)
+            if not verified:
                 raise OSError("retained blob destination failed verification")
         self.state["promoted_ref_count"] += 1
         canonical = target.with_name(f"{ref['sha256']}.{ref['kind']}.gz") if placement else target
         return {**ref, "path": str(canonical), "compressed_size": target.stat().st_size if target.is_file() else 0}
 
-    def _carry_parts(self, placement_path):
-        """A view's parts into the parent before its skeleton placement. A call manifest queues them
-        first; a view referenced from anywhere else (a trace, a usage fact) brings them here."""
+    def _carry_parts(self, placement_path, task) -> int:
+        """A view's parts into the parent before its skeleton placement, counting the parts written. A call
+        manifest queues them first; a view referenced from anywhere else (a trace, a usage fact) brings them here."""
         from ouroboros import observability as obs
         from ouroboros.shared_values import token_digests
 
+        carried = 0
         for digest in token_digests(packs.read_loose_gzip(placement_path)):
+            if (digest, "json") in self.parent_proven:
+                continue
             part = {"sha256": digest, "kind": "json", "encoding": "gzip"}
             try:
-                packs.blob_bytes(self.parent, part, expected_kind="json")
+                with store.acquisition_budget(0):  # a probe never waits: what it cannot prove now is carried
+                    packs.blob_bytes(self.parent, part, expected_kind="json", task_id=task)
+                self.parent_proven.add((digest, "json"))
                 continue  # the parent already holds it
             except (OSError, ValueError, EOFError, zlib.error):
                 pass
             _check_open()
-            obs.write_blob_bytes(self.parent, packs.blob_bytes(self.child, part, expected_kind="json"))
+            obs.write_blob_bytes(self.parent, packs.blob_bytes(self.child, part, expected_kind="json", task_id=task))
             self.state["promoted_ref_count"] += 1
+            carried += 1  # written, not proven: the skeleton's check reads it back
+        return carried
 
     def _manifest(self, node, data):
         from ouroboros import observability as obs
@@ -674,14 +791,48 @@ class RetentionWalk:
         return result
 
     def drain(self):
+        with packs.part_cache_scope(packed_only=True):  # bounded: later views reuse the parts the sweep decoded
+            self._drain()
+
+    def _owe(self, node, exc):
+        """Keep ``node`` owed at its address: a ``pending_refs`` fact (a source's at its child path), an incomplete walk,
+        its own ref as the result. A later walk reads it again; only a deterministic refusal is remembered."""
+        from ouroboros import observability as obs
+
+        pending_ref = node["ref"]
+        if node["kind"] == "source":
+            pending_ref = {**pending_ref, "path": str(self.child / "task_results" / "artifacts" /
+                                                       node["task_id"] / pending_ref["path"])}
+        fact = obs._promotion_fact(pending_ref, f"{type(exc).__name__}: {exc}")
+        if isinstance(exc, InvalidRetainedSource):
+            # Deterministic: remembered by basis until a watched file changes.
+            fact.update(failure_kind="invalid_source", watched_paths=sorted(set(exc.paths)))
+        obs._append_promotion_fact(self.state["pending_refs"], fact)
+        self.state["status"] = "incomplete"
+        node["result"] = dict(node["ref"])
+        node["failure"] = "pending"
+
+    def _drain(self):
         from ouroboros import observability as obs
         from ouroboros.task_custody import PublicationClosed
 
-        while self.queue:
-            _check_open()
-            node = self.queue.popleft()
+        held = None  # (member, node, data): one member, for the carriers that name it: they sort adjacently
+        while self.queue or self.sweep or self.next_sweep or self.after_packed:
+            _check_open()  # before each node, as when this loop ran over the queue alone; an empty drain asks nothing
+            node, position = self._next_node()  # never None while the loop's condition holds
+            member = (node["kind"], position) if position else None
             try:
-                data, _source = self._read_source(node)
+                if held and held[0] == member and _vouches(held[1], held[2], node):
+                    data = held[2]
+                else:  # any other claim is checked by its own read, as if no carrier came before it
+                    data, _source = self._read_source(node)
+                    held = (member, node, data) if member is not None else None
+                    if node["kind"] == "blob" and node["carrier"] == "response_ref" and node["ref"]["kind"] == "json":
+                        # Under the root that physically held these bytes (``_read_source`` names the root it tried).
+                        packs.remember_part(pathlib.Path(*data[1].parts[:-3]), node["ref"]["sha256"], data[0])
+            except packs.EvidenceUnavailable as exc:
+                self._owe(node, exc)  # where the bytes lie cannot be learned now: never an unavailable source
+                continue
             except (OSError, ValueError, TypeError, KeyError, EOFError, zlib.error) as exc:
                 reason = obs._task_source_failure_reason(exc) if node["kind"] == "source" else obs._promotion_source_error(exc).reason
                 obs._append_promotion_fact(self.state["unavailable_refs"],
@@ -696,21 +847,10 @@ class RetentionWalk:
             except PublicationClosed:
                 raise
             except Exception as exc:
-                pending_ref = node["ref"]
-                if node["kind"] == "source":
-                    pending_ref = {**pending_ref, "path": str(self.child / "task_results" / "artifacts" /
-                                                               node["task_id"] / pending_ref["path"])}
-                fact = obs._promotion_fact(pending_ref, f"{type(exc).__name__}: {exc}")
-                if isinstance(exc, InvalidRetainedSource):
-                    # Deterministic: remembered by basis until a watched file changes.
-                    fact.update(failure_kind="invalid_source", watched_paths=sorted(set(exc.paths)))
-                obs._append_promotion_fact(self.state["pending_refs"], fact)
-                self.state["status"] = "incomplete"
-                node["result"] = dict(node["ref"])
-                node["failure"] = "pending"
+                self._owe(node, exc)
             finally:
                 self.current_node = None
-                del data  # no operation-lifetime raw/decoded payload cache
+                del data  # beyond the scope's bounded parts and one adjacent member, no raw/decoded payload cache
 
     def inventory(self, task_id):
         from ouroboros import observability as obs

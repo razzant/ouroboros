@@ -498,7 +498,9 @@ def test_three_os_gate_installs_the_reviewed_runtime_instead_of_floating_npm():
     ).read_text(encoding="utf-8")
     assert "os: [ubuntu-latest, windows-latest, macos-latest]" in workflow
     assert workflow.count("--managed-runtime") == 2
-    assert "node-version: '24.16.0'" in workflow
+    pin = json.loads((pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "claudexor_runtime_pin.json")
+                     .read_text(encoding="utf-8"))["release"]
+    assert f"node-version: '{pin['node_version']}'" in workflow  # the lockstep pair named beside it
     assert workflow.count("Stage the host-owned bundled Node layout") == 1
     assert "claudexor@next" not in workflow
     assert "CLAUDEXOR_NPM_SPEC" not in workflow

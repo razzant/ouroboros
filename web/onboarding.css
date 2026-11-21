@@ -142,13 +142,13 @@ textarea::placeholder {
 .wizard-steps {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(min-content, 1fr); /* a one-word title (Consciousness) never runs into its neighbour */
   gap: 10px;
 }
 
 /* The step rail: trays, the current step a chosen card in the soft crimson, a done step's chip in green. */
 .wizard-step {
-  min-width: 0;
+  min-width: min-content;
   padding: 10px 12px;
   border-radius: var(--radius-inner);
   border: 1px solid transparent;
@@ -431,6 +431,15 @@ textarea::placeholder {
   font-weight: 600;
 }
 
+.wizard-choice-grid.one {
+  /* A deployment's ceiling can leave the access picker one or two choices. */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.wizard-choice-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .wizard-choice-grid.three {
   /* Runtime-mode picker for contracts with three choices. */
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -568,6 +577,8 @@ textarea::placeholder {
   padding: 10px var(--wizard-content-pad) var(--wizard-content-pad);
   border-radius: 0 0 var(--radius-object) var(--radius-object);
   background: linear-gradient(var(--surface-object), var(--surface-object)), var(--bg);
+  /* Its own width decides whether the aside fits beside the buttons (a component follows its container). */
+  container: wizardfooter / inline-size;
 }
 
 @supports (animation-timeline: scroll()) {
@@ -609,6 +620,12 @@ textarea::placeholder {
 
 .wizard-error:not(:empty) + .footer-copy {
   display: none;
+}
+
+/* An unconfirmed save's warning is no ornament: the compact rules that drop the aside keep it, and only a reason
+   beside Continue still takes its slot. */
+.footer-copy.footer-warning {
+  display: block;
 }
 
 /* ---------------------------------------------------------------------------
@@ -806,6 +823,14 @@ textarea::placeholder {
   vertical-align: middle;
   position: relative;
   top: -1px;
+}
+
+/* A family's program line (docs/DESIGN.md §7): the model chooser's compact line under the row's status, shown only
+   with something to act on. Its Update takes the in-row control size so the line stays compact. */
+.agent-family-identity .harness-model-program {
+  --control-h: var(--control-h-sm);
+  --control-pad-x: var(--space-3);
+  --button-font-size: var(--type-meta);
 }
 
 .agent-service-note,
@@ -1271,22 +1296,12 @@ textarea::placeholder {
     gap: 10px;
   }
 
-  /* Title shrinks dropped with the one-off sizes they adjusted; hiding the
-     copy below reclaims far more height. */
+  /* A short or narrow window drops ornament only: the slogan, the rail's sub-labels and the rotation artwork
+     (its text stands beside it). The words a choice or a field is made by stay: a step's sentence, a card's
+     meaning, a field's note, and the footer's aside wherever it fits beside the buttons (the narrow rule
+     below). A taller step scrolls under the pinned footer (DESIGN.md §7). */
   .wizard-subtitle,
   .wizard-step-copy,
-  .step-copy,
-  .panel-card p,
-  .field-note:not(.compatible-load-status):not(.budget-shared-note),
-  .footer-copy {
-    display: none;
-  }
-
-  /* Agents step: the ARTWORK is what a short viewport drops, never the ladder.
-     Everything the diagram draws is stated in the text beside it, so hiding it
-     costs nothing and buys back ~180px. The login card's own sentences are
-     re-exempted from the blanket `.panel-card p` rule above: they are the live
-     sign-in instructions, not explanatory prose. */
   .agents-rotation-figure {
     display: none;
   }
@@ -1314,10 +1329,6 @@ textarea::placeholder {
     margin-top: 8px;
   }
 
-  .harness-login-card p {
-    display: block;
-  }
-
   .wizard-steps {
     gap: 8px;
   }
@@ -1341,14 +1352,21 @@ textarea::placeholder {
   .wizard-runtime-strip {
     padding: 10px 12px;
   }
+}
 
+/* A narrow footer: pinned over the step, its aside would take the step's own lines. */
+@container wizardfooter (max-width: 52rem) {
+  .footer-copy {
+    display: none;
+  }
 
-  .wizard-footer {
-    justify-content: flex-end;
+  /* With the aside gone the buttons stay on the right at any window size, not only below the viewport rule. */
+  .footer-actions {
+    margin-inline-start: auto;
   }
 }
 
-/* A short window: each pill as wide as its own title, so five titles stay on one line where they fit. */
+/* A short window: each pill as wide as its own title, so six titles stay on one line where they fit. */
 @media (max-height: 820px) {
   .wizard-steps {
     display: flex;
@@ -1386,6 +1404,8 @@ textarea::placeholder {
   .grid.two,
   .grid.three,
   .wizard-choice-grid,
+  .wizard-choice-grid.two,
+  .wizard-choice-grid.three,
   .wizard-choice-grid.four,
   .agent-ladder-layout {
     grid-template-columns: 1fr;
@@ -1408,7 +1428,7 @@ textarea::placeholder {
   }
 }
 
-/* A rail too narrow for five titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
+/* A rail too narrow for six titles scrolls sideways, keeping its pills' numbers (onboarding_wizard.js::revealCurrentStep). */
 @media (max-width: 720px) {
   .wizard-steps {
     display: flex;
@@ -1460,12 +1480,13 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
    depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
-/* The Consciousness row (#1603) beside it shares the value and note ink; its label holds the one checkbox. */
-.skills-starter-summary, .consciousness-offer { display: grid; gap: 2px; min-width: 0; }
-.skills-starter-value, .consciousness-offer-value, .consciousness-offer-choice { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.skills-starter-sub, .consciousness-offer-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-offer-choice { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; cursor: pointer; }
-[data-consciousness-offer]:empty { display: none; } /* no row offered: no extra gap in the card */
+.skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
+.skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-starter-sub { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
+   subscription pays with, its limits and its door. */
+.consciousness-step { display: grid; gap: var(--space-2); }
+.consciousness-step .wizard-choice-grid { margin-bottom: var(--space-1); }
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;

@@ -38,7 +38,7 @@ def _with_coordination_context(ctx: Any, raw: str) -> str:
 # LOAD-BEARING COUPLING: "malformed_response"/"daemon_unreachable" can also be
 # raised post-POST (a run may be live) — they are safe here ONLY because the
 # ClaudexorUnavailable handler in tools/delegate attaches the pending
-# invocation handle to every non-4xx fault, and the custody-handle guard
+# invocation handle to every fault after its POST was entered (a 4xx too), and the custody-handle guard
 # below then forces the wake. Refactors of that error path must keep
 # post-POST refusals carrying a handle.
 _DEFINITE_UNRUN_REASONS = frozenset({
@@ -304,9 +304,9 @@ def _pre_start_leaf(
 
     try:
         prior = initial_receipt(ctx, actor_bootstrap)
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, ValueError, TimeoutError) as exc:  # the cause stays (an actor lock keeps its platform errno)
         return json.dumps({"status": "configured_session_recovery_wake", "recovery": {
-            "status": "recovery_required", "reason": "initial_invocation_unknown"}})
+            "status": "recovery_required", "reason": "initial_invocation_unknown", "cause": f"{type(exc).__name__}: {exc}"}})
     if prior:
         _ground_restored_activity(ctx, task)
         return json.dumps({"status": "configured_session_continuation", "startup": prior})
@@ -478,7 +478,9 @@ def actor_first_unresolved_fact(
     children is disclosed as an incomplete execution, never a clean one
     (children remain visible in the fact's evidence fields). Unreadable
     receipt evidence stays ``unknown`` rather than permission to finalize
-    cleanly.
+    cleanly. A bound first interruption — or a first success whose work-order
+    coverage stayed unverified — beside a settled success is an informational
+    witness, not an unresolved execution.
     """
     bootstrap = getattr(ctx, "_configured_actor_bootstrap", None)
     if not isinstance(bootstrap, dict):
@@ -523,6 +525,11 @@ def actor_first_unresolved_fact(
                     "delegated_obligations": obligations}
         succeeded = int(evidence.get("delegated_runs_succeeded") or 0)
         if succeeded:
+            run_id = initial.get("run_id")
+            if (initial.get("state") in {"interrupted", "succeeded_source_unverified"}
+                    and isinstance(run_id, str) and run_id.strip()):
+                return {"status": "unknown", "reason": "initial_execution_display_only",
+                        "initial_execution": initial, "delegated_runs_succeeded": succeeded}
             return None
         started = int(evidence.get("delegated_runs_started") or 0)
         settled = int(evidence.get("delegated_runs_settled") or 0)
@@ -546,6 +553,8 @@ def actor_first_unresolved_fact(
             "delegated_runs_failed": int(evidence.get("delegated_runs_failed") or 0),
             "delegated_run_failure_states": failure_states[:12],
             "route_available": bootstrap.get("route_available"),
+            # The FIRST attempt's own typed fact, already read above; the readers state it beside the aggregate.
+            **({"initial_execution": initial} if initial else {}),
         }
         if len(failure_states) > 12:
             # Bounded but DISCLOSED (P1): never a silent truncation.
@@ -599,84 +608,6 @@ def actor_first_unresolved_fact(
            if direct_child_statuses else {}),
         **({"child_evidence_error": child_evidence} if child_evidence else {}),
     }
-
-
-def configured_actor_finalization_message(
-    ctx: Any, *, task_id: str, fallback_root: Any,
-) -> str | None:
-    """The charter finalization fact for a configured session actor.
-
-    ``None`` = not a configured actor (no charter fact to state);
-    ``""`` = clean (succeeded leaf, adoption, or a typed zero-run receipt);
-    otherwise the one structural reminder, prefixed ``CONFIGURED_ACTOR_INCOMPLETE``
-    for an incomplete fact and ``CONFIGURED_ACTOR_UNKNOWN`` for anything else:
-    a disclosure, not a gate. Host children and coordination
-    activity are auxiliary evidence and never silence it (owner 2026-08-28).
-    """
-    if not isinstance(getattr(ctx, "_configured_actor_bootstrap", None), dict):
-        return None
-    meta = getattr(ctx, "task_metadata", {})
-    meta = meta if isinstance(meta, dict) else {}
-    status_root = Path(str(
-        meta.get("budget_drive_root")
-        or getattr(ctx, "budget_drive_root", "")
-        or fallback_root
-    ))
-    try:
-        actor_fact = actor_first_unresolved_fact(
-            ctx, task_id=str(task_id or ""), drive_root=status_root,
-        )
-    except Exception:
-        actor_fact = None
-    if not actor_fact:
-        return ""
-    status = str(actor_fact.get("status") or "unknown")
-    code = (
-        "CONFIGURED_ACTOR_INCOMPLETE"
-        if status == "incomplete" else "CONFIGURED_ACTOR_UNKNOWN"
-    )
-    close_clause = (
-        "record the typed terminal via verify_and_record(contract_kind="
-        f"delegation_zero_run, zero_run_decision={status!r}, zero_run_basis=...) "
-        "when no run ever started. A plain prose answer cannot close this "
-        "evidence gap."
-    )
-    reason = str(actor_fact.get("reason") or "")
-    if reason == "zero_run_evidence_unavailable":
-        # A fence state: exact_start structurally REFUSES here, so telling the
-        # model to delegate_start would send it into a wall.
-        return (
-            f"⚠️ {code}: this configured session child is finalizing over "
-            "unreadable/ambiguous zero-run receipt evidence — a physical start "
-            f"is fenced. Reconcile the durable evidence, then {close_clause}"
-        )
-    if reason == "evidence_read_failed":
-        # Unreadable custody on a STARTED actor proves neither settlement nor
-        # absence: another physical start could double-run a possibly-live
-        # leaf, so the guidance must never prescribe one.
-        return (
-            f"⚠️ {code}: this configured session child is finalizing over an "
-            "UNREADABLE delegated-run custody log — whether its leaf ran is "
-            "unknown, not \"none\". Do NOT start another physical leaf over "
-            "it: check the run (delegate_wait) or reconcile the durable "
-            "evidence, and finalize with the unknown disclosed honestly in "
-            "your result."
-        )
-    if reason in {"delegated_runs_failed_without_success", "delegated_run_unsettled",
-                  "physical_start_uncustodied", "initial_execution_unresolved"}:
-        return (
-            f"⚠️ {code}: this configured session child is finalizing without a "
-            f"SUCCEEDED delegated run ({reason}). Retry or replace the run "
-            "(retry_of for an unresolved start; a new prompt for independent work), wait on it "
-            "(delegate_wait), or finalize with the failure disclosed honestly "
-            "in your result — the execution axis stays "
-            f"{status} either way."
-        )
-    return (
-        f"⚠️ {code}: this configured session child is finalizing with no "
-        "physical leaf run and no durable typed zero-run decision. Start the "
-        f"exact assigned session now (delegate_start), or {close_clause}"
-    )
 
 
 def _durable_zero_run_receipt(
@@ -761,6 +692,9 @@ def actor_first_terminal_projection(
             # fences a second physical start on read, but a self-reported
             # completion with zero runs is unverifiable authority: project it
             # as UNKNOWN with disclosure (owner 2026-08-28), never as clean.
+            # The validated receipt's no-physical-start fact is still proof:
+            # the first-attempt twin (tool_error_words.first_attempt_cause_key)
+            # reads exactly this typed spelling as "did not start".
             fact = {
                 "status": "unknown",
                 "reason": "historical_zero_run_complete",
@@ -952,7 +886,7 @@ def append_startup_receipt(
     else:
         guidance = _custody_guidance(receipt, ctx)
     delivered = _startup_view(
-        startup_wake, receipt, getattr(ctx, "_loop_mailbox_seen_ids", None) if seen is None else seen)
+        startup_wake, receipt, getattr(ctx, "_loop_mailbox_seen_ids", None) if seen is None else seen, ctx, messages)
     messages.append({
         "role": "user",
         "content": (
@@ -965,26 +899,26 @@ def append_startup_receipt(
 
     if seen is not None:
         ctx._loop_mailbox_seen_ids = seen
-    stage_pending_wake_exposure(ctx, delivered)
+    stage_pending_wake_exposure(ctx, delivered, mail=False)  # its old wake's mail stays the first drain's
     # The canonical receipt, not its narrowed view, names every id the ACK covers.
     defer_content_ack(ctx, lambda: acknowledge_pending_wake(ctx, startup_wake))
     ctx._configured_startup_wake = ""
 
 
-def _startup_view(raw: str, receipt: Any, seen: Any) -> str:
+def _startup_view(raw: str, receipt: Any, seen: Any, ctx: Any = None, messages: Any = None) -> str:
     """The receipt as delivered: one wake copy, without mail the restored transcript holds."""
     recovery = receipt.get("recovery") if isinstance(receipt, dict) else None
     if isinstance(recovery, dict) and len(recovery.get("holders") or []) > 1:
         from ouroboros.delegate_supervision import unseen_wake_view
 
-        views = [{**item, "wake": unseen_wake_view(item["wake"], seen)} if isinstance(item.get("wake"), dict)
+        views = [{**item, "wake": unseen_wake_view(item["wake"], seen, ctx, messages)} if isinstance(item.get("wake"), dict)
                  else item for item in recovery["holders"]]
         return json.dumps({**receipt, "recovery": {**recovery, "holders": views}}, ensure_ascii=False, indent=2)
     if not isinstance(receipt, dict) or not isinstance(receipt.get("wake"), dict):
         return raw
     from ouroboros.delegate_supervision import unseen_wake_view
 
-    view = {**receipt, "wake": unseen_wake_view(receipt["wake"], seen)}
+    view = {**receipt, "wake": unseen_wake_view(receipt["wake"], seen, ctx, messages)}
     recovery = view.get("recovery")
     if isinstance(recovery, dict) and recovery.get("wake") == receipt["wake"]:
         view["recovery"] = {key: value for key, value in recovery.items() if key != "wake"}
@@ -996,5 +930,4 @@ __all__ = [
     "actor_first_unresolved_fact",
     "append_startup_receipt",
     "bootstrap_before_context",
-    "configured_actor_finalization_message",
 ]

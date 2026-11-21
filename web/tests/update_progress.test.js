@@ -109,10 +109,10 @@ test('the requested description task ends through its own task_done, which alone
     const listeners = new Map();
     const ws = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); } };
     let phase = '';
-    let requested = 'd3adb33f';
+    let requested = ['d3adb33f', 'receipt-task'];
     const reads = [];
     const binding = bindUpdateRefreshEvents({ ws, getPhase: () => phase, loadStatus: (value) => reads.push(value),
-        reconcileRestart: () => {}, getRequestTaskId: () => requested });
+        reconcileRestart: () => {}, getRequestTaskIds: () => requested });
     const log = listeners.get('log');
     log({ data: { type: 'task_done', task_id: 'other-task' } });
     log({ data: { type: 'task_heartbeat', task_id: 'd3adb33f' } });
@@ -126,12 +126,14 @@ test('the requested description task ends through its own task_done, which alone
     log({ data: { type: 'task_done', task_id: 'd3adb33f-retry', root_task_id: 'd3adb33f' } });
     assert.equal(reads.length, 2);
     reads.pop();
-    requested = '';
+    log({ data: { type: 'task_done', task_id: 'receipt-task' } });
+    assert.equal(reads.length, 2, 'a receipt can name another task than the last status');
+    requested = [];
     log({ data: { type: 'task_done', task_id: 'd3adb33f' } });
     phase = 'restarting';
-    requested = 'd3adb33f';
+    requested = ['d3adb33f'];
     log({ data: { type: 'task_done', task_id: 'd3adb33f' } });
-    assert.equal(reads.length, 1, 'no request, or a restart in progress, reads nothing');
+    assert.equal(reads.length, 2, 'no request, or a restart in progress, reads nothing');
     binding.dispose();
     assert.equal(listeners.size, 0);
 });
@@ -142,7 +144,7 @@ test('Continue admitted in another client refreshes both panels and follows its 
         const ws = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); } };
         let current = 'original';
         const binding = bindUpdateRefreshEvents({ ws, getPhase: () => '', reconcileRestart() {},
-            getRequestTaskId: () => current,
+            getRequestTaskIds: () => [current],
             loadStatus: (options) => { reads.push(options); current = 'successor'; } });
         return { listeners, reads, binding };
     });

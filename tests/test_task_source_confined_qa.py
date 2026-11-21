@@ -29,10 +29,9 @@ def _packed(root, task="wanted"):
 
 
 def _warm_index(root):
-    """Validate the shared placement cache (building it when absent) the way its owners do: the
-    packer and the readers that need every pack. An addressed handle read never builds or checks it."""
-    with packs.open_index(root):
-        pass
+    """Build the shared placement cache the way its one owner does, the packing pass (``ensure_index``).
+    An addressed handle read never builds or checks it."""
+    packs.ensure_index(root)
 
 
 def _finish_stream_lease(pack):
@@ -178,7 +177,7 @@ def test_confined_placement_work_stays_constant(tmp_path, monkeypatch, record_pr
                              "median_seconds": statistics.median(times), "sidecars_decoded_total": len(decoded),
                              "enumerated_entries_total": sum(enumerated), "sidecar_scans_total": len(scans),
                              "confined_open_calls_total": len(reads)})
-        assert decoded == []
+        assert set(decoded) <= {packs.sidecar_name("zz-target", 1)}  # its own sidecar, by name; never history
         assert enumerated == []
         assert scans == []
     record_property("placement_cost", json.dumps(measurements))
@@ -339,3 +338,24 @@ def test_retained_roots_propose_every_drive_the_one_child_root_vocabulary_names(
     write_task_result(drive, successor, "completed", result="ran in the original drive")
     assert source_retention.retained_task_roots(anchor, successor) == [drive.resolve()]
     assert artifacts.read_actor_source_bytes(anchor, successor, ref, anchor=anchor) == raw
+
+
+def test_a_confined_handle_opens_only_its_own_sidecar_names(tmp_path, monkeypatch):
+    """An admitted root whose occupant no row records is read through confined opens. Only a name this
+    task's generations may carry can hold its members, so another task's sidecar there, even an unreadable
+    one, is never opened: the found handle answers and an absent one stays an absence."""
+    anchor = tmp_path / "data"
+    write_task_result(anchor, "wanted", "completed")  # a row that names no execution drive
+    root = anchor / "task_drives" / "wanted"
+    ref, raw, _loose, _pack, _ = _packed(root)
+    (packs.packs_dir(root) / "other.members.json").write_text("{", encoding="utf-8")
+    opened, real_open = [], confined_files.ConfinedDirectory.open
+
+    def spied(self, name):
+        opened.append(name)
+        return real_open(self, name)
+
+    monkeypatch.setattr(confined_files.ConfinedDirectory, "open", spied)
+    assert packs.handle_bytes(root, "wanted", ref["path"], anchor=anchor) == raw
+    assert packs.handle_info(root, "wanted", ref["path"].replace("record-", "absent-"), anchor=anchor) is None
+    assert {name for name in opened if name.endswith(".members.json")} == {packs.sidecar_name("wanted", 1)}, opened

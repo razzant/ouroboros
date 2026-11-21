@@ -69,6 +69,32 @@ def test_a_carried_owner_turn_reads_its_own_wait_in_its_carrier(lane):
     assert _owner_wait_fact(SimpleNamespace(task_id=task_id)) == ""  # released with the turn
 
 
+def test_a_resumed_turn_waits_from_its_own_entry_and_keeps_its_messages_acceptance_apart(lane):
+    """A turn that resumes saved work (here its warm wait, returned after a restart) answers no fresh message: its
+    wait runs from where this carrier took it, never from the turn's first admission a day ago, and the message's
+    acceptance is its own fact; the fresh turn above still measures from that acceptance."""
+    from ouroboros.context_runtime_facts import _owner_wait_fact
+    from supervisor.active_activity import turn_execution
+    from tests.conversation_carrier_support import dispatched_tasks
+
+    seen = {}
+
+    def behave(_actor, task):
+        seen.update(fact=_owner_wait_fact(SimpleNamespace(task_id=task["id"])), receipt=turn_execution(task["id"]).receipt())
+        return []
+
+    _owner_turn(lane)
+    for task in dispatched_tasks(lane.spare):
+        task["_owner_wait_resume"] = {"wait_id": "warm-1"}  # a governing continuation (owner_wait.governing_continuation)
+        task["_conversation_prepare"]["admitted_at"] -= 86_400
+        (lane.spare.in_q.append if isinstance(lane.spare.in_q, list) else lane.spare.in_q.put)(task)
+    carry(workers, lane.spare, _Actor(behave))
+    receipt = seen["receipt"]
+    assert (receipt["resumed"], receipt["origin_accepted_at"]) == ("owner_wait", ORIGIN["ts"])
+    assert "accepted_at" not in receipt and "owner_wait_sec" not in receipt and receipt["handler_wait_sec"] < 3600
+    assert seen["fact"].startswith("my resumed turn (owner_wait) began at ") and f"accepted at {ORIGIN['ts']}" in seen["fact"]
+
+
 def test_a_finished_carried_turn_keeps_only_its_late_event_address(lane):
     from supervisor.log_addressing import _TASK_ENDPOINTS, stamp_recorded_row
 

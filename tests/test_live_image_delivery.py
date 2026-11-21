@@ -148,6 +148,135 @@ def test_automatic_and_explicit_preparation_preserve_detail_and_original(tmp_pat
         assert decode_block(block) == raw
 
 
+def gray_tiff(values, size=None, mode="I"):
+    """A real wide-grayscale TIFF: signed 32-bit ``I``, 16-bit ``I;16``/``I;16B`` or float ``F``."""
+    from array import array
+    size = size or (len(values), 1)
+    if mode == "I":
+        image = Image.frombytes("I", size, array("i", values).tobytes())
+    elif mode == "F":
+        image = Image.frombytes("F", size, array("f", values).tobytes())
+    else:  # little-endian I;16, or big-endian I;16B as many Mac tools write it
+        order = "big" if mode == "I;16B" else "little"
+        image = Image.frombytes(mode, size, b"".join(value.to_bytes(2, order) for value in values))
+    out = io.BytesIO()
+    image.save(out, format="TIFF")
+    with Image.open(io.BytesIO(out.getvalue())) as decoded:
+        assert decoded.mode == mode, "the fixture must reach the wide-gray branch"
+    return out.getvalue()
+
+
+WIDE_GRAY_CASES = {  # values, decoder mode, the words the note must carry
+    "twelve-bit-in-16": ([0, 1000, 2000, 3000, 4095], "I;16", "16-bit integer grayscale values 0..4095"),
+    "big-endian-16": ([0, 300, 40000, 65535], "I;16B", "16-bit integer grayscale values 0..65535"),
+    # Mode I names no width: Pillow decodes 16-bit PGM and signed 16-bit TIFF to it as well.
+    "int32-signed": ([-5, 0, 10, 20], "I", "Integer grayscale values -5..20"),
+    "int32-extremes": ([-2**31, -1, 0, 2**31 - 1], "I", "values -2147483648..2147483647"),
+    "near-int32-max": ([2147483000, 2147483001, 2147483009, 2147483010], "I", "values 2147483000..2147483010"),
+    "constant": ([-7] * 4, "I", "Every pixel has the integer value -7"),
+    "float": ([1000.0, 1000.25, 1000.5, 1001.0], "F", "32-bit float grayscale values 1000..1001"),
+    "float-adjacent": ([1.0, 1 + 2**-23, 1 + 2**-22], "F", "values 1..1.00000024 are shown as 8-bit: 1 is black"),
+    # No-data pixels of a depth map or DEM: the finite values set the range, NaN and infinity are black and counted.
+    "float-nan": ([0.0, float("nan"), 1.0, 2.0], "F",
+                  "values 0..2 are shown as 8-bit: 0 is black, 2 is white, linear in between. "
+                  "NaN or infinity in 1 of 4 pixels, shown black."),
+    "float-all-nan": ([float("nan"), float("inf"), float("-inf"), float("nan")], "F",
+                      "Every pixel is NaN or infinity; shown as uniform black."),
+}
+
+
+@pytest.mark.parametrize("case", list(WIDE_GRAY_CASES))
+def test_wide_gray_is_shown_as_an_8_bit_view_of_its_own_range(case):
+    """Pillow 13 refuses mode I as PNG, 12.3 clamps it, and 16-bit pixels turn white or black depending on
+    who reduces them: the preview stretches the actual range to 8 bits and says so; the original stays exact."""
+    from fractions import Fraction
+    values, mode, words = WIDE_GRAY_CASES[case]
+    prepared = prepare_image_bytes(gray_tiff(values, mode=mode), max_bytes=8 << 20)
+    with Image.open(io.BytesIO(prepared.data)) as shown:
+        assert (prepared.mime, shown.format, shown.mode, shown.size) == ("image/png", "PNG", "L", (len(values), 1))
+        levels = [shown.getpixel((x, 0)) for x in range(len(values))]
+    assert words in prepared.note and "Converted image/tiff to PNG" in prepared.note
+    assert "The original keeps the exact values." in prepared.note
+    if "nan" in case:
+        want = [0, 0, 128, 255] if case == "float-nan" else [0] * len(values)
+        assert all(abs(level - goal) <= 1 for level, goal in zip(levels, want)), (levels, want)
+        return
+    low, high = min(values), max(values)
+    if low == high:
+        assert levels == [0] * len(values)
+        return
+    expected = [int(Fraction(value - low) * 255 / Fraction(high - low) + Fraction(1, 2)) for value in values]
+    assert all(abs(level - want) <= 1 for level, want in zip(levels, expected)), (levels, expected)
+    assert levels[0] == 0 and levels[-1] == 255 or min(levels) == 0 and max(levels) == 255
+    if case == "near-int32-max":
+        assert len(set(levels)) == len(values), "close values near the int32 limit stay apart"
+
+
+@pytest.mark.parametrize("mode", ["I", "I;16B", "I;16"])
+def test_wide_gray_reduction_and_jpeg_fallback_keep_its_levels(mode):
+    # A real >=4x reduction runs on the 8-bit view; before, thumbnail raised on I;16 (both Pillow lines).
+    ramp = [round(x * 65535 / 1999) for x in range(2000)] * 40
+    if mode == "I;16":  # a native 16-bit PNG over the side bound
+        out = io.BytesIO()
+        Image.frombytes("I;16", (2000, 40), b"".join(v.to_bytes(2, "little") for v in ramp)).save(out, format="PNG")
+        raw = out.getvalue()
+    else:
+        raw = gray_tiff([value * 65537 - 2**31 for value in ramp] if mode == "I" else ramp, size=(2000, 40), mode=mode)
+    prepared = prepare_image_bytes(raw, max_bytes=8 << 20, max_side=400)
+    with Image.open(io.BytesIO(prepared.data)) as shown:
+        assert (shown.mode, shown.size) == ("L", (400, 8))
+        low, high = shown.getextrema()
+        assert low < 8 and high > 247, "levels span the range instead of collapsing or clipping"
+    assert "Reduced dimensions" in prepared.note and "are shown as 8-bit" in prepared.note
+    # A byte budget forces JPEG: the dark and bright halves stay dark and bright, not one clamped color.
+    import random
+    rnd = random.Random(5)
+    noisy = [(5000 if x < 128 else 60000) + rnd.randrange(-5000, 5000) for _y in range(256) for x in range(256)]
+    prepared = prepare_image_bytes(gray_tiff(noisy, size=(256, 256), mode="I;16B" if mode == "I;16" else mode),
+                                   max_bytes=40000)
+    assert prepared.mime == "image/jpeg" and "Reduced representation" in prepared.note
+    assert "Converted image/tiff to JPEG" in prepared.note and "to PNG" not in prepared.note  # what is sent
+    with Image.open(io.BytesIO(prepared.data)) as shown:
+        gray = shown.convert("L")
+        assert gray.getpixel((10, 10)) < 30 and gray.getpixel((245, 10)) > 200
+
+
+def test_a_16_bit_transparent_value_is_dropped_from_the_8_bit_view_and_said():
+    # 0x1234 as a 16-bit tRNS has no 8-bit counterpart: carried over it would mark a wrong level or nothing at all.
+    out = io.BytesIO()
+    pixels = b"".join(value.to_bytes(2, "little") for value in [0x1234, 40000] * 600)
+    Image.frombytes("I;16", (600, 2), pixels).save(out, format="PNG", transparency=0x1234)
+    prepared = prepare_image_bytes(out.getvalue(), max_bytes=8 << 20, max_side=300)
+    with Image.open(io.BytesIO(prepared.data)) as shown:
+        assert shown.mode == "L" and "transparency" not in shown.info
+    assert "Its transparent value is not kept in this view. The original keeps the exact values." in prepared.note
+
+
+def jpeg2000(container):
+    """A real JPEG2000 image, alone or as the ``icp5`` member of an ICNS icon."""
+    import struct
+    source = Image.new("RGB", (32, 32), (200, 40, 90))
+    source.paste((10, 220, 30), (0, 0, 16, 32))
+    out = io.BytesIO()
+    source.save(out, format="JPEG2000", irreversible=False)
+    if container == "jp2":
+        return out.getvalue(), "Converted image/jp2 to PNG"
+    entry = b"icp5" + struct.pack(">I", 8 + len(out.getvalue())) + out.getvalue()
+    return b"icns" + struct.pack(">I", 8 + len(entry)) + entry, "Converted image/icns to PNG"
+
+
+@pytest.mark.parametrize("container", ["jp2", "icns"])
+def test_jpeg2000_alone_and_inside_icns_stay_readable(container):
+    """The decoder line Pillow 13 patched (OpenJPEG) stays enabled, for both carriers."""
+    raw, note = jpeg2000(container)
+    prepared = prepare_image_bytes(raw, max_bytes=8 << 20)
+    assert note in prepared.note
+    with Image.open(io.BytesIO(prepared.data)) as shown:
+        assert shown.format == "PNG" and shown.size == (32, 32)
+        assert shown.convert("RGB").getpixel((2, 2)) == (10, 220, 30)
+        assert shown.convert("RGB").getpixel((30, 2)) == (200, 40, 90)
+
+
 def test_partial_jpeg_is_reencoded_and_corrupt_png_is_explained(tmp_path):
     original = pixels("JPEG", (100, 100))[:-20]
     prepared = prepare_image_bytes(original, max_bytes=8 * 1024 * 1024)

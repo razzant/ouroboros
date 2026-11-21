@@ -675,3 +675,98 @@ def test_wait_decision_preserves_existing_settings_timeout_receipt(live_wait, mo
         finally:
             release.set()
             assert completed.wait(5)
+
+
+class _AppliedPlan:
+    """An identity token for a plan the call applied before it yielded (an authored view, a low retry, a card's
+    rebind). Every attribute reads as None, so these tests never reach a real rebind: the harness has no context core."""
+
+    def __getattr__(self, _name):
+        return None
+
+
+class _Answering:
+    calls = 0
+
+    def default_model(self):
+        return "test-model"
+
+    def chat(self, **_kwargs):
+        self.calls += 1
+        return {"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1}
+
+
+@pytest.mark.parametrize("reason", ["owner_words_waiting", "owner_model"])
+@pytest.mark.parametrize("where", ["in_call", "before_call"])
+def test_a_yielded_round_redials_from_what_its_call_applied(tmp_path, monkeypatch, reason, where):
+    """Before a call yields to an owner control it may apply the owner's wait-card route, the mind's authored memory view
+    or a low retry, each rewriting the transcript in place. The free redial starts from that route, plan and mode.
+    A yield before this round's call has nothing of it to carry: the loop keeps its own state."""
+    from ouroboros.route_choice import explicit
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_loop_transport_wait import _loop_kwargs
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    call_round, inject, seen, applied = loop._call_round_model, loop._inject_round_checkpoints, [], _AppliedPlan()
+
+    def call(model_call):
+        seen.append((model_call.active_model, model_call.active_use_local, model_call.context_fit_plan,
+                     model_call.active_context_mode))
+        if where == "in_call" and len(seen) == 1:  # what _reprepare_waiting_main, a view and _reproject_actual_overflow_low set
+            model_call.active_model, model_call.active_use_local = "card/model", True
+            model_call.context_fit_plan, model_call.active_context_mode = applied, "low"
+            model_call.tools._ctx.route_choice = explicit("wait_card")
+            raise model_wait.ModelWaitInterrupted(reason)
+        if where == "in_call":  # the applied plan is a stand-in: this redial's answer is scripted
+            return {"role": "assistant", "content": "done"}, 0.0, model_call.active_context_mode
+        return call_round(model_call)
+
+    def checkpoints(**kwargs):
+        if where == "before_call" and not seen and not kwargs["accumulated_usage"].get("_probe_yielded"):
+            kwargs["accumulated_usage"]["_probe_yielded"] = True
+            raise model_wait.ModelWaitInterrupted(reason)
+        return inject(**kwargs)
+
+    monkeypatch.setattr(loop, "_call_round_model", call)
+    monkeypatch.setattr(loop, "_inject_round_checkpoints", checkpoints)
+    result, _usage, _trace = loop.run_llm_loop(
+        **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=_Answering()))
+    assert result == "done"
+    if where == "in_call":
+        assert seen[0] == ("test-model", False, None, "max") and len(seen) == 2
+        assert seen[1][:2] == ("card/model", True) and seen[1][2] is applied and seen[1][3] == "low"
+    else:
+        assert seen == [("test-model", False, None, "max")]  # one call, from the loop's own state, after the early yield
+
+
+@pytest.mark.parametrize("reason", ["owner_words_waiting", "owner_model"])
+def test_a_later_rounds_early_yield_never_adopts_an_earlier_rounds_call(tmp_path, monkeypatch, reason):
+    """Round 1's call ends; round 2 binds the view the mind authored meanwhile and yields before its own call. The redial
+    keeps round 2's plan: nothing of round 1's finished call is carried."""
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_loop_transport_wait import _loop_kwargs
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    inject, seen, yielded = loop._inject_round_checkpoints, [], []
+    first, authored = _AppliedPlan(), _AppliedPlan()
+    tool_call = {"id": "c1", "type": "function", "function": {"name": "no_such_tool", "arguments": "{}"}}
+
+    def call(model_call):
+        seen.append(model_call.context_fit_plan)
+        if len(seen) == 1:  # round 1 applies a plan, answers with a tool call, and leaves an authored view for round 2
+            model_call.context_fit_plan, model_call.tools._ctx._authored_memory_plan = first, authored
+            return {"role": "assistant", "content": "", "tool_calls": [tool_call]}, 0.0, model_call.active_context_mode
+        return {"role": "assistant", "content": "done"}, 0.0, model_call.active_context_mode
+
+    def checkpoints(**kwargs):
+        if kwargs["round_idx"] == 2 and not yielded:
+            yielded.append(True)
+            raise model_wait.ModelWaitInterrupted(reason)
+        return inject(**kwargs)
+
+    monkeypatch.setattr(loop, "_call_round_model", call)
+    monkeypatch.setattr(loop, "_inject_round_checkpoints", checkpoints)
+    result, _usage, _trace = loop.run_llm_loop(
+        **_loop_kwargs(tmp_path, ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path), [], llm=_Answering()))
+    assert result == "done" and yielded == [True] and len(seen) == 2
+    assert seen[0] is None and seen[1] is authored  # round 2's bound view, not round 1's finished call

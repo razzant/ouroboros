@@ -887,7 +887,7 @@ def test_pseudo_owner_seat_homes_use_their_own_proof_in_free(tmp_path, monkeypat
     else:
         snapshot = {"runs": {"run": SimpleNamespace(
             execution_root=str(area), terminal_state="succeeded" if state == "done" else "",
-            started_ts=marker["created_at"], max_seconds=0)}, "pending": []}
+            started_ts=marker["created_at"], window_origin=marker["created_at"], max_seconds=0)}, "pending": []}
     monkeypatch.setattr(current, "task_snapshot", lambda _root, _task_id: snapshot)
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("review_evidence",))
@@ -918,7 +918,8 @@ def test_each_pseudo_owner_seat_home_is_judged_on_its_own_runs_whatever_the_orde
         (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
         (home / "area").rmdir()
         runs[home.name] = SimpleNamespace(execution_root=str(home / "area"), terminal_state=state,
-                                          started_ts=marker["created_at"], max_seconds=0)
+                                          started_ts=marker["created_at"], window_origin=marker["created_at"],
+                                          max_seconds=0)
     reads = []
     monkeypatch.setattr(current, "task_snapshot", lambda _root, task_id: reads.append(task_id) or {"runs": runs, "pending": []})
     _fake_sizer(monkeypatch)
@@ -986,8 +987,9 @@ def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_
     sw.capture_result_commit("snap-w", patch, data_dir=root)
     assert sw.release_snapshot_checkout("snap-w", worktree_root=wtroot, data_dir=root)
     seed_result(root, "writer", document("writer", "completed"))
-    custody.record_started(root, custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id="snap-w",
-                                                    execution_root=handle.path))
+    entry = custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id=handle.snapshot_id,
+                               execution_root=handle.path, baseline_sha=handle.baseline_sha)
+    assert custody.record_started(root, entry)
     _fake_sizer(monkeypatch)
     owner = _owner({})
     view = _preview(owner, root, tmp_path)
@@ -1002,9 +1004,9 @@ def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_
     record = sw.find_execution_snapshot("snap-w", root)
     assert record["pins_released"] and not {"baseline_ref", "result_ref", "result_sha"} & set(record)
     assert "changed by the writer" in patch.read_text(encoding="utf-8")
-    entry = SimpleNamespace(snapshot_id="snap-w", patch_disposed=False, execution_root=handle.path, baseline_sha="b",
-                            run_id="run-w")
-    assert _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))[0] is None
+    snapshot, refusal, detail = _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))
+    assert snapshot is None and refusal == "continuation_snapshot_missing"
+    assert "integrate_delegated_patch" in detail
     assert _group(_preview(owner, root, tmp_path), "result_pins")["count"] == 0, "nothing left to offer"
 
 

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderSkillIcon } from '../modules/page_icons.js';
+import { FLUENT } from '../modules/fluent_glyphs.js';
 
 test('named and missing icons keep monochrome house geometry and decorative semantics', () => {
     assert.match(renderSkillIcon('mail'), /currentColor/);
@@ -23,11 +24,15 @@ test('host-sanitized SVG paints without a second client sanitizer and keeps requ
         assert.match(skillIconHtml(icon), /<circle cx="12"/);
         assert.doesNotMatch(skillIconHtml(normalizeIcon({}), 21), /<circle/);
         assert.match(skillIconHtml({}, 21), /width="21" height="21"/);
+        // One icon set (page_icons.js): a named glyph draws its Fluent body, an unnamed one the plug.
+        const mail = FLUENT['mail-20-filled'];
+        const plug = FLUENT['plug-connected-20-filled'];
+        assert.ok(mail && plug);
         for (const spec of [{ kind: 'host', name: 'mail' }, { name: 'mail' }]) {
-            assert.match(skillIconHtml(spec), /<rect x="2" y="4"/);
-            assert.doesNotMatch(skillIconHtml(spec), /M9 3v5/);
+            assert.ok(skillIconHtml(spec).includes(mail), JSON.stringify(spec));
+            assert.ok(!skillIconHtml(spec).includes(plug), JSON.stringify(spec));
         }
-        assert.match(skillIconHtml({}), /M9 3v5/);
+        assert.ok(skillIconHtml({}).includes(plug));
         assert.equal(skillIconHtml({ svg }), skillIconHtml({}));
     } finally { delete globalThis.DOMPurify; }
 });

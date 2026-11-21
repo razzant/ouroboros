@@ -119,6 +119,28 @@ def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
     return lambda: in_process_stop_now(ctx)
 
 
+def turn_control_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
+    """``turn_stop_reader`` widened, for a host wait that runs no command (the gate's wait for memory), to every
+    control the turn's model wait reads (``TaskModelWait.control_reason``): a finalize control (Wrap up, a carrier's
+    cooperative stop at teardown or Update), the task's deadlines. True on a control; None when Stop is unknown or
+    the controls are unreadable (it stops nothing); else False. Reads only, by the waiter's private seen copy:
+    delivery stays the loop's. Ordinary pooled work keeps the worker kill: no reader."""
+    stop = turn_stop_reader(ctx)
+    if stop is None:
+        return None
+    waiter = ctx.model_wait_context
+
+    def read() -> Optional[bool]:
+        stopped = stop()
+        if stopped:
+            return True
+        try:
+            return True if waiter.control_reason() else stopped
+        except Exception:
+            return None
+    return read
+
+
 def communicate_or_stop(proc: subprocess.Popen, timeout: Optional[float], stop: Optional[Callable[[], Any]] = None,
                         end: Optional[Callable[[], Any]] = None) -> tuple:
     """The one command wait. Without ``stop`` it is ``proc.communicate(timeout)``, as before. With a reader
@@ -185,6 +207,12 @@ def tracked_start():
         return proc
 
     try:
+        # Direct git/skill callers share this boundary; interruption must still
+        # settle admission. The census starts no process and holds no start lock.
+        try:
+            maintain_tracked_children()
+        except Exception:
+            log.debug("Tracked-child maintenance failed before spawn", exc_info=True)
         yield publish
     finally:
         try:
@@ -411,7 +439,7 @@ def _kill_process_group(proc):
     kill_process_tree(proc)
 
 
-def _tree_remains(proc) -> Optional[bool]:
+def _tree_remains(proc, *, live_groups: Optional[dict[int, bool]] = None) -> Optional[bool]:
     """After its root's exit: whether what its containment holds still runs (its recorded group, or its Job's
     members). None when nothing measured holds it, so an exited root never stands for its tree."""
     held = _held(proc)
@@ -421,21 +449,30 @@ def _tree_remains(proc) -> Optional[bool]:
         if "_ouroboros_group_held" not in held or not retained_child_group(proc):
             return None  # an unknown/reaped/recycled leader cannot vouch for this number
         from ouroboros.process_containment import process_group_has_live_members
+        if live_groups is not None:
+            return live_groups.get(held["_ouroboros_pgid"])
         return process_group_has_live_members(held["_ouroboros_pgid"])
     if held.get("_ouroboros_job") is None:
         return None
     return job_has_running_member(held["_ouroboros_job"])
 
 
-def retire_tracked(proc) -> bool:
+def retire_tracked(proc, *, live_groups: Optional[dict[int, bool]] = None) -> bool:
     """Release only an exited root AND a measured empty tree; otherwise retain it.
 
     A task-group record is discovery, not transfer of this live OS witness.
     Foreground/external receipts describe the root separately. Idle workers
-    keep this registry alive; stop/idle probes retire naturally ended trees.
+    keep this registry alive; stop/idle probes and Linux spawn retries retire
+    naturally ended trees. Spawn retries wait for the owner's first attempt,
+    so publication bookkeeping can still read the retained leader's identity.
     """
     held = _held(proc)
-    if proc.poll() is None or _tree_remains(proc) is not False:
+    if live_groups is None:
+        held["_ouroboros_retirement_pending"] = True
+    if proc.poll() is None:
+        return False
+    remains = _tree_remains(proc) if live_groups is None else _tree_remains(proc, live_groups=live_groups)
+    if remains is not False:
         return False
     held["_ouroboros_tree_settled"] = True
     if held.get("_ouroboros_group_held") and not retained_child_group(proc, release=True):
@@ -515,6 +552,29 @@ def unsettled_tracked_children() -> Optional[dict]:
     return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
 
 
+def maintain_tracked_children() -> None:
+    """Retry exited trees at spawn boundaries; Linux batches a non-spawning census.
+
+    The snapshot belongs to this call, never to the shared process handles. An
+    unreadable census retains POSIX groups without falling back to per-group ps.
+    Jobs keep owner/idle/stop retirement. No global waitpid consumes others' status.
+    """
+    from ouroboros.process_containment import process_groups_have_live_members
+
+    candidates = [proc for proc in _active_subprocesses.copy()
+                  if _held(proc).get("_ouroboros_retirement_pending")
+                  and _held(proc).get("_ouroboros_pgid") and proc.poll() is not None]
+    if not candidates:
+        return
+    pgids = {int(_held(proc).get("_ouroboros_pgid", 0) or 0) for proc in candidates}
+    census = process_groups_have_live_members(pgids) or {}
+    for proc in candidates:
+        pgid = int(_held(proc).get("_ouroboros_pgid", 0) or 0)
+        if census.get(pgid) is not False:
+            continue  # no identity lock/probe for a live or unknown POSIX group
+        retire_tracked(proc, live_groups=census)
+
+
 def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     """For a command whose cwd is OUTSIDE the Ouroboros system repo (an external
     workspace / target project, e.g. SWE-bench dig-direct ``/app``), return an
@@ -531,6 +591,9 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     if isolated is not None:
         return isolated
     env = runtime_environ()
+    from ouroboros.node_runtime import forward_playwright_node
+
+    forward_playwright_node(env)
     try:
         system_repo = pathlib.Path(getattr(ctx, "repo_dir")).resolve(strict=False)
         wd = pathlib.Path(work_dir).resolve(strict=False)
@@ -697,6 +760,8 @@ def _format_process_output(stdout: str, stderr: str) -> str:
 
 
 def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
+    """Whether the command goes to the executor; an unmapped cwd runs on the host only without a managed
+    executor, whose dispatch then refuses it (``workspace_executor_paths.ManagedPathRefused``)."""
     executor_ref = executor_ref_from_ctx(ctx)
     if executor_ref is None:
         return False
@@ -704,7 +769,7 @@ def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
         executor_map_host_path(executor_ref, pathlib.Path(work_dir).resolve(strict=False))
         return True
     except Exception:
-        return False
+        return executor_ref.managed
 
 def _publish_finished_process_facts(ctx, res, started_ts) -> int:
     """Typed process facts (R5) for a returned child, measured structurally —

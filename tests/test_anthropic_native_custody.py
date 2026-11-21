@@ -179,6 +179,30 @@ def test_builder_places_exact_content_immediately_before_matching_results():
     ]
 
 
+def test_system_cache_endpoint_keeps_native_replay_in_the_full_candidate(monkeypatch):
+    from ouroboros.context_fit import seal_task_transcript
+    from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+
+    target = _target()
+    source = [{"role": "system", STABLE_PREFIX_BLOCKS_KEY: 2, "content": [
+        {"type": "text", "text": value, "cache_control": {"type": "ephemeral"}}
+        for value in ("governance", "identity")
+    ] + [{"type": "text", "text": "starting context"}]},
+        {"role": "user", "content": "task"}, _canonical_message(target), *_tool_results()]
+    seal_task_transcript(source, min_prefix_tokens=0)
+    original = copy.deepcopy(source)
+    client = LLMClient(api_key="unused")
+    monkeypatch.setattr(config, "resolve_prompt_cache_ttl", lambda: "1h")
+    with anthropic_replay_scope():
+        payload = client._build_remote_candidate(target, source, "high", 512, "auto", None, None)
+        client._normalize_payload_cache_ttl(target, payload)
+    assert payload["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert payload["messages"][1] == {"role": "assistant", "content": _raw_content()}
+    assert source == original and source[2][ANTHROPIC_NATIVE_RECEIPT_KEY] == original[2][ANTHROPIC_NATIVE_RECEIPT_KEY]
+    assert len(client._payload_cache_breakpoints(payload)) == 4
+    assert client._cache_breakpoint_tls.pending is None
+
+
 def test_complete_tool_unit_stays_active_until_successful_continuation_consumes_it():
     target = _target()
     message = _canonical_message(target)
@@ -448,6 +472,72 @@ def test_invalid_json_after_repair_commits_no_anthropic_evidence(tmp_path, monke
             )
     assert len(sent) == 2
     assert not (root / "state" / wire.REQUEST_WIRE_STATE_FILE).exists()
+
+
+class _NativeBody:
+    status_code, reason, text = 200, "OK", ""
+    url = "https://api.anthropic.example/v1/messages"
+
+    def __init__(self, body):
+        self.body = body
+
+    def json(self):
+        return copy.deepcopy(self.body)
+
+
+def test_sonnet_5_5_none_sends_its_off_state_once_and_replays_the_signed_note(tmp_path, monkeypatch):
+    """Sonnet 5.5 refuses "disabled": requested none is its own between_tools, sent once and
+    disclosed none/none; the signed note it writes beside a tool call replays unchanged."""
+    monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path / "wire")
+    target = _target(model="claude-sonnet-5-5")
+    tools = [{"type": "function", "function": {
+        "name": "probe_a", "description": "Probe.",
+        "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}},
+    }}]
+    tool_turn = [
+        {"type": "thinking", "thinking": "progress note", "signature": "sig-note"},
+        {"type": "tool_use", "id": "tool-A", "name": "probe_a", "input": {"value": 1}},
+    ]
+    replies = [  # empty usage, like the tests above: nothing here prices a model
+        {"content": tool_turn, "stop_reason": "tool_use", "usage": {}},
+        {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn", "usage": {}},
+    ]
+    sent = []
+
+    def post(*_args, **kwargs):
+        sent.append(copy.deepcopy(kwargs["json"]))
+        return _NativeBody(replies[len(sent) - 1])
+
+    import requests
+
+    monkeypatch.setattr(requests, "post", post)
+    client = LLMClient(api_key="unused")
+    # No up-front thinking: the note comes after an earlier call's result, beside the next call.
+    history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "", "tool_calls": [{
+        "id": "tool-0", "type": "function", "function": {"name": "probe_a", "arguments": '{"value": 0}'},
+    }]}, {"role": "tool", "tool_call_id": "tool-0", "content": "result-0"}]
+    with usage_scope(UsageScope(drive_root=tmp_path / "usage", task_id="sonnet-none")):
+        message, usage = client._chat_anthropic(target, history, tools, "none", 64, "auto")
+        assert len(sent) == 1
+        assert sent[0]["thinking"] == {"type": "between_tools"}
+        assert "output_config" not in sent[0] and "tool_choice" not in sent[0]
+        assert (usage["request_wire"]["requested_effort"], usage["request_wire"]["applied_effort"]) == ("none", "none")
+        assert usage.get("reasoning_effort_clamped") is None
+        assert [call["id"] for call in message["tool_calls"]] == ["tool-A"]
+        receipt = message[ANTHROPIC_NATIVE_RECEIPT_KEY]
+        assert json.loads(receipt["content_json"]) == tool_turn
+
+        final, _usage = client._chat_anthropic(
+            target, [*history, message, {"role": "tool", "tool_call_id": "tool-A", "content": "result-A"}],
+            tools, "none", 64, "auto",
+        )
+    assert len(sent) == 2
+    assert sent[1]["thinking"] == {"type": "between_tools"}
+    assert [row["role"] for row in sent[1]["messages"]] == ["user", "assistant", "user", "assistant", "user"]
+    assert sent[1]["messages"][3] == {"role": "assistant", "content": tool_turn}
+    assert sent[1]["messages"][4]["content"][0]["tool_use_id"] == "tool-A"
+    assert final["content"] == "done"
+    assert final[ANTHROPIC_CONSUMED_RECEIPTS_KEY] == [receipt["content_sha256"]]
 
 
 def test_main_preserves_private_receipt_but_persists_only_public_projection(

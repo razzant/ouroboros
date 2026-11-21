@@ -500,6 +500,23 @@ test('the pill goes to the oldest target off screen, then onward past what is on
     assert.deepEqual([main.calls.mounted, main.calls.revealed], [[], []], 'loaded cards need no mounting');
 });
 
+test('the pill lands a target below the header\'s frosted edge, as every landing in the room does', async t => {
+    const main = mainPage(t);
+    // The header's edge reaches 32 px below it (style.css "A room's edges"); the test above pins the bar alone (72).
+    const doc = main.page.ownerDocument;
+    doc.defaultView = { getComputedStyle: node => ({
+        getPropertyValue: name => (name === '--edge-reach' && node.className === 'chat-page-header' ? '32px' : '') }) };
+    t.after(() => { delete doc.defaultView; });
+    main.filler('2020-01-01T08:00:00Z');
+    const first = main.card(question('first'));
+    main.filler('2020-01-01T10:00:00Z');
+    main.filler('2020-01-01T11:00:00Z');
+    main.feed.scrollTop = 2 * ROW - 72;  // reading below the question
+    main.waiting.snapshot(census({ questions: [question('first')] }));
+    await main.press();
+    assert.equal(first.getBoundingClientRect().top, 60 + 32 + 12, 'just under the header and its edge');
+});
+
 test('an off-window question mounts at its own date (Project) or opens through its canonical read (Main\'s own)', async t => {
     const revealed = [];
     const native = { task_id: 'main-task', quiz_id: 'q-native', chat_id: 1, native: true, quiz_state: 'open',

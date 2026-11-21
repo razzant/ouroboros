@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import time
+from types import SimpleNamespace
+
 import pytest
 
 from supervisor.active_activity import (
@@ -177,7 +179,10 @@ def test_a_turn_execution_moves_forward_only_and_ends_with_its_entry(monkeypatch
 
 def test_a_call_its_route_never_observes_is_dispatched_at_its_start_once_it_finished(monkeypatch):
     from ouroboros import update_generation_facts
+    from supervisor import active_activity
 
+    now = 100.0
+    monkeypatch.setattr(active_activity, "time", SimpleNamespace(monotonic=lambda: now, time=time.time))
     dispatches = []
     monkeypatch.setattr(update_generation_facts, "observe_direct_dispatch", lambda **kw: dispatches.append(kw))
     registry = DirectActivityRegistry()
@@ -185,10 +190,13 @@ def test_a_call_its_route_never_observes_is_dispatched_at_its_start_once_it_fini
     execution = registry.register("act-6", 6, reply_expected=True).execution
     execution.observe("main_llm_call_state", {"llm_call_id": "llm-1", "phase": "started"})
     first_start = execution.marks[-1][1]
+    assert first_start == now
     execution.observe("main_llm_call_state", {"llm_call_id": "llm-1", "phase": "failed"})
-    time.sleep(0.01)
+    now += 1
     execution.observe("main_llm_call_state", {"llm_call_id": "llm-2", "phase": "started"})
     second_start = execution.call[1]
+    assert second_start == now
+    now += 1  # Finishing proves the send, but the dispatch stamp belongs to the second start.
     execution.observe("main_llm_call_state", {"llm_call_id": "llm-other", "phase": "finished"})  # not this call
     assert execution.phase == "requested" and dispatches == []
     execution.observe("main_llm_call_state", {"llm_call_id": "llm-2", "phase": "finished"})

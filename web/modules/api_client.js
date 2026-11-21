@@ -1,4 +1,5 @@
 import './api_types.js';
+import { clearChatPreviews } from './chat_preview.js';
 
 /**
  * Single browser-side gateway client. Keep backend calls here so UI modules
@@ -48,18 +49,34 @@ export function withinRequestLifetime(read, { signal = null, lifetimeMs = STATE_
     });
 }
 
+// The `task_bindings_revision` the newest state body this page read was answered with ('' until one names it, after
+// a failed bindings read and for a server without the field). A reader that opens nothing in the bindings map names
+// it, as the contract lets it (CLIENT_CONTRACT "Task bindings"), so every such read stays a fresh read of the other
+// fields without the map riding along; the map's own reader (state_snapshots.js) names the revision of the map it
+// holds in its own path. This is the server's token, not a kept answer: an outdated one costs one whole map.
+let bindingsSeen = '';
+const noteBindings = (state) => {
+    if (state && typeof state === 'object') {
+        bindingsSeen = typeof state.task_bindings_revision === 'string' ? state.task_bindings_revision : '';
+    }
+    return state;
+};
+const statePath = () => (bindingsSeen ? `/api/state?bindings_since=${encodeURIComponent(bindingsSeen)}` : '/api/state');
+
 /**
  * One `/api/state` read that settles within its lifetime: `{response, state}`, where `state` is the parsed body
  * of an OK answer and `undefined` for a non-OK answer or a body that does not parse. It rejects with the
  * transport's own error, or with a `StateReadEnded` whose `reason` is `expired` (the lifetime ran out, request or
- * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing).
+ * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing). Without a `path` the read names
+ * the bindings revision this page last saw, so its body may carry `task_bindings: null`: a reader of the map passes
+ * its own path.
  */
-export function readState(path = '/api/state', { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
+export function readState(path = statePath(), { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
     return withinRequestLifetime(async (transport) => {
         const response = await apiFetch(path, { cache: 'no-store', signal: transport });
         if (!response.ok) return { response, state: undefined };
         try {
-            return { response, state: await response.json() };
+            return { response, state: noteBindings(await response.json()) };
         } catch (error) {
             if (transport.aborted) throw error;
             return { response, state: undefined };
@@ -68,13 +85,16 @@ export function readState(path = '/api/state', { signal = null, lifetimeMs = STA
 }
 
 /**
- * `fetchJson('/api/state')` within the same lifetime, for readers that keep its contract: the body, or its typed
+ * `fetchJson` of `/api/state` within the same lifetime, for readers that keep its contract: the body, or its typed
  * error (`status`, `body`, `payload`; `isStoreMigrating`) for a non-OK answer. The caller's `init.signal` ends it
- * as fetch would (its abort reason, an `AbortError`); a read that outlives the lifetime is a `StateReadEnded`.
+ * as fetch would (its abort reason, an `AbortError`); a read that outlives the lifetime is a `StateReadEnded`. It
+ * names the bindings revision this page last saw (see `readState`): a fresh read of every other field, for readers
+ * that open nothing in `task_bindings`.
  */
 export function readStateJson(init = {}) {
     const { signal = null, ...rest } = init;
-    return withinRequestLifetime((transport) => fetchJson('/api/state', { cache: 'no-store', ...rest, signal: transport }),
+    return withinRequestLifetime((transport) => fetchJson(statePath(), { cache: 'no-store', ...rest, signal: transport })
+        .then(noteBindings),
         { signal, aborted: () => signal.reason ?? new DOMException('This operation was aborted', 'AbortError') });
 }
 
@@ -84,7 +104,8 @@ export function readStateJson(init = {}) {
  * separately hosted interface never passes through the gate's login page at load,
  * and a page whose session expired keeps showing until such a read is refused.
  * Every other failure keeps its own presentation, and nothing the page had queued
- * or failed to save is resent after signing in — the return is a fresh load.
+ * or failed to save is resent after signing in — the return is a fresh load. A
+ * refused session takes this browser's saved conversation text with it (chat_preview.js).
  */
 export function signInUrl(href = window.location.href) {
     const here = new URL(href);
@@ -94,6 +115,7 @@ export function signInUrl(href = window.location.href) {
 }
 
 export function openSignIn() {
+    clearChatPreviews();
     window.location.replace(signInUrl());
 }
 
@@ -257,8 +279,9 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '', stopActio
 }
 
 const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 const plainSegments = (text) => typeof text === 'string' && !!text && !text.includes('\\') && !text.includes('\0')
-    && text.split('/').every((part) => part && part !== '.' && part !== '..');
+    && !LONE_SURROGATE.test(text) && text.split('/').every((part) => part && part !== '.' && part !== '..');
 // Python quote(safe='') spelling of one path segment.
 const encodeSegment = (text) => encodeURIComponent(text).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 
@@ -269,7 +292,8 @@ const encodeSegment = (text) => encodeURIComponent(text).replace(/[!'()*]/g, cha
  */
 export function taskArtifactDownloadUrl(taskId, name, relpath = '') {
     if (!TASK_ID_RE.test(String(taskId || ''))
-        || typeof name !== 'string' || !name || name.startsWith('.') || /[/\\]/.test(name)) return '';
+        || typeof name !== 'string' || !name || name.startsWith('.') || /[/\\]/.test(name)
+        || LONE_SURROGATE.test(name)) return '';
     const url = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeSegment(name)}`;
     if (!relpath || relpath === name) return url;
     if (!plainSegments(relpath) || relpath.split('/').at(-1) !== name) return '';
@@ -339,6 +363,23 @@ export function hurryTask(taskId, requestId) {
 }
 
 /**
+ * One act on a work's model: `set` a model for it, `follow` Main again, or leave a fallback by `return`, `wait` or
+ * `keep`. The answer says when it applies (`applied`) and carries the work's fact (`lead`); a refusal rejects with
+ * the server's `reason_code` and status on the error (card_model.js says it in the owner's words).
+ * @param {string} taskId
+ * @param {string} requestId  // a retry of the same act carries the same id
+ * @param {Omit<import('./work_types.js').TaskModelRequest, 'request_id'>} act
+ * @returns {Promise<import('./work_types.js').TaskModelResponse>}
+ */
+export function taskModel(taskId, requestId, act) {
+    return jsonPost(
+        `/api/tasks/${encodeURIComponent(taskId)}/model`,
+        { request_id: String(requestId || ''), ...act },
+        { rejectOkFalse: true },
+    );
+}
+
+/**
  * Owner Pause of a whole task tree (Batch4): the body is the stable request_id
  * (the same id on retry is idempotent) and this client's declaration that the
  * owner pressed it (`actor: "owner"`, no text), which the card words as "You
@@ -371,7 +412,7 @@ export function continueTask(taskId, actionNonce) {
     return jsonPost(
         `/api/tasks/${encodeURIComponent(taskId)}/continue`,
         { action_nonce: String(actionNonce || '') },
-        { rejectOkFalse: true },
+        { rejectOkFalse: true, headers: APP_SETTINGS_ORIGIN },
     );
 }
 
@@ -465,7 +506,7 @@ export const skillSourcesApi = {
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogResponse>} */
     catalog: ({ refresh = false } = {}) => fetchJson(`/api/skill-catalog${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogSearchResponse>} */
-    search: ({ q = '', source = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}) })}`, { cache: 'no-store', ...init }),
+    search: ({ q = '', source = '', sort = '', cursor = '' } = {}, init = {}) => fetchJson(`/api/skill-catalog/search?${new URLSearchParams({ q, ...(source ? { source } : {}), ...(sort ? { sort } : {}), ...(cursor ? { cursor } : {}) })}`, { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./skill_source_contract_types.js').SkillCatalogItemDetailResponse>} */
     item: (sourceId, name, init = {}) => fetchJson(`/api/skill-catalog/item/${encodeURIComponent(sourceId)}/${encodeURIComponent(name)}`, { cache: 'no-store', ...init }),
     /**
@@ -498,6 +539,27 @@ export function updateStrategyForPlan(plan = {}) {
 /** Storage actions may have started when the answer is cut: an unreadable OK body is an error, not a reply. */
 const STORAGE_READ = { requireBody: true };
 
+function hasUpdateStatus(body) {
+    return typeof body?.available === 'boolean' || body?.managed === false || typeof body?.check_ok === 'boolean'
+        || body?.update_tx?.active === true || body?.update_progress?.active === true;
+}
+
+function readUpdateStatus(body) {
+    if (hasUpdateStatus(body)) return body;
+    throw Object.assign(new Error('No update status in the response'), { unreadable: true });
+}
+
+function descriptionReply(body, latest) {
+    const hasTask = typeof body?.task_id === 'string' && body.task_id.trim();
+    if (hasTask && (body.status === 'queued' || (latest && body.status === 'writing'))) {
+        // The task receipt stands on its own even if the accompanying status cannot refresh the page.
+        return latest && !hasUpdateStatus(body.update) ? { ...body, update: null } : body;
+    } else if (latest && ['check_failed', 'current', 'no_update'].includes(body?.status) && hasUpdateStatus(body.update)) {
+        return body;
+    }
+    throw Object.assign(new Error('No usable description outcome in the response'), { unreadable: true });
+}
+
 export const apiClient = {
     harnessMaintenanceInventory,
     startHarnessMaintenance,
@@ -511,6 +573,13 @@ export const apiClient = {
         if (around) params.set('around', around);  // `task:<id>` or canonical `row:…`
         const query = params.toString();
         return fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });
+    },
+    /** One bounded read of a room's saved messages as candidates for the words `q`, newest first; `cursor` continues older.
+     * @returns {Promise<import('./client_contract_types.js').ChatSearchResponse>} */
+    chatSearch: ({ chatId = 1, q = '', cursor = null, signal } = {}) => {
+        const params = new URLSearchParams({ chat_id: String(chatId), q: String(q) });
+        if (cursor) params.set('cursor', cursor);
+        return fetchJson(`/api/chat/search?${params}`, { cache: 'no-store', signal });
     },
     /** @returns {Promise<import('./api_types.js').HealthResponse>} */
     health: () => fetchJson('/api/health', { cache: 'no-store' }),
@@ -565,7 +634,7 @@ export const apiClient = {
     exportI18nUrl: (language = '') => `/api/ui/i18n/export${language ? `?language=${encodeURIComponent(language)}` : ''}`,
     regenerateI18n: (payload = {}) => jsonPost('/api/ui/i18n/regenerate', payload),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
-    desktopAutostart: () => fetchJson('/api/desktop/autostart', { cache: 'no-store' }),
+    desktopAutostart: (init = {}) => fetchJson('/api/desktop/autostart', { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
     setDesktopAutostart: (enabled) => jsonPost('/api/desktop/autostart', { enabled: Boolean(enabled) }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
@@ -596,15 +665,23 @@ export const apiClient = {
     previewOnboardingSubagents: (payload) => jsonPost('/api/onboarding/subagents/preview', payload),
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
-    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }, { headers: APP_SETTINGS_ORIGIN }),
     /** Save room primary effort and ordered helper bounds. @param {import('./client_contract_types.js').OwnerEffortRangeRequest} range */
     ownerEffortRange: (range) => jsonPost('/api/owner/effort-range', range),
     /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
      * @returns {Promise<import('./api_types.js').OwnerSubagentsModeResponse>} */
     ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
+    /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
+     * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
+    ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice, { headers: APP_SETTINGS_ORIGIN }),
+    /** The room's processing tier for new owner work ('' = Default); Main's own without project_id.
+     * @param {import('./client_contract_types.js').OwnerChatProcessingRequest} choice
+     * @returns {Promise<import('./client_contract_types.js').OwnerChatProcessingResponse>} */
+    ownerChatProcessing: (choice) => jsonPost('/api/owner/chat-processing', choice, { headers: APP_SETTINGS_ORIGIN }),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
-    logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
+    /** A log's newest rows; `view` 'compact' bounds each row and keeps its `ts` and `type` (ouroboros/gateway/logs.py). */
+    logsTail: (name, limit = 2000, view = '') => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}${view ? `&view=${encodeURIComponent(view)}` : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./model_route_types.js').ResponseLimitAckResponse|Object>} */
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
@@ -614,7 +691,7 @@ export const apiClient = {
      * @returns {Promise<import('./api_types.js').ProviderTestResponse>}
      */
     providerTest: (payload) => jsonPost('/api/providers/test', payload),
-    extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),
+    extensions: (init = {}) => fetchJson('/api/extensions', { cache: 'no-store', ...init }),
     /**
      * Widgets page cards: live extension UI tabs projected from the loader
      * snapshot (no skill discovery), each stamped with the owning skill's
@@ -624,12 +701,22 @@ export const apiClient = {
     widgets: (init = {}) => fetchJson('/api/widgets', { cache: 'no-store', ...init }),
     skillPublishPreflight,
     createTask,
-    skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),
+    skillLifecycleQueue: ({ signal } = {}) => withinRequestLifetime(
+        (transport) => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store', signal: transport }), { signal }),
     /** @returns {Promise<import('./api_types.js').SkillDeleteResponse>} */
     deleteSkill: (skill, payloadRoot, expectedContentHash = '') => jsonPost(`/api/skills/${encodeURIComponent(skill)}/delete`, {
         payload_root: payloadRoot,
         ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
+    /** @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectPreviewResponse>} */
+    skillMcpConnectPreview: (skill) => fetchJson(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, { cache: 'no-store' }),
+    /**
+     * @param {string} skill
+     * @param {import('./skill_mcp_types.js').SkillMcpConnectRequest} body
+     * @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectResponse|import('./skill_mcp_types.js').SkillMcpConnectPending>}
+     */
+    skillMcpConnect: (skill, body) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, body,
+        { headers: { Prefer: 'respond-async' } }),
     skillGrants: (skill, items, expectedContentHash = '', enableAfterGrant = false) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, {
         items, ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
         ...(enableAfterGrant ? { enable_after_grant: true } : {}),
@@ -647,6 +734,12 @@ export const apiClient = {
         typeof update === 'string' ? { name: update } : update),
     /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /** One Project's working folder as one look finds it (the only read that inspects a folder).
+     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    projectFolder: (projectId) => fetchJson(`/api/projects/${encodeURIComponent(projectId)}/folder`, { cache: 'no-store' }),
+    /** @param {import('./project_folder_types.js').ProjectFolderRequest} change
+     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    projectFolderChange: (projectId, change) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/folder`, change),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     /**
@@ -709,19 +802,30 @@ export const apiClient = {
      */
     cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
+    updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }, { requireBody: true }).then(readUpdateStatus),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateCheck: () => jsonPost('/api/update/check', {}),
+    updateCheck: () => jsonPost('/api/update/check', {}, { requireBody: true }).then(readUpdateStatus),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     /**
      * The owner's Write/Rewrite: one ordinary Main task describes this exact range.
+     * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply: the server may
+     * already have admitted that writer, so the press says the outcome is unknown instead of returning in
+     * silence.
      * @param {'write'|'rewrite'} mode
      * @returns {Promise<import('./api_types.js').UpdateDescriptionResponse>}
      */
     updateDescription: (mode, key = {}) => jsonPost('/api/update/description', {
         mode, base_sha: String(key.base_sha || ''), target_sha: String(key.target_sha || ''),
-    }),
+    }, { requireBody: true }).then(body => descriptionReply(body, false)),
+    /**
+     * Check and describe: the server checks the channel, then asks for the range that check found at most once.
+     * An answer that arrives unreadable is an unknown outcome (no HTTP status), never a reply.
+     * A usable task receipt survives an unreadable update snapshot; only its update field becomes null.
+     * @returns {Promise<Omit<import('./api_types.js').UpdateDescriptionLatestResponse, 'update'> & {update: Object|null}>}
+     */
+    updateDescribeLatest: () => jsonPost('/api/update/description', { mode: 'latest' }, { requireBody: true })
+        .then(body => descriptionReply(body, true)),
     /** @returns {Promise<import('./api_types.js').UpdateApplySuccessResponse>} */
     updateApply: (strategy, plan = {}, { confirmRecovery = false } = {}) => jsonPost('/api/update/apply', {
         strategy,

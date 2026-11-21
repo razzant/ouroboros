@@ -89,7 +89,7 @@ def test_pinned_reader_admits_once_at_the_lane_without_storage_under_q(env, monk
     bus = env.ctx.event_queue = stdqueue.Queue()
     copies = spy_provisions(monkeypatch)
     worker, delivered = install_worker(env, monkeypatch)
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)  # one slot: the pool spawns no process for the second child
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))  # one slot: the pool spawns no process for the second child
     under_q = store_opens_under_q(monkeypatch)
     with contextlib.ExitStack() as stack:
         held, transitions, failures = hold_at_receipt(env, monkeypatch, stack, write=journal == "WAL")

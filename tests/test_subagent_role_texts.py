@@ -104,7 +104,7 @@ def test_both_assignment_branches_grant_signed_memory_and_drop_the_old_bans():
         for claim in FALSE_CLAIMS:
             assert claim not in text
     # What stays forbidden is still said in each branch.
-    assert "Do NOT commit" in acting and "or write identity or scratchpad." in acting
+    assert "Committing, review gates" in acting and "writing identity or scratchpad are the parent's steps" in acting
     assert "Do not write local repo/data state" in readonly and "tree_note" in readonly
 
 
@@ -118,8 +118,9 @@ def test_schedule_subagent_tells_the_parent_children_write_signed_memory_and_dra
     assert "Children may write knowledge notes, memory marks and chronicle drafts in their own name" in description
     assert "(the integrating mind accepts or rejects drafts: chronicle_write kind=decision)" in description
     assert "no child commits, grants itself tools or writes identity/scratchpad" in description
-    assert ("READ-ONLY children inspect local repo/data/history and web/browser and return findings; no other "
-            "local writes or shell/review/runtime/skills") in description
+    assert description.startswith("Start a child on one objective; it returns task_id and reports back.")
+    assert ("Default native READ-ONLY children inspect repo/data/history and web/browser; no "
+            "other writes or shell/review/runtime/skills") in description
     # Which records a child drafts is said once, by the tool that writes them, in the same catalog.
     chronicle = next(entry.schema for entry in chronicle_tools() if entry.name == "chronicle_write")["description"]
     assert "A delegated child or nanny publishes pages and parts only as drafts" in chronicle

@@ -165,10 +165,12 @@ def _run_terminal_duty(drive_root: pathlib.Path, step: str, latch: Any,
         if _stop_requested(stop_event):
             return
         if step == "cancel_intent_sweep":
+            from supervisor.ended_work_helpers import close_abandoned_helpers
             from supervisor.task_lifecycle import sweep_cancel_intents
             outcomes = sweep_cancel_intents()
             if outcomes:
                 log.info("Cancel-intent watchdog settled: %s", outcomes)
+            close_abandoned_helpers()  # discovery only, after the watchdog: the next sweep settles what it requests
         elif step == "terminal_delivery_replay":
             from ouroboros import custody_owed
             from ouroboros.dialogue_retry import drain, _requested
@@ -390,7 +392,7 @@ def _periodic_supervisor_maintenance(
     # waiting for the park event would make release and acceptance wait on each other.
     from supervisor.active_activity import get_direct_activity_registry
     has_actors = bool(queue.RUNNING or queue.PENDING or get_direct_activity_registry().actors())
-    from ouroboros.delegate_supervision import _TICK_SEC
+    from ouroboros.delegate_feed import _TICK_SEC
     if (has_actors and now - _LAST_COLD_CUSTODY_SWEEP[0] >= _TICK_SEC
             and _COLD_CUSTODY_SWEEP_LOCK.acquire(blocking=False)):
         _LAST_COLD_CUSTODY_SWEEP[0] = now
@@ -553,15 +555,17 @@ def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None) 
                      if restore_owner_wait_allowed(DATA_DIR, task)}
 
         # Zero admission wait: a daemon in its recovery-only window waits for the next sweep. Once a
-        # stop, restart or panic is in flight the factory is ATTACH-ONLY and nothing is replayed
-        # (``replay_pending`` is re-asked before each re-POST); the one ensure left here is the latch
-        # retry (ARCHITECTURE §9). This admitted sweep is the ONLY surface replaying an ended task's start.
+        # stop, restart or panic is in flight the factory is ATTACH-ONLY and nothing is replayed or read
+        # (one predicate, re-asked before each re-POST and each accepted-start read); the one ensure left
+        # here is the latch retry (ARCHITECTURE §9). This admitted sweep is the ONLY surface replaying an
+        # ended task's start; it reads every other owner's accepted start, a paused owner's included.
+        running = lambda: not _stop_requested(stop_event)  # noqa: E731
         outcomes = reconcile_orphaned_runs(
             DATA_DIR, running_task_ids=running_task_ids,
             gateway_factory=lambda: (read_owned_gateway() if _stop_requested(stop_event)
                                      else ensure_owned_gateway(admission_wait_sec=0)),
             recoverable_handles=recoverable_handles(DATA_DIR) | continuation_handles(DATA_DIR, continued),
-            replay_pending=lambda: not _stop_requested(stop_event),
+            replay_pending=running, observe_pending=running,
         )
         if outcomes:
             log.info("Delegated-run reconciliation handled %d orphan(s): %s", len(outcomes), outcomes)
@@ -904,13 +908,13 @@ def _memory_journal_sizes(root: pathlib.Path) -> Dict[str, Any]:
 
 
 def _startup_prune_sweeps(*, preserve_task_sources=False, recovery_report=None):
-    """Boot's housekeeping: note whether recovery left a gap, reap the fallback scripts (only before
-    intake, when none can be live) and observe the memory journals' sizes once per generation. History-sized
-    retirers run in the maintenance child; queue-owned copies stay on the custody pass."""
+    """Boot's housekeeping: note whether recovery left a gap and what it left unresolved, reap the fallback
+    scripts (only before intake, when none can be live) and observe the memory journals' sizes once per generation.
+    History-sized retirers run in the maintenance child; queue-owned copies stay on the custody pass."""
     _STARTUP_RECOVERY_GAPS[0] = bool(preserve_task_sources and (
         recovery_report is None or recovery_report.get("errors") or "*" in recovery_report.get("unresolved", [])))
     from ouroboros.maintenance_retirement import record_startup
-    record_startup(DATA_DIR, gaps=_STARTUP_RECOVERY_GAPS[0])
+    record_startup(DATA_DIR, gaps=_STARTUP_RECOVERY_GAPS[0], report=recovery_report)
     if not preserve_task_sources:  # the atomic-temp walk is the maintenance child's temp_sweep job
         from ouroboros.temp_sweep import sweep_stale_temp_files
         sweep_stale_temp_files(DATA_DIR, atomic_temps=False)
@@ -1197,6 +1201,17 @@ def settlement_verdicts(root: pathlib.Path) -> Dict[str, Any]:
     return {key: dict(item) for key, item in value.items() if isinstance(item, dict)} if isinstance(value, dict) else {}
 
 
+def _young_counted(report: Dict[str, Any]) -> Dict[str, Any]:
+    """A layout's prune report as the pass's event carries it: a copy with every field as returned, except that
+    the drives still inside the retention term (the rule, not a hold) leave ``skipped`` for
+    ``younger_than_retention_count``, so the row no longer grows with every young drive on every pass (#3237)."""
+    out = {**report, "younger_than_retention_count": 0}
+    if isinstance(report.get("skipped"), list):
+        out["skipped"] = [item for item in report["skipped"] if item.get("reason") != "younger_than_retention"]
+        out["younger_than_retention_count"] = len(report["skipped"]) - len(out["skipped"])
+    return out
+
+
 def _run_drive_custody_pass(stop_event: Any = None) -> None:
     """The settled canonical mailboxes the loop thread's seam left (unread inputs to carry),
     then settle terminal child and direct drives past retention (a cancelled subagent's at
@@ -1282,7 +1297,8 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
                 if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
                     holds.note(skipped.get("reason"), task_id)
         maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
-                                                                "headless": reports["headless"], "direct": reports["direct"],
+                                                                "headless": _young_counted(reports["headless"]),
+                                                                "direct": _young_counted(reports["direct"]),
                                                                 "mailboxes": mailboxes}, event="headless_task_drive_prune")
 
 
@@ -1451,6 +1467,7 @@ def _run_startup_task_recovery(
         report["errors"].append("prior_worker_ownership_unconfirmed")
         log.warning("Startup file/task recovery deferred: prior worker ownership is unconfirmed")
         return report
+    report["prior_workers_ended"] = True  # the one positive answer; an early return above leaves it unknown
     try:
         from ouroboros.task_status import _load_queue_snapshot
         snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
@@ -1471,7 +1488,7 @@ def _run_startup_task_recovery(
     except Exception:
         intent_errors.append("promotion_intent_reconcile_failed")
         log.warning("Startup new-work intent reconciliation deferred", exc_info=True)
-    report = _recover_terminal_task_files(drive_root, protected)
+    report = {**_recover_terminal_task_files(drive_root, protected), "prior_workers_ended": True}
     report["unresolved"].extend(preparations["retained"] + preparations["uncertain"])
     report["errors"].extend(f"preparation:{item}" for item in preparations["errors"])
     report["errors"].extend(intent_errors)

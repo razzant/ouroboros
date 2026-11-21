@@ -106,7 +106,7 @@ def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
     _write_chat(root, rows)
     before = path.read_bytes()
     changing = _view(tmp_path, 1)
-    room, block = section(changing, "## This room (Main)"), section(changing, "## Other conversations")
+    room, block = section(changing, "## This room (Main [chat_id=1])"), section(changing, "## Other conversations")
     assert path.read_bytes() == before
     assert "] MAIN" in room and "] MISSING" in room and room.index("] MAIN") < room.index("] MISSING")
     assert "] UNKNOWN" in room  # a non-Project chat's unbound row is Main's too

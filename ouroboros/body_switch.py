@@ -12,6 +12,8 @@ It acts on two phases of ``handoff.json`` and nothing else:
 * ``switching`` — an interrupted switch. Resume it by content.
 
 A ``stuck`` transition refuses the boot (exit 3): a mixed tree is never imported.
+Under a deployment policy no captured helper runs: the hook executes this tree's
+own copy with ``MANAGED_HELPER_DIR`` (``managed_entry``), which switches nothing.
 
 Order: files first, each changed path replaced atomically (temp + fsync +
 ``os.replace``), so a crash leaves old-or-new bytes and never a torn file; then
@@ -32,6 +34,7 @@ the adoption is confirmed from what this process loaded, never from a later
 read of HEAD.
 """
 import contextlib
+import itertools
 import json
 import os
 import stat
@@ -172,11 +175,17 @@ def _states(root, rows, tracked):
     """``(blob id, kind)`` of what is on disk at each switch path (``(None, None)`` absent).
 
     Regular files go through ``git hash-object`` so the repository's own clean
-    filters apply: an untouched CRLF checkout still equals its blob.
+    filters apply: an untouched CRLF checkout still equals its blob. Their paths
+    ride argv, never ``--stdin-paths``: Git answers each path as it reads, and on a
+    spent macOS pipe budget both sides can wait past the timeout
+    (``work_domain._stdin_source``). Each argv holds paths of ONE ``_CHUNK`` group
+    of rows, the groups ``_index_states`` and ``_dirty`` already pass, so it is
+    never longer than theirs. No call hashes more than ``_CHUNK`` files. A group
+    with a newline in a name keeps one call and timeout per file, as before.
     """
     states, regular = {}, []
     switch_paths = {row["path"] for row in rows}
-    for row in rows:
+    for row_index, row in enumerate(rows):
         full = os.path.join(root, row["path"])
         try:
             mode = os.lstat(full).st_mode
@@ -189,16 +198,18 @@ def _states(root, rows, tracked):
         elif stat.S_ISDIR(mode):
             states[row["path"]] = _dir_state(root, row["path"], switch_paths)
         else:
-            regular.append((row["path"], _file_mode("100755" if mode & stat.S_IXUSR else "100644", tracked)))
+            kind = _file_mode("100755" if mode & stat.S_IXUSR else "100644", tracked)
+            regular.append((row["path"], kind, row_index // _CHUNK))
     for start in range(0, len(regular), _CHUNK):
-        chunk = [path for path, _kind in regular[start:start + _CHUNK]]
-        if any("\n" in path for path in chunk):
-            hashes = [_git(root, "hash-object", "--", path)[1].decode().strip() for path in chunk]
+        group = regular[start:start + _CHUNK]
+        if any("\n" in path for path, _kind, _rows in group):
+            batches = [[entry] for entry in group]
         else:
-            data = "\n".join(chunk).encode("utf-8", "surrogateescape") + b"\n"
-            hashes = _git(root, "hash-object", "--stdin-paths", data=data)[1].decode().split()
-        for (path, kind), sha in zip(regular[start:start + _CHUNK], hashes):
-            states[path] = (sha, kind)
+            batches = [list(batch) for _rows, batch in itertools.groupby(group, key=lambda entry: entry[2])]
+        for batch in batches:
+            hashes = _git(root, "hash-object", "--", *[path for path, _kind, _rows in batch])[1].decode().split()
+            for (path, kind, _rows), sha in zip(batch, hashes):
+                states[path] = (sha, kind)
     return states
 
 
@@ -659,5 +670,34 @@ def main(serving_root):
                 type(exc).__name__, exc))
 
 
+def managed_entry(serving_root, helper_dir):
+    """The package-init hook's entry under a deployment policy: the program is its administrator's, so no
+    captured helper runs and nothing is switched. An ``armed`` adoption is abandoned with the tree untouched
+    (``managed_by_deployment``); its record stays for ``body_adoption.finalize_on_boot`` to archive and tell,
+    and the candidate stays where it is. A ``switched`` tree is attested as ``main`` attests it; a record
+    found unreadable or mid-switch under the lock refuses the boot as ``main`` would."""
+    root, phase = os.path.realpath(serving_root), "unreadable (no record directory)"
+    if os.path.isdir(helper_dir):
+        with _locked(helper_dir):
+            try:
+                handoff = read_handoff(helper_dir)
+                phase = handoff.get("phase")
+            except (OSError, ValueError, AttributeError) as exc:
+                handoff, phase = {}, "unreadable (%s)" % exc
+            if phase == "armed":
+                record(helper_dir, handoff, "abandoned", "managed_by_deployment")
+                _remove_pointer(root)
+                return
+            if phase == "switched" and os.path.realpath(str(handoff.get("repo_dir") or "")) == root:
+                _attest_loaded(root, handoff)
+            if phase not in ("switching", "stuck") and not str(phase).startswith("unreadable"):
+                return
+    _refuse_boot(root, helper_dir, "a body adoption is %s under a deployment policy; its administrator decides what "
+                                   "this tree should be" % phase)
+
+
 if __name__ == "__ouroboros_body_switch__":
-    main(SERVING_ROOT)  # noqa: F821 -- injected by the package-init hook
+    if "MANAGED_HELPER_DIR" in globals():  # a deployment policy's entry: this tree's own copy, read as a file
+        managed_entry(SERVING_ROOT, MANAGED_HELPER_DIR)  # noqa: F821 -- injected by the package-init hook
+    else:
+        main(SERVING_ROOT)  # noqa: F821 -- injected by the package-init hook

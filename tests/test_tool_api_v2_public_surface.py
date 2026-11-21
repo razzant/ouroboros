@@ -2,6 +2,7 @@ import pathlib
 import shlex
 import sys
 
+import pytest
 
 from ouroboros.tools.registry import ToolRegistry
 
@@ -940,31 +941,33 @@ def test_run_command_outputs_registers_artifact(tmp_path, monkeypatch):
     assert records[0]["source_path"] == str(desktop / "deliverable.txt")
 
 
-def test_run_command_unchanged_output_is_cosmetic(tmp_path, monkeypatch):
+def test_run_command_unchanged_output_is_captured_once_then_cosmetic(tmp_path, monkeypatch):
+    from ouroboros.artifacts import collect_task_artifact_records
+
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, _repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     (desktop / "personal_notes.txt").write_text("old", encoding="utf-8")
+    args = {"cmd": ["python3", "-c", "print('no file generated')"], "cwd": str(desktop),
+            "outputs": ["personal_notes.txt"]}
 
-    result = registry.execute(
-        "run_command",
-        {
-            "cmd": ["python3", "-c", "print('no file generated')"],
-            "cwd": str(desktop),
-            "outputs": ["personal_notes.txt"],
-        },
-    )
+    first = registry.execute_result("run_command", args)
+    repeat = registry.execute_result("run_command", args)
 
-    # C2 (v6.36.0): present-but-unchanged declared output is a cosmetic note, not a
-    # blocking ARTIFACT_OUTPUT_ERROR (a missing output still blocks — sibling test).
-    assert not result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
-    assert "unchanged output (cosmetic)" in result
-    assert not (data / "task_results" / "artifacts" / "task1" / "personal_notes.txt").exists()
-    # round-5: a cosmetic-only note must NOT borrow the canonical "ARTIFACT_OUTPUTS"
-    # marker — downstream (outcomes.py / loop_tool_execution.py) reads that exact
-    # substring as a real registration / false recovery signal. Use ARTIFACT_OUTPUT_NOTE.
-    assert "ARTIFACT_OUTPUT_NOTE" in result
-    assert "ARTIFACT_OUTPUTS" not in result
+    # A declared output the run left unchanged is still a deliverable: its first
+    # declaration registers the canonical capture of the bytes as found.
+    assert first.code == "OK" and first.meta.get("artifact_registered") is True, first.text
+    assert "ARTIFACT_OUTPUTS" in first.text and "(existing output, captured as found)" in first.text
+    assert (data / "task_results" / "artifacts" / "task1" / "personal_notes.txt").read_text(encoding="utf-8") == "old"
+    # C2 (v6.36.0): a repeat with that capture current is a cosmetic note, not a blocking
+    # ARTIFACT_OUTPUT_ERROR (a missing output still blocks — sibling test). round-5: it must
+    # NOT borrow the canonical "ARTIFACT_OUTPUTS" marker or the typed registration fact that
+    # outcomes.py / _outcome_tool_errors.py read as a real effect or recovery.
+    assert repeat.code == "OK" and repeat.meta.get("artifact_registered") is not True, repeat.text
+    assert ("unchanged output (cosmetic): personal_notes.txt; current capture artifact_store:personal_notes.txt"
+            in repeat.text)
+    assert "ARTIFACT_OUTPUT_NOTE" in repeat.text and "ARTIFACT_OUTPUTS" not in repeat.text
+    assert [row["name"] for row in collect_task_artifact_records(data, "task1")] == ["personal_notes.txt"]
 
 
 def test_run_command_outputs_missing_is_semantic_failure(tmp_path, monkeypatch):
@@ -1017,13 +1020,20 @@ def test_run_command_outputs_block_protected_repo_files(tmp_path, monkeypatch):
     assert not (data / "task_results" / "artifacts" / "task1" / "BIBLE.md").exists()
 
 
-def test_run_command_without_outputs_blocks_absolute_user_file_writes(tmp_path, monkeypatch):
+def _assert_the_note_closes_the_text(text: str) -> None:
+    """The note closes a shell result's own text (a cut view keeps a result's tail); only the
+    dispatcher's one-line runtime fact may follow it."""
+    after = text.split("otherwise nothing is needed.", 1)[1].strip()
+    assert not after or (after.startswith("Runtime selection:") and "\n" not in after), after
+
+
+def test_run_command_without_outputs_notes_absolute_user_file_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     target = desktop / "live-regression.html"
 
-    result = registry.execute(
+    typed = registry.execute_result(
         "run_command",
         {
             "cmd": [
@@ -1035,10 +1045,26 @@ def test_run_command_without_outputs_blocks_absolute_user_file_writes(tmp_path, 
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "without declaring outputs" in result
+    result = typed.text
+    # A finished command with a note: no error, the note's own code, and the paths as a typed fact.
+    assert (typed.status, typed.code) == ("ok", "ARTIFACT_OUTPUT_UNDECLARED")
+    assert typed.meta["undeclared_outputs"] == [str(target.resolve())] and typed.meta["undeclared_outputs_total"] == 1
+    assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
+    _assert_the_note_closes_the_text(result)
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
+
+    # The sensor reads names and modification times: a file modified just before a run that names it
+    # as a write target in a branch it never takes is reported too, so the sentence states that
+    # evidence and never says the run changed the file.
+    kept = desktop / "kept.html"
+    kept.write_text("before", encoding="utf-8")
+    untouched = registry.execute_result("run_command", {"cwd": str(repo), "cmd": [
+        "python3", "-c", f"if False:\n    open({str(kept)!r}, 'w').write('after')"]})
+    assert untouched.code == "ARTIFACT_OUTPUT_UNDECLARED" and kept.read_text(encoding="utf-8") == "before"
+    assert "they were modified around the time it ran" in untouched.text and "changed during" not in untouched.text
 
 
 def test_run_command_artifact_error_still_invalidates_repo_advisory(tmp_path, monkeypatch):
@@ -1068,7 +1094,8 @@ def test_run_command_artifact_error_still_invalidates_repo_advisory(tmp_path, mo
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
+    assert result.startswith("exit_code=0"), result
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
     assert calls
     assert calls[-1][1]["source_tool"] == "run_command"
     assert "changed.txt" in calls[-1][1]["changed_paths"]
@@ -1098,7 +1125,7 @@ def test_run_command_without_outputs_allows_absolute_user_file_reads(tmp_path, m
     assert "exit_code=0" in result
 
 
-def test_run_command_without_outputs_blocks_absolute_user_file_open_writes(tmp_path, monkeypatch):
+def test_run_command_without_outputs_notes_absolute_user_file_open_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
@@ -1116,10 +1143,101 @@ def test_run_command_without_outputs_blocks_absolute_user_file_open_writes(tmp_p
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "without declaring outputs" in result
+    assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
+
+
+def test_undeclared_output_note_names_every_path_and_its_fact_stays_bounded(tmp_path, monkeypatch):
+    """The sentence names every path, so the result itself keeps the whole list (a script that names only
+    a folder leaves no other record of its files); the typed fact keeps whole paths only (a cut path is a
+    false address) inside the result's encoded meta budget, with the total beside them."""
+    import json
+
+    from ouroboros.tools.shell_audit import undeclared_outputs_meta, undeclared_outputs_note
+
+    assert undeclared_outputs_note([]) == "" and undeclared_outputs_meta([]) == {}
+    paths = [f"/home/проект-{index}/" + "отчёт" * 60 + ".md" for index in range(9)]
+    note = undeclared_outputs_note(paths)
+    assert note.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets")
+    assert all(path in note for path in paths) and "Re-run" not in note
+    fact = undeclared_outputs_meta(paths)
+    assert fact["undeclared_outputs_total"] == 9 and 0 < len(fact["undeclared_outputs"]) < 9
+    assert fact["undeclared_outputs"] == paths[:len(fact["undeclared_outputs"])]
+    assert len(json.dumps(fact["undeclared_outputs"], ensure_ascii=True)) <= 2048
+
+    # The same through run_script, whose body names only the folder: the result is the one place
+    # that names each file, and its typed fact still fits.
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    folder = desktop / "reports"
+    typed = registry.execute_result("run_script", {"interpreter": "python3", "script": (
+        "from pathlib import Path\n"
+        f"folder = Path({str(folder)!r})\nfolder.mkdir()\n"
+        "for index in range(12):\n    (folder / ('отчёт' * 8 + f'-{index}.md')).write_text('x')\n")})
+    written = [str(path.resolve()) for path in folder.iterdir()]
+    assert typed.code == "ARTIFACT_OUTPUT_UNDECLARED" and len(written) == 12, typed.text
+    assert all(path in typed.text for path in written), typed.text
+    assert typed.meta["undeclared_outputs_total"] == 12 and 0 < len(typed.meta["undeclared_outputs"]) < 12
+    assert set(typed.meta["undeclared_outputs"]) <= set(written)
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script"])
+def test_a_run_in_a_user_files_cwd_carries_one_note_about_its_undeclared_files(tmp_path, monkeypatch, tool):
+    """A named write target and a changed user_files cwd are one fact: the run carries the note that names
+    the file, once, and not the cwd note beside it. With no named target the cwd note still speaks, and
+    both give the same advice."""
+    from ouroboros.tools.shell_audit import REGISTER_OUTPUT_ADVICE
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+
+    def run(body):
+        call = {"script": body, "interpreter": "python3"} if tool == "run_script" else {"cmd": ["python3", "-c", body]}
+        return registry.execute_result(tool, {"cwd": str(desktop), **call})
+
+    target = desktop / "named.html"
+    named = run(f"from pathlib import Path\nPath({str(target)!r}).write_text('x')\n")
+    assert named.code == "ARTIFACT_OUTPUT_UNDECLARED", named.text
+    assert named.text.count("⚠️ ARTIFACT_OUTPUT_UNDECLARED") == 1 and "ARTIFACT_AUDIT_GAP" not in named.text
+    assert named.meta["undeclared_outputs"] == [str(target.resolve())]
+    assert REGISTER_OUTPUT_ADVICE in named.text
+    _assert_the_note_closes_the_text(named.text)
+
+    unnamed = run("open(chr(117)+'nnamed.dat','w').write('x')\n")
+    assert unnamed.status == "ok" and unnamed.text.count("⚠️ ARTIFACT_AUDIT_GAP") == 1, unnamed.text
+    assert "ARTIFACT_OUTPUT_UNDECLARED" not in unnamed.text and "undeclared_outputs" not in unnamed.meta
+    assert REGISTER_OUTPUT_ADVICE in unnamed.text and "rerun" not in unnamed.text
+
+
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
+def test_undeclared_output_audit_skips_what_ouroboros_owns_in_every_mode(tmp_path, monkeypatch, mode):
+    """A fresh file inside Ouroboros's own data drive or program checkout is its own data, never a
+    person's deliverable, in every runtime mode: under unrestricted agency the access check admits
+    everything, so ownership is asked on its own. A real user file beside them is still named."""
+    import time
+
+    from ouroboros.tools.shell_audit import _mentioned_user_file_outputs_without_declaration
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    registry, repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    started = time.time()
+    own_data = data / "task_drives" / "task1" / "notes.txt"
+    own_source = repo / "module.py"
+    theirs = desktop / "report.html"
+    for path in (own_data, own_source, theirs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    body = "; ".join(f"open({str(path)!r}, 'w').write('x')" for path in (own_data, own_source, theirs))
+
+    found = _mentioned_user_file_outputs_without_declaration(
+        registry._ctx, ["python3", "-c", body], None, command_start_ts=started, cwd=repo)
+
+    assert found == [str(theirs.resolve())]
 
 
 def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, monkeypatch):
@@ -1132,7 +1250,7 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
     registry, _repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     target = desktop / "script-write.html"
 
-    result = registry.execute(
+    typed = registry.execute_result(
         "run_script",
         {
             "script": f"from pathlib import Path\nPath({str(target)!r}).write_text('<h1>ok</h1>')\n",
@@ -1140,8 +1258,13 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "run_script wrote user_files without declaring outputs" in result
+    result = typed.text
+    assert (typed.status, typed.code) == ("ok", "ARTIFACT_OUTPUT_UNDECLARED")
+    assert typed.meta["undeclared_outputs"] == [str(target.resolve())]
+    assert result.startswith("# script_path="), result  # the script's own answer leads; the note trails it
+    _assert_the_note_closes_the_text(result)
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert str(target) in result
     # #447/D5: the nudge must not REPLACE the payload. It held line 1 (the typed
     # policy-denial surface the classifier reads) and returned nothing else, so a
@@ -1151,6 +1274,15 @@ def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, mo
     # The write happened (post-exec) but the file is NOT registered as an artifact.
     assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
+
+    # A script that wrote a file and then failed is still that failure: its marker owns line 1 and
+    # its code and exit are untouched. The note follows it: the file is on disk whatever the exit says.
+    half = desktop / "half-done.html"
+    failed = registry.execute_result("run_script", {"interpreter": "python3", "script": (
+        f"from pathlib import Path\nPath({str(half)!r}).write_text('x')\nraise SystemExit(3)\n")})
+    assert (failed.code, failed.meta["exit_code"]) == ("SHELL_EXIT_ERROR", 3) and failed.status != "ok", failed.text
+    assert failed.text.startswith("⚠️ SHELL_EXIT_ERROR") and failed.text.count("⚠️ ARTIFACT_OUTPUT_UNDECLARED") == 1
+    assert failed.meta["undeclared_outputs"] == [str(half.resolve())]
 
 
 def test_run_command_without_outputs_detects_shell_redirection_to_user_files(tmp_path, monkeypatch):
@@ -1164,8 +1296,9 @@ def test_run_command_without_outputs_detects_shell_redirection_to_user_files(tmp
         {"cmd": ["sh", "-c", f"echo ok > {shlex.quote(target.as_posix())}"], "cwd": str(desktop)},
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-    assert "without declaring outputs" in result
+    assert result.startswith("exit_code=0"), result  # the command's own answer leads; the note trails it
+    assert "\n\n⚠️ ARTIFACT_OUTPUT_UNDECLARED: this run names these files as write targets" in result
+    assert "without being registered as task outputs" in result
     assert target.read_text(encoding="utf-8").strip() == "ok"
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
@@ -1225,8 +1358,8 @@ def test_workspace_run_command_outputs_can_reference_policy_visible_user_files(t
     )
 
     assert not result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
-    assert "unchanged output (cosmetic)" in result
-    assert not (data / "task_results" / "artifacts" / "task1" / "outside.txt").exists()
+    assert "registered output" in result and "(existing output, captured as found)" in result
+    assert (data / "task_results" / "artifacts" / "task1" / "outside.txt").read_text(encoding="utf-8") == "outside"
 
 
 def test_repeated_user_file_write_updates_same_canonical_artifact(tmp_path, monkeypatch):
@@ -1275,6 +1408,231 @@ def test_user_file_artifact_history_retains_last_five_versions(tmp_path, monkeyp
     version_contents = [path.read_text(encoding="utf-8") for path in sorted(version_dir.glob("*"))]
     assert len(version_contents) == 5
     assert version_contents == ["v1", "v2", "v3", "v4", "v5"]
+
+
+def _task_drive_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, data, _desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    drive = registry._ctx.task_drive_root()
+    drive.mkdir(parents=True, exist_ok=True)
+    return registry, data, drive
+
+
+def _write(registry, root, path, text):
+    written = registry.execute("write_file", {"root": root, "path": path, "content": text})
+    assert written.startswith("OK"), written
+
+
+def _declare_unchanged(registry, tool, cwd, output="report.md"):
+    """A successful process that verifies its declared report without writing it."""
+    args = {"cwd": str(cwd), "outputs": [output]}
+    if tool == "run_script":
+        args.update(script="print('verified')", interpreter=sys.executable)
+    else:
+        args["cmd"] = [sys.executable, "-c", "print('verified')"]
+    result = registry.execute_result(tool, args)
+    assert result.code == "OK", result.text
+    return result
+
+
+def _capture_deliveries(registry, monkeypatch):
+    delivered = []
+    registry._ctx.current_chat_id = 11
+    monkeypatch.setattr("ouroboros.tools.owner_delivery.deliver_owner_event",
+                        lambda _ctx, event: delivered.append(event) or "live")
+    return delivered
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script"])
+def test_declared_unchanged_report_is_captured_reused_and_recaptured(tmp_path, monkeypatch, tool):
+    registry, data, drive = _task_drive_registry(tmp_path, monkeypatch)
+    versions = data / "task_results" / "artifact_versions" / "task1" / "report.md"
+
+    def canonical():  # the consumer's read of the canonical deliverable
+        return registry.execute("read_file", {"root": "artifact_store", "path": "report.md"})
+
+    _write(registry, "task_drive", "report.md", "# report v1\n")
+    first, repeat = _declare_unchanged(registry, tool, drive), _declare_unchanged(registry, tool, drive)
+    assert first.meta.get("artifact_registered") is True and "report v1" in canonical(), first.text
+    assert repeat.meta.get("artifact_registered") is not True and "ARTIFACT_OUTPUT_NOTE" in repeat.text, repeat.text
+    assert "ARTIFACT_OUTPUTS" not in repeat.text  # the marker downstream reads as a registration
+
+    _write(registry, "task_drive", "report.md", "# report v2 edited\n")  # edited before a no-op declaration
+    edited = _declare_unchanged(registry, tool, drive)
+    assert edited.meta.get("artifact_registered") is True and "report v2 edited" in canonical(), edited.text
+    # A rewrite of the process capture keeps its previous bytes as recovery history.
+    assert [path.read_text(encoding="utf-8") for path in versions.iterdir()] == ["# report v1\n"]
+
+
+def test_unchanged_output_repairs_a_missing_corrupt_or_stale_capture_beside_an_immutable_delivery(tmp_path, monkeypatch):
+    from ouroboros.artifacts import registered_task_artifact, stream_artifact_file
+
+    registry, data, drive = _task_drive_registry(tmp_path, monkeypatch)
+    store = data / "task_results" / "artifacts" / "task1"
+    delivered = _capture_deliveries(registry, monkeypatch)
+
+    def served():  # what an expected-row consumer serves: the row and the retained bytes agree
+        row = registered_task_artifact(data, "task1", "report.md")
+        assert row and not row.get("immutable") and stream_artifact_file(store / "report.md", expected=row)
+        return (store / "report.md").read_text(encoding="utf-8")
+
+    def registered():
+        return _declare_unchanged(registry, "run_command", drive).meta.get("artifact_registered") is True
+
+    _write(registry, "task_drive", "report.md", "# report v1\n")
+    assert registry.execute_result("send_file", {"file_path": str(drive / "report.md")}).code == "OK"
+    delivery = delivered[-1]["file_ref"]
+    # The immutable delivery of this source never stands in for its missing mutable capture.
+    assert registered() and served() == "# report v1\n"
+    (store / "report.md").unlink()  # retained capture missing
+    assert registered() and served() == "# report v1\n"
+    _write(registry, "artifact_store", "report.md", "# tampered!\n")  # retained bytes changed, row stale
+    assert registered() and served() == "# report v1\n"
+    _write(registry, "task_drive", "report.md", "# report v2\n")
+    _write(registry, "artifact_store", "report.md", "# report v2\n")  # bytes match the source, row still v1
+    assert registered() and served() == "# report v2\n"
+    assert not registered()  # proven current again: a cosmetic repeat
+    row = registered_task_artifact(data, "task1", delivery["path"])
+    assert row["immutable"] is True and row["sha256"] == delivery["sha256"]
+    assert stream_artifact_file(store / delivery["path"], expected=row)["sha256"] == delivery["sha256"]
+
+
+def test_unchanged_output_whose_source_changes_during_its_capture_fails_explicitly(tmp_path, monkeypatch):
+    from ouroboros import artifacts
+
+    registry, data, drive = _task_drive_registry(tmp_path, monkeypatch)
+    _write(registry, "task_drive", "report.md", "# report v1\n")
+    assert _declare_unchanged(registry, "run_command", drive).meta.get("artifact_registered") is True
+    _write(registry, "task_drive", "report.md", "# report v2\n")  # the capture is stale: it must be refreshed
+    source, original = (drive / "report.md").resolve(), artifacts.copy_artifact_file
+
+    def changing(path, destination, *, expected=None):  # the copier's own answer to an unstable source
+        if pathlib.Path(path).resolve() == source:
+            raise OSError(f"artifact source changed during read: {path}")
+        return original(path, destination, expected=expected)
+
+    monkeypatch.setattr(artifacts, "copy_artifact_file", changing)
+    result = registry.execute_result("run_command", {"cmd": [sys.executable, "-c", "print('verified')"],
+                                                     "cwd": str(drive), "outputs": ["report.md"]})
+    assert result.code == "ARTIFACT_OUTPUT_ERROR" and result.meta.get("artifact_registered") is not True, result.text
+    assert "failed output copy report.md: OSError: artifact source changed during read" in result.text
+    assert "unchanged output (cosmetic)" not in result.text
+    stale = data / "task_results" / "artifacts" / "task1" / "report.md"
+    assert stale.read_text(encoding="utf-8") == "# report v1\n"  # the earlier capture is kept whole, never torn
+
+
+def test_process_and_user_file_rewrites_of_one_source_share_its_recovery_history(tmp_path, monkeypatch):
+    from ouroboros.artifacts import registered_task_artifact, stream_artifact_file
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    store = data / "task_results" / "artifacts" / "task1"
+    versions = data / "task_results" / "artifact_versions" / "task1" / "report.html"
+    delivered = _capture_deliveries(registry, monkeypatch)
+
+    def produce(text):
+        code = f"from pathlib import Path; Path('report.html').write_text({text!r})"
+        result = registry.execute_result("run_command", {"cmd": ["python3", "-c", code], "cwd": str(desktop),
+                                                         "outputs": ["report.html"]})
+        assert result.code == "OK" and result.meta.get("artifact_registered") is True, result.text
+
+    _write(registry, "user_files", "Desktop/report.html", "<p>v1</p>")  # the old user_file capture
+    assert registry.execute_result("send_file", {"file_path": str(desktop / "report.html")}).code == "OK"
+    produce("<p>v2</p>")  # a process rewrite of that capture
+    _write(registry, "user_files", "Desktop/report.html", "<p>v3</p>")  # a user_file rewrite of a process capture
+    produce("<p>v4</p>")
+
+    assert (store / "report.html").read_text(encoding="utf-8") == "<p>v4</p>"
+    assert [path.read_text(encoding="utf-8") for path in sorted(versions.iterdir())] == [
+        "<p>v1</p>", "<p>v2</p>", "<p>v3</p>"]
+    # The earlier immutable delivery is a separate capture: never reused, rewritten or versioned.
+    ref = delivered[-1]["file_ref"]
+    row = registered_task_artifact(data, "task1", ref["path"])
+    assert row["immutable"] is True and stream_artifact_file(store / ref["path"], expected=row)["sha256"] == ref["sha256"]
+    assert (store / ref["path"]).read_text(encoding="utf-8") == "<p>v1</p>"
+
+
+def _run_in_store(registry, code, output):
+    return registry.execute_result("run_command", {"cmd": [sys.executable, "-c", code], "cwd": "artifact_store",
+                                                   "outputs": [output]})
+
+
+@pytest.mark.parametrize("origin", ["task_drive", "user_files"])
+def test_store_declaration_of_a_captured_report_keeps_its_source_capture_canonical(tmp_path, monkeypatch, origin):
+    from ouroboros.artifacts import collect_task_artifact_records, registered_task_artifact
+
+    registry, data, drive = _task_drive_registry(tmp_path, monkeypatch)
+
+    def produce(text):  # the source's own writer: a task_drive process declaration or a user_files write
+        _write(registry, origin, "report.md" if origin == "task_drive" else "Desktop/report.md", text)
+        if origin == "task_drive":
+            assert _declare_unchanged(registry, "run_command", drive).meta.get("artifact_registered") is True
+
+    produce("# report v1\n")
+    captured = registered_task_artifact(data, "task1", "report.md")
+    for _ in range(2):  # a process in the store re-verifies the deliverable it declares: the capture is its proof
+        verified = _declare_unchanged(registry, "run_command", "artifact_store")
+        assert verified.meta.get("artifact_registered") is not True, verified.text
+        assert "ARTIFACT_OUTPUT_NOTE" in verified.text and "ARTIFACT_OUTPUTS" not in verified.text
+        assert registered_task_artifact(data, "task1", "report.md") == captured
+    # An in-place conversion is a distinct store result, no longer a postimage of the original source.
+    converted = _run_in_store(registry, "from pathlib import Path; Path('report.md').write_text('# v1 converted\\n')",
+                              "report.md")
+    assert converted.code == "OK" and converted.meta.get("artifact_registered") is True, converted.text
+    row = registered_task_artifact(data, "task1", "report.md")
+    assert (row["kind"], row["source_path"]) == ("process_output", row["path"])
+    produce("# report v2\n")  # preserve the conversion and establish one current capture for the original
+    records = collect_task_artifact_records(data, "task1")
+    (current,) = [item for item in records if item.get("source_path") == captured["source_path"]]
+    assert "# report v2" in registry.execute("read_file", {"root": "artifact_store", "path": current["name"]})
+    assert "# v1 converted" in registry.execute("read_file", {"root": "artifact_store", "path": "report.md"})
+    assert len(records) == 2
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script"])
+def test_declared_store_metadata_is_refused_before_launch_but_normal_outputs_work(tmp_path, monkeypatch, tool):
+    from ouroboros.artifacts import task_artifact_dir_path
+
+    registry, data, drive = _task_drive_registry(tmp_path, monkeypatch)
+    _write(registry, "task_drive", "report.md", "retained")
+    _declare_unchanged(registry, "run_command", drive)
+    store = task_artifact_dir_path(data, "task1")
+    manifest = store / ".artifact_manifest.json"
+    before = manifest.read_bytes()
+    code = "from pathlib import Path; Path('ran').write_text('unexpected')"
+    args = {"cwd": "artifact_store", "outputs": [manifest.name]}
+    args.update({"cmd": [sys.executable, "-c", code]} if tool == "run_command" else
+                {"script": code, "interpreter": sys.executable})
+    refused = registry.execute_result(tool, args)
+    assert refused.code != "OK" and "reserved" in refused.text, refused.text
+    assert not (store / "ran").exists() and manifest.read_bytes() == before
+    assert _declare_unchanged(registry, tool, "artifact_store").meta.get("artifact_registered") is not True
+
+
+def test_store_declaration_of_an_immutable_delivery_verifies_it_without_rewriting_it(tmp_path, monkeypatch):
+    from ouroboros.artifacts import registered_task_artifact
+
+    registry, data, drive = _task_drive_registry(tmp_path, monkeypatch)
+    delivered = _capture_deliveries(registry, monkeypatch)
+    _write(registry, "task_drive", "report.md", "# report v1\n")
+    assert registry.execute_result("send_file", {"file_path": str(drive / "report.md")}).code == "OK"
+    name = delivered[-1]["file_ref"]["path"]
+    row = registered_task_artifact(data, "task1", name)
+    for _ in range(2):
+        verified = _declare_unchanged(registry, "run_command", "artifact_store", name)
+        assert verified.meta.get("artifact_registered") is not True, verified.text
+        assert "ARTIFACT_OUTPUT_NOTE" in verified.text and "ARTIFACT_OUTPUTS" not in verified.text
+        assert registered_task_artifact(data, "task1", name) == row  # identity, kind and source kept
+    resent = registry.execute_result("send_file", {"file_path": row["path"]})  # the copier's own self-capture
+    assert resent.code == "OK" and delivered[-1]["file_ref"]["path"] == name, resent.text
+    assert registered_task_artifact(data, "task1", name) == row
+    # Delivered bytes a process rewrote in place are refused, never registered under the delivery.
+    rewritten = _run_in_store(registry, f"from pathlib import Path; Path({name!r}).write_text('# forged\\n')", name)
+    assert rewritten.code == "ARTIFACT_OUTPUT_ERROR" and rewritten.meta.get("artifact_registered") is not True
+    assert f"failed output copy {name}: ArtifactIdentityError" in rewritten.text, rewritten.text
+    assert registered_task_artifact(data, "task1", name) == row
 
 
 def test_merge_artifact_records_preserves_specific_kind_against_generic_collection():
@@ -1467,23 +1825,26 @@ def test_user_files_read_block_status_is_policy_denial(tmp_path, monkeypatch):
     assert len(buckets["policy_denials"]) == 1
 
 
-def test_artifact_output_nudge_split_from_registration_failure():
-    """The exit_code=0 undeclared-outputs NUDGE is typed apart from the real
-    'declared output registration failed' case: the nudge is a policy denial,
-    the registration failure stays a genuine blocking error."""
+def test_artifact_output_note_is_no_failure_and_registration_failure_is():
+    """The undeclared-outputs note rides a finished command: no error, its own bucket kept for
+    the journal and the trace. The real 'declared output registration failed' case stays a
+    genuine blocking error. A retired marker-first text reads the same way."""
     from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
     from ouroboros.outcomes import _BLOCKING_TOOL_STATUSES, _POLICY_DENIAL_STATUSES
+    from ouroboros.tools.tool_result import TOOL_CODE_SPECS
 
-    nudge = (
+    spec = TOOL_CODE_SPECS["ARTIFACT_OUTPUT_UNDECLARED"]
+    assert (spec.status, spec.outcome_bucket) == ("ok", "artifact_output_undeclared")
+    note = (
         "⚠️ ARTIFACT_OUTPUT_UNDECLARED: command appears to write user_files outputs "
         "without declaring outputs=[...]. Paths: /x/y.txt.\n\nexit_code=0\n"
     )
-    assert _is_tool_execution_failure(True, nudge) is True  # honest ⚠️ in the trace
-    nudge_meta = _extract_result_metadata("run_command", nudge, True)
-    assert nudge_meta["status"] == "artifact_output_undeclared"
-    assert nudge_meta["status"] in _POLICY_DENIAL_STATUSES
+    assert _is_tool_execution_failure(True, note) is False
+    note_meta = _extract_result_metadata("run_command", note, False)
+    assert note_meta["status"] == "artifact_output_undeclared"
 
     real = "⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed.\nexit_code=0\n"
+    assert _is_tool_execution_failure(True, real) is True
     real_meta = _extract_result_metadata("run_command", real, True)
     assert real_meta["status"] == "artifact_output_error"
     assert real_meta["status"] in _BLOCKING_TOOL_STATUSES

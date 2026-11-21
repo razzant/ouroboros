@@ -20,6 +20,8 @@ def bootstrap(tmp_path, monkeypatch):
     monkeypatch.setattr(git_ops, "update_state", lambda fn: fn({}))
     monkeypatch.setattr(git_ops_reset.sys, "frozen", False, raising=False)
     monkeypatch.delenv("OUROBOROS_DISABLE_MANAGED_UPDATES", raising=False)
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(repo))  # bootstrap's safe_restart runs launcher-managed only
     calls = []
     run = subprocess.run
 

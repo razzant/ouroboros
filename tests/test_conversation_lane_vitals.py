@@ -47,7 +47,8 @@ def test_a_carried_turns_heartbeat_reports_its_carriers_own_size_to_the_lane_cen
     [beat] = [frame for frame in sent if frame.get("type") == "task_heartbeat"]
     assert beat["_carrier_rss"] == {"rss_bytes": 812 * MIB, "rss_measure": "peak"}
 
-    # The server side: the newest beat's report stays on its carrier's slot; a project slot keeps none.
+    # The server side: the newest beat's report stays on its worker's slot, a project slot's too (memory admission
+    # reads every live worker's own size, ``pool_admission.typical_size``).
     carrier_slot, spare, project = _slot(7, busy="turn-v"), _slot(8), _slot(1, lane="project", busy="job")
     pushed: list = []
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, WORKERS={7: carrier_slot, 8: spare, 1: project},
@@ -60,7 +61,7 @@ def test_a_carried_turns_heartbeat_reports_its_carriers_own_size_to_the_lane_cen
     _handle_task_heartbeat({"type": "task_heartbeat", "task_id": "job", "phase": "running", "ts": _stamp(),
                             "_carrier_rss": {"rss_bytes": 9 * MIB, "rss_measure": "peak"}}, ctx)
     assert carrier_slot.rss == {"rss_bytes": 812 * MIB, "rss_measure": "peak"}  # an older beat never overwrites
-    assert not hasattr(project, "rss") and len(pushed) == 3
+    assert project.rss == {"rss_bytes": 9 * MIB, "rss_measure": "peak"} and len(pushed) == 3
 
     # The census the per-minute row carries: every carrier, the spare before its first turn's beat included.
     monkeypatch.setattr(workers, "WORKERS", ctx.WORKERS)

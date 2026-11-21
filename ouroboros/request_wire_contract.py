@@ -41,7 +41,7 @@ REQUEST_WIRE_STATE_FILE = "request_wire_compatibility.json"
 OPTIONAL_SAMPLING_FIELDS = ("temperature", "top_p", "top_k")
 OPTIONAL_REQUEST_FIELDS = OPTIONAL_SAMPLING_FIELDS + (
     "response_format",
-    "reasoning_effort",
+    "reasoning_effort", "reasoning",  # Chat's tier field; Responses' reasoning object
     "output_config",
     "thinking",
     "parallel_tool_calls",
@@ -195,6 +195,8 @@ def _nested_value_identity(payload: Mapping[str, Any], dotted_path: str) -> Dict
 def reasoning_carrier(payload: Mapping[str, Any]) -> str:
     if "reasoning_effort" in payload:
         return "reasoning_effort"
+    if isinstance(payload.get("reasoning"), Mapping) and "effort" in payload["reasoning"]:
+        return "reasoning"
     output_config = payload.get("output_config")
     thinking = payload.get("thinking")
     if isinstance(thinking, Mapping):
@@ -213,7 +215,9 @@ def reasoning_carrier(payload: Mapping[str, Any]) -> str:
 
 
 def payload_effort(payload: Mapping[str, Any]) -> str:
-    direct = str(payload.get("reasoning_effort") or "").strip().lower()
+    top = payload.get("reasoning")
+    direct = str(payload.get("reasoning_effort") or (top.get("effort") if isinstance(top, Mapping) else "")
+                 or "").strip().lower()
     if direct:
         return direct
     output_config = payload.get("output_config")
@@ -222,7 +226,7 @@ def payload_effort(payload: Mapping[str, Any]) -> str:
         if effort:
             return effort
     thinking = payload.get("thinking")
-    if isinstance(thinking, Mapping) and str(thinking.get("type") or "").lower() == "disabled":
+    if isinstance(thinking, Mapping) and str(thinking.get("type") or "").lower() in {"disabled", "between_tools"}:
         return "none"
     extra_body = payload.get("extra_body")
     if not isinstance(extra_body, Mapping):
@@ -384,6 +388,8 @@ def function_strictness(payload: Mapping[str, Any]) -> str:
     states = set()
     for tool in payload.get("tools") or []:
         function = tool.get("function") if isinstance(tool, Mapping) else None
+        if function is None and isinstance(tool, Mapping) and tool.get("type") == "function":
+            function = tool  # a Responses function tool carries ``strict`` beside its name
         if isinstance(function, Mapping):
             value = function.get("strict")
             states.add("absent" if "strict" not in function else "true" if value is True
@@ -670,6 +676,7 @@ def validate_wire_action_for_profile(
     carrier = profile.reasoning_carrier
     carrier_requirements = {
         "reasoning_effort": "reasoning_effort",
+        "reasoning": "reasoning",
         NESTED_REASONING_FIELD: NESTED_REASONING_FIELD,
     }
     for field_name, required_carrier in carrier_requirements.items():
@@ -878,16 +885,6 @@ def _read_wire_action_records_at(
 
 def read_wire_action_records(profile: RequestWireProfile, *, now: Any = None) -> Tuple[StoredWireAction, ...]:
     return _read_wire_action_records_at(canonical_wire_evidence_root(), profile, now=now)
-
-
-def _read_wire_actions_at(drive_root: Any, profile: RequestWireProfile, *,
-                          now: Any = None) -> Tuple[Dict[str, Any], ...]:
-    records = _read_wire_action_records_at(drive_root, profile, now=now)
-    return tuple(_wire_action_dict(record.action) for record in records)
-
-
-def read_wire_actions(profile: RequestWireProfile, *, now: Any = None) -> Tuple[Dict[str, Any], ...]:
-    return tuple(_wire_action_dict(record.action) for record in read_wire_action_records(profile, now=now))
 
 
 _CACHE_HINTS = frozenset((*CACHE_HINT_FIELDS, "prompt_cache_key"))

@@ -127,6 +127,28 @@ test('the clamp puts its toggle into the row it is given, never a row of its own
     assert.equal(clampWithToggle(null, row), null);
 }));
 
+test('a CSS-only fit keeps authored child nodes intact through Show all and Show less', () => withDom(() => {
+    const host = document.createElement('div');
+    const line = document.createElement('p');
+    const authored = document.createElement('span');
+    authored.textContent = '  My EXACT words\n<as typed> 🙂  ';
+    authored.dataset.i18nAuthored = '';
+    line.append(authored);
+    host.append(line);
+    const fits = [];
+    const toggle = clampWithToggle(line, host, { fit: (node, _text, lines, onFit) => {
+        fits.push(lines);
+        assert.equal(node.children[0], authored);
+        onFit(lines > 0);
+    } });
+    assert.equal(toggle.hidden, false);
+    toggle.click();
+    toggle.click();
+    assert.deepEqual(fits, [6, 0, 6]);
+    assert.equal(authored.textContent, '  My EXACT words\n<as typed> 🙂  ');
+    assert.equal(authored.dataset.i18nAuthored, '');
+}));
+
 test('a quoted photo leads the panel with its thumbnail; only a safe upload URL becomes one', () => withDom(() => {
     const url = '/api/files/download?upload=0e3dabd5a6bf487ba054deef93921914_shot.png';
     const panel = createReplyQuote({ address: 'row:1@a#1', role: 'user', snippet: 'заведи проект', ts: 't',

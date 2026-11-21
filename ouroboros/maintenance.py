@@ -16,7 +16,8 @@ time passed. The spawn is the existing custodied one (``startup_historical_audit
 spawn_maintenance_job``: session custody, its own process group, a parent lifeline; ``stop`` and
 ``live_children`` serve the Panic and exit census). Queue-owned work (orphan recovery, drive
 settlement under the queue lock and the supervisor's liveness probe) stays in the server: a
-fresh child owns no queue.
+fresh child owns no queue. After each child run not ended by Stop or Panic the server tells the owner
+once what each one-time walk did, when it is over (``delegate_result_taken``/``historical_retirement.deliver_receipt``).
 
 Child half: ``main`` (``python -m ouroboros.maintenance``) lowers its priority and runs ``JOBS``
 in order, each asking its own facts again, and prints one bounded JSON report.
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -34,8 +36,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros import (delegate_capture_job, delegate_pending, maintenance_jobs, maintenance_retirement,
-                       plan_collection_job, record_compression, room_appearances, store, subagent_metrics)
+from ouroboros import (delegate_capture_job, delegate_pending, delegate_result_taken, historical_retirement,
+                       maintenance_jobs, maintenance_retirement, plan_collection_job, record_compression,
+                       room_appearances, room_messages, store, subagent_metrics)
 from ouroboros.startup_historical_audit import _REPORT_BYTES, finish_maintenance_job, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
@@ -232,38 +235,43 @@ def _analyze_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[st
 def _packing_inputs(root: pathlib.Path) -> Dict[str, Any]:
     """The facts the packing rule reads, cheaply: the store's terminal-write counter (a task closing
     or a closed task written again moves it; a live task's writes do not; one meta row, never a read
-    over the rows), whether archived usage segments wait, and whether any loose evidence exists."""
-    from ouroboros import evidence_packer
+    over the rows), whether archived usage segments wait, whether the evidence index awaits its rebuild
+    (``evidence_packs.index_owed``: stats, nothing of the packs opened) and whether any loose evidence exists."""
+    from ouroboros import evidence_packer, evidence_packs
 
     return {"terminal": _plain(evidence_packer.terminal_revision(root)),
-            "archive_pending": evidence_packer.archive_pending(root),
+            "archive_pending": evidence_packer.archive_pending(root), "index_owed": evidence_packs.index_owed(root),
             "loose": any(_any_entry(root / rel) for rel in ("observability/calls", "task_results/artifacts"))}
 
 
 def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
-    """Evidence may wait when archived usage segments wait, or when loose evidence exists and the
+    """Evidence may wait when archived usage segments wait or the evidence index awaits its rebuild
+    (only the pass rebuilds it, so even a quiet install is due once its file is gone or a reader marked
+    it unusable), or when loose evidence exists and the
     terminal rows moved since the last pass, or the last pass unlinked (one more look is owed: it
     records the moved directories' stamps), or it left candidates unfinished (``pending``: deferred
-    by a held custody lock, busy files, faults) and the store has been written since that pass began
+    by a held custody lock, busy files, faults, a manifest a candidate wrote after the census) and the
+    store has been written since that pass began
     (the contender that held the lock or the file writes its receipt, during the pass or after it;
     nothing but a write re-arms it, so a persistent fault costs one pass per store change, never a
     tight loop); in the child the unfinished work runs whenever the child runs for another reason."""
     inputs = _packing_inputs(root)
     unfinished = bool(row.get("pending")) and (child or facts["revision"] != row.get("revision"))
-    return inputs["archive_pending"] or (inputs["loose"] and (
+    return inputs["archive_pending"] or inputs["index_owed"] or (inputs["loose"] and (
         row.get("terminal") != inputs["terminal"] or not row.get("quiet") or unfinished))
 
 
 def _packing_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """Discovery (archive first, then the first changed task stamp) and, when it finds work, one
-    packing pass, both over the census the job row addresses: the rows written terminal since the
+    """Discovery (archives and an owed index rebuild first, then the first changed task stamp) and, when
+    it finds work, one packing pass, both over the census the job row addresses: the rows written terminal since the
     position the last pass recorded (``census``, the counter it read before its pass, under the store's
     body fact ``body``) and the candidates it left (``pending``); every loose folder only without a
     readable position (``evidence_packer.census_since``: the first run, an older body's pass, another
     HEAD booted on the store since, a counter that went back). The inputs are read before the pass and
     recorded after it, so a task closing during the
     pass makes the next look differ. A pass that unlinked records ``quiet: False``; one that left
-    candidates deferred, busy or faulted records their ids as ``pending`` with the store revision
+    candidates deferred, busy, faulted or written a manifest after the census records their ids as
+    ``pending`` with the store revision
     it has seen: the one its own record leaves when nothing else wrote during the pass, else the
     one the pass began at, since a write during the pass (the contender's receipt, committed after
     the deferral and before this record) is one the pass has not seen, and recording the later
@@ -324,32 +332,20 @@ def _tail_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], ch
         return False
 
 
-def _tail_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """``memory_inventory.fill_tail``, resumable at its stored prefix; this row keeps only its state."""
-    from ouroboros.memory_inventory import fill_tail
-
-    try:
-        report = fill_tail(root, should_stop)
-    except Exception as exc:
-        if not _contention(exc):
-            maintenance_jobs.record(root, "memory_tail", state="failed")
-        raise
-    if (maintenance_jobs.job(root, "memory_tail") or {}).get("state") != report["state"]:
-        maintenance_jobs.record(root, "memory_tail", state=report["state"])
-    return report
-
-
-def _appearances_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """``room_appearances.run``, resumable at the store's mark; this row keeps only its state."""
-    try:
-        report = room_appearances.run(root, should_stop)
-    except Exception as exc:
-        if not _contention(exc):
-            maintenance_jobs.record(root, "room_appearances", state="failed")
-        raise
-    if (maintenance_jobs.job(root, "room_appearances") or {}).get("state") != report["state"]:
-        maintenance_jobs.record(root, "room_appearances", state=report["state"])
-    return report
+def _resumable(name: str, module: str, function: str = "run") -> Callable[..., Dict[str, Any]]:
+    """``module.function(root, should_stop)``, resumable at its own stored facts; the job's row keeps its state,
+    ``failed`` on a fault other than contention (its ``due`` then waits for the child to run for another reason)."""
+    def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
+        try:
+            report = getattr(importlib.import_module(module), function)(root, should_stop)
+        except Exception as exc:
+            if not _contention(exc):
+                maintenance_jobs.record(root, name, state="failed")
+            raise
+        if (maintenance_jobs.job(root, name) or {}).get("state") != report["state"]:
+            maintenance_jobs.record(root, name, state=report["state"])
+        return report
+    return run
 
 
 def _hot_facts_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
@@ -380,8 +376,9 @@ JOBS: Dict[str, tuple] = {
     # then finishes in the same pass (the next pass rests; tests/test_cost_contract.py B6).
     "legacy_reconcile": (_legacy_due, _legacy_run),
     "dialogue_import": (_dialogue_due, _dialogue_run),  # the owner's history: newest segments first
-    "memory_tail": (_tail_due, _tail_run),  # after the import: the tail's positions are settled
-    "room_appearances": (room_appearances.due, _appearances_run),  # after the import, like the tail
+    "memory_tail": (_tail_due, _resumable("memory_tail", "ouroboros.memory_inventory", "fill_tail")),  # after the import
+    "room_appearances": (room_appearances.due, _resumable("room_appearances", "ouroboros.room_appearances")),  # likewise
+    "room_messages": (room_messages.due, _resumable("room_messages", "ouroboros.room_messages")),  # dates the history
     "hot_facts": (_hot_facts_due, _hot_facts_run),
     "ended_plan_asks": (plan_collection_job.due, plan_collection_job.run),
     "custody_trash": (_trash_due, _trash_run),  # before retirement: a removed drive's bytecode goes in the same pass
@@ -545,6 +542,9 @@ class MaintenanceChild:
                 return
             process = spawn_maintenance_job(data_root, repo_dir, PURPOSE)
             finish_maintenance_job(self, process, data_root, started, _report_fields, _record)
+            if not self._stopped.is_set():  # the one-time walks' receipts, never after Stop or Panic
+                delegate_result_taken.deliver_receipt(data_root)
+                historical_retirement.deliver_receipt(data_root)
         except Exception as exc:
             with contextlib.suppress(Exception):
                 _record(data_root, phase="failed", exception_class=type(exc).__name__,

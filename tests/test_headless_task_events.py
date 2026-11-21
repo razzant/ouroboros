@@ -8,7 +8,7 @@ projection that waits for workspace artifacts.
 from __future__ import annotations
 
 import json
-import os
+import sys
 
 import pytest
 from starlette.applications import Starlette
@@ -16,6 +16,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.tasks import (
+    api_task_artifact,
     api_task_events,
     api_task_get,
     api_tasks_list,
@@ -28,33 +29,6 @@ from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies
     _managed_worker_pool_available,
 )
 from tests._store_shared import seed_result
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte filename")
-def test_task_detail_returns_raw_byte_artifact_names_losslessly(tmp_path):
-    from ouroboros.headless import task_artifacts_dir
-
-    data = tmp_path / "data"
-    write_task_result(data, "raw-artifact", "completed", result="é🪶 retained")
-    folder = task_artifacts_dir(data, "raw-artifact")
-    folder.mkdir(parents=True, exist_ok=True)
-    names = ["fixture_\udcff.dat", "literal_\\udcff.dat", "é🪶.dat"]
-    for name in names:
-        (folder / name).write_bytes(b"evidence")
-    app = Starlette(routes=[Route("/api/tasks/{task_id}", api_task_get),
-                            Route("/api/tasks/{task_id}/events", api_task_events)])
-    app.state.drive_root = data
-    response = TestClient(app).get("/api/tasks/raw-artifact")
-    assert response.status_code == 200
-    assert response.content.decode("utf-8") == response.text
-    assert {row["name"] for row in response.json()["artifacts"]} == set(names)
-    assert response.json()["result"] == "é🪶 retained"
-    assert all((folder / name).read_bytes() == b"evidence" for name in names)
-    stream = TestClient(app).get("/api/tasks/raw-artifact/events?wait=0")
-    events = [json.loads(line.removeprefix("data: ")) for line in stream.text.splitlines()
-              if line.startswith("data: ")]
-    final = next(row["data"] for row in events if row["type"] == "task_result")
-    assert {row["name"] for row in final["artifacts"]} == set(names)
 
 
 def test_task_event_replay_uses_existing_logs_and_result(tmp_path):
@@ -323,6 +297,73 @@ def test_task_sse_emits_final_result_after_cursor_saw_scheduled_result(tmp_path)
     assert response.status_code == 200
     assert '"type": "task_result"' in response.text
     assert '"status": "completed"' in response.text
+
+
+def test_task_result_readers_keep_posix_name_bytes_and_ordinary_download(tmp_path):
+    from ouroboros.artifacts import artifact_record, task_artifacts_dir
+
+    data = tmp_path / "data"
+    directory = task_artifacts_dir(data, "names")
+    (directory / "report.txt").write_bytes(b"verified result\n")
+    raw = b"fixture-\xff.txt"
+    name = raw.decode("utf-8", "surrogateescape")
+    nested = "deliverables/" + b"fixture-\xfe.txt".decode("utf-8", "surrogateescape")
+    (directory / "deliverables").mkdir()
+    if sys.platform == "linux":
+        # Linux can enumerate the original byte spellings from disk. Feed the
+        # measured records through the same result store and readers as ordinary files.
+        for relpath in (name, nested):
+            (directory / relpath).write_bytes(b"fixture\n")
+        records = [{**artifact_record(path), "relpath": path.relative_to(directory).as_posix()}
+                   for path in directory.rglob("*") if path.is_file()]
+    else:
+        # On filesystems without byte names, exercise their recorded representation.
+        records = [{"kind": "task_artifact", "name": relpath.rsplit("/", 1)[-1], "relpath": relpath,
+                    "path": str(directory / relpath)} for relpath in (name, nested, "report.txt")]
+    write_task_result(data, "names", "completed", result="Файлы готовы 🪶", artifacts=records)
+    app = Starlette(routes=[
+        Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),
+        Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
+        Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET", "POST"]),
+        Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET"]),
+    ])
+    app.state.drive_root = data
+    client = TestClient(app)
+    detail = client.get("/api/tasks/names")
+    listing = client.get("/api/tasks?status=completed")
+    assert detail.status_code == listing.status_code == 200
+
+    def assert_names(result):
+        paths = {row.get("relpath") or row["name"] for row in result["artifacts"]}
+        assert {name, nested, "report.txt"} <= paths
+        assert next(path for path in paths if path == name).encode("utf-8", "surrogateescape") == raw
+        assert result["result"] == "Файлы готовы 🪶"
+
+    assert_names(detail.json())
+    assert_names(listing.json()["tasks"][0])
+    for response in (client.get("/api/tasks/names/events?wait=0"),
+                     client.post("/api/tasks/names/events", json={"v": 2, "wait": 0})):
+        assert response.status_code == 200
+        wire = response.content.decode("utf-8")
+        assert "fixture-\\udcff.txt" in wire and "🪶" in wire
+        frames = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: ")]
+        [terminal] = [frame for frame in frames if frame["type"] == "task_result"]
+        assert_names(terminal["data"])
+    response = client.get("/api/tasks/names/artifacts/report.txt")
+    assert response.status_code == 200 and response.content == b"verified result\n"
+
+
+def test_task_result_http_and_sse_carriers_preserve_raw_posix_names():
+    from ouroboros.gateway._helpers import UTF8JSONResponse
+    from ouroboros.gateway.task_events import _sse
+
+    result = {"artifacts": [{"name": "fixture-\udcff.txt"}, {"name": r"fixture-\udcff.txt"}], "result": "готово 🪶"}
+    detail = UTF8JSONResponse(result).body.decode("utf-8")
+    assert detail == r'{"artifacts":[{"name":"fixture-\udcff.txt"},{"name":"fixture-\\udcff.txt"}],"result":"готово 🪶"}'
+    assert json.loads(detail) == result
+    event = {"type": "task_result", "data": result}
+    frame = _sse(event, event_id=1).encode("utf-8").decode("utf-8")
+    assert json.loads(next(line[6:] for line in frame.splitlines() if line.startswith("data: "))) == event
 
 
 def test_task_list_filters_on_effective_child_status(tmp_path):

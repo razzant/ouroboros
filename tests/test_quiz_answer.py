@@ -97,9 +97,9 @@ def test_late_frame_does_not_invent_continuation_after_terminal(tmp_path, monkey
     reconcile_terminal(tmp_path, "t1")
     answer = record_answered(tmp_path, "t1", quiz_id="q1", option_index=0,
                              request_id="late", allow_expired=True)
-    frame = owner_quiz.recorded_answer_frame(answer["block"])
+    frame = owner_quiz.recorded_answer_frame(answer["block"], asker="t1")
     assert ("You continued under the assumption" in frame) == (wait_mode != "waiting")
-    assert "The owner chose option 1: A" in frame
+    assert "The owner pressed option 1 and wrote no words. The label «A» is the text of task t1" in frame
 
 
 def test_projection_refuses_out_of_range_and_unknown(tmp_path):
@@ -716,7 +716,7 @@ def test_own_answer_needs_no_option_index(tmp_path, monkeypatch):
             "option. Verbatim: neither — use duckdb") in frame_text
     # The host never words the free answer as a rejection the owner did not state.
     assert "rejected" not in frame_text
-    assert "chose option" not in frame_text
+    assert "pressed option" not in frame_text
 
 
 def test_own_answer_without_a_comment_is_refused(tmp_path, monkeypatch):

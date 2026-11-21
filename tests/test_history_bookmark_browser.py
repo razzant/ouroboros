@@ -1,6 +1,5 @@
 """Card lines, receipts and Reviews keep their nodes while a room is read; a room
-opened again, recreated or kept, is at its newest message (DESIGN "History edges",
-owner decisions 2026-07-10 and 2026-10-05)."""
+opened again is found as it was left (DESIGN "History edges", owner 2026-11-03)."""
 import json
 import pytest
 
@@ -11,7 +10,7 @@ from tests.test_history_continuity_browser import (
     _bookmark_place, _deep_gesture_history, _nested_full_output_history, _open_nested_full_output, _OFFSET,
 )
 from tests.test_chat_history_paging_browser import (
-    _append, _assert_at_newest, _open, _open_project, _step, _idle, _screenshot, _FRAMES, _result,
+    _append, _assert_at_newest, _open, _open_project, _step, _idle, _screenshot, _AT_NEWEST, _FRAMES, _result,
 )
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
@@ -19,11 +18,24 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 pytestmark = [pytest.mark.ui_browser]
 
 
+def _new_page(page):
+    page.reload(wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_function("() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)")
+
+
+def _down_to_newest(page, feed, newest):
+    """↓ is the one return to the present: a present not loaded is read first, then the room is at its newest message."""
+    page.locator('#project-panel .chat-scroll-bottom-btn').click()
+    _idle(page, feed)
+    page.wait_for_function(f"feed => ({_AT_NEWEST})(feed).gap <= 8", arg=feed, timeout=15_000)
+    _assert_at_newest(page, feed, newest)
+
+
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_a_deep_place_with_an_open_review_and_line_reopens_at_the_newest_message(direct_server_with_data, browser_engine, tmp_path):
+def test_a_deep_place_with_an_open_review_and_line_returns_as_it_was_left(direct_server_with_data, browser_engine, tmp_path):
     """Read pages back, with a Review attempt and a long line of its card expanded, a Project closed and
-    opened again is at its newest message: the recreated room reads its newest page only, no older page
-    again, and claims no approximate place (owner decisions 2026-07-10, 2026-10-05)."""
+    opened again is the same room on that passage: the same nodes, the same disclosures open, no older page
+    read again and no approximate place claimed (owner 2026-11-03)."""
     from playwright.sync_api import sync_playwright
 
     root = direct_server_with_data['data_dir']
@@ -51,17 +63,21 @@ def test_a_deep_place_with_an_open_review_and_line_reopens_at_the_newest_message
             line = card.locator('.chat-live-line.expandable').last
             line.locator('[data-live-line-toggle]').click()
             assert line.get_attribute('data-expanded') == '1' and len(line.inner_text()) > 150
-            _bookmark_place(page, detail)
+            offset = _bookmark_place(page, detail)
+            card.evaluate('node => { window.__keptCard = node; }')
             _screenshot(page, tmp_path, f'reopen-deep-before-{browser_engine}')
             page.locator('#project-panel-close').click()
+            page.wait_for_function("() => !document.querySelector('.chat-instance-panel[data-leaving]')")
             before = page.evaluate('() => window.__historyReads.length')
             _click_project(page, project)
             _idle(page, feed)
             reads = page.evaluate('([n, id]) => window.__historyReads.slice(n).filter(r => r.chatId === id).map(r => r.cursor)',
                                   [before, project['chat_id']])
-            assert reads and not any(reads), ('the recreated room reads its newest page only', reads)
-            _assert_at_newest(page, feed, 'Gesture message 0899')
-            assert card.count() == 0, 'the card read pages back is not read again'
+            assert not any(reads), ('the return reads what it missed, no older page again', reads)
+            assert card.evaluate('node => node === window.__keptCard'), 'the same card, not a rebuilt one'
+            detail.wait_for(state='visible')
+            assert line.get_attribute('data-expanded') == '1', 'its disclosures stay open'
+            assert abs(detail.evaluate(_OFFSET) - offset) <= 3, 'on the passage it was left at'
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             _screenshot(page, tmp_path, f'reopen-deep-after-{browser_engine}')
         finally:
@@ -177,13 +193,15 @@ def test_late_latest_cannot_erase_newer_physical_coverage(direct_server_with_dat
             assert held['messages'][-1]['client_message_id'] == 'race-150'
             append(151, 451)
             sockets, prefs = page.evaluate('() => [window.__testSockets.length, window.__prefs.asked]')
-            rooms = page.evaluate("() => document.querySelectorAll('#chat-messages, .chat-messages').length")
             reconnect()
-            # Each room reads its preferences on the open, then its newest page (chat.js, the socket's open): once
-            # every room's preference read is answered, a room that read anew at once has asked by now.
-            page.wait_for_function('''([n, p, rooms]) => window.__testSockets.length > n
-                && window.__testSockets.at(-1).readyState === 1 && window.__prefs.asked >= p + rooms
-                && window.__prefs.answered === window.__prefs.asked''', arg=[sockets, prefs, rooms])
+            # Every room on screen hears the open (docked, Main beside the Project too); a room away does not. Each
+            # one's preference read precedes its newest-page request (chat.js), so wait for those of the rooms shown.
+            shown = page.evaluate('''() => [...document.querySelectorAll('#chat-messages, .chat-messages')]
+                .filter(feed => !feed.closest('.chat-instance-panel[hidden], .page:not(.active)')).length''')
+            assert shown == 2, 'docked: Main and the Project'
+            page.wait_for_function('''([n, p, shown]) => window.__testSockets.length > n
+                && window.__testSockets.at(-1).readyState === 1 && window.__prefs.asked >= p + shown
+                && window.__prefs.answered === window.__prefs.asked''', arg=[sockets, prefs, shown])
             page.evaluate(_FRAMES)
             asked_while_held = page.evaluate('() => window.__roomLatest.length')
             page.evaluate('() => window.__releaseLatest()')
@@ -237,12 +255,12 @@ def _bookmark_reconnect(page):
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 @pytest.mark.parametrize('line_kind', ['receipt', 'narration'])
-def test_a_card_line_arrives_with_its_source_page_and_a_reopen_reads_only_the_newest(
+def test_a_card_line_arrives_with_its_source_page_and_a_return_reads_no_older_page(
         direct_server_with_data, browser_engine, line_kind, tmp_path):
     """A card's older line comes with the older page of the conversation that holds it, not with
     the card's recent progress; a live receipt of the same revision keeps its node and selection
-    when the saved row adopts it. Closed and opened again, the room reads only its newest page and
-    is at its newest message (owner decisions 2026-10-05)."""
+    when the saved row adopts it. Closed and opened again, the room is on the passage it was left
+    at and reads no older page; ↓ takes it to its newest message (owner 2026-11-03)."""
     from datetime import datetime, timedelta, timezone
     from ouroboros.merge_receipts import card_row_text, coverage_reading, review_coverage
     from ouroboros.projects_registry import create_project
@@ -327,7 +345,7 @@ def test_a_card_line_arrives_with_its_source_page_and_a_reopen_reads_only_the_ne
             else:
                 line.locator('[data-live-line-toggle]').click()
                 assert line.get_attribute('data-expanded') == '1'
-            _bookmark_place(page, line, 1)
+            offset = _bookmark_place(page, line, 1)
             _screenshot(page, tmp_path, f'source-page-{line_kind}-before-{browser_engine}')
             page.locator('#project-panel-close').click()
             before = page.evaluate('() => window.__historyReads.length')
@@ -336,21 +354,22 @@ def test_a_card_line_arrives_with_its_source_page_and_a_reopen_reads_only_the_ne
             reads = page.evaluate('n => window.__historyReads.slice(n)', before)
             (tmp_path / f'source-page-{line_kind}-{browser_engine}.json').write_text(json.dumps({
                 'source': source, 'recent': recent, 'supplying': supplying, 'reopen': reads}, indent=2))
-            assert not [read['cursor'] for read in reads if read['cursor']], 'the reopen reads only the newest page'
-            _assert_at_newest(page, feed, 'Reading context 299')
+            assert not [read['cursor'] for read in reads if read['cursor']], 'the return reads no older page'
+            assert abs(line.evaluate(_OFFSET) - offset) <= 3, 'it is on the passage it was left at'
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             _screenshot(page, tmp_path, f'source-page-{line_kind}-after-{browser_engine}')
+            _down_to_newest(page, feed, 'Reading context 299')
         finally:
             browser.close()
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_reopen_lands_at_the_newest(
+def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_a_return_keeps_the_passage(
         direct_server_with_data, browser_engine, tmp_path):
     """300 messages arrive while the reader is on the first page: the reconnect's newest read moves past
     their chain, but a reader in older history is not re-anchored, keeps the passage and keeps the rows
-    the newest window let go. Closed and opened again, the room reads its newest page only and is at its
-    newest message, not at that passage (owner decisions 2026-10-05)."""
+    the newest window let go. Closed and opened again, the room reads no older page and is on that
+    passage; ↓ takes it to its newest message (owner 2026-11-03)."""
     from datetime import datetime, timedelta, timezone
     from ouroboros.projects_registry import create_project
     from playwright.sync_api import sync_playwright
@@ -394,9 +413,10 @@ def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_reopen_la
             _idle(page, feed)
             cursors = page.evaluate('n => window.__historyReads.slice(n).filter(r => r.cursor).map(r => r.cursor)', before)
             assert cursors == [], cursors
-            _assert_at_newest(page, feed, 'Rebase retained message 0449')
+            assert abs(target.evaluate(_OFFSET) - offset) <= 8, 'on the passage it was left at'
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
             _screenshot(page, tmp_path, f'composed-rebase-after-{browser_engine}')
+            _down_to_newest(page, feed, 'Rebase retained message 0449')
             (tmp_path / f'composed-rebase-reads-{browser_engine}.json').write_text(json.dumps(page.evaluate('() => window.__historyReads'), indent=2))
         finally:
             browser.close()
@@ -407,8 +427,8 @@ def test_a_moved_newest_window_leaves_a_reader_in_history_in_place_and_reopen_la
 def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_its_saved_row(
         direct_server_with_data, browser_engine, line_kind, tmp_path):
     """A live line the reader expanded keeps its node, key and disclosure when its saved row adopts it on
-    a reconnect. Closed and opened again, the room is at its newest message and replays the line from
-    its saved source (owner decisions 2026-10-05)."""
+    a reconnect, and when the room is closed and opened again (owner 2026-11-03). A new page opens the
+    room at its newest message and replays the line from its saved source (owner decisions 2026-10-05)."""
     from ouroboros.projects_registry import create_project
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
     from playwright.sync_api import sync_playwright
@@ -468,9 +488,13 @@ def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_it
             assert anchor['lineKey'] == live_key and anchor['lineExpanded'] is True, anchor
             _screenshot(page, tmp_path, f'composed-{line_kind}-before-{browser_engine}')
             page.locator('#project-panel-close').click()
-            # A reopen during the exit keeps the same room. Exercise cold replay after it leaves.
-            page.locator(feed).wait_for(state='detached')
+            page.wait_for_function("() => !document.querySelector('.chat-instance-panel[data-leaving]')")
             _click_project(page, project)
+            _idle(page, feed)
+            assert line.evaluate('n => n === window.__adoptedLine'), 'a return finds the same line'
+            assert line.get_attribute('data-expanded') == '1'
+            _new_page(page)  # a cold replay needs a new page: a room left in this one stays whole
+            feed = _open_project(page, project)
             _idle(page, feed)
             _assert_at_newest(page, feed, 'Live line context 59')
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
@@ -494,7 +518,7 @@ def test_a_live_line_keeps_its_node_through_history_adoption_and_reopens_from_it
 def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newer_revisions(
         direct_server_with_data, browser_engine, tmp_path):
     """Live receipts of one revision keep their nodes and keys through a saved replay of the same
-    revision. Closed and opened again, the room is at its newest message; its receipts come from
+    revision. Opened on a new page, the room is at its newest message; its receipts come from
     the saved rows, and live frames update them in place only with a newer revision."""
     from ouroboros.merge_receipts import card_row_text
     from ouroboros.projects_registry import create_project
@@ -550,9 +574,8 @@ def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newe
             assert card.get_attribute('data-expanded') == '1'
             _bookmark_place(page, line, 1)
             _screenshot(page, tmp_path, f'receipt-bookmark-before-{browser_engine}')
-            page.locator('#project-panel-close').click()
-            page.locator(feed).wait_for(state='detached')  # cold replay, after the room's exit
-            _click_project(page, project)
+            _new_page(page)  # a cold replay needs a new page: a room left in this one stays whole
+            feed = _open_project(page, project)
             _idle(page, feed)
             _assert_at_newest(page, feed, 'Receipt context 59')
             assert 'could not be restored exactly' not in page.locator(feed).locator('..').inner_text()
@@ -586,12 +609,57 @@ def test_a_live_receipt_survives_equal_replay_and_a_reopened_one_takes_only_newe
             browser.close()
 
 
+# The next history read of room `chatId` (`older`: one with a cursor, else its newest page) is answered by the server and
+# then held, its body buffered, until `window.__releaseHeld()`; it is then delivered as a fresh response, so a
+# reader's cancellation cannot abort it and only the room's own check of a superseded read can refuse it.
+_HOLD_ANSWERED = """({older, chatId}) => {
+    const inner = window.fetch;
+    window.__held = null;
+    window.fetch = async (input, init = {}) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (url.pathname !== '/api/chat/history' || window.__held || url.searchParams.has('cursor') !== older
+                || Number(url.searchParams.get('chat_id') || 1) !== chatId)
+            return inner(input, init);
+        const {signal: _signal, ...rest} = init;
+        const held = window.__held = {status: 0, body: null, released: false};
+        const response = await inner(input, rest);
+        held.status = response.status; held.body = await response.json();
+        await new Promise(resolve => { window.__releaseHeld = resolve; });
+        held.released = true;
+        const fresh = new Response(JSON.stringify(held.body), {status: held.status, headers: {'Content-Type': 'application/json'}});
+        const read = fresh.json.bind(fresh);
+        // `delivered`: the room has read the body; whether it lands or is dropped is decided in that continuation.
+        fresh.json = () => read().then(body => { held.delivered = true; return body; });
+        return fresh;
+    };
+}"""
+
+# The revisions of Main in each `/api/state` body the page itself reads, recorded as the page's own read resolves:
+# the snapshot is applied (app.js `observeMainRevision`) in that continuation, before any later task runs.
+_RECORD_STATE = """() => {
+    const inner = window.fetch;
+    window.__stateRevisions = [];
+    window.fetch = async (input, init) => {
+        const response = await inner(input, init);
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        if (url.pathname !== '/api/state') return response;
+        const read = response.json.bind(response);
+        response.json = () => read().then(body => { window.__stateRevisions.push(body?.main_visible_revision); return body; });
+        return response;
+    };
+}"""
+
+
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_latest_waiting_for_history_yields_to_reading_inside_a_box(direct_server_with_data, browser_engine, tmp_path):
-    """#1347 A: ↓ waits for an older read in flight; reading on inside a full output meanwhile keeps the place."""
+def test_latest_does_not_wait_for_a_held_older_read_whose_late_page_moves_no_one(
+        direct_server_with_data, browser_engine, tmp_path):
+    """↓ reaches the loaded present at once while an older page is still being read; that read yields, and its
+    late answer, though the server answered it, neither lands nor pulls the reader back nor moves a full output's own
+    place (#3601; DESIGN "History edges": ↓ "immediately reaches retained messages' end", "Older loading yields")."""
     from playwright.sync_api import sync_playwright
 
     project = _nested_full_output_history(direct_server_with_data['data_dir'])
+    newest = 'Nested context 199'
     with sync_playwright() as pw:
         browser = getattr(pw, browser_engine).launch(headless=True)
         try:
@@ -601,30 +669,132 @@ def test_latest_waiting_for_history_yields_to_reading_inside_a_box(direct_server
             root.evaluate('feed => { feed.scrollTop = 0; }')
             body.evaluate('n => { n.scrollTop = Math.round((n.scrollHeight - n.clientHeight) / 2); }')
             page.evaluate(_FRAMES)
-            # Turning back at the top edge reads an older page; that read is held.
-            page.evaluate("() => { window.__historyFault = 'hold'; }")
+            # Turning back at the top edge reads an older page; the server answers it and the answer is held.
+            page.evaluate(_HOLD_ANSWERED, {'older': True, 'chatId': project['chat_id']})
             root.evaluate("feed => feed.dispatchEvent(new WheelEvent('wheel', {deltaY: -1}))")
-            page.wait_for_function('() => Boolean(window.__heldHistory)')
-            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
-            rect, frame = body.bounding_box(), root.bounding_box()
-            page.mouse.move(rect['x'] + rect['width'] / 2, max(rect['y'], frame['y']) + 40)
-            page.wait_for_timeout(300)  # a new wheel burst, not the tail of the edge gesture
+            page.wait_for_function('() => Boolean(window.__held?.body && window.__releaseHeld)')
+            held = page.evaluate('() => window.__held')
+            assert held['status'] == 200 and held['body']['messages'], held
+            sentinel = held['body']['messages'][0]['text']
+            assert sentinel.startswith('Nested context ') and sentinel not in root.text_content(), sentinel
             before = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_OFFSET)}
-            page.mouse.wheel(0, 240)
-            page.wait_for_timeout(300)
-            page.evaluate(_FRAMES)
-            read = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_OFFSET)}
-            assert read['body'] > before['body'] and abs(read['line'] - before['line']) <= 1, (before, read)
-            page.evaluate('() => window.__releaseHistory()')
+            page.locator('#project-panel-body .chat-scroll-bottom-btn').click()
+            page.wait_for_function(f"feed => ({_AT_NEWEST})(feed).gap <= 8", arg=feed, timeout=5_000)
+            assert page.evaluate('() => !window.__held.released'), 'the present is reached while the older read is held'
+            moved = _assert_at_newest(page, feed, newest)
+            page.evaluate('() => window.__releaseHeld()')
+            page.wait_for_function('() => window.__held.delivered === true')
             _idle(page, feed)
-            page.wait_for_timeout(200)
+            page.evaluate(_FRAMES)  # a page that landed would be drawn within these frames
+            after = _assert_at_newest(page, feed, newest)
+            box = body.evaluate('n => n.scrollTop')
+            (tmp_path / f'latest-yields-{browser_engine}.json').write_text(json.dumps(
+                {'before': before, 'moved': moved, 'after': after, 'box': box, 'sentinel': sentinel}, indent=2),
+                encoding='utf-8')
+            _screenshot(page, tmp_path, f'latest-moves-at-once-{browser_engine}')
+            assert page.evaluate('() => window.__held.released')
+            assert sentinel not in root.text_content(), ('the superseded older page was drawn', sentinel)
+            # Exact: a dropped page draws nothing, so the newest row's geometry is the same layout, not a near one.
+            assert after['top'] == moved['top'] and after['gap'] == moved['gap'], (moved, after)
+            assert abs(box - before['body']) <= 2, ('the late older page leaves the full output where it was', before, box)
+        finally:
+            browser.close()
+
+
+def _main_full_output_near_end(root, card_after=185):
+    """Main's own history: 200 saved messages and, near their end, a subagent line whose fetched full output scrolls."""
+    full = ''.join(f'Retained paragraph {index:03d}. ' + 'The full output stays readable in place. ' * 3 + '\n\n'
+                   for index in range(120)) + 'UNIQUE_NESTED_TAIL'
+    lineage = {'subagent_task_id': 'nested-child', 'parent_task_id': 'nested-parent',
+               'root_task_id': 'nested-parent', 'delegation_role': 'subagent', 'subagent_role': 'Archive reader'}
+
+    def minute(index):
+        return f'2026-09-01T{10 + index // 60:02d}:{index % 60:02d}'
+    at = minute(card_after)
+    _append(root, 'chat', [{'direction': 'in', 'chat_id': 1, 'ts': f'{minute(index)}:00Z',
+                            'client_message_id': f'nested-{index}', 'text': f'Nested context {index:03d}'}
+                           for index in range(200)])
+    _append(root, 'progress', [
+        {'chat_id': 1, 'ts': f'{at}:30Z', 'task_id': 'nested-parent', 'content': 'Parent narration'},
+        {'chat_id': 1, 'ts': f'{at}:31Z', 'task_id': 'nested-child', **lineage, 'subagent_event': 'completed',
+         'status': 'completed', 'content': 'Child finished', 'result': full[:4000], 'result_truncated': True}])
+    _result(root, 'nested-parent', chat_id=1, result='Parent finished.')
+    _result(root, 'nested-child', chat_id=1, result=full, **lineage)
+
+
+_MAIN_OFFSET = "n => n.getBoundingClientRect().top - document.querySelector('#chat-messages').getBoundingClientRect().top"
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+def test_a_wheel_inside_a_box_supersedes_a_landing_still_reading_and_its_late_answer_moves_no_one(
+        direct_server_with_data, browser_engine, tmp_path):
+    """Main pressed again while unread messages are still being read (a reconnect's catch-up, held) lands on its newest
+    arrival once that read answers (chat.js `showLatest({arrive: true})`, the waiting claim ↓ draws busy). A physical
+    wheel inside a full output meanwhile scrolls the box and keeps the feed where it is, and the late answer then
+    neither moves the passage nor jumps to the arrivals (DESIGN "History edges": "New reading gestures, even in
+    bounded boxes, ... supersede pending ↓"; chat_reading_position.js, the nested gesture's cancel). A plain ↓ press
+    moves at once (chat.js `if (!arrive || !needed) follow()`), so its wait leaves nothing late for a box to cancel."""
+    from playwright.sync_api import sync_playwright
+
+    data = direct_server_with_data['data_dir']
+    _main_full_output_near_end(data)
+    feed = '#chat-messages'
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            _open(page, direct_server_with_data['url'])
+            child = page.locator(f'{feed} .chat-live-card[data-task-id="nested-child"]')
+            for card in (page.locator(f'{feed} .chat-live-card[data-task-id="nested-parent"]'), child):
+                card.wait_for(state='attached')
+                if card.get_attribute('data-expanded') != '1':
+                    card.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
+            line = child.locator(':scope > [data-live-timeline] > .chat-live-line.expandable')
+            line.locator('[data-live-line-toggle]').click()
+            body = line.locator(':scope > .chat-live-line-body-full')
+            body.get_by_text('UNIQUE_NESTED_TAIL', exact=False).wait_for(state='attached')
+            root = page.locator(feed)
+            line.evaluate('n => n.scrollIntoView({block: "center"})')
+            body.evaluate('n => { n.scrollTop = Math.round((n.scrollHeight - n.clientHeight) / 3); }')
             page.evaluate(_FRAMES)
-            after = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_OFFSET),
+            # Replies saved while the room is disconnected (no live notice); its catch-up read is answered and held.
+            page.evaluate(_HOLD_ANSWERED, {'older': False, 'chatId': 1})
+            page.evaluate(_RECORD_STATE)
+            for index in range(40):
+                dialogue_store.append(data, 'chat', {'direction': 'out', 'chat_id': 1, 'ts': f'2026-09-01T14:{index:02d}:00Z',
+                                                     'text': f'Late arrival {index:02d}'}, feed=True, emit_live=False)
+            unread_revision = page.request.get(direct_server_with_data['url'] + '/api/state').json()['main_visible_revision']
+            page.evaluate('() => window.__testSockets.find(s => s.readyState === WebSocket.OPEN).close()')
+            page.wait_for_function('() => Boolean(window.__held?.body && window.__releaseHeld)', timeout=30_000)
+            # Pressing Main lands only once Main counts as unread: wait for the page's own read of that revision.
+            page.wait_for_function('r => window.__stateRevisions.some(seen => seen >= r)', arg=unread_revision,
+                                   timeout=30_000)
+            assert any(row.get('text') == 'Late arrival 39' for row in page.evaluate('() => window.__held.body.messages'))
+            page.locator('#primary-sidebar [data-nav-page="chat"]').click()
+            page.evaluate(_FRAMES)
+            assert page.locator('#chat-scroll-bottom').get_attribute('aria-busy') == 'true', 'the landing waits for its read'
+            rect, frame = body.bounding_box(), root.bounding_box()
+            assert rect['y'] >= frame['y'] and rect['y'] + 80 <= frame['y'] + frame['height'], (rect, frame)
+            page.mouse.move(rect['x'] + rect['width'] / 2, rect['y'] + 40)  # no earlier wheel: this one starts a burst
+            before = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET)}
+            page.mouse.wheel(0, 240)
+            page.wait_for_function('([n, top]) => n.scrollTop > top', arg=[body.element_handle(), before['body']],
+                                   timeout=5_000)
+            page.evaluate(_FRAMES)
+            read = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET)}
+            assert read['body'] > before['body'] and abs(read['line'] - before['line']) <= 1, (before, read)
+            page.evaluate('() => window.__releaseHeld()')
+            page.wait_for_function("feed => document.querySelector(feed).textContent.includes('Late arrival 39')",
+                                   arg=feed, timeout=15_000)
+            page.wait_for_function("() => document.querySelector('#chat-scroll-bottom').getAttribute('aria-busy') !== 'true'",
+                                   timeout=15_000)
+            page.evaluate(_FRAMES)  # a late follow lands within followAfterLayout's two animation frames
+            after = {'body': body.evaluate('n => n.scrollTop'), 'line': line.evaluate(_MAIN_OFFSET),
                      'gap': root.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')}
-            (tmp_path / f'latest-yields-{browser_engine}.json').write_text(
-                json.dumps({'before': before, 'read': read, 'after': after}, indent=2))
-            _screenshot(page, tmp_path, f'latest-yields-to-box-{browser_engine}')
-            assert after['gap'] > 200, ('the superseded ↓ must not pull the reader to the present', after)
+            (tmp_path / f'box-supersedes-landing-{browser_engine}.json').write_text(
+                json.dumps({'before': before, 'read': read, 'after': after}, indent=2), encoding='utf-8')
+            _screenshot(page, tmp_path, f'box-supersedes-landing-{browser_engine}')
+            assert after['gap'] > 200, ('the superseded landing must not jump to the late arrivals', after)
             assert abs(after['line'] - read['line']) <= 8 and abs(after['body'] - read['body']) <= 2, (read, after)
         finally:
             browser.close()
@@ -657,10 +827,10 @@ _GAP = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_a_room_kept_for_a_staged_file_reopens_at_the_newest_message_and_follows_replies(direct_server_with_data, browser_engine, tmp_path):
+def test_a_room_kept_with_a_staged_file_returns_to_its_passage_and_follows_replies_from_the_end(direct_server_with_data, browser_engine, tmp_path):
     """Read pages back, a room whose composer holds a staged file is hidden, not destroyed; opened again
-    it is at its newest message, reads no older page again, keeps the file, and follows a new reply
-    (owner decision 2026-10-05)."""
+    it is on that passage, reads no older page again and keeps the file; from ↓ on it follows a new
+    reply (owner 2026-11-03)."""
     from playwright.sync_api import sync_playwright
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
@@ -673,7 +843,8 @@ def test_a_room_kept_for_a_staged_file_reopens_at_the_newest_message_and_follows
             feed = _open_project(page, project)
             for _ in range(3):
                 _step(page, feed, automatic=True)
-            _bookmark_place(page, page.locator(f'{feed} [data-client-message-id="kept-room-650"]'), 80)
+            target = page.locator(f'{feed} [data-client-message-id="kept-room-650"]')
+            offset = _bookmark_place(page, target, 80)
             _stage_file(page)
             page.locator('#project-panel-close').click()
             page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state='attached')
@@ -683,8 +854,13 @@ def test_a_room_kept_for_a_staged_file_reopens_at_the_newest_message_and_follows
             _idle(page, feed)
             cursors = page.evaluate('n => window.__historyReads.slice(n).filter(r => r.cursor).map(r => r.cursor)', before)
             assert cursors == [], 'no older page is read again'
-            _assert_at_newest(page, feed, 'kept-room message 1199')
+            assert abs(target.evaluate(_OFFSET) - offset) <= 8, 'on the passage it was left at'
             assert page.locator('#project-panel .attach-name').filter(has_text='kept.txt').count() == 1
+            page.locator('#project-panel .chat-scroll-bottom-btn').click()
+            # Latest may read a fresh window after the room's return reconciliation.
+            # Its response, not two animation frames, makes the present ready to land.
+            _idle(page, feed)
+            _assert_at_newest(page, feed, 'kept-room message 1199')
             _emit_ws_frame(page, {'type': 'chat', 'chat_id': project['chat_id'], 'role': 'assistant',
                                   'content': 'LIVE_REPLY_AFTER_REOPEN', 'ts': '2026-09-27T22:00:00Z'})
             page.evaluate(_FRAMES)

@@ -47,21 +47,87 @@ def _mail(tmp_path, task_id, text, *, sender="", kind="task_message", msg_id=Non
         from ouroboros.owner_mailbox import _mailbox_path
 
         path = _mailbox_path(tmp_path, task_id)
-        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         rows[-1]["source_task_id"] = sender
-        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
-def test_the_default_in_slot_wait_is_unchanged_and_selectors_need_a_sleep_mode(tmp_path):
+def _await_tool(ctx, **args):
+    """The registered tool through the executor's public dispatch (``ToolRegistry.execute``), whose
+    guards read the ``repo_dir`` every ``ToolContext`` carries."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx.repo_dir = getattr(ctx, "repo_dir", None) or ctx.drive_root
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    return registry.execute("await_messages", args)
+
+
+def test_an_unnamed_mode_sleeps_and_a_named_in_slot_wait_is_unchanged(tmp_path):
+    """Owner Q2=A: with no mode named, an omitted or positive timeout_sec or a selector sleeps; a named
+    in_slot and a zero window hold the slot as before, and in_slot never takes a selector."""
     from ouroboros.tools.control_task_results import _await_messages
 
+    _result(tmp_path, "peer")
     ctx = _ctx(tmp_path)
-    out = json.loads(_await_messages(ctx, 1))
+    out = json.loads(_await_messages(ctx, 1, mode="in_slot"))
     assert out["reason"] == "timeout" and out["slot"] == "held"
-    refused = _await_messages(ctx, 1, senders=["x"])
-    assert "requires mode=warm or cold" in refused
-    assert 'await_messages(mode="warm", wake_after_sec=60)' in refused
-    assert not getattr(ctx, "_model_sleep", None)
+    assert json.loads(_await_messages(ctx, 0))["slot"] == "held", "a zero window is a peek in the slot"
+    refused = _await_messages(ctx, 1, mode="in_slot", senders=["peer"])
+    assert "in_slot takes only timeout_sec" in refused and not getattr(ctx, "_model_sleep", None)
+    armed = json.loads(_await_messages(ctx, 30))
+    assert armed["reason"] == "sleep_armed" and ctx._model_sleep["wake_at"] and ctx._model_sleep["any_mail"]
+    assert ctx._model_sleep["mode"] == armed["mode"] in {"cold", "warm"}
+    ctx._model_sleep, ctx._owner_wait_requested = None, ""
+    assert json.loads(_await_messages(ctx, senders=["peer"]))["reason"] == "sleep_armed"
+    assert ctx._model_sleep["senders"] == ["peer"] and not ctx._model_sleep["any_mail"]
+    ctx._model_sleep, ctx._owner_wait_requested = None, ""
+    bare = json.loads(_await_messages(ctx))
+    assert bare["reason"] == "sleep_armed" and ctx._model_sleep["any_mail"] and not ctx._model_sleep["wake_at"]
+    from ouroboros.model_sleep import wake_reason
+
+    assert not wake_reason(ctx, ctx._model_sleep)
+    _mail(tmp_path, ctx.task_id, "from an unselected peer", sender="peer")
+    assert wake_reason(ctx, ctx._model_sleep)
+    presence = _ctx(tmp_path, task_id="presence")
+    presence.owner_wait_callback = None
+    assert json.loads(_await_messages(presence))["slot"] == "held"
+    assert not getattr(presence, "_model_sleep", None)
+
+
+def test_timeout_sec_is_the_wake_time_of_any_sleep_and_an_explicit_time_still_outranks_it(tmp_path):
+    """#3332: timeout_sec is a sleep's wake time whether the mode is omitted or named warm/cold, beside
+    the selected sources. An explicit wake_after_sec/wake_at still outranks it, a zero or omitted one arms
+    no time (events only), and a negative or non-integer one is refused as an unnamed sleep refuses it."""
+    _result(tmp_path, "sleeper")
+    _result(tmp_path, "child")
+    ctx = _ctx(tmp_path)
+
+    def arm(**args):
+        ctx._model_sleep, ctx._owner_wait_requested, ctx._owner_wait_deadline_at = None, "", ""
+        out = _await_tool(ctx, **args)
+        assert '"reason": "sleep_armed"' in out, (args, out)
+        assert ctx._model_sleep["mode"] == args.get("mode", ctx._model_sleep["mode"]), (args, out)
+        return ctx._model_sleep
+
+    for mode in ({}, {"mode": "warm"}, {"mode": "cold"}):
+        before = datetime.datetime.now(datetime.timezone.utc)
+        sleep = arm(timeout_sec=60, tasks=["child"], **mode)
+        after = datetime.datetime.now(datetime.timezone.utc)
+        assert sleep["wake_at"] and ctx._owner_wait_deadline_at == sleep["wake_at"], mode
+        wake = datetime.datetime.fromisoformat(sleep["wake_at"])
+        assert before + datetime.timedelta(seconds=60) <= wake <= after + datetime.timedelta(seconds=60)
+        assert sleep["tasks"] == ["child"] and sleep["any_mail"] is False
+    later = "2099-01-01T00:00:00+00:00"
+    assert arm(mode="warm", timeout_sec=60, wake_at=later)["wake_at"] == later
+    soon = datetime.datetime.fromisoformat(arm(mode="cold", timeout_sec=3600, wake_after_sec=5)["wake_at"])
+    assert soon <= datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)
+    assert arm(mode="warm")["wake_at"] == arm(mode="cold", timeout_sec=0)["wake_at"] == ""
+    for mode in ({}, {"mode": "warm"}, {"mode": "cold"}):
+        for bad in (-5, "soon"):
+            ctx._model_sleep = None
+            refused = _await_tool(ctx, timeout_sec=bad, **mode)
+            assert refused.startswith("⚠️ TOOL_ARG_ERROR (await_messages)") and not ctx._model_sleep, refused
 
 
 def test_selectors_are_validated_and_a_ready_source_answers_at_once(tmp_path):
@@ -110,6 +176,25 @@ def test_a_warm_sleep_wakes_only_on_its_selected_source_and_never_loses_one_land
     from ouroboros.owner_mailbox import OwnerMailboxPeek
 
     assert OwnerMailboxPeek().pending(tmp_path, "sleeper", set(), 1), "nothing was acknowledged by the wake"
+
+
+def test_a_named_warm_sleep_saves_its_timeout_sec_and_that_time_wakes_the_park(tmp_path):
+    """#3332: the saved continuation carries the wake time beside the selected task; the time wakes it."""
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.owner_wait import checkpoint_owner_wait, direct_owner_wait
+
+    _result(tmp_path, "sleeper")
+    _result(tmp_path, "child")
+    ctx = _ctx(tmp_path)
+    armed = _await_tool(ctx, mode="warm", tasks=["child"], timeout_sec=1)
+    assert '"reason": "sleep_armed"' in armed, armed
+    wake_at = ctx._model_sleep["wake_at"]
+    assert wake_at, "the named warm sleep kept no wake time"
+    checkpoint = checkpoint_owner_wait(ctx, [{"role": "user", "content": "x"}], {}, {}, 1, [], set())
+    saved = json.loads(read_actor_source_bytes(tmp_path, "sleeper", checkpoint["source_ref"]))
+    assert saved["sleep"]["wake_at"] == saved["wait_deadline_at"] == wake_at
+    assert saved["sleep"]["tasks"] == ["child"] and saved["sleep"]["mode"] == "warm"
+    assert direct_owner_wait(ctx, checkpoint) == "timeout", "the selected child still runs: only the time wakes it"
 
 
 def test_an_owner_pause_or_stop_control_is_never_filtered(tmp_path):
@@ -192,7 +277,8 @@ def test_a_cold_sleep_is_refused_over_its_own_live_writers(tmp_path, monkeypatch
     assert armed["reason"] == "sleep_armed" and ctx._model_sleep["mode"] == "cold"
 
 
-def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", **selected):
+def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", arm=None, barrier=None, **selected):
+    """``arm(ctx)`` arms the sleep through the tool instead of these ``selected`` sources."""
     from ouroboros import budget_pause, model_sleep
     from supervisor.events_budget import install_exact_budget_pause
 
@@ -201,7 +287,10 @@ def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", **selected):
     _fast_hold(monkeypatch, budget_pause)
     _quiet_external(monkeypatch, budget_pause)
     monkeypatch.setattr(model_sleep, "cold_blockers", lambda _ctx, **_kw: [])
-    ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, **selected)}
+    if arm is None:
+        ctx._model_sleep = {"sleep_id": "s1", "mode": "cold", **model_sleep.selectors(ctx, **selected)}
+    else:
+        arm(ctx)
     with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
         budget_pause.enter_cold_sleep(limit_ctx)
     budget_pause.end_dispatch_fence(task_id)
@@ -210,7 +299,7 @@ def _cold_park(tmp_path, monkeypatch, workers, task_id="sleeper", **selected):
                                 "worker_id": 0, "attempt": 1}
     sup = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                           WORKERS=workers.WORKERS, sort_pending=lambda: None,
-                          persist_queue_snapshot=lambda reason="": True, bridge=None)
+                          persist_queue_snapshot=barrier or (lambda reason="": True), bridge=None)
     install_exact_budget_pause(sup, task_id, budget_pause.exact_pause_marker(row)["checkpoint"])
     return row
 
@@ -287,6 +376,26 @@ def test_an_ordinary_restart_restores_a_cold_sleep_that_wakes_itself(tmp_path, m
     time.sleep(1.2)
     outcome = wake_ready_sleepers(queue)
     assert outcome[0]["ok"] is True and outcome[0]["ready"]["reason"] == "timeout"
+
+
+def test_a_named_cold_sleep_parks_its_timeout_sec_and_that_time_wakes_it(tmp_path, monkeypatch):
+    """#3332: the saved pause row carries the wake time beside the selected task; the time wakes it."""
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+    _result(tmp_path, "child")
+
+    def arm(ctx):
+        armed = _await_tool(ctx, mode="cold", tasks=["child"], timeout_sec=1)
+        assert '"reason": "sleep_armed"' in armed, armed
+
+    row = _cold_park(tmp_path, monkeypatch, workers, arm=arm)
+    assert row["sleep"]["mode"] == "cold" and row["sleep"]["tasks"] == ["child"]
+    assert row["sleep"]["wake_at"], "the named cold sleep kept no wake time"
+    time.sleep(1.2)
+    outcome = wake_ready_sleepers(queue)
+    assert outcome[0]["ok"] is True and outcome[0]["ready"]["reason"] == "timeout", outcome
 
 
 @pytest.mark.parametrize("source", ["mail", "task", "runs"])
@@ -485,3 +594,84 @@ def test_busy_sleep_poll_logs_one_traceback_then_counts_and_resets(tmp_path, mon
     checkpoint = {**checkpoint, "wait_id": "two"}
     assert owner_wait._sleep_wake(ctx, checkpoint) == ""
     assert caplog.records[-1].exc_info and caplog.records[-1].args[-1] == 1
+
+
+def test_wake_grant_has_no_durable_permission_until_its_snapshot(tmp_path, monkeypatch):
+    from ouroboros.budget_pause import budget_pause_row
+    from supervisor.sleep_wake import wake_ready_sleepers
+
+    q, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 5.0)
+    _result(tmp_path, "peer")
+    original = _cold_park(tmp_path, monkeypatch, workers, senders=["peer"], barrier=q.publish_queue_snapshot)
+    _mail(tmp_path, "sleeper", "ready", sender="peer")
+    before = q.QUEUE_SNAPSHOT_PATH.read_bytes()
+
+    class Crash(BaseException):
+        pass
+
+    def crash(reason):
+        assert reason == "budget_exact_resume_granted"
+        assert not q._queue_lock._is_owned()
+        assert budget_pause_row(tmp_path, "sleeper")["state"] == "paused"
+        raise Crash()
+
+    with monkeypatch.context() as fault, pytest.raises(Crash):
+        fault.setattr(q, "publish_queue_snapshot", crash)
+        wake_ready_sleepers(q)
+    assert q.QUEUE_SNAPSHOT_PATH.read_bytes() == before
+    workers.PENDING.clear()
+    assert q.restore_pending_from_snapshot() == 1
+    assert workers.PENDING[0]["_budget_pause"]["checkpoint"]["source_ref"] == original["source_ref"]
+    assert wake_ready_sleepers(q)[0]["ok"]
+    assert wake_ready_sleepers(q) == []
+
+
+def test_one_publication_for_all_ready_pauses_and_none_for_unready(tmp_path, monkeypatch):
+    from ouroboros import budget_pause as bp
+    from ouroboros.utils import atomic_write_json
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    q, state, _ = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    for i in range(3):
+        task, row = _parked(tmp_path, monkeypatch, task_id=f"tech-{i}")
+        bp.end_dispatch_fence(task["id"])
+        row.update(
+            reason="authority", rail=bp.RAIL_CONTROL_AUTHORITY, cause="dispatch_fence_unreadable", state="paused"
+        )
+        bp.set_budget_pause(tmp_path, task["id"], row)
+        task["_budget_pause"] = bp.exact_pause_marker(row)
+    atomic_write_json(
+        tmp_path / "state/queue_dispatch.json", {"generation": "g", "budget_root_fences": [], "members": {}}
+    )
+    barriers, writes = [], []
+    publish, write = q.publish_queue_snapshot, q.atomic_write_text
+
+    def counted(reason=""):
+        barriers.append(reason)
+        return publish(reason=reason)
+
+    def counted_write(path, data):
+        writes.append((path.name, len(data)))
+        return write(path, data)
+
+    monkeypatch.setattr(q, "publish_queue_snapshot", counted)
+    monkeypatch.setattr(q, "atomic_write_text", counted_write)
+    with monkeypatch.context() as blocked:
+        def refuse(reason):
+            barriers.append(reason)
+            return False
+        blocked.setattr(q, "publish_queue_snapshot", refuse)
+        refused = wake_ready_sleepers(q)
+    assert len(barriers) == 1 and len(refused) == 3
+    assert all(reply["error"] == "snapshot_not_persisted" for reply in refused)
+    assert all("_budget_pause_resume" not in t and bp.budget_pause_row(tmp_path, t["id"])["state"] == "paused"
+               for t in q.PENDING)
+    barriers.clear()
+    outcomes = wake_ready_sleepers(q)
+    woken = [o for o in outcomes if o.get("ok")]
+    snapshot_writes = [w for w in writes if w[0] == "queue_snapshot.json"]
+    assert len(woken) == 3 and len(snapshot_writes) == len(barriers) == 1
+    assert not wake_ready_sleepers(q) and len(barriers) == 1

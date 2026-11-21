@@ -137,6 +137,7 @@ def make(monkeypatch):
     """A Background around a stand-in window; teardown stops every thread it started."""
     created = []
     monkeypatch.setattr(lb, "status_line", lambda port: "Ouroboros: waiting")  # never a real server
+    monkeypatch.setattr(lb, "_MACOS", False, raising=False)  # an open acts at once; macOS's turn: tests below
     monkeypatch.setattr(lb, "_active", None)
 
     def factory(*, indicator=FakeIndicator, answer=None):
@@ -276,6 +277,37 @@ def test_without_an_adapter_or_native_hooks_closing_quits_and_never_asks(setting
     close(background, window)
     wait_for(lambda: background.events == ["exit"])
     assert window.calls == []
+
+
+@pytest.mark.parametrize("indicator", ["broken_hooks", None])
+def test_a_hookless_close_keeps_the_engine_for_a_saved_keep_running_choice_and_an_explicit_quit_stops_it(
+        settings, make, indicator):
+    """Without close hooks a close still exits; a saved "keep running" makes it no owner Quit (``owner_exit``
+    unset: the engine is kept), while an explicit Quit and a saved or undecided quit-on-close stay owner exits."""
+    class Broken(FakeIndicator):
+        def attach_native(self, window):
+            raise RuntimeError("delegate unavailable")
+
+    kind = Broken if indicator else None
+    choose(settings, "true")
+    background, window = make(indicator=kind)
+    assert not background.native_ready
+    close(background, window)
+    wait_for(lambda: background.events == ["exit"])
+    assert background.shutdown.is_set() and not background.owner_exit.is_set() and window.calls == []
+
+    background, window = make(indicator=kind)
+    background.quit.set()  # Cmd+Q, the indicator's Quit or sign-out before the close
+    close(background, window)
+    wait_for(lambda: background.events == ["exit"])
+    assert background.owner_exit.is_set()
+
+    for choice in ("false", ""):
+        choose(settings, choice)
+        background, window = make(indicator=kind)
+        close(background, window)
+        wait_for(lambda: background.events == ["exit"])
+        assert background.owner_exit.is_set(), choice
 
 
 def test_quit_requests_bypass_the_question_and_are_never_cancelled(settings, monkeypatch, make):
@@ -702,13 +734,15 @@ def test_windows_keeps_its_one_icon_for_the_whole_run_and_background_decides_onl
 READY = {"supervisor_ready": True, "supervisor_error": None, "works_complete": True}
 
 
-def projection(*works, confirmed=True, **facts):
-    """A /api/state work projection: each work is (activity, transition, has_turn)."""
+def projection(*works, confirmed=True, loose=0, **facts):
+    """A /api/state work projection: each work is (activity, transition, has_turn); ``loose`` unanswered questions
+    belong to no listed work (their work ended). The summary counts what waits as the server does."""
     rows = [{"work_id": f"w{index}", "activity": activity, "transition": transition,
              "turn": [{"kind": "question", "task_id": f"w{index}"}] if turn else [],
              **({"confirmed": confirmed} if confirmed is not None else {})}
             for index, (activity, transition, turn, confirmed) in enumerate(works)]
-    return {**READY, "works": rows, "work_summary": {"counts": {}, "turn": 0, "confirmed": confirmed}, **facts}
+    waits = sum(bool(row["turn"]) for row in rows) + loose
+    return {**READY, "works": rows, "work_summary": {"counts": {}, "turn": waits, "confirmed": confirmed}, **facts}
 
 
 def work(activity, transition="none", turn=False, confirmed=None):
@@ -723,6 +757,8 @@ def work(activity, transition="none", turn=False, confirmed=None):
     # What waits for the owner is counted on the same line.
     (projection(work("working"), work("waiting", turn=True)), "Ouroboros: working on 1 task · 1 waits for you"),
     (projection(work("paused", turn=True), work("waiting", turn=True)), "Ouroboros: waiting · 2 wait for you"),
+    # An unanswered question whose work has ended waits too: no work lists it, the server's count does.
+    (projection(work("working"), loose=1), "Ouroboros: working on 1 task · 1 waits for you"),
     # What the server says it does not know is neither "waiting" nor "working" (review r1).
     (projection(supervisor_ready=False, supervisor_error="Supervisor init failed: boom"),
      "Ouroboros: error, tasks are not running"),
@@ -738,8 +774,24 @@ def test_the_state_line_reads_the_servers_own_activity(monkeypatch, body, line):
             raise body
         return Answer(body if isinstance(body, bytes) else json.dumps(body).encode())
 
+    monkeypatch.setattr(lb, "_bindings_seen", "")
     monkeypatch.setattr(lb.urllib.request, "urlopen", urlopen)
     assert lb.status_line(1) == line
+
+
+def test_the_state_line_asks_for_no_bindings_map_it_never_reads(monkeypatch):
+    """The line reads the works only. Once an answer named the bindings map's revision, each later read names it
+    back, so the server keeps the map home; an answer naming none (a failed read) is asked whole again."""
+    asked, revisions = [], iter(["r1", "r1", "", "r2"])
+
+    def urlopen(url, timeout):
+        asked.append(url.partition("/api/state")[2])
+        return Answer(json.dumps({**projection(work("working")), "task_bindings_revision": next(revisions)}).encode())
+
+    monkeypatch.setattr(lb, "_bindings_seen", "")
+    monkeypatch.setattr(lb.urllib.request, "urlopen", urlopen)
+    assert [lb.status_line(1) for _ in range(4)] == ["Ouroboros: working on 1 task"] * 4
+    assert asked == ["", "?bindings_since=r1", "?bindings_since=r1", ""]
 
 
 def test_windows_form_closing_decides_with_the_close_reason(settings, monkeypatch, make):
@@ -790,7 +842,7 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
         def applicationShouldTerminate_(self, sender):
             return answers[-1] if background.quit.is_set() else "asked as a close"
 
-    background = SimpleNamespace(quit=threading.Event(), shown=[])
+    background = SimpleNamespace(quit=threading.Event(), shown=[], window=Window())  # the main window exists
     background.show_window = lambda: background.shown.append(True)
     mac._shared["background"] = background
     delegate_class, _target = mac._classes(PywebviewDelegate)
@@ -805,6 +857,111 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     assert mac.MacStatusItem.confirm(None, window, "t", "m") is True
     assert window.calls[-1][2] == {"global.ok": "Keep running", "global.cancel": "Quit"}
     assert window.localization == {"global.ok": "OK", "global.cancel": "Cancel"}, "labels restored"
+
+
+class NSApp:
+    """``NSApplication.sharedApplication()``: pywebview's delegate until the launcher installs its own."""
+
+    def __init__(self):
+        self.current = self.Pywebview()
+
+    class Pywebview:
+        @classmethod
+        def alloc(cls):  # Objective-C allocation: the launcher's subclass is made the same way
+            return cls.__new__(cls)
+
+        def init(self):
+            return self
+
+        def applicationShouldTerminate_(self, sender):
+            return 1  # YES: no closing handler kept a setup window, so AppKit would end the process now
+
+    def delegate(self):
+        return self.current
+
+    def setDelegate_(self, delegate):
+        self.current = delegate
+
+
+def appkit_doubles(monkeypatch, app):
+    objc = types.ModuleType("objc")
+    objc.super = lambda cls, obj: super(cls, obj)
+    appkit = types.ModuleType("AppKit")
+    appkit.NSObject, appkit.NSTerminateLater, appkit.NSTerminateCancel = object, 2, 0
+    appkit.NSApplication = SimpleNamespace(sharedApplication=lambda: app)
+    monkeypatch.setitem(sys.modules, "objc", objc)
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+    from ouroboros import launcher_tray_macos as mac
+
+    monkeypatch.setattr(mac, "_shared", {})
+    return mac
+
+
+def test_a_macos_app_quit_before_the_main_window_is_the_owners_quit_and_its_close_keeps_its_meaning(make,
+                                                                                                    monkeypatch):
+    """Cmd+Q, Dock Quit or logout over a setup window: the delegate installed at that window's ``before_show``
+    (the native seam) asks this launcher's Quit and answers ``NSTerminateLater``: AppKit (and a logout) waits for
+    the closer's exit, never cancelled; the window gets no close policy, so its red button and a programmatic
+    destroy ask nothing."""
+    app = NSApp()
+    mac = appkit_doubles(monkeypatch, app)
+    monkeypatch.setattr(lb, "indicator_class", lambda: mac.MacStatusItem)
+    background = lb.Background(lambda: background.events.append("close body"), lambda: 1, threading.Event())
+    background.events = []
+    setup = Window()
+    assert background.attach_setup(setup) is setup and background.window is None
+    assert setup.events.closing.handlers == [] and not background.native_ready, "no window policy"
+    assert isinstance(app.delegate(), NSApp.Pywebview)
+    fire(setup, "before_show")
+    delegate = app.delegate()
+    assert type(delegate).__name__ == "OuroborosAppDelegate" and not background.native_ready
+    assert not background.owner_exit.is_set(), "installing the hook is no Quit"
+    assert delegate.applicationShouldTerminate_(app) == 2, "NSTerminateLater: not YES (exit first), not Cancel"
+    assert background.app_quit.is_set() and background.quit.is_set() and background.owner_exit.is_set()
+    wait_for(lambda: background.events == ["close body"])
+    main = Window()
+    background.attach(main)
+    fire(main, "before_show")
+    assert background.native_ready and type(app.delegate()).__name__ == "OuroborosAppDelegate"
+
+
+def test_a_dock_click_over_a_setup_window_keeps_appkits_own_reopen(make, monkeypatch):
+    """Before the main window ``show_window`` only keeps the request, so a minimized Git, onboarding or Startup Failed
+    window comes back by AppKit's own reopen (YES), and nothing is kept for later; once the main window exists the
+    launcher opens it (NO), as before."""
+    app = NSApp()
+    mac = appkit_doubles(monkeypatch, app)
+    monkeypatch.setattr(lb, "indicator_class", lambda: mac.MacStatusItem)
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
+    fire(background.attach_setup(Window()), "before_show")
+    delegate = app.delegate()
+    assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(app, False) is True
+    assert not background._open_pending, "no open kept for a main window the Dock click never asked for"
+    opened = []
+    monkeypatch.setattr(background, "show_window", lambda: opened.append(True))
+    background.attach(Window())
+    assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(app, False) is False and opened == [True]
+
+
+@pytest.mark.parametrize("pending,panic", [(True, False), (False, False), (True, True)])
+def test_a_startup_close_answers_a_pending_app_terminate_by_its_exit_before_any_window_closes(monkeypatch, make,
+                                                                                               pending, panic):
+    """``end_setup``: AppKit waits on ``NSTerminateLater``, so the process's exit (lock first) is the answer, and no
+    window is destroyed before it (pywebview's last close calls ``app.stop_`` and ``abortModal``). Without a pending
+    terminate the windows close and main returns; an accepted Panic owns the exit and is not waited for."""
+    events = []
+    monkeypatch.setattr(lb.os, "_exit", lambda code: events.append(("exit", code)))
+    monkeypatch.setattr(lb, "indicator_class", lambda: None)
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
+    if pending:
+        background.app_quit.set()
+    if panic:
+        background.panic.set()
+    windows = [SimpleNamespace(destroy=lambda: events.append("destroy"))]
+    background.end_setup(lambda: events.append("lock released"), windows)
+    expected = {(True, False): ["lock released", ("exit", 0), "destroy"],  # the exit never returns natively
+                (False, False): ["destroy"], (True, True): ["lock released", "destroy"]}[(pending, panic)]
+    assert events == expected
 
 
 @pytest.mark.parametrize("intent,answered,other,expected", [
@@ -899,6 +1056,45 @@ def test_an_open_request_before_the_window_exists_is_kept_and_cancels_the_quiet_
     assert window.calls == ["show"] and not background.indicator.hidden
 
 
+@pytest.mark.parametrize("macos", [True, False], ids=["macos", "windows and linux"])
+def test_an_open_from_another_thread_is_one_main_thread_turn_on_macos_only(settings, monkeypatch, macos):
+    """The boot's kept request still latches synchronously (it cancels the quiet start). On macOS a request from another
+    thread (pywebview's ``shown`` replaying the kept one, a notification click) opens in a main-thread turn, where every
+    close is decided and hidden; the main thread's own requests, and every request elsewhere, open at once."""
+    turns = []
+    tools = types.ModuleType("PyObjCTools")
+    tools.AppHelper = SimpleNamespace(callAfter=lambda fn, *args: turns.append((fn, args)))
+    monkeypatch.setitem(sys.modules, "PyObjCTools", tools)
+    monkeypatch.setattr(lb, "_MACOS", macos, raising=False)
+    monkeypatch.setattr(lb, "indicator_class", lambda: FakeIndicator)
+    choose(settings, "true")
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
+
+    def elsewhere(act):
+        worker = threading.Thread(target=act)
+        worker.start()
+        worker.join(5)
+
+    def main_turns():
+        while turns:
+            fn, args = turns.pop(0)
+            fn(*args)
+
+    elsewhere(background.show_window)  # the SIGURG/kernel-event listener during the boot: no window yet
+    assert background.start_hidden("automatic") is False and turns == []
+    window = Window()
+    background.attach(window)
+    fire(window, "before_show")
+    elsewhere(lambda: fire(window, "shown"))  # pywebview's event thread replays the kept request
+    assert window.calls == ([] if macos else ["show"]) and len(turns) == int(macos)
+    main_turns()
+    assert window.calls == ["show"] and not background.indicator.hidden
+    elsewhere(background.show_window)  # a notification click's thread
+    main_turns()
+    background.show_window()  # the main thread: the menu's Open, the Dock, a second launch on macOS
+    assert window.calls == ["show"] * 3 and turns == []
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal; Windows uses its kernel event")
 def test_a_real_sigurg_during_the_boot_opens_the_window_once_it_exists(settings, monkeypatch, tmp_path):
     """The signal.signal branch (Linux) on any POSIX host; macOS's MachSignals queues the
@@ -972,3 +1168,271 @@ def test_real_windows_kernel_event_is_shared_by_same_install(tmp_path):
         assert kernel.WaitForSingleObject(handle, 0) == 258  # auto-reset, no stale request
     finally:
         kernel.CloseHandle(handle)
+
+
+class FullScreenChrome:
+    """``WindowChrome`` of a window in full screen: it takes every close and keeps ``later`` until DidExit."""
+
+    def __init__(self):
+        self.later, self.calls, self.hiding = [], [], False
+
+    def hide_when_windowed(self, later):
+        self.calls.append("close")
+        self.later.append(later)
+        self.hiding = True
+        return False
+
+    def keep(self):
+        self.calls.append("keep")
+        self.hiding = False
+
+    def zoom_changed(self):
+        pass
+
+
+def test_a_close_in_full_screen_keeps_the_window_until_did_exit_then_hides_behind_the_icon(settings, monkeypatch, make):
+    """macOS (#3134): the close is taken, nothing hides and nothing counts as hidden until the window is out of full
+    screen; then it hides once, behind the live icon."""
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    assert close(background, window) is False and background.events == []
+    assert window.calls == [] and not background.indicator.hidden and chrome.calls == ["close"]
+    chrome.later[0]()  # DidExit, on the main thread
+    assert window.calls == ["hide"] and background.indicator.hidden
+
+
+@pytest.mark.parametrize("meanwhile", ["the icon went away", "a quit", "a panic"])
+def test_a_close_waiting_for_did_exit_never_hides_without_a_live_icon_or_during_a_quit(settings, monkeypatch, make,
+                                                                                      meanwhile):
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    close(background, window)
+    if meanwhile == "the icon went away":
+        background.indicator.stop()
+    else:
+        background.shutdown.set()
+        background.quit.set()
+    chrome.later[0]()
+    assert "hide" not in window.calls and not background.indicator.hidden
+
+
+def test_a_quit_from_full_screen_exits_as_before_and_waits_for_nothing(settings, monkeypatch, make):
+    """Cmd+Q and Dock Quit mark the quit before pywebview's ``closing``: the closer runs, the chrome is never asked."""
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    background.quit.set()  # applicationShouldTerminate_
+    assert close(background, window) is False
+    wait_for(lambda: background.events == ["exit"])
+    assert chrome.calls == [] and window.calls == []
+
+
+def test_the_first_close_in_full_screen_asks_then_waits_for_did_exit(settings, monkeypatch, make):
+    """The consent path (``_ask`` on its own thread) hides through the same wait as a later close."""
+    background, window = make(answer=True)
+    background.chrome = chrome = FullScreenChrome()
+    assert close(background, window) is False
+    wait_for(lambda: chrome.later)
+    assert stored(settings) == "true" and "hide" not in window.calls and not background.indicator.hidden
+    chrome.later[0]()
+    assert "hide" in window.calls and background.indicator.hidden and background.events == []
+
+
+def test_every_way_of_opening_the_window_drops_a_waiting_close_first(settings, monkeypatch, make):
+    """The icon's Open, the Dock, a banner click and a second launch all reach ``show_window``: the chrome is told
+    to keep the window before it is shown."""
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    close(background, window)
+    shown_at = []
+    window.show = lambda: shown_at.append(list(chrome.calls))
+    background.show_window()
+    background.open_notification("")
+    assert shown_at == [["close", "keep"], ["close", "keep", "keep"]]
+
+
+def test_an_alert_while_the_close_leaves_full_screen_cues_the_dock_and_raises_nothing(settings, monkeypatch, make):
+    """Carbon's case 4: the closing window is still on screen (``indicator.hidden`` is False) until DidExit; an alert
+    then takes the background path (the icon's cue) and cancels nothing. Only an open makes it visible again."""
+    cues = []
+    monkeypatch.setattr(lb, "request_native_attention",
+                        lambda show, sound=True: cues.append((show, sound)) or {"ok": True, "sound_played": sound})
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    close(background, window)
+    assert not background.indicator.hidden and chrome.hiding
+    result = background.attention(True, "Task finished", "Report ready", False)
+    assert result["status"] == "background" and ("banner", "Task finished", "Report ready") in background.events
+    assert cues == [(None, False)] and window.calls == [] and chrome.calls == ["close"], "nothing raised or kept"
+    chrome.later[0]()  # DidExit
+    assert window.calls == ["hide"] and background.indicator.hidden
+    background.show_window()
+    cues.clear()
+    background.attention(True)
+    assert cues == [(window.show, True)], "opened again: the visible window's cue"
+
+
+def _around_the_hide(window, act, when):
+    """``act`` on another thread just before (or after) the deferred hide is queued; pywebview queues hide and
+    show as main-thread turns in call order, so ``window.calls`` is the order the window sees them."""
+    hide = window.hide
+
+    def other_thread():
+        worker = threading.Thread(target=act)
+        worker.start()
+        worker.join(5)
+
+    def racing_hide():
+        if when == "before the hide":
+            other_thread()
+        hide()
+        if when == "after the hide":
+            other_thread()
+
+    window.hide = racing_hide
+
+
+@pytest.mark.parametrize("when", ["before the hide", "after the hide"])
+@pytest.mark.parametrize("meanwhile", ["an open", "the icon went away", "a quit"])
+def test_an_open_or_a_lost_icon_around_the_deferred_hide_never_strands_the_window(settings, make, meanwhile, when):
+    """Carbon's case 2: ``_hide_later`` commits ``hidden`` and then queues the hide. An open or the icon's loss in
+    between queued its show first; the window is shown once more after the hide. A quit never reopens it."""
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    close(background, window)
+    act = {"an open": background.show_window, "the icon went away": background.indicator._stopped,
+           "a quit": background.request_quit}[meanwhile]
+    _around_the_hide(window, act, when)
+    chrome.later[0]()  # DidExit, on the main thread
+    seen = [call for call in window.calls if call in ("hide", "show")]
+    if meanwhile == "a quit":
+        assert seen == ["hide"], "a dying shell is never shown again"
+        return
+    assert seen[-1] == "show" and not background.indicator.hidden
+    assert background.indicator.ready.is_set() is (meanwhile == "an open")
+
+
+@pytest.mark.parametrize("when", ["before the hide", "after the hide"])
+def test_turning_background_off_around_the_deferred_hide_keeps_the_icon_for_the_hidden_window(settings, make, when):
+    choose(settings, "true")
+    background, window = make()
+    background.chrome = chrome = FullScreenChrome()
+    close(background, window)
+    _around_the_hide(window, background.indicator.stop_if_visible, when)
+    chrome.later[0]()
+    assert window.calls == ["hide"] and background.indicator.hidden and background.indicator.ready.is_set()
+
+
+def test_the_poll_turning_background_off_never_races_a_hide_past_its_icon(settings, make):
+    """The status poll reads the window visible, then the close commits and hides: the icon it then removes would
+    have been the hidden window's only way back. The visible-check and the icon's removal are one step."""
+    class Racing(FakeIndicator):
+        race = None
+
+        @property
+        def hidden(self):
+            value, race, self.race = self._hidden, self.race, None
+            if race is not None:
+                race()  # the close commits right after the poll looked
+            return value
+
+    class OneTick(threading.Event):
+        def wait(self, timeout=None):
+            return True
+
+    choose(settings, "true")
+    background, window = make(indicator=Racing)
+    background.chrome = chrome = FullScreenChrome()
+    close(background, window)
+    background.shutdown.set()
+    background._poller.join(timeout=5)
+    background.shutdown = OneTick()
+    choose(settings, "false")
+    background.indicator.race = chrome.later[0]
+    background._poll()
+    if background.indicator.race is not None:  # the poll no longer reads the property: the close comes after it
+        chrome.later[0]()
+    stranded = "hide" in window.calls and not background.indicator.ready.is_set()
+    assert not stranded and background.indicator.hidden is ("hide" in window.calls)
+
+
+def test_only_owner_gestures_mark_an_owner_exit(settings, monkeypatch, make):
+    """Quit's engine stop reads ``owner_exit``: a lost indicator, an unshowable window, an unshowable question and a
+    hide that failed after the owner chose to keep running exit without it; the owner's own close or Quit marks it."""
+    calls = []
+
+    def recorded(background):
+        background.exit_launcher = lambda *, owner=True: calls.append(owner) or False
+        return background
+
+    background, window = make()
+    recorded(background)
+    window.show = lambda: (_ for _ in ()).throw(RuntimeError("no window"))
+    background.indicator._hidden = True
+    background.indicator._show_or_exit(window)  # the indicator is gone and the window cannot come back
+    background.indicator._hidden, background.window = True, None
+    background.indicator._stopped()  # the indicator went away with no window at all
+    background, window = make(answer=None)
+    recorded(background)
+    background.indicator.confirm = lambda *a: (_ for _ in ()).throw(RuntimeError("no dialog"))
+    background._asking.acquire()
+    background._ask()  # the background question could not be shown: the owner's answer is unknown
+    choose(settings, "")
+    background, window = make()
+    recorded(background)
+    background.indicator.confirm = lambda *a: True
+    monkeypatch.setattr(background.indicator, "hide_on_close", lambda window: False)
+    background._asking.acquire()
+    background._ask()  # the owner chose to keep running and the hide failed
+    assert calls == [False, False, False, False]
+    background, window = make()
+    recorded(background)
+    background.indicator.confirm = lambda *a: False
+    background._asking.acquire()
+    background._ask()  # the owner declined background: closing quits
+    background.request_quit()
+    assert calls[4:] == [True, True]
+
+
+def test_an_owner_exit_marks_the_launchers_quit_before_the_body_runs(make):
+    background, window = make()
+    shared = threading.Event()
+    background.owner_exit = shared
+    background._close = lambda: background.events.append(("body", shared.is_set()))
+    background.exit_launcher()
+    wait_for(lambda: background.events)
+    assert background.events == [("body", True)]
+
+
+def test_a_saved_keep_running_choice_whose_indicator_or_hide_fails_exits_without_an_owner_quit(
+        settings, monkeypatch, make):
+    """The saved "keep running" answer means the owner's close is no Quit: a missing icon or a failed hide still
+    exits (never a hidden window without a way back) but leaves ``owner_exit`` unset, so the engine is kept. A
+    saved "quit on close" and the explicit Quit stay owner exits."""
+    class NoIcon(FakeIndicator):
+        comes_up = False
+
+    choose(settings, "true")
+    background, window = make(indicator=NoIcon)
+    close(background, window)  # the indicator never came up
+    wait_for(lambda: background.events == ["exit"])
+    assert background.shutdown.is_set() and not background.owner_exit.is_set() and window.calls == []
+    background.request_quit()  # the owner's explicit Quit afterwards still marks the engine stop
+    assert background.owner_exit.is_set()
+
+    background, window = make()
+    window.hide = lambda: (_ for _ in ()).throw(RuntimeError("hide failed"))
+    close(background, window)  # the icon is up, the hide itself fails
+    wait_for(lambda: background.events == ["exit"])
+    assert not background.owner_exit.is_set() and not background.indicator.hidden
+
+    choose(settings, "false")
+    background, window = make()
+    close(background, window)  # the saved answer is "quit on close": the owner's close is Quit
+    wait_for(lambda: background.events == ["exit"])
+    assert background.owner_exit.is_set()

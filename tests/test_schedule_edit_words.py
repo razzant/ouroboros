@@ -108,12 +108,18 @@ def test_an_edited_schedule_hands_both_door_instructions_to_the_next_follow_up(t
     [updated] = schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
     fired = schedules._task_from_schedule(updated)
     ctx.task_metadata, ctx.task_id, ctx._owner_directives = fired["metadata"], "fired", []
+    ctx.task_contract = fired["task_contract"]
     _initialize_owner_directives(ctx, [{"role": "user", "content": fired["text"]}])
-    assert [row["content"] for row in ctx._owner_directives] == ["Check staging.", constraint]
+    # The words, then the schedule's own text under its supplier (the editing task), never as words (#2764).
+    assert [(row["source"], row["content"]) for row in ctx._owner_directives] == [
+        ("initial_user", "Check staging."), ("initial_user", constraint), ("schedule_text", "Check production.")]
+    assert (ctx._owner_directives[-1]["supplier"], ctx._owner_directives[-1]["supplier_task_id"]) == ("task", "root-1")
     assert _handle_schedule_followup(ctx, relation="independent", objective="Recheck production.",
                                      run_at="2030-01-01T00:00:00+00:00").startswith("FOLLOWUP_SCHEDULED")
     descendant = next(row for row in schedules.list_scheduled_tasks(ctx.drive_root)["tasks"]
                       if row["id"] != registered["id"])
     carried = descendant["task"]["metadata"]["owner_corpus"]
-    assert [(row["content"], row.get("client_message_id")) for row in carried] == [
+    assert [(row["content"], row.get("client_message_id")) for row in carried if row["source"] != "schedule_text"] == [
         ("Check staging.", "registration"), (constraint, "revision")], "both instructions, each by its own id"
+    assert [(row["source"], row["content"], row["schedule_id"]) for row in carried if row["source"] == "schedule_text"] == [
+        ("schedule_text", "Check production.", registered["id"])], "the schedule's conditions ride on, as its text"

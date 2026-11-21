@@ -145,6 +145,70 @@ def test_catalog_search_and_detail(env):
     assert missing.status_code == 404
 
 
+def _with_clawhub(hub, monkeypatch):
+    rows = [*hub.rows(), {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}]
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps(rows))
+
+
+def _clawhub_summary(slug):
+    from ouroboros.marketplace import clawhub
+
+    return clawhub._summary_from_record({"name": slug, "summary": f"{slug} does things.", "stats": {"downloads": 9}})
+
+
+def test_a_named_registry_with_no_query_answers_one_page(env, monkeypatch):
+    client, _drive, hub, _tmp = env
+    from ouroboros.marketplace import clawhub
+
+    _with_clawhub(hub, monkeypatch)
+    asked = []
+
+    def fake_search(query, **kwargs):
+        asked.append((query, kwargs["sort"], kwargs["cursor"], kwargs["limit"]))
+        return {"results": [_clawhub_summary("first"), _clawhub_summary("second")], "next_cursor": "page-2"}
+
+    monkeypatch.setattr(clawhub, "search", fake_search)
+    first = client.get("/api/skill-catalog/search", params={"q": "", "source": "clawhub"})
+    assert assert_bound("GET /api/skill-catalog/search", first) == "SkillCatalogSearchResponse"
+    assert [item["id"] for item in first.json()["items"]] == ["clawhub/first", "clawhub/second"]
+    assert first.json()["next_cursor"] == "page-2"
+    assert asked == [("", "popular", None, 24)], "popular by default, one bounded request"
+    following = client.get("/api/skill-catalog/search", params={"source": "clawhub", "sort": "updated", "cursor": "page-2"})
+    assert following.status_code == 200 and asked[-1] == ("", "updated", "page-2", 24)
+    monkeypatch.setattr(clawhub, "search", lambda *_a, **_k: {"results": [_clawhub_summary("last")], "next_cursor": ""})
+    last = client.get("/api/skill-catalog/search", params={"source": "clawhub", "cursor": "page-9"})
+    assert assert_bound("GET /api/skill-catalog/search", last) and "next_cursor" not in last.json()
+
+
+def test_a_registry_is_asked_only_when_named_or_searched(env, monkeypatch):
+    client, _drive, hub, _tmp = env
+    from ouroboros.marketplace import clawhub
+
+    _with_clawhub(hub, monkeypatch)
+    asked = []
+    monkeypatch.setattr(clawhub, "search", lambda query, **kw: (asked.append(query), {"results": [], "next_cursor": ""})[1])
+    for params in ({"q": ""}, {"q": "", "source": ""}, {"q": "", "source": "ouroboros"}, {"sort": "popular", "cursor": "x"}):
+        assert client.get("/api/skill-catalog/search", params=params).status_code == 200
+    assert asked == [], "All sources and a local source never wait on the registry"
+    client.get("/api/skill-catalog/search", params={"q": "weather"})
+    assert asked == ["weather"], "a text search is unchanged"
+
+
+def test_a_registry_that_cannot_answer_is_not_an_empty_list(env, monkeypatch):
+    client, _drive, hub, _tmp = env
+    from ouroboros.marketplace import clawhub
+
+    _with_clawhub(hub, monkeypatch)
+
+    def refuse(*_a, **_k):
+        raise clawhub.ClawHubClientError("HTTP 503 from registry")
+
+    monkeypatch.setattr(clawhub, "search", refuse)
+    answer = client.get("/api/skill-catalog/search", params={"source": "clawhub"})
+    assert assert_bound("GET /api/skill-catalog/search", answer)
+    assert answer.json() == {"items": [], "registry_error": "ClawHub: HTTP 503 from registry"}
+
+
 def test_install_answers_the_job_at_once_and_refuses_a_taken_name(env, monkeypatch):
     client, drive, _hub, _tmp = env
     reviews = []

@@ -24,12 +24,12 @@ STATE_FIELDS = {
     "evolution_cycle", "evolution_state", "bg_consciousness_state", "spent_calls", "supervisor_ready",
     "supervisor_error", "boot", "runtime_mode", "context_mode", "subagents_mode", "subagents_availability",
     "context_mode_auto_low", "effort_range", "safety_mode", "skills_repo_configured", "github_token_configured",
-    "accounting", "projects", "project_listable_count", "project_chat_ids", "main_visible_revision", "task_bindings",
-    "task_bindings_revision", "task_bindings_unchanged", "active_direct_turns", "active_chat_activities",
+    "accounting", "projects", "project_messages_revision", "project_listable_count", "project_chat_ids",
+    "main_visible_revision", "task_bindings", "task_bindings_revision", "task_bindings_unchanged", "active_direct_turns", "active_chat_activities",
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
     "main_attention", "main_attention_complete", "main_attention_gaps", "works", "rooms", "work_summary",
     "works_complete", "works_gaps", "served_ui",
-}
+} | {"main_route"} | {"processing_tiers"}  # Main chat writes Main itself; its tiers beside it
 
 
 @pytest.fixture
@@ -127,6 +127,34 @@ def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count
     assert payload["project_listable_count"] == 60
 
 
+def test_a_room_that_is_the_owners_turn_always_has_its_row_in_the_feed(serving, monkeypatch):
+    """The Projects header's amber stands for a row the owner can reach: a listable Project whose room is the owner's
+    turn joins the feed beyond its recent slice, in message order after the pins. Without such a room the feed is the
+    capped one, byte for byte, also when the amber room is already in it."""
+    from ouroboros import projects_registry as registry
+    from ouroboros.gateway import work_projection
+
+    for index in range(60):
+        registry.create_project(serving.root, f"project-{index:03d}", name=f"Project {index:03d}", origin="owner_ui")
+    capped = gateway_state._state_snapshot(_request(serving.app))["projects"]
+    everything = registry.projects_summary(serving.root, limit=None, by_message=True)
+    [beyond] = [row for row in everything if row["id"] not in {row["id"] for row in capped}][:1]
+    real = work_projection.works_snapshot
+    amber = []
+
+    def with_amber(*args, **kwargs):
+        works = real(*args, **kwargs)
+        return {**works, "rooms": {**works["rooms"], **{str(chat): {"amber": True, "turn": [{}]} for chat in amber}}}
+
+    monkeypatch.setattr(work_projection, "works_snapshot", with_amber)
+    amber[:] = [capped[0]["chat_id"]]
+    assert gateway_state._state_snapshot(_request(serving.app))["projects"] == capped
+    amber[:] = [beyond["chat_id"]]
+    fed = gateway_state._state_snapshot(_request(serving.app))["projects"]
+    assert len(fed) == len(capped) + 1 and beyond in fed
+    assert [row["id"] for row in fed] == [row["id"] for row in everything if row in capped or row == beyond]
+
+
 def test_concurrent_readers_share_one_production_even_when_nothing_could_be_reused(serving, monkeypatch):
     real_probe = publication.probe
     monkeypatch.setattr(publication, "probe", lambda *a, **k: (*real_probe(*a, **k), object()))  # never equal
@@ -201,6 +229,32 @@ def test_an_unchanged_revision_serves_the_held_publication_without_reading_a_tas
     assert len(productions) == 1 and third.headers[publication.GENERATION_HEADER] == "2"
 
 
+def test_publication_reprobes_an_effective_child_root_after_it_changes(serving, monkeypatch):
+    """A split-drive effective result is a publication dependency, not only a budget root."""
+    child = str(serving.root / "child-drive")
+    revision = [1]
+    productions = []
+
+    def fake_probe(_root, roots=frozenset(), **_kwargs):
+        return (tuple(sorted(roots)), revision[0])
+
+    def produce(_direct):
+        productions.append(1)
+        return {"fields": {}, "task_bindings": {}, "roots": [child], "jobs": {}}
+
+    monkeypatch.setattr(publication, "probe", fake_probe)
+    held = publication.Publisher(str(serving.root))
+    held.refresh(produce)
+    held.refresh(produce)
+    # The first refresh learns the split-drive dependency; the following
+    # refresh publishes that expanded probe key, then the key is stable.
+    held.refresh(produce)
+    assert productions == [1, 1]
+    revision[0] = 2
+    held.refresh(produce)
+    assert productions == [1, 1, 1]
+
+
 def test_bindings_the_client_holds_are_not_sent_again(serving):
     first = _payload(_get(serving.app))
     revision = first["task_bindings_revision"]
@@ -211,6 +265,35 @@ def test_bindings_the_client_holds_are_not_sent_again(serving):
     assert again.headers[publication.GENERATION_HEADER] == "1"
     stale = _payload(_get(serving.app, b"bindings_since=other"))
     assert stale["task_bindings"] == first["task_bindings"] and stale["task_bindings_unchanged"] is False
+
+
+def test_only_project_times_move_the_public_message_revision(serving):
+    from ouroboros import dialogue_store as ds, projects_registry as registry, room_messages
+
+    root = serving.root
+    room = registry.create_project(root, "messages", name="Messages", origin="owner_ui")["chat_id"]
+    ds.ensure(root)
+    room_messages.run(root, lambda: False)
+    before = _payload(_get(serving.app))["project_messages_revision"]
+    assert before
+    for index, (chat, direction) in enumerate(((1, "in"), (1, "out"), (12345, "in"))):
+        ds.append(root, "chat", {"ts": f"2026-01-01T00:0{index}:00Z", "chat_id": chat,
+                                 "direction": direction, "text": "Outside Projects"}, feed=True, appearances=[])
+        assert _payload(_get(serving.app))["project_messages_revision"] == before
+    ds.append(root, "chat", {"ts": "2026-01-01T01:00:00Z", "chat_id": room,
+                             "direction": "in", "text": "Owner request"}, feed=True, appearances=[])
+    after = _payload(_get(serving.app))
+    assert after["project_messages_revision"] != before
+    project = next(row for row in after["projects"] if row["chat_id"] == room)
+    assert project["last_message_at"] == "2026-01-01T01:00:00Z" and project["visible_revision"] == 1
+    # An older delivery moves arrival/unread, but not the latest original event time.
+    ds.append(root, "chat", {"ts": "2026-01-01T00:00:00Z", "chat_id": room,
+                             "direction": "out", "text": "Delayed answer"}, feed=True, appearances=[])
+    assert _payload(_get(serving.app))["project_messages_revision"] == after["project_messages_revision"]
+    ds.append(root, "chat", {"ts": "2026-01-01T02:00:00Z", "chat_id": 1, "direction": "out",
+                             "type": "main_notice", "text": "Also shown in the Project"},
+              feed=True, appearances=[f"room:{room}"], shown_in=[room])
+    assert _payload(_get(serving.app))["project_messages_revision"] != after["project_messages_revision"]
 
 
 def _key(serving):
@@ -234,6 +317,12 @@ def test_each_source_the_body_reads_moves_the_revision(serving):
     after_running = _key(serving)
     serving.workers.RUNNING["new-task"]["active_llm_call"] = {"model_activity": {"phase": "reasoning"}}
     assert _key(serving) != after_running, "a live model activity the queue documents omit"
+    after_activity = _key(serving)
+    serving.workers.RUNNING["new-task"]["turn_phase"] = "context_building"
+    assert _key(serving) != after_activity, "a start step its frames land (#2862) the queue documents omit"
+    after_activity = _key(serving)
+    serving.workers.RUNNING["new-task"]["context_attempt"] = {"attempt_id": "a1", "ledger_state": "dispatched"}
+    assert _key(serving) != after_activity, "a sent attempt's context the queue documents omit"
     after_activity = _key(serving)
     supervisor_state.STATE_PATH.write_text(json.dumps({"evolution_cycle": 3}), encoding="utf-8")
     after_state = _key(serving)

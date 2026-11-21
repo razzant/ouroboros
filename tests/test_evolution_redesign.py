@@ -675,8 +675,8 @@ def test_frontend_evolution_and_consciousness_controls_are_present():
     consciousness = next(row for row in build_setup_contract()["modelSlots"] if row["slot"] == "consciousness")
     assert consciousness["settingKey"] == "OUROBOROS_MODEL_CONSCIOUSNESS"
     assert consciousness["settingsToggleId"] == "s-local-consciousness"
-    assert "modelRolesHost('settings-model-roles')" in settings_ui
-    assert "modelRoles.load(s," in settings
+    # Settings › Models draws that slot's page with the shared role editor (model_roles.js mountRole).
+    assert "modelRolesHost(hostId)" in (root / "web" / "modules" / "model_roles.js").read_text(encoding="utf-8")
     # The role effort keys are retired: evolution and wakes start at the top of the owner's
     # effort range, which only the composer's Effort control shows and edits.
     assert "OUROBOROS_EFFORT_CONSCIOUSNESS" not in settings and "OUROBOROS_EFFORT_EVOLUTION" not in settings
@@ -969,7 +969,7 @@ def test_evolution_restart_uses_local_commit_not_origin_and_blocks_dirty_tree(tm
 def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True, objective="Improve cron")
 
@@ -980,7 +980,7 @@ def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
 def test_toggle_evolution_tool_refuses_in_light_mode(monkeypatch):
     from ouroboros.tools.control import _toggle_evolution
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     pending = []
     result = _toggle_evolution(SimpleNamespace(pending_events=pending), True)
 
@@ -1003,16 +1003,17 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
         json.loads(line)
         for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    from tests._knowledge_history_shared import replaced
+    from tests._knowledge_history_shared import published, replaced
     assert replaced(tmp_path, history[-1]) == current.text
-    assert history[-1]["new_content"] == "---\ntype: note\n---\nnew"
+    assert published(tmp_path, history[-1]) == "---\ntype: note\n---\nnew"
 
     from hashlib import sha256
     from ouroboros.memory import Memory
     Memory(tmp_path).ensure_files()
     identity = tmp_path / "memory/identity.md"
-    _update_identity(ctx, "I am v1 with enough detail to satisfy the identity update length gate.", sha256(identity.read_bytes()).hexdigest())
-    _update_identity(ctx, "I am v2 with enough detail to satisfy the identity update length gate.", sha256(identity.read_bytes()).hexdigest())
+    # No length floor: a short identity is written and journaled like any other (owner 12.11, 2A).
+    assert _update_identity(ctx, "I am v1.", sha256(identity.read_bytes()).hexdigest()).startswith("OK:")
+    assert _update_identity(ctx, "I am v2.", sha256(identity.read_bytes()).hexdigest()).startswith("OK:")
     identity_history = [
         json.loads(line)
         for line in (tmp_path / "memory" / "identity_journal.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1024,14 +1025,14 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
 def test_evolution_block_reason_depends_on_runtime_mode(monkeypatch):
     from supervisor import queue
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     blocked = queue.evolution_block_reason()
     assert blocked
     assert "advanced" in blocked and "pro" in blocked
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     assert queue.evolution_block_reason() == ""
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     assert queue.evolution_block_reason() == ""
 
 
@@ -1043,7 +1044,7 @@ def test_enqueue_evolution_blocked_in_light_mode(tmp_path, monkeypatch):
     supervisor_state.save_state({})  # an initialized install (#1307)
     sent = []
     monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     queue.init(tmp_path)
     pending = []
     queue.init_queue_refs(pending, {}, {"value": 0})
@@ -1070,7 +1071,7 @@ def test_enqueue_evolution_omits_duplicate_cycle_message(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
     sent = []
     monkeypatch.setattr(queue, "send_with_budget", lambda chat_id, text, *a, **k: sent.append(text))
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     queue.init(tmp_path)
     pending = []
     queue.init_queue_refs(pending, {}, {"value": 0})
@@ -1176,7 +1177,7 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
 def test_toggle_evolution_tool_blocked_in_light_mode(monkeypatch):
     from supervisor import events
 
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     state = {"owner_chat_id": 7}
     sent = []
     ctx = SimpleNamespace(

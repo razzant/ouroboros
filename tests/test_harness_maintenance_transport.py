@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,10 +13,25 @@ from ouroboros.gateways import claudexor as wire
 OPERATIONS = ["get:maintenance.harnesses", "post:maintenance.operations",
               "get:maintenance.operations.id", "post:maintenance.operations.id.cancel"]
 REQUEST = {"harness": "agy", "target": {"kind": "latest"}}
+PROGRAM = {"path": "/vendor/cli", "realPath": "/vendor/releases/cli", "version": "1.2.3",
+           "versionOutput": "Vendor CLI 1.2.3", "overrideEnv": None, "overrideValue": None}
+ACTION = {"available": True, "reason": None, "commands": [
+    {"kind": "exec", "command": "/vendor/cli", "args": ["update"], "env": {"CHANNEL": "stable"}}]}
+ENTRY = {"harness": "future+cli", "selection": PROGRAM,
+         "newest": {"status": "not_read", "source": "https://vendor.example/latest"},
+         "updateAvailable": "cannot_tell", "releaseNotesUrl": None,
+         "actions": {"install": {"available": False, "reason": "A program is selected.", "commands": []},
+                     "update": ACTION, "exactVersion": ACTION},
+         "operation": None, "observedAt": "2026-11-11T00:00:00Z"}
 OPERATION = {"id": "maintenance-one", "harness": "agy", "state": "running", "phase": "installing",
-             "target": {"kind": "latest", "version": None}, "before": None, "after": None,
-             "mutation": "unknown", "termination": "unconfirmed", "limitations": ["in_place_replacement"],
-             "problem": None, "progress": ["Installing the vendor program"]}
+             "target": {"kind": "latest", "version": None}, "before": PROGRAM, "after": None,
+             "requester": {"source": "control-api", "requestId": "stable-key"},
+             "installationHome": "/installation", "commands": [{"binary": "/bin/sh", "args": ["/tmp/vendor.sh"],
+                 "env": {}, "script": {"url": "https://vendor.example/install.sh", "size": 52, "sha256": "a" * 64}}],
+             "elsewhere": None, "activeRunsAtStart": 2, "exitCode": None, "outcome": "unknown",
+             "mutation": "unknown", "termination": "unconfirmed", "limitations": ["The installer may still run."],
+             "problem": None, "progress": ["Installing the vendor program"],
+             "createdAt": "2026-11-11T00:00:00Z", "startedAt": "2026-11-11T00:00:01Z", "finishedAt": None}
 
 
 @pytest.fixture
@@ -23,7 +39,7 @@ def client(monkeypatch):
     original = httpx.Client
     clients = []
 
-    def build(respond, operations=OPERATIONS):
+    def build(respond, operations=OPERATIONS, version="6.0.0"):
         seen = []
 
         def handle(request):
@@ -41,17 +57,27 @@ def client(monkeypatch):
             return value
 
         monkeypatch.setattr(wire.httpx, "Client", factory)
-        return wire.ClaudexorGateway(wire.DaemonEndpoint("127.0.0.1", 1, "fixture-maintenance-token")), seen
+        gateway = wire.ClaudexorGateway(wire.DaemonEndpoint("127.0.0.1", 1, "fixture-maintenance-token"))
+        gateway._engine_version = version  # Acquisition's handshake has already completed.
+        return gateway, seen
 
     yield build
     for value in clients:
         value.close()
 
 
-def test_inventory_keeps_generic_harness_facts_and_repeated_filters(client):
-    payload = {"observedAt": "2026-10-09T00:00:00Z", "harnesses": [
-        {"harness": "agy", "mechanism": "future_vendor_updater", "maintainable": True,
-         "targets": ["latest"], "available": None, "operation": None}]}
+@pytest.mark.parametrize("status,update_available", [("not_read", "cannot_tell"), ("available", "yes"),
+                                                   ("available", "no"), ("unavailable", "cannot_tell")])
+def test_inventory_keeps_generic_harness_facts_and_repeated_filters(client, status, update_available):
+    row = deepcopy(ENTRY)
+    row["updateAvailable"] = update_available
+    row["newest"]["status"] = status
+    if status != "not_read":
+        row["newest"]["observedAt"] = row["observedAt"]
+        row["newest"].update({"version": "opaque-vendor-version"} if status == "available" else {
+            "problem": {"code": "source_unavailable", "message": "The vendor did not answer."}})
+    row["operation"] = OPERATION
+    payload = {"observedAt": row["observedAt"], "harnesses": [row]}
     gateway, seen = client(lambda request: httpx.Response(200, json=payload))
     assert gateway.maintenance_harnesses(["agy", "future+cli"], fresh=True, check_latest=True) == payload
     assert seen[-1].url.params.get_list("harness") == ["agy", "future+cli"]
@@ -59,13 +85,50 @@ def test_inventory_keeps_generic_harness_facts_and_repeated_filters(client):
     assert "fixture-maintenance-token" not in json.dumps(payload)
 
 
-def test_old_engine_refuses_before_mutation_and_never_reinstalls(client):
-    gateway, seen = client(lambda request: pytest.fail("No maintenance call on an old engine"), [])
+@pytest.mark.parametrize("change", ["old_inventory", "old_selection", "missing_actions", "bad_action"])
+def test_inventory_without_vendor_contract_is_unavailable_not_translated(client, change):
+    row = deepcopy(ENTRY)
+    if change == "old_inventory":
+        row = {"harness": "future+cli", "maintainable": True, "targets": ["latest"],
+               "selection": {"kind": "managed", "binary": "/old/cli", "version": "1.2.3"}}
+    elif change == "old_selection":
+        row["selection"] = {"binary": "/old/cli", "version": "1.2.3"}
+    elif change == "missing_actions":
+        del row["actions"]
+    else:
+        row["actions"]["update"]["available"] = "false"
+    gateway, seen = client(lambda request: httpx.Response(200, json={"observedAt": "now", "harnesses": [row]}))
     with pytest.raises(wire.ClaudexorUnavailable) as caught:
-        gateway.maintenance_create(REQUEST, "request-one")
+        gateway.maintenance_harnesses()
+    assert caught.value.code == "maintenance_unavailable" and caught.value.status_code == 503
+    assert all(request.method == "GET" for request in seen)
+
+
+@pytest.mark.parametrize("removed", ["commands", "outcome", "requester"])
+def test_old_receipt_after_create_keeps_acceptance_unknown(client, removed):
+    old = deepcopy(OPERATION)
+    del old[removed]
+    gateway, _ = client(lambda request: httpx.Response(202, json=old))
+    with pytest.raises(wire.ClaudexorUnavailable) as caught:
+        gateway.maintenance_create(REQUEST, "stable-key")
+    assert caught.value.problem["context"] == {
+        "requestId": "stable-key", "acceptance": "unknown",
+        "remedy": "Retry the same body with the same Idempotency-Key"}
+
+
+@pytest.mark.parametrize("action", ["inventory", "create", "read", "cancel"])
+def test_old_engine_refuses_all_contract_requests_even_when_routes_exist(client, action):
+    gateway, seen = client(lambda request: pytest.fail("No maintenance call on an old engine"), version="5.1.0")
+    with pytest.raises(wire.ClaudexorUnavailable) as caught:
+        {"inventory": gateway.maintenance_harnesses,
+         "create": lambda: gateway.maintenance_create(REQUEST, "request-one"),
+         "read": lambda: gateway.maintenance_operation("one"),
+         "cancel": lambda: gateway.maintenance_cancel("one")}[action]()
     assert caught.value.code == "maintenance_unavailable"
     assert caught.value.status_code == 503
-    assert [request.url.path for request in seen] == ["/v2/operations"]
+    assert "Update the app" in str(caught.value)
+    assert "Program inspection unavailable" not in str(caught.value), "the row owns its inspection label"
+    assert seen == []
 
 
 def test_control_problem_keeps_existing_operation_remedy(client):
@@ -136,3 +199,19 @@ def test_invalid_key_never_contacts_engine(client, key):
     with pytest.raises(ValueError):
         gateway.maintenance_create(REQUEST, key)
     assert not seen
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_connect_receipt_reads_bound_catalog_and_operation_calls(client, cancel, monkeypatch):
+    from ouroboros.gateways import claudexor_maintenance
+
+    # The module's own clock, advancing on every read: a coarse system clock (Windows) can return
+    # the same instant twice, and then both phases honestly get the same remaining budget.
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(claudexor_maintenance, "time",
+                        SimpleNamespace(monotonic=lambda: 100 + 0.05 * next(ticks)))
+    gateway, seen = client(lambda _request: httpx.Response(200, json=OPERATION))
+    call = gateway.maintenance_cancel if cancel else gateway.maintenance_operation
+    assert call(OPERATION["id"], timeout_sec=0.75) == OPERATION
+    assert all(0 < value <= 0.75 for request in seen for value in request.extensions["timeout"].values())
+    assert seen[-1].extensions["timeout"]["read"] < seen[0].extensions["timeout"]["read"]

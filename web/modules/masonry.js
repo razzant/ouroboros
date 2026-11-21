@@ -152,24 +152,29 @@ function layout(container, config) {
     items.forEach((item, idx) => {
         const placement = plan.placements[idx];
         item.style.setProperty('--masonry-w', `${placement.width}px`);
+        // A card the owner is carrying (`config.held`) stays where the pointer has it.
+        if (keys[idx] && keys[idx] === config.held) return;
         item.style.setProperty('--masonry-x', `${placement.left}px`);
         item.style.setProperty('--masonry-y', `${placement.top}px`);
     });
     container.style.setProperty('--masonry-h', `${plan.height}px`);
     // The caller may ask what one card would be under another owner span: a
-    // width depends on the spans alone, so the same specs answer, unmeasured.
+    // width depends on the spans alone, so the same specs answer, unmeasured;
+    // and where every card would go in another key order, at today's heights.
+    const specOf = new Map(keys.map((key, idx) => [key, itemSpecs[idx]]));
     config.onLayout?.(plan, items, (index, owner) => planMasonryLayout(
         width, itemSpecs.map((spec, i) => (i === index ? { ...spec, owner } : spec)), config,
-    ));
+    ), (order) => planMasonryLayout(width, order.map((key) => specOf.get(key)).filter(Boolean), config));
 }
 
 /**
  * Bind (once per container) and schedule a layout. A later call with
  * `options.order` replaces the key order, with `options.spans` the owner's
- * spans by key, with `options.onLayout` the callback that receives each plan,
- * its items and `replan(index, owner)`, and relayouts; every call returns the
- * same idempotent disposer, which disconnects the three observers, cancels a
- * pending frame and forgets the container.
+ * spans by key, with `options.held` the key of a card being carried ('' for
+ * none: its position is the caller's), with `options.onLayout` the callback that
+ * receives each plan, its items, `replan(index, owner)` and `planOrder(keys)`,
+ * and relayouts; every call returns the same idempotent disposer, which
+ * disconnects the three observers, cancels a pending frame and forgets the container.
  */
 export function applyMasonry(container, options = {}) {
     if (!container) return () => {};
@@ -177,6 +182,7 @@ export function applyMasonry(container, options = {}) {
     if (existing) {
         if (Array.isArray(options.order)) existing.config.order = options.order.slice();
         if (options.spans) existing.config.spans = { ...options.spans };
+        if (typeof options.held === 'string') existing.config.held = options.held;
         if (options.onLayout) existing.config.onLayout = options.onLayout;
         existing.run();
         return existing.dispose;
@@ -189,6 +195,7 @@ export function applyMasonry(container, options = {}) {
         keyOf: options.keyOf || ((item) => item.dataset.widgetKey || ''),
         order: Array.isArray(options.order) ? options.order.slice() : [],
         spans: { ...options.spans },
+        held: typeof options.held === 'string' ? options.held : '',
         onLayout: options.onLayout || null,
     };
     // One layout per frame however many triggers land before it.

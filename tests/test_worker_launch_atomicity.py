@@ -585,7 +585,7 @@ def test_stop_after_a_raised_put_captures_the_bound_worker(world, monkeypatch, c
     assert queue.RUNNING[task["id"]]["worker_id"] == 0
     proc = _LiveProc()
     workers.WORKERS[0].proc, workers.WORKERS[0].reaping = proc, False
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(queue, "_emit_cancel_task_done", lambda *a, **k: None)
     if completed_first:
         write_task_result(root, task["id"], STATUS_COMPLETED, result="finished before the Stop",
