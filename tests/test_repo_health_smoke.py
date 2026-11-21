@@ -522,6 +522,39 @@ def test_a_tip_blob_git_cannot_give_is_a_partial_finding_never_an_absent_module(
     assert finding.endswith("not checked: band rationales of touched modules and removed entries")
 
 
+def test_the_pairwise_reads_of_head_fetch_nothing_and_a_read_past_its_time_bound_is_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial clone, as installs are, that lacks HEAD's blob of a touched module answers ``partial:``
+    and fetches nothing from its promisor; a read past its time bound is ``partial:``, never a pass."""
+    from ouroboros import review
+
+    for name in ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL"):  # the manifest reads may fetch, as on an install
+        monkeypatch.delenv(name, raising=False)
+    source = _band_repo(tmp_path, {"gap.py": 1550}, _manifest())
+    base = _git(source, "rev-parse", "HEAD")
+    _write_lines(source / "gap.py", 1551)
+    _git(source, "commit", "-qam", "touch gap.py")
+    _git(source, "config", "uploadpack.allowFilter", "true")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", "--filter=blob:none", "--no-checkout", source.as_uri(), str(clone))
+    blob = _git(clone, "rev-parse", "HEAD:gap.py")
+
+    def fetched() -> bool:
+        probe = ["git", "cat-file", "-e", blob]
+        return subprocess.run(probe, cwd=clone, env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}).returncode == 0
+
+    unavailable = "partial: pairwise touched or recorded modules at HEAD unavailable ("
+    assert not fetched()
+    [finding] = validate_size_ratchet_transition_against_base(clone, base)
+    assert finding.startswith(unavailable + "SizeRatchetRefUnavailable: ") and not fetched()
+    assert validate_size_ratchet_transition_against_base(source, base) == [
+        "touched 1551-line module needs a nonblank band rationale: gap.py"]
+    monkeypatch.setattr(review, "_GIT_READ_SECONDS", 1e-9)
+    [finding] = validate_size_ratchet_transition_against_base(source, base)
+    assert finding.startswith(unavailable + "TimeoutExpired: ")
+
+
 def test_touched_runs_from_the_fork_point_of_a_base_that_moved_on(tmp_path: Path) -> None:
     """A base ahead of HEAD (a target that moved on) lends HEAD neither the modules it touched nor the
     reasons it recorded; HEAD's own touches still owe theirs, against either base."""

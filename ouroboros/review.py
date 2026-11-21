@@ -27,6 +27,7 @@ MAX_FUNCTION_LINES = 300
 
 SIZE_RATCHET_MANIFEST_PATH = "ouroboros/size_ratchet_manifest.py"
 TEST_DURATIONS_PATH = "state/test-durations.json"  # under the data root
+_GIT_READ_SECONDS = 120  # the time bound of one offline batch read (the pulse's and the pairwise check's)
 
 
 class SizeRatchetRefUnavailable(ValueError):
@@ -339,16 +340,15 @@ def collect_size_ratchet_inventory(
     )
 
 
-def _gated_blobs(root: pathlib.Path, ref: str, wanted: frozenset[str] | None = None) -> Iterator[tuple[str, bytes]]:
+def _gated_blobs(
+    root: pathlib.Path, ref: str, wanted: frozenset[str] | None = None, **run: Any,
+) -> Iterator[tuple[str, bytes]]:
     """``(path, bytes)`` of each gated source in ``ref``'s tree, of ``wanted`` alone when given, read in
-    one ``git cat-file --batch``: a path the tree lacks is absent; an object the local store lacks
-    raises ``SizeRatchetRefUnavailable``; a non-regular gated entry or malformed output ``ValueError``."""
-    tree = subprocess.run(
-        ["git", "ls-tree", "-rz", "--full-tree", ref],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    )
+    one ``git cat-file --batch`` (``run`` adds an environment or a time bound to both Git calls): a path
+    the tree lacks is absent; an object the local store lacks raises ``SizeRatchetRefUnavailable``; a
+    non-regular gated entry or malformed output ``ValueError``."""
+    tree = subprocess.run(["git", "ls-tree", "-rz", "--full-tree", ref], cwd=root, check=True,
+                          capture_output=True, **run)
     entries: list[tuple[str, bytes]] = []
     for record in tree.stdout.split(b"\0"):
         if not record:
@@ -369,13 +369,8 @@ def _gated_blobs(root: pathlib.Path, ref: str, wanted: frozenset[str] | None = N
     with tempfile.TemporaryFile() as source_ids:
         source_ids.write(b"".join(object_id + b"\n" for _path, object_id in entries))
         source_ids.seek(0)
-        batch = subprocess.run(
-            ["git", "cat-file", "--batch"],
-            cwd=root,
-            check=True,
-            stdin=source_ids,
-            capture_output=True,
-        ).stdout
+        batch = subprocess.run(["git", "cat-file", "--batch"], cwd=root, check=True, stdin=source_ids,
+                               capture_output=True, **run).stdout
     cursor = 0
     for path, expected_id in entries:
         header_end = batch.find(b"\n", cursor)
@@ -422,8 +417,14 @@ def _git_source_snapshot(repo_dir: pathlib.Path, ref: str) -> Iterator[tuple[pat
 
 
 def _tree_line_counts(root: pathlib.Path, ref: str, paths: Iterable[str]) -> dict[str, int]:
-    """The inventory's line count of each gated module among ``paths`` that ``ref``'s tree holds."""
-    return {path: len(_canonical_text(data).splitlines()) for path, data in _gated_blobs(root, ref, frozenset(paths))}
+    """The inventory's line count of each gated module among ``paths`` that ``ref``'s tree holds, read
+    offline within ``_GIT_READ_SECONDS`` as the pulse reads: a partial clone fetches nothing, and an
+    object it lacks or a timeout raises (``SizeRatchetRefUnavailable``, ``subprocess.TimeoutExpired``)."""
+    from ouroboros.reference_books import _OFFLINE_GIT
+
+    offline = {"env": {**os.environ, **_OFFLINE_GIT}, "timeout": _GIT_READ_SECONDS}
+    return {path: len(_canonical_text(data).splitlines())
+            for path, data in _gated_blobs(root, ref, frozenset(paths), **offline)}
 
 
 def collect_size_ratchet_inventory_at_ref(repo_dir: pathlib.Path, ref: str) -> SizeRatchetInventory:
@@ -1096,7 +1097,7 @@ def validate_size_ratchet_transition_against_base(
         removed = (set(previous.band_paths) & recorded) - set(tip.band_paths)
         lines = _tree_line_counts(root, "HEAD", touched | removed)
         unread: list[str] = []
-    except (OSError, subprocess.CalledProcessError, SizeRatchetRefUnavailable) as exc:  # never read as absent
+    except (OSError, subprocess.SubprocessError, SizeRatchetRefUnavailable) as exc:  # never read as absent
         touched, removed, lines = frozenset(), set(), {}
         unread = [_partial_finding("pairwise touched or recorded modules at HEAD", exc,
                                    "band rationales of touched modules and removed entries")]
@@ -1274,7 +1275,7 @@ def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
         if batched:
             try:
                 done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root),
-                                      timeout=120, stdin=source, capture_output=True,
+                                      timeout=_GIT_READ_SECONDS, stdin=source, capture_output=True,
                                       env={**os.environ, **_OFFLINE_GIT})
                 out = done.stdout if done.returncode == 0 else b""
             except (OSError, subprocess.SubprocessError):
