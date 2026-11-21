@@ -543,6 +543,8 @@ def test_the_published_facts_reach_the_mind_dated_and_the_worker_never_reads_the
     assert memory == document["memory_admission"] and memory["read_at"]
     assert (memory["starts_admitted"], memory["starting_processes"], memory["reason"]) == (3, 0, "memory_room")
     assert fact["recorded_max_workers"] is None and fact["acting_worker_count"] == 1
+    # The shipped per-root subagent number is none: the fact says so as null, and the note says what null means.
+    assert fact["max_active_subagents_per_root"] is None and "(null: no number; how many is your judgment" in fact["note"]
     assert "owner cap none (the machine's memory is the limit)" in line
     assert "available 4.0 GiB of 10.0 GiB, reserve 1.0 GiB" in line and "new processes admitted 3 (memory_room)" in line
 
@@ -639,10 +641,31 @@ def test_the_root_child_limit_counts_acting_children(assigning, monkeypatch):
     workers.PENDING.append(child("third"))
     workers.assign_tasks()
     assert len(assigning.created) == 1
-    # No number of the owner's (the shipped default): the waiting child starts as soon as the pool admits it.
-    monkeypatch.setattr(config, "get_max_active_subagents_per_root", lambda: None)
+
+
+@pytest.mark.parametrize("number", [None, "6"])
+def test_the_shipped_default_admits_a_roots_seventh_child_through_scheduling_and_assignment(assigning, monkeypatch,
+                                                                                         number):
+    """No monkeypatched number: the getter reads the shipped default (no number) or the owner's 6, and both the
+    scheduling decision and worker selection take it as it is; no number holds nothing behind six acting children."""
+    from supervisor.events_schedule_task import _active_cap_state
+    from ouroboros.config import get_max_active_subagents_per_root
+
+    if number is None:
+        monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", number)
+    machine(monkeypatch, 9)
+    assigning.original.rss = {"rss_bytes": GIB, "rss_measure": "current"}
+    for index in range(6):
+        workers.RUNNING[f"kid{index}"] = {**workers.RUNNING["owner"], "task": child(f"kid{index}"),
+                                          "worker_id": 20 + index}
+    seventh = child("seventh")
+    workers.PENDING.append(seventh)
+    blocked, refusal = _active_cap_state("owner", "owner", [], workers.RUNNING, get_max_active_subagents_per_root())
+    assert (blocked, refusal) == (number is not None, ""), "scheduling: queued only behind the owner's number"
     workers.assign_tasks()
-    assert len(assigning.created) == 2, "no number: only the pool's admission holds a root's next child"
+    assert len(assigning.created) == (0 if number else 1), "assignment: the seventh starts while the pool admits it"
 
 
 def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assigning, monkeypatch):

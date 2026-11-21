@@ -227,7 +227,7 @@ def snapshot_labelled(section: str, captured_at: str) -> str:
 
 def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     """One dated canonical-queue view, frozen with the task's ContextCore."""
-    from ouroboros.config import DATA_DIR, get_max_active_subagents_per_root, get_max_workers
+    from ouroboros.config import DATA_DIR, MAX_ACTIVE_SUBAGENTS_HARD_CAP, get_max_active_subagents_per_root, get_max_workers
     from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
 
     root = pathlib.Path(task.get("budget_drive_root") or DATA_DIR)
@@ -310,6 +310,9 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         "explicitly, and other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on its own process "
         "(a warm sleep, an owner wait or an in-slot wait) and is not counted against the owner's cap, which counts "
         "acting tasks only (recorded_max_workers; null: no number, the machine's memory is the limit). "
+        "max_active_subagents_per_root is the owner's number of one root's acting subagents (null: no number; how "
+        f"many is your judgment, the same memory admission and the hard limit of {MAX_ACTIVE_SUBAGENTS_HARD_CAP} "
+        "children still bound the tree). "
         "free_worker_slots is assignable idle existing capacity, not headroom; booting and reaping overlap for "
         "fresh slots. memory_admission is the supervisor's last reading of the machine (dated read_at): available, "
         "reserve, the typical worker size, the processes still starting, how many new processes it admitted and why "
