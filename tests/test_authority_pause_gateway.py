@@ -68,3 +68,32 @@ def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp
         assert _js_typedef_fields(js.read_text(), "TaskResumeResponse") == fields
     finally:
         env.runtime.close(wait=True)
+
+
+def test_resume_runs_off_the_web_loop_with_the_owner_door_and_named_unknowns_bound(monkeypatch):
+    """C01 PR II: the Resume's queue writes run on a worker thread (``asyncio.to_thread``), so a write waiting on Q
+    or the disk never stops the web loop answering others; the owner door and the named held calls stay bound
+    where the call runs (a moved Presence turn's allowance reads that door, #2566), and the answer waits for it."""
+    import asyncio
+
+    from ouroboros.control_actor import accepted_unknown, owner_door_bound
+
+    seen = {}
+
+    def resume(task_id):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        seen.update(task_id=task_id, door=owner_door_bound().get("door"), unknown=accepted_unknown())
+        return {"ok": True, "task_id": task_id, "grant_id": "g-1"}
+
+    monkeypatch.setattr("supervisor.queue.resume_budget_paused_task", resume)
+    with TestClient(Starlette(routes=[Route("/api/tasks/{task_id}/resume", api_task_resume, methods=["POST"])])) as client:
+        response = client.post("/api/tasks/saved/resume", json={"accept_unknown": ["op-1"], "reason": "seen it"})
+    assert response.status_code == 200 and response.json()["grant_id"] == "g-1"
+    assert seen["on_loop"] is False, "the Resume ran inside the web loop"
+    assert seen["task_id"] == "saved" and seen["door"] == "api_task_resume"
+    assert seen["unknown"] == {"ids": ["op-1"], "text": "seen it"}
+    assert owner_door_bound() == {} and accepted_unknown() == {}  # nothing leaks past the call

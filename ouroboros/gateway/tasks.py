@@ -1396,12 +1396,16 @@ async def api_task_resume(request: Request) -> JSONResponse:
             or not all(isinstance(value, str) for value in named)):
         return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
                           reason_code="unexpected_fields")
-    try:
+    def resume() -> Dict[str, Any]:
         from ouroboros.control_actor import accepting_unknown, owner_door
         from supervisor.queue import resume_budget_paused_task
 
+        # Bound on the worker thread itself: the grant decisions read these where the call runs.
         with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
-            result = resume_budget_paused_task(task_id)
+            return resume_budget_paused_task(task_id)
+
+    try:
+        result = await asyncio.to_thread(resume)  # its writes wait on Q and the disk, never on the web loop
     except Exception as exc:
         return json_exception(exc, 503)
     if result.get("ok"):
