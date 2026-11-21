@@ -123,7 +123,7 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         "(unknown, never 0) for a task that ended without loop evidence.",
         _fields("ts type task_id task_type duration_sec tool_calls tool_errors reason_code"),
         nullable=_fields("tool_calls tool_errors"),
-        optional=_fields("outcome_axes routing_tool_calls completion_tool_calls tool_call_counts chat_id "
+        optional=_fields("task_attempt outcome_axes routing_tool_calls completion_tool_calls tool_call_counts chat_id "
                          "parent_task_id root_task_id"),
         content=_fields("outcome_axes"), natural_key=("task_id", "type", "ts"),
     ),

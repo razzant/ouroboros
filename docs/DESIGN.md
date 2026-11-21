@@ -1521,23 +1521,8 @@ Reviews in their actual nodes.
 
 ### Room work status
 
-Each room's bar has one status, right after its title: the short word in its
-status ink (a turn still preparing adds the start step it stands at, `Preparing ·
-Building context`, and nothing reads `Thinking` before a model call is sent),
-then one mark, as on the sidebar's rows; no frame at rest, a neutral
-tint on hover and while open, a caret when it opens. A working work the host dated as silent
-says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
-new mark), until its own progress. A work comprises one request, its Continue
-episodes and live subagents, delegated runs or post-answer upkeep. The server's
-single work/room status is worded by the bar, work list, sidebar, cards and tray;
-none decides its own.
-Activity uses the chip's queue words, never raw phase codes, and the work's controls.
-Parked subagents close when their ended root's tree is quiet; a live member keeps
-that tree's paused subagents resumable and may keep amber visible. A
-card without a projected work (a child, Main's owner-action message, a replayed
-card) takes its shape from its census phase through one table pinned to the
-server's `mark_of`, and the owner's move only from proved facts (`can_resume`,
-`requires_owner_action`, its own question). The room says its busiest work:
+The room bar follows its title with a word in status ink and the same mark as the sidebar. A preparing turn adds its step (`Preparing · Building context`); `Thinking` requires a sent model call. At rest the control has no frame; hover/open adds a neutral tint, with a caret when it opens. A host-dated silent work leads its quiet line with `No recorded progress since 14:02` (after a recorded Stop), until its own progress. Keep status ink, no amber or new mark.
+A work comprises a request, its Continue episodes and live subagents, delegated runs or post-answer upkeep. Bar, work list, sidebar, cards and tray render the server's state; a nested card shows its own member and external work. Activity uses the chip's queue words and the work's controls, never raw codes. Parked helpers close when an ended root's tree falls quiet; a live member can keep them resumable and amber visible. Without a projected state (e.g. Main's owner-action message or an old card), map the recorded census phase through the table pinned to `mark_of`. Show an owner move only on `can_resume`, `requires_owner_action` or the card's own question. The room says its busiest work:
 working, then queued, waiting, paused, and its mark is the server's status mark
 (Status marks): moving dots while anything in it runs (a paused work's finishing review too), still dots while it queues or waits on
 something that ends by itself, two bars while paused, a faint ring when
@@ -2422,18 +2407,7 @@ narration, a late live row is dropped and renames nothing; a saved narration
 still competes, because history adds its row to the timeline. This never
 changes the earliest transcript anchor, explicit name, child identity or final
 lifecycle.
-A task that ends with a cause states it on the collapsed line in the
-owner's words (the sentence of the durable row and the expanded body), so a
-`Done with warnings` chip never stands beside an unrelated last action; a clean
-ending's own summary replaces the last narration (owner 01.11 10:52, A). The badge means "look at this": a
-residual tool error warns only when it is loud — an effect that did not land, a send or command Safety stopped, a
-tool of unknown kind that ran and failed (MCP and extension tools included), a command killed by a signal or whose declared output never registered. A
-failed read named in `PURE_READ_TOOLS`, a command that ran and failed or timed out, and a call the tool refused for
-its arguments or because it named no tool stay in the details, in the evidence row below. The clause names the first loud failure in plain words (a noun for the step and
-what happened, never a tool name, its result text or a path) and counts the rest of those (`tool_error_words`); a record written before the
-flags keeps its stored word. A check that did not pass is said by its cause, in the words of its "Check did not pass" row where the card has
-one and the receipt holds the same fact, and with how many checks passed after it; its command is in that row. A
-record without that fact says what it cannot tell. Successful tool calls are not rows: they fold
+The collapsed line names the recorded cause in the same words as the durable row and expanded body, so `Done with warnings` never stands beside an unrelated last action. A clean ending's summary replaces the last narration (owner 01.11 10:52, A). The badge means “look at this”. A loud leftover is an undelivered effect, a Safety-stopped send or command, a failed tool of unknown kind (including MCP/extensions), or a command killed by a signal or missing its declared output. Failed `PURE_READ_TOOLS` reads, commands that failed or timed out, argument refusals and unknown tools stay in details. A handled Git/review refusal shows its own warning detail without adding an error. `tool_error_words` names the first loud failure (step noun and what happened, not a tool name, raw result or path) and counts the rest; a row predating the flags keeps its recorded word. For a failed check show its cause as in its “Check did not pass” row if the receipt supports it, and the number of later passes. That row includes the command, if any; file observations have none. Disclose what an older record cannot tell. Successful calls fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`

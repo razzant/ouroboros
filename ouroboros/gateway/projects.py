@@ -286,9 +286,7 @@ def _emit_naming_reason(drive_root: object, task_id: str, name: str, reason: str
 async def api_projects_list(request: Request) -> JSONResponse:
     try:
         from ouroboros.project_facts import explicit_project_id_ok
-        from ouroboros.projects_registry import (
-            projects_summary,
-        )
+        from ouroboros.projects_registry import list_sidebar_projects, projects_summary
 
         drive_root = request_drive_root(request)
         query = request.query_params
@@ -301,8 +299,9 @@ async def api_projects_list(request: Request) -> JSONResponse:
             projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"], by_message=True)
             return JSONResponse({"projects": projects})
         # The plain list stays capped; `all=1` names the complete list (every active and deleting Project).
-        projects = await run_in_threadpool(projects_summary, drive_root, by_message=True,
-                                           limit=None if query.get("all") == "1" else 200)
+        projects = await run_in_threadpool(
+            lambda: projects_summary(drive_root, by_message=True, limit=None if query.get("all") == "1" else 200,
+                                     sidebar_rows=list_sidebar_projects(drive_root, require_readable=True)))
         return JSONResponse({"projects": projects})
     except Exception as exc:
         return json_exception(exc)

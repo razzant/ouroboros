@@ -691,3 +691,23 @@ def test_project_chat_ids_is_unknown_never_empty_while_no_row_of_the_registry_ca
     assert rooms_and_count() == (None, None)
     registry.write_bytes(intact)
     assert rooms_and_count() == ([project["chat_id"]], 1)
+
+
+@pytest.mark.parametrize("unknown", ["lifecycle", "skipped_identity"])
+def test_unknown_project_feed_count_preserves_readable_reservations(gateway, unknown):
+    project = create_project(gateway.root, "known", name="Known")
+    registry = gateway.root / "state" / "projects.json"
+    data = json.loads(registry.read_bytes())
+    [known] = data["projects"]
+    gone = {**known, "lifecycle": "tombstoned"}
+    rows = [{**known, "lifecycle": "unknown"}] if unknown == "lifecycle" else [gone, {"chat_id": 7}]
+    registry.write_text(json.dumps({**data, "projects": rows}), encoding="utf-8")
+    payload = _state(gateway)
+    assert payload["projects"] == [] and payload["project_messages_revision"] is None
+    assert payload["project_chat_ids"] == [project["chat_id"]]
+    assert payload["project_listable_count"] is None
+
+    registry.write_text(json.dumps({**data, "projects": [gone]}), encoding="utf-8")
+    payload = _state(gateway)
+    assert payload["projects"] == [] and payload["project_listable_count"] == 0
+    assert payload["project_chat_ids"] == [project["chat_id"]]

@@ -185,8 +185,9 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # whole beside its bare structure on the direct-OpenAI custom route; nothing else changed (7a1e368b... before).
     # Rolled again after review: "A card stays answerable, from Main after the task ends too" stands as its own
     # sentence again, a fact of every card; nothing else changed (c54daa33... before).
+    # forward_to_worker describes the next mailbox check for both initial admission and readmission.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "6a522316bb44bb5c0f3c25e77fa555ad231022b830f05aa9c27396714663da2e"
+        "d2e98c6b6c9c7a0f9c4265a0f3fb69b3689bf3fb7bb14ce061aaf30897fb0e7c"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
