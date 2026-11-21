@@ -45,30 +45,27 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
     if not names:
         return ""
     try:
-        from ouroboros.skill_catalogue import skill_status
-        from ouroboros.skill_loader import find_skill, summarize_skills
+        from ouroboros.skill_loader import find_skill
+        from ouroboros.skill_readiness import skill_readiness_for_execution
     except Exception:
         return ""
     blockers: List[str] = []
-    rows: Optional[Dict[str, Any]] = None  # one summary for every touched skill: the order the section shows
     for name in names:
         try:
             skill = find_skill(pathlib.Path(drive_root), name)
             if skill is None or not getattr(skill, "is_self_authored", False):
                 continue
-            rows = rows if rows is not None else {row["name"]: row for row in summarize_skills(pathlib.Path(drive_root))["skills"]}
-            row = rows.get(skill.name) or {}
-            status, readiness = skill_status(row), row.get("readiness") or {}
-            ready = status["ready"]
+            readiness = skill_readiness_for_execution(pathlib.Path(drive_root), skill)
+            ready = readiness.ready
         except Exception:
             continue
         if not ready:
             blockers.append(
                 f"{skill.name}: status={skill.review.status!r}, "
-                f"blockers={status['reasons']}, "
-                f"agent_fixable={readiness.get('agent_fixable_blockers') or []}, "
-                f"owner_action={readiness.get('owner_action_blockers') or []}, "
-                f"next_actions={readiness.get('next_actions') or []}"
+                f"blockers={readiness.blockers}, "
+                f"agent_fixable={readiness.agent_fixable_blockers}, "
+                f"owner_action={readiness.owner_action_blockers}, "
+                f"next_actions={readiness.next_actions}"
             )
     if not blockers:
         return ""
