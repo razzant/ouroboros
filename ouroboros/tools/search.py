@@ -653,7 +653,7 @@ def _web_search_openai(
     failure_usage = None
     manifest = None
     try:
-        from ouroboros._usage_response import processing_receipt, usage_from_response
+        from ouroboros._usage_response import processing_receipt, search_failure_usage, usage_from_response
         from ouroboros.config import get_finalization_grace_sec
         from ouroboros.deadline_utils import physical_dispatch_timeout
         from ouroboros.llm_attempt import _PhysicalSendNotStarted
@@ -831,11 +831,7 @@ def _web_search_openai(
                 terminal_response = refusal_failure_payload(e)
             _retain_physical_failure(reservation, exc=e)  # this send's receive path ended raising
             try:
-                usage, cost, final = failure_usage or usage_from_response(
-                    getattr(e, "response", None), payload=terminal_response, provider="openai", provider_reported_cost_only=True)
-                if cost is None and isinstance(getattr(e, "stream_usage", None), dict):
-                    usage, cost, final = usage_from_response({"usage": e.stream_usage}, provider="openai",
-                                                           provider_reported_cost_only=True)
+                usage, cost, final = search_failure_usage(e, terminal_response, failure_usage, work_seen=work_seen)
                 if terminal or refused_before_work or cost is not None:
                     settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
                 else:

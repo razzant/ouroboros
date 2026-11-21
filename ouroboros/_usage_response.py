@@ -13,6 +13,17 @@ from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 _UNREAD_PAYLOAD = object()
 
 
+def provider_body_error(body: Any) -> Optional[Dict[str, Any]]:
+    """A top-level provider error is nonfatal if the first completion is usable."""
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return None
+    choices = body.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = first.get("message") if isinstance(first, dict) else None
+    return None if isinstance(message, dict) and (message.get("content") or message.get("tool_calls")) else error
+
+
 def _plain(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool, dict, list)):
         return value
@@ -459,20 +470,20 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
         normalized["cost_invalid"] = True
     if basis:  # the same consumed amount the loop lane reports, tagged on the settled row
         normalized.update(cost=cost, cost_basis=basis)
+    failed = provider_body_error(payload) is not None
     if cost is not None:
-        if cost == 0 and isinstance(payload, dict) and isinstance(payload.get("error"), dict) \
-                and refusal_body_conflicts(payload):
+        if cost == 0 and failed and refusal_body_conflicts(payload):
             # A failed reply whose own body shows work or an upstream attempt has not proved a free call.
             return normalized, None, False
         return normalized, cost, True
     completion = normalized["completion_tokens"]
     if (
-        not provider_reported_cost_only and isinstance(payload, dict)
-        and isinstance(payload.get("error"), dict)
+        not provider_reported_cost_only and failed
         and prompt == 0
         and completion == 0
         and _reported_usage_empty(usage, reported)
         and not invalid  # no amount was reported at all
+        and not refusal_body_conflicts(payload)
     ):
         normalized.update(prompt_tokens=0, completion_tokens=0, cached_tokens=0, cache_write_tokens=0)
         return normalized, 0.0, True
@@ -671,6 +682,22 @@ def refusal_failure_payload(error: BaseException) -> Any:
     return envelope
 
 
+def _confirmed_zero_bill(payload: Any, cost: Optional[float], final: bool) -> bool:
+    return final and cost == 0 and isinstance(payload, dict) and provider_cost_value(payload.get("total_cost_usd")) == 0
+
+
+def search_failure_usage(error: BaseException, payload: Any, reported: Any, *, work_seen: bool):
+    usage, cost, final = reported or usage_from_response(
+        getattr(error, "response", None), payload=payload, provider="openai", provider_reported_cost_only=True)
+    if cost is None and isinstance(getattr(error, "stream_usage", None), dict):
+        usage, cost, final = usage_from_response({"usage": error.stream_usage}, provider="openai",
+                                                provider_reported_cost_only=True)
+    if not _confirmed_zero_bill(payload, cost, final) and cost == 0 and (
+            work_seen or refusal_conflicts(error, check_stream_framing=False)):
+        return usage, None, False
+    return usage, cost, final
+
+
 def priced_failure_usage(error: BaseException, payload: Any, provider: str):
     """Read a failed send's own prices, without deriving a free rejection from zero token counts."""
     from ouroboros.transport_custody import is_processing_refusal
@@ -679,7 +706,12 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
     if not is_processing_refusal(error):
         for body in (stream, payload):
             usage, cost, final = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
-            if final and cost is not None and not (cost == 0 and refusal_conflicts(error, check_stream_framing=False)):
+            # A later wire close doesn't invalidate a usage bill. An explicit provider failure
+            # can contradict a zero in the cumulative stream view, as it can in its own body.
+            check_zero = (body is not stream or provider_body_error(payload) is not None) and not _confirmed_zero_bill(
+                body, cost, final)
+            if final and cost is not None and not (
+                    cost == 0 and check_zero and refusal_conflicts(error, check_stream_framing=False)):
                 return usage, cost
         return None
 

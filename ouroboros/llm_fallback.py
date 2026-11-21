@@ -20,7 +20,7 @@ import time
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
-from ouroboros._usage_response import _plain, refusal_failure_payload
+from ouroboros._usage_response import _plain, provider_body_error, refusal_failure_payload
 from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.llm_attempt import (
@@ -351,26 +351,7 @@ class _RecoveryLadderMixin:
         self._rotate_openrouter_session_affinity(retry_kwargs)
         return retry_kwargs
 
-    @staticmethod
-    def _provider_body_error(resp_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """An OpenAI-compatible HTTP 200 whose body carries a top-level ``error``
-        object instead of a usable completion. OpenRouter passes upstream
-        provider errors and its own 429/5xx through the body with status 200; the
-        OpenAI SDK builds these leniently, keeping ``error`` and ``choices=None``.
-        Returns the error dict, else None (a real completion wins over a
-        non-fatal error field)."""
-        if not isinstance(resp_dict, dict):
-            return None
-        err = resp_dict.get("error")
-        if not isinstance(err, dict):
-            return None
-        choices = resp_dict.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0] if isinstance(choices[0], dict) else {}
-            msg = first.get("message") if isinstance(first, dict) else None
-            if isinstance(msg, dict) and (msg.get("content") or msg.get("tool_calls")):
-                return None
-        return err
+    _provider_body_error = staticmethod(provider_body_error)
 
     @staticmethod
     def _is_transient_body_error(err: Dict[str, Any]) -> bool:

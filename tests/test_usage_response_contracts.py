@@ -112,6 +112,25 @@ def test_free_body_error_requires_empty_raw_usage(details, expected_cost):
         assert normalized["_reported_token_usage"]["output_tokens_details"] == details["output_tokens_details"]
 
 
+def test_zero_counters_do_not_price_an_upstream_attempt():
+    body = {"error": {"code": 429}, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+    body["openrouter_metadata"] = {"attempts": [{"status": 504}]}
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
+def test_usable_completion_keeps_explicit_zero_with_nonfatal_error_field():
+    from ouroboros.llm import LLMClient
+
+    body = {"error": {"code": 429}, "usage": {"prompt_tokens": 4, "completion_tokens": 2, "cost": 0},
+            "choices": [{"finish_reason": "stop", "message": {"content": "answer"}}]}
+    assert LLMClient._provider_body_error(body) is None
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (0.0, True)
+    body["choices"][0]["message"] = {}
+    assert LLMClient._provider_body_error(body) == body["error"]
+    assert ua.usage_from_response(body, provider="openrouter")[1:] == (None, False)
+
+
 def test_api_cost_extraction_rejects_untrustworthy_provider_amounts():
     """The AUTHORITATIVE cost boundary: whatever survives `usage_from_response` is
     what the durable attempt ledger settles as money.

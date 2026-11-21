@@ -730,6 +730,36 @@ def test_chat_sse_tier_refusal_reads_prior_reports_before_settlement(transport, 
         assert first["cost_basis"] == "byok_gateway_plus_upstream" and first["completion_tokens"] == 2
 
 
+@pytest.mark.parametrize(("explicit_error", "cost", "full_bill", "expected"), [
+    (True, 0.0, False, None), (True, 0.125, False, 0.125),
+    (False, 0.0, False, 0.0), (True, 0.0, True, 0.0),
+])
+def test_chat_sse_failure_does_not_revive_rejected_zero(transport, monkeypatch, explicit_error, cost, full_bill, expected):
+    from ouroboros.llm_stream import IncompleteProviderStream, ProviderStreamError
+    from tests.test_openrouter_transport_evidence import Wire
+
+    root, client, sent = transport
+
+    def create(**candidate):
+        sent.append(candidate)
+        frames = [{"choices": [{"index": 0, "delta": {"content": "partial"}}]},
+                  {"usage": {"cost": cost, "prompt_tokens": 0, "completion_tokens": 0}, "choices": []}]
+        if explicit_error:
+            frames.append({"error": {"code": 502, "message": "failed"}})
+            if full_bill:
+                frames[-1]["total_cost_usd"] = cost
+        return Wire([("data: " + json.dumps(frame) + "\n\n").encode() for frame in frames])
+
+    monkeypatch.setattr(client, "_get_remote_client", lambda _: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    with pytest.raises(ProviderStreamError if explicit_error else IncompleteProviderStream):
+        client.chat([{"role": "user", "content": "once"}], "openrouter::same-model", stream=True)
+    assert len(sent) == 1
+    [row] = ledger_rows(root)
+    assert (row["state"], row.get("cost_usd"), bool(row.get("cost_final"))) == (
+        "unresolved" if expected is None else "settled", expected, expected is not None)
+
+
 def test_partial_ultrafast_stream_never_authorizes_a_second_send(transport, monkeypatch):
     from ouroboros.llm_stream import IncompleteProviderStream
     from tests.test_openai_responses import _Wire

@@ -153,6 +153,38 @@ def test_responses_flex_refusal_reprices_standard_and_keeps_original_intent(ctx,
         assert all(row["effort"] == request.effort for row in attempt_rows)
 
 
+@pytest.mark.parametrize(("work_seen", "cost", "full_bill", "expected"), [
+    (True, 0.0, False, None), (True, 0.125, False, 0.125), (False, 0.0, False, 0.0),
+    (True, 0.0, True, 0.0),
+])
+def test_responses_failure_bills_zero_only_without_contradictory_prior_work(
+    ctx, patch_env, mock_openai, monkeypatch, work_seen, cost, full_bill, expected,
+):
+    monkeypatch.setenv("OUROBOROS_WEBSEARCH_BACKEND", "openai")
+    holds = []
+    original_reserve = search_module.reserve_attempt
+
+    def reserve(request):
+        hold = original_reserve(request)
+        holds.append(hold)
+        return hold
+
+    monkeypatch.setattr(search_module, "reserve_attempt", reserve)
+    terminal = {"status": "failed", "error": {"code": "invalid_request_error", "status_code": 400},
+                "usage": {"input_tokens": 0, "output_tokens": 0}}
+    if full_bill:
+        terminal["total_cost_usd"] = cost
+    else:
+        terminal["usage"]["cost"] = cost
+    events = [_make_event("response.web_search_call.searching")] if work_seen else []
+    events.append(_make_event("response.failed", response=types.SimpleNamespace(model_dump=lambda: terminal)))
+    mock_openai.responses.create.return_value = _FakeStream(events)
+    assert "error" in json.loads(_web_search(ctx, "once"))
+    assert mock_openai.responses.create.call_count == len(holds) == 1
+    [row] = [row for row in ledger_rows(holds[0].drive_root) if row["attempt_id"] == holds[0].attempt_id]
+    assert (row["state"], row["cost_usd"], row["cost_final"]) == ("settled", expected, expected is not None)
+
+
 def test_web_search_uses_official_openai_responses(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)

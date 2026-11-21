@@ -1369,9 +1369,10 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if not tier_conflict and isinstance(stream_usage, dict) and stream_usage:
-        usage, cost, final = usage_from_response({"usage": stream_usage}, provider=provider)
-        settle_attempt(reservation, dict(usage or {}), cost_usd=cost, cost_final=final)
-        return "settled"
+        usage, _, billed = usage_from_response({"usage": stream_usage}, provider=provider)
+        if not billed:  # A price rejected by priced_failure_usage cannot be recovered from a subset of that evidence.
+            settle_attempt(reservation, usage)
+            return "settled"
     from ouroboros.transport_custody import attempt_custody_event_fields
     cause = attempt_custody_event_fields(exc).get("transport_cause_type")
     suffix = f" [cause: {cause}]" if cause else ""
