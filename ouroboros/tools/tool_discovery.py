@@ -229,7 +229,8 @@ def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
     """Resolve names in request order: ``mcp_<server>`` with tools (every one this actor may call), a tool, a
     policy-hidden tool, then a live skill's name or extension namespace (each of its tools resolved exactly
     as when named alone; those this actor cannot call are counted, never named), then a policy refusal of
-    any other name. One generation adoption serves the whole call."""
+    any other name. One family adoption probe serves the whole call (a missed ``ext_`` surface name has
+    already taken its own in dispatch)."""
     wanted: Dict[str, Dict[str, Any]] = {}
     servers, hidden, not_found, visible, partial, adopted = {}, [], [], None, [], False
     for name in names:

@@ -688,8 +688,8 @@ def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
     """The 27.10 call enabled 7 of 24 desktop tools one name at a time and told the owner the rest did not
     exist. A skill's name (or its extension namespace) now loads each of its tools exactly as naming it alone
     would: the request's tools change once, a withheld tool is counted and never named, resident schemas
-    answer "already loaded", and a skill that is not live or a stray name loads nothing. A tool, then a
-    policy-hidden tool, then an MCP server with tools, then the exact namespace keep their answer before a
+    answer "already loaded", and a skill that is not live or a stray name loads nothing. An MCP server with
+    tools, then a tool, then a policy-hidden tool, then the exact namespace keep their answer before a
     same-named skill; a skill called mcp_<slug> loads when no such server has tools."""
     from ouroboros import extension_loader
     from ouroboros.extension_surface_names import extension_surface_name
