@@ -542,8 +542,12 @@ def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
 def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
     """Release permission, not readiness; empty actor means owner, mind doors must use ``mind_control``."""
     stop, actor = stop or {}, actor or {}
-    if stop.get("release") == "owner" and actor.get("actor", "owner") != "owner":
-        return {"ok": False, "error": "panic_requires_owner_resume"}
+    panic = stop.get("cause") == "panic" or stop.get("door") == "panic"  # ``panic_hold``, or saved work Panic held
+    if (panic or stop.get("release") == "owner") and actor.get("actor", "owner") != "owner":
+        from ouroboros.control_actor import owner_word_after_panic  # his own message after it is his act (21 Nov)
+
+        if not (panic and owner_word_after_panic()):
+            return {"ok": False, "error": "panic_requires_owner_resume"}
     if stop.get("release") == "none":
         return {"ok": False, "error": "stop_not_resumable"}
     return release_refusal(stop["member_stop"], actor) if stop.get("member_stop") else None
@@ -786,7 +790,8 @@ def resume_outcome(outcome: dict) -> dict:
     if outcome.get("runs") and not outcome.get("blockers"):
         outcome = {**outcome, "blockers": [{"kind": "delegated_run", **run} for run in outcome["runs"]]}
     error = str(outcome.get("error") or "")
-    phrases = {"panic_requires_owner_resume": "Only the owner can release a Panic hold.",
+    phrases = {"panic_requires_owner_resume": "A Panic hold needs the owner: his own message written after that "
+               "Panic, cited as owner_words, or his press.",
                "update_in_progress": "An update is in progress; press Resume after the restart.",
                "root_still_paused": STOP_TEXT["awaiting_selection"],
                "root_resume_grant_missing": STOP_TEXT["awaiting_selection"]}

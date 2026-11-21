@@ -289,8 +289,16 @@ def test_unreadable_panic_content_retains_the_existing_installation_veto(tmp_pat
     assert evolution_lifecycle.evolution_stop_reason({}) == "panic_flag_unknown"
 
 
-def test_boot_panic_keeps_sleep_owner_only_and_saved_work_resumable_by_mind(tmp_path, monkeypatch):
-    from ouroboros.control_actor import mind_control
+def test_boot_panic_holds_need_the_owners_word_after_that_panic_or_his_press(tmp_path, monkeypatch):
+    """Emergency Stop Invariant, read 21 Nov 2026: after Panic a mind releases a hold of either class (``panic_hold``
+    for sleeping work, ``saved_work_hold{door: panic}`` for working) only with the owner's own message written after
+    that Panic began, cited and verified by author and time; the owner's press works as before. No cite, or a cite
+    from before the Panic, refuses; a second Panic voids the first cite. The Panic moment is taken when it starts
+    and kept across the restart (``panic_started_at``)."""
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros import server_control
+    from ouroboros.control_actor import citing_owner, mind_control
     from supervisor import worker_chat_lane
     from tests.test_model_sleep import _cold_park
     from tests.test_restart_saved_work import _working_run
@@ -302,19 +310,48 @@ def test_boot_panic_keeps_sleep_owner_only_and_saved_work_resumable_by_mind(tmp_
     _cold_park(tmp_path, monkeypatch, workers, wake_after_sec=3600)
     _working_run(tmp_path, workers, "working")
     assert q.persist_queue_snapshot(reason="before_panic")
+    started = datetime.now(timezone.utc) - timedelta(minutes=5)
+    monkeypatch.setattr(server_control, "_PANIC_STARTED_AT", started.timestamp())
+    server_control._persist_panic_controls(tmp_path)  # the stopping process records when its Panic began
     (tmp_path / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
     workers.PENDING.clear()
     workers.RUNNING.clear()
     assert q.restore_pending_from_snapshot() == 2
     rows = {task["id"]: task for task in workers.PENDING}
     assert current_stop(rows["sleeper"])["release"] == "owner"
-    assert current_stop(rows["working"])["release"] == "resume"
     assert current_stop(rows["working"])["door"] == "panic"
     worker_chat_lane.auto_resume_after_restart()
-    with mind_control("mind", "continue saved work"):
-        assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
+    assert state.load_state()["panic_started_at"] == started.isoformat(), "the start, not the boot, survives"
+    assert "panic_pending_started_at" not in state.load_state()
+    before, after = (started - timedelta(seconds=1)).isoformat(), (started + timedelta(seconds=1)).isoformat()
+    for task_id in ("sleeper", "working"):
+        with mind_control("mind", "continue saved work"):
+            assert q.resume_budget_paused_task(task_id)["error"] == "panic_requires_owner_resume", task_id
+            with citing_owner(before):
+                assert q.resume_budget_paused_task(task_id)["error"] == "panic_requires_owner_resume", task_id
+    # A second Panic voids a cite written after the first one only.
+    state.update_state(lambda st: st.update(panic_started_at=(started + timedelta(minutes=1)).isoformat()))
+    with mind_control("mind", "continue saved work"), citing_owner(after):
+        assert q.resume_budget_paused_task("working")["error"] == "panic_requires_owner_resume"
+    state.update_state(lambda st: st.update(panic_started_at=started.isoformat()))
+    with mind_control("mind", "continue saved work"), citing_owner(after):
         assert q.resume_budget_paused_task("working")["ok"]
-    assert q.resume_budget_paused_task("sleeper")["ok"]
+    assert q.resume_budget_paused_task("sleeper")["ok"], "the owner's own press works as before"
+
+
+def test_a_launcher_panic_with_no_stopping_server_dates_the_panic_at_the_boot_that_takes_it(tmp_path, monkeypatch):
+    """No server recorded a start (a tray or launcher Panic): the boot's receipt time stands, before which no owner
+    message can have reached the host; a cite older than it never releases a Panic hold."""
+    from ouroboros.utils import utc_now_iso
+    from supervisor import worker_chat_lane
+    from tests.test_state_authority import _prior
+
+    q, state, _workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state(_prior())
+    (tmp_path / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+    earlier = utc_now_iso()
+    worker_chat_lane.auto_resume_after_restart()
+    assert state.load_state()["panic_started_at"] >= earlier
 
 
 def test_android_reader_cli_recognizes_the_receipt_without_product_import(tmp_path):

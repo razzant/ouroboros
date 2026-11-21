@@ -391,3 +391,64 @@ def test_a_cascade_stop_of_a_retry_senders_logical_root_stops_its_list(tmp_path,
     write_task_result(tmp_path, "stale", "running", root_task_id="original", delegation_role="root",
                       original_task_id="original", timeout_retry_from="original")
     assert _sender_stopped("stale") == {"ok": False, "error": "sender_state_unreadable"}, "not the root's actor"
+
+
+def test_a_resume_cites_the_owners_message_after_a_panic_and_one_cite_covers_the_list(tmp_path, monkeypatch):
+    """``owner_words`` on resume_task is verified as for a model choice (``cited_owner_basis``) and carries when the
+    owner wrote the message (``cited_owner_time``: the carrier's send time when kept, else when the room accepted
+    it). After Panic the mind releases a Panic hold of either class only with a message written after the Panic
+    began: one cite covers every root of a list; a message from before it, or no cite, leaves the hold. A child is
+    released by the same cite when Main names it. Words not found refuse at the tool, nothing is sent."""
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros.owner_words import cited_owner_basis, cited_owner_time
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_mind import _resume_task
+    from ouroboros.tool_call_log import invocation_scope
+    from supervisor.events_budget import HOLD_PANIC, HOLD_SAVED_WORK, hold_budget_row
+    from supervisor.events_mind_controls import _apply
+
+    from tests.test_state_authority import _prior
+
+    _q, state, workers = _install_queue(tmp_path, monkeypatch)
+    state.save_state(_prior())
+    started = datetime.now(timezone.utc) - timedelta(minutes=10)
+    state.update_state(lambda st: st.update(panic_started_at=started.isoformat()))
+    rows = _roots(tmp_path, workers, "sleeping", "saved")
+    hold_budget_row(rows["sleeping"], reason=HOLD_PANIC)
+    rows["saved"]["_budget_pause_hold"] = {**hold_budget_row(dict(rows["saved"]), reason=HOLD_SAVED_WORK),
+                                           "door": "panic"}
+    kid = {"id": "kid", "type": "task", "root_task_id": "saved", "parent_task_id": "saved",
+           "delegation_role": "subagent", "chat_id": 7, "_attempt": 1, "admitted_dispatch": "none"}
+    hold_budget_row(kid, reason=HOLD_PANIC)
+    workers.PENDING.append(kid)
+    write_task_result(tmp_path, "kid", "scheduled", root_task_id="saved", parent_task_id="saved",
+                      delegation_role="subagent")
+    old, new = "Carry on with everything, please", "Now resume all of it"
+    ctx = SimpleNamespace(task_id="mind-root", drive_root=tmp_path, pending_events=[], event_queue=None,
+                          task_metadata={}, _owner_directives=[
+                              {"source": "owner_mailbox", "content": old, "msg_id": "m-old",
+                               "ts": (started - timedelta(minutes=1)).isoformat()},
+                              {"source": "owner_mailbox", "content": new, "msg_id": "m-new",
+                               "ts": (started + timedelta(minutes=1)).isoformat()}])
+    assert cited_owner_time(ctx, cited_owner_basis(ctx, new)[0]) == (started + timedelta(minutes=1)).isoformat()
+    with invocation_scope({"tool_call_id": "invented"}):
+        refused = json.loads(_resume_task(ctx, reason="all", task_ids=["sleeping"], owner_words="never said"))
+    assert refused["error"] == "owner_words_unverified" and not ctx.pending_events
+
+    _receipt, outcomes, _events = _list(ctx, _resume_task, "uncited", reason="all", task_ids=["sleeping", "saved"])
+    assert {outcomes[t]["error"] for t in outcomes} == {"panic_requires_owner_resume"}
+    assert "after that Panic" in outcomes["saved"]["message"]
+    _receipt, outcomes, events = _list(ctx, _resume_task, "before", reason="all", task_ids=["sleeping", "saved"],
+                                       owner_words=old)
+    assert events[0]["cited_at"] < started.isoformat()
+    assert {outcomes[t]["error"] for t in outcomes} == {"panic_requires_owner_resume"}, "written before the Panic"
+    _receipt, outcomes, events = _list(ctx, _resume_task, "after", reason="all", task_ids=["sleeping", "saved"],
+                                       owner_words=new)
+    assert all(event["cited"] == new for event in events) and outcomes["saved"]["ok"], outcomes
+    assert outcomes["sleeping"]["ok"], outcomes["sleeping"]
+    assert _apply(_event("resume_task", "kid", "kid-uncited"))["error"] == "panic_requires_owner_resume"
+    with invocation_scope({"tool_call_id": "kid"}):
+        json.loads(_resume_task(ctx, "kid", reason="its root is back", owner_words=new))
+    child = _apply(ctx.pending_events.pop())
+    assert child.get("error") != "panic_requires_owner_resume" and child["ok"], child

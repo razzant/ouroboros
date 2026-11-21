@@ -2,7 +2,7 @@
 
 import json
 
-from ouroboros.control_actor import accepting_unknown, mind_control
+from ouroboros.control_actor import accepting_unknown, citing_owner, mind_control
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 
@@ -32,7 +32,8 @@ def _apply(evt: dict) -> dict:
     named = evt.get("accept_unknown") if action == "resume_task" and isinstance(evt.get("accept_unknown"), list) else ()
     if evt.get("list_call") and (stopped := _sender_stopped(actor)):
         return stopped  # one row of a list call whose sender was stopped meanwhile: nothing is done for it
-    with mind_control(actor, reason), accepting_unknown(named, reason):
+    cited_at = str(evt.get("cited_at") or "") if action == "resume_task" else ""
+    with mind_control(actor, reason), accepting_unknown(named, reason), citing_owner(cited_at):
         if action == "resume_task" and evt.get("general") and (kept := _kept_pause(task_id)):
             from ouroboros.work_stop import resume_outcome
 
@@ -124,7 +125,7 @@ def handle_mind_task_control(evt: dict, ctx) -> None:
         outcome = {"ok": False, "error": "control_outcome_unknown", "detail": str(exc)}
     record = {"ts": utc_now_iso(), "type": "mind_task_control_outcome",
               **{key: evt.get(key) for key in ("task_id", "action", "actor_task_id", "action_nonce", "reason")},
-              **{key: evt[key] for key in ("list_call", "general") if evt.get(key)},  # a list call's row
+              **{key: evt[key] for key in ("list_call", "general", "cited", "cited_at") if evt.get(key)},
               **({"accept_unknown": evt["accept_unknown"]} if evt.get("accept_unknown") else {}),
               "actor": "mind", "outcome": outcome}
     append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", record)

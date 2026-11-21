@@ -14,7 +14,8 @@ def _continue_in_background(ctx, reason: str = "") -> str:
     return json.dumps(arm_detach(ctx, reason), ensure_ascii=False)
 
 
-def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None, task_ids=None) -> str:
+def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None, task_ids=None,
+                     owner_words: str = "") -> str:
     """One control event per named work. ``task_ids`` (Pause and Resume): the roots, de-duplicated, each as an
     ordinary single event under its own nonce (as if named alone in this call), all marked with this call's id
     (``list_call``); a list Resume is a general one (``general``). Each mails its own outcome; nothing is kept
@@ -45,6 +46,17 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
     call_id = current_tool_call_id()
     if not actor or not call_id:
         return json.dumps({"ok": False, "error": "control_call_identity_missing"})
+    cite = {}
+    if str(owner_words or "").strip():  # one verified cite covers every named root of this call
+        from ouroboros.owner_words import cited_owner_basis, cited_owner_time
+
+        basis, error = cited_owner_basis(ctx, owner_words)
+        written = cited_owner_time(ctx, basis) if basis else ""
+        if error or not basis or not written:
+            return json.dumps({"ok": False, "error": "owner_words_unverified", "detail": error or (
+                "owner_words were not found in a message of your human that reached this run." if not basis
+                else "The host recorded no time for that message, so it cannot be placed after a Panic.")})
+        cite = {"cited": basis["cited"], "cited_source": basis["source"], "cited_at": written}
     rows = []
     for target in targets:
         if action == "pause_task" and target == actor:
@@ -54,7 +66,7 @@ def _request_control(ctx, action: str, task_id, reason: str, accept_unknown=None
         emitted = _emit_control_event(ctx, {
             "type": "mind_task_control", "action": action, "task_id": target,
             "actor": "mind", "actor_task_id": actor, "action_nonce": nonce,
-            "reason": str(reason or ""), "ts": utc_now_iso(),
+            "reason": str(reason or ""), "ts": utc_now_iso(), **cite,
             **({"list_call": call_id, **({"general": True} if action == "resume_task" else {})} if batch else {}),
             **({"accept_unknown": [str(value) for value in accept_unknown if value]}
                if isinstance(accept_unknown, list) and accept_unknown else {})})
@@ -81,8 +93,9 @@ def _pause_task(ctx, task_id: str = "", reason: str = "", task_ids=None) -> str:
     return _request_control(ctx, "pause_task", task_id, reason, task_ids=task_ids)
 
 
-def _resume_task(ctx, task_id: str = "", reason: str = "", accept_unknown=None, task_ids=None) -> str:
-    return _request_control(ctx, "resume_task", task_id, reason, accept_unknown, task_ids)
+def _resume_task(ctx, task_id: str = "", reason: str = "", accept_unknown=None, task_ids=None,
+                 owner_words: str = "") -> str:
+    return _request_control(ctx, "resume_task", task_id, reason, accept_unknown, task_ids, owner_words)
 
 
 def _continue_task(ctx, task_id: str, reason: str = "") -> str:
@@ -121,6 +134,18 @@ def _list_schema(schema: dict) -> dict:
     return schema
 
 
+def _citing_schema(schema: dict) -> dict:
+    schema["parameters"]["properties"]["owner_words"] = {
+        "type": "string",
+        "description": "Your human's exact words from one of their own messages that reached this run (or the "
+                       "complete label they pressed), as the order this Resume carries. A Panic hold, of sleeping "
+                       "or of saved work, is released by you only with your human's own message written after that "
+                       "Panic began: the host verifies who wrote it and when, never what it says; whether it asks "
+                       "for this Resume is your judgment. One cite covers every root of the call. Words of a call "
+                       "never count; a message from before the Panic, or none, leaves the hold for your human."}
+    return schema
+
+
 def _accepting_schema(schema: dict) -> dict:
     schema["parameters"]["properties"]["accept_unknown"] = {
         "type": "array", "items": {"type": "string"},
@@ -153,7 +178,7 @@ def mind_tool_entries() -> list:
              "general word to pause everything, say), name them in task_ids: one sentence for all, one outcome per "
              "root. A root already paused keeps its earlier Pause, author and sentence. "
              "The outcome arrives in your task mailbox.")), _pause_task),
-        ToolEntry("resume_task", _accepting_schema(_list_schema(_control_schema("resume_task",
+        ToolEntry("resume_task", _citing_schema(_accepting_schema(_list_schema(_control_schema("resume_task",
              "Request Resume of listed paused work through the owner's existing grants. "
              "A technical pause waits for the named billing or control record to become readable. "
              "The host rechecks the saved task's controls then. Resume a deliberate Pause when its named return "
@@ -161,13 +186,14 @@ def mind_tool_entries() -> list:
              "continue returns what their general request paused; work they paused by name waits for their word "
              "about it or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
-             "Only the owner can release a Panic hold. A list Resume (task_ids) is a general return: it lifts "
+             "A Panic hold needs your human: their press, or their own message written after that Panic, cited "
+             "in owner_words (a message from before it does not count). A list Resume (task_ids) is a general return: it lifts "
              "the Pauses Ouroboros itself placed and every other saved stop you may release, and keeps every Pause "
              "Ouroboros did not itself place, whoever is shown as its author now: the owner's "
              "(owner_paused_by_name) and one whose press declared no author (pause_author_unknown, often the "
              "owner's own from an older window). To lift such a Pause, name it alone by task_id when the owner's "
              "word names it. A child is its root's to choose (not_a_root_task). "
-             "The outcome arrives in your task mailbox."))), _resume_task),
+             "The outcome arrives in your task mailbox.")))), _resume_task),
         ToolEntry("continue_task", _control_schema("continue_task",
              "Request one successor episode of listed work that was interrupted or that its author stopped "
              "as unfinished (finish_task action=stop), through the same Continue action as the owner's button. "

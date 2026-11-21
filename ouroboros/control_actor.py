@@ -15,6 +15,7 @@ from contextvars import ContextVar
 
 _ACTOR = ContextVar("lifecycle_control_actor", default=None)
 _ACCEPT_UNKNOWN = ContextVar("lifecycle_accept_unknown", default=None)
+_OWNER_WORD = ContextVar("lifecycle_owner_word", default=None)
 
 
 def control_actor() -> dict:
@@ -71,6 +72,33 @@ def creating_author(fence: dict | None) -> dict:
     own = {key: fence[key] for key in ("actor", "text", "reason", "requested_at") if key in fence}
     return pause_author({**own, **{key: value for key, value in (entry if isinstance(entry, dict) else {}).items()
                                    if key not in {"fence_id", "requests"}}})
+
+
+@contextmanager
+def citing_owner(written_at: str):
+    """Bind, for this one call, when the owner wrote the message a mind's control cites (``owner_words``, verified
+    by ``owner_words.cited_owner_basis``): ``work_stop.release_refusal`` reads it for a Panic hold, and what the door
+    selects inside this call inherits it. No time: nothing bound."""
+    token = _OWNER_WORD.set(str(written_at or "") or None)
+    try:
+        yield
+    finally:
+        _OWNER_WORD.reset(token)
+
+
+def owner_word_after_panic() -> bool:
+    """Whether the bound cite was written after the last Panic began (``state.panic_started_at``, taken when Panic
+    starts): the owner's own message after a Panic is his manual action (Emergency Stop Invariant, 21 Nov 2026).
+    An unknown time on either side is no."""
+    from ouroboros.work_stop import _instant
+
+    written = _instant(_OWNER_WORD.get() or "")
+    if written is None:
+        return False
+    from supervisor.state import load_state
+
+    started = _instant(load_state().get("panic_started_at") or "")
+    return started is not None and written > started
 
 
 @contextmanager

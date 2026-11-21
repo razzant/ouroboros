@@ -1094,7 +1094,10 @@ def auto_resume_after_restart() -> None:
             from supervisor.state import update_state
 
             update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS)
-            update_state(lambda state: state.update({PANIC_RECEIPT: identity}))
+            # The Panic moment owner words must follow: the stopping process's start time, else (a launcher's
+            # Panic with no server) this boot's, before which no owner message can have reached the host.
+            update_state(lambda state: state.update({PANIC_RECEIPT: identity, "panic_started_at": str(
+                state.pop("panic_pending_started_at", "") or utc_now_iso())}))
             remove_received_panic(root, identity)
             return
         if restart:

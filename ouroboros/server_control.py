@@ -7,6 +7,8 @@ import os
 import json
 import pathlib
 import sys
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from ouroboros.platform_layer import IS_WINDOWS
@@ -14,6 +16,7 @@ from ouroboros.platform_layer import IS_WINDOWS
 # The successor this generation spawned, published before custody I/O so Panic can stop it.
 _restart_successors: list = []
 _restart_stop_requested = False
+_PANIC_STARTED_AT = 0.0  # epoch seconds when this process's Panic began (execute_panic_stop)
 
 
 def external_owner_binding(state: dict) -> tuple[bool, Any, tuple[int, int]]:
@@ -354,12 +357,12 @@ def execute_panic_stop(
     A managed execution domain's dedicated containers are killed by the identity
     this generation measured (``execution_domain``); their settlement only reports.
     """
-    global _restart_stop_requested
+    global _restart_stop_requested, _PANIC_STARTED_AT
     _restart_stop_requested = True  # claim termination before any import, stop callback or I/O
+    _PANIC_STARTED_AT = time.time()  # the Panic moment, before any kill (the flag is written last)
     requests, settlements = {}, {}
     try:
         import threading
-        import time
 
         request_threads = []
 
@@ -535,6 +538,9 @@ def _persist_panic_controls(data_dir: pathlib.Path) -> None:
     failures = []
     for step in (
         lambda: state.update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS, lock_timeout_sec=0.5),
+        lambda: _PANIC_STARTED_AT and state.update_state(lambda st: st.update(  # the next boot's receipt keeps it
+            panic_pending_started_at=datetime.fromtimestamp(_PANIC_STARTED_AT, timezone.utc).isoformat()),
+            lock_timeout_sec=0.5),
         lambda: record_evolution_stop_intent("panic", "panic stop"),
         # cleanup_worktree=False: Panic never runs git stash/reset; the flag + boot reconcile own it.
         lambda: complete_evolution_campaign("panic stop", status="stopped", cleanup_worktree=False),
