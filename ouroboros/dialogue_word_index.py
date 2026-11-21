@@ -235,10 +235,11 @@ def _wal_bytes(root: pathlib.Path) -> int:
 
 
 def _log_chunk(root: pathlib.Path, **facts: Any) -> None:
+    """One record a chunk in ``logs/supervisor.jsonl``, its own type beside the child's lifecycle records."""
     from ouroboros.utils import append_jsonl, utc_now_iso
 
     append_jsonl(pathlib.Path(root) / "logs" / "supervisor.jsonl",
-                 {"ts": utc_now_iso(), "type": "maintenance", "phase": "chunk", "job": "dialogue_words", **facts})
+                 {"ts": utc_now_iso(), "type": "maintenance_chunk", "job": "dialogue_words", **facts})
 
 
 def _post_segment(root: pathlib.Path, name: str, segment: int, mark: int, upper: int,

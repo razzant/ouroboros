@@ -408,6 +408,10 @@ def _setup_job(name, data, monkeypatch):
         # A message stored before this generation dated the history: the pass dates every Project once.
         room = projects_registry.create_project(data, "dated", name="Dated")["chat_id"]
         dialogue_store.append(data, "chat", {"chat_id": room, "direction": "in", "text": "before the pass"})
+    elif name == "dialogue_words":
+        from ouroboros import dialogue_store
+
+        dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "in", "text": "words to post"})
     elif name == "hot_facts":
         from ouroboros import store
 
@@ -502,7 +506,7 @@ def test_the_real_child_process_runs_the_due_jobs_and_reports(data):
     from ouroboros import dialogue_import
 
     dialogue_import.cutover(data)  # as the boot does before the dialogue opens: the archive is planned
-    assert maintenance.due(data) == ["subagent_metrics", "pending_invocations", "dialogue_import",
+    assert maintenance.due(data) == ["subagent_metrics", "pending_invocations", "dialogue_import", "dialogue_words",
                                      "ended_plan_asks", "custody_trash", "runtime_retirement", "record_compression"]
     unit = maintenance.MaintenanceChild()
     assert unit.tick(data, REPO)
