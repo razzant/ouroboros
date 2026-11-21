@@ -34,6 +34,7 @@ from ouroboros.outcomes import (
 )
 from ouroboros.budget_pause import LIVE_PAUSE_STATES
 from ouroboros.post_task_checkpoint import (
+    _ATTEMPT_OUTCOME_FIELDS,
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
@@ -54,6 +55,7 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
+from ouroboros.terminal_time import replica_advances_attempt
 from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
@@ -829,7 +831,7 @@ def reconcile_orphaned_running_tasks(
         except Exception:
             continue
         eff_status = str(effective.get("status") or "").strip().lower()
-        if eff_status not in SETTLED_STATUSES:
+        if eff_status not in SETTLED_STATUSES or effective.get("task_id") != task_id:
             continue
         # An ACTIVE cancel intent means cancellation custody already owns this
         # row and will settle it with its own outcome and text; at boot that
@@ -856,6 +858,12 @@ def reconcile_orphaned_running_tasks(
             )
             if effective.get(key) is not None
         }
+        if replica_advances_attempt(row, effective):
+            # The sweep publishes the same selected execution as copyback, not
+            # its answer under the old mirror's attempt and stop reason.
+            persist_fields.update({key: effective[key] for key in _ATTEMPT_OUTCOME_FIELDS | {
+                "task_attempt", "_attempt", "started_at", "metadata", "execution_owner",
+            } if key in effective})
         try:
             applied: List[bool] = []
             observed = (attempt_basis(row), row.get("updated_at"))
@@ -1051,33 +1059,24 @@ def effective_task_result(
     if child_result:
         parent_status = str(result.get("status") or "").lower()
         child_status = str(child_result.get("status") or "").lower()
-        copied_child_status = str(result.get("child_status") or "").lower()
-        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        result_is_workspace = bool(str(result.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip())
-        copied_child_terminal = (
-            result_is_workspace
-            and copied_child_status in FINAL_STATUSES
-            and parent_status == copied_child_status
-        )
-        parent_owns_terminal = (
-            parent_status in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE}
-            and not copied_child_terminal
-        )
-        stale_replica = (
+        advances = replica_advances_attempt(result, child_result)
+        preserve_parent_retry = (
             child_status not in FINAL_STATUSES
             and parent_status not in {STATUS_REQUESTED, STATUS_SCHEDULED, STATUS_RUNNING}
+            and parent_status not in FINAL_STATUSES
+            and not advances
         )
-        parent_authoritative_fields = set()
-        if parent_owns_terminal or stale_replica:
-            parent_authoritative_fields.update(("status", "result", "error", "ts"))
+        parent_authoritative_fields = {"status", "ts", *_ATTEMPT_OUTCOME_FIELDS} if preserve_parent_retry else set()
+        # A parent that ended on its own keeps its capture state; read_replica admits only the matching attempt.
+        if parent_status in {STATUS_FAILED, STATUS_REJECTED_DUPLICATE}:
             producer_drive = None
         if producer_drive is None:
-            parent_authoritative_fields |= _parent_workspace_artifact_lifecycle_fields(result)
+            parent_authoritative_fields = parent_authoritative_fields | _parent_workspace_artifact_lifecycle_fields(result)
         else:
             merged.pop("artifact_bundle", None)  # a legacy producer may publish only its status and file rows
         # Pool assignment can rebind a paused direct turn before its old child
         # replica receives the new start. Owner and its attempt remain one fact.
-        if "execution_owner" in result:
+        if "execution_owner" in result and not advances:
             parent_authoritative_fields = parent_authoritative_fields | {"execution_owner", "task_attempt", "_attempt"}
         canonical_pause = result.get("budget_pause") if isinstance(result.get("budget_pause"), dict) else {}
         # Only a STALE nonterminal replica (the worker's pre-pause ``running``
@@ -1098,6 +1097,7 @@ def effective_task_result(
         merged.setdefault("child_drive_root", child_text)
         merged.setdefault("headless_child_drive_root", child_text)
 
+    # Artifact readiness belongs to the selected result, with or without a replica.
     merged = _normalize_workspace_artifact_status(merged)
 
     queue_snapshot = None

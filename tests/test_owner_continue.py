@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
-from tests._owner_continue_helpers import NONCE, _interrupted
+from tests._owner_continue_helpers import NONCE, _interrupted, _running_predecessor
 from tests._store_shared import delete_result, seed_result
 
 
@@ -155,6 +155,357 @@ def test_an_accounting_expiry_never_outranks_a_stop_or_a_whole_work_bound(tmp_pa
 
 
 _STAMP = "delegated_custody_unreconciled"
+
+
+@pytest.mark.parametrize("prior,source,eligible,cause", [
+    (None, "", False, "cancelled"),
+    ("", "", False, "cancelled"),
+    ("owner_paused", "", False, "cancelled"),
+    ("provider_failure", "", False, "cancelled"),
+    ("provider_failure", "owner_restart", True, "owner_restart"),
+    ("provider_failure", "http_single", False, "http_single"),
+    ("provider_failure", "panic", False, "panic"),
+    ("budget_exhausted", "owner_restart", False, "budget_exhausted"),
+    ("deadline", "owner_restart", False, "deadline"),
+    ("billing_authority_refused", "owner_restart", False, "billing_authority_refused"),
+    (_STAMP, "owner_restart", False, "budget_exhausted"),
+])
+def test_pool_cancel_keeps_the_earlier_stop_separate_from_continue_authority(tmp_path, monkeypatch, prior, source,
+                                                                           eligible, cause):
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    tid = "pred-1"
+    _running_predecessor(tmp_path, tid)
+    fields = {"reason_code": prior or "budget_exhausted"} if prior is not None else {}
+    write_task_result(tmp_path, tid, "interrupted", **fields,
+                      outcome_axes={"execution": {"status": "failed", "reason_code": "budget_exhausted"}})
+    if prior == "":  # Resume clears the point's reason. Its old execution axis is still present.
+        write_task_result(tmp_path, tid, "running", reason_code="")
+    if source in {"http_single", "panic"}:
+        request_cancel(tmp_path, tid, source=source, reason="stop the test work", allow_settled_target=True)
+    door = source if source == "owner_restart" else ""
+    assert workers._write_failure_result(tid, status="cancelled", stop_source=door) == "cancelled"
+    row = load_task_result(tmp_path, tid)
+    assert row["reason_code"] == row["outcome_axes"]["execution"]["reason_code"] == "cancelled"
+    facts = _ended_work_facts(row, tid)
+    assert facts["cause"] == "cancelled" and facts.get("cancelled_by", "") == source
+    earlier = "budget_exhausted" if prior == _STAMP else prior
+    if earlier:
+        assert facts["earlier_stop"] == earlier
+    else:
+        assert "earlier_stop" not in facts
+    assert facts["ended_at"] is None
+    assert (facts["continuation_offer"]["eligible"], facts["continuation_offer"]["cause"]) == (eligible, cause)
+    answer = admit_continuation(tid, action_nonce=NONCE)
+    assert answer["ok"] is eligible
+    if eligible:
+        assert workers.PENDING[0]["metadata"]["continuation"]["cause"] == cause
+    else:
+        assert answer["error"] == facts["continuation_offer"]["refusal"]
+        assert not workers.PENDING and "continued_by" not in load_task_result(tmp_path, tid)
+
+
+def test_legacy_cancel_with_its_own_technical_reason_still_admits_continue(tmp_path, monkeypatch):
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    # Use a complete terminal record; only the legacy placement of its cause is under test.
+    _interrupted(tmp_path, origin={})
+    seed_result(tmp_path, "pred-1", {**load_task_result(tmp_path, "pred-1"), "reason_code": "provider_failure"})
+    facts = _ended_work_facts(load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert facts["cause"] == "provider_failure" and "earlier_stop" not in facts and "cancelled_by" not in facts
+    admitted = admit_continuation("pred-1", action_nonce=NONCE)
+    assert admitted["ok"], admitted
+    assert workers.PENDING[0]["metadata"]["continuation"]["cause"] == "provider_failure"
+    assert "earlier_stop" not in load_task_result(tmp_path, "pred-1")
+
+
+def test_global_budget_resume_without_its_result_mirror_still_allows_restart_continue(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros import task_results
+    from ouroboros.server_routing_context import _ended_work_facts
+    from supervisor.continuation_admission import admit_continuation
+    from tests.worker_pool_support import affirm_ready
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    money = [0.0]
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: money[0])
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.2")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "")
+    tid = "pred-1"
+    _running_predecessor(tmp_path, tid)
+    sent = []
+    workers.WORKERS[0] = affirm_ready(SimpleNamespace(
+        wid=0, busy_task_id=None, reaping=False, in_q=SimpleNamespace(put=sent.append)))
+    workers.PENDING.append({"id": tid, "root_task_id": tid, "type": "task", "chat_id": 7, "priority": 1,
+                            "_attempt": 1, "admitted_dispatch": "none", "drive_root": str(tmp_path)})
+    workers.assign_tasks()
+    paused = task_results.load_task_result(tmp_path, tid)
+    assert (paused["status"], paused["reason_code"], paused["resource_limit"]["scope"]) == (
+        "scheduled", "budget_exhausted", "global")
+    assert not sent
+    money[0] = 10.0
+    write = task_results.write_task_result
+
+    def fail_resume_mirror(*args, **fields):
+        if (fields.get("resource_limit") or {}).get("status") == "resumed":
+            raise OSError("result mirror unavailable")
+        return write(*args, **fields)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(task_results, "write_task_result", fail_resume_mirror)
+        assert queue.resume_budget_paused_task(tid)["ok"]
+    workers.assign_tasks()
+    assert [task["id"] for task in sent] == [tid]
+    running = task_results.load_task_result(tmp_path, tid)
+    assert (running["status"], running["reason_code"]) == ("running", "budget_exhausted")
+    assert workers._write_failure_result(tid, status="cancelled", stop_source="owner_restart") == "cancelled"
+    workers.RUNNING.pop(tid)
+    facts = _ended_work_facts(task_results.load_task_result(tmp_path, tid), tid)
+    assert (facts["cause"], facts["cancelled_by"]) == ("cancelled", "owner_restart")
+    assert "earlier_stop" not in facts
+    assert facts["continuation_offer"] == {"eligible": True, "cause": "owner_restart", "refusal": ""}
+    assert admit_continuation(tid, action_nonce=NONCE)["ok"]
+
+
+@pytest.mark.parametrize("next_state", ["wedged", "interrupted_without_cause", "different_attempt"])
+def test_a_running_code_is_not_a_record_of_an_earlier_stop(tmp_path, monkeypatch, next_state):
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from supervisor.task_reaper import _hold_wedged_worker
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    tid = "pred-1"
+    _running_predecessor(tmp_path, tid)
+    _hold_wedged_worker(tid, "task", 0, "deadline", 3, None)
+    assert load_task_result(tmp_path, tid)["reason_code"] == "reaper_wedged_worker_alive"
+    if next_state == "interrupted_without_cause":
+        write_task_result(tmp_path, tid, "running", reason_code="deadline")
+        write_task_result(tmp_path, tid, "interrupted")
+        assert not load_task_result(tmp_path, tid).get("reason_code")
+    elif next_state == "different_attempt":
+        write_task_result(tmp_path, tid, "interrupted", task_attempt=1, reason_code="deadline")
+        write_task_result(tmp_path, tid, "interrupted", task_attempt=2)
+    assert workers._write_failure_result(tid, status="cancelled") == "cancelled"
+    facts = _ended_work_facts(load_task_result(tmp_path, tid), tid)
+    assert facts["cause"] == "cancelled" and "earlier_stop" not in facts
+    assert facts["continuation_offer"]["refusal"] == "interruption_cause_unrecorded"
+    assert admit_continuation(tid, action_nonce=NONCE)["error"] == "interruption_cause_unrecorded"
+    assert not workers.PENDING
+
+
+@pytest.mark.parametrize("previous,source,earlier,refusal", [
+    pytest.param({"reason_code": "deadline"}, "owner_restart", "deadline", "hard_limit_reached", id="deadline"),
+    pytest.param({"reason_code": _STAMP, "task_attempt": 1,
+                  "outcome_axes": {"execution": {"reason_code": "budget_exhausted"}}},
+                 "owner_restart", "budget_exhausted", "hard_limit_reached", id="stamped-budget"),
+    pytest.param({"reason_code": "billing_authority_refused"}, "owner_restart", "billing_authority_refused",
+                 "billing_lineage_refused", id="billing"),
+    pytest.param({"reason_code": "provider_failure", "task_attempt": 0}, "owner_restart", "provider_failure", "",
+                 id="provider"),
+    pytest.param({"reason_code": "provider_failure"}, "", "provider_failure", "interruption_cause_unrecorded",
+                 id="provider-without-restart"),
+    pytest.param({"outcome_axes": {"execution": {"reason_code": "deadline"}}}, "owner_restart", None, "",
+                 id="no-recorded-cause"),
+    pytest.param({"reason_code": "deadline", "earlier_stop": None}, "owner_restart", None, "", id="cleared-stop"),
+    pytest.param({"status": "cancel_requested", "reason_code": "deadline"}, "owner_restart", None, "", id="intent-only"),
+])
+def test_restart_cancel_preserves_the_legacy_interrupted_attempt(
+        tmp_path, monkeypatch, previous, source, earlier, refusal):
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import load_effective_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    tid = "pred-1"
+    _running_predecessor(tmp_path, tid)
+    legacy = seed_result(tmp_path, tid, {**load_task_result(tmp_path, tid), "status": "interrupted", **previous})
+    assert workers._write_failure_result(tid, status="cancelled", stop_source=source) == "cancelled"
+    for row in (load_task_result(tmp_path, tid), load_effective_task_result(tmp_path, tid, materialize_artifacts=False)):
+        assert (row["status"], row["reason_code"]) == ("cancelled", "cancelled")
+        assert row.get("task_attempt") == legacy.get("task_attempt")
+        assert row.get("cancel_origin", {}).get("source", "") == source and row.get("earlier_stop") == earlier
+    answer = admit_continuation(tid, action_nonce=NONCE)
+    if refusal:
+        assert answer == {"ok": False, "error": refusal, "cause": earlier if source else "cancelled"}
+        assert not workers.PENDING and "continued_by" not in load_task_result(tmp_path, tid)
+    else:
+        assert answer["ok"] and workers.PENDING[0]["metadata"]["continuation"]["cause"] == "owner_restart"
+
+
+@pytest.mark.parametrize("receiver_attempt,local_stop,replica_stop,status,source,earlier,refusal", [
+    (1, None, "deadline", "cancelled", "owner_restart", "deadline", "hard_limit_reached"),
+    (2, None, "deadline", "cancelled", "owner_restart", None, ""),
+    (2, None, "deadline", "interrupted", "owner_restart", None, ""),
+    pytest.param(2, None, None, "failed", "owner_restart", None, "", id="older-failed"),
+    pytest.param(2, None, None, "completed", "owner_restart", None, "", id="older-completed"),
+    pytest.param(1, "provider_failure", "deadline", "legacy-interrupted", "owner_restart", "deadline",
+                 "hard_limit_reached", id="matching-legacy-stop"),
+    pytest.param(2, None, "deadline", "legacy-interrupted", "owner_restart", None, "", id="older-legacy-stop"),
+    (2, None, None, "cancelled", "", None, "interruption_cause_unrecorded"),
+    (1, None, None, "cancelled", "", None, ""),
+    (2, "budget_exhausted", "deadline", "interrupted", "owner_restart", "budget_exhausted", "hard_limit_reached"),
+    (1, "deadline", None, "cancelled", "owner_restart", "deadline", "hard_limit_reached"),
+    (1, "deadline", None, "running", "owner_restart", "deadline", "hard_limit_reached"),
+    (1, "provider_failure", "deadline", "interrupted", "owner_restart", "deadline", "hard_limit_reached"),
+    (1, "billing_authority_refused", "provider_failure", "interrupted", "owner_restart",
+     "billing_authority_refused", "billing_lineage_refused"),
+    (1, None, "provider_failure", "interrupted", "", "provider_failure", "interruption_cause_unrecorded"),
+])
+def test_a_replica_carries_only_its_own_attempts_confirmed_stop(
+        tmp_path, monkeypatch, receiver_attempt, local_stop, replica_stop, status, source, earlier, refusal):
+    from ouroboros.headless import copy_child_task_result
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_status import load_effective_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    tid = "pred-1"
+    sender = tmp_path / "executor"
+
+    def read_and_copy():
+        visible = load_effective_task_result(tmp_path, tid, materialize_artifacts=False)
+        copied = copy_child_task_result(tmp_path, {"id": tid, "drive_root": str(sender)})
+        return visible, copied, load_task_result(tmp_path, tid)
+
+    _running_predecessor(tmp_path, tid)
+    write_task_result(tmp_path, tid, "running", task_attempt=receiver_attempt, child_drive_root=str(sender))
+    if local_stop:
+        write_task_result(tmp_path, tid, "interrupted", reason_code=local_stop)
+    write_task_result(sender, tid, "running", task_attempt=1)
+    # Finalization may copy the still-running child before that same drive records its stop.
+    for row in read_and_copy():
+        assert row["task_attempt"] == receiver_attempt
+        assert row.get("earlier_stop") == local_stop
+
+    if status == "legacy-interrupted":
+        seed_result(sender, tid, {**load_task_result(sender, tid), "status": "interrupted", "reason_code": replica_stop})
+    elif replica_stop:
+        write_task_result(sender, tid, "interrupted", reason_code=replica_stop)
+    if status == "cancelled":
+        write_task_result(sender, tid, "cancelled", cancel_origin={"source": "owner_restart"})
+    elif status in {"failed", "completed"}:
+        # Either of these old results would offer Continue if it became the new attempt's result.
+        write_task_result(sender, tid, status, reason_code="provider_failure" if status == "failed" else "round_limit")
+
+    observations = (*read_and_copy(), *read_and_copy())
+    for row in observations:
+        assert row.get("earlier_stop") == earlier
+        assert row["task_attempt"] == receiver_attempt
+        if receiver_attempt == 2:
+            assert row["status"] == ("interrupted" if local_stop else "running")
+            assert not row.get("cancel_origin")
+    if receiver_attempt == 2:
+        assert _ended_work_facts(observations[0], tid)["continuation_offer"]["refusal"] == "predecessor_live"
+        assert admit_continuation(tid, action_nonce=NONCE)["error"] == "predecessor_live"
+        assert not workers.PENDING
+    # The canonical Stop door can supply its own terminal cause even when the replica was a previous attempt.
+    assert workers._write_failure_result(tid, status="cancelled", stop_source=source) == "cancelled"
+    facts = _ended_work_facts(load_effective_task_result(tmp_path, tid, materialize_artifacts=False), tid)
+    assert facts["cause"] == "cancelled" and facts.get("earlier_stop") == earlier
+    assert facts["continuation_offer"]["eligible"] is (not refusal)
+    answer = admit_continuation(tid, action_nonce=NONCE)
+    assert answer["ok"] is (not refusal), answer
+    if refusal:
+        assert answer["error"] == refusal
+        assert not workers.PENDING
+    else:
+        assert workers.PENDING[0]["id"] == answer["successor_task_id"]
+
+
+@pytest.mark.parametrize("canonical,replica,accepted", [
+    ({"metadata": {"task_attempt": 2}}, {"_attempt": 1}, False),
+    pytest.param({"metadata": {"task_attempt": 1}}, {"_attempt": 0}, False, id="older-zero"),
+    ({"task_attempt": 2, "metadata": {"attempt": 2}}, {"task_attempt": 2, "metadata": {}}, False),
+    ({"task_attempt": 1, "started_at": 200}, {"task_attempt": 1, "started_at": 100}, False),
+    ({"task_attempt": 1}, {"task_attempt": True}, False),
+    ({"task_attempt": 2}, {}, True),
+    ({"task_attempt": 1, "started_at": 100}, {"task_attempt": 2, "started_at": 200}, True),
+])
+def test_running_replica_preserves_recorded_attempt_fields(canonical, replica, accepted):
+    from ouroboros.post_task_checkpoint import project_replica_task_result_fields
+    from ouroboros.terminal_time import task_attempt_witness
+
+    current = {"task_id": "root", "status": "running", **canonical}
+    progress = {"task_id": "root", "status": "running", "result": "child progress", **replica}
+    row = {**current, **project_replica_task_result_fields(current, progress)}
+    expected = {**current, **progress} if accepted else current
+    assert row.get("result") == expected.get("result")
+    assert task_attempt_witness(row) == task_attempt_witness(expected)
+
+
+@pytest.mark.parametrize("earlier", [None, "deadline"])
+@pytest.mark.parametrize("canonical,replica,matches", [
+    ({"task_attempt": 2}, {"task_id": "other", "task_attempt": 2}, False),
+    ({"task_attempt": 2, "started_at": "2026-11-10T11:00:00Z"},
+     {"task_attempt": 2, "started_at": "2026-11-10T10:00:00Z"}, False),
+    ({"metadata": {"attempt": 1}}, {"metadata": {"attempt": True}}, False),
+    ({"task_attempt": 0}, {"task_attempt": 0}, False),
+    pytest.param({"task_attempt": 0, "started_at": 100}, {"task_attempt": 0, "started_at": 100}, True,
+                 id="started-zero"),
+    ({}, {}, False),
+    ({"started_at": "2026-11-10T10:00:00Z"}, {"started_at": "2026-11-10T10:00:00Z"}, True),
+    ({"task_attempt": 2}, {"task_attempt": 2}, True),
+])
+def test_a_replica_needs_matching_task_and_attempt_evidence(tmp_path, monkeypatch, canonical, replica, matches, earlier):
+    from ouroboros import task_status
+    from ouroboros.server_routing_context import _ended_work_facts
+
+    child = tmp_path / "child"
+    current = {"task_id": "root", "status": "running", "child_drive_root": str(child), **canonical}
+    source = {"task_id": "root", "status": "cancelled", "reason_code": "cancelled",
+              "cancel_origin": {"source": "owner_restart"}, **replica}
+    if earlier:
+        source["earlier_stop"] = earlier
+    monkeypatch.setattr(task_status, "load_task_result", lambda root, tid: source if root == child else current)
+    row = task_status.load_effective_task_result(tmp_path, "root", materialize_artifacts=False)
+    facts = _ended_work_facts(row, "root")
+    assert row["task_id"] == "root" and facts.get("earlier_stop") == (earlier if matches else None)
+    assert row["status"] == ("cancelled" if matches else "running")
+    if matches:
+        assert facts["continuation_offer"]["refusal"] == ("hard_limit_reached" if earlier else "")
+    else:
+        assert facts["continuation_offer"]["refusal"] == "predecessor_live"
+
+
+@pytest.mark.parametrize("winner,later", [
+    pytest.param("interrupted", "budget_exhausted", id="interrupted"),
+    pytest.param("cancelled", "budget_exhausted", id="cancelled"),
+    pytest.param("interrupted", "provider_failure", id="legacy-hard-first"),
+])
+def test_pool_cancel_reads_the_stop_at_its_terminal_write(tmp_path, monkeypatch, winner, later):
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _running_predecessor(tmp_path, "pred-1")
+    if later == "provider_failure":
+        prior = load_task_result(tmp_path, "pred-1")
+        seed_result(tmp_path, "pred-1", {**prior, "status": "interrupted", "reason_code": "budget_exhausted"})
+    else:
+        write_task_result(tmp_path, "pred-1", "interrupted", reason_code="provider_failure")
+    competing = {}
+
+    def reconstruct(task_id, *, fields):
+        write_task_result(tmp_path, task_id, winner, reason_code=later)
+        competing.update(load_task_result(tmp_path, task_id))
+        return {}
+
+    monkeypatch.setattr(workers, "reconstruct_task_cost", reconstruct)
+    assert workers._write_failure_result("pred-1", status="cancelled") == "cancelled"
+    row = load_task_result(tmp_path, "pred-1")
+    if winner == "cancelled":
+        assert row == competing
+    else:
+        assert row["reason_code"] == "cancelled" and row["earlier_stop"] == "budget_exhausted"
 
 
 @pytest.mark.parametrize("stored,admitted,cause_or_refusal", [

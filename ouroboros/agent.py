@@ -1105,6 +1105,7 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
             emit_task_results(self.env, self.memory, self.llm, self._pending_events, task, text, usage, llm_trace,
@@ -1121,6 +1122,7 @@ class OuroborosAgent:
         self._emit_live_log(
             "task_started",
             task_id=self._current_task_id or "",
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             task_type=self._current_task_type,
             task_text=str(task.get("text") or "")[:200],
             direct_chat=bool(task.get("_is_direct_chat")),

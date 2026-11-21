@@ -235,7 +235,9 @@ def test_a_refusal_that_offers_resume_closes_with_the_ended_work(env, reason):
 @pytest.mark.parametrize("marks", [
     {"_continuation_prepared": True}, {"_owner_hold": {"reason": "owner"}},
     {"_budget_pause_hold": {"reason": "dispatch_outcome_unknown"}},
-], ids=["publication_unconfirmed", "owner_hold", "dispatch_unknown"])
+    {"_budget_pause": {"refusal": {"reason": "dispatch_outcome_unknown", "dispatch_unknown": True,
+                                  "refusal_basis": "saved_work_unverified"}}},
+], ids=["publication_unconfirmed", "owner_hold", "dispatch_unknown", "saved_source_unverified"])
 def test_an_unknown_dispatch_or_an_owner_hold_keeps_the_helper(env, marks):
     _work_root(env.root)
     write_task_result(env.root, CHILD, "scheduled", root_task_id=ROOT, parent_task_id=ROOT, delegation_role="subagent")
@@ -432,6 +434,41 @@ def test_a_failed_capture_returns_the_row_and_the_watchdog_finishes_it(env, monk
     assert load_task_result(env.root, CHILD)["status"] == "scheduled"
     assert sweep_cancel_intents(now=time.time() + 3600) == {CHILD: "cancelled"}
     _closed(env)
+
+
+@pytest.mark.parametrize("ended", [1, 2, 3, None], ids=["earlier", "same", "later", "unnamed"])
+def test_a_closure_skips_the_publication_check_only_for_a_proven_earlier_attempts_end(env, monkeypatch, ended):
+    """The child drive still holds a settled end beside the helper's open row, which names attempt 2. Only an end with a
+    smaller integer attempt is proven no end of it (copy-back declines it): the closure goes on to its own capture
+    without asking for a publication. An equal, later or unnamed end keeps the check, and a publication that cannot
+    say holds the closure as before: the row is given back and the watchdog retries."""
+    import ouroboros.headless as headless
+    from ouroboros.headless import prepare_task_drive
+
+    _work_root(env.root)
+    child = prepare_task_drive(env.root, CHILD, "empty")
+    placement = {"drive_root": str(child), "budget_drive_root": str(env.root)}
+    _paused_helper(env.root, env.monkeypatch, extra=placement)
+    write_task_result(env.root, CHILD, "scheduled", task_attempt=2, **placement)
+    write_task_result(child, CHILD, "completed", result="An earlier attempt's answer",
+                      **({} if ended is None else {"task_attempt": ended}))
+    asked = []
+
+    def cannot_say(root, row):
+        asked.append(row["id"])
+        return {"task_id": row["id"], "result": None, "error": "", "terminal_source_present": None}
+
+    monkeypatch.setattr(headless, "prepare_terminal_task_files", cannot_say)
+    minted, outcomes = _sweep(env)
+    assert minted == [CHILD]
+    if ended == 1:
+        assert outcomes == {CHILD: "cancelled"} and asked == []
+        assert "artifact_error" not in _closed(env)
+    else:
+        assert outcomes == {CHILD: "failed"} and asked == [CHILD]
+        assert _pending(env) is not None and ci.active_intent(env.root, CHILD)
+        row = load_task_result(env.root, CHILD)
+        assert row["status"] == "scheduled" and "artifact_error" not in row
 
 
 def test_a_closed_helper_lets_the_last_root_fence_go_and_its_card_settles_after_task_done(env):

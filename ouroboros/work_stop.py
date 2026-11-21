@@ -45,21 +45,57 @@ STOP_REASONS = {
     "authority": {"cause": "authority", "release": "resume", "ui_code": "budget_paused"},
     "sleep": {"cause": "wait", "release": "none", "ui_code": "sleeping"},
 }
+# Evidence from checks which share the custody reason dispatch_outcome_unknown.
+_REPLAY_TEXT = {
+    "dispatch_unconfirmed": "An earlier assignment may already have reached a worker",
+    "saved_work_unverified": "The saved work could not be verified for this attempt",
+    "resume_evidence_unavailable": "The evidence for starting this attempt could not be verified",
+    "saved_wait_unverified": "The saved wait could not be cleared to resume",
+    "schedule_receipt_busy": "The scheduled run's record was busy",
+    "schedule_receipt_unverified": "The record for this scheduled run could not be verified",
+    "schedule_settled": "The scheduled run has already ended",
+    "never_admitted": "The task was never admitted to run",
+    "task_terminal": "The task has already ended",
+    "cancel_requested": "Cancellation has been requested",
+}
+_REFUSAL_TEXT = {
+    **_REPLAY_TEXT,
+    "continuation_publication_unconfirmed": "Continue has not been confirmed in the queue",
+    "stale_queue_row_grant_consumed": "The earlier Resume was already used",
+    "stale_resume_grant_superseded": "The earlier Resume no longer matches the current pause",
+    "resume_grant_revocation_unwritten": "Withdrawal of the earlier Resume could not be recorded",
+    "restart_revocation_unwritten": "The restart could not record withdrawal of the earlier Resume",
+    "pause_record_unreadable_at_revoke": "The pause record could not be read when withdrawing Resume",
+    "malformed_resume_identity": "The record does not identify which Resume was granted",
+    "root_acceptance_fenced_at_restore": "The root work entered result review",
+    "owner_held": "An owner hold is in effect",
+    "pause_record_missing": "No current pause record was found",
+    "pause_record_unreadable": "The pause record could not be read",
+    "pause_source_missing": "The pause has no saved work to resume",
+    "pause_source_unreadable": "The work saved at the pause could not be read",
+    "pause_identity_mismatch": "The saved pause belongs to a different pause request",
+    "not_an_exact_pause": "The queue has no exact pause to restore",
+    "owner_wait_source_unavailable": "The saved wait could not be restored",
+    "invalid_acceptance_fence_snapshot": "The saved acceptance state could not be verified",
+    "invalid_budget_fence_snapshot": "The saved budget hold could not be verified",
+    "restore_failed": "Its saved state could not be restored",
+}
 # Product words shared by the owner's work projection and the mind's roster.
 STOP_TEXT = {
+    **_REFUSAL_TEXT,
     "paused_by_owner": "You paused it", "paused_by_mind": "Ouroboros paused it",
     "paused_unattributed": "", "saved_on_stop": "Saved when the app stopped",
     "after_restart": "Held after a restart", "after_panic": "Stopped by Panic",
     "spending_limit": "Spending limit reached", "technical_pause": "After a technical problem",
     "awaiting_selection": "Waiting for Ouroboros or you to resume it",
-    "restore_failed": "Its saved state could not be restored", "held": "Held",
+    "held": "Held",
     "start_unconfirmed": "Its last start is unconfirmed, or its saved work could not be read",
     "sleeping": "Sleeping until it is woken",
     "earlier_work_unconfirmed": "Continue starts when the earlier attempt's work is confirmed finished",
 }
 _CAUSE_CODES = {"pause": "paused_unattributed", "app_stop": "saved_on_stop", "panic": "after_panic",
                 "money": "spending_limit", "authority": "technical_pause",
-                "awaiting_selection": "awaiting_selection", "refusal": "restore_failed"}
+                "awaiting_selection": "awaiting_selection"}
 _PAUSE_CAUSES = {"pause": "owner", "app_stop": "restart", "money": "budget", "authority": "authority"}
 
 
@@ -84,6 +120,15 @@ def record_policy(record: dict | None) -> dict:
     if policy["cause"] != "refusal":
         policy["release"] = record.get("release", policy["release"])
     return policy
+
+
+def _refusal_code(reason: str, basis: str | None = None) -> str:
+    reason = reason.removeprefix("restore_refused:")
+    if reason == "dispatch_outcome_unknown":
+        return basis if isinstance(basis, str) and basis in _REPLAY_TEXT else "start_unconfirmed"
+    if reason == "_owner_hold":
+        return "owner_held"
+    return reason if reason in _REFUSAL_TEXT else "held"
 
 
 def hold_fact(task: dict | None) -> dict | None:
@@ -162,7 +207,7 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     refusal = task.get("refusal") or continuation_refusal(task)
     point = pause_marker(task)
     if not stop and not refusal and point.get("reason") and record_policy(point)["cause"] == "refusal":
-        refusal = {"reason": point["reason"]}
+        refusal = {key: point[key] for key in ("reason", "refusal_basis") if key in point}
     cause = stop.get("cause")
     code = _CAUSE_CODES.get(cause, "held")
     author = pause_author(stop)
@@ -170,12 +215,17 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
         code = {"owner": "paused_by_owner", "ouroboros": "paused_by_mind"}.get(author["actor"], code)
     elif cause == "app_stop" and stop.get("door") == "owner_restart":
         code = "after_restart"
+    elif cause == "refusal":
+        code = _refusal_code(str(stop.get("reason") or ""), stop.get("refusal_basis"))
     wait = record_policy(hold_fact(task)) if not stop else {}
     sleeping = not stop and record_policy(pause_marker(task) or task.get("budget_pause")).get("cause") == "wait"
     if not stop:
-        unknown_start = refusal and reason_policy(str(refusal.get("reason") or "")).get("dispatch_unknown")
-        code = ("earlier_work_unconfirmed" if wait.get("wait_for") else "start_unconfirmed" if unknown_start
-                else "restore_failed" if refusal else "sleeping" if sleeping else "held")
+        if wait.get("wait_for"):
+            code = "earlier_work_unconfirmed"
+        elif refusal:
+            code = _refusal_code(str(refusal.get("reason") or ""), refusal.get("refusal_basis"))
+        elif sleeping:
+            code = "sleeping"
     # An interrupted, consumed handoff can still need addressed Resume even
     # though its stop was already released; the census names that existing door.
     needs_resume = refusal or task.get("can_resume")
@@ -710,6 +760,13 @@ def acceptable_unknown(blockers) -> list:
     return ids if rows and len(ids) == len(rows) and all(ids) else []
 
 
+def unsafe_replay_response(observation: dict) -> dict:
+    """Keep the admission error and action; say which of its checks refused this attempt."""
+    basis = observation.get("refusal_basis")
+    return {"ok": False, "error": observation["unsafe_error"], "action": "cancel_or_new_run",
+            **({"refusal_basis": basis} if basis else {})}
+
+
 def resume_outcome(outcome: dict) -> dict:
     """Ordinary words beside typed refusals, shared by HTTP and both mind doors; an accepted
     Resume also names the damaged records its Pause did not wait for (``membership_gaps``)."""
@@ -723,14 +780,15 @@ def resume_outcome(outcome: dict) -> dict:
     error = str(outcome.get("error") or "")
     phrases = {"panic_requires_owner_resume": "Only the owner can release a Panic hold.",
                "update_in_progress": "An update is in progress; press Resume after the restart.",
-               "pause_source_unreadable": STOP_TEXT["restore_failed"],
-               "pause_record_missing": STOP_TEXT["restore_failed"],
                "root_still_paused": STOP_TEXT["awaiting_selection"],
                "root_resume_grant_missing": STOP_TEXT["awaiting_selection"]}
     from ouroboros.pause_notices import authority_wait_text
     if error in {"billing_authority_unavailable", "billing_authority_unreadable", "control_authority_unreadable"} and (
             cause := authority_wait_text(outcome.get("cause"))):
         phrases[error] = cause
+    refusal = _refusal_code(error, outcome.get("refusal_basis"))
+    if refusal != "held" or error.startswith("restore_refused:"):
+        phrases[error] = STOP_TEXT[refusal]
     words = []
     for block in outcome.get("blockers") or ():
         kind, tid = block.get("kind"), block.get("task_id", "")

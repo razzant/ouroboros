@@ -508,7 +508,7 @@
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
- * @property {string=} kind
+ * @property {string=} kind On an accepted web user echo, "room_echo" limits display to chat_id and also_rooms.
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
  * @property {number[]=} also_rooms  // the other Projects that show this row: the frame is theirs too, one message
  */
@@ -745,14 +745,7 @@
 
 /** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
 
-/** Additive /api/chat/history terminality projection.
- * @typedef {Object} TaskOutcomeHistoryFields
- * @property {"working"|"done"|"warn"|"error"|"cancelled"=} outcome_phase  // canonical display phase; "working" is not terminal
- * @property {boolean=} outcome_final  // true only after the canonical task outcome settles; false marks a pre-finalization narrative
- * @property {{status: string, phase: string, ts: string, provenance: string, model_execution?: Object}=} historical_terminal
- * @property {Object=} model_execution
- * @property {{v: 1, occurred_at: ?string, source: "executor_terminal"|"supervisor_cancel"|"unknown", attempt: Object}=} terminal_time  // a task_summary row's host end fact; `ts` stays its publication time
- */
+/** @typedef {import('./client_contract_types.js').TaskOutcomeHistoryFields} TaskOutcomeHistoryFields */
 
 /**
  * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git

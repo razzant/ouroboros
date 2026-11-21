@@ -360,7 +360,7 @@ def test_split_capture_reads_the_published_files_before_copyback(tmp_path, monke
         "ready_with_changes" if stage == "canonical-references" else "pending")
 
 
-@pytest.mark.parametrize("case", ["attempt", "start", "other_layout", "reopened", "finalizing", "native_pending", "readonly"])
+@pytest.mark.parametrize("case", ["attempt", "start", "other_layout", "reopened", "finalizing", "native_pending", "readonly", "parent_ended"])
 def test_split_capture_rejects_a_replica_outside_the_current_publication(tmp_path, monkeypatch, case):
     from ouroboros import cli
     from ouroboros.task_results import write_task_result
@@ -371,12 +371,12 @@ def test_split_capture_rejects_a_replica_outside_the_current_publication(tmp_pat
     ctx, target, _, records = publish_child_patch(tmp_path, monkeypatch, producer_layout=layout)
     changes = {
         "attempt": {"task_attempt": 2}, "start": {"started_at": "2026-01-01T01:00:00Z"},
-        "other_layout": {}, "finalizing": {"artifact_status": "finalizing"},
+        "other_layout": {}, "parent_ended": {}, "finalizing": {"artifact_status": "finalizing"},
         "native_pending": {"native_capture_pending": {"run": {"effect": "unknown"}}},
         "readonly": {"delegation_role": "subagent", "task_constraint": {"mode": "local_readonly_subagent"}},
         "reopened": {"artifacts": [{**records["workspace_patch_manifest"], "kind": "workspace_capture_history"}]},
     }
-    write_task_result(ctx.drive_root, "child", "running", **changes[case])
+    write_task_result(ctx.drive_root, "child", "failed" if case == "parent_ended" else "running", **changes[case])
     with task_file_client(ctx.drive_root) as http:
         reader, _ = use_cli_http(monkeypatch, http)
         public = reader.request("GET", "/api/tasks/child")

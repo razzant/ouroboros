@@ -256,6 +256,7 @@ def test_crash_retry_admission_block_terminalizes_task(tmp_path):
 
     assert writes[-1][1] == "failed"
     assert writes[-1][2]["reason_code"] == "worker_crash_retry_admission_blocked"
+    assert writes[-1][2]["task_attempt"] == 1
     assert terminal and terminal[-1][0][2] == "failed"
 
 
@@ -555,7 +556,7 @@ def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_pat
     # Fires: -15 with saved work -> attempt 2, the same id, saved state attached, no handoff row.
     job, events = _reserved_job(tmp_path, monkeypatch, exitcode=-15, attempt=1)
     task_id = job["task_id"]
-    write_task_result(tmp_path, task_id, "running")
+    write_task_result(tmp_path, task_id, "running", reason_code="budget_exhausted")
     _saved(tmp_path, task_id, 1)
     recover_confirmed_dead_worker(job)
     assert [t["id"] for t in enqueued] == [task_id] and enqueued[0]["_attempt"] == 2
@@ -564,6 +565,7 @@ def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_pat
     assert released == [(task_id, "interrupted", True)], "its open delegated runs end as an abrupt loss"
     row = load_task_result(tmp_path, task_id)
     assert row["status"] == "interrupted" and "signal 15" in row["result"]
+    assert (row["task_attempt"], row["reason_code"], row["earlier_stop"]) == (1, "worker_crash", "worker_crash")
     assert events.empty(), "no terminal was fabricated for a retried attempt"
 
     # Quiet: an exit-code death keeps its handoff reservation.
@@ -576,10 +578,12 @@ def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_pat
     # The bound holds: the retried attempt's signal death is terminal, with the signal recorded.
     W.WORKERS.clear(); W.RUNNING.clear(); q.RUNNING = W.RUNNING
     job, events = _reserved_job(tmp_path, monkeypatch, exitcode=-15, attempt=2)
-    write_task_result(tmp_path, job["task_id"], "running")
+    # The previous interruption is still on disk when attempt 2 dies before mirroring RUNNING.
+    write_task_result(tmp_path, job["task_id"], "interrupted", task_attempt=1, reason_code="deadline")
     recover_confirmed_dead_worker(job)
     row = load_task_result(tmp_path, job["task_id"])
     assert row["status"] == "failed" and row["reason_code"] == "worker_crash_retry_exhausted"
+    assert row["task_attempt"] == 2 and not row.get("earlier_stop")
     assert row["crash_signal"] == 15 and row["crash_exitcode"] == -15 and len(enqueued) == 2
     assert events.get_nowait()["type"] == "task_done"
     assert {"worker_crash_signal", "worker_crash_retry_exhausted"} <= TECHNICAL_REASON_CODES  # old rows stay Continue-eligible
@@ -782,6 +786,33 @@ def test_a_crashed_child_retries_on_its_own_id_under_its_parent_and_root(tmp_pat
     assert not retry.get('timeout_retry_from') and retry.get('original_task_id', job['task_id']) == job['task_id']
 
 
+@pytest.mark.parametrize('child_status', ['failed', 'completed'])
+def test_another_attempts_child_terminal_neither_holds_the_dead_worker_nor_fails_the_live_row(
+        tmp_path, monkeypatch, child_status):
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    job, _events = _reserved_job(tmp_path, monkeypatch, child=True, exitcode=1, attempt=2)
+    lineage = {'parent_task_id': 'parent-task', 'root_task_id': 'root-task', 'delegation_role': 'subagent'}
+    for task in {id(job['task']): job['task'], id(job['meta']['task']): job['meta']['task']}.values():
+        task.update(lineage)
+    monkeypatch.setattr(W, 'QUEUE_MAX_RETRIES', 3)
+    child = Path(job['task']['drive_root'])
+    write_task_result(child, job['task_id'], child_status, task_attempt=1, started_at='2026-09-24T18:18:27+00:00',
+                      result='Attempt one answer')
+    write_task_result(tmp_path, job['task_id'], 'running', task_attempt=2, started_at='2026-09-25T15:19:01+00:00',
+                      child_drive_root=str(child), result='Attempt two work', **lineage)
+    enqueued = []
+    monkeypatch.setattr(q, 'enqueue_task', lambda task, front=False: enqueued.append(dict(task)) or task)
+    recover_confirmed_dead_worker(job)  # another attempt's end is absence: the crash policy runs, no held recovery
+    [retry] = enqueued
+    assert (retry['id'], retry['_attempt']) == (job['task_id'], 3)
+    row = load_task_result(tmp_path, job['task_id'], strict=True)
+    assert not {'artifact_status', 'artifact_error'} & row.keys()
+
+
 def test_file_preparation_runs_without_queue_or_lifecycle_lock(tmp_path, monkeypatch):
     import threading
     import supervisor.queue as q
@@ -966,12 +997,16 @@ def test_retry_queue_transition_is_atomic_and_failure_retains_binding(tmp_path, 
 def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path, monkeypatch, cause):
     import supervisor.queue as q
     import supervisor.workers as W
-    from ouroboros.task_results import load_task_result
+    from ouroboros.task_results import load_task_result, write_task_result
     from supervisor.worker_health import recover_confirmed_dead_worker
 
-    job, events = _reserved_job(tmp_path, monkeypatch)
+    job, events = _reserved_job(tmp_path, monkeypatch, attempt=2)
+    monkeypatch.setattr(W, 'QUEUE_MAX_RETRIES', 2)
+    job['task'].pop('_attempt')
+    job['meta']['task'].pop('_attempt')  # only the worker slot observed attempt 2
+    write_task_result(tmp_path, job['task_id'], 'interrupted', task_attempt=1, reason_code='deadline')
     if cause == 'owner_wait':
-        job['meta']['owner_wait'] = {'task_attempt': 1, 'source_ref': {'retained': True}}
+        job['meta']['owner_wait'] = {'task_attempt': 2, 'source_ref': {'retained': True}}
     elif cause == 'inactive_owner':
         job['worker'].active_capacity = False
     else:
@@ -988,6 +1023,8 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     assert result['reason_code'] == ('evolution_stopped_no_retry' if cause == 'evolution_stopped'
                                      else 'worker_crash_owner_wait')
     assert result['status'] == ('cancelled' if cause == 'evolution_stopped' else 'failed')
+    assert result['task_attempt'] == 2 and not result.get('earlier_stop')
+    assert result['outcome_axes']['execution']['reason_code'] == result['reason_code']
     done = events.get_nowait()
     assert done['accounted_upper_bound_usd'] == 12.5 and done['rounds'] == 7
     q.enqueue_task.assert_not_called()
@@ -1314,11 +1351,15 @@ def test_a_dead_carriers_turn_retries_on_its_lane_never_through_pending(tmp_path
     import supervisor.queue as q
     import supervisor.workers as W
     from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import execution_owner_record
     from supervisor.worker_health import recover_confirmed_dead_worker
     from tests.conversation_carrier_support import dispatched_tasks, install_lane_spare
 
-    task = {**_make_task("lane-turn"), "_is_direct_chat": True,
-            "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}}
+    task = {**_make_task("lane-turn"), "_is_direct_chat": True}
+    del task["_attempt"]  # admitted unnumbered: ``conversation_lane.admit_turn`` stamps its owner's physical 0
+    task["_execution_owner"] = {**execution_owner_record(tmp_path, task, "direct"), "lane": LANE_CONVERSATION,
+                                "executor": EXECUTOR_WORKER}
     carrier = _make_worker(busy_task_id=task["id"], exitcode=0)  # it exited: no signal, no terminal written
     carrier.lane = LANE_CONVERSATION
     W.WORKERS[0] = carrier
@@ -1337,6 +1378,8 @@ def test_a_dead_carriers_turn_retries_on_its_lane_never_through_pending(tmp_path
     assert enqueued == [] and W.PENDING == []
     retry = W.RUNNING[task["id"]]
     assert retry["lane"] == LANE_CONVERSATION and retry["attempt"] == 2 and retry["task"]["_attempt"] == 2
+    row = load_task_result(tmp_path, task["id"])  # the dead first launch's outcome: its own 0, not the queue's 1
+    assert (row["status"], row["task_attempt"]) == ("interrupted", 0), row
     assert retry["client_message_id"] == "cm-1" and retry["reply_expected"] is True
     assert retry["worker_id"] == spare.wid and spare.busy_task_id == task["id"]
     assert [queued["id"] for queued in dispatched_tasks(spare)] == [task["id"]]

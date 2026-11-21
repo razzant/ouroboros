@@ -493,13 +493,18 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // Any other run is named as its card is (the producer's suggested_name), never by its whole order.
             const named = t._presence_turn ? presenceWorkName(census, ownId) : String(t.suggested_name || t.title || '').trim();
             const label = esc(named || (t._presence_turn ? 'Live turn' : q.type || ownId || 'task'));
-            const spent = kind === 'running' ? elapsedWords(q.runtime_sec) : '';
+            // The queue and the census are two reads: across a retry of this id they can name two attempts, and the
+            // queue's time is then not the time of the census words beside it, so the row lacks one (DESIGN §2).
+            const censusRow = ownId ? activities.find((entry) => entry?.activity_id === ownId) : undefined;
+            const otherAttempt = Number.isSafeInteger(q.attempt) && Number.isSafeInteger(censusRow?.task_attempt)
+                && q.attempt !== censusRow.task_attempt;
+            const spent = kind === 'running' && !otherAttempt ? elapsedWords(q.runtime_sec) : '';
             const rt = spent ? ` · ${spent}` : '';
             const projected = workOfEpisode(census, ownId) || memberState(census, ownId);
             const view = workRowView(projected || { activity: 'unknown', confirmed: false });
             const parked = projected?.activity === 'paused';
             const kindLabel = view.word;
-            const outcome = ownId && ownOutcomePhase(activities.find((entry) => entry?.activity_id === ownId),
+            const outcome = ownId && ownOutcomePhase(censusRow,
                 view.outcome || (projected?.activity === 'working' && projected.transition === 'none') ? '' : kindLabel);
             // The chip already says Finalizing beside its outcome; retain only the work's other facts.
             const secondary = outcome && view.outcome ? workLine(projected, kindLabel) : view.secondary;

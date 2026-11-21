@@ -1434,7 +1434,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
         "predecessor_writers_unsettled", "selection_owner_held",
     } else 404
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
-                             "action", "blockers", "message", "acceptable_unknown") if result.get(key)}},
+                             "action", "blockers", "message", "refusal_basis", "acceptable_unknown") if result.get(key)}},
                         status_code=status)
 
 

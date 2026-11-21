@@ -1,11 +1,9 @@
 """The Done card follows the answer: the outbox's own debt gates it (owner Fork 2, 20:48).
 
-``_delivery_disposition`` reads only the terminal-delivery registry: ``owed``
-holds the card (a pending model final, Stop/reap salvage receipt or cascade
-digest — debt outranks every older or technical receipt), ``exhausted`` and an
-unreadable registry (``unknown``) are SHOWN on the card, never hidden, and
-nothing is recomputed from the stored result's prose. The two writers that used
-to write their terminal row before owing the salvage answer (pending-deadline
+``owed`` for any pending model final, Stop/reap salvage receipt or cascade digest
+holds the card. A delivery warning and its saved copy belong to the evidenced
+answer and chat. Unbound failures stay visible as task facts. The two writers
+that used to write their terminal row before owing the salvage answer (pending-deadline
 expiry, running cancel) now owe first, so a settle landing between the write
 and the registration sees "not yet", never a card without the answer.
 """
@@ -342,7 +340,7 @@ def test_an_exhausted_delivery_is_shown_with_its_saved_copy_and_a_late_receipt_c
     assert notice[0] == 9 and "was not confirmed" in notice[1] and notice[2]["system_type"] == "terminal_incident"
     (card,) = _terminal_rows(tmp_path, tid)
     assert card["outcome_phase"] == "warn" and card["terminal_delivery"] == {
-        "state": "exhausted", "delivery_id": event["delivery_id"], "preserved_path": mark["preserved_path"]}
+        "state": "exhausted", "delivery_id": event["delivery_id"], "chat_id": 9, "preserved_path": mark["preserved_path"]}
     assert card["reason_detail"] == ("Sending the final answer was not confirmed after the delivery attempts "
                                      f"ran out; a copy of the answer is saved at {mark['preserved_path']}.")
     # The queued original lands after all: the real receipt retires only that id's mark.
@@ -351,6 +349,88 @@ def test_an_exhausted_delivery_is_shown_with_its_saved_copy_and_a_late_receipt_c
     assert sent == [(9, event["text"])]
     receipts = td.terminal_answer_receipts(tmp_path, tid)
     assert receipts["state"] == "delivered" and receipts["exhausted"] == []
+
+
+@pytest.mark.parametrize(("chat", "destination", "attempt", "binding"), [
+    (0, 0, 1, "current"), (0, 7, 1, "different"), (7, 0, 1, "different"),
+    (None, 0, 1, "unbound"), (0, None, 1, "unbound"), (7, 7, 2, "different"),
+])
+def test_published_delivery_uses_the_recorded_attempt_and_address(tmp_path, monkeypatch, chat, destination, attempt, binding):
+    tid, words = "source-address", "Answer"
+    event = {"task_id": tid, "chat_id": destination, "progress_meta": {"task_attempt": attempt},
+             "text": words, "delivery_id": td.delivery_id_for(tid, words)}
+    assert td.register_pending_delivery(tmp_path, event)
+    with monkeypatch.context() as worker:
+        worker.setattr("ouroboros.utils.in_worker_process", lambda: True)
+        td._retire_exhausted(tmp_path, [event])
+    [failure] = td.terminal_answer_receipts(tmp_path, tid)["exhausted"]
+    path = failure["preserved_path"]
+    assert path
+    write_task_result(tmp_path, tid, "completed", _terminal_observed=True, chat_id=chat, result=words, task_attempt=1)
+    assert settle_terminal_projection(tmp_path, tid) == SETTLEMENT_SETTLED
+    [card] = _terminal_rows(tmp_path, tid)
+    if binding == "current":
+        assert card["terminal_delivery"] == {"state": "exhausted", "delivery_id": event["delivery_id"],
+                                             "chat_id": 0, "preserved_path": path}
+    elif binding == "different":
+        assert "terminal_delivery" not in card
+    else:
+        assert card["terminal_delivery"] == {"state": "exhausted", "scope": "task"}
+    for detail in (card["text"], card["completion_notice"]["detail"]):
+        assert (path in detail) is (binding == "current")
+        assert ("affected answer is unknown" in detail) is (binding == "unbound")
+
+
+@pytest.mark.parametrize("registry", ["absent", "unreadable", "id-only"])
+@pytest.mark.parametrize("saved", ["current", "different", "unbound", "adopted", "confirmed"])
+def test_retained_delivery_evidence_when_the_registry_has_no_answer(tmp_path, registry, saved):
+    tid, words = "retained-answer", "Current words"
+    copy = tmp_path / "retained-copy.txt"
+    copy.write_text(words if saved in ("current", "confirmed") else "Older words", encoding="utf-8")
+    path = str(copy)
+    did = td.delivery_id_for(tid, copy.read_text(encoding="utf-8"))
+    fields = {"terminal_delivery": {"state": "exhausted", "preserved_path": path,
+                                    **({"delivery_id": did, "chat_id": 7} if saved != "unbound" else {})}}
+    if saved == "adopted":
+        fields = {"reason_code": "finalization_incomplete", "terminal_origin": "host_salvage",
+                  "finalization_recovery": {"answer": "exhausted", "delivery_id": did, "attempt": 1}}
+    elif saved == "confirmed":
+        fields = {"terminal_delivery": {"state": "delivered", "delivery_id": did, "chat_id": 7}}
+    write_task_result(tmp_path, tid, "failed" if saved == "adopted" else "completed", _terminal_observed=True,
+                      chat_id=7, result=words, task_attempt=1, **fields)
+    if registry == "unreadable":
+        (tmp_path / "state").mkdir(exist_ok=True)
+        (tmp_path / "state" / "terminal_deliveries.json").write_text("{", encoding="utf-8")
+    elif registry == "id-only":
+        assert td.register_delivery(tmp_path, did)
+        assert td.terminal_answer_receipts(tmp_path, tid)["unverified_delivery_ids"] == [did]
+    assert settle_terminal_projection(tmp_path, tid) == SETTLEMENT_SETTLED
+    [card] = _terminal_rows(tmp_path, tid)
+    if saved == "current":
+        assert card["terminal_delivery"] == fields["terminal_delivery"]
+    elif saved == "confirmed":
+        assert "terminal_delivery" not in card and "could not be confirmed" not in card["text"]
+    elif saved == "different":
+        assert card.get("terminal_delivery") == ({"state": "unknown"} if registry == "unreadable" else None)
+    else:
+        assert card["terminal_delivery"] == {"state": "exhausted", "scope": "task"}
+        assert "affected answer is unknown" in card["completion_notice"]["detail"]
+    assert (path in card["text"]) is (saved == "current")
+
+
+@pytest.mark.parametrize("reached", [7, 0, None])
+def test_stop_receipt_keeps_the_destination_the_sender_confirmed(tmp_path, reached):
+    tid, episode = "stop-receipt", "one-stop"
+    did = f"cancel:{tid}:{episode}"
+    write_task_result(tmp_path, tid, "cancelled", _terminal_observed=True, chat_id=7, task_attempt=1,
+                      cancel_origin={"request_id": episode}, cancel_receipt={"settled_status": "cancelled", "delivery_id": did})
+    if reached is not None:
+        td.record_cancel_receipt_delivery(tmp_path, tid, did, reached, strict=True)
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "terminal_deliveries.json").write_text("{", encoding="utf-8")
+    assert settle_terminal_projection(tmp_path, tid) == SETTLEMENT_SETTLED
+    [card] = _terminal_rows(tmp_path, tid)
+    assert card.get("terminal_delivery") == (None if reached == 7 else {"state": "unknown"})
 
 
 def test_a_capacity_eviction_in_a_worker_records_the_mark_and_the_copy_only(tmp_path, monkeypatch):

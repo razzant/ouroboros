@@ -18,7 +18,9 @@ from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tupl
 from uuid import uuid4
 
 from ouroboros.contracts.task_constraint import normalize_task_constraint  # noqa: F401
-from ouroboros.post_task_checkpoint import CANONICAL_CUSTODY_FIELDS, project_replica_task_result_fields
+from ouroboros.post_task_checkpoint import (
+    CANONICAL_CUSTODY_FIELDS, project_replica_task_result_fields, replica_task_annotations, select_replica_attempt,
+)
 from ouroboros.delegate_named_evidence import published_workspace_evidence
 from ouroboros.workspace_file_outputs import _directory_direct_artifacts
 from ouroboros.task_results import (
@@ -560,6 +562,11 @@ def _copy_child_task_result_locked(parent_drive_root: pathlib.Path, task: Dict[s
     child_result = load_task_result(child_drive, task_id)
     if not isinstance(child_result, dict):
         return None
+    if not select_replica_attempt(canonical_existing, child_result)[0]:
+        if not replica_task_annotations(canonical_existing, child_result):
+            return canonical_existing
+        return write_task_result(parent_drive_root, task_id, canonical_existing["status"], strict_existing_dict=True,
+            _field_projector=lambda current, _: replica_task_annotations(current, child_result) or None)
     # Adopt the answer and deliverables now. Historical sources keep their exact
     # references and their child drive until the existing off-loop custody pass
     # verifies the archive. History size must not delay task_done or startup.
@@ -634,30 +641,37 @@ def _retry_child_task_refs_locked(parent: pathlib.Path, child: pathlib.Path, tas
                 patch = promote_child_task_ref_patch(parent, child, task_id, source)
                 basis = {key: source.get(key) for key in patch}
             else:
-                source = {**source, **project_replica_task_result_fields(source, replica)}
-                review = source.get("review_projection")
-                promotion = copy.deepcopy(replica["child_ref_promotion"])
-                # The same publication records the drive we read, not the replica's spelling of its placement.
-                patch = {"child_ref_promotion": promotion, "headless_child_drive_root": str(child)}
-                if isinstance(review, dict):
-                    patch["review_projection"] = review
-                basis = {"review_projection": review}
+                overlay = project_replica_task_result_fields(source, replica)
+                if not overlay:
+                    return source
+                source = {**source, **overlay}
+                patch, basis = {}, {}
+                if "status" in overlay:  # a task annotation is not adoption of these refs
+                    review = source.get("review_projection")
+                    promotion = copy.deepcopy(replica["child_ref_promotion"])
+                    # The same publication records the drive we read, not the replica's spelling of its placement.
+                    patch = {"child_ref_promotion": promotion, "headless_child_drive_root": str(child)}
+                    if isinstance(review, dict):
+                        patch["review_projection"] = review
+                    basis = {"review_projection": review}
 
             def project(current: dict, _incoming: dict) -> Optional[dict]:
                 if stop is not None and stop():
                     raise _GenerationClosed()  # re-asked at the commit, not only before the walk
                 if replica is not None and cancellation_blocks_child_result(current):
                     return None  # cancelled under the row lock: the child enriches nothing, not even by replica
-                selected = {**current, **project_replica_task_result_fields(current, replica)} if replica is not None else current
+                selected = current
+                if replica is not None:
+                    overlay = project_replica_task_result_fields(current, replica)
+                    if "status" not in overlay:
+                        return overlay or None  # the attempt moved on while child refs were being prepared
+                    if not patch:
+                        raise _RefPublicationChanged()
+                    selected = {**current, **overlay}
                 if {key: selected.get(key) for key in basis} != basis:
                     raise _RefPublicationChanged()
                 if replica is None and all(key in current and current[key] == value for key, value in patch.items()):
                     return None  # an unchanged retry rewrites nothing: no fresh updated_at/mtime (#1305)
-                if replica is not None and current.get("status") in _FINAL_STATUSES \
-                        and selected.get("status") != current["status"]:
-                    # A settled canonical row keeps its outcome; the child's is child_status.
-                    selected = {**selected, **{key: current[key] for key in ("status", "result", "error", "ts")
-                                               if key in current}, "child_status": replica.get("status")}
                 return {**(selected if replica is not None else {}), **patch, "status": selected["status"]}
 
             try:
@@ -705,12 +719,13 @@ def terminal_task_files_ready(canonical_root: pathlib.Path, task: Dict[str, Any]
 def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, Any]) -> Dict[str, Any]:
     """Finish one file-save attempt without turning an I/O failure into a worker crash.
 
-    The dispatcher re-reads CURRENT; pending refs keep custody. terminal_source_present is True after a strict terminal read,
-    False for absence/nonterminal, None for unknown; later write failure preserves that observation, never inventing a source.
+    The dispatcher re-reads CURRENT; pending refs keep custody. terminal_source_present is True after a strict terminal read
+    (an open row counts its child's end only when copy-back selects that attempt), False for absence, nonterminal or another
+    attempt's row, None for unknown; a later write failure keeps that observation, never invents a source, never fails an open row.
     """
     task_id = str(task.get("id") or task.get("task_id") or "")
     report: Dict[str, Any] = {"task_id": task_id, "result": None, "error": "", "terminal_source_present": None}
-    from ouroboros.task_custody import CustodyBusy
+    from ouroboros.task_custody import CustodyBusy, attempt_basis
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
     try:
@@ -724,6 +739,9 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
         source = current
         if child is not None and not adopted and not cancelled:
             source = load_task_result(child, task_id, strict=True)
+            if (source and str(current.get("status") or "") not in _FINAL_STATUSES
+                    and not select_replica_attempt(current, source)[0]):
+                source = None  # copy-back declines another attempt's end for an open row: no source of this one
         report["terminal_source_present"] = bool(source and str(source.get("status") or "") in _FINAL_STATUSES)
         if not report["terminal_source_present"]:
             raise ValueError("terminal task source is missing or not settled")
@@ -764,9 +782,11 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
             if existing:
                 fields = dict(artifact_status=ARTIFACT_STATUS_FAILED, artifact_error=report["error"],
                               artifact_finalized_at=utc_now_iso())
-                report["result"] = write_task_result(  # the live row's bundle and outcome axis take the failure
+                report["result"] = write_task_result(  # only the row this step read, still settled, takes its failure: a retry or another end keeps its own
                     canonical_root, task_id, existing["status"], strict_existing_dict=True, **fields,
-                    _field_projector=lambda live, _: {**_artifact_projection(live, fields), "status": live["status"]})
+                    _field_projector=lambda live, _: ({**_artifact_projection(live, fields), "status": live["status"]}
+                                                      if str(live.get("status") or "") in _FINAL_STATUSES
+                                                      and attempt_basis(live) == attempt_basis(current) else None))
         except Exception:
             log.warning("Terminal file failure could not be persisted for %s", task_id, exc_info=True)
     return report

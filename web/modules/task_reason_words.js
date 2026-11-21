@@ -220,14 +220,20 @@ export function refusedByStop(evt = {}) {
         && ['cancelled', 'task_cancelled'].includes(evt.tool_result_meta.control_reason);
 }
 
-/** The headline of a finished step that did not succeed: held by Safety (never "failed"), ended by a control (never
- *  "failed"), refused further work without a call error, a command's exit, or a failed step. */
+/** These two producer buckets are handled refusals; neither increments the call-error count. */
+export function handledRefusalHeadline(evt) {
+    if (evt.is_error) return '';
+    if (evt.status === 'git_error') return tr('task.tools.git_refused', 'Git refused the operation');
+    if (evt.status === 'review_blocked') return tr('task.tools.review_blocked', 'Review blocked the operation');
+    return '';
+}
+
+/** The headline of a finished step that did not succeed. */
 export function failedStepHeadline(evt = {}) {
-    const exitCode = Number(evt.exit_code);
     const tool = evt.tool ? ` · ${evt.tool}` : '';
     if (evt.status === 'interrupted') return `${interruptedBy(evt.control_reason)}${tool}`;
-    return (evt.status === 'blocked' && refusedStepPhrase(evt)) || heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
-        ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
+    return (evt.status === 'blocked' && refusedStepPhrase(evt)) || handledRefusalHeadline(evt) || heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
+        ? `A command returned ${Number.isInteger(evt.exit_code) ? `exit code ${evt.exit_code}` : 'a non-zero exit code'}`
         : `One of the steps failed${tool}`);
 }
 

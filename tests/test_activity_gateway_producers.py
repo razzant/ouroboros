@@ -80,6 +80,61 @@ try {
         assert rows[task]["resume"] is (task == "warm-author")
 
 
+def _rendered_queue_rows(state, queue_body):
+    """Production Activity over both Python-produced bodies: each queue row's text, by its control's task id."""
+    script = """
+import { initActivity } from './modules/activity.js';
+import { setup } from './tests/dashboard_dom_fixture.js';
+let raw = '';
+for await (const chunk of process.stdin) raw += chunk;
+const { state, queue } = JSON.parse(raw), cleanup = [];
+const { mount, routes, ws } = setup({after: f => cleanup.push(f)});
+const response = data => ({ok: true, status: 200, json: async () => data});
+routes.set('/api/tasks?queue_only=1', response({queue}));
+routes.set('/api/state', response({...state, bg_consciousness_enabled: false}));
+routes.set('/api/schedules', response({tasks: []}));
+const activity = initActivity({mount, ws});
+try {
+    await activity.refresh();
+    const rows = mount.querySelector('[data-activity-section="queue"]').querySelectorAll('.activity-row');
+    process.stdout.write(JSON.stringify(Object.fromEntries(
+        rows.map(row => [row.querySelector('button').dataset.id, row.textContent]))));
+} finally {activity.destroy(); cleanup.reverse().forEach(f => f());}
+"""
+    rendered = subprocess.run([NODE_BIN, "--input-type=module", "-e", script],
+                              input=json.dumps({"state": state, "queue": queue_body}),
+                              text=True, encoding="utf-8", capture_output=True, cwd=WEB_ROOT, timeout=30)
+    assert rendered.returncode == 0, rendered.stderr
+    return json.loads(rendered.stdout)
+
+
+def test_a_queue_rows_time_stays_with_the_attempt_its_census_words_name(tmp_path, monkeypatch):
+    """The queue and the census are two reads. A retry of one id between them (the census still names attempt 1, the
+    published queue already attempt 2) never pairs the new attempt's time with the old attempt's words: that row says
+    no time. A row whose two reads name one attempt keeps its time."""
+    import re
+    import time
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    ids, started = ("retried", "steady"), time.time() - 1490
+    for wid, task_id in enumerate(ids):
+        write_task_result(tmp_path, task_id, "running", chat_id=0)
+        workers.RUNNING[task_id] = {"task": {"id": task_id, "type": "task", "chat_id": 0, "root_task_id": task_id},
+                                    "worker_id": wid, "attempt": 1, "started_at": started}
+    body = state_fields(tmp_path)  # the census read
+    old = workers.RUNNING["retried"]  # then the retry: the same id, its next attempt, started now
+    workers.RUNNING["retried"] = {**old, "attempt": 2, "started_at": time.time(), "task": {**old["task"], "_attempt": 2}}
+    assert queue.persist_queue_snapshot(reason="activity-retry-test")
+    queue_body = _queue_snapshot(tmp_path)  # the queue read
+    assert {row["activity_id"]: row["task_attempt"] for row in body["active_chat_activities"]
+            if row["activity_id"] in ids} == {"retried": 1, "steady": 1}
+    assert {row["id"]: row["attempt"] for row in queue_body["running"] if row["id"] in ids} == {"retried": 2, "steady": 1}
+    rows = _rendered_queue_rows(body, queue_body)
+    assert "Working" in rows["retried"] and "· task" in rows["retried"], rows["retried"]
+    assert not re.search(r"· \d", rows["retried"]), rows["retried"]
+    assert "Working" in rows["steady"] and re.search(r"· task · \d+ min", rows["steady"]), rows["steady"]
+
+
 def test_activity_background_lists_the_gateways_kept_services_and_stops_one_by_its_launch(tmp_path):
     """The real kept-service routes over a real kept launch, rendered by the production Activity module: the row says
     the service, its task's name, its state and printed address; Stop posts that launch with a reason; the stop's

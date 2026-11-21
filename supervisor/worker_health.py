@@ -499,7 +499,16 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
         or task.get("chat_id"),
         0,
     )
-    attempt = int(task.get("_attempt") or 1)
+    from ouroboros.terminal_time import execution_owner_attempt
+
+    observed_attempt = meta.get("attempt") or task.get("_attempt")
+    attempt = int(observed_attempt or 1)  # the queue's number: retry bound, budget, recovery, the next attempt
+    # The outcome names the attempt this execution ran as: a first direct launch keeps the 0 its bound owner
+    # recorded for the queue's 1 (``terminal_time.source_task_attempt``); without that owner the number stands.
+    recorded = observed_attempt if type(observed_attempt) is int and observed_attempt > 0 else None
+    if recorded == 1 and execution_owner_attempt(task_id, task.get("_execution_owner")) == 0:
+        recorded = 0
+    attempt_fields = {} if recorded is None else {"task_attempt": recorded}
     # A `pausing` row without a checkpoint yet (death during the drain), or an
     # UNREADABLE pause record, fences the ordinary retry exactly like an
     # owner-wait checkpoint: completed work is never replayed (#1196).
@@ -586,7 +595,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
         try:
             from ouroboros.task_results import STATUS_FAILED, STATUS_RUNNING, write_task_result
             write_task_result(
-                root, task_id, STATUS_FAILED,
+                root, task_id, STATUS_FAILED, **attempt_fields,
                 result=result_text,
                 reason_code=reason_code,
                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_FAILED, execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
@@ -631,7 +640,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
         try:
             from ouroboros.task_results import STATUS_CANCELLED, write_task_result
             write_task_result(
-                root, task_id, STATUS_CANCELLED,
+                root, task_id, STATUS_CANCELLED, **attempt_fields,
                 result="Evolution worker died after the campaign was stopped; not retried.",
                 reason_code="evolution_stopped_no_retry",
                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_CANCELLED, execution="cancelled", reason_code="evolution_stopped_no_retry", review_trigger="worker_terminal"),
@@ -680,7 +689,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                             task_id, exc_info=True)
         try:
             write_task_result(
-                root, task_id, STATUS_INTERRUPTED,
+                root, task_id, STATUS_INTERRUPTED, **attempt_fields, reason_code="worker_crash",
                 result=(f"Worker process died mid-task (attempt {attempt}"
                         f"{f', signal {crash_signal}' if crash_signal else ''}). Retrying."),
                 **r_cost_fields,
@@ -724,6 +733,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                     root,
                     task_id,
                     STATUS_FAILED,
+                    **attempt_fields,
                     result=(
                         "Worker crashed and its retry was blocked by the active "
                         f"{admission_block} admission fence."

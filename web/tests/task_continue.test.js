@@ -475,7 +475,8 @@ test('chat replays settled rows through the one seam, not a card-opening detail 
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     const summary = chat.slice(chat.indexOf('function appendTaskSummaryToLiveCard'),
         chat.indexOf('function renderLiveCardMeta'));
-    assert.match(summary, /syncSettledItems\(record, msg, \{ write: withStableViewport \}\);/);
+    assert.match(summary, /\bnoteTaskDetails\(record, msg\)/);
+    assert.doesNotMatch(summary, /\bsyncSettledItems\(/, 'noteTaskDetails is the one seam; the summary adds no second direct sync');
     // A task detail can start the late Continue read (an unclean root): its write goes through the same seam.
     const details = chat.slice(chat.indexOf('function noteTaskDetails'), chat.indexOf('function noteTaskDetails') + 300);
     assert.match(details, /syncSettledItems\(record, detail, \{ write: withStableViewport \}\);/);

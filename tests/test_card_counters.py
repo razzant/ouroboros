@@ -16,7 +16,8 @@ from tests.test_task_correlation_facts import _Clock, _TimedLLM
 
 
 @pytest.mark.parametrize("direct", [False, True])
-def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch, direct):
+@pytest.mark.parametrize("attempt", [None, 0, 2])
+def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch, direct, attempt):
     from ouroboros import loop_llm_call
 
     logs = tmp_path / "logs"
@@ -42,13 +43,20 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     monkeypatch.setattr(pipeline, "_task_cost_fields", lambda *a: {"total_rounds": 99})
     task = {"id": "counter-task", "type": "task", "chat_id": 7, "text": "check",
             "_is_direct_chat": direct, "_skip_post_task_synthesis": True}
+    if attempt is not None:
+        task["_attempt"] = attempt
+        pipeline.write_task_result(tmp_path, task["id"], "running", task_attempt=attempt)
     pending = []
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
     pipeline.emit_task_results(env, None, None, pending, task, message["content"], usage,
                                {"tool_calls": [], "reasoning_notes": []}, 0.0, logs)
     metrics = next(evt for evt in pending if evt["type"] == "task_metrics")
+    evaluation = next(row for line in (logs / "events.jsonl").read_text().splitlines()
+                      if (row := json.loads(line)).get("type") == "task_eval")
     _handle_task_metrics(json.loads(json.dumps(metrics)), ctx)
     assert pushed[-1]["rounds"] == 3 and pushed[-1]["tool_calls"] == 0
+    for row in (metrics, evaluation, pushed[-1]):
+        assert row.get("task_attempt") == attempt and ("task_attempt" in row) == (attempt is not None)
     stored = pipeline.load_task_result(tmp_path, "counter-task")
     assert stored["total_rounds"] == 99
     assert stored["loop_outcome"]["usage"]["total_rounds"] == 3
@@ -58,6 +66,24 @@ def test_round_producer_transport_storage_and_cold_history(tmp_path, monkeypatch
     rows = json.loads(response.body)["messages"]
     summaries = [row for row in rows if row.get("system_type") == "task_summary"]
     assert summaries and all(row["rounds"] == 3 for row in summaries)
+
+
+@pytest.mark.parametrize('owner', [{}, {'task_id': 'other', 'task_attempt': 0},
+                                   {'task_id': 'root', 'task_attempt': False}, {'task_id': 'root', 'task_attempt': '0'}])
+def test_evaluation_does_not_invent_attempt_from_unbound_execution(tmp_path, monkeypatch, owner):
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    task = {'id': 'root', 'type': 'task', 'chat_id': 1, 'text': 'Check', '_is_direct_chat': True,
+            '_execution_owner': owner, '_attempt': 1, '_skip_post_task_synthesis': True}
+    pending = []
+    monkeypatch.setattr(pipeline, '_task_cost_fields', lambda *_: {})
+    pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None,
+                               pending, task, 'Checked.', {'rounds': 3},
+                               {'tool_calls': [], 'reasoning_notes': []}, 0.0, logs)
+    [metrics] = [row for row in pending if row['type'] == 'task_metrics']
+    [evaluation] = [row for line in (logs / 'events.jsonl').read_text().splitlines()
+                    if (row := json.loads(line)).get('type') == 'task_eval']
+    assert 'task_attempt' not in metrics and 'task_attempt' not in evaluation
 
 
 @pytest.mark.parametrize(("retained", "saved_usage"), [
@@ -234,3 +260,26 @@ def test_recovery_facts_use_retained_loop_rounds(tmp_path, monkeypatch, snapshot
     facts = next(row for row in _dialogue.chat_rows(tmp_path) if row.get("summary_kind") == "host_task_facts")
     assert facts["rounds"] == expected
     assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path) == 0
+
+
+def test_recovery_facts_use_only_their_own_saved_execution_owner(tmp_path, monkeypatch):
+    from ouroboros.task_status import execution_owner_record
+    from tests._dialogue import chat_rows
+
+    for tid in ('bound', 'unbound'):
+        owner_id = tid if tid == 'bound' else 'other'
+        pipeline.write_task_result(tmp_path, tid, pipeline.STATUS_COMPLETED, chat_id=1, root_task_id=tid,
+            objective='finish recovery', _is_direct_chat=True,
+            execution_owner=execution_owner_record(tmp_path, {'id': owner_id}, 'direct'),
+            loop_outcome={'usage': {'total_rounds': 3}},
+            root_phase_checkpoint={'phase': 'task_acceptance', 'status': 'pass', 'post_task_synthesis': 'pending_once'})
+
+    def free_facts(env, task, usage, trace, logs, **_kwargs):
+        pipeline._record_task_facts(env, task, usage, trace, logs)
+        pipeline._set_root_post_task_checkpoint(env, task, 'completed')
+
+    monkeypatch.setattr(pipeline, '_run_post_task_processing_async', free_facts)
+    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path) == 2
+    facts = {row['task_id']: row for row in chat_rows(tmp_path) if row.get('summary_kind') == 'host_task_facts'}
+    assert facts['bound']['task_attempt'] == 0 and facts['bound']['rounds'] == 3
+    assert 'task_attempt' not in facts['unbound'] and facts['unbound']['rounds'] == 3

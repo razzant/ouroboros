@@ -1112,6 +1112,24 @@ for (const calls of [undefined, 0]) test(`rounds alone never manufacture tool ev
     } finally { g.close(); }
 });
 
+test('an open attempt keeps the live count its journal states, then its own scalar', () => {
+    const f = fixture();
+    try {
+        f.log({ type: 'task_started', task_attempt: 1 });
+        f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1' });
+        assert.match(f.meta(), /1 tool call/, 'the selected attempt\'s empty store does not hide the running count');
+        f.log({ type: 'tool_call_started', tool: 'web_search', tool_call_id: 'c2' });
+        f.log({ type: 'tool_call_finished', tool: 'web_search', tool_call_id: 'c2', duration_sec: 0.4 });
+        assert.match(f.meta(), /2 tool calls/, 'the line follows the invocation journal while the attempt runs');
+        f.log({ type: 'task_metrics_event', task_attempt: 1, tool_calls: 7, rounds: 2 });
+        assert.match(f.meta(), /7 tool calls/, 'the attempt\'s addressed scalar replaces the journal view');
+        f.log({ type: 'task_started', task_attempt: 2 });
+        assert.match(f.meta(), /2 tool calls/, 'the two observed invocations remain, not the earlier estimate of seven');
+        f.log({ type: 'task_metrics_event', task_attempt: 2, tool_calls: 3 });
+        assert.match(f.meta(), /3 tool calls/, 'a newer attempt\'s scalar fences the older attempt\'s numbers');
+    } finally { f.close(); }
+});
+
 test('known zero stays in Details, missing counts stay absent, and replay cannot lower a current count', () => {
     const f = fixture();
     try {

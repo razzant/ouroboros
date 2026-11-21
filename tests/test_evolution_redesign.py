@@ -1144,6 +1144,7 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
     import supervisor.queue as queue
     from supervisor import state as supervisor_state
     from ouroboros.task_results import load_task_result
+    from ouroboros.terminal_time import terminal_time_fact
 
     supervisor_state.init(tmp_path)
     monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 100.0)
@@ -1159,6 +1160,8 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
     workers.RUNNING.clear()
     workers.PENDING[:] = [{"id": "evo1", "type": "evolution", "text": "x"}]
     queue.PENDING = workers.PENDING
+    observed = "2026-10-10T10:00:00+00:00"
+    monkeypatch.setattr("ouroboros.task_results.utc_now_iso", lambda: observed)
     monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "light blocked")
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
@@ -1171,7 +1174,11 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
         workers.PENDING[:] = []
 
     assert all(t.get("type") != "evolution" for t in workers.PENDING)
-    assert load_task_result(tmp_path, "evo1")["status"] == "cancelled"
+    stored = load_task_result(tmp_path, "evo1")
+    assert stored["status"] == "cancelled"
+    clock = terminal_time_fact(stored)
+    assert (clock["source"], clock["occurred_at"]) == ("supervisor_cancel", observed)
+    assert not stored.get("started_at") and "cancel_origin" not in stored
 
 
 def test_toggle_evolution_tool_blocked_in_light_mode(monkeypatch):

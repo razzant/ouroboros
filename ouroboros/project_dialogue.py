@@ -843,16 +843,22 @@ def _cause_phrase(code: str, undescribed: Optional[List[str]] = None) -> str:
     return TASK_CAUSE_PHRASES["reason_undescribed"]
 
 
-def terminal_delivery_clause(state: str, preserved_path: str = "") -> str:
+def terminal_delivery_clause(delivery: dict) -> str:
     """The card's one sentence about a delivery the host could not confirm (exhausted / unknown).
 
     An exhausted delivery names the saved copy when one exists and says so when it
     does not — never a claimed copy. The browser twin is terminalDeliveryClause.
     """
+    state = delivery.get("state")
+    if state == "exhausted" and delivery.get("scope") == "task":
+        return "Delivery attempts ran out for a terminal message from this task. The affected answer is unknown."
     sentence = TASK_CAUSE_PHRASES.get(f"terminal_delivery_{state}", "")
     if not sentence:
         return ""
     if state == "exhausted":
+        preserved_path = delivery.get("preserved_path", "")
+        if preserved_path is None:
+            return sentence + "; the saved copy for this answer could not be verified."
         sentence += (f"; a copy of the answer is saved at {preserved_path}." if preserved_path
                      else "; no copy of the answer could be saved.")
     return sentence
@@ -1277,7 +1283,8 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     elif held:
         # A task HELD by a blocking plan review states the objective's own reason.
         clause = _cause_phrase(str(objective.get("reason") or ""), undescribed)
-    elif reason in {REASON_FINAL_MESSAGE, ""} or (author_stop and reason == "plan_review_advisory"):
+    elif (reason in {REASON_FINAL_MESSAGE, ""} or (phase == "cancelled" and reason == "cancelled")
+          or (author_stop and reason == "plan_review_advisory")):
         # A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
         clause = (TASK_CAUSE_PHRASES["author_stop"] if author_stop
                   else TASK_CAUSE_PHRASES["plan_review_awaiting"] if plan_review_awaiting(event, result) and phase == "done" else "")
@@ -1375,12 +1382,12 @@ def _run_lives_in_its_project(
 MAIN_MIRROR_OWED, MAIN_MIRROR_INELIGIBLE, MAIN_MIRROR_UNKNOWN = "owed", "ineligible", "unknown"
 
 
-def _enqueue_main_completion(drive_root: Any, tid: str, event: Dict[str, Any], *, event_queue: Any = None) -> tuple:
+def _enqueue_main_completion(drive_root: Any, tid: str, event: Dict[str, Any], *, event_queue: Any = None, receipts=None) -> tuple:
     from ouroboros.terminal_projection import retain_main_delivery, claim_main_delivery
     from supervisor.event_observation import delivery_outstanding
     from supervisor.terminal_delivery import enqueue_terminal_delivery, register_pending_delivery
 
-    event = retain_main_delivery(drive_root, tid, event)
+    event = retain_main_delivery(drive_root, tid, event, receipts=receipts)
     if event.get("terminal_projection_token"):
         if event_queue is None:
             from supervisor.workers import get_event_q
@@ -1408,7 +1415,7 @@ def _enqueue_main_completion(drive_root: Any, tid: str, event: Dict[str, Any], *
 def project_completion_delivery_outcome(
     drive_root: Any, evt: Dict[str, Any], task_id: str, task: Dict[str, Any],
     result: Dict[str, Any], task_done_event: Dict[str, Any],
-    *, event_queue: Any = None, source_delivery: Optional[dict] = None,
+    *, event_queue: Any = None, source_delivery: Optional[dict] = None, receipts: Optional[dict] = None,
 ) -> tuple:
     """Owe Main's answer for Project roots, including conversations moved from Main.
 
@@ -1437,7 +1444,7 @@ def project_completion_delivery_outcome(
         ready = result.get("canonical_terminal_projection_ready")
         retained = ready.get("main_delivery") if isinstance(ready, dict) else None
         if isinstance(retained, dict) and isinstance(retained.get("event"), dict):
-            return _enqueue_main_completion(drive_root, tid, retained["event"], event_queue=event_queue)
+            return _enqueue_main_completion(drive_root, tid, retained["event"], event_queue=event_queue, receipts=receipts)
 
         if any(bool(row.get("_is_direct_chat")) for row in (evt, task, result, task_done_event)
                if isinstance(row, dict)):
@@ -1482,9 +1489,10 @@ def project_completion_delivery_outcome(
         # Text preserves only the labelled salvage excerpt, never a cut of the authored answer (which rides whole
         # in its typed key or not at all). The Project reference is the sole door, so the text invites nothing;
         # promising the same action in prose would duplicate it. Salvaged bytes exist nowhere else in this row.
+        from ouroboros.terminal_projection import completion_notice, current_answer_delivery
         excerpt = _completion_excerpt(result, chat_id=1, salvage_only=True)
-        delivery = source_delivery or {}
-        clause = terminal_delivery_clause(delivery.get("state", ""), delivery.get("preserved_path", ""))
+        delivery = current_answer_delivery(drive_root, {**task, **result, "task_id": tid}, source_delivery, receipts=receipts)
+        clause = terminal_delivery_clause(delivery)
         source_clause = f"Source Project: {clause}" if clause else ""
         verdict = _join_cause_clauses([_completion_verdict(result, task_done_event), source_clause])
         # Web details retain undescribed codes; canonical text and Telegram retain the full verdict.
@@ -1492,7 +1500,6 @@ def project_completion_delivery_outcome(
         cause = _join_cause_clauses([_completion_verdict(result, task_done_event, undescribed=undescribed), source_clause])
         detail = " ".join(part for part in (verdict, excerpt) if part)
         from ouroboros.terminal_time import terminal_time_fact
-        from ouroboros.terminal_projection import completion_notice
         from ouroboros.project_completion_facts import completion_facts
         event = {
             "type": "send_message", "chat_id": 1, "task_id": tid,
@@ -1514,7 +1521,7 @@ def project_completion_delivery_outcome(
                 **mirrored_answer(result, outcome_phase(result, task_done_event)),
             },
         }
-        return _enqueue_main_completion(drive_root, tid, event, event_queue=event_queue)
+        return _enqueue_main_completion(drive_root, tid, event, event_queue=event_queue, receipts=receipts)
     except Exception:
         log.warning("Failed to enqueue Project completion summary for %s", tid, exc_info=True)
         return MAIN_MIRROR_UNKNOWN, False

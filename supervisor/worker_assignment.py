@@ -118,7 +118,7 @@ def _cancel_unauthorized_evolution(task: Dict[str, Any], reason: str) -> bool:
         write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
-            STATUS_CANCELLED,
+            STATUS_CANCELLED, _cancel_observed=True,
             reason_code="evolution_authority_missing",
             authority_reason=str(reason or "unknown"),
             metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
@@ -978,7 +978,7 @@ def assign_tasks() -> None:
             for tid in blocked_ids:
                 try:
                     write_task_result(
-                        _pool().DRIVE_ROOT, tid, STATUS_CANCELLED,
+                        _pool().DRIVE_ROOT, tid, STATUS_CANCELLED, _cancel_observed=True,
                         result="Evolution is disabled in light runtime mode.",
                     )
                 except Exception:

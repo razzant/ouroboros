@@ -397,6 +397,27 @@ def test_current_readiness_uses_existing_adoption_and_artifact_facts(tmp_path):
     assert headless.terminal_task_files_ready(parent, {"id": task["id"]}, {"task_id": task["id"], "status": "failed"})
 
 
+def test_a_failure_stamp_never_lands_on_another_end_of_the_row(tmp_path, monkeypatch):
+    """The stamp belongs to the row the failed step read. A Stop that ended it meanwhile wrote its own artifact status;
+    the child's unpublished end must not overwrite it (an unchanged settled row is still stamped:
+    test_headless_task_artifacts)."""
+    parent, child, task = _child(tmp_path)
+    tid, start = task["id"], "2026-09-24T18:18:27+00:00"
+    write_task_result(parent, tid, "running", task_attempt=1, started_at=start)
+    write_task_result(child, tid, "completed", task_attempt=1, started_at=start, result="The child's own answer")
+
+    def stopped_then_failed(*_args, **_kwargs):
+        write_task_result(parent, tid, "cancelled", task_attempt=1, started_at=start, result="Stopped",
+                          artifact_status="ready_no_changes")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(headless, "copy_child_task_result", stopped_then_failed)
+    report = headless.prepare_terminal_task_files(parent, task)
+    row = load_task_result(parent, tid, strict=True)
+    assert report["terminal_source_present"] is True and report["error"] == "OSError: disk full"
+    assert (row["status"], row["artifact_status"]) == ("cancelled", "ready_no_changes") and "artifact_error" not in row
+
+
 def test_helper_canonical_cancellation_precedes_child_retry(tmp_path, monkeypatch):
     parent, child, task = _child(tmp_path)
     cancelled = write_task_result(parent, task["id"], "cancelled", result="stopped",
@@ -408,3 +429,64 @@ def test_helper_canonical_cancellation_precedes_child_retry(tmp_path, monkeypatc
     assert report["terminal_source_present"] is True and report["error"] == ""
     assert report["result"] == cancelled
     assert headless.terminal_task_files_ready(parent, task, cancelled)
+
+
+_START_ONE, _START_TWO = "2026-09-24T18:18:27+00:00", "2026-09-25T15:19:01+00:00"
+
+
+@pytest.mark.parametrize("status", ["failed", "completed"])
+@pytest.mark.parametrize("child_start,present", [
+    pytest.param({"task_attempt": 1, "started_at": _START_ONE}, False, id="older_attempt"),
+    pytest.param({"task_attempt": 2, "started_at": _START_ONE}, False, id="other_start"),
+    pytest.param({"task_attempt": 2, "started_at": _START_TWO}, True, id="selected"),
+])
+def test_an_open_row_takes_only_the_terminal_its_attempt_selects_as_a_source(tmp_path, status, child_start, present):
+    parent, child, task = _child(tmp_path)
+    tid = task["id"]
+    write_task_result(parent, tid, "running", task_attempt=2, started_at=_START_TWO, child_drive_root=str(child),
+                      result="Current work")
+    write_task_result(child, tid, status, result="Child answer", **child_start)
+    before = result_signature(parent, tid)
+    report = headless.prepare_terminal_task_files(parent, task)
+    row = load_task_result(parent, tid, strict=True)
+    assert report["terminal_source_present"] is present
+    if present:
+        assert (row["status"], row["result"]) == (status, "Child answer")
+        assert headless.terminal_task_files_ready(parent, task, row)
+    else:  # another attempt's end is absence: nothing written, no failure stamped on the live row
+        assert report["error"] and report["result"] is None and result_signature(parent, tid) == before
+        assert row["status"] == "running" and not {"artifact_status", "artifact_error"} & row.keys()
+
+
+def test_a_row_taken_by_another_attempt_after_the_source_read_gets_no_failure_stamp(tmp_path, monkeypatch):
+    parent, child, task = _child(tmp_path)
+    tid = task["id"]
+    write_task_result(parent, tid, "running", task_attempt=1, started_at=_START_ONE, child_drive_root=str(child))
+    write_task_result(child, tid, "completed", task_attempt=1, started_at=_START_ONE, result="Attempt one answer")
+    retried = {}
+
+    def publish_after_retry(*args, **kwargs):
+        if not retried:  # the retry starts after the source was read and before copy-back commits
+            retried.update(write_task_result(parent, tid, "running", task_attempt=2, started_at=_START_TWO,
+                                             result="Current"))
+        return write_task_result(*args, **kwargs)
+
+    monkeypatch.setattr(headless, "write_task_result", publish_after_retry)
+    report = headless.prepare_terminal_task_files(parent, task)
+    row = load_task_result(parent, tid, strict=True)
+    assert report["error"] and (row["status"], row["task_attempt"], row["result"]) == ("running", 2, "Current")
+    assert not {"artifact_status", "artifact_error"} & row.keys()
+
+
+def test_a_canonical_terminal_still_pays_its_capture_beside_another_attempts_replica(tmp_path, monkeypatch):
+    parent, child, task = _child(tmp_path)
+    tid = task["id"]
+    task["workspace_root"] = str(tmp_path / "workspace")
+    write_task_result(parent, tid, "failed", task_attempt=2, started_at=_START_TWO, child_drive_root=str(child),
+                      workspace_root=task["workspace_root"], artifact_status="pending", result="Canonical ending")
+    write_task_result(child, tid, "completed", task_attempt=1, started_at=_START_ONE, result="Old attempt answer")
+    owed = []
+    monkeypatch.setattr(headless, "finalize_task_artifacts", lambda _root, owing: owed.append(owing["id"]))
+    report = headless.prepare_terminal_task_files(parent, task)
+    assert report["terminal_source_present"] is True and report["error"] == "" and owed == [tid]
+    assert load_task_result(parent, tid)["result"] == "Canonical ending"  # the declined replica rewrote nothing

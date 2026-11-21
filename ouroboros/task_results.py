@@ -15,7 +15,10 @@ from ouroboros.utils import utc_now_iso
 # Projection owner retains read custody; this historical import remains compatible.
 from ouroboros.review_projection import merge_review_projection as merge_review_projection
 from ouroboros.review_records import validate_author_disposition
-from ouroboros.terminal_time import SUPERVISOR_CANCEL, preserve_terminal_attempt, task_attempt_witness, terminal_time_patch
+from ouroboros.terminal_time import (
+    SUPERVISOR_CANCEL, preserve_terminal_attempt, replica_started_attempt_advances, same_attempt_witness,
+    task_attempt_witness, terminal_time_patch,
+)
 
 log = logging.getLogger(__name__)
 
@@ -210,6 +213,94 @@ def lifecycle_named(axes: Any, status: str) -> Any:
     if not isinstance(lifecycle, dict) or lifecycle.get("status") == status:
         return axes
     return {**axes, "lifecycle": {**lifecycle, "status": status}}
+
+
+def recorded_attempt_stop(row: dict) -> Optional[str]:
+    """Older writers recorded the interruption in reason_code, before earlier_stop existed."""
+    if "earlier_stop" in row or row.get("status") != STATUS_INTERRUPTED:
+        return row.get("earlier_stop")
+    from ouroboros.outcomes import recorded_cause
+
+    cause = recorded_cause(row)
+    return cause if cause not in ("", STATUS_INTERRUPTED, STATUS_CANCEL_REQUESTED, STATUS_CANCELLED) else None
+
+
+def _bound_attempt_stop(cause: Optional[str]) -> bool:
+    from ouroboros.owner_continue import HARD_LIMIT_REASON_CODES
+
+    return isinstance(cause, str) and (cause in HARD_LIMIT_REASON_CODES or cause == "billing_authority_refused")
+
+
+def _select_attempt_stop(preferred: Optional[str], other: Optional[str]) -> Optional[str]:
+    """A bound witnessed by either writer survives another stop on the same attempt."""
+    if preferred and other and preferred != other:
+        for cause in (preferred, other):
+            if _bound_attempt_stop(cause):
+                return cause
+    return preferred or other
+
+
+def replica_earlier_stop(task_id: str, canonical: dict, replica: dict) -> tuple[bool, Optional[str]]:
+    """Select a replica's own stop, without borrowing a cause from an older attempt."""
+    retained = recorded_attempt_stop(canonical)
+    if (not task_id or replica.get("task_id") != task_id
+            or replica.get("status") not in (STATUS_INTERRUPTED, STATUS_CANCEL_REQUESTED, STATUS_CANCELLED)):
+        return False, retained
+    if replica_started_attempt_advances(canonical, replica):
+        from ouroboros.owner_continue import OWNER_STOP_SOURCES
+
+        origin = canonical.get("cancel_origin")
+        source = origin.get("source") if isinstance(origin, dict) else None
+        if _bound_attempt_stop(retained) or (isinstance(source, str) and source in OWNER_STOP_SOURCES):
+            return False, retained
+        return True, recorded_attempt_stop(replica)
+    if canonical:
+        witness = task_attempt_witness(canonical)
+        other = task_attempt_witness(replica)
+        started = witness["started_at"]
+        named = (any(type(value) is int and value > 0 for value in witness.values())
+                 or isinstance(started, str) and bool(started.strip()) or type(started) is float and started > 0)
+        if canonical.get("task_id") != task_id or not named or not same_attempt_witness(witness, other):
+            return False, retained
+    return True, _select_attempt_stop(retained, recorded_attempt_stop(replica))
+
+
+def _project_attempt_stop(task_id: str, existing: dict, fields: dict, status: str, replica: Optional[dict]) -> None:
+    """Carry a stopped attempt's cause through cancellation under the result lock."""
+    prior = existing.get("status")
+    fields.pop("earlier_stop", None)
+    if prior in _TRULY_TERMINAL_STATUSES:
+        return
+    earlier = None
+    if status in (STATUS_INTERRUPTED, STATUS_CANCEL_REQUESTED, STATUS_CANCELLED):
+        attempt = task_attempt_witness({**existing, **fields})
+        previous = task_attempt_witness(existing)
+        same_attempt = same_attempt_witness(attempt, previous)
+        if same_attempt and prior in (STATUS_INTERRUPTED, STATUS_CANCEL_REQUESTED):
+            earlier = recorded_attempt_stop(existing)
+        elif status != STATUS_INTERRUPTED and same_attempt and prior == STATUS_SCHEDULED:
+            # The completed park names its attempt. A scheduled global budget hold before dispatch is not one.
+            pause = existing.get("budget_pause")
+            if (isinstance(pause, dict) and pause.get("state") == "paused" and pause.get("pause_id")
+                    and type(pause.get("task_attempt")) is int and pause["task_attempt"] == attempt["task_attempt"]):
+                earlier = {"owner": "owner_paused", "authority": "authority_paused", "sleep": "model_sleeping",
+                           "budget": "budget_paused"}.get(pause.get("reason"))
+        if replica is not None:
+            if replica.get("status") == status and same_attempt_witness(attempt, task_attempt_witness(replica)):
+                matches, stop = replica_earlier_stop(task_id, existing, replica)
+                if matches:
+                    earlier = stop or earlier
+        elif status == STATUS_INTERRUPTED and (
+            status != prior or not same_attempt
+            or ("reason_code" in fields and fields["reason_code"] != existing.get("reason_code"))
+        ):
+            # Read only this interruption's fields. A running mirror's code can survive a failed Resume write.
+            fields.setdefault("reason_code", "")
+            earlier = _select_attempt_stop(recorded_attempt_stop({**fields, "status": status}), earlier)
+    if status == STATUS_CANCELLED and not fields.get("reason_code"):
+        fields["reason_code"] = STATUS_CANCELLED
+    if earlier or existing.get("earlier_stop"):
+        fields["earlier_stop"] = earlier
 
 
 def is_reconciled_presence_placeholder(row: Dict[str, Any]) -> bool:
@@ -563,6 +654,7 @@ def write_task_result(
             log.debug("Blocked status regression %s -> %s for task %s",
                       existing.get("status"), projected_status, task_id)
             return None
+        _project_attempt_stop(task_id, existing, projected_fields, projected_status, _terminal_time_source)
         # The lifecycle axis names the status this accepted write lands: in the axes it carries,
         # or in the current axes it keeps across a status change. Same-status enrichment leaves
         # stored axes alone, so untouched history is never migrated.
@@ -613,19 +705,22 @@ def write_task_result(
                                         suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         # The clock belongs to whoever performs this transition: the executor ending its attempt, or
-        # (``_cancel_observed``) the supervisor carrying out a requested cancel. No field can claim either.
+        # (``_cancel_observed``) the supervisor cancelling work it holds. No field can claim either.
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if (_terminal_observed or _cancel_observed) else None,
             replica=_terminal_time_source, source="executor_terminal" if _terminal_observed else SUPERVISOR_CANCEL))
         transition["admitted"] = (existing_status in {"", STATUS_REQUESTED}
                                   and projected_status in {STATUS_SCHEDULED, STATUS_RUNNING})
         # ABI-3: shared deep cost normalization handles both rows/nested planes; incoming values win.
+        # A replica's projector selected the publication stamp as well as the result;
+        # a stale incoming timestamp must not reappear after a locked refusal of its payload.
+        selected_ts = projected_fields.get("ts") if _terminal_time_source is not None and _field_projector else explicit_ts
         return stamp_task_result_schema(normalize_task_result_cost_planes({
             **normalize_task_result_cost_planes(existing),
             **projected_fields,
             "task_id": task_id,
             "status": projected_status,
-            "ts": explicit_ts or str(existing.get("ts") or now),
+            "ts": str(selected_ts or existing.get("ts") or now),
             "updated_at": now,
         }))
 

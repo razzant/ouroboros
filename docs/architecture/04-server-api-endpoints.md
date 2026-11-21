@@ -185,7 +185,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/services/kept/{launch_id}/stop` | `reason`; one launch, fresh outcome |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
-| GET | `/api/projects` | |
+| GET | `/api/projects` | Project list and lookup; unavailable is not empty (§6 of CLIENT_CONTRACT). |
 | POST | `/api/projects` | |
 | POST | `/api/projects/from-task` | |
 | POST | `/api/projects/{project_id}/update` | |
@@ -242,7 +242,7 @@ Update-status, log-tail and schedule-list reads run off the event loop.
 
 `/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds through REST and history. `gateway/ws.py` admits JSON objects, owned extension namespaces, `command` text, `chat` text/attachments. Chat acceptance (row → queue → echo) runs off the ASGI loop through `gateway._helpers.run_sync_to_completion`. Each socket chains its chats in receive order without awaiting them, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake and commands); disconnect waits for received chats to settle (`settle_to_completion`). Authentication above governs admission; public sockets never carry Host Service or owned-daemon tokens.
 
-Feature modules subscribe, and the complete Project chat-id set is fetched, before the first open, so an early Project frame cannot pass for Main traffic. Every decoded frame reaches the generic `message` event and then its type-specific event, so Widgets consume reviewed namespaced events.
+Feature subscriptions and the initial Project chat-id lookup precede the first socket open; that lookup can fail. Every decoded frame emits `message`, then its type-specific event, including reviewed namespaced events for Widgets.
 
 #### WebSocket chat
 
@@ -260,7 +260,7 @@ A `command` frame routes through the bridge without rebroadcast; authorization, 
 
 Outbound envelope types are the members of `gateway.contracts.WS_MESSAGE_TYPES` other than the inbound `command`. `update_progress_changed` invalidates the update observation, never proving boot completion. Chat progress carries additive presentation facts (`ChatOutbound` in `GET /api/contract`); consumers must not infer a missing receipt, cost or result from an absent optional field.
 
-Project chat, typing, media and log frames carry `chat_id`; each Project panel consumes its own thread and frames naming it in `also_rooms`, Main only what §3 shows there. `projects_changed` carries the new chat id so every tab extends its fan-out before fetching the registry; if that still loses the race, the server-stamped `project_thread` marker keeps Main from adopting the frame (`chat_activity.mainThreadAccepts`). The message-bus broadcast choke sets that marker once from the registry (a membership lens, not a numeric range), so external transport ids such as Telegram stay unstamped. Task-scoped log events get their audience at supervisor ingress: `supervisor/log_addressing.py::address_task_event` stamps host-attested truth (explicit chat_id 0 is `HIDDEN_CHAT_ID`, never missing), and conversation turns carry their chat by value: their row ends with the turn while queued events drain later. `message_annotation` updates one canonical owner message without a second bubble; `task_named` updates a card only where that task exists.
+Project panels take chat, typing, media and log frames by `chat_id` or `also_rooms`; Main follows §3. `projects_changed` extends the tab's known ids before fetch. The bus stamps `project_thread` by registry membership, not ID range; Telegram stays unstamped. `chat_activity.mainThreadAccepts` honors a web `room_echo` as a display address only (CLIENT_CONTRACT §5). `supervisor/log_addressing.py::address_task_event` stamps task log audiences at ingress: explicit 0 is `HIDDEN_CHAT_ID`, not missing. Conversation turns carry the address by value since queued events can outlive a turn row. `message_annotation` updates one canonical owner message without another bubble; `task_named` only updates an existing card.
 
 Extension WebSocket traffic is namespaced by `extension_loader.extension_surface_name()`, so an extension cannot shadow a built-in type. Each incoming extension frame resolves its owning skill and rechecks that the extension is still desired, reviewed, granted, enabled and live; out-of-process handlers run in their extension child off the event loop. A missing or failed handler never ends the socket loop (replies and error frames: CLIENT_CONTRACT §5).
 

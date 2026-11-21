@@ -212,31 +212,37 @@ def _write_failure_result(
         return ""
     try:
         from ouroboros.task_results import (
-            STATUS_FAILED, STATUS_COMPLETED, STATUS_REJECTED_DUPLICATE,
-            STATUS_CANCELLED, load_task_result, write_task_result,
+            _TRULY_TERMINAL_STATUSES, STATUS_CANCELLED, STATUS_FAILED, load_task_result,
+            write_task_result,
         )
-        # STATUS_INTERRUPTED is not final; it is written before requeue.
-        _FINAL_STATUSES = {STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE, STATUS_CANCELLED}
         existing = load_task_result(_pool().DRIVE_ROOT, task_id, strict=True)
-        if existing and existing.get("status") in _FINAL_STATUSES:
+        if existing and existing.get("status") in _TRULY_TERMINAL_STATUSES:
             return str(existing.get("status") or "")
         final_status = status or STATUS_FAILED
+        reason_code = "worker_terminal_failure" if final_status == STATUS_FAILED else final_status
         # Reconstruct from durable llm_usage so an abnormally-finalized task does
         # not record zero cost/rounds (understating per-task + campaign metrics).
         f_cost_fields = _pool().reconstruct_task_cost(str(task_id), fields=True)
         cause = (_recorded_cancel_fields(task_id, stop_source=stop_source, reason=reason)
                  if stop_source or final_status == STATUS_CANCELLED else {})
+
+        def only_if_unsettled(current, fields):
+            if current.get("status") in _TRULY_TERMINAL_STATUSES:
+                return None  # another writer settled it during cost/intent reconstruction
+            return fields
+
         stored = write_task_result(
             _pool().DRIVE_ROOT,
             task_id,
             final_status,
             strict_existing_dict=True,
             result=reason,
-            reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
+            _field_projector=only_if_unsettled,
+            reason_code=reason_code,
             outcome_axes=terminal_outcome_axes(
                 lifecycle=final_status,
                 execution=EXECUTION_INFRA_FAILED if final_status == STATUS_FAILED else str(final_status or ""),
-                reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
+                reason_code=reason_code,
                 review_trigger="worker_terminal",
             ),
             **f_cost_fields,

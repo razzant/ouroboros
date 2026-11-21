@@ -435,6 +435,38 @@
  */
 
 /**
+ * Facts frozen on one published ending. Its `ts` is the publication time.
+ * @typedef {Object} HistoricalTerminal
+ * @property {string} status
+ * @property {'done'|'warn'|'error'|'cancelled'} phase
+ * @property {string} ts
+ * @property {'canonical_task_result_after_finalization'} provenance
+ * @property {Object=} model_execution
+ * @property {number=} task_attempt
+ * @property {Object=} terminal_time
+ * @property {Object=} terminal_delivery
+ * @property {string=} wake_summary
+ * @property {string=} suggested_name
+ * @property {string=} schedule_name
+ * @property {Object=} place_origin
+ * @property {boolean=} wake_silent
+ * @property {boolean=} quiet_effective
+ */
+
+/** Additive task-ending fields of a history row.
+ * @typedef {Object} TaskOutcomeHistoryFields
+ * @property {'working'|'done'|'warn'|'error'|'cancelled'=} outcome_phase
+ * @property {boolean=} outcome_final
+ * @property {number=} task_attempt
+ * @property {(string|Object)=} task_outcome
+ * @property {Object=} current_outcome  // its own attempt and terminal_time, never the publication's
+ * @property {HistoricalTerminal=} historical_terminal
+ * @property {Object=} model_execution
+ * @property {Object=} terminal_delivery
+ * @property {{v: 1, occurred_at: ?string, source: 'executor_terminal'|'supervisor_cancel'|'unknown', attempt: Object}=} terminal_time
+ */
+
+/**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
  * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
@@ -482,8 +514,26 @@
  * @property {ChatHistoryQuiz=} quiz
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
- * @property {Object=} historical_terminal
- * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
+ * @property {string=} status
+ * @property {string=} task_terminal_status
+ * @property {string=} task_phase
+ * @property {number=} task_attempt
+ * @property {(string|Object)=} task_outcome
+ * @property {HistoricalTerminal=} historical_terminal
+ * @property {Object=} current_outcome  // separately scoped by its own task_attempt and terminal_time when known
+ * @property {Object=} terminal_time
+ * @property {Object=} terminal_delivery  // scope="task" for unbound debt, preserved_path=null for an unverified copy
+ * @property {string=} reason_code
+ * @property {Object=} outcome_axes
+ * @property {boolean=} _result_text_present
+ * @property {string[]=} delegated_runs_unreconciled
+ * @property {Object=} review_projection
+ * @property {string=} wake_summary
+ * @property {string=} suggested_name
+ * @property {string=} schedule_name
+ * @property {Object=} place_origin
+ * @property {boolean=} wake_silent
+ * @property {boolean=} quiet_effective
  * @property {Object=} model_waits
  * @property {boolean=} lifecycle_virtual
  * @property {Object=} review_group
