@@ -1403,6 +1403,9 @@ def test_key_grants_follow_the_installation_and_permissions_the_accepted_bytes(t
     # ... and once it is accepted, the same installation's key follows it.
     update_install_record(drive_root, skill.name, pending_update=None)
     assert grant_status_for_skill(drive_root, skill)["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"]
+    # An accepted update from the same source records another release digest: still the same installation.
+    update_install_record(drive_root, skill.name, release={"version": "2", "digest": "b" * 64})
+    assert grant_status_for_skill(drive_root, skill)["granted_keys"] == ["GOOGLE_OAUTH_CLIENT_ID"]
 
     # The same name installed from another source, or in another folder, inherits nothing.
     write_install_record(drive_root, skill.name, {"source": {"id": "hub-b", "kind": "hub"},
