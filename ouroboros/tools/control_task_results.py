@@ -1028,14 +1028,14 @@ def _await_as_sleep(ctx: ToolContext, mode: str, **chosen: Any) -> str:
     ``request_default_sleep``): validate the selected sources, answer at once when one is
     already ready, else arm the park that follows this tool batch."""
     from ouroboros import model_sleep
+    from ouroboros.native_task_wait import armed_conflict
+    from ouroboros.tools.arg_feedback import repair_call_available
 
     try:
-        if mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD, "default"):
-            raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: in_slot takes only timeout_sec, and a task with no continuation owner cannot sleep")
-        if not callable(getattr(ctx, "owner_wait_callback", None)):
-            from ouroboros.tools.arg_feedback import repair_call_available
-            raise ValueError("this task has no continuation owner to sleep under" + ('; to wait here for any mail: await_messages(mode="in_slot", timeout_sec=…), which takes no senders/tasks/runs/services' if repair_call_available(ctx, "await_messages") else ""))
-        from ouroboros.native_task_wait import armed_conflict
+        owned = callable(getattr(ctx, "owner_wait_callback", None))  # with no owner nothing sleeps, in any mode
+        if not owned or mode not in (model_sleep.MODE_WARM, model_sleep.MODE_COLD, "default"):
+            raise ValueError("senders/tasks/runs/services/wake_at/wake_after_sec select a sleep: in_slot takes only timeout_sec, and a task with no continuation owner cannot sleep" if owned else
+                             "this task has no continuation owner to sleep under" + ('; await_messages(mode="in_slot", timeout_sec=…) waits here for any mail, without selectors' if repair_call_available(ctx, "await_messages") else ""))
         if conflict := armed_conflict(ctx):  # an owed native task wait is never overwritten
             raise ValueError(conflict)
         selected_runs = []

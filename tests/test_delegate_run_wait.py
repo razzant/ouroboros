@@ -253,6 +253,10 @@ def test_a_run_only_this_process_holds_is_read_at_once_unless_a_selected_durable
         task = _armed(ds.run_wait(ctx, "kidtask09"))
         assert task["reason"] == "run_ownership_unknown" and task["hint"] == (
             "That id names a task, not a delegated run: get_task_result(task_id='kidtask09') reads it.")
+        # An id this task's custody OWNS is never called a task, even when a task record shares it.
+        write_task_result(_status_root(ctx), "run-local", "completed", result="done")
+        mixed = _armed(ds.run_wait(ctx, ["run-local", "run-nobody"]))
+        assert mixed["reason"] == "run_ownership_unknown" and "hint" not in mixed
         assert _armed(ds.run_wait(ctx, "run-sibling"))["reason"] == "run_not_owned" and reads == []
         for durable, ready, status, woke_by in (("run-quiet", None, "no_progress", None),
                                                 ("run-done", _ended, "terminal", "run:run-done"),

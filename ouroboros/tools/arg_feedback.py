@@ -95,7 +95,8 @@ def repair_call_available(ctx: Any, tool: str) -> bool:
     """Whether a refusal may name ``tool`` as the call that works for this caller: not withheld by the task
     contract's ``disabled_tools`` (dispatch refuses it even where a consciousness schema still shows it), in a
     subagent profile's set, and granted by a Presence ceiling with no host-bound arguments (a bound call is not
-    the call the text would name). ``False`` whenever the host cannot show it, so the refusal names nothing."""
+    the call the text would name). For a caller outside those profiles it answers True for any tool that is not
+    withheld, which is true only of core tools (``tool_capabilities.CORE_TOOL_NAMES``): name only those."""
     from ouroboros.contracts.task_contract import canonical_tool_name
     from ouroboros.presence_authority import presence_ceiling_from_context
     from ouroboros.tool_access_roots import active_tool_profile
