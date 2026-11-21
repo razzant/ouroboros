@@ -15,9 +15,13 @@ import importlib.util
 import logging
 import os
 import pathlib
+import zlib
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+import anyio.to_thread
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.middleware import Middleware
 from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
@@ -32,6 +36,11 @@ UI_OWNER_MARKER = '<meta name="ouroboros-ui-owner" content="core">'
 APPEARANCE_SCOPE_META = "ouroboros-appearance-scope"
 TELEGRAM_MINIAPP_HEADER = "X-Ouroboros-Telegram-MiniApp"
 _NO_STORE = {"Cache-Control": "no-store"}
+BUILTIN_STATIC_CACHE = b"private, no-cache, must-revalidate"
+_GZIP_TYPES = frozenset({"application/json", "text/javascript", "application/javascript", "text/css", "text/plain",
+                         "image/svg+xml"})
+_GZIP_MIN_BYTES = 1024
+_GZIP_THREAD_BYTES = 128 * 1024
 _NO_MAIN_UI_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Ouroboros</title></head>
 <body><h1>No main interface is served here</h1>
@@ -73,23 +82,86 @@ def read_author_kit_assets(repo_dir: pathlib.Path) -> dict[str, str]:
 
 
 class NoCacheStaticFiles:
-    """Wrap StaticFiles to add Cache-Control: no-cache headers."""
+    """Wrap StaticFiles so every answer is revalidated (ETag, 304) before reuse.
 
-    def __init__(self, **kwargs):
+    The builtin tree says ``private`` too: the Telegram proxy keeps exactly that answer and turns
+    any other into ``no-store``, so a selected directory's files are never kept on the phone."""
+
+    def __init__(self, *, cache_control: bytes = b"no-cache, must-revalidate", **kwargs):
         self._app = StaticFiles(**kwargs)
+        self._cache_control = cache_control
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             async def send_with_no_cache(message):
                 if message["type"] == "http.response.start":
                     headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
-                    headers.append((b"cache-control", b"no-cache, must-revalidate"))
+                    headers.append((b"cache-control", self._cache_control))
                     message = {**message, "headers": headers}
                 await send(message)
 
             await self._app(scope, receive, send_with_no_cache)
         else:
             await self._app(scope, receive, send)
+
+
+class GzipText:
+    """gzip a 200 text answer of 1 KiB or more for a client that accepts it, with ``Vary: Accept-Encoding``.
+
+    Sockets, event streams and other types, downloads (``Content-Disposition``) and encoded bodies pass
+    untouched; a streamed text body is flushed per chunk, so compression never holds back what was sent."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or "gzip" not in Headers(scope=scope).get("accept-encoding", ""):
+            await self.app(scope, receive, send)
+            return
+        start: dict | None = None
+        gzip: Any = None
+
+        async def deflate(data: bytes, last: bool) -> bytes:
+            def run() -> bytes:
+                return gzip.compress(data) + gzip.flush(zlib.Z_FINISH if last else zlib.Z_SYNC_FLUSH)
+            return await anyio.to_thread.run_sync(run) if len(data) > _GZIP_THREAD_BYTES else run()
+
+        async def send_gzip(message):
+            nonlocal start, gzip
+            if message["type"] == "http.response.start":
+                headers = Headers(raw=message["headers"])
+                if (message["status"] == 200 and "content-encoding" not in headers
+                        and "content-disposition" not in headers
+                        and headers.get("content-type", "").partition(";")[0].strip().lower() in _GZIP_TYPES):
+                    # Held until the first body shows whether it is worth compressing; edited as a copy,
+                    # never the response object's own header list.
+                    start = {**message, "headers": list(message["headers"])}
+                    return
+            elif message["type"] == "http.response.body" and start is not None:
+                body, more = message.get("body", b""), message.get("more_body", False)
+                if gzip is None:
+                    headers = MutableHeaders(raw=start["headers"])
+                    headers.add_vary_header("Accept-Encoding")
+                    if not more and len(body) < _GZIP_MIN_BYTES:
+                        start, held = None, start
+                        await send(held)
+                        await send(message)
+                        return
+                    gzip = zlib.compressobj(6, zlib.DEFLATED, 31)
+                    headers["Content-Encoding"] = "gzip"
+                    del headers["Content-Length"]
+                    message = {**message, "body": await deflate(body, not more)}
+                    if not more:
+                        headers["Content-Length"] = str(len(message["body"]))
+                    await send(start)
+                else:
+                    message = {**message, "body": await deflate(body, not more)}
+            await send(message)
+
+        await self.app(scope, receive, send_gzip)
+
+
+TEXT_COMPRESSION = [Middleware(GzipText)]
 
 
 def appearance_scope(drive_root: Any) -> str:
@@ -208,7 +280,7 @@ class ServedUI:
         self.repo_dir = pathlib.Path(repo_dir)
         self.builtin_dir = resolve_web_dir(self.repo_dir)
         self.builtin_dir.mkdir(parents=True, exist_ok=True)
-        self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir))
+        self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir), cache_control=BUILTIN_STATIC_CACHE)
         self._builtin_page = make_index_page(self.builtin_dir, head=lambda request: self.appearance_meta(request.headers))
         self._current = _Generation(UiSelection("builtin", self.builtin_dir), self._builtin_static)
 

@@ -11,6 +11,7 @@ an absent key leaves the choice to the environment; a merged save never authors 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import re
@@ -207,6 +208,89 @@ def test_a_new_generation_replaces_the_whole_selection(custom_ui, tmp_path, appl
     assert _state(app) == {"source": "builtin"} and applied_settings["OUROBOROS_UI_DIR"] == ""
 
 
+def test_only_builtin_static_files_carry_the_private_revalidation_mark(custom_ui, tmp_path, applied_settings):
+    """The Telegram proxy keeps exactly this mark and stores nothing else; both trees still revalidate."""
+    served = ServedUI(REPO)
+    app = _app(served, tmp_path)
+    with TestClient(app) as client:
+        first = client.get("/static/ui.css")
+        again = client.get("/static/ui.css", headers={"If-None-Match": first.headers["etag"]})
+    assert first.headers["cache-control"] == again.headers["cache-control"] == "private, no-cache, must-revalidate"
+    assert again.status_code == 304 and again.content == b""
+    served.apply(app, {"OUROBOROS_UI_DIR": str(custom_ui)})
+    with TestClient(app) as client:
+        directory = client.get("/static/modules/app.js")
+        onboarding = client.get("/onboarding/static/ui.css")
+    assert directory.status_code == 200 and directory.headers["cache-control"] == "no-cache, must-revalidate"
+    assert onboarding.headers["cache-control"] == "private, no-cache, must-revalidate"
+
+
+def _gzip_app():
+    from starlette.responses import JSONResponse, Response, StreamingResponse
+
+    big = JSONResponse({"rows": ["x" * 40] * 200})
+
+    async def chunks():
+        for part in (b"data: one\n\n" * 200, b"data: two\n\n" * 200):
+            yield part
+
+    routes = [
+        Route("/api/state", lambda _r: big),
+        Route("/small", lambda _r: JSONResponse({"ok": True})),
+        Route("/events", lambda _r: StreamingResponse(chunks(), media_type="text/event-stream")),
+        Route("/log", lambda _r: StreamingResponse(chunks(), media_type="text/plain")),
+        Route("/download", lambda _r: Response(b"y" * 4096, media_type="text/plain",
+                                                headers={"Content-Disposition": "attachment; filename=y.txt"})),
+        Route("/image", lambda _r: Response(b"z" * 4096, media_type="image/png")),
+    ]
+    return Starlette(routes=routes, middleware=server_web.TEXT_COMPRESSION), bytes(big.body)
+
+
+def test_text_answers_are_gzipped_only_for_clients_that_accept_it():
+    import zlib
+
+    app, big = _gzip_app()
+    with TestClient(app) as client:
+        state = client.get("/api/state", headers={"Accept-Encoding": "gzip"})
+        plain = client.get("/api/state", headers={"Accept-Encoding": "identity"})
+        small = client.get("/small", headers={"Accept-Encoding": "gzip"})
+        untouched = {path: client.get(path, headers={"Accept-Encoding": "gzip"})
+                     for path in ("/events", "/download", "/image")}
+    assert state.headers["content-encoding"] == "gzip" and state.headers["vary"] == "Accept-Encoding"
+    assert state.content == big and int(state.headers["content-length"]) < len(big) // 4
+    assert "content-encoding" not in plain.headers and plain.content == big
+    assert "content-encoding" not in small.headers and small.headers["vary"] == "Accept-Encoding"
+    for path, response in untouched.items():
+        assert "content-encoding" not in response.headers, path
+    assert untouched["/events"].content == b"data: one\n\n" * 200 + b"data: two\n\n" * 200
+
+    # A streamed text body is flushed per chunk: each message decodes alone, so nothing waits for the next.
+    sent: list[dict] = []
+
+    async def scenario():
+        requested = []
+
+        async def receive():
+            if requested:
+                await asyncio.Event().wait()  # no disconnect: the response ends on its own
+            requested.append(True)
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "method": "GET", "path": "/log", "raw_path": b"/log", "query_string": b"",
+                 "headers": [(b"accept-encoding", b"gzip")], "scheme": "http", "server": ("t", 80),
+                 "root_path": "", "http_version": "1.1"}
+        await app(scope, receive, send)
+
+    asyncio.run(scenario())
+    decoder = zlib.decompressobj(31)
+    bodies = [m["body"] for m in sent if m["type"] == "http.response.body" and m.get("body")]
+    assert decoder.decompress(bodies[0]) == b"data: one\n\n" * 200
+    assert b"".join(decoder.decompress(b) for b in bodies[1:]) == b"data: two\n\n" * 200
+
+
 def test_state_reports_the_builtin_default_until_a_generation_applies(tmp_path):
     from ouroboros.gateway.state import _served_ui_state
 
@@ -230,6 +314,7 @@ def test_the_server_composes_the_served_interface_and_applies_it_in_the_lifespan
     paths = [getattr(route, "path", "") for route in server.routes]
     assert paths[0] == "/" and paths[-3:] == ["/auth", "/onboarding/static", "/static"]
     assert isinstance(server.served_ui, ServedUI) and server.routes[0].endpoint is server.index_page
+    assert [entry.cls for entry in server.app.app.user_middleware] == [server_web.GzipText]
     source = (REPO / "server.py").read_text(encoding="utf-8")
     lifespan = source[source.index("async def lifespan(app):"):]
     # Applied after the settings read and env projection, before any extension or supervisor work.
