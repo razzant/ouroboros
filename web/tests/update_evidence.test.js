@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { afterUpdateRows, preflightDescription, preflightEvidenceRows, updateOverReview } from '../modules/update_status.js';
+import { afterUpdateRows, preflightDescription, preflightEvidenceRows, updateOverReview, updateTarget } from '../modules/update_status.js';
 import { factValueHtml, initUpdates } from '../modules/updates.js';
 import { setup } from './dashboard_dom_fixture.js';
 
@@ -40,8 +40,9 @@ test('confirmation details name failed, absent and green evidence without conver
     qualification.landed_over_review = [{ sha: 'cccc1111dddd', subject: 'own change', reason: 'critical_findings', outcome },
         { sha: 'bbbb', subject: '#123', reason: 'review_quorum', outcome: 'no review verdict: review quorum' }];
     const own = preflightEvidenceRows({ merge_plan: plan, letter, qualification });
-    assert.deepEqual(own[0], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}` });
-    assert.equal(own[1].value, '#123\nOuroboros made it on this computer; no review verdict: review quorum.');
+    assert.deepEqual(own[0], { label: 'Commits', value: 'aaaa → bbbb' }, 'the exact range leads its Details');
+    assert.deepEqual(own[1], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}` });
+    assert.equal(own[2].value, '#123\nOuroboros made it on this computer; no review verdict: review quorum.');
     assert.doesNotMatch(rowsText(own), /Not read for this range/);
     const over = updateOverReview(qualification);
     assert.equal(over.line, 'Went in over a review FAIL or no verdict: 2 commits Ouroboros made on this computer.');
@@ -73,9 +74,23 @@ test('confirmation details name failed, absent and green evidence without conver
     assert.doesNotMatch(green, /also covers/);
     qualification.github.runs[0].covered_shas = ['earlier-merge'];
     assert.match(rowsText(preflightEvidenceRows({ merge_plan: plan, letter, qualification })), /This run also covers: earlier-/);
-    // Facts of another range are unknown for this one, never borrowed.
+    // Facts of another range are unknown for this one, never borrowed; its commits still lead the Details.
     assert.deepEqual(preflightEvidenceRows({ merge_plan: { ...plan, target_sha: 'cccc' }, letter, qualification }),
-        [{ label: 'Checks', value: 'Qualification for this range is unknown.' }]);
+        [{ label: 'Commits', value: 'aaaa → cccc' }, { label: 'Checks', value: 'Qualification for this range is unknown.' }]);
+});
+
+test('an update is named by its versions, else by its count of changes, never by its commits', () => {
+    // The Apply dialog's title and the Updates headline (DESIGN principle 7): hashes are the record's, in Details.
+    assert.equal(updateTarget({ current_version: '7.12.0', latest_version: '7.13.0', current_sha: 'aaaa', latest_sha: 'bbbb' }),
+        '7.12.0 → 7.13.0');
+    assert.equal(updateTarget({ current_version: '7.12.0', latest_version: '7.12.0', behind: 3 }), '3 new changes');
+    assert.equal(updateTarget({ current_version: '7.12.0', latest_version: '7.12.0', behind: 1 }), '1 new change');
+    assert.equal(updateTarget({}), 'unknown');
+    const source = (url) => import('node:fs').then((fs) => fs.readFileSync(new URL(url, import.meta.url), 'utf8'));
+    return source('../modules/updates.js').then((text) => {
+        assert.match(text, /title: `Update: \$\{updateTarget\(latestStatus\)\}`/, 'the dialog says the versions');
+        assert.doesNotMatch(text, /title: `Update \$\{String\(plan\.base_sha\)/, 'no commit pair in the title');
+    });
 });
 
 test('each commit keeps its own verdict, record state and request-time relation; a legacy receipt invents neither', () => {

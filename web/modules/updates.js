@@ -4,7 +4,7 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, updateTarget, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -285,13 +285,11 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
         const unsafe = !data.safe_to_apply;
         if (data.latest_short_sha) chips.push({ label: 'Update commit', value: data.latest_short_sha });
         if (data.latest_message) chips.push({ label: 'Latest', value: data.latest_message });
-        const target = latestVersion !== currentVersion ? `${currentVersion} → ${latestVersion}`
-            : data.behind ? `${data.behind} new ${data.behind === 1 ? 'change' : 'changes'}` : latestVersion;
         return {
             ...base,
             state: unsafe ? 'available_unsafe' : 'available',
             tone: unsafe ? 'warn' : 'ok',
-            headline: `Update available: ${target}`,
+            headline: `Update available: ${updateTarget(data)}`,
             hint: unsafe ? unsafeUpdateHint(data) : '',
             action: { id: 'update', label: `Update to ${latestVersion}` },
         };
@@ -1337,7 +1335,7 @@ export function initUpdates({ mount, state, ws }) {
             // The description reads as rendered prose in its own region; the consequences of
             // applying stay plain text below it, and the per-commit evidence sits in Details.
             const proceed = await openConfirmDialog({
-                title: `Update ${String(plan.base_sha).slice(0, 8)} -> ${String(plan.target_sha).slice(0, 8)}`,
+                title: `Update: ${updateTarget(latestStatus)}`,  // the versions; the exact commits lead its Details
                 content: description || over ? { label: "What's new", mount: (el) => mountDescription(el, description, over) } : null,
                 body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
