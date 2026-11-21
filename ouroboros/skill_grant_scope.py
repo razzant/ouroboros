@@ -195,6 +195,6 @@ def import_grant_identities(drive_root: pathlib.Path, *, log_obj: Any = None,
 
 
 __all__ = [
-    "USE_TIME_PERMISSIONS", "blocking_items", "blocking_lists", "end_identity", "grant_notes", "import_grant_identities", "grant_view", "identity_holds", "install_identity",
-    "payload_location", "waiting_refusal",
+    "USE_TIME_PERMISSIONS", "blocking_items", "blocking_lists", "end_identity", "grant_notes", "grant_view",
+    "identity_holds", "import_grant_identities", "install_identity", "payload_location", "waiting_refusal",
 ]

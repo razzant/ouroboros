@@ -471,7 +471,8 @@ def test_owner_edit_rebinds_unchanged_grant_requests(tmp_path):
                       granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
     (skill_dir / "notes.md").write_text("owner edit\n", encoding="utf-8")
     digest = record_owner_edit(drive_root, skill_dir, task_id="t1")
-    # The manifest requests nothing, so the old request set no longer matches: no carry.
+    # The grant names no installation (a record of the exact bytes) and the manifest requests nothing:
+    # no carry. The installation's carry: test_grant_installations_are_imported_once_and_carried_at_acceptance.
     assert load_skill_grants(drive_root, "probe")["content_hash"] != digest
 
 
