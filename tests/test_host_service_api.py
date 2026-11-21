@@ -134,11 +134,14 @@ def _seed_token(
     review_status: str = "pass",
     subscribe_events=None,
     manifest_permissions=None,
+    bundled=False,
 ) -> None:
     topics = list(subscribe_events or ["chat.outbound"])
     manifest_perms = list(manifest_permissions or ["inject_chat", "subscribe_event"])
-    skill_dir = data_dir / "skills" / "external" / skill
+    skill_dir = data_dir / "skills" / ("native" if bundled else "external") / skill
     skill_dir.mkdir(parents=True, exist_ok=True)
+    if bundled:
+        (skill_dir / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     (skill_dir / "SKILL.md").write_text(
         f"""---
 name: {skill}

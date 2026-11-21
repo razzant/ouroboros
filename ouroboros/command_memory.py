@@ -87,8 +87,14 @@ _SLOW_LOCK = threading.Lock()  # serialises the slow ``_probe()`` itself
 
 
 def _show(*argv: str) -> dict:
+    # A packaged user service inherits no login session: give --user the bus it always has,
+    # so the probe reads the manager from inside the service exactly as from a shell.
+    env = os.environ.copy()
+    if argv and argv[0] == "--user":
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{_uid()}")
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={env['XDG_RUNTIME_DIR']}/bus")
     out = subprocess.run(["systemctl", *argv], check=True, capture_output=True, text=True,
-                         encoding="utf-8", timeout=_SHOW_TIMEOUT_SEC).stdout
+                         encoding="utf-8", timeout=_SHOW_TIMEOUT_SEC, env=env).stdout
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
 
 
@@ -195,8 +201,11 @@ def _probe() -> Union[Enabled, Unavailable]:
     try:
         service = _show("--user", "show", unit, *(f"--property={name}" for name in props))
         manager = _show("show", f"user@{_uid()}.service", *(f"--property={name}" for name in props))
-    except (OSError, subprocess.SubprocessError):
-        return Unavailable("systemctl_unreadable", "systemctl show failed", True)
+    except subprocess.CalledProcessError as exc:
+        tail = " ".join((exc.stderr or "").split())[-200:]
+        return Unavailable("systemctl_unreadable", f"systemctl show failed: {tail}", True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Unavailable("systemctl_unreadable", f"systemctl show failed: {exc}", True)
     for found in (_check_unit(service, unit, subgroup=True, cgroup=cgroup),
                   _check_unit(manager, f"user@{_uid()}.service", subgroup=False, cgroup=cgroup)):
         if found is not None:

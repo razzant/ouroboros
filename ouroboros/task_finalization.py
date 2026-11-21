@@ -171,7 +171,7 @@ def provider_terminal_body(text: str, notice: str) -> str:
 
 
 def host_operation_reply_kwargs(
-    source_ref: Any, terminal_status: str = "", client_message_id: str = "",
+    source_ref: Any, terminal_status: str = "", client_message_id: str = "", transport: Any = None,
 ) -> Dict[str, Any]:
     """Correlate a host-accepted reply without inventing a durable task result.
 
@@ -179,11 +179,14 @@ def host_operation_reply_kwargs(
     metadata. An empty status marks an acknowledgement, not completion.
     ``client_message_id`` names the owner submission a System row answers, so the
     live frame settles that submission's ``Sending...`` and no other; it is not
-    persisted and confers no finality.
+    persisted and confers no finality. ``transport``: the address its turn carries
+    (``chat_references.TURN_ADDRESS``), where the receipt is told.
     """
     from ouroboros.project_dialogue import owner_message_ref_is_valid
 
     meta: Dict[str, Any] = {"client_message_id": str(client_message_id)} if client_message_id else {}
+    if isinstance(transport, dict) and transport:
+        meta["transport"] = dict(transport)
     if owner_message_ref_is_valid(source_ref):
         meta["origin_message_ref"] = dict(source_ref)
         if terminal_status:

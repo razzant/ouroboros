@@ -561,7 +561,19 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         correlated = {"operation_ref": operation_ref(chat_id, client_message_id)} if client_message_id else {}
         rejoined = False
         if client_message_id:
-            accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            from ouroboros.store import StoreBusy, StoreMigrating
+
+            try:
+                accepted = await asyncio.to_thread(_accepted_inbound, ctx, chat_id, client_message_id)
+            except (StoreBusy, StoreMigrating):
+                from ouroboros.chat_references import exact_reply_ingress
+
+                if not (payload.get("reply_to") and exact_reply_ingress(
+                    ctx.data_dir, f"skill:{skill_name}", chat_id, client_message_id, payload.get("transport")
+                )):
+                    raise
+                return JSONResponse({"ok": False, "error": "the store was busy before this attempt was accepted",
+                                     "code": "not_accepted", **correlated}, status_code=503)
             inbound = accepted.row if accepted is not None else None
             if inbound is not None:
                 if str(inbound.get("source") or "") != f"skill:{skill_name}":
@@ -647,6 +659,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             )
             if client_message_id:
                 from supervisor.message_bus import accept_local_message
+                from supervisor.message_ingress import NotAccepted
 
                 try:
                     _, rejoined = await run_sync_to_completion(
@@ -658,6 +671,9 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
                     return _json_error(str(exc), 400)  # the unnamed path's answer; 409 stays an id conflict
                 except ValueError as exc:
                     return _json_error(str(exc), 409)
+                except NotAccepted as exc:  # this attempt wrote nothing: the caller may send it again
+                    return JSONResponse({"ok": False, "error": str(exc), "code": "not_accepted", **correlated},
+                                        status_code=503)
             else:
                 # Custody passes BEFORE the handoff: dispatch may enqueue and then raise, so from
                 # here a failure is unknown. The copies stay (an orphan at worst), never deleted
@@ -1048,7 +1064,9 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     indexed under that origin, a turn's own record told apart by its origin; no room history or routing
     annotation is read. A managed root (a promoted or detached task) answers before the direct turn
     that handed it off; children and retry successors fold into their root, unless a record its
-    retry-aware read went through cannot be read (``task_record_unreadable``). Otherwise ``pending``,
+    retry-aware read went through cannot be read (``task_record_unreadable``). A message the owner router refused
+    before any work began is ``failed`` with the sentence its notice said (``dialogue_store.refuse_dispatch``).
+    Otherwise ``pending``,
     or ``lost`` when the host process or session that accepted the message is gone and nothing else
     answers; a record linked to the message that cannot be read (``task_record_unreadable``) or a
     dialogue range still importing after it (``history_importing``) keeps it ``pending`` with that
@@ -1161,10 +1179,14 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
         stored = load_effective_task_result(ctx.data_dir, target, materialize_artifacts=False) or {}
         if str(stored.get("status") or "") in SETTLED_STATUSES:
             return _task_view(state, target, stored, cancel_owner_matches)
+    from supervisor.message_ingress import dispatch_facts, dispatch_lost, dispatch_taken_over_here
+
+    if refused := (dispatch_facts(inbound, ctx.data_dir) or {}).get("refused"):
+        state.update(status="failed", text=refused)  # the router refused it before any work began, and said so
+        return state
     if not dialogue_store.range_coverage(ctx.data_dir, "chat", lower=accepted.seq)["imported"]:
         state["reason"] = "history_importing"  # an answer may sit in the rows still importing
         return state
-    from supervisor.message_ingress import dispatch_lost, dispatch_taken_over_here
 
     accepted_session = str(inbound.get("session_id") or "")
     live_session = str((read_json_dict(ctx.data_dir / "state" / "state.json") or {}).get("session_id") or "")

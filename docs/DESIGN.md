@@ -2043,6 +2043,8 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
+Reply quotes a row for Ouroboros to interpret. In the owner’s bundled Telegram chat, a confirmed Project Reply
+opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`).
 A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
 (owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
 menu, questions their own field. Select words in one message for **Reply to quote** beside them or

@@ -23,6 +23,7 @@ class ChatReplyReference(TypedDict, total=False):
     ts: str
     task_id: str
     target_home: Literal["work", "room", "none"]  # what decides the quoted row's room; an older reference lacks it
+    telegram_room_chat_id: int | None  # the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
     unresolved: bool
 
 
