@@ -1182,6 +1182,7 @@ def test_recording_languages_before_any_speech_leaves_the_opening_turn_open(tmp_
             session.emit('response_started', response_id='first-words')
             session.emit('audio', item_id='greeting', rate=24000, pcm=b'\0' * 4800)
             session.emit('response_done', response_id='first-words', usage={}, raw_usage={}, status='completed')
+            await until(lambda: any(item == 'greeting' for _, item in host.hub.audio))  # a receipt before its audio is never heard
             host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': 'greeting', 'played_ms': 100}))
             session.renewal_ready = True
             await until(lambda: len(host.sessions) == 2)
