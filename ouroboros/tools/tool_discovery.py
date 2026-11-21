@@ -183,36 +183,55 @@ def list_available_tools(
     return "\n".join(lines)
 
 
-def _skill_tools(registry: "ToolRegistry", name: str) -> List[str]:
+def _skill_tools(registry: "ToolRegistry", name: str, *, adopt: bool = True) -> List[str]:
     """The live extension tools of the skill ``name`` gives, sorted: its exact namespace (``ext_<n>_<token>``)
-    first, else the skill named so. Like a single surface name (``_extension_dispatch_candidate``) it first
-    takes the bounded adoption of the published generation, so a skill enabled or updated after this worker
-    spawned is seen; a registered skill that is not live (disabled, revoked, stale review) gives nothing."""
+    first, else the skill named so. Like a single surface name (``_extension_dispatch_candidate``) it can first
+    take the bounded adoption of the published generation (``adopt``; one per ``enable_tools`` call), so a
+    skill enabled or updated after this worker spawned is seen. A registered skill that is not live (disabled,
+    revoked, stale review), or whose liveness cannot be read, gives nothing; one observation per skill."""
     from types import SimpleNamespace
     from ouroboros.extension_loader import _lock as ext_lock, _tools as ext_tools, is_extension_live
     from ouroboros.tools.extension_dispatch import _adopt_extension_generation, _extension_capability_root
 
     ctx = getattr(registry, "_ctx", None) or SimpleNamespace()
-    try:
-        _adopt_extension_generation(ctx)
-    except Exception:
-        log.debug("Extension generation adoption failed before a skill load", exc_info=True)
-    root, live = _extension_capability_root(ctx), {}
+    if adopt:
+        try:
+            _adopt_extension_generation(ctx)
+        except Exception:
+            log.debug("Extension generation adoption failed before a skill load", exc_info=True)
     with ext_lock:
         rows = [(str(tool.get("name") or ""), str(tool.get("skill") or ""),
                  str(tool.get("skills_repo_path") or "") or None) for tool in ext_tools.values()]
-    rows = [(tool, skill) for tool, skill, repo in rows if skill and name in (skill, tool_namespace(tool))
-            and live.setdefault((skill, repo), bool(is_extension_live(skill, root, repo_path=repo)))]
+    rows = [row for row in rows if row[1] and name in (row[1], tool_namespace(row[0]))]
+    root, live = _extension_capability_root(ctx), {}
+    for _tool, skill, repo in rows:
+        if (skill, repo) not in live:
+            try:
+                live[skill, repo] = bool(is_extension_live(skill, root, repo_path=repo))
+            except Exception:  # an unreadable record answers like a dispatch miss: not live
+                log.debug("Liveness of skill %s could not be read", skill, exc_info=True)
+                live[skill, repo] = False
+    rows = [(tool, skill) for tool, skill, repo in rows if live[skill, repo]]
     return sorted([tool for tool, _skill in rows if tool_namespace(tool) == name]
                   or [tool for tool, skill in rows if skill == name])
 
 
+def _is_tool_name(registry: "ToolRegistry", name: str) -> bool:
+    """Whether a policy refusal of ``name`` refuses a tool: a registered built-in, an extension or MCP tool
+    name, or a name this task's contract disables. Any other name may still be a skill's."""
+    from ouroboros.tools.registry_guards import _disabled_tools
+
+    return (tool_namespace(name) != BUILTIN_NAMESPACE or name in getattr(registry, "_entries", {})
+            or name in _disabled_tools(getattr(registry, "_ctx", None)))
+
+
 def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
-    """Resolve names in request order: a tool, then a policy-hidden tool, then ``mcp_<server>`` (every tool of
-    that server this actor may call), then a live skill's name or extension namespace (each of its tools
-    resolved exactly as when named alone; those this actor cannot call are counted, never named)."""
+    """Resolve names in request order: ``mcp_<server>`` with tools (every one this actor may call), a tool, a
+    policy-hidden tool, then a live skill's name or extension namespace (each of its tools resolved exactly
+    as when named alone; those this actor cannot call are counted, never named), then a policy refusal of
+    any other name. One generation adoption serves the whole call."""
     wanted: Dict[str, Dict[str, Any]] = {}
-    servers, hidden, not_found, visible, partial = {}, [], [], None, []
+    servers, hidden, not_found, visible, partial, adopted = {}, [], [], None, [], False
     for name in names:
         if name.startswith("mcp_") and "__" not in name:
             visible = registry.schemas() if visible is None else visible
@@ -226,9 +245,13 @@ def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
         schema = registry.get_schema_by_name(name)
         if schema is not None:
             wanted.setdefault(name, schema)
-        elif reason := registry.policy_hidden_reason(name):  # F3 (2026-08-10 saga): policy-filtered is not a typo
+            continue
+        reason = registry.policy_hidden_reason(name)
+        if reason and _is_tool_name(registry, name):  # F3 (2026-08-10 saga): policy-filtered is not a typo
             hidden.append(f"{name} — {reason}")
-        elif members := _skill_tools(registry, name):
+            continue
+        members, adopted = _skill_tools(registry, name, adopt=not adopted), True
+        if members:
             schemas = {member: registry.get_schema_by_name(member) for member in members}
             servers[name] = [member for member in members if schemas[member] is not None]
             for member in servers[name]:
@@ -236,6 +259,8 @@ def _load_set(registry: "ToolRegistry", names: List[str]) -> tuple:
             if withheld := len(members) - len(servers[name]):
                 (partial if servers[name] else hidden).append(
                     f"{name} — {withheld} of its {len(members)} tools are not callable in this task (names withheld)")
+        elif reason:
+            hidden.append(f"{name} — {reason}")
         else:
             not_found.append(name)
     return wanted, servers, hidden, not_found, partial

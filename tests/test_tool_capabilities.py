@@ -711,7 +711,16 @@ def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
     mcp_named = register("mcp_probe", "ping")
     shadow = register(namespace, "other")  # a skill named after another skill's exact namespace
     hidden_twin = register("write_file", "ghost")  # a skill named after a policy-hidden built-in
-    monkeypatch.setattr(extension_loader, "is_extension_live", lambda skill, *_a, **_k: skill != "dead_skill")
+    register("broken_skill", "probe")
+    observed = []
+
+    def is_live(skill, *_a, **_k):
+        observed.append(skill)
+        if skill == "broken_skill":  # an unreadable review record (skill_loader raises on a non-object panel)
+            raise ValueError("panel is not an object")
+        return skill != "dead_skill"
+
+    monkeypatch.setattr(extension_loader, "is_extension_live", is_live)
     adoptions = []
     monkeypatch.setattr(extension_dispatch, "_adopt_extension_generation", lambda ctx: adoptions.append(ctx) or {})
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
@@ -724,7 +733,10 @@ def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
     out = td.enable_tools(registry, ctx, "unix_computer_use", resident, enabled)
     loaded = sorted(names[:4])
     assert [s["function"]["name"] for s in resident[1:]] == loaded and enabled == set(loaded)
-    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out and adoptions
+    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out and len(adoptions) == 1
+    # One family observation for the skill, then each member's own single-name check (the withheld one stops
+    # at its contract before liveness): 1 + 4, where one observation per family row would make 5 + 4.
+    assert observed.count("unix_computer_use") == 1 + len(loaded), observed
     assert "unix_computer_use — 1 of its 5 tools are not callable in this task (names withheld)" in out
     assert names[4] not in out
     # Every member resolves exactly as when named alone: the withheld one is refused, the others load.
@@ -753,6 +765,29 @@ def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
     refusal = td.enable_tools(registry, ctx, "write_file", twin, set())
     assert "write_file — disabled by this task's contract" in refusal and hidden_twin[0] not in refusal
     assert len(twin) == 1
+
+    # A liveness read that raises makes that skill not live; the other names of the call still load, and the
+    # whole call adopts the published generation once.
+    adoptions.clear()
+    mixed = fresh()
+    answer = td.enable_tools(registry, ctx, f"broken_skill, {names[1]}, no_such_a, no_such_b", mixed, set())
+    assert [s["function"]["name"] for s in mixed[1:]] == [names[1]] and "Not found: broken_skill" in answer
+    assert len(adoptions) == 1
+
+    # A retained Presence ceiling refuses any name outside its grants, tool or not. The same grants load the
+    # granted tools by the skill's name and by a tool's own name; a refused built-in keeps its own refusal.
+    import ouroboros.presence_authority as authority
+
+    grants = {"enable_tools", names[0], names[1]}
+    monkeypatch.setattr(authority, "presence_ceiling_from_context", lambda _ctx: object())
+    monkeypatch.setattr(authority, "presence_ceiling_allows_tool", lambda _ceiling, tool: tool in grants)
+    by_skill, by_tool = [], []
+    family = td.enable_tools(registry, ctx, "unix_computer_use", by_skill, set())
+    assert [s["function"]["name"] for s in by_skill] == sorted(names[:2]) and "unix_computer_use (all 2 tools)" in family
+    td.enable_tools(registry, ctx, names[0], by_tool, set())
+    assert [s["function"]["name"] for s in by_tool] == [names[0]]
+    ceiling = td.enable_tools(registry, ctx, "read_file", [], set())
+    assert "read_file — outside this presence task's positive capability ceiling" in ceiling
 
 
 def test_every_catalog_that_names_extract_pdf_text_names_read_archive():

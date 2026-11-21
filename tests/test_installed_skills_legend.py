@@ -49,3 +49,9 @@ def test_the_loading_hint_reaches_both_forms_only_beside_registered_tools(monkey
     for form in (extension, extension.operative_view, mixed, mixed.operative_view):
         assert hint in form and 'unix_computer_use' in form
     assert 'script_tool' in mixed.operative_view
+
+
+def test_an_extension_without_registered_tools_keeps_its_name_and_adds_no_loading_hint(monkeypatch, tmp_path):
+    text = _section(monkeypatch, tmp_path, [])
+    assert '  Tools:' not in text and 'enable_tools' not in text and 'enable_tools' not in text.operative_view
+    assert all('unix_computer_use' in form for form in (text, text.operative_view))

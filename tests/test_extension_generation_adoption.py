@@ -153,12 +153,12 @@ def test_a_skill_name_loads_what_a_late_enable_published_and_nothing_once_disabl
 _SLOW_PLUGIN = _PROBE_PLUGIN.replace("schema={})", "schema={}, timeout_sec=1200)")
 
 
-def _update_published_by_another_server(repo_root, drive_root, name="genprobe"):
+def _update_published_by_another_server(repo_root, drive_root, name="genprobe", plugin=_SLOW_PLUGIN):
     """Review a new payload and let a genuinely separate server process publish it."""
     from ouroboros.skill_loader import SkillReviewState, find_skill, save_review_state
     from tests.test_extension_freshness_cross_process import _in_another_process
 
-    (repo_root / name / "plugin.py").write_text(_SLOW_PLUGIN, encoding="utf-8")
+    (repo_root / name / "plugin.py").write_text(plugin, encoding="utf-8")
     updated = find_skill(drive_root, name, repo_path=str(repo_root))
     save_review_state(drive_root, name, SkillReviewState(status="pass", content_hash=updated.content_hash))
     before = published_extension_generation(drive_root)
@@ -766,3 +766,27 @@ def test_the_server_publishes_and_never_adopts(tmp_path, monkeypatch):
 
     assert adopt_published_extension_generation(
         drive_root, lambda: {}, repo_path=str(repo_root)) == {"action": "server_process"}
+
+
+_TWO_TOOL_PLUGIN = _PROBE_PLUGIN + (
+    "    api.register_tool('echo2', lambda ctx, message='hi': f'echo2: {message}',\n"
+    "                      description='second echo probe', schema={})\n")
+
+
+def test_a_skill_name_loads_a_tool_an_update_added_while_the_worker_ran(tmp_path, monkeypatch):
+    """A worker that loaded genprobe's one tool before a reviewed update added a second one loads both by the
+    skill's name: the family is read after the call's one adoption, never from the pre-update registry."""
+    from ouroboros.tools import tool_discovery as td
+    from ouroboros.tools.registry import ToolRegistry
+
+    loaded, repo_root, drive_root, surface, _empty, _published = _published_by_a_server_that_loaded_it(tmp_path)
+    _settings_and_repo(monkeypatch, repo_root)
+    _as_worker()
+    second = extension_loader.extension_surface_name(loaded.name, "echo2")
+    _update_published_by_another_server(repo_root, drive_root, plugin=_TWO_TOOL_PLUGIN)
+    assert extension_loader.get_tool(second) is None, "premise: the worker still holds the one-tool registry"
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+
+    resident: list = []
+    out = td.enable_tools(registry, registry._ctx, loaded.name, resident, set())
+    assert sorted(schema["function"]["name"] for schema in resident) == sorted([surface, second]), out
