@@ -190,7 +190,8 @@ def test_extension_rows_keep_liveness_apart_from_script_execution():
     record = skill_catalogue.list_skills_payload({"count": 1, "skills": rows})["skills"][0]
     assert record["desired_live"] is True and record["live_loaded"] is False
     assert record["live_reason"] == "load_error" and record["process"] == "worker"
-    assert record["ready"] is True and "available_for_execution" not in record
+    # A failed load this process holds is its liveness, not the skill's configuration: readiness stays the answer.
+    assert record["ready"] is True and "available_for_execution" not in record and "not_ready" not in record
     assert record["load_error"] == "E" * 200 and record["omitted"] == {"load_error": 300}
 
 

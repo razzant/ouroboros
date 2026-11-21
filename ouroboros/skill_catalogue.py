@@ -203,7 +203,7 @@ LIST_SKILLS_SCHEMA = {
 # Preview bounds; list_skills(name=...) returns every full value.
 _PREVIEW_CHARS = {"type": 80, "version": 80, "description": 200, "when_to_use": 160,
                   "what_model_sees": 160, "token_effect": 160, "load_error": 200,
-                  "live_reason": 120}
+                  "live_reason": 120, "not_ready": 240}
 _PREVIEW_TOOLS = 6
 _PREVIEW_TOOL_CHARS = 80
 _STATE = ("name", "source", "enabled", "review_status", "review_stale")
@@ -215,10 +215,68 @@ def _encode(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _compact(row: dict) -> dict:
-    """State facts plus bounded previews, with what each preview omitted."""
+# The load gate's refusals (``desired_live`` false) that readiness does not compute itself; every other one repeats a
+# readiness blocker. A reason over a desired state (``desired_live`` true: loaded or not in this process, a failed load
+# held in its memory, a companion's health) is the running process's, never the skill's configuration.
+_GATE_ONLY_REASONS = ("deployment_untrusted", "deps_declaration_desync")
+
+
+def skill_status(row: Any) -> dict:
+    """Whether one ``summarize_skills`` row can run now: ``{"ready", "reasons", "notes"}``.
+
+    The one ordered answer every reader that shows the mind a skill's state uses (the Installed Skills section,
+    ``list_skills``): readiness's blockers in their order, then what runs the files: a script's interpreter and
+    declared entry file (``runnable_via_skill_exec``), an extension's load gate as configuration decides it
+    (``desired_live``). Configuration only (installed set, switch, grants, review, dependencies, manifest), never
+    whether a process holds it now. ``notes`` are readiness's non-blocking remarks."""
+    if row.get("collision_row_id"):
+        return {"ready": False, "reasons": [str(row.get("load_error") or "skill name collision")], "notes": []}
+    readiness = row.get("readiness") if isinstance(row.get("readiness"), dict) else {}
+    reasons = [str(item) for item in readiness.get("blockers") or [] if str(item).strip()]
+    if row.get("type") == "script" and not row.get("runnable_via_skill_exec") and not reasons:
+        reasons.append("entry_unavailable: its runtime's interpreter or a declared script file is missing")
+    gate = str(row.get("live_reason") or "")
+    if row.get("type") == "extension" and not row.get("desired_live") and gate and gate != "not_extension" and (
+            not reasons or gate in _GATE_ONLY_REASONS):
+        words = str(row.get("load_error") or "") if gate in _GATE_ONLY_REASONS or gate.startswith("deps_") else ""
+        reasons.append(f"{gate}: {words}" if words else gate)
+    notes = [str(item) for item in readiness.get("notes") or [] if str(item).strip()]
+    return {"ready": not reasons, "reasons": reasons, "notes": notes}
+
+
+def off_state(drive_root: Any, row: Any) -> str:
+    """Who left an installed skill Off, when it was not a choice: ``""`` when ``enabled.json`` holds an Off written
+    by anyone but a failed load's revert (``skill_lifecycle_actions._REVERSIBLE_DISABLE_ACTORS``)."""
+    from ouroboros.skill_loader import skill_state_dir_path
+    from ouroboros.utils import read_json_dict
+
+    if row.get("collision_row_id"):
+        return "name conflict: several folders claim this name, none is selected"
+    if row.get("load_error") and not row.get("manifest_file"):
+        return "its manifest cannot be read"
+    path = skill_state_dir_path(pathlib.Path(drive_root), str(row.get("name") or "")) / "enabled.json"
+    if not path.exists():
+        return "never turned on"
+    choice = read_json_dict(path)
+    if not isinstance(choice, dict) or not isinstance(choice.get("enabled"), bool):
+        return "its on/off record is unreadable (state unknown)"
+    if choice.get("enabled"):
+        return "switched on, but the host does not run it as on"
+    return "turned off after it failed to load" if choice.get("actor") == "load_error_revert" else ""
+
+
+def _compact(row: dict, drive_root: Any = None) -> dict:
+    """State facts plus bounded previews, with what each preview omitted; readiness is ``skill_status``'s."""
     out = {key: row.get(key) for key in _STATE}
-    out["ready"] = bool((row.get("readiness") or {}).get("ready"))
+    status = skill_status(row)
+    out["ready"] = status["ready"]
+    reason = " ".join(status["reasons"][0].split()) if status["reasons"] else ""
+    if reason:
+        out["not_ready"] = reason[:_PREVIEW_CHARS["not_ready"]]
+    if status["notes"]:
+        out["notes"] = status["notes"]
+    if drive_root is not None and not row.get("enabled") and (off := off_state(drive_root, row)):
+        out["off_state"] = off
     experience = row.get("model_experience")
     experience = experience if isinstance(experience, dict) else {}
     texts = {"type": row.get("type"), "version": row.get("version"),
@@ -233,7 +291,8 @@ def _compact(row: dict) -> dict:
         out.update(desired_live=row.get("desired_live"), live_loaded=row.get("live_loaded"),
                    process=row.get("process"))
         texts["live_reason"] = row.get("live_reason")
-    omitted = {}
+    cut = len(reason) - _PREVIEW_CHARS["not_ready"]
+    omitted = {"not_ready": cut} if cut > 0 else {}
     for key, value in texts.items():
         text = " ".join(str(value or "").split())
         out[key] = text[:_PREVIEW_CHARS[key]]
@@ -274,8 +333,9 @@ def _named(rows: list, name: str) -> dict:
 
 
 def list_skills_payload(summary: dict, *, name: str = "", offset: int = 0,
-                        snapshot: str = "") -> dict:
-    """Project one fresh ``summarize_skills`` result; other consumers keep it whole."""
+                        snapshot: str = "", drive_root: Any = None) -> dict:
+    """Project one fresh ``summarize_skills`` result; other consumers keep it whole. ``drive_root`` lets a
+    compact Off row say when its Off was not a choice (``off_state``)."""
     if not isinstance(name, str) or not isinstance(snapshot, str):
         raise ValueError("name and snapshot must be strings")
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -308,7 +368,7 @@ def list_skills_payload(summary: dict, *, name: str = "", offset: int = 0,
         _encode({**out, "next": {"offset": len(rows), "snapshot": token}}))
     page = []
     for row in rows[start:]:
-        record = _compact(row)
+        record = _compact(row, drive_root)
         cost = len(_encode(record)) + 1
         if page and cost > budget:
             break
