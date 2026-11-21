@@ -291,7 +291,7 @@ class SkillUninstallResponse(TypedDict, total=False):
 class StarterConnection(TypedDict, total=False):
     """A built-in skill's declared connection card, carried on its starter item (the skill manifest's
     ``connection_card``; DESIGN §7). ``token`` and ``pairing.code`` name the skill's secret fields; ``pairing.link``
-    holds ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint`` and
+    holds ``{username}`` and ``{code}``. ``title``, ``pitch``, ``steps`` ([{text, link, action}]), ``pairing.hint``, ``pairing.note`` and
     ``options`` ([{key, label, on, off, new_connection}]) are the skill's own words. The card checks a token with
     ``POST /api/onboarding/connection/identity`` and its values ride the completion as ``connections``."""
 

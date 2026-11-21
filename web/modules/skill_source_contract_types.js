@@ -244,7 +244,7 @@
 /**
  * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` and
  * `pairing.code` name its secret fields, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`,
- * `pairing.hint` and `options` are the skill's own words.
+ * `pairing.hint`, `pairing.note` and `options` are the skill's own words.
  * @typedef {Object} StarterConnection
  * @property {string} skill
  * @property {string} token

@@ -2996,27 +2996,32 @@ Skills is its own step after Consciousness (owner 2026-11-21: «показать
 списком, но юзер может поснимать галочки», which revises his 4A of 2026-10-17, a Summary row), offered only where Finish
 honors its ticks: a data root whose starter list never ran. Elsewhere the step is absent and the Skills page is where
 skills change, so no tick is shown that Finish would ignore. It is a list, not cards (his «слишком крупные карточки»
-of the same day): one row per skill with no surface of its own, its box, its human title and, muted on the same line,
-what it gives (an author's longer description falls back there) and, quieter, what it needs first where the catalog
-says so; a row wraps whole under its title where the line is short, never cut. The groups, by category with built-ins
-first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each group whole in its column, and one
-column below that and on a phone; a group's head is its name and count. The maintainer's recommended skills are
+of the same day): one row per skill with no surface of its own, its box, its human title and, muted on one line with
+it, what it gives (an author's longer description falls back there) and, quieter, what it lacks in a few words (the
+catalog's mark: «· Gemini key», else «· needs setup»), whose whole sentence a screen reader hears instead. The catalog's
+pitches are written to keep each row on one line at 980 px; a narrower row wraps whole under its title, never cut. The
+groups, by category with built-ins first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each
+group whole in its column, and one column below that and on a phone; a group's head is its name only, and categories
+of a single skill close the list together as «More». The maintainer's recommended skills are
 ticked; the box is the chosen thing. Inside a group what works at once leads, recommended first, and what needs a key
 or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
 installs nothing. Where the hub's skills come from and how they install is one small sentence under the list (Official
 skills from the hub without a review, the community's reviewed first), its two choices per source behind it in
 Settings' words. What is still being read stands under the list too, where the hub's skills join it, so their arrival
 moves no row; a refresh keeps the ticks, focus and the row being read. Entering the step, the rows arrive once in a
-short sequence, the owner's «анимированный список»: each comes on `--motion-open` by position and opacity, a beat after
-the one before, the whole under a second; the boxes answer from the first frame, a repaint or the hub's late list never
-plays it again, and reduced motion shows the list as it ends. Review & start passes it; Summary keeps one row back to
+short sequence, the owner's «анимированный список»: each comes on `--motion-open` by position and opacity, a 30 ms beat
+after the one above it in its own column, so both columns start at once and build at one pace, 700 ms in all; the
+boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows the
+list as it ends. Review & start passes it; Summary keeps one row back to
 it. Nothing installs before Start.
 
 A skill that declares a connection card stands first in the step as that card (the Telegram skill's «Phone via
 Telegram»; owner 2026-11-21, 3A: the QR right in the wizard), its box the skill's tick, with Connect. Open, it shows the
-skill's own steps to get a token, the token field and, once the host's identity check names the account, a QR of the
-skill's link with a one-time code made in the page, the account's @name, the same link for this device and the skill's
-options (Telegram's «Send results and errors of work here», on for a new connection). The QR is drawn on the device by
+skill's own steps to get a token, the token field under the last of them (which says what to paste) and, once the
+host's identity check names the account, a QR of the skill's link with a one-time code made in the page, the account's
+@name, the skill's hint and note (Telegram: scan, press Start; finishing setup now is fine), the same link for this
+device and the skill's options (Telegram's «Send results and errors of work here», on for a new connection). On a phone
+the Check button sits under the field. The QR is drawn on the device by
 the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token. A failed check
 says only its own cause («Could not reach Telegram from here», «Telegram did not accept this token») and blocks neither
 Continue nor Finish; a refused token is not saved, an unchecked one is. The code is made once per card and kept until
