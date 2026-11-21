@@ -1,7 +1,9 @@
-"""Git repositories for native workspace capture and integration tests."""
+"""Git repositories for native workspace capture and integration tests, copied from the run's Git worlds."""
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
+
+from tests._worlds import git_repository
 
 
 def git(root, *args):
@@ -9,19 +11,14 @@ def git(root, *args):
 
 
 def repository(root, *, unborn=False):
-    root.mkdir()
-    git(root, "init")
-    if not unborn:
-        git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "commit", "--allow-empty", "-m", "base")
-    return root
+    """One empty commit ``base`` by Fixture, or ``unborn``."""
+    return git_repository(root, unborn=unborn)
 
 
 def seeded_repository(path, files):
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "config", "user.name", "Fixture")
-    git(path, "config", "user.email", "fixture@example.invalid")
+    """One root commit ``fixture`` holding ``files``, over the unborn world that keeps Fixture as the author the
+    tests' own later commits read: one world for every file set."""
+    git_repository(path, unborn=True, identity=True)
     for name, content in files.items():
         (path / name).write_bytes(content)
     git(path, "add", "-A")

@@ -20,7 +20,7 @@ from tests import _contributor_packet_shared as shared
 from tests import _worlds
 from tests._live_world import _own_installation, installation_template
 from tests._source_scan import parse
-from tests._worlds import clone, run_folder, world
+from tests._worlds import clone, git_repository, run_folder, world
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 RACERS = 3
@@ -215,6 +215,51 @@ def test_a_cloned_checkout_is_stat_clean_and_its_own_repository(run_root, tmp_pa
     assert shared.git(template, "rev-parse", "HEAD") == shared.git(sibling, "rev-parse", "HEAD") == fixture["base_sha"]
     assert shared.git(template, "branch", "--list", "only-here") == shared.git(sibling, "branch", "--list", "only-here") == ""
     assert shared.git(sibling, "status", "--porcelain") == ""
+
+
+def test_a_git_world_is_a_private_repository_on_its_branch_whatever_git_state_its_first_test_set(
+        run_root, tmp_path, monkeypatch):
+    def unset(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True).returncode != 0
+
+    elsewhere = tmp_path / "elsewhere.git"
+    monkeypatch.setenv("GIT_DIR", str(elsewhere))  # the first consumer's own Git, set before it builds the world
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "this test's own author")
+    first = git_repository(tmp_path / "first")
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_AUTHOR_NAME")
+    template = run_folder("worlds") / "git-base-master"
+    second = git_repository(tmp_path / "second")
+    assert not elsewhere.exists()
+    for repo in (first, second, template):  # the template is only read: a status could refresh its index
+        assert shared.git(repo, "symbolic-ref", "HEAD") == "refs/heads/master"
+        assert shared.git(repo, "log", "--format=%an <%ae> %s") == "Fixture <fixture@example.invalid> base"
+        assert unset(repo, "config", "--local", "--get", "user.name") and not (repo / ".git" / "hooks").exists()
+    for repo in (first, second):
+        shared.git(repo, "diff-files", "--quiet")
+        shared.git(repo, "diff-index", "--quiet", "HEAD")
+        assert shared.git(repo, "status", "--porcelain") == ""
+
+    base = shared.git(template, "rev-parse", "HEAD")
+    (first / "only-here.txt").write_text("one copy's own\n", encoding="utf-8")
+    shared.git(first, "add", "-A")
+    shared.git(first, "commit", "-q", "-m", "only here")
+    head = shared.git(first, "rev-parse", "HEAD")
+    assert shared.git(first, "rev-parse", "HEAD^") == base == shared.git(second, "rev-parse", "HEAD")
+    assert unset(second, "cat-file", "-e", head) and unset(template, "cat-file", "-e", head)
+    assert shared.git(second, "status", "--porcelain") == ""
+    assert shared.git(template, "rev-list", "--count", "HEAD") == "1"
+
+    unborn = git_repository(tmp_path / "unborn", unborn=True, branch="main", identity=True)
+    assert shared.git(unborn, "symbolic-ref", "HEAD") == "refs/heads/main"
+    assert unset(unborn, "rev-parse", "-q", "--verify", "HEAD")
+    assert shared.git(unborn, "config", "--local", "user.email") == "fixture@example.invalid"
+
+    os.replace(template, tmp_path / "gone")  # a template that is gone is built again
+    rebuilt = git_repository(tmp_path / "rebuilt")
+    assert template.is_dir() and shared.git(rebuilt, "log", "--format=%an %s") == "Fixture base"
+    with pytest.raises(FileExistsError):
+        git_repository(tmp_path / "first")
 
 
 def test_the_installation_a_host_starts_from_is_a_private_copy(run_root, tmp_path):

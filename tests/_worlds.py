@@ -17,17 +17,22 @@ it: the first test's fixtures run before the build.
 Templates live beneath the owner root of the run (``OUROBOROS_TEST_TEMP_ROOT``: safe_test, the
 commit gate), declared, so the owner's release takes them with the run (PERSISTENCE). Bare pytest
 has no owner to share a root through: each of its processes keeps its own until it exits.
+
+The plain Git repository a test starts from, unborn or with one empty commit, is a world of its own:
+``git_repository(tmp_path / name)`` copies it, where ``git init`` and a commit cost two processes.
 """
 from __future__ import annotations
 
 import contextlib
 import ctypes
+import functools
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from typing import Callable, Iterator
 
 _bare_root = None  # tempfile.TemporaryDirectory: its finalizer is the remover
@@ -150,3 +155,40 @@ def clone_repository(template: pathlib.Path, destination: pathlib.Path) -> pathl
     destination = clone(template, destination)
     subprocess.run(["git", "update-index", "-q", "--refresh"], cwd=destination, capture_output=True, check=False)
     return destination
+
+
+FIXTURE_AUTHOR = ("user.name=Fixture", "user.email=fixture@example.invalid")
+
+
+def _git_environment() -> dict[str, str]:
+    """The run's environment without a test's own Git state (``GIT_DIR``, an author, a date): the first consumer's
+    fixtures set it before the build. Configuration stays what tests/conftest.py gives every test: none."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    return env
+
+
+def _lay_git_repository(folder: pathlib.Path, *, branch: str, unborn: bool, identity: bool) -> None:
+    env = _git_environment()
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=folder, env=env, check=True, capture_output=True)
+
+    git("init", "-q", "--template=", "-b", branch)  # no sample hooks: a test that wants hooks brings its own template
+    if identity:
+        for setting in FIXTURE_AUTHOR:
+            git("config", *setting.split("=", 1))
+    if not unborn:
+        git("-c", FIXTURE_AUTHOR[0], "-c", FIXTURE_AUTHOR[1], "-c", "commit.gpgsign=false",
+            "commit", "-q", "--allow-empty", "-m", "base")
+
+
+def git_repository(destination: pathlib.Path, *, unborn: bool = False, branch: str = "master",
+                   identity: bool = False) -> pathlib.Path:
+    """A private Git repository at ``destination``, which must not exist: one empty commit ``base`` by the fixture's
+    author on ``branch``, or ``unborn``. ``identity`` keeps that author in its configuration for the test's own
+    commits. ``master`` is what ``git init`` names a branch where no configuration says otherwise, as in tests.
+    Its index holds no entry, so a copy is clean as it lands: nothing to refresh, no child process."""
+    key = f"git-{'unborn' if unborn else 'base'}-{urllib.parse.quote(branch, safe='')}{'-identity' if identity else ''}"
+    build = functools.partial(_lay_git_repository, branch=branch, unborn=unborn, identity=identity)
+    return clone(world(key, build), destination)
