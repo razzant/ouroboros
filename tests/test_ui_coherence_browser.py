@@ -1047,9 +1047,9 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
             .openConfirmDialog({ title, body: 'Grant access?', confirmLabel: 'Grant access' }); }""", title)
         box = page.locator('.confirm-dialog').evaluate("""dialog => {
             const d = dialog.getBoundingClientRect(), h = dialog.querySelector('h3').getBoundingClientRect();
-            const c = dialog.querySelector('.marketplace-modal-actions [data-confirm-cancel]').getBoundingClientRect();
+            const c = dialog.querySelector('.ui-modal-actions [data-confirm-cancel]').getBoundingClientRect();
             return {inside: h.left >= d.left && h.right <= d.right + 0.5 && c.right <= d.right + 0.5,
-                headClose: dialog.querySelectorAll('.marketplace-modal-head button').length,
+                headClose: dialog.querySelectorAll('.ui-modal-head button').length,
                 centred: Math.abs((d.top + d.bottom) / 2 - innerHeight / 2) <= 1,
                 cancel: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
         }""")

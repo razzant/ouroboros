@@ -1204,21 +1204,21 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
    control crimson; a second [data-primary] in the same slot is neutral, so two crimsons in one place cannot be
    expressed. Any other crimson there is a page-level choice the review sees. */
 .ui-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary] {
     background: var(--tone-crimson);
     color: var(--tone-crimson-ink);
     box-shadow: var(--elev-rest);
     --press: var(--press-solid);
 }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary]:not(:disabled):hover {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary]:not(:disabled):hover {
     background: var(--tone-crimson-hover);
 }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary] {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary] ~ [data-primary] {
     background: var(--surface-capsule);
     color: var(--text-primary);
     --press: brightness(1.12);
 }
-:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary]:not(:disabled):hover {
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .ui-modal-actions) > [data-primary] ~ [data-primary]:not(:disabled):hover {
     background: var(--surface-capsule-hover);
 }
 
@@ -1598,6 +1598,70 @@ textarea.ui-control { resize: vertical; }
 @keyframes ui-popup-in { from { opacity: 0; transform: scale(0.96); } }
 @media (prefers-reduced-motion: reduce) {
     .ui-popup:not([hidden]) { animation: none; }
+}
+
+/* ---- The shared dialog (confirm_dialog.js and every dialog drawn on these classes) ---------------------------------
+   One veil and one box. The backdrop is the theme's --scrim over the whole window (U020), and it scrolls a dialog
+   taller than the window. The box stands in the window's middle, clear of the bars (U024), on the popups' backed
+   material and the float shadow, so no words bleed through (DESIGN principle 2); one taller than the window starts at
+   its top and scrolls (the auto margins centre only while there is room). While a phone's keyboard is up the window
+   keeps its height under it, so a dialog stands at the top instead, its foot above the keyboard (M12). Inside: a head
+   (a long title wraps; Close never leaves the dialog), the body that scrolls, and the foot, whose [data-primary] is the
+   dialog's one primary action (the primary slot above). A dialog's own class sets its width and what its body holds;
+   the veil, the box and its material are this part's. */
+.ui-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: calc(4vh + var(--inset-top)) 16px 4vh;
+    background: var(--scrim);
+}
+.ui-modal {
+    width: 100%;
+    max-width: 900px;
+    max-height: calc(var(--vvh) - 8vh - var(--inset-top));
+    min-height: 0;
+    margin-block: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-object);
+    background: var(--popup-float);
+    box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+}
+body.keyboard-open .ui-modal { margin-block: 0 auto; }
+.ui-modal-head {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.ui-modal-head > h3 { min-width: 0; overflow-wrap: anywhere; }
+.ui-modal-head > button { flex: 0 0 auto; }
+.ui-modal-body {
+    min-height: 0;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+}
+.ui-modal-body > * { flex-shrink: 0; }
+.ui-modal-actions {
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
 }
 
 /* ---- The one hint (DESIGN "Hints", ui_hint.js) ---------------------------------------------------------------------

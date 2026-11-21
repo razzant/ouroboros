@@ -602,7 +602,7 @@ def test_files_project_actions_fit_available_viewport(direct_server_with_data, e
                 page.evaluate("window.openGeometryProject(); undefined")
                 page.locator('[name="np-source"][value="attach"]').check()
                 expect(page.locator("[data-np-path]")).to_contain_text("long-folder-name")
-                for selector in [".new-project-dialog", "[data-np-create]", ".new-project-dialog .marketplace-modal-actions [data-np-cancel]"]:
+                for selector in [".new-project-dialog", "[data-np-create]", ".new-project-dialog .ui-modal-actions [data-np-cancel]"]:
                     result = _hit_target(page, selector)
                     if not result["visible"] or (selector != ".new-project-dialog" and not result["hit"]):
                         failures.append({"surface": "Project", "width": width, "height": height, "selector": selector, **result})
@@ -962,10 +962,10 @@ def _geometry(ui, dialog) -> dict:
     """What eyes miss: the dialog inside the window, no sideways scroll anywhere in it, every control reachable."""
     facts = dialog.evaluate("""(el) => {
         const box = el.getBoundingClientRect();
-        const body = el.querySelector('.marketplace-modal-body');
+        const body = el.querySelector('.ui-modal-body');
         const wide = [...el.querySelectorAll('*')].filter((node) => node.scrollWidth > node.clientWidth + 1
             && getComputedStyle(node).overflowX !== 'visible').map((node) => node.className || node.tagName);
-        const buttons = [...el.querySelectorAll('.marketplace-modal-actions button:not([hidden])')].map((button) => {
+        const buttons = [...el.querySelectorAll('.ui-modal-actions button:not([hidden])')].map((button) => {
             const b = button.getBoundingClientRect();
             const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
             return {text: button.textContent.trim(), height: b.height, inside: b.left >= box.left - 0.5 && b.right <= box.right + 0.5,

@@ -125,7 +125,7 @@ def sync_project_rows(page):
 
 SURFACES = {
     'confirm': {'surface': '.confirm-dialog-backdrop',
-                'control': '.confirm-dialog .marketplace-modal-actions [data-confirm-cancel]'},
+                'control': '.confirm-dialog .ui-modal-actions [data-confirm-cancel]'},
     'reader': {'surface': 'dialog.document-reader', 'control': 'dialog.document-reader [data-reader-action="close"]'},
 }
 OVER_ROOM = """sel => {

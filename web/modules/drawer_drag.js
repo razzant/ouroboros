@@ -54,7 +54,7 @@ export const SIDEWAYS_SELECTOR = 'pre, code, table, .md-table-wrap, .app-tab-str
 // What lies over the room and owns the finger while it is open (shown, not merely mounted): a dialog, the reader,
 // a menu, the work list. A Project open on the phone is the room: the drag opens the drawer over it, as ☰ does. A
 // menu's picture leaving after it closed (motion.js leaveAsPicture) and a work list folding away are closed already.
-export const BLOCKING_SELECTOR = 'dialog[open], .marketplace-modal-backdrop, .ui-popup:not([data-leaving]), .task-control-menu, '
+export const BLOCKING_SELECTOR = 'dialog[open], .ui-modal-backdrop, .ui-popup:not([data-leaving]), .task-control-menu, '
     + '.chat-photo-menu:not([data-leaving]), .rw-shade:not([hidden]):not([inert])';
 
 /** The chain under the finger keeps its own sideways gesture: a `touch-action: none` element (the effort strip) or a
