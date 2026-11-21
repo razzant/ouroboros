@@ -702,3 +702,46 @@ def roll_up_summary(rooms: Mapping[Any, Mapping[str, Any]], works: List[Mapping[
                 if not item.get("work_id") and not any(_same_question(item, held) for held in carried))
     return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + loose,
             "confirmed": complete and all(room.get("confirmed", True) for room in rooms.values())}
+
+
+# A text surface's one word for a work: the cards' chip words (web/modules/work_status.js ``activityWord``, without
+# its call sub-words), so Telegram says Paused, Waiting or Queued as the window does and keeps no table. The chip's
+# catalogue key rides beside it: a translation reads the same ``code:task.chip.*`` entry the window does.
+ACTIVITY_WORDS = {"working": "Working", "finalizing": "Finalizing…", "pausing": "Pausing…", "queued": "Queued",
+                  "waiting": "Waiting", "question": "Waiting for your answer", "paused": "Paused",
+                  "unknown": "Activity unconfirmed"}
+ACTIVITY_CHIP_KEYS = {"working": "task.chip.working", "finalizing": "task.chip.finalizing",
+                      "pausing": "task.chip.pausing", "queued": "task.chip.queued", "waiting": "task.chip.waiting",
+                      "question": "task.chip.waiting_for_answer", "paused": "task.chip.paused",
+                      "unknown": "task.chip.activity_unconfirmed"}
+
+
+def said_works(state: Any) -> Optional[List[Dict[str, str]]]:
+    """The works of an ``/api/state`` body as a text surface lists them, in the server's order: ``name``, ``state``
+    (an ACTIVITY_WORDS key), ``word``, its catalogue ``chip_key``, ``reason`` and its catalogue ``reason_code`` (its first reason's sentence, ``""`` when none). ``None`` when the
+    body is missing or its projection incomplete: said as unknown, never as an empty queue."""
+    works = state.get("works") if isinstance(state, Mapping) else None
+    if not isinstance(works, list) or state.get("works_complete") is not True:
+        return None
+    said = []
+    for work in works:
+        if not isinstance(work, Mapping):
+            continue
+        key = str(work.get("activity") or "")
+        if key == "working" and work.get("transition") in ("finalizing", "pausing"):
+            key = str(work["transition"])
+        elif key == "waiting" and any(isinstance(item, Mapping) and item.get("kind") == "question"
+                                      for item in work.get("turn") or ()):
+            key = "question"
+        key = key if key in ACTIVITY_WORDS else "unknown"
+        reasons = [row for row in work.get("because") or () if isinstance(row, Mapping) and row.get("text")]
+        first = reasons[0] if reasons else {}
+        # The code rides when the text is the sentence the window says by ``work.because.<code>``: the code's own one,
+        # a counted reason's singular included; a plural count, a wake or a rewritten sentence goes by its text.
+        phrase = REASON_TEXT.get(first.get("code")) if first else None
+        own = phrase[0] if isinstance(phrase, tuple) and first.get("count") == 1 else phrase
+        code = str(first.get("code") or "") if first and first.get("text") == own else ""
+        said.append({"name": str(work.get("name") or ""), "state": key, "word": ACTIVITY_WORDS[key],
+                     "chip_key": ACTIVITY_CHIP_KEYS[key], "reason": str(first.get("text") or ""), "reason_code": code,
+                     "place_turn": work.get("place_turn") is True})
+    return said

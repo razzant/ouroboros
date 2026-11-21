@@ -551,8 +551,9 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         # Stop ends the whole work: a retry's logical original carries its tree too (never an earlier attempt).
         logical = [current_root] if current_root and current_root != current_id else []
         ended = [] if current_state is not None else [current_id]
+        presence_turn = bool((raw.get(current_id) or {}).get("_presence_turn"))
         controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier,
-                                   presence_turn=bool((raw.get(current_id) or {}).get("_presence_turn")))
+                                   presence_turn=presence_turn)
         from ouroboros.owner_model import eligibility
 
         durable = obs.result(current_id) if current_row is not None else None
@@ -576,6 +577,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
                             and member.get("stop", {}).get("scope") != "tree")
         work.update(kind="direct" if str(room_row.get("kind") or "") == "direct_chat" else "task",
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
+        if presence_turn or (current_row or {}).get("kind") == "presence":
+            work["place_turn"] = True  # a correspondent's Presence turn (the fact its controls read)
         if current_row is not None and current_row.get("lead"):
             work["lead"] = current_row["lead"]
             if isinstance(current_row.get("processing"), dict):

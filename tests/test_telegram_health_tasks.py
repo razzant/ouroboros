@@ -104,27 +104,76 @@ def test_health_discloses_when_incident_tail_omits_prefix(tmp_path, monkeypatch)
     plugin.telegram_i18n.configure(None)
 
 
-def test_tasks_idle_and_list(tmp_path):
+def _works(*works, complete=True):
+    return {"works": list(works), "works_complete": complete}
+
+
+def test_tasks_list_the_windows_works_and_an_unread_projection_is_unknown(tmp_path):
+    """The Tasks panel lists the server's ``/api/state`` works with the window's words and the server's reasons;
+    a body that could not be read, or an incomplete projection, is unknown, never idle; the queue file is not read."""
     _load_plugin()
-    health = sys.modules["tg_ht_test.lib.telegram_health"]  # _collect_tasks_text lives here post-split
+    health = sys.modules["tg_ht_test.lib.telegram_health"]
+    assert "unknown" in health._collect_tasks_text({}, "en") and "idle" not in health._collect_tasks_text({}, "en")
+    partial = _works({"name": "Report", "activity": "working"}, complete=False)
+    assert "unknown" in health._collect_tasks_text(partial, "en") and "Report" not in health._collect_tasks_text(partial, "en")
+    assert "idle" in health._collect_tasks_text(_works(), "en")
+    txt = health._collect_tasks_text(_works(
+        {"name": "Report", "activity": "working", "transition": "none", "because": []},
+        {"name": "Migration", "activity": "paused", "because": [{"code": "paused_by_owner", "text": "You paused it"}]},
+        {"name": "Survey", "activity": "waiting", "turn": [{"kind": "question"}],
+         "because": [{"code": "owner_answer", "text": "Waiting for your answer"}]},
+        {"name": "Digest", "activity": "queued", "because": [{"code": "queued", "text": ""}]}), "en")
+    lines = txt.splitlines()
+    assert lines[0] == "🟡 Report — Working"
+    assert lines[1] == "⏸ Migration — Paused: You paused it"
+    assert lines[2] == "❓ Survey — Waiting for your answer: Waiting for your answer"
+    assert lines[3] == "⏳ Digest — Queued"
+    import inspect
+    assert "queue_snapshot" not in inspect.getsource(health._collect_tasks_text)
+
+
+def test_tasks_say_the_windows_translated_chip_word_from_its_catalogue_key(tmp_path, monkeypatch):
+    """Another language reads the chip word from the same catalogue entry the window reads (``code:task.chip.*``),
+    the reason by its text; a word the memory lacks stays English."""
+    plugin = _load_plugin()
+    health = sys.modules["tg_ht_test.lib.telegram_health"]
+    from ouroboros import i18n_memory as memory
+
+    plugin.telegram_i18n.configure(tmp_path)
+    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
+    memory.update_memory(tmp_path, "ru", lambda doc: (memory.apply_generated(doc, {
+        "code:task.chip.paused": {"text": "На паузе"},
+        "code:work.because.paused_by_owner": {"text": "Вы поставили на паузу"},
+        "Spending limit reached": {"text": "Достигнут лимит трат"}}, model="test"), doc)[1], create=True)
+    try:
+        txt = health._collect_tasks_text(_works(
+            {"name": "Migration", "activity": "paused", "because": [{"code": "paused_by_owner", "text": "You paused it"}]},
+            {"name": "Report", "activity": "paused",
+             "because": [{"code": "spending_limit", "text": "Spending limit reached"}]},
+            {"name": "Digest", "activity": "queued"}), "ru")
+        # by its code when the catalogue has it; else by its text; a word the memory lacks stays English
+        assert txt.splitlines() == ["⏸ Migration — На паузе: Вы поставили на паузу",
+                                    "⏸ Report — На паузе: Достигнут лимит трат", "⏳ Digest — Queued"]
+    finally:
+        plugin.telegram_i18n.configure(None)
+
+
+def test_health_queue_line_says_the_windows_works_and_unknown_when_unread(tmp_path):
+    plugin = _load_plugin()
     api, data = _api_with_data(tmp_path)
-    (data / "state" / "queue_snapshot.json").write_text(json.dumps({"running": [], "pending": []}), encoding="utf-8")
-    assert "idle" in health._collect_tasks_text(api, "en")
-    (data / "state" / "queue_snapshot.json").write_text(json.dumps({
-        "running": [{"id": "abc12345", "type": "evolution", "delegation_role": "root"}],
-        "pending": [{"id": "def67890", "type": "task", "delegation_role": "subagent"}],
-    }), encoding="utf-8")
-    txt = health._collect_tasks_text(api, "en")
-    assert "evolution" in txt and "abc12345" in txt
-    assert "task" in txt and "subagent" in txt
+    (data / "state" / "queue_snapshot.json").write_text(
+        json.dumps({"running_count": 0, "pending_count": 1, "running": [], "pending": []}), encoding="utf-8")
+    assert "Queue: ❔ unknown (RUNNING 0 · PENDING 1)" in plugin._collect_health(api, "en", {})
+    assert "Queue: 🟢 idle" in plugin._collect_health(api, "en", _works())
+    paused = _works({"name": "a", "activity": "paused"}, {"name": "b", "activity": "paused"},
+                    {"name": "c", "activity": "waiting"})
+    assert "Queue: 🟡 2 Paused · 1 Waiting (RUNNING 0 · PENDING 1)" in plugin._collect_health(api, "en", paused)
 
 
 def test_tasks_panel_builds(tmp_path, monkeypatch):
     plugin = _load_plugin()
 
-    class A:
-        def get_state_dir(self): return "/tmp/nope-telegram-bridge"
-    header, kb = plugin._build_menu_tasks(A(), "safe_commands", "")
+    header, kb = plugin._build_menu_tasks({}, "safe_commands", "")
     assert header.startswith("📋 Tasks")
     assert kb[-1][0]["callback_data"] == "nav:menu"
     from ouroboros import i18n_memory as memory
@@ -133,7 +182,7 @@ def test_tasks_panel_builds(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
     memory.update_memory(tmp_path, "ru", lambda doc: (memory.apply_generated(doc, {
         "code:tg.menu.tasks_title": {"text": "📋 Задачи"}}, model="test"), doc)[1], create=True)
-    header, kb = plugin._build_menu_tasks(A(), "safe_commands", "ru")
+    header, kb = plugin._build_menu_tasks({}, "safe_commands", "ru")
     assert "Задачи" in header
     plugin.telegram_i18n.configure(None)
 
@@ -148,6 +197,8 @@ def test_default_command_mode_is_full():
 
 
 def test_a_correspondents_presence_turn_is_neither_counted_nor_listed_as_the_owners(tmp_path):
+    """02.11 (``99fee149788``): a place's Presence turn is not the owner's work. The RUNNING count, the Status
+    line's words and the Tasks list leave it out by its recorded fact; the owner's works stay listed."""
     plugin = _load_plugin()
     health = sys.modules["tg_ht_test.lib.telegram_health"]
     api, data = _api_with_data(tmp_path)
@@ -160,5 +211,10 @@ def test_a_correspondents_presence_turn_is_neither_counted_nor_listed_as_the_own
     (data / "state" / "queue_snapshot.json").write_text(json.dumps(
         {"running_count": 3, "pending_count": 0, "running": running, "pending": []}), encoding="utf-8")
     assert "RUNNING 2" in plugin._collect_health(api, "en")
-    txt = health._collect_tasks_text(api, "en")
-    assert "owner-tu" in txt and "project-" in txt and "presence" not in txt
+    state = _works({"name": "Reply to Anna", "activity": "working", "place_turn": True},
+                   {"name": "Owner turn", "activity": "working"}, {"name": "Project work", "activity": "paused"})
+    txt = health._collect_tasks_text(state, "en")
+    assert "Owner turn" in txt and "Project work" in txt and "Reply to Anna" not in txt
+    assert "Queue: 🟡 1 Working · 1 Paused" in plugin._collect_health(api, "en", state)
+    only_place = _works({"name": "Reply to Anna", "activity": "working", "place_turn": True})
+    assert "idle" in health._collect_tasks_text(only_place, "en")
