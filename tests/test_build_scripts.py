@@ -1749,11 +1749,51 @@ def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
     assert "secrets." not in job
 
 
+def _datas_the_spec_passes_to_analysis(monkeypatch, tmp_path, platform):
+    """Run the real ``Ouroboros.spec`` with PyInstaller's classes stubbed and return the ``datas`` it hands to Analysis."""
+    import types
+
+    captured = {}
+
+    class Analysis:
+        binaries, zipfiles, zipped_data, pure, scripts = [], [], [], [], []
+
+        def __init__(self, scripts, **kwargs):
+            captured.update(kwargs)
+            self.datas = list(kwargs["datas"])
+
+    def anything(*args, **kwargs):
+        return types.SimpleNamespace()
+
+    hooks = types.ModuleType("PyInstaller.utils.hooks")
+    hooks.collect_all = lambda package: ([(f"{package}_data", package)], [], [])
+    for name, module in (("PyInstaller", types.ModuleType("PyInstaller")),
+                         ("PyInstaller.utils", types.ModuleType("PyInstaller.utils")),
+                         ("PyInstaller.utils.hooks", hooks)):
+        monkeypatch.setitem(sys.modules, name, module)
+    for directory in ("node-standalone", "ripgrep-standalone", "betterleaks-standalone", "claudexor-runtime"):
+        (tmp_path / directory).mkdir()
+    (tmp_path / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "setrecursionlimit", lambda limit: None)
+    namespace = {"__name__": "ouroboros_spec", "Analysis": Analysis, "PYZ": anything, "EXE": anything,
+                 "COLLECT": anything, "BUNDLE": anything}
+    exec(compile(_pkg_read("Ouroboros.spec"), "Ouroboros.spec", "exec"), namespace)
+    return captured["datas"]
+
+
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
-def test_spec_does_not_bundle_the_tests_tree_but_keeps_runtime_trees():
-    """The managed checkout comes from ``repo.bundle`` (which carries ``tests``); nothing reads a bundled copy."""
-    source = _pkg_read("Ouroboros.spec")
-    assert "('tests', 'tests')" not in source
-    for entry in ("('web', 'web')", "('docs', 'docs')", "('prompts', 'prompts')", "('skills', 'skills')",
-                  "('supervisor', 'supervisor')", "('repo.bundle', '.')"):
-        assert entry in source
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_spec_does_not_bundle_the_tests_tree_but_keeps_runtime_trees(monkeypatch, tmp_path, platform):
+    """The managed checkout comes from ``repo.bundle`` (which carries ``tests``); nothing reads a bundled copy.
+
+    Checked on the ``datas`` list the spec passes to PyInstaller's Analysis, per platform, not on the spec's text."""
+    datas = _datas_the_spec_passes_to_analysis(monkeypatch, tmp_path, platform)
+    pairs = {(entry[0], entry[1]) for entry in datas}
+    assert not [pair for pair in pairs if pathlib.PurePosixPath(pair[0].replace("\\", "/")).parts[:1] == ("tests",)
+                or pathlib.PurePosixPath(pair[1].replace("\\", "/")).parts[:1] == ("tests",)]
+    for entry in (("web", "web"), ("docs", "docs"), ("prompts", "prompts"), ("skills", "skills"),
+                  ("supervisor", "supervisor"), ("ouroboros", "ouroboros"), ("repo.bundle", "."),
+                  ("python-standalone", "python-standalone")):
+        assert entry in pairs, entry
