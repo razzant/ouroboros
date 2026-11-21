@@ -39,6 +39,12 @@ def _skills_step(ui, *, answer=STARTER, status=200, width=1360, route=True):
     return page
 
 
+def _settled(page):
+    """The step's entrance has ended (it moves cards by a transform while it plays)."""
+    page.wait_for_function("""() => document.getAnimations().filter((animation) => animation.animationName === 'skills-starter-arrive')
+        .every((animation) => animation.playState !== 'running')""")
+
+
 def _completion(ui):
     for _ in range(200):
         posted = [payload for path, payload in ui["posts"] if path == "/api/onboarding/complete"]
@@ -66,6 +72,7 @@ def test_the_step_lists_the_offer_and_the_completion_carries_the_choices(subscri
     assert page.locator(".skills-starter-card input:checked").count() == 6
     # A ticked card keeps the neutral body (the box says it), the same in both themes.
     page.mouse.move(0, 0)  # no card under the pointer: a hover deepens one
+    page.wait_for_timeout(300)  # and the colour's own 120 ms change has ended
     assert len(set(page.locator(".skills-starter-card").evaluate_all(
         "cards => cards.map((card) => getComputedStyle(card).backgroundColor)"))) == 1
     # Inside a group what works at once leads; what needs a key comes last (here Telegram after Computer control).
@@ -198,6 +205,7 @@ def test_the_hub_arrives_on_the_step_keeping_ticks_focus_and_place(starter_ui, w
     assert 'Reading the Ouroboros hub…' in step.inner_text()
     assert 'default starter list once it can read the hub' in step.inner_text()
     page.locator('[data-starter-item="builtin/telegram"]').uncheck()
+    _settled(page)
     box = page.locator('[data-starter-item="builtin/unix_computer_use"]')
     box.focus()
     page.evaluate("window.scrollTo(0, 60)")

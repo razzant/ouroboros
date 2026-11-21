@@ -51,6 +51,8 @@ const sourceWords = (row, inLine) => SOURCE_WORDS[row.part]?.[inLine ? 0 : 1] ||
 const capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
 const quote = (value) => String(value).replace(/["\\]/g, '\\$&');
+// Where a card sits in the page's layout, whatever an entrance's transform does to it at this moment.
+const layoutTop = (node) => { let top = 0; for (let at = node; at; at = at.offsetParent) top += at.offsetTop; return top; };
 const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 
 /** The step and its Summary row. `offered`: the bootstrap's `stepOrder` has the step (else it renders and sends
@@ -189,11 +191,11 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         const key = active && host.contains(active) ? FOCUS_KEYS.find((name) => active.dataset?.[name] !== undefined) : '';
         const focus = key ? `[${dataAttr(key)}="${quote(active.dataset[key])}"]${key === 'starterTrust' ? `[data-trust="${quote(active.dataset.trust)}"]` : ''}` : '';
         const card = [...host.querySelectorAll('[data-starter-card]')].find((node) => node.getBoundingClientRect().bottom > 0);
-        const anchor = card && { id: card.dataset.starterCard, top: card.getBoundingClientRect().top };
+        const anchor = card && { id: card.dataset.starterCard, top: layoutTop(card) };
         return () => {
             if (focus) host.querySelector(focus)?.focus({ preventScroll: true });
             const again = anchor && host.querySelector(`[data-starter-card="${quote(anchor.id)}"]`);
-            const moved = again ? again.getBoundingClientRect().top - anchor.top : 0;
+            const moved = again ? layoutTop(again) - anchor.top : 0;
             if (moved) host.ownerDocument?.defaultView?.scrollBy(0, moved);
         };
     }
