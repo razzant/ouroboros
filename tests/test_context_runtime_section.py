@@ -3,8 +3,8 @@
 Split verbatim out of ``tests/test_context.py`` by theme. This module owns the
 legacy metadata that must not rewrite the user's text, the light-mode rule and filesystem affordances the runtime section states,
 the workspace rules that preserve system review/commit authority, the host routing
-manifest and manual contract, the improvement backlog digest, and the runtime_env
-block.
+manifest and manual contract, the improvement backlog digest, the runtime_env
+block, and the setup facts (``context_first_hour``).
 """
 
 from __future__ import annotations
