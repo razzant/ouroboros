@@ -1303,7 +1303,7 @@ def test_a_held_selection_with_only_a_preview_takes_a_later_source_once_and_an_a
     member.task_id = "member"
     member._held_owner_messages = {address: {**owner, "_owner_reply_target": preview, "carried": dict(standing)}}
     messages = []
-    inject_relay(member, entry(went="routed:head", enrich=True, target=full), messages)
+    inject_relay(member, entry(went="", enrich=True, target=full), messages)
     held = member._held_owner_messages[address]
     assert held["_owner_reply_target"] == full and held["carried"] == standing, "the source moved; the standing did not"
     assert messages == [], "no words are shown again"

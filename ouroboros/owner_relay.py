@@ -652,6 +652,20 @@ def takes_source(held: dict, late) -> bool:
             and (late.get("address"), late.get("excerpt")) == (reply.get("address"), reply.get("excerpt")))
 
 
+def _inherited_unread(field: dict, address: str, row: dict) -> dict:
+    """A later source can complete a birth-time citation, only for that same owner row and selection."""
+    from ouroboros.chat_references import has_source
+    from ouroboros.owner_words import _carrier_ref, _same_selection
+
+    inherited = field.get(_carrier_ref(row, canonical=address)) or {}
+    citation = inherited.get("reply_citation") or {}
+    target = row.get("_owner_reply_target")
+    if (has_source(target) and citation.get("reply_view") == "unread" and citation.get("excerpt")
+            and inherited.get("text") == owner_text(row) and _same_selection(citation, target)):
+        return inherited
+    return {}
+
+
 def inject_carried(ctx, entry: dict, messages: list) -> list:
     """The carried mode: each row is held by its address with the carriage fact beside it (persisted for a
     Continue) and shown once under the carried line, typed as my human's words; it enters no corpus, owes no
@@ -662,19 +676,29 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     hash, idempotent). Returns the addresses shown under ``reached this work``."""
     from ouroboros import loop
     from ouroboros.answer_facts import card_input, mark_press_arrival, row_source
-    from ouroboros.owner_words import OWNER_PRESS, _chat_ref
+    from ouroboros.owner_words import OWNER_PRESS, _chat_ref, task_governing_words
 
     fact_of = entry["host_carried"]
     went = str(fact_of.get("went_to") or "")
     held = held_owner_messages(ctx) if ctx is not None else {}
+    enrich = fact_of.get("enrich")
+    birth = _field_rows(task_governing_words(getattr(ctx, "task_metadata", None))[0]) if enrich else {}
     stamps = first_request_stamps(messages)
     addressed = []
     for row, quote in _quotes_by_row(entry):
         source = quote.get("source") if isinstance(quote.get("source"), dict) else {}
         address = str(source.get("address") or "") or owner_row_address(row)
         prior = held.get(address)
-        if fact_of.get("enrich") and not isinstance(prior, dict):
-            continue  # a source for an address this work never held: no words of its own to show
+        if enrich:
+            if isinstance(prior, dict):
+                if takes_source(prior, row.get("_owner_reply_target")):
+                    prior["_owner_reply_target"] = copy.deepcopy(row["_owner_reply_target"])
+            elif inherited := _inherited_unread(birth, address, row):
+                # The birth stamp keeps the words and their standing; this later row supplies only the missing source.
+                carrier = inherited["carrier"]
+                standing = carrier.removeprefix("went to ") if carrier.startswith("went to ") else ""
+                held[address] = {**copy.deepcopy(row), "carried": {"went_to": standing}}
+            continue
         if isinstance(prior, dict):
             if takes_source(prior, row.get("_owner_reply_target")):
                 prior["_owner_reply_target"] = copy.deepcopy(row["_owner_reply_target"])  # once: its standing is not touched
@@ -950,6 +974,12 @@ def _words_identity(row: dict) -> Any:
     return row["ref"] or ("words", _text_sha256(row["text"]), str(row.get("ts") or ""))
 
 
+def _field_rows(rows: list) -> dict:
+    from ouroboros.owner_words import REPLY_TARGET
+
+    return {_words_identity(row): row for row in rows if row["source"] != REPLY_TARGET}
+
+
 def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     """``(address, chat row)`` for a row of the set this run holds no chat row for (a direct turn's input): its
     words, time, room and client id as the corpus recorded them, in the shape a quote is built from."""
@@ -1014,12 +1044,11 @@ def _rows_to_carry(ctx, root) -> list:
 
 
 def _member_has(drive, task_id: str, member: dict) -> tuple:
-    """What a member already holds, read once: the identities of its inherited field and its mailbox's ids, each with
-    whether that entry carries a selected passage's source (append-only until its settlement; an id counts whatever
-    its other bytes)."""
+    """What a member already holds, read once: inherited rows by identity, and its mailbox ids with whether each
+    entry carries a selected passage's source (append-only until settlement; an id counts whatever its other bytes)."""
     from ouroboros.chat_references import has_source
     from ouroboros.owner_mailbox import _mail_text, _mailbox_path, mailbox_lines
-    from ouroboros.owner_words import REPLY_TARGET, task_governing_words
+    from ouroboros.owner_words import task_governing_words
 
     path, ids = _mailbox_path(Path(drive), task_id), {}
     if path.exists():
@@ -1032,25 +1061,25 @@ def _member_has(drive, task_id: str, member: dict) -> tuple:
                 key = str(parsed.get("msg_id") or "")
                 ids[key] = ids.get(key, False) or any(
                     isinstance(row, dict) and has_source(row.get("_owner_reply_target")) for row in parsed.get("owner_rows") or [])
-    return {_words_identity(row) for row in task_governing_words(member)[0] if row["source"] != REPLY_TARGET}, ids
+    return _field_rows(task_governing_words(member)[0]), ids
 
 
 def _carry_to_member(root, drive, task_id: str, member: dict, rows: list, teller: str) -> None:
     """One ``host_carried`` entry per row the member holds under none of its references: ``carry:<address>`` for a
     row addressed to this work, ``carry-context:<address>`` for a row held as context; an addressed entry stands
     for both (a context row the head then addressed is written once more, and the member's fact flips). A row held
-    in the mail without its selected passage's source is completed once by ``carry-source:<address>``."""
+    in the mail or at birth without its selected passage's source is completed once by ``carry-source:<address>``."""
     from ouroboros.chat_references import has_source
 
     field, ids = _member_has(drive, task_id, member)
     for identities, address, quote, went, before in rows:
         carried, context, source = (f"relay:{kind}:{address}:{task_id}" for kind in ("carry", "carry-context", "carry-source"))
-        held = bool(identities & field) or carried in ids or bool(went and context in ids)
-        # A row its holder holds in the mail without its selected passage's source takes it, once, from a later copy of
-        # the same address, whichever standing wrote either: only the source moves, never the standing or the words.
+        held = bool(identities & field.keys()) or carried in ids or bool(went and context in ids)
+        # Only the source moves, never the standing or the words; birth citations need no earlier mail.
         mailed = [entry for entry in (carried, context) if entry in ids]
-        enrich = bool(held and mailed and has_source(quote["owner_row"].get("_owner_reply_target"))
-                      and source not in ids and not any(ids[entry] for entry in mailed))
+        row = quote["owner_row"]
+        enrich = bool(held and source not in ids and has_source(row.get("_owner_reply_target"))
+                      and (not any(ids[entry] for entry in mailed) if mailed else _inherited_unread(field, address, row)))
         if held and not enrich:
             continue
         relay_id = "carry-source" if enrich else "carry-context" if went else "carry"

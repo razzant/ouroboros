@@ -249,6 +249,15 @@ def excerpt_source_text(row: dict) -> str:
     return project_answer_text(row) or media_caption(row) or body
 
 
+def excerpt_source_attachments(row: dict) -> list:
+    """Files beside a selected source. Delivered documents record their download facts on the row, not in uploads."""
+    files = copy.deepcopy(row["attachments"]) if isinstance(row.get("attachments"), list) else []
+    if row.get("direction") == "out" and row.get("type") == "document" and row.get("filename"):
+        files.append({"name": row["filename"], "mime": row.get("mime"), "size": row.get("size_bytes"),
+                      **({"download_url": row["download_url"]} if row.get("download_url") else {})})
+    return files
+
+
 def ingress_reply(root, metadata: dict, *, accepted: dict | None = None) -> dict:
     """Fresh selections require a real authored row. A duplicate compares with its original acceptance."""
     ref = reply_identity(metadata)
@@ -274,8 +283,9 @@ def ingress_reply(root, metadata: dict, *, accepted: dict | None = None) -> dict
     reference = reference_from_row(row, root)
     reference.pop("chars", None)
     source = excerpt_source_text(row)  # captured now, before the owner row is saved: delivery needs no later history read
+    files = excerpt_source_attachments(row)
     return {**reference, **_preview(source), "excerpt": ref["excerpt"], "text": source,
-            **({"attachments": copy.deepcopy(row["attachments"])} if row.get("attachments") else {})}
+            **({"attachments": files} if files else {})}
 
 
 def origin_reply(root, task_id: str, metadata=None) -> dict:

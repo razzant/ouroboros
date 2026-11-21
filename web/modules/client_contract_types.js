@@ -1161,6 +1161,7 @@
  * @typedef {Object} CardOutbound
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label
  * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay

@@ -1856,9 +1856,14 @@ def test_selected_passage_round_trip(direct_server_with_data, room, direction):
                 room_browser._open(page, project["id"])
             saved = feed.locator(f'.chat-bubble.user[data-row-address={json.dumps(format_address(row_address(accepted.row)))}]')
             quote = saved.locator(".chat-quote[data-excerpt]")
-            quote.get_by_role("button", name="Show all", exact=True).click()
+            jump, expand = quote.locator(".chat-quote-main"), quote.get_by_role("button", name="Show all", exact=True)
+            expand.wait_for(state="visible")
+            target_box, expand_box = jump.bounding_box(), expand.bounding_box()
+            assert target_box and expand_box
+            assert expand_box["x"] - (target_box["x"] + target_box["width"]) >= 7.5  # --space-2, as in the composer
+            expand.click()
             assert quote.locator(".chat-quote-text").text_content() == passage
-            quote.locator(".chat-quote-main").click()
+            jump.click()
             page.wait_for_function("""([address, expected, start]) => {
                 const r = [...(CSS.highlights?.get('reply-excerpt') || [])][0]
                     || (getSelection().rangeCount ? getSelection().getRangeAt(0) : null);

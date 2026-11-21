@@ -801,8 +801,8 @@ def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
         return {"address": address, "author": "", "text": "", **citation}
     recorded_author = str((reference.get("author") if citation else "") or reference.get("author_label") or "")
     from ouroboros.chat_chain import resolve_row
-    from ouroboros.chat_references import (REPLY_ROLES, card_reply_display, excerpt_source_text, project_answer_text,
-                                           reply_role)
+    from ouroboros.chat_references import (REPLY_ROLES, card_reply_display, excerpt_source_attachments,
+                                           excerpt_source_text, project_answer_text, reply_role)
     from ouroboros.dialogue_provenance import quote_words, render_row_text, row_author
     from ouroboros.store import StoreError
 
@@ -821,9 +821,10 @@ def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
     if display := card_reply_display(drive_root, row):
         return {"address": address, "author": "System", "text": display, **citation}
     if citation:
+        files = excerpt_source_attachments(row)
         return {"address": address, "author": "Ouroboros" if project_answer_text(row) else row_author(row)["label"],
                 "text": excerpt_source_text(row), **citation, "role": reply_role(row),
-                **({"attachments": row["attachments"]} if row.get("attachments") else {})}
+                **({"attachments": files} if files else {})}
     return {"address": address, "author": row_author(row)["label"],
             "text": quote_words(row) if _mapping(row.get("reply_to")).get("excerpt") else render_row_text(row)}
 
@@ -1385,13 +1386,13 @@ def project_words(drive_root: Any, room: int, *, open_rows: Any = (), indent: st
 
 
 def attachments_line(files: Any) -> str:
-    """The files a row of my human's carries, named by the host under its words (name, type, size, and the staged
-    path a birth gave it: ``_stage_birth_files``): the row never loses a file silently. ``""`` for a row with none."""
+    """Files named by the host under the row's words: name, type, size and a staged path or a delivered download URL.
+    ``""`` for a row with none."""
     named = []
     for ref in files if isinstance(files, list) else []:
         if isinstance(ref, Mapping):
             facts = ([str(ref["mime"])] * bool(ref.get("mime")) + [f"{ref['size']} bytes"] * (ref.get("size") is not None)
-                     + [str(ref.get("staged"))] * bool(ref.get("staged")))
+                     + [str(ref[key]) for key in ("staged", "download_url") if ref.get(key)])
             named.append(str(ref.get("name") or "attachment") + (f" ({', '.join(facts)})" if facts else ""))
     return f"[Host-retained attachments: {'; '.join(named)}]" if named else ""
 

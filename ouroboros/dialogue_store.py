@@ -828,29 +828,41 @@ def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) ->
 
 
 def _move_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, states: Tuple[str, ...],
-                   process: str) -> bool:
+                   process: str, read_reply: bool = False) -> tuple[bool, Optional[Dict[str, Any]]]:
     if not client_message_id or not present(root):
-        return False
+        return False, None
+    # A pending retry takes the original reply snapshot in the same transaction as the claim. Select only the
+    # reference, not the rest of the dispatch input (which can include inline media).
+    returning = (" RETURNING json_quote(json_extract(dispatch_input, '$.message.task_metadata.reply_reference'))"
+                 if read_reply else "")
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
             "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='dispatched', "
             "dispatch_input=json_set(coalesce(dispatch_input, '{}'), '$.process', ?) WHERE stream='chat' AND client_message_id=? "
-            f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))})",
+            f"AND chat_id IS ? AND direction='in' AND dispatch IN ({','.join('?' * len(states))}){returning}",
             (process, client_message_id, chat_id, *states))
-        return cursor.rowcount == 1
+        rows = cursor.fetchall() if read_reply else []
+        reply = json.loads(rows[0][0]) if len(rows) == 1 else None
+        return cursor.rowcount == 1, reply if isinstance(reply, dict) else None
 
 
 def claim_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
     """Take the owed dispatch of an accepted row (pending -> dispatched): the durable "entered"
     mark, with the ``process`` (custody session) that takes it. Exactly one caller wins -- the
     acceptor, a same-id retry or the recovery."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process)[0]
+
+
+def claim_dispatch_with_reply(root: Any, chat_id: Optional[int], client_message_id: str, *,
+                              process: str = "") -> tuple[bool, Optional[Dict[str, Any]]]:
+    """The same one-winner claim plus its accepted Reply reference, when one was recorded."""
+    return _move_dispatch(root, chat_id, client_message_id, states=("pending",), process=process, read_reply=True)
 
 
 def note_dispatched(root: Any, chat_id: Optional[int], client_message_id: str, *, process: str = "") -> bool:
     """The entry mark of a named acceptance that owed no bus dispatch (``none`` -> dispatched):
     its caller hands it to its own dispatcher now."""
-    return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)
+    return _move_dispatch(root, chat_id, client_message_id, states=("none", "pending"), process=process)[0]
 
 
 def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str) -> bool:

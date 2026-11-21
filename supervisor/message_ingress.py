@@ -552,7 +552,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             saved_answer = late_answer_ref(row.get("late_answer"))
             if saved_answer:
                 message["task_metadata"] = {**(message.get("task_metadata") or {}), "late_answer": saved_answer}
-            if not dialogue_store.claim_dispatch(root, chat_id, message_id, process=_process()):
+            claimed, reply = dialogue_store.claim_dispatch_with_reply(root, chat_id, message_id, process=_process())
+            if not claimed:
                 return row, True
             # Its dispatch was still owed: this retry's identical copies feed it; the echo shows the row's refs.
             if retain_inputs is not None and not attempted:
@@ -561,9 +562,8 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                 message["task_metadata"] = {**message["task_metadata"], "chat_attachments": row.get("attachments")}
         ts = str(row.get("ts") or "")
         if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            sent = (message.get("task_metadata") or {}).get("reply_reference")
             message["task_metadata"] = {**(message.get("task_metadata") or {}),
-                                        "reply_reference": delivery_reply(row["reply_to"], sent)}
+                                        "reply_reference": delivery_reply(row["reply_to"], reply)}
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.
@@ -775,11 +775,13 @@ def handle_web_message(
                             execution_transport=metadata.get("execution_transport"))
             ts, attachments = str(row.get("ts") or ts), row.get("attachments")
             log_text, placeholder = str(row.get("text") or log_text), row.get("text_placeholder") is True
-            if handed := dialogue_store.claim_dispatch(bus.DATA_DIR, thread_id, message_id, process=current_custody_session_id()):
+            handed, reply = dialogue_store.claim_dispatch_with_reply(bus.DATA_DIR, thread_id, message_id,
+                                                                    process=current_custody_session_id())
+            if handed:
                 claim_refs(metadata.get("chat_attachments"), bus.DATA_DIR)  # the copies it stages are kept
-        if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            metadata["reply_reference"] = delivery_reply(row["reply_to"], reply)
         if handed:
+            if row.get("reply_to"):  # an owed dispatch carries the first acceptance's capture, not the retry's identity
+                metadata["reply_reference"] = delivery_reply(row["reply_to"], reply)
             ref = build_owner_message_ref(chat_id=thread_id, client_message_id=message_id, ts=ts, text=log_text)
             message = dict(
                 chat_id=thread_id, user_id=1, source="web",

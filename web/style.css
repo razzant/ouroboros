@@ -11959,7 +11959,7 @@ html[data-layout="stack"] .project-panel {
     -webkit-touch-callout: default;
 }
 ::highlight(reply-excerpt) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
-.chat-quote[data-excerpt] { display: flex; align-items: center; padding-inline-end: var(--space-2); }
+.chat-quote[data-excerpt] { display: flex; align-items: center; gap: var(--space-2); padding-inline-end: var(--space-2); }
 .chat-quote[data-excerpt] .chat-quote-main { flex: 1; }
 .chat-quote[data-excerpt] .chat-quote-head { flex-wrap: wrap; row-gap: 0; }
 .chat-quote[data-excerpt] .chat-quote-text { display: block; white-space: pre; }
