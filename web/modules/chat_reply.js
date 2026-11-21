@@ -354,8 +354,10 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         const words = caption?.textContent || bubble.querySelector(':scope > .message')?.textContent
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';
         const sender = bubble.querySelector(':scope > .sender, :scope > .chat-bubble-voice > .sender');
+        // A System row speaks as System whatever sender line it wears ("Task Summary") or label an older frame stamped.
         return { address, chat_id: chatId, role,
-            author_label: caption?.dataset.sourceAuthor || bubble.dataset.replyAuthor || sender?.textContent || '',
+            author_label: role === 'system' ? authorOf('system')
+                : caption?.dataset.sourceAuthor || bubble.dataset.replyAuthor || sender?.textContent || '',
             kind: bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
             ts: caption ? caption.dataset.sourceTs || '' : bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '',
             task_id: bubble.dataset.taskId || '' };

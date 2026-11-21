@@ -29,6 +29,7 @@ class ChatReplyReference(TypedDict, total=False):
 class ChatReferenceFields(TypedDict, total=False):
     row_address: str
     row_client_message_id: str  # a row's own saved name (outgoing or host-fact ingress); never the owner's submission id
+    reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
     reply_to: ChatReplyReference
     relay: dict[str, Any]
     reply_to_relay: str

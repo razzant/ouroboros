@@ -7,9 +7,34 @@ requires an exact source at acceptance and remains a sender-reported citation.
 """
 from __future__ import annotations
 
+import copy
+
 from ouroboros.chat_chain import format_address, parse_address, resolve_row, row_address
 from ouroboros.chat_uploads import web_attachment_caption
 from ouroboros.store import StoreError
+
+# A selected passage's source as acceptance captured it (words and files). It rides the delivery's ``reply_reference``
+# by value, so a work reads it when history cannot (``owner_words.reply_target``), and is never stored on the owner row.
+SOURCE_KEYS = ("text", "attachments")
+
+
+def stored_reply(reply):
+    """A Reply reference as the owner row stores it and every client reads it: without the captured source."""
+    return {key: value for key, value in reply.items() if key not in SOURCE_KEYS} if isinstance(reply, dict) else reply
+
+
+def has_source(reply) -> bool:
+    """Whether a reference carries its selected passage's source (words or files), not only its preview."""
+    return isinstance(reply, dict) and bool(reply.get("text") or reply.get("attachments"))
+
+
+def delivery_reply(stored, held):
+    """The saved row's reference as delivery carries it: the source acceptance captured stays beside it while ``held``
+    names the same address and passage, never beside another's."""
+    if not (isinstance(stored, dict) and isinstance(held, dict) and stored.get("excerpt")
+            and held.get("address") == stored.get("address") and held.get("excerpt") == stored.get("excerpt")):
+        return stored
+    return {**stored, **{key: held[key] for key in SOURCE_KEYS if key in held}}
 
 
 def _card_display(root, row: dict) -> dict:
@@ -99,8 +124,11 @@ def _reply_author_label(row: dict) -> str:
 def reply_role(row: dict) -> str:
     """Whose words a replied row holds, from the stored row alone: the one actor identity every reader of it
     shares, whatever label each shows for that person. A lifecycle row carrying an authored answer is that answer
-    in Ouroboros's voice wherever Main shows it (project_answer.js::appendProjectRow)."""
-    return "assistant" if project_answer_text(row) else {"in": "user", "out": "assistant"}.get(
+    in Ouroboros's voice wherever Main shows it (project_answer.js::appendProjectRow). A row stored as ``role: system``
+    is the host's even when it entered by the owner's door (a call's opening: ``direction: in``), as history shows it."""
+    if project_answer_text(row):
+        return "assistant"
+    return "system" if row.get("role") == "system" else {"in": "user", "out": "assistant"}.get(
         row.get("direction"), "system")
 
 
@@ -245,7 +273,9 @@ def ingress_reply(root, metadata: dict, *, accepted: dict | None = None) -> dict
         raise ReplyExcerptNotAuthored("Only a passage of an authored chat message can be quoted")
     reference = reference_from_row(row, root)
     reference.pop("chars", None)
-    return {**reference, **_preview(excerpt_source_text(row)), "excerpt": ref["excerpt"]}
+    source = excerpt_source_text(row)  # captured now, before the owner row is saved: delivery needs no later history read
+    return {**reference, **_preview(source), "excerpt": ref["excerpt"], "text": source,
+            **({"attachments": copy.deepcopy(row["attachments"])} if row.get("attachments") else {})}
 
 
 def origin_reply(root, task_id: str, metadata=None) -> dict:

@@ -10798,6 +10798,8 @@ html[data-layout="stack"] .project-panel {
 /* A button that carries a paragraph is a card (DESIGN.md principle 4): its own height and inset, the inner radius, the
    bubble's text size — chosen through the control tokens, never by writing the box. */
 .chat-file-card { --control-h: auto; --control-pad-y: 9px; --control-pad-x: 9px; --control-radius: var(--radius-inner); --button-font-size: 1em; font-weight: inherit; }
+/* Its wrapper wears the same radius, so the quote-target ring and the keyboard outline (both drawn on the wrapper) follow the card. */
+.chat-file-item { border-radius: var(--radius-inner); }
 
 .chat-file-thumb,
 .chat-file-glyph {
@@ -11957,7 +11959,7 @@ html[data-layout="stack"] .project-panel {
     -webkit-touch-callout: default;
 }
 ::highlight(reply-excerpt) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
-.chat-quote[data-excerpt] { display: flex; align-items: center; }
+.chat-quote[data-excerpt] { display: flex; align-items: center; padding-inline-end: var(--space-2); }
 .chat-quote[data-excerpt] .chat-quote-main { flex: 1; }
 .chat-quote[data-excerpt] .chat-quote-head { flex-wrap: wrap; row-gap: 0; }
 .chat-quote[data-excerpt] .chat-quote-text { display: block; white-space: pre; }

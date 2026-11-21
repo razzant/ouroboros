@@ -1270,3 +1270,57 @@ def test_reference_only_relay_quotes_one_read_of_the_askers_store(tmp_path, monk
         assert "accepted answer is unavailable" in quote["text"] and quote["text"] in history
         assert "Owner words quoted" not in history
     assert reads == [(str(source_drive), asker)]
+
+
+def test_a_held_selection_with_only_a_preview_takes_a_later_source_once_and_an_addressed_flip_keeps_it(tmp_path):
+    """A carried entry that completes a held selected reply keys on the source itself: a held ``_owner_reply_target``
+    with preview fields only is completed like one with none, by a copy of the same address and passage alone, once.
+    Another passage's source, or an address this work never held, changes nothing; a context row an addressed copy
+    flips keeps the source it already held. The row's standing never moves with its source."""
+    from ouroboros.owner_relay import inject_relay, owner_quote, owner_row_address, relay_envelope
+
+    excerpt = {"text": "North", "start_utf16": 0}
+    reference = {"address": "row:1@source#0123456789ab", "author_label": "Mira", "role": "user",
+                 "snippet": "North trail…", "excerpt": excerpt}
+    owner = {"chat_id": 1, "direction": "in", "source": "web", "user_id": 1, "ts": "2026-11-04T09:01:00Z",
+             "client_message_id": "owner-held", "text": "Which trail?", "reply_to": reference}
+    address = owner_row_address(owner)
+    files = [{"name": "trail.pdf", "mime": "application/pdf", "size": 55}]
+    full = {"address": reference["address"], "author": "Mira", "excerpt": excerpt, "role": "user",
+            "text": "North trail. The full body.", "attachments": files}
+    preview = {"address": reference["address"], "author": "Mira", "excerpt": excerpt, "role": "user", "snippet": "North trail…"}
+    standing = {"from": "root", "went_to": "routed:head", "at": "2026-11-04T09:02:00Z"}
+
+    def entry(*, went, enrich, target):
+        quote = owner_quote(tmp_path, {**owner, "_owner_source_root": str(tmp_path),
+                                       **({"_owner_reply_target": target} if target else {})}, address=address)
+        return {"kind": "relay_entry", "msg_id": f"relay:carry-source:{address}:member", "ts": "2026-11-04T09:03:00Z", "text": "",
+                "relay": relay_envelope("carry-source", [quote], chat_id=1), "owner_rows": [quote["owner_row"]],
+                "source_task_id": "root", "relay_canonical_root": str(tmp_path),
+                "host_carried": {"went_to": went, **({"enrich": True} if enrich else {})}}
+
+    member = context(tmp_path)
+    member.task_id = "member"
+    member._held_owner_messages = {address: {**owner, "_owner_reply_target": preview, "carried": dict(standing)}}
+    messages = []
+    inject_relay(member, entry(went="routed:head", enrich=True, target=full), messages)
+    held = member._held_owner_messages[address]
+    assert held["_owner_reply_target"] == full and held["carried"] == standing, "the source moved; the standing did not"
+    assert messages == [], "no words are shown again"
+    inject_relay(member, entry(went="routed:head", enrich=True, target={**full, "text": "A different body."}), messages)
+    assert member._held_owner_messages[address]["_owner_reply_target"] == full, "once: the held source is not replaced"
+
+    member._held_owner_messages = {address: {**owner, "carried": dict(standing)}}
+    other_passage = {**full, "excerpt": {"text": "trail", "start_utf16": 6}}
+    inject_relay(member, entry(went="routed:head", enrich=True, target=other_passage), messages)
+    assert "_owner_reply_target" not in member._held_owner_messages[address], "another passage's source completes nothing"
+
+    member._held_owner_messages = {}
+    inject_relay(member, entry(went="", enrich=True, target=full), messages)
+    assert member._held_owner_messages == {} and messages == [], "an address this work never held: nothing held or shown"
+
+    member._held_owner_messages = {address: {**owner, "_owner_reply_target": full, "carried": dict(standing)}}
+    inject_relay(member, entry(went="", enrich=False, target=None), messages)
+    flipped = member._held_owner_messages[address]
+    assert flipped["carried"]["went_to"] == "" and flipped["_owner_reply_target"] == full, "addressed now, source kept"
+    assert "Which trail?" in str(messages), "the flip shows its words once, as it always did"

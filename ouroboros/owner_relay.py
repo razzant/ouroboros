@@ -243,9 +243,10 @@ def quote_rows(ctx, handles) -> tuple[list, str]:
             current[handle] = row
     if not isinstance(handles, list) or any(not isinstance(h, str) or h not in current for h in handles):
         return [], "QUOTE_NOT_HELD: choose only held owner handles: " + json.dumps(list(current), ensure_ascii=False)
+    from ouroboros.chat_references import has_source
     selected, captured, targets = list(dict.fromkeys(handles)), {}, {}
     if any(isinstance(reply := current[h].get("reply_to"), dict) and reply.get("excerpt")
-           and not current[h].get("_owner_reply_target") for h in selected):
+           and not has_source(current[h].get("_owner_reply_target")) for h in selected):
         rows = _tree_words(ctx)[0]  # already captured words, never a new history read
         captured = {row["ref"]: row for row in rows if row["source"] != REPLY_TARGET}
         targets = _reply_bodies(rows)
@@ -289,7 +290,10 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
     if root and (row.get("late_answer") or isinstance(reply, dict) and reply.get("excerpt")):
         quote["owner_row"].setdefault("_owner_source_root", str(root))
     if isinstance(reply, dict) and reply:
-        quote["reply_to"] = copy.deepcopy(reply)
+        from ouroboros.chat_references import stored_reply
+        # What the room, history and every client read of the relay (``relay.reply_to``, each ``quotes[i].reply_to``)
+        # is the preview alone; the selected passage's source stays on the internal owner row, beside its words.
+        quote["reply_to"] = stored_reply(copy.deepcopy(reply))
     if late := late_answer_ref(row.get("late_answer")):
         block = resolved_late_quiz(root, late)
         fact = late_quiz_input(late, block)
@@ -637,6 +641,17 @@ def words_unseen_in(ctx: Any, text: Any) -> list[dict[str, Any]]:
     return [row for row in rows if not (seen and held(row))]
 
 
+def takes_source(held: dict, late) -> bool:
+    """Whether ``late``, a later copy's captured source of a selected passage, completes the row ``held`` already holds:
+    that row replied to this very address and passage and holds no source (words or files) for it yet. Only the
+    source moves: what the row is to its holder (``carried``) and its words stay as they were."""
+    from ouroboros.chat_references import has_source
+
+    reply = held.get("reply_to") if isinstance(held.get("reply_to"), dict) else {}
+    return (has_source(late) and not has_source(held.get("_owner_reply_target")) and bool(reply.get("excerpt"))
+            and (late.get("address"), late.get("excerpt")) == (reply.get("address"), reply.get("excerpt")))
+
+
 def inject_carried(ctx, entry: dict, messages: list) -> list:
     """The carried mode: each row is held by its address with the carriage fact beside it (persisted for a
     Continue) and shown once under the carried line, typed as my human's words; it enters no corpus, owes no
@@ -658,12 +673,18 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
         source = quote.get("source") if isinstance(quote.get("source"), dict) else {}
         address = str(source.get("address") or "") or owner_row_address(row)
         prior = held.get(address)
+        if fact_of.get("enrich") and not isinstance(prior, dict):
+            continue  # a source for an address this work never held: no words of its own to show
         if isinstance(prior, dict):
+            if takes_source(prior, row.get("_owner_reply_target")):
+                prior["_owner_reply_target"] = copy.deepcopy(row["_owner_reply_target"])  # once: its standing is not touched
             prior_fact = prior.get("carried") if isinstance(prior.get("carried"), dict) else {}
             if went or not str(prior_fact.get("went_to") or ""):
                 continue  # the same standing, or addressed already: nothing more to show
         held[address] = {**copy.deepcopy(row), "carried": {"from": str(entry.get("source_task_id") or ""),
                                                             "went_to": went, "at": str(entry.get("ts") or "")}}
+        if isinstance(prior, dict) and takes_source(held[address], prior.get("_owner_reply_target")):
+            held[address]["_owner_reply_target"] = copy.deepcopy(prior["_owner_reply_target"])  # addressed now: its source stays
         refs = {address, _chat_ref(row) if row.get("client_message_id") else "", str(fact_of.get("earlier_ref") or "")}
         seen = [stamps[ref] for ref in refs - {""} if ref in stamps]
         if not seen:
@@ -993,35 +1014,50 @@ def _rows_to_carry(ctx, root) -> list:
 
 
 def _member_has(drive, task_id: str, member: dict) -> tuple:
-    """What a member already holds, read once: the identities of its inherited field and the ids of its mailbox
-    (append-only until its settlement; an id counts whatever its bytes)."""
+    """What a member already holds, read once: the identities of its inherited field and its mailbox's ids, each with
+    whether that entry carries a selected passage's source (append-only until its settlement; an id counts whatever
+    its other bytes)."""
+    from ouroboros.chat_references import has_source
     from ouroboros.owner_mailbox import _mail_text, _mailbox_path, mailbox_lines
     from ouroboros.owner_words import REPLY_TARGET, task_governing_words
 
-    path, ids = _mailbox_path(Path(drive), task_id), set()
+    path, ids = _mailbox_path(Path(drive), task_id), {}
     if path.exists():
         for line in mailbox_lines(_mail_text(path)):
             try:
                 parsed = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(parsed, dict):
-                ids.add(str(parsed.get("msg_id") or ""))
+            if isinstance(parsed, dict):  # id -> whether that entry carries the source of a selected passage
+                key = str(parsed.get("msg_id") or "")
+                ids[key] = ids.get(key, False) or any(
+                    isinstance(row, dict) and has_source(row.get("_owner_reply_target")) for row in parsed.get("owner_rows") or [])
     return {_words_identity(row) for row in task_governing_words(member)[0] if row["source"] != REPLY_TARGET}, ids
 
 
 def _carry_to_member(root, drive, task_id: str, member: dict, rows: list, teller: str) -> None:
     """One ``host_carried`` entry per row the member holds under none of its references: ``carry:<address>`` for a
     row addressed to this work, ``carry-context:<address>`` for a row held as context; an addressed entry stands
-    for both (a context row the head then addressed is written once more, and the member's fact flips)."""
+    for both (a context row the head then addressed is written once more, and the member's fact flips). A row held
+    in the mail without its selected passage's source is completed once by ``carry-source:<address>``."""
+    from ouroboros.chat_references import has_source
+
     field, ids = _member_has(drive, task_id, member)
     for identities, address, quote, went, before in rows:
-        if identities & field or f"relay:carry:{address}:{task_id}" in ids or (
-                went and f"relay:carry-context:{address}:{task_id}" in ids):
+        carried, context, source = (f"relay:{kind}:{address}:{task_id}" for kind in ("carry", "carry-context", "carry-source"))
+        held = bool(identities & field) or carried in ids or bool(went and context in ids)
+        # A row its holder holds in the mail without its selected passage's source takes it, once, from a later copy of
+        # the same address, whichever standing wrote either: only the source moves, never the standing or the words.
+        mailed = [entry for entry in (carried, context) if entry in ids]
+        enrich = bool(held and mailed and has_source(quote["owner_row"].get("_owner_reply_target"))
+                      and source not in ids and not any(ids[entry] for entry in mailed))
+        if held and not enrich:
             continue
-        write_relay(drive, task_id, relay_id=f"{'carry-context' if went else 'carry'}:{address}", note="",
+        relay_id = "carry-source" if enrich else "carry-context" if went else "carry"
+        write_relay(drive, task_id, relay_id=f"{relay_id}:{address}", note="",
                     quotes=[quote], chat_id=int(quote["source"]["chat_id"]), teller_task_id=teller,
-                    canonical_root=root, host_carried={"went_to": went, **({"earlier_ref": before} if before else {})})
+                    canonical_root=root, host_carried={"went_to": went, **({"earlier_ref": before} if before else {}),
+                                                       **({"enrich": True} if enrich else {})})
 
 
 def carry_to_members(ctx, *, delivered: bool) -> None:
@@ -1107,9 +1143,24 @@ def carry_at_receipt(drive_root, work_id: str, quotes: list, *, went_to: str = "
     return place_at_receipt(drive_root, work_id, rows) if rows else None
 
 
-def carry_row_at_receipt(drive_root, work_id: str, chat_id: int, client_message_id: str) -> Any:
+def captured_selection(drive_root, row: dict, reply=None) -> dict:
+    """The selected passage a row replies to, its source whole (words and files): the history row, else the source
+    acceptance captured into ``reply`` (``owner_words.reply_target``); ``{}`` for no selection or no source."""
+    stored = row.get("reply_to")
+    if not (isinstance(stored, dict) and stored.get("excerpt")):
+        return {}
+    from ouroboros.chat_references import delivery_reply, has_source
+    from ouroboros.owner_words import reply_target
+
+    target = reply_target(drive_root, delivery_reply(stored, reply))
+    return target if has_source(target) else {}
+
+
+def carry_row_at_receipt(drive_root, work_id: str, chat_id: int, client_message_id: str, reply=None) -> Any:
     """``carry_at_receipt`` of the accepted chat row the room delivered to ``work_id`` (``server_owner_routing``),
-    quoted as the work's drain will hold it (``retain_owner_message``: beside its source root)."""
+    quoted as the work's drain will hold it (``retain_owner_message``: beside its source root). ``reply``: the
+    reference as delivery carried it, holding the source of a selected passage as acceptance captured it, so the
+    members' copies name that source whole even when history cannot be read now."""
     from supervisor.message_ingress import accepted_chat_message
 
     try:
@@ -1117,6 +1168,8 @@ def carry_row_at_receipt(drive_root, work_id: str, chat_id: int, client_message_
         if not quotable_owner_row(row, drive_root):
             return None
         held = {**row, "_owner_source_root": str(Path(drive_root).resolve(strict=False))}
+        if selection := captured_selection(drive_root, row, reply):
+            held["_owner_reply_target"] = selection
         quote = owner_quote(drive_root, held, address=owner_row_address(row))
     except Exception:
         logging.getLogger(__name__).warning("Carriage at receipt: row %s of room %s unreadable", client_message_id,
@@ -1141,7 +1194,7 @@ def carry_relay_at_receipt(root, target: str, entry: dict) -> Any:
     return carry_at_receipt(root, target, quotes) if quotes else None
 
 
-def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: list, went_to: str) -> None:
+def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: list, went_to: str, reply=None) -> None:
     """At a Project room's ingress, after the routing outcome: one carried context entry of the accepted chat row
     to every other live root of the room (``addressable_roots``), naming where the row went (the work it was
     delivered to, else ``ROUTED_BY_HEAD``: a head of the room routed it), and down each root's tree at once
@@ -1155,6 +1208,8 @@ def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: 
         if not quotable_owner_row(row, drive_root):
             return
         address = owner_row_address(row)
+        if selection := captured_selection(drive_root, row, reply):
+            row = {**row, "_owner_reply_target": selection}
         quote = owner_quote(drive_root, row, address=address)
     except Exception:
         log.warning("Carriage: room %s row %s unreadable at ingress", chat_id, client_message_id, exc_info=True)

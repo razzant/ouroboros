@@ -143,6 +143,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     wait_ended_at: str
     row_address: str
     reply_excerpt_disabled: bool
+    reply_author_label: str  # whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
     row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
     reply_to: ChatReplyReference
     relay: Dict[str, Any]

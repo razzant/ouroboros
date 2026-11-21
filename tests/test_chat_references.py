@@ -174,6 +174,35 @@ def test_a_call_opening_row_names_itself_on_its_live_echo():
     assert "row_client_message_id" not in projection_fields(owner), "the owner's own row keeps its id alone"
 
 
+def test_a_reply_to_a_system_row_names_system_on_every_surface_never_you(tmp_path, monkeypatch):
+    """A call's opening enters by the owner's door (``direction: in``) yet is the host's row (``role: system``): a Reply
+    to it signs System on the reference, on the row's live frame and on its replay, and nobody can quote a passage of it."""
+    from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply, projection_fields
+    from ouroboros.owner_words import reply_target
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    bridge.handle_web_message("Cue: greet the caller.", client_message_id="call:c1:open",
+                              task_metadata={"host_fact": {"kind": "call_open", "call_id": "c1"}})
+    opening = next(echo for echo in echoes if echo.get("client_message_id") == "call:c1:open")
+    stored = dialogue_test.chat_rows(tmp_path)[-1]
+    assert (stored["direction"], stored["role"]) == ("in", "system")
+    assert opening["role"] == "system" and opening["reply_author_label"] == projection_fields(stored)["reply_author_label"] == "System"
+    replay = next(row for row in _history(tmp_path) if row.get("client_message_id") == "call:c1:open")
+    assert (replay["role"], replay["reply_author_label"]) == ("system", "System")
+    reference = resolve_reply(tmp_path, opening["row_address"])
+    assert (reference["role"], reference["author_label"]) == ("system", "System")
+    bridge.handle_web_message("About the call.", client_message_id="about-call", task_metadata={"reply_to": opening["row_address"]})
+    echo = next(echo for echo in echoes if echo.get("client_message_id") == "about-call")
+    assert (echo["reply_to"]["role"], echo["reply_to"]["author_label"]) == ("system", "System")
+    assert reply_target(tmp_path, echo["reply_to"])["author"] != "You", "the model reads the host's row, never my human's"
+    with pytest.raises(ReplyExcerptNotAuthored):
+        ingress_reply(tmp_path, {"reply_to": opening["row_address"], "reply_excerpt": {"text": "Cue", "start_utf16": 0}})
+    # The owner's own row, beside it, still signs You: only the host's rows changed.
+    own = message_bus.log_chat("in", 1, 1, "Meet at noon.", ts="2026-10-01T00:00:00Z", source="web")
+    assert projection_fields(own)["reply_author_label"] == "You" and resolve_reply(
+        tmp_path, format_address(row_address(own)))["role"] == "user"
+
+
 @pytest.mark.parametrize("comment", ["", "  Follow the creek at dawn.  "])
 def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_path, monkeypatch, comment):
     from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply
@@ -216,6 +245,7 @@ def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_
 
 
 def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp_path, monkeypatch):
+    from ouroboros.chat_references import stored_reply
     from ouroboros.dialogue_provenance import quote_words, relation_text
     from ouroboros.owner_words import reply_target
 
@@ -230,7 +260,9 @@ def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp
     stored = dialogue_test.chat_rows(tmp_path)[-1]
     ref = stored["reply_to"]
     assert ref == {**reference_from_row(original), "excerpt": excerpt}
-    assert ref == echoes[-1]["reply_to"] == bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
+    delivered = bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
+    assert ref == echoes[-1]["reply_to"] == stored_reply(delivered), "the row and its echo keep the compact reference"
+    assert delivered["text"] == source, "delivery carries the source whole, captured before the owner row was saved"
     assert ref == next(r for r in _history(tmp_path) if r.get("client_message_id") == "selected")["reply_to"]
     assert json.dumps(excerpt["text"], ensure_ascii=False) in relation_text(stored)
     assert quote_words(stored) == stored["text"] == "Trace this path."

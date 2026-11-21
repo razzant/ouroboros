@@ -273,7 +273,8 @@ def _owner_message_facts(metadata: dict) -> dict:
     facts = {}
     reply = metadata.get("reply_reference")
     if isinstance(reply, dict) and reply:
-        facts["reply_to"] = reply
+        from ouroboros.chat_references import stored_reply
+        facts["reply_to"] = stored_reply(reply)  # the captured source reaches the model as a bound host row, once
         if reply.get("excerpt"):
             facts["reply_excerpt_note"] = (
                 "excerpt is the sender's client-reported rendered selection in the addressed message, supplied as a citation."

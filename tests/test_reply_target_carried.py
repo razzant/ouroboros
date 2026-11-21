@@ -50,6 +50,37 @@ def _targets(ctx):
     return [row["text"] for row in governing_words_for_schedule(ctx)[FIELD] if row["source"] == REPLY_TARGET]
 
 
+def test_a_run_started_by_a_selected_reply_hands_its_helper_the_captured_source_while_history_is_unreadable(
+        tmp_path, monkeypatch):
+    """The run the owner's selected Reply started holds the delivery's reference, which carries the source captured at
+    acceptance: its helper reads that source's exact author, whole text and files by value, and the compact reference
+    a replay holds gives it the address alone."""
+    from ouroboros.chat_references import ingress_reply, stored_reply
+    from ouroboros.owner_words import UNREAD_TARGET, render_owner_words
+    from ouroboros.store import StoreError
+
+    ctx = _door_run(tmp_path)
+    full = "Map: **North trail**. Return at dawn. " * 12
+    saved = dialogue_store.append(ctx.drive_root, "chat", {"ts": "2026-11-04T09:00:30+00:00", "direction": "out", "chat_id": 1,
+                                                          "text": full, "client_message_id": "trail-map"}).row
+    address = format_address(row_address(saved))
+    delivered = ingress_reply(ctx.drive_root, {"reply_to": address, "reply_excerpt": {"text": "North trail", "start_utf16": 11}})
+    assert delivered["text"] == full and "text" not in stored_reply(delivered)
+
+    def unavailable(*_args, **_kwargs):
+        raise StoreError("history unavailable")
+
+    monkeypatch.setattr("ouroboros.chat_chain.resolve_row", unavailable)
+    for reference, expected in ((delivered, full), (stored_reply(delivered), "")):
+        ctx.task_metadata["reply_reference"] = reference
+        ctx._owner_directives = []
+        _initialize_owner_directives(ctx, [{"role": "user", "content": "Do this."}])
+        [target] = [row for row in governing_words_for_schedule(ctx)[FIELD] if row["source"] == REPLY_TARGET]
+        assert target["author"] == "Ouroboros" and target["text"] == expected
+        rendered = render_owner_words(governing_words_for_schedule(ctx)[FIELD], audience="child")
+        assert (full in rendered) is bool(expected) and (UNREAD_TARGET in rendered) is not bool(expected)
+
+
 @pytest.mark.parametrize("routed", [False, True])
 def test_a_reply_target_survives_a_drafted_start_into_its_helper(tmp_path, routed):
     from ouroboros.tools.control_routing import _attach_drafted_objective, _attach_origin_from_metadata
@@ -345,10 +376,10 @@ def test_inherited_safety_evidence_keeps_each_replies_selection(tmp_path):
 
 
 @pytest.mark.parametrize("selected_first", [False, True])
-@pytest.mark.parametrize("source_read", ["readable", "unavailable", "unresolved"])
+@pytest.mark.parametrize("source_read", ["readable", "captured", "unavailable", "unresolved"])
 @pytest.mark.parametrize("source_kind", ["project", "media"])
 def test_whole_reply_and_selected_passage_keep_their_own_source_in_a_helper(tmp_path, selected_first, source_read, source_kind):
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import ingress_reply, stored_reply
     from ouroboros.dialogue_provenance import excerpt_citation
     from ouroboros.owner_relay import _rows_to_carry
     from ouroboros.owner_words import UNREAD_TARGET, render_owner_words, reply_target, safety_sources
@@ -366,11 +397,13 @@ def test_whole_reply_and_selected_passage_keep_their_own_source_in_a_helper(tmp_
     saved = dialogue_store.append(root, "chat", {**source, "chat_id": 1, "ts": "2026-11-04T09:00:00+00:00"}).row
     address = format_address(row_address(saved))
     excerpt = {"text": "North trail", "start_utf16": 5}
-    selected = ingress_reply(root, {"reply_to": address, "reply_excerpt": excerpt})
+    selected = ingress_reply(root, {"reply_to": address, "reply_excerpt": excerpt})  # the delivery's: it carries its source
+    if source_read in ("unavailable", "unresolved"):  # what an older row or a replay holds: the compact reference alone
+        selected = stored_reply(selected)
     if source_read == "unresolved":
         selected = {**selected, "unresolved": True}
     whole = reply_target(root, {"address": address})
-    selection = reply_target(root if source_read == "readable" else None, selected)
+    selection = reply_target(root if source_read == "readable" else None, selected)  # "captured": history is not read
     messages = [("About the whole notice.", whole), ("About the north trail.", selection)]
     if selected_first:
         messages.reverse()
@@ -381,7 +414,7 @@ def test_whole_reply_and_selected_passage_keep_their_own_source_in_a_helper(tmp_
     rows = governing_words_for_schedule(child)[FIELD]  # by-value round trip, without consulting history for the quote
     rendered = render_owner_words(rows, audience="child")
     author = "" if source_read == "unresolved" else "Ouroboros"
-    body = answer if source_read == "readable" else ""
+    body = answer if source_read in ("readable", "captured") else ""
     assert (f"[{whole['author']}: the message my human replied to, not my human's words · {address}]"
             f"\n{source['text']}") in rendered
     assert (f"[{author or 'author not recorded'}: the message my human replied to, not my human's words · {address}]"
@@ -454,14 +487,16 @@ def test_two_readers_labels_for_one_author_keep_the_selected_source(tmp_path, au
     """The door labels the replied row's author for the page (You, Ouroboros); a reader of the row signs it for the
     record (User [source=web], Ouroboros (task …)). Carriers of one selected reply that differ only so are one
     selection, and its readable source stays; another actor's, passage's or message's record is never merged in."""
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import ingress_reply, stored_reply
     from ouroboros.owner_words import _deduped, _words_rows, reply_target, task_governing_words
 
     words = "Meet at the north gate."
     saved = dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "ts": "2026-11-04T09:00:00+00:00", "text": words,
                                                      **author}).row
     address = format_address(row_address(saved))
-    reference = ingress_reply(tmp_path, {"reply_to": address, "reply_excerpt": {"text": "north gate", "start_utf16": 12}})
+    # The compact reference: what the saved row, history and a replay hold (the delivery's own carries the source whole).
+    reference = stored_reply(ingress_reply(tmp_path, {"reply_to": address,
+                                                      "reply_excerpt": {"text": "north gate", "start_utf16": 12}}))
     unread, readable = reply_target(None, reference), reply_target(tmp_path, reference)
     assert unread["author"] != readable["author"] and unread["role"] == readable["role"] == reference["role"]
     assert (unread["text"], readable["text"]) == ("", words)
@@ -551,7 +586,9 @@ def test_held_owner_row_carries_the_captured_source_without_rewriting_its_addres
         assert not error
     else:
         _, address, quote, _, _ = _rows_to_carry(parent, tmp_path)[0]
-    assert quote["reply_to"]["text"] == full and quote["reply_to"]["attachments"] == files
+    internal = quote["owner_row"]["_owner_reply_target"]  # the source rides the internal row, never the client's fields
+    assert internal["text"] == full and internal["attachments"] == files
+    assert "text" not in quote["reply_to"] and "attachments" not in quote["reply_to"], "a client reads the preview alone"
     assert quote["owner_row"]["reply_to"] == reference, "the accepted row is not rewritten with projection fields"
     assert owner_source_row(quote["owner_row"]) == owner and owner_row_address(quote["owner_row"]) == address
     monkeypatch.setattr("ouroboros.chat_chain.resolve_row", lambda *_: pytest.fail("the captured source needs no history read"))
@@ -598,3 +635,178 @@ def test_explicit_quote_never_borrows_a_source_not_captured_for_its_owner_select
     assert not error and quote["reply_to"] == reference
     assert quote["owner_row"] == {**owner, "_owner_source_root": str(tmp_path)}
     assert parent._held_owner_messages == {handle: owner}, "quote preparation changes neither row nor held state"
+
+
+def test_a_relay_envelope_shows_clients_only_the_preview_and_keeps_the_forwarded_words_and_files(tmp_path):
+    """The room, history and every client read ``relay.reply_to`` and each ``quotes[i].reply_to``: the preview alone.
+    The selected passage's source rides the internal owner row; the forwarded owner message keeps its own words and
+    files whole, whatever the source carries."""
+    import json
+
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+
+    full = "Map: **North trail**. Return at dawn. " * 12
+    own_words = "Which trail do we take? " * 30
+    own_files = [{"name": "photo.png", "mime": "image/png", "size": 9}]
+    source_files = [{"name": "trail.pdf", "mime": "application/pdf", "size": 55}]
+    excerpt = {"text": "North trail", "start_utf16": 5}
+    reference = {"address": "row:1@2026-11-04T09:00:00+00:00#0123456789ab", "role": "assistant", "author_label": "Ouroboros",
+                 "snippet": "Map: North trail…", "excerpt": excerpt}
+    internal = {"address": reference["address"], "author": "Ouroboros", "excerpt": excerpt, "role": "assistant",
+                "text": full, "attachments": source_files}
+    owner = {"chat_id": 1, "direction": "in", "source": "web", "user_id": 1, "ts": "2026-11-04T09:01:00Z",
+             "client_message_id": "owner-held", "text": own_words, "attachments": own_files, "reply_to": reference}
+    quote = owner_quote(tmp_path, {**owner, "_owner_reply_target": internal}, address="handle")
+    assert quote["owner_row"]["_owner_reply_target"] == internal, "the source stays on the internal row, whole"
+    envelope = relay_envelope("relay-1", [quote], chat_id=1)
+    for shown in (envelope, envelope["quotes"][0]):
+        assert (shown["text"], shown["attachments"]) == (own_words, own_files), "the forwarded words and files are not cut"
+        assert shown["reply_to"]["address"] == reference["address"] and shown["reply_to"]["excerpt"] == excerpt
+        assert "text" not in shown["reply_to"] and "attachments" not in shown["reply_to"], "preview fields only"
+        assert "owner_row" not in shown
+    assert full not in json.dumps(envelope) and "trail.pdf" not in json.dumps(envelope)
+    plain = owner_quote(tmp_path, {**owner, "reply_to": reference}, address="handle")
+    assert plain["reply_to"] == reference, "a compact reference is its own preview"
+
+
+@pytest.mark.parametrize("source_kind", ["assistant", "owner-with-files"])
+def test_a_selected_passage_reaches_every_member_whole_at_receipt_and_the_next_helper_without_history(
+        tmp_path, monkeypatch, source_kind):
+    """Immediate delivery from its first step: the owner's Reply to a passage goes through the real ingress, which
+    captures the source's words and files before it saves the row; the host's carriage at receipt hands them to the
+    tree's members; history then becomes unreadable, and the member that drains its mail still hands the next helper
+    the source's exact author, whole text and files. The client's fields hold no source."""
+    import json
+
+    from ouroboros.chat_references import stored_reply
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.owner_words import UNREAD_TARGET, attachments_line, render_owner_words, reply_target
+    from ouroboros.store import StoreError
+    from ouroboros.task_results import write_task_result
+    from supervisor import message_bus
+    from supervisor.message_ingress import accepted_chat_message
+    from tests.test_chat_attachments import _web_bridge
+    from tests.test_owner_words_at_receipt import _mail, _nanny, _round_top, _said
+    from tests.test_owner_words_carried import _owner_root
+
+    write_task_result(tmp_path, "t-root", "running", delegation_role="root", root_task_id="t-root")
+    for task_id, status, parent in (("t-nanny", "running", "t-root"), ("t-child", "scheduled", "t-nanny")):
+        write_task_result(tmp_path, task_id, status, delegation_role="subagent", parent_task_id=parent, root_task_id="t-root")
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    full = "Map: **North trail**. Return at dawn. " * 12
+    files = [{"name": "trail.pdf", "mime": "application/pdf", "size": 55}]
+    if source_kind == "assistant":
+        source = message_bus.log_chat("out", 1, 0, full, ts="2026-11-09T09:00:00Z")
+        files = []
+    else:
+        source = message_bus.log_chat("in", 1, 1, f"{full}\n\n[Attached file: trail.pdf]", source="web",
+                                      ts="2026-11-09T09:00:00Z", message_meta={"attachments": files})
+    address = format_address(row_address(source))
+    excerpt = {"text": "North trail", "start_utf16": 11}
+
+    # 1. The delivery: accepted by the real ingress, carried at receipt to every live member of the work's tree.
+    bridge.handle_web_message("Which trail?", client_message_id="owner-reply",
+                              task_metadata={"reply_to": address, "reply_excerpt": excerpt})
+    delivered = bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
+    saved = accepted_chat_message(tmp_path, 1, "owner-reply")
+    assert delivered["text"] == full and delivered.get("attachments", []) == files, "captured before the row was saved"
+    assert saved["reply_to"] == stored_reply(delivered) == echoes[-1]["reply_to"], "the row and its echo stay compact"
+    expected = reply_target(tmp_path, delivered)  # the record's own reading of the source, while history reads
+    assert expected["text"] == full and expected["author"]
+    from ouroboros.owner_relay import carry_row_at_receipt
+    carry_row_at_receipt(tmp_path, "t-root", 1, "owner-reply", reply=delivered)
+    for member in ("t-nanny", "t-child"):
+        [entry] = _mail(tmp_path, member).values()
+        assert entry["host_carried"] == {"went_to": ""}
+        assert entry["owner_rows"][0]["_owner_reply_target"]["text"] == full
+        assert full not in json.dumps(entry["relay"]), "no client-visible field holds the source"
+
+    # 2. History becomes unreadable; the member drains its mail and tells its helper.
+    def unavailable(*_args, **_kwargs):
+        raise StoreError("history unavailable")
+
+    monkeypatch.setattr("ouroboros.chat_chain.resolve_row", unavailable)
+    nanny, messages = _nanny(tmp_path), [{"role": "user", "content": "your assignment"}]
+    controls = _round_top(nanny, messages)
+    assert controls["owner_carried_addressed"] == [format_address(row_address(saved))]
+    said = _said(messages)
+    assert full in said and "Which trail?" in said and (not files or "trail.pdf" in said)
+    held = held_owner_messages(nanny)[format_address(row_address(saved))]
+    assert held["_owner_reply_target"]["text"] == full and held["_owner_reply_target"].get("attachments", []) == files
+
+    # 3. The next helper, and the one after it, read the exact author, the whole text and the files, by value.
+    child = _owner_root(tmp_path, governing_words_for_schedule(nanny))
+    for rows in (governing_words_for_schedule(nanny)[FIELD], governing_words_for_schedule(child)[FIELD]):
+        [target] = [row for row in rows if row["source"] == REPLY_TARGET]
+        assert (target["author"], target["text"], target.get("attachments", [])) == (expected["author"], full, files)
+        rendered = render_owner_words(rows, audience="child")
+        assert f"[{expected['author']}: the message my human replied to, not my human's words · {address}]\n{full}" in rendered
+        assert UNREAD_TARGET not in rendered and attachments_line(files) in rendered + ("" if files else attachments_line(files))
+        assert "Sender-selected passage of" in rendered and json.dumps(excerpt["text"]) in rendered
+
+
+@pytest.mark.parametrize("standing", ["addressed", "context"])
+def test_a_later_copy_completes_a_held_selection_once_without_raising_its_standing_or_repeating_words(
+        tmp_path, monkeypatch, standing):
+    """A member that holds a selected reply without its source (history was unreadable when the row reached it) takes
+    the source from a later copy of the same address exactly once, whichever standing wrote either copy: only the
+    source moves. The row stays what it was to its holder (addressed to this work, or context that went elsewhere),
+    no words are shown again and no closing control fires."""
+    from ouroboros.owner_relay import (ROUTED_BY_HEAD, captured_selection, carry_at_receipt, carry_row_at_receipt,
+                                       held_owner_messages, owner_quote, owner_row_address)
+    from ouroboros.store import StoreError
+    from ouroboros.task_results import write_task_result
+    from supervisor import message_bus
+    from supervisor.message_ingress import accepted_chat_message
+    from tests.test_chat_attachments import _web_bridge
+    from tests.test_owner_words_at_receipt import _mail, _nanny, _round_top, _said
+
+    write_task_result(tmp_path, "t-root", "running", delegation_role="root", root_task_id="t-root")
+    write_task_result(tmp_path, "t-nanny", "running", delegation_role="subagent", parent_task_id="t-root",
+                      root_task_id="t-root")
+    bridge, _echoes = _web_bridge(tmp_path, monkeypatch)
+    full = "Map: **North trail**. Return at dawn. " * 12
+    source = message_bus.log_chat("out", 1, 0, full, ts="2026-11-09T09:00:00Z")
+    bridge.handle_web_message("Which trail?", client_message_id="owner-reply", task_metadata={
+        "reply_to": format_address(row_address(source)), "reply_excerpt": {"text": "North trail", "start_utf16": 11}})
+    delivered = bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
+    row = accepted_chat_message(tmp_path, 1, "owner-reply")
+    address = owner_row_address(row)
+    went = "" if standing == "addressed" else ROUTED_BY_HEAD
+
+    def carry(reply):
+        """One carriage of the owner's row: at receipt (addressed), or as the context another work received."""
+        if standing == "addressed":
+            return carry_row_at_receipt(tmp_path, "t-root", 1, "owner-reply", reply=reply)
+        held = {**row, "_owner_source_root": str(tmp_path)}
+        if selection := captured_selection(tmp_path, row, reply):
+            held["_owner_reply_target"] = selection
+        return carry_at_receipt(tmp_path, "t-root", [owner_quote(tmp_path, held, address=address)], went_to=went)
+
+    def unavailable(*_args, **_kwargs):
+        raise StoreError("history unavailable")
+
+    # The first copy reaches the member while history is unreadable and carries no source: it holds the row alone.
+    with monkeypatch.context() as unread:
+        unread.setattr("ouroboros.chat_chain.resolve_row", unavailable)
+        carry(None)
+    [first] = _mail(tmp_path, "t-nanny").values()
+    assert first["host_carried"] == {"went_to": went} and "_owner_reply_target" not in first["owner_rows"][0]
+    nanny, messages = _nanny(tmp_path), [{"role": "user", "content": "your assignment"}]
+    controls = _round_top(nanny, messages)
+    assert ("owner_carried_addressed" in controls) == (standing == "addressed")
+    held = held_owner_messages(nanny)[address]
+    assert "_owner_reply_target" not in held and held["carried"]["went_to"] == went
+    assert _said(messages).count("Which trail?") == 1
+
+    # A later copy, now with the source the delivery captured, completes it once.
+    carry(delivered)
+    completing = first["msg_id"].replace(":carry:" if standing == "addressed" else ":carry-context:", ":carry-source:")
+    assert sorted(_mail(tmp_path, "t-nanny")) == sorted([first["msg_id"], completing])
+    later_messages = [{"role": "user", "content": "your assignment"}]
+    controls = _round_top(nanny, later_messages)
+    held = held_owner_messages(nanny)[address]
+    assert held["_owner_reply_target"]["text"] == full and held["carried"] == {**held["carried"], "went_to": went}
+    assert "owner_carried_addressed" not in controls and "Which trail?" not in _said(later_messages), "nothing shown again"
+    carry(delivered)  # a retried carriage writes nothing more
+    assert len(_mail(tmp_path, "t-nanny")) == 2

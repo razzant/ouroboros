@@ -705,3 +705,58 @@ def test_send_as_new_recovers_the_old_quote_only_when_the_composer_is_free(proje
     assert second['client_message_id'] != first['client_message_id'] and second['content'] == first['content']
     assert second['reply_to'] == old['row_address'] and second['reply_excerpt'] == first['reply_excerpt']
     expect(composer).to_have_value('')
+
+
+def test_a_selected_sends_delivery_doubt_leaves_its_bubble_when_the_host_confirms_dispatch(project_chat):
+    """A saved row of a host process that has ended says its delivery is not confirmed and offers Send as new; the
+    running host's own dispatch fact on that row takes the warning and the action off the bubble, not only off storage."""
+    page, expect = project_chat['page'], project_chat['expect']
+    project_chat['rows'][:] = [row(1, 'Copper lantern')]
+    page.reload()
+    select_contents(bubble(page, project_chat['rows'][0]).locator('.message'))
+    page.get_by_role('button', name='Reply to quote', exact=True).click()
+    page.locator('#chat-input').fill('Which one?')
+    page.locator('#chat-send').click()
+    page.wait_for_function('sentFrames.length === 1')
+    first = page.evaluate('sentFrames[0]')
+    saved = """([frame, facts]) => emit('chat', { ...frame, type:'chat', role:'user', source:'web', chat_id:1,
+        ts:'2026-10-01T17:00:30Z', ingress_accepted:true, ...facts, reply_to:{address:frame.reply_to, excerpt:frame.reply_excerpt} })"""
+    page.evaluate(saved, [first, {}])  # no dispatch fact: the process that saved it has since ended
+    sent = page.locator('#chat-messages .chat-bubble.user')
+    expect(sent.locator("[data-ingress-saved='unconfirmed']")).to_contain_text('Saved; delivery not confirmed.')
+    again = page.get_by_role('button', name='Send as a new message', exact=True)
+    expect(again).to_have_count(1)
+    page.evaluate(saved, [first, {'ingress_dispatched': True}])  # the running host entered its dispatch
+    expect(sent.locator("[data-ingress-saved='unconfirmed']")).to_have_count(0)
+    expect(again).to_have_count(0)
+    expect(sent.locator('[data-ingress-saved]')).to_have_count(1)  # the plain saved tick stands in its place
+
+
+def test_a_long_sent_quote_keeps_its_show_all_clear_of_the_rounded_edge(project_chat):
+    page, expect = project_chat['page'], project_chat['expect']
+    source = row(1, 'First line.\nSecond line.\nThird line.')
+    excerpt = {'text': 'First line.\nSecond line.\nThird line.', 'start_utf16': 0}
+    reply = row(2, 'About these lines.', role='user', source='web', reply_to=ref(source, excerpt))
+    project_chat['rows'][:] = [source, reply]
+    page.reload()
+    toggle = bubble(page, reply).locator('.chat-quote[data-excerpt] .chat-clamp-toggle')
+    expect(toggle).to_be_visible()
+    inset = toggle.evaluate("""node => {
+        const quote = node.closest('.chat-quote'), box = node.getBoundingClientRect(), edge = quote.getBoundingClientRect();
+        return getComputedStyle(quote).direction === 'rtl' ? box.left - edge.left : edge.right - box.right;
+    }""")
+    assert inset >= 7.5, f'Show all sits {inset}px from the quote edge; the composer strip keeps --space-2 (8px)'
+
+
+def test_a_file_items_wrapper_wears_the_cards_radius_so_its_target_ring_follows_it(project_chat):
+    page, expect = project_chat['page'], project_chat['expect']
+    project_chat['rows'].clear()
+    page.reload()
+    page.wait_for_function('typeof window.emit === "function"')
+    doc = row(1, 'Plan', msg_type='document', filename='plan.txt', mime='text/plain', caption='Plan', task_id='maps')
+    page.evaluate("doc => emit('document', {...doc, type:'document', history_id:undefined})", doc)
+    item = bubble(page, doc).locator('.chat-file-item').first
+    expect(item).to_be_visible()
+    radius, token = item.evaluate("""node => [getComputedStyle(node).borderTopLeftRadius,
+        getComputedStyle(document.documentElement).getPropertyValue('--radius-inner').trim()]""")
+    assert radius == token and radius != '0px', f'wrapper radius {radius} should be the inner radius {token}'

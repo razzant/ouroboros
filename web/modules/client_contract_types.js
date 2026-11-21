@@ -452,6 +452,7 @@
  * @property {string=} wait_ended_at
  * @property {string=} row_address
  * @property {boolean=} reply_excerpt_disabled  // a mixed or wordless card display, not one authored passage
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
  * @property {Object=} relay

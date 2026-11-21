@@ -257,6 +257,26 @@ test('an owner press is still a whole-row Reply target, not an authored passage'
     assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@press#1' });
 });
 
+test('a Reply to a System row signs System, whatever sender line it wears or label an older frame stamped', t => {
+    const f = fixture();
+    t.after(() => f.close());
+    const opening = f.bubble('system', 'Call opened: say hello.');  // this double's sender line says Ouroboros
+    const summary = f.bubble('system', 'Task finished.');
+    summary.querySelector('.sender').textContent = 'Task Summary';   // a sender line System rows wear
+    f.feed.append(opening, summary);
+    f.replies.decorate(opening, { row_address: 'row:1@call#1', role: 'system', text: 'Call opened', reply_author_label: 'You' });
+    f.replies.decorate(summary, { row_address: 'row:1@sum#2', role: 'system', text: 'Task finished.' });
+    for (const row of [opening, summary]) assert.equal(f.replies.bubbleRef(row).author_label, 'System');
+    opening.querySelector('.chat-message-reply').click();
+    const staged = JSON.parse(f.storage.get('ouro_chat_reply'));
+    assert.deepEqual([staged.role, staged.author_label], ['system', 'System']);
+    assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'System');
+    const mine = f.bubble('user', 'a note');  // the owner's own bubble keeps the host's label for its author
+    f.feed.append(mine);
+    f.replies.decorate(mine, { ...owner('row:1@mine#3'), reply_author_label: 'Mira' });
+    assert.equal(f.replies.bubbleRef(mine).author_label, 'Mira');
+});
+
 test('Reply stages the strip and the next frame carries only the address; Esc or × cancels; a send clears it', async () => {
     const f = fixture();
     try {

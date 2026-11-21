@@ -283,9 +283,10 @@ def _chat_record(
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
             meta["reply_to"] = origin_reply(root, task_id)
+        from ouroboros.chat_references import stored_reply
         for key in ("reply_to", "relay"):
             if isinstance(meta.get(key), dict) and meta[key]:
-                record[key] = dict(meta[key])
+                record[key] = stored_reply(meta[key]) if key == "reply_to" else dict(meta[key])  # no captured source
         if meta.get("reply_to_relay"):
             record["reply_to_relay"] = str(meta["reply_to_relay"])
         if isinstance(meta.get("presence_contact"), dict):
@@ -513,7 +514,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import ingress_reply
+    from ouroboros.chat_references import delivery_reply, ingress_reply
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
     placeholder = not text.strip() and not str(message.get("image_caption") or "").strip()
     name = dispatcher_name(dispatch)
@@ -560,7 +561,9 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
                 message["task_metadata"] = {**message["task_metadata"], "chat_attachments": row.get("attachments")}
         ts = str(row.get("ts") or "")
         if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": row["reply_to"]}
+            sent = (message.get("task_metadata") or {}).get("reply_reference")
+            message["task_metadata"] = {**(message.get("task_metadata") or {}),
+                                        "reply_reference": delivery_reply(row["reply_to"], sent)}
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.
@@ -629,7 +632,10 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         ts = ref["ts"]
         placeholder = row.get("text_placeholder") is True
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
-            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": row["reply_to"]}
+            from ouroboros.chat_references import delivery_reply
+            sent = (message.get("task_metadata") or {}).get("reply_reference")
+            message["task_metadata"] = {**(message.get("task_metadata") or {}),
+                                        "reply_reference": delivery_reply(row["reply_to"], sent)}
     elif message.get("suppress_chat_log"):
         return None
     else:
@@ -698,7 +704,7 @@ def handle_web_message(
 ) -> None:
     from supervisor import message_bus as bus
     from ouroboros.chat_uploads import claim_refs
-    from ouroboros.chat_references import ingress_reply, projection_fields
+    from ouroboros.chat_references import delivery_reply, ingress_reply, projection_fields
     from ouroboros.room_appearances import frame_rooms
 
     # Web ownership stays user_id=1; positive chat_id selects Main/Project.
@@ -772,7 +778,7 @@ def handle_web_message(
             if handed := dialogue_store.claim_dispatch(bus.DATA_DIR, thread_id, message_id, process=current_custody_session_id()):
                 claim_refs(metadata.get("chat_attachments"), bus.DATA_DIR)  # the copies it stages are kept
         if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            metadata["reply_reference"] = row["reply_to"]
+            metadata["reply_reference"] = delivery_reply(row["reply_to"], reply)
         if handed:
             ref = build_owner_message_ref(chat_id=thread_id, client_message_id=message_id, ts=ts, text=log_text)
             message = dict(

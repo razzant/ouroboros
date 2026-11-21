@@ -9,6 +9,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros.chat_chain import format_address, row_address
+from ouroboros.chat_references import stored_reply
 from ouroboros.gateway.control import api_command
 from ouroboros.gateway.ws import ws_endpoint
 from supervisor import message_bus
@@ -72,7 +73,9 @@ def test_websocket_reply_keeps_the_host_preview_on_echo_and_queue(bridge, extra)
     assert echo["reply_to"].get("excerpt") == extra.get("reply_excerpt")
     assert echo["reply_to"]["address"] == address and echo["reply_to"]["snippet"] == "Earlier answer"
     [item] = [u["message"] for u in bridge.get_updates(offset=0, timeout=0)]
-    assert item["task_metadata"]["reply_reference"] == echo["reply_to"]
+    delivered = item["task_metadata"]["reply_reference"]
+    assert stored_reply(delivered) == echo["reply_to"], "the echo keeps the compact reference"
+    assert delivered.get("text") == ("Earlier answer" if extra else None), "a selection's source rides the delivery"
     row = item["accepted_source_row"]
     assert echo["row_address"] == format_address(row_address(row))
 

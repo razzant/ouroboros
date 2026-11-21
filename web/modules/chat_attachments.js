@@ -502,6 +502,19 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         placeIngressNote(bubble, note);
     }
 
+    // The running host's own fact on the row (dispatched, or pending) ends every doubt its bubble wears, whoever drew it and
+    // whether or not a saved tick followed: the delivery doubt with its "Send as new", a "Not confirmed" note with its
+    // actions, and the actions of a pending note. Nothing of the warning outlives the fact it was about.
+    function clearDoubt(bubble) {
+        let changed = false;
+        for (const note of [...bubble.querySelectorAll('[data-ingress-unconfirmed]')]) { note.remove(); changed = true; }
+        for (const note of [...bubble.querySelectorAll('[data-ingress-saved]')]) {
+            if (note.dataset.ingressSaved === 'unconfirmed') { note.remove(); changed = true; }
+            else if (note.querySelector('[data-unconfirmed-action]')) { clearActions(note, bubble); changed = true; }
+        }
+        return changed;
+    }
+
     function action(label, kind, onClick) {
         const button = document.createElement('button');
         button.type = 'button';
@@ -591,22 +604,29 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
         settle(row) {
             const id = String(row?.client_message_id || '');
             if (row?.role !== 'user' || row.ingress_accepted !== true || !frames.has(id)) return;
-            const bubble = bubbleOf(id);
+            const entry = frames.get(id), bubble = bubbleOf(id);
             if (row.ingress_dispatched === true) {
                 forget(id);
+                if (bubble) onDomWrite(() => clearDoubt(bubble));
             } else if (row.ingress_pending === true) {
                 // The running host took it and still owes dispatch: the frame waits for its confirmation,
                 // and a reload's first read that shows it so has answered for the kept copy (no doubt from `reconcile`).
-                const entry = frames.get(id);
                 entry.restored = false;
-                if (entry.deliveryUnknown) { entry.deliveryUnknown = false; persist(); }
-            } else if (bubble) {  // without its bubble the frame waits, so the doubt is not lost unseen
-                const entry = frames.get(id);
+                if (entry.deliveryUnknown) {
+                    entry.deliveryUnknown = false;
+                    persist();
+                    if (bubble) onDomWrite(() => clearDoubt(bubble));
+                }
+            } else {
+                // A saved row of an ended host is a fact of the receipt, kept with the frame whether or not its bubble is in
+                // the feed now. Drawn on the bubble when there is one; without it the frame stays `restored` (a kept copy
+                // the first read has not yet reconciled), so `reconcile` shows its bubble again with the doubt, and any
+                // later `unsettle` or replay of the row draws it.
                 entry.deliveryUnknown = true;
-                entry.restored = false;
                 entry.reply = { ...entry.reply, reply_to: row.reply_to || entry.reply?.reply_to };
+                if (bubble) entry.restored = false;
                 persist();
-                onDomWrite(() => doubtDelivery(bubble, entry.reply.reply_to));
+                if (bubble) onDomWrite(() => doubtDelivery(bubble, entry.reply.reply_to));
             }
         },
         /** The socket closed or a frame was refused: every still-unsaved sent message in the feed says so. */

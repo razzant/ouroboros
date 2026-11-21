@@ -178,9 +178,44 @@ test('a selected reply keeps its delivery doubt and recovery through two reloads
                 assert.deepEqual(JSON.parse(sessionStorage.getItem('ouro_chat_reply')).excerpt, savedReply.excerpt);
                 f.echo(kept[0].frame.client_message_id, 'Which gate?');
                 assert.deepEqual(f.kept(), [], 'a confirmed dispatch settles the stored delivery doubt');
+                assert.deepEqual(f.actions(bubble), [], 'and Send as new leaves the bubble with its warning, not only the storage');
+                assert.deepEqual(f.notes(bubble).map((note) => note.textContent), ['Input saved'], 'the saved tick stands where it was');
             } else kept = f.kept();
         } finally { f.close(); }
     }
+});
+
+test('a selected reply\'s delivery doubt met without its bubble in an inactive tab returns with its quote and Send as new, and the host\'s fact removes both', async () => {
+    const savedReply = { address: 'row:1@source#0123456789ab', role: 'user', author_label: 'Mira',
+        excerpt: { text: 'north gate', start_utf16: 12 } };
+    let f = fixture({ savedReply });
+    let kept, cmid;
+    try {
+        await f.send('Which gate?');
+        const frame = f.sent.at(-1).frame;
+        cmid = frame.client_message_id;
+        f.bubbleOf((node) => node.dataset.clientMessageId === cmid).remove();  // the feed released the bubble
+        document.hidden = true;                                                 // and the tab is inactive
+        f.echo(cmid, frame.content, { ingress_dispatched: undefined, reply_to: savedReply });  // a row of an ended host
+        kept = f.kept();
+        assert.equal(kept[0].deliveryUnknown, true, 'the receipt does not wait for a bubble');
+        assert.deepEqual(kept[0].reply.reply_to.excerpt, savedReply.excerpt, 'and keeps the quote it must give back');
+    } finally { f.close(); }
+    f = fixture({ keptSends: kept });
+    try {
+        for (let n = 0; n < 100 && !f.bubbleOf(node => node.dataset.clientMessageId === cmid); n += 1) {
+            await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        const bubble = f.bubbleOf(node => node.dataset.clientMessageId === cmid);
+        assert.ok(bubble, 'the kept words bring the bubble back');
+        assert.deepEqual(f.actions(bubble), ['Send as new']);
+        assert.ok(f.notes(bubble)[0].textContent.startsWith('Saved; delivery not confirmed.'));
+        document.hidden = true;                                                 // inactive again at the confirmation
+        f.echo(cmid, 'Which gate?');
+        assert.deepEqual(f.actions(bubble), [], 'Send as new is gone with the warning');
+        assert.deepEqual(f.notes(bubble).map((note) => note.textContent), ['Input saved']);
+        assert.deepEqual(f.kept(), []);
+    } finally { f.close(); }
 });
 
 test('a reply stages the speaker projected by the host rather than its generic displayed sender', async () => {
