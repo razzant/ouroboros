@@ -799,7 +799,7 @@ of `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg`, `audio/wav`. The record
 honors these limits before upload; 393216 bytes at 32 kbps for 60 seconds is a
 provider declaration, never a host exception by skill name.
 
-**The skill's own routes:** everything else under `/api/extensions/{skill}/` belongs to the skill.
+**The skill's own routes:** everything else under `/api/extensions/{skill}/` belongs to the skill, which documents them in its `SKILL.md` (Telegram: `pairing/status`, `settings/save`).
 - A route that does not exist answers 404, and a skill that is not running answers 409.
 - A method the skill did not declare answers 405.
 - A request body over 512 KiB answers 413.

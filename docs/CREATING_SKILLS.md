@@ -992,6 +992,13 @@ Panic in every command mode, including strict; it sends once. Its clock-dependen
 and boundary-second limits are defined in `CLIENT_CONTRACT.md` §15. A rejected message's previous outcome
 is unknown, not definitely undelivered.
 
+A transport that has bound its owner itself (Telegram: its pairing link or first private writer)
+registers that pair with `POST /owner/external` (`{user_id, chat_id}`, positive integers; the same
+token and `inject_chat` grant). It fills the core's external command owner, the pair Panic and
+external commands require, only while that slot is known to be empty, exactly as a first slash
+command would; it never replaces a bound pair (that stays until owner Reset) and the emergency door
+observes the pair at once. Answer: `{ok: true, owner: "bound" | "same" | "other" | "unknown"}`.
+
 ### Declaring a place, tool effects and an icon
 
 A connector skill (it connects a place: a Slack workspace, a Telegram group, an inbox) declares three facts in its

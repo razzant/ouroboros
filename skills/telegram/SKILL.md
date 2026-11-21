@@ -35,8 +35,11 @@ companion_processes:
 # Telegram
 
 One owner-only Telegram integration provides both the established bot bridge
-and the optional Mini App. The first positive private Telegram chat binds as
-the sole owner. Text, photos and files (documents, video, audio and voice notes within
+and the optional Mini App. The owner binds by opening the one-time pairing link
+the Telegram card shows (its QR code, Open in Telegram, or `/start <code>` sent
+in the bot's private chat); while that code waits nothing else binds, and with
+no code saved the first positive private Telegram chat binds as the sole owner.
+Text, photos and files (documents, video, audio and voice notes within
 this integration's 10 MiB download cap) can be sent to Ouroboros, with or without a
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
 cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
@@ -49,8 +52,9 @@ never keep it on (DESIGN §9). A quiz card is
 answered by tapping an option or by replying to the card with a free-form
 answer; both reach the same host decision ingress as the web UI. Owner `/panic`
 is available in every command mode, including strict: it sends once through the emergency door,
-never queues or replays. Telegram dates before the host's whole-second import time are refused;
-their previous outcome is unknown. This assumes aligned clocks: a host ahead rejects fresh Panic
+never queues or replays. The first one already stops: the bridge registers its owner with that
+door when it binds them, or at their next message on an install bound before 1.4.18. Telegram
+dates before the host's whole-second import time are refused; their previous outcome is unknown. This assumes aligned clocks: a host ahead rejects fresh Panic
 until Telegram reaches that second; a host behind can accept retained commands. Dates in the
 boundary second are accepted. Other slash commands keep their command-mode rules even in replies; quote a literal command
 as code or include it inside an explanation to send it as a quiz answer.
@@ -198,6 +202,24 @@ buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice
 slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
 bare `/language` and `/panic`.
 
+Pairing (1.4.18). The manifest's `connection_card` tells the core's Telegram card what it uses:
+the token field (`botToken`), the pairing code field (`pairingCode`, `TELEGRAM_PAIRING_CODE`), the
+standard-library `lib/telegram_pairing.py` with `new_code` and `bot_identity` (one bare `getMe` to
+the cloud or a saved `TELEGRAM_API_BASE`, never redirected; otherwise `refused` or `unreachable`,
+never naming the token or the URL), the link `https://t.me/{username}?start={code}`, the status
+route and the connection options. The card saves the code in Settings and then grants it to this
+skill: a newly saved key is one the bridge may read only with its grant, and until then it sees no
+code. While the bridge reads a code it has not consumed, only a private chat's `/start <code>`
+binds: that chat becomes the owner (replacing an earlier one), the code's SHA-256 digest goes to
+`pairing_consumed.json` so the link never binds again, the owner is registered with the emergency
+door, and one greeting follows, with the Mini App's Open button when the Mini App is ready; the
+command never reaches the Main chat. Any other message binds nothing, and a private `/start` whose
+code binds nothing gets one line saying the link is no longer valid. The bridge answers `/start`
+itself in every command mode, greeting its owner again. `GET pairing/status` answers
+`{bot_username, owner_bound, pending}` (`bot_username` once the bridge validated its token; never
+the code or the token). An option with `store: skill_settings` is this skill's own setting, saved
+once the skill answers through `POST settings/save`, for example `{"TELEGRAM_NOTIFY_TASKS": "on"}`.
+
 The bridge marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.
 GET settings/save serves the stored settings so the Settings form shows saved
@@ -278,8 +300,9 @@ attributed observations, not the supervising task's narration or a completion
 receipt; journal gaps and preview omissions remain visible.
 
 Set `TELEGRAM_BOT_TOKEN` in Settings (or enter it in the form setup asks with),
-grant it to this skill, enable the skill, and send the bot a private message to
-bind the owner. No legacy Telegram skill
+grant it to this skill, enable the skill, and bind the owner: open the pairing
+link of the Telegram card or, with no pairing code saved, send the bot a private
+message. No legacy Telegram skill
 state is copied or changed. Installations that use `telegram-bridge` or
 `telegram-miniapp-poc` must disable or remove those skills before enabling this
 one.

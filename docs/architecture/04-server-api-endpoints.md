@@ -223,6 +223,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/operations/{operation_ref:path}` | the calling skill's own accepted message, pending through terminal |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/cancel` | the existing cancellation owner; a typed outcome |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/chat/decision` | `task_decision.answer_decision` relayed for a transport skill |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/owner/external` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/language` | the same `ui_i18n.choose_language` writer as `/api/ui/i18n/language` |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/place` | current place state for an authenticated connector |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/turn` | capture before attention |
