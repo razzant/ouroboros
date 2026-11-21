@@ -20,6 +20,7 @@ EVENT_TAG = 0x4F55524F  # "OURO" in kCGEventSourceUserData of every posted event
 # Receipt methods of programs that refuse BEFORE posting anything (a missing grant, a key no layout gives): such a
 # refusal is a known "not sent". The paste chord is not one of them: its clipboard write ran first.
 REFUSES_BEFORE_POSTING = frozenset({"command_chord", "cg_events", "unicode_events"})
+_POSTING_METHODS = REFUSES_BEFORE_POSTING | {"paste"}
 MODIFIERS = frozenset({"cmd", "ctrl", "alt", "shift", "fn"})
 BUTTONS = ("left", "right", "middle")
 _FKEYS = (122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106)
@@ -46,10 +47,18 @@ _GRANT_REASONS = {"accessibility_untrusted": "accessibility", "screen_recording_
 
 
 def permission_refusal(grant: str) -> dict[str, Any]:
-    """The one structured field of a refusal for a missing macOS grant: its kind, which grant, and that only the owner
-    can give it (System Settings; nothing here asks the system to prompt)."""
-    return {_REFUSAL_FIELD: {"kind": "permission", "grant": grant, "fixable_by": "owner",
+    """The one structured field of a refusal for a missing macOS grant, in the shape the host's other capabilities
+    use: the capability is unavailable, which permission it lacks, that only the owner can repair it and where
+    (System Settings; nothing here asks the system to prompt). ``reason`` beside it stays the string code."""
+    return {_REFUSAL_FIELD: {"capability_unavailable": True, "permission": grant, "repair": "owner",
                              "where": f"System Settings > Privacy & Security > {_GRANT_PANES[grant]}"}}
+
+
+def proved(payload: dict[str, Any], permission: str) -> dict[str, Any]:
+    """A successful answer names the permission the call just proved it holds (``permissions_available``)."""
+    if payload.get("ok") is True:
+        payload["permissions_available"] = sorted({*payload.get("permissions_available", []), permission})
+    return payload
 
 
 def with_refusal(payload: dict[str, Any]) -> dict[str, Any]:
@@ -135,13 +144,22 @@ def position_of(output: Any) -> dict[str, Any]:
 
 
 def resolve_refusal(rc: int, stdout: str, stderr: str) -> dict[str, Any] | None:
-    """The ``resolve`` answer as a refusal of the whole key sequence when some character has no key, else None (an
-    unread answer refuses nothing: each step still refuses its own character before posting)."""
+    """The ``resolve`` answer (read on the target after any switch) as a refusal of the whole key sequence: no right
+    to post first, then a character no key gives; an answer that cannot be read refuses too, since then nothing is
+    known about the layout the steps would land in. None only when every character has its key."""
     try:
         answer = json.loads(stdout.strip().splitlines()[-1]) if rc == 0 else None
     except (ValueError, IndexError):
         answer = None
-    if not isinstance(answer, dict) or not (answer.get("missing") or answer.get("missing_command")):
+    if not isinstance(answer, dict) or not isinstance(answer.get("missing"), list):
+        return {"ok": False, "reason": "layout_unread", "dispatched": False, "note": "the input was not sent",
+                "error": "the characters of the key sequence could not be looked up in the active keyboard layout "
+                         f"({(stderr or stdout or f'exit {rc}').strip()[:300]}), so no step was sent"}
+    if answer.get("post_events") is False:
+        return {"ok": False, "reason": "permission_denied", **permission_refusal("post_events"), "dispatched": False,
+                "note": "the input was not sent",
+                "error": "this process may not post input events (the Accessibility grant), so no step was sent"}
+    if not (answer.get("missing") or answer.get("missing_command")):
         return None
     missing, command = list(answer.get("missing") or []), list(answer.get("missing_command") or [])
     layout = answer.get("layout") or "the active keyboard layout"
@@ -158,6 +176,10 @@ def posted_effect(payload: dict[str, Any]) -> dict[str, Any]:
     carries no input mark, and one that stopped after posting some keeps the mark and says how much went out. An
     answer that never came back (a lost SSH reply) has no count and is left as it is: unknown, never "not sent"."""
     posted = payload.get("posted")
+    if payload.get("ok") is not True:
+        payload.pop("permissions_available", None)  # a receipt demoted after the first look proves nothing
+    elif payload.get("method") in _POSTING_METHODS and posted != 0:
+        proved(payload, "post_events")  # events went out: the right to post them is a fact, not a preflight
     if not isinstance(posted, int):
         return payload
     if payload.get("ok") and posted == 0:

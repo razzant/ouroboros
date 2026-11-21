@@ -309,9 +309,9 @@ def test_local_key_commands_are_prepared_once_before_activation(desktop, monkeyp
         monkeypatch.setattr(plugin, "_which", lambda _tool: pytest.fail("backend selection after activation"))
         return {"ok": True, "target": {"pid": 7}, "front": {"pid": 7}, "verified": True}
     desktop._native = native
-    desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, "", "")
+    desktop._try = lambda cmd, **kw: sent.append(cmd) or (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}' if mac_input.ops_of(cmd) == [{"op": "resolve", "chars": ["A"], "command_chars": ["a"]}] else "", "")
     out = json.loads(desktop.key(keys="down A cmd+A", app="Editor"))
-    # First one lookup of every character the sequence names (typing and Command planes), posting nothing.
+    # After the switch, one lookup of every character the sequence names (typing and Command planes), posting nothing.
     assert sent[0] == mac_input.argv([{"op": "resolve", "chars": ["A"], "command_chars": ["a"]}])
     assert out["ok"] is True and sent[1:] == [mac_input.argv([{"op": "keys", "mods": [], "code": 125}]),
                                               mac_input.argv([{"op": "keys", "mods": [], "char": "A"}]), plugin.command_chord_argv("a")]
@@ -608,7 +608,7 @@ def test_a_requested_switch_that_could_not_be_verified_still_says_so(tmp_path, m
 def test_ssh_super_modifier_preserves_existing_mapping(desktop):
     select(desktop, "ssh_macos")
     commands = []
-    desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, "", "")
+    desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}' if '"op":"resolve"' in command else "", "")
     out = json.loads(desktop.key(keys="super+a meta+b"))
     assert out["ok"] is True  # both name Command: the Command chord, its program and character quoted word by word
     assert '"op":"resolve"' in commands[0] and "osascript -l JavaScript -e" in commands[0], "one lookup first, over SSH"

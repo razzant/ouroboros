@@ -25,6 +25,7 @@ def test_a_targeted_key_is_sent_only_after_the_target_is_verified_in_front(tmp_p
     out = receipt(api.tools["key"](keys="right", app="Keynote"))
     assert out["ok"] is True and out["observed_effect"] is True, out
     assert inputs(state) == [[RIGHT]], "exactly one input, after the switch"
+    assert out["permissions_available"] == ["post_events"], "events went out: the right to post them is proved"
     assert state["helper"][0][:2] == ["activate", "Keynote"], "one helper call resolves, activates and verifies"
     assert out["target"]["requested"] == "Keynote" and out["target"]["activated"] is True and out["target"]["verified"] is True
     assert out["delivered_to"] == app_dict(KEYNOTE)
@@ -87,7 +88,7 @@ def test_a_refused_input_is_an_honest_failure(tmp_path, monkeypatch):
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is False and "observed_effect" not in out and out["dispatched"] is False, out
     assert out["reason"] == "permission_denied" and out["permission"] == {"accessibility": "untrusted", "source": "helper stderr"}
-    assert out["refusal"] == {"kind": "permission", "grant": "post_events", "fixable_by": "owner",
+    assert out["refusal"] == {"capability_unavailable": True, "permission": "post_events", "repair": "owner",
                               "where": "System Settings > Privacy & Security > Accessibility"}, out
     assert "Accessibility" in out["helper_stderr"] and "not sent" in out["note"] and out["front"]["app"] == "Safari"
     # A switch observed before the dropped input keeps its own mark.
@@ -97,6 +98,7 @@ def test_a_refused_input_is_an_honest_failure(tmp_path, monkeypatch):
     module, api, state = mac(tmp_path, monkeypatch, events=(0, "", "some note\n"))
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is True and out["observed_effect"] is True and out["helper_stderr"] == "some note" and "refusal" not in out
+    assert out["permissions_available"] == ["post_events"]
 
 
 def test_a_text_that_posts_nothing_has_no_mark_and_one_stopped_part_way_keeps_its_count(tmp_path, monkeypatch):
@@ -117,15 +119,25 @@ def test_a_text_that_posts_nothing_has_no_mark_and_one_stopped_part_way_keeps_it
     assert "Привет" in sent["cmd"][-1] and "\\u" not in sent["cmd"][-1] and len(sent["cmd"][-1]) < 700, sent["cmd"][-1][:200]
 
 
-def test_a_sequence_with_a_character_no_key_gives_sends_no_step_and_switches_nothing(tmp_path, monkeypatch):
+def test_a_sequence_with_a_character_no_key_gives_sends_no_step_and_keeps_its_switch(tmp_path, monkeypatch):
     """key("return Ж") on ABC used to press Return (a form could go) and then refuse Ж: now every character of the
-    sequence is looked up first, in one call that posts nothing, before any switch or step."""
-    missing = (0, '{"layout":"com.apple.keylayout.ABC","missing":["Ж"],"missing_command":[]}\n', "")
+    sequence is looked up in one call that posts nothing, after the switch to the target (with a layout per document
+    it is the target's layout that counts) and before any step. The switch keeps its own mark; an unread lookup
+    refuses the same way."""
+    missing = (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":["Ж"],"missing_command":[]}\n', "")
     module, api, state = mac(tmp_path, monkeypatch, resolved=missing)
     out = receipt(api.tools["key"](keys="return Ж", app="Keynote"))
     assert out["ok"] is False and out["reason"] == "untypable_characters" and out["untyped"] == ["Ж"], out
-    assert out["dispatched"] is False and out["steps_done"] == 0 and inputs(state) == [] and state["helper"] == [], state
+    assert out["dispatched"] is False and out["steps_done"] == 0 and inputs(state) == [], state
     assert state["resolved"] == [{"op": "resolve", "chars": ["Ж"], "command_chars": []}]
+    activated = next(i for i, argv in enumerate(state["calls"]) if any(p.endswith("macos_native.py") for p in argv))
+    looked_up = next(i for i, argv in enumerate(state["calls"]) if '"op":"resolve"' in argv[-1])
+    assert activated < looked_up, "the lookup reads the layout of the verified target, after the switch"
+    assert out["activation_done"] is True and out["observed_effect"] is True and "switch to Keynote" in out["note"], out
+    for answer in ((0, "", ""), (1, "", "execution error")):
+        module, api, state = mac(tmp_path, monkeypatch, resolved=answer)
+        unread = receipt(api.tools["key"](keys="return Ж"))
+        assert unread["reason"] == "layout_unread" and unread["dispatched"] is False and inputs(state) == [], unread
     module, api, state = mac(tmp_path, monkeypatch)
     whole = receipt(api.tools["key"](keys="return Ж", app="Keynote"))
     assert whole["ok"] is True and inputs(state) == [[RETURN], [key(None, char="Ж")]], (whole, inputs(state))
@@ -138,7 +150,7 @@ def test_an_element_act_without_accessibility_carries_the_one_refusal_field(tmp_
         return {"ok": False, "error": "no fake"}
     module, api, state = mac(tmp_path, monkeypatch, helper=helper)
     out = receipt(api.tools["element_act"](app="Keynote", do="press", select={"identifier": "qa.commit"}))
-    assert out["ok"] is False and out["dispatched"] is False and out["refusal"]["grant"] == "accessibility", out
+    assert out["ok"] is False and out["dispatched"] is False and out["refusal"]["permission"] == "accessibility", out
 
 
 def test_text_goes_in_any_layout_and_a_key_the_layout_lacks_is_an_honest_refusal(tmp_path, monkeypatch):
@@ -360,12 +372,13 @@ def test_a_display_capture_without_the_screen_recording_grant_is_refused_and_one
     module, api, state = mac(tmp_path, monkeypatch, helper=helper("denied"))
     out = receipt(api.tools["screenshot"](job_id="denied"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and out["note"] == "nothing was captured", out
-    assert out["refusal"] == {"kind": "permission", "grant": "screen_recording", "fixable_by": "owner",
+    assert out["refusal"] == {"capability_unavailable": True, "permission": "screen_recording", "repair": "owner",
                               "where": "System Settings > Privacy & Security > Screen & System Audio Recording"}
     assert not any(argv[0] == "screencapture" for argv in state["calls"]) and "auto_attach_image" not in out
     module, api, state = mac(tmp_path, monkeypatch, helper=helper("granted"))
     taken = receipt(api.tools["screenshot"](job_id="granted"))
     assert taken["ok"] is True and "refusal" not in taken and any(argv[0] == "screencapture" for argv in state["calls"])
+    assert taken["permissions_available"] == ["screen_recording"] and "permissions_available" not in out
 
 
 # --- registration -------------------------------------------------------------------------------
@@ -376,6 +389,7 @@ def test_surface_exposes_targeting_on_input_tools(tmp_path, monkeypatch):
     assert len(api.tools) == 25
     for tool in ("click", "double_click", "triple_click", "left_click_drag", "mouse_down", "type_text", "key", "hold_key", "scroll"):
         assert api.meta[tool]["schema"]["properties"]["app"] == {"type": "string", "default": ""}, tool
+    assert "window under the pointer receives the wheel" in api.meta["scroll"]["description"], "app= does not pick the wheel's window"
     lead = api.meta["key"]["description"]
     assert lead.startswith("Press keys in the front app or app=") and "not that the app reacted" in lead[:120]
     assert "run_command" in lead
@@ -640,7 +654,7 @@ def test_a_failed_paste_helper_still_reports_the_clipboard_write(tmp_path, monke
     module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", warning))
     dropped = receipt(api.tools["type_text"](text="secret", via="paste"))
     assert dropped["reason"] == "permission_denied" and dropped["clipboard_done"] is True and dropped["observed_effect"] is True
-    assert "clipboard write" in dropped["note"] and dropped["refusal"]["grant"] == "post_events"
+    assert "clipboard write" in dropped["note"] and dropped["refusal"]["permission"] == "post_events"
 
 
 def test_a_failed_clipboard_write_sends_nothing_and_says_so(tmp_path, monkeypatch):
@@ -663,7 +677,7 @@ def test_a_refused_step_inside_a_sequence_is_reported_as_not_sent_with_its_facts
     module, api, state = mac(tmp_path, monkeypatch, events=(0, "", warning))
     out = receipt(api.tools["key"](keys="down return"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and out["steps_done"] == 0
-    assert "not sent" in out["error"] and out["permission"]["accessibility"] == "untrusted" and out["refusal"]["grant"] == "post_events"
+    assert "not sent" in out["error"] and out["permission"]["accessibility"] == "untrusted" and out["refusal"]["permission"] == "post_events"
     assert out["dispatched"] is False and "was not sent" in out["note"], "the refused step keeps its own explanation"
     # After completed steps the explanation is said about the next step, beside what completed.
     module, api, state = mac(tmp_path, monkeypatch)

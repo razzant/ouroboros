@@ -17,8 +17,12 @@ const KEYBOARD_FLAGS = 0x80000; // a new key event carries what the keyboard hol
 // ...and, as CoreGraphics does, the class bits of its key: arrows Fn and NumericPad, F-keys and the navigation block
 // Fn, the keypad NumericPad (the program must keep these and drop the held Option).
 const CLASS = (code) => ([123, 124, 125, 126].includes(code) ? 0xa00000
-  : [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 115, 119, 116, 121, 117, 114].includes(code) ? 0x800000
-    : [65, 67, 69, 71, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92].includes(code) ? 0x200000 : 0);
+  : [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 115, 119, 116, 121, 117, 114, 71].includes(code) ? 0x800000
+    : [65, 67, 69, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92].includes(code) ? 0x200000 : 0);
+// An Objective-C property that returns a CoreFoundation object (NSEvent.CGEvent) comes back as an object wrapper,
+// as JXA's bridge gives it; a C function bound with void* would receive NULL from one. Only ObjC.castObjectToRef
+// turns it into the pointer: the stand-ins of void* parameters refuse a wrapper outright.
+const wrapper = (object) => ({kind: "ObjectSpecifier", wrapped: object, isNil: () => object === null});
 
 function trace(program, scenario) {
   const t = {calls: [], log: [], posted: [], delays: [], error: null, returned: null};
@@ -125,7 +129,7 @@ function trace(program, scenario) {
           if (fault("event")) return null;
           const cg = {kind: "CGEvent", alive: true, fields: {}, type: "system", n: data1 >> 16, down: ((data1 >> 8) & 0xff) === 0xa,
                       flags, subtype};
-          return {CGEvent: cg};
+          return {isNil: () => false, get CGEvent() { return wrapper(cg); }};
         },
     },
     NSScreen: {screens: {objectAtIndex: (i) => ({frame: {origin: {x: 0, y: 0}, size: {width: 1728, height: scenario.screen_height || 1117}}})}},
@@ -138,13 +142,20 @@ function trace(program, scenario) {
       if (name === "CGEventCreateMouseEvent") t.mouse_signature = signature;
     },
     castRefToObject: (ref) => { live(ref.owner, "TISInputSource", "castRefToObject"); return string(ref.value); },
+    castObjectToRef: (object) => {
+      if (!object || object.kind !== "ObjectSpecifier") throw new Error("castObjectToRef of something not an object wrapper");
+      return object.wrapped;
+    },
     unwrap: (object) => (object && object.kind === "NSString" ? object.value : object),
   };
   const $ = new Proxy((value) => string(String(value)), {get: (target, name) => {
     if (typeof name !== "string") return undefined;
     if (Object.hasOwn(Foundation, name)) return Foundation[name];
     if (!bound.has(name)) throw new Error(`$.${name} without ObjC.bindFunction`);
-    return (...args) => { t.calls.push(name); clock += scenario.tick_ms || 0; return C[name](...args); };
+    return (...args) => {
+      if (args.some((arg) => arg && arg.kind === "ObjectSpecifier")) throw new Error(`${name}: an object wrapper where a pointer goes (NULL in JXA)`);
+      t.calls.push(name); clock += scenario.tick_ms || 0; return C[name](...args);
+    };
   }});
   const context = vm.createContext({ObjC, $, Intl, Date: {now: () => clock},
     delay: (seconds) => { t.delays.push(seconds); clock += seconds * 1000; },

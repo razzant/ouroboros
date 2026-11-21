@@ -124,9 +124,11 @@ def test_a_key_keeps_its_class_flags_and_never_a_held_modifier():
     """A keyboard puts Fn and NumericPad on an arrow, Fn on the F-keys and the navigation block, NumericPad on the
     keypad; macOS ignores Ctrl+arrow without them. The stand-in's new key events carry those bits and the Option the
     keyboard holds: the program keeps the first and drops the second."""
-    arrow, function, keypad, letter = runs(*({"spec": spec({"op": "keys", "mods": ["ctrl"], "code": code})} for code in (123, 96, 83)),
-                                           {"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "a"}), "layout": ABC})
-    for run, bits in ((arrow, NUMERIC_PAD | SECONDARY_FN), (function, SECONDARY_FN), (keypad, NUMERIC_PAD), (letter, 0)):
+    arrow, function, keypad, clear, letter = runs(*({"spec": spec({"op": "keys", "mods": ["ctrl"], "code": code})} for code in (123, 96, 83, 71)),
+                                                  {"spec": spec({"op": "keys", "mods": ["ctrl"], "char": "a"}), "layout": ABC})
+    # Keypad clear (71) is the keypad key a keyboard gives Fn, not NumericPad (measured on CoreGraphics' own flags).
+    for run, bits in ((arrow, NUMERIC_PAD | SECONDARY_FN), (function, SECONDARY_FN), (keypad, NUMERIC_PAD), (clear, SECONDARY_FN),
+                      (letter, 0)):
         clean(run)
         key = [r for r in run["posted"] if r["key"] not in (59,)]
         assert [r["flags"] for r in key] == [CTRL | bits] * 2, run["posted"]
@@ -182,12 +184,29 @@ def test_the_counts_of_what_went_out_survive_an_empty_text_and_a_stop_mid_text()
     assert report["chars_total"] == 3 and report["posted"] == len(stopped["posted"]), report
 
 
+def test_a_character_counts_when_its_key_goes_down_and_each_press_has_its_own_release():
+    """A stop between a key's down and its up: the character went down, so it counts, and the release posted in the
+    catch counts as posted; overrides count when they go out, not when planned. In "aA" a stop after the first press
+    lets that press up (no Shift), not the shifted release of the last pair."""
+    stopped, two, cut = runs({"spec": spec({"op": "type", "text": "ab", "interval_ms": 0}), "layout": ABC, "fail": "post:1"},
+                             {"spec": spec({"op": "type", "text": "aA"}), "layout": ABC, "fail": "post:1"},
+                             {"spec": spec({"op": "type", "text": "a🙂", "interval_ms": 600}, budget_ms=500), "layout": ABC})
+    for run in (stopped, two, cut):
+        assert run["held"] == [] and run["leaked"] == [], run
+    report = json.loads(next(e for e in stopped["log"] if e.startswith("__POSTED__ ")).split(" ", 1)[1])
+    assert report["chars_sent"] == 1 and report["posted"] == len(stopped["posted"]) == 2, (report, stopped["posted"])
+    assert [(r["key"], r["down"], r["flags"]) for r in two["posted"]] == [(0, True, 0), (0, False, 0)], "its own release"
+    late = json.loads(next(e for e in cut["log"] if e.startswith("__POSTED__ ")).split(" ", 1)[1])
+    assert late["override_only"] == 0 and late["chars_sent"] == 1, "the emoji never went out, so it is not counted"
+
+
 def test_a_sequence_resolves_its_characters_without_the_right_to_post_and_posts_nothing():
     found, = runs({"spec": spec({"op": "resolve", "chars": ["å", "Ж", "a"], "command_chars": ["g", "п"]}), "layout": ABC,
                    "post": False})
     assert found["posted"] == [] and found["error"] is None and found["leaked"] == []
-    assert json.loads(found["returned"]) == {"layout": "com.apple.keylayout.ABC", "missing": ["Ж"], "missing_command": ["п"]}
-    assert "CGPreflightPostEventAccess" not in found["calls"] and "CGEventSourceCreate" not in found["calls"]
+    assert json.loads(found["returned"]) == {"layout": "com.apple.keylayout.ABC", "post_events": False, "missing": ["Ж"],
+                                             "missing_command": ["п"]}, "the grant is reported beside the keys, read without a prompt"
+    assert "CGEventSourceCreate" not in found["calls"], "no event exists"
 
 
 def test_without_the_right_to_post_nothing_is_posted_and_reading_the_pointer_needs_no_right():
@@ -291,16 +310,19 @@ def test_the_remote_snippets_translate_to_the_same_operations():
 
 def test_a_grant_refusal_is_one_structured_field():
     assert mac_input.permission_refusal("screen_recording") == {"refusal": {
-        "kind": "permission", "grant": "screen_recording", "fixable_by": "owner",
+        "capability_unavailable": True, "permission": "screen_recording", "repair": "owner",
         "where": "System Settings > Privacy & Security > Screen & System Audio Recording"}}
+    # A success names what it proved, and only a success does.
+    assert mac_input.proved({"ok": True}, "accessibility") == {"ok": True, "permissions_available": ["accessibility"]}
+    assert mac_input.proved({"ok": False}, "accessibility") == {"ok": False}
     assert set(mac_input.permission_refusal("accessibility")) == {"refusal"}
     # The native helpers' own reasons for a missing grant gain the same field; any other reason stays as it was.
     for reason, grant in (("accessibility_untrusted", "accessibility"), ("screen_recording_denied", "screen_recording")):
-        assert mac_input.with_refusal({"ok": False, "reason": reason})["refusal"]["grant"] == grant
+        assert mac_input.with_refusal({"ok": False, "reason": reason})["refusal"]["permission"] == grant
     assert mac_input.with_refusal({"ok": False, "reason": "no_window"}) == {"ok": False, "reason": "no_window"}
 
 
-def test_a_sequence_with_a_character_no_key_gives_is_refused_whole_and_an_unread_lookup_refuses_nothing():
+def test_a_sequence_with_a_character_no_key_gives_is_refused_whole_and_an_unread_lookup_sends_nothing():
     steps = [mac_input.argv([{"op": "keys", "mods": [], "code": 36}]), mac_input.argv([{"op": "keys", "mods": [], "char": "Ж"}]),
              ["osascript", "-l", "JavaScript", "paste_chord.js", "g"]]
     cmd, chars, command = mac_input.resolve_argv(steps)
@@ -310,7 +332,12 @@ def test_a_sequence_with_a_character_no_key_gives_is_refused_whole_and_an_unread
     assert refusal["reason"] == "untypable_characters" and refusal["untyped"] == ["Ж"] and refusal["dispatched"] is False
     assert "ABC" in refusal["error"] and "no step" in refusal["error"]
     assert mac_input.resolve_refusal(0, '{"missing":[],"missing_command":[]}', "") is None
-    assert mac_input.resolve_refusal(1, "", "boom") is None and mac_input.resolve_refusal(0, "", "") is None
+    # Unread is a refusal too (nothing is known about the layout the steps would land in), and the grant comes first.
+    for unread in ((1, "", "boom"), (0, "", ""), (0, "not json", "")):
+        out = mac_input.resolve_refusal(*unread)
+        assert out["reason"] == "layout_unread" and out["dispatched"] is False, unread
+    denied = mac_input.resolve_refusal(0, '{"post_events":false,"missing":["Ж"],"missing_command":[]}', "")
+    assert denied["reason"] == "permission_denied" and denied["refusal"]["permission"] == "post_events" and denied["dispatched"] is False
 
 
 def test_what_was_posted_decides_the_mark():

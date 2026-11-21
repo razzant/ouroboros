@@ -598,6 +598,7 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
     assert result["app"] == {"pid": 77, "app_id": "com.apple.Safari", "app": "Safari"}
     assert result["window"] == "Start Page" and result["truncated_by"] == ["max_nodes"]
     assert len(result["marks"]) == 2 and len(result["nodes"]) == 3
+    assert result["permissions_available"] == ["accessibility"], "a tree read proves the Accessibility grant"
     first = result["marks"][0]
     assert first["id"] == 1 and first["role"] == "Button" and first["title"] == "Reload"
     assert first["center_x"] == 115 and first["center_y"] == 60
@@ -611,7 +612,8 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", failing)
     degraded = json.loads(impl.ax_tree())
     assert degraded["ok"] is False and degraded["reason"] == "accessibility_untrusted" and "marks" not in degraded
-    assert degraded["refusal"] == {"kind": "permission", "grant": "accessibility", "fixable_by": "owner",
+    assert "permissions_available" not in degraded
+    assert degraded["refusal"] == {"capability_unavailable": True, "permission": "accessibility", "repair": "owner",
                                    "where": "System Settings > Privacy & Security > Accessibility"}
 
 

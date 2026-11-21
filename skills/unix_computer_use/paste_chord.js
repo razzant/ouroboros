@@ -30,6 +30,10 @@ function run(argv) {
    ["CGEventSetFlags", ["void", ["void*", "unsigned long long"]]], ["CGEventPost", ["void", ["unsigned int", "void*"]]],
    ["CGEventSetIntegerValueField", ["void", ["void*", "unsigned int", "long long"]]]
   ].forEach(function (f) { ObjC.bindFunction(f[0], f[1]); });
+  if (!$.CGPreflightPostEventAccess()) { /* the grant first: without it no layout advice is the answer */
+    console.log("WARNING: Accessibility privileges not enabled (no right to post input events); the " + what + " was not sent");
+    return "";
+  }
   var source = $.TISCopyCurrentKeyboardLayoutInputSource(), id = "", data = null, key = -1;
   if (source) {
     var name = $.TISGetInputSourceProperty(source, $("TISPropertyInputSourceID"));
@@ -60,10 +64,6 @@ function run(argv) {
     console.log("Unable to get key code for " + wanted + " (" + (layout ? "no key of " + id + " gives " + wanted + " under Command" +
                                                                     (named ? " or Command+Shift" : "") : "the active keyboard layout could not be read") +
                 "); the " + what + " was not sent");
-    return "";
-  }
-  if (!$.CGPreflightPostEventAccess()) {
-    console.log("WARNING: Accessibility privileges not enabled (no right to post input events); the " + what + " was not sent");
     return "";
   }
   /* All events exist before the first is posted: one the system cannot make fails the chord with nothing sent.

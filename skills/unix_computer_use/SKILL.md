@@ -402,8 +402,10 @@ Input receipts (the same contract on every backend):
   chord program check before posting anything whether the process may post
   input events (`CGPreflightPostEventAccess`, prompt-free; the grant first) and
   whether every key a chord names exists in the active keyboard layout (a key
-  sequence looks all its characters up in one call that posts nothing, before
-  its first step, so `key("return Ж")` on ABC sends no Return); either refusal posts
+  sequence looks all its characters up in one call that posts nothing, after
+  any switch to `app=` and before its first step, so in the target's own layout
+  `key("return Ж")` on ABC sends no Return; a lookup that cannot be read is
+  `layout_unread` and sends nothing; a switch before it keeps its mark); either refusal posts
   nothing, warns on stderr and exits 0. Such receipts are `ok: false` with
   `reason: permission_denied` / `untypable_characters`, no input mark and, for
   the input and Command chord programs, `dispatched: false` (a completed
@@ -412,9 +414,13 @@ Input receipts (the same contract on every backend):
   the paste chord). Every refusal for a missing grant carries one structured field
   (input, display and window screenshots, the window session, `ax_tree` and
   `element_act` without Accessibility alike),
-  `refusal`: `{"kind": "permission", "grant": "post_events" | "accessibility" |
-  "screen_recording", "fixable_by": "owner", "where": "System Settings > Privacy
-  & Security > …"}`. Nothing asks the system to show a grant prompt. A local
+  `refusal`: `{"capability_unavailable": true, "permission": "post_events" |
+  "accessibility" | "screen_recording", "repair": "owner", "where": "System
+  Settings > Privacy & Security > …"}` (`reason` stays the string code). Nothing
+  asks the system to show a grant prompt. A successful answer names the
+  permission the call proved it holds, `permissions_available`: `post_events`
+  for posted input (local or on the SSH Mac), `screen_recording` for a macOS
+  screenshot, `accessibility` for `ax_tree` and `element_act`. A local
   display `screenshot` without the Screen Recording grant (read with the display
   list) is refused the same way, `note: "nothing was captured"`, instead of
   returning the wallpaper. With `app=` the switch runs before the input program
@@ -544,8 +550,11 @@ Backend matrix (honest limitations):
   Russian layout, emoji, accents), on the key that gives the character when
   the layout has one (a dead key never is: such a character goes on the
   neutral key with its string); a line break (`\n`, `\r` or CRLF) is Return.
-  The receipt says how (see "Input receipts"). A command too long for the
-  host's command line (Windows) reaches an SSH Mac on ssh's stdin instead.
+  The receipt says how (see "Input receipts"). A command the host could not
+  start as an argument (Windows: the quoted command line over 32,767 UTF-16
+  units; elsewhere an argument over 128 KiB) reaches an SSH Mac as UTF-8 bytes
+  on ssh's stdin, read by the account's own login shell, so `remote_exec` keeps
+  its shell syntax.
   `key(cmd+v)` sends only the shortcut, without changing the clipboard.
   `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
   UTF-8 and told so whatever locale the process inherited, as over SSH) and

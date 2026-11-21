@@ -483,7 +483,7 @@ def test_a_window_capture_without_the_grant_carries_the_one_refusal_field(desk, 
               "permissions": {"screen_recording": "denied"}, "error": "no Screen Recording grant; nothing was asked or captured"}
     fake_helper(monkeypatch, answer=denied, rc=1, write=False)
     out = shot(desk, app="Editor", window=7)
-    assert out["ok"] is False and out["reason"] == "screen_recording_denied" and out["refusal"]["grant"] == "screen_recording", out
+    assert out["ok"] is False and out["reason"] == "screen_recording_denied" and out["refusal"]["permission"] == "screen_recording", out
     fake_helper(monkeypatch, answer={"ok": False, "reason": "window_not_found", "error": "no such window"}, rc=1, write=False)
     other = shot(desk, app="Editor", window=8)
     assert other["reason"] == "window_not_found" and "refusal" not in other
@@ -502,6 +502,7 @@ def test_a_window_capture_is_capture_only_and_keyed_to_its_window(desk, monkeypa
     first = shot(desk, app="Editor", window=7, job_id="j")
     second = shot(desk, app="Editor", window=7, job_id="j")
     assert first["ok"] is True and first["capture_kind"] == "window" and first["backend"] == "ScreenCaptureKit"
+    assert first["permissions_available"] == ["screen_recording"]
     assert first["auto_attach_source"] == second["auto_attach_source"] == "window:11:7"
     assert first["auto_attach_image"] == first["path"] and pathlib.Path(first["path"]).is_file()
     assert first["mapped_input_available"] is False and first["window"]["window_id"] == 7 and first["app"]["pid"] == 11

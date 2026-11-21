@@ -73,8 +73,8 @@ class Transport:
     def __call__(self, cmd, *args, **kwargs):
         argv = [str(part) for part in cmd]
         if is_probe(argv):
-            self.probes.append(argv)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            self.probes.append(argv)  # a sequence's lookup answers that the layout has every key it names
+            return subprocess.CompletedProcess(cmd, 0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\n' if '"op":"resolve"' in argv[-1] else "", "")
         self.calls.append(argv)
         outcome = self.answer(argv, len(self.calls) - 1)
         if isinstance(outcome, BaseException):

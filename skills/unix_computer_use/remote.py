@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -31,9 +32,14 @@ from . import mac_input
 from .macos_native import parse_info, parse_list, resolve
 from .place import parse_wmctrl_rows, parse_x11_front, window_id_int, x11_resolve, x11_same
 
-# The longest remote command handed to ssh as an argument: below Windows' 32,767-character command line with room
-# for the ssh words around it. A longer one goes on ssh's stdin (``_ssh_run``).
-_SSH_ARGV_CHARS = 30_000
+def _fits_command_line(argv: list[str], windows: bool = os.name == "nt") -> bool:
+    """Whether the host can start this argv: on Windows the command line the launcher builds (quoting and escaping
+    included), measured in UTF-16 units against CreateProcess's 32,767 with its terminator; elsewhere one argument
+    against Linux's 128 KiB per-argument limit and the whole against a 1 MiB argument area (macOS ARG_MAX)."""
+    if windows:
+        return len(subprocess.list2cmdline(argv).encode("utf-16-le")) // 2 + 1 <= 32_767
+    sizes = [len(arg.encode("utf-8")) + 1 for arg in argv]
+    return max(sizes) <= 131_072 and sum(sizes) <= 1_000_000
 # Cap a remote /screenshot download (a 1920x1080 PNG is well under 10 MB).
 _MAX_REMOTE_SHOT_BYTES = 20 * 1024 * 1024
 
@@ -385,7 +391,12 @@ class RemoteBackends:
             payload.update({k: v for k, v in note.items() if k not in payload})
         if not input_effect:  # a read dispatches no input; an SSH Mac's pointer comes back as fields, as locally
             payload.pop("dispatched", None)
-            return {**payload, **mac_input.position_of(payload.get("output"))} if backend == "ssh_macos" else payload
+            if backend != "ssh_macos" or not payload.get("ok"):
+                return payload
+            at = mac_input.position_of(payload.get("output"))
+            return {**payload, **at} if at else {**payload, "ok": False, "reason": "position_unread",
+                                                 "error": "the remote Mac answered no pointer position: "
+                                                          f"{str(payload.get('output'))[:200]!r}"}
         if payload["ok"]:
             payload["observed_effect"] = True
         else:
@@ -799,15 +810,14 @@ class RemoteBackends:
         return ["-P", str(port), src] if port != 22 else [src]
 
     def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30) -> tuple[int, str, str]:
-        """One remote command through the user's ssh. A command longer than a host's command line can carry (Windows
-        stops at 32,767 characters for the whole ssh line; the input program alone is about 15,000) goes on ssh's stdin
-        to the remote ``/bin/sh -s`` instead, the same POSIX shell words, so long text still types without the
-        clipboard."""
+        """One remote command through the user's ssh, as its argument while the host's command line can carry it, else
+        on ssh's stdin to the account's own login shell (no remote command: the same shell that would run it, so a
+        raw ``remote_exec`` keeps its syntax), as UTF-8 bytes (a text pipe on Windows would turn LF into CRLF)."""
         dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn)]
-        if len(command) <= _SSH_ARGV_CHARS:
+        if _fits_command_line([*dest, command]):
             return self._run_cmd([*dest, command], timeout=timeout)
-        proc = subprocess.run([*dest, "/bin/sh -s"], input=command, encoding="utf-8", capture_output=True, timeout=timeout)
-        return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+        proc = subprocess.run(dest, input=command.encode("utf-8"), capture_output=True, timeout=timeout)
+        return int(proc.returncode), (proc.stdout or b"").decode("utf-8", "replace"), (proc.stderr or b"").decode("utf-8", "replace")
 
     def _ssh_macos_screenshot(self, conn: dict[str, Any], *, max_width: int, max_height: int,
                               connection_name: str = "") -> str:

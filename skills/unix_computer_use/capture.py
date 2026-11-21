@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any
 
-from .mac_input import permission_refusal, with_refusal
+from .mac_input import permission_refusal, proved, with_refusal
 from .macos_capture import window_selector
 
 _WINDOW_TIMEOUT_MS = 5000  # both ScreenCaptureKit completion handlers together (macos_capture.SPEC)
@@ -159,7 +159,7 @@ class CaptureMixin:
         }
         if img_path != out_path:
             result["full_resolution_path"] = str(out_path)
-        return self._json_text(result)
+        return self._json_text(proved(result, "screen_recording"))
 
     @staticmethod
     def _discard_window_output(out_path: pathlib.Path) -> None:

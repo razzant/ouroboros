@@ -89,7 +89,7 @@ def key(code: int | None = None, *mods: str, char: str | None = None) -> dict:
 
 DOWN, RIGHT, RETURN, TAB = key(125), key(124), key(36), key(48)
 # The resolve answer of a layout that gives every character a key sequence names (the program's own words).
-RESOLVED_ALL = '{"layout":"com.apple.keylayout.ABC","missing":[],"missing_command":[]}\n'
+RESOLVED_ALL = '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\n'
 
 
 def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, events=(0, "", ""), lsappinfo=True, on_input=None,

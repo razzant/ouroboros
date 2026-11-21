@@ -906,7 +906,7 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
                     + scale_note
                     + (" Multi-display scale is approximate; prefer ax_tree marks." if approx else "")
                 )
-        return _json(result)
+        return _json(mac_input.proved(result, "screen_recording") if plat == "macos" else result)
 
     # ------------------------------------------------------------------
     # pointer actions
@@ -1260,14 +1260,17 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         except ValueError as exc:
             return _json({"ok": False, "reason": "invalid_key_sequence", "error": str(exc),
                           "steps_done": 0, "steps_total": len(steps), "dispatched": False, "note": "the input was not sent"})
-        if len(prepared) > 1 and (unknown := self._unresolved_keys(prepared, connection)):  # before any switch or step
-            return _json({**unknown, "steps_done": 0, "steps_total": len(steps), "keys": combo})
         # Raising the target and sending each chord are independent actions of this call.
         refusal, ctx = self._begin(app, raise_policy=raise_policy, connection=connection, ask_stop=True)
         if refusal:
             if refusal.get("reason") == "stopped" and len(steps) > 1:
                 refusal.update(steps_done=0, steps_total=len(steps), keys=combo)
             return self._key_result(refusal)
+        if len(prepared) > 1 and (unknown := self._unresolved_keys(prepared, connection)):  # the target's layout, before any step
+            if (ctx.get("target") or {}).get("activated"):
+                unknown.update(observed_effect=True, activation_done=True)  # the switch ran before the refusal
+            unknown = self._finish(unknown, ctx, **({"after": None} if connection[0] != "local" else {}))
+            return _json({**unknown, "steps_done": 0, "steps_total": len(steps), "keys": combo})
         if len(prepared) == 1:
             return self._key_result(self._send_key(prepared[0], connection, ctx=ctx, raise_policy=raise_policy, keys=combo, ask_stop=True))
         results: list[dict[str, Any]] = []
@@ -1320,14 +1323,17 @@ class _ComputerUse(CaptureMixin, PlaceMixin, RemoteBackends):
         return self._key_result(payload)
 
     def _unresolved_keys(self, prepared, connection) -> dict[str, Any] | None:
-        """A Mac key sequence's characters, all looked up in the active layout by one call that posts nothing, so a
-        character no key gives refuses the whole sequence before its first step (``mac_input.resolve_argv``)."""
+        """A Mac key sequence's characters, all looked up by one call that posts nothing in the layout of the target
+        now in front, so a character no key gives (or an unread lookup) refuses the sequence before its first step."""
         name, conn = connection
         cmd, _chars, _command = mac_input.resolve_argv(prepared, remote=name != "local")
         if cmd is None:
             return None
         import shlex
-        rc, out, err = self._try(cmd) if name == "local" else self._ssh_run(conn, shlex.join(cmd), timeout=30)
+        try:
+            rc, out, err = self._try(cmd) if name == "local" else self._ssh_run(conn, shlex.join(cmd), timeout=30)
+        except Exception as exc:  # noqa: BLE001 - a lost lookup is a refusal with its receipt, never a crashed tool
+            rc, out, err = 1, "", f"{type(exc).__name__}: {exc}"
         return mac_input.resolve_refusal(rc, out, err)
 
     def hold_key(self, *, keys: str, duration_ms: int = 500, app: str = "", raise_policy: str = "allow") -> str:
@@ -1570,7 +1576,7 @@ def register(api: Any) -> None:
     api.register_tool("type_text", impl.type_text, description="Type text into the focused field of the frontmost app, or of app=. raise_policy=never requires app already in front and never activates it. On a local or SSH Mac text goes as Unicode key events in any layout (method, chars_sent, override_only say how); via=paste writes the clipboard and pastes there instead (long text, or an app that ignores typed text; the clipboard is replaced); an OSWorld guest pastes such text through its clipboard by itself.", schema={"type": "object", "properties": {"text": {"type": "string"}, "interval_ms": {"type": "integer", "default": 0}, **_input_app, "via": {"type": "string", "default": ""}}, "required": ["text"]}, timeout_sec=180)
     api.register_tool("key", impl.key, description="Press keys in the front app or app= (verified; else nothing sent). Result: who was in front, not that the app reacted. Combos with '+', sequences with spaces (cmd+s, ctrl+l, page-down, 'down down return'); on a Mac, Command plus one character presses the key giving it under Command (cmd+g, not a layout's own cmd+п), other combos the key giving the character alone or with Shift/Option, media names (play-pause, volume-up, mute, brightness-up, keys-light-up, ...) the system key; all steps and their characters are validated before activation/input and a targeted sequence stops when its app leaves the front. raise_policy=never requires app already in front and never activates it. Scriptable apps are better driven by their own commands through run_command.", schema={"type": "object", "properties": {"keys": {"type": "string"}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
     api.register_tool("hold_key", impl.hold_key, description="Hold a key or modifier combo for a duration (50-10000 ms). " + _targeted, schema={"type": "object", "properties": {"keys": {"type": "string"}, "duration_ms": {"type": "integer", "default": 500}, **_input_app}, "required": ["keys"]}, timeout_sec=90)
-    api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). up/down/left/right (Wayland: up/down), at the pointer on macOS. The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
+    api.register_tool("scroll", impl.scroll, description="Scroll 1-20 wheel steps; app= acts in that app (verified first, else nothing is sent). up/down/left/right (Wayland: up/down); on macOS the window under the pointer receives the wheel, app= only checks who is in front (move the pointer over the window first). The result names who was in front at dispatch.", schema={"type": "object", "properties": {"clicks": {"type": "integer", "default": 3}, "direction": {"type": "string", "default": "down"}, **_input_app}}, timeout_sec=90)
     api.register_tool("wait", impl.wait, description="Sleep up to 10s so the UI can settle before the next observation.", schema={"type": "object", "properties": {"ms": {"type": "integer", "default": 500}}}, timeout_sec=12)
     api.register_tool("activate_app", impl.activate_app, description="Bring a running application to the front (name, bundle id / WM_CLASS, or pid:<n> from window_list; resolved from the running list, never launched) and report who is in front afterwards. Inputs with app= do this themselves; use this to switch before several inputs or to check that a switch works.", schema={"type": "object", "properties": {"app": {"type": "string"}, "wait_ms": {"type": "integer", "default": 2000}}, "required": ["app"]}, timeout_sec=90)
     api.register_tool("window_list", impl.window_list, description="Running applications with their windows: who is in front, titles, bounds, pid, and on macOS whether the app has its own scripting commands (scriptable). app= filters; limit caps the rows (truncated says so).", schema={"type": "object", "properties": {**_app, "limit": {"type": "integer", "default": 50}}}, timeout_sec=60)

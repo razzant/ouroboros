@@ -489,7 +489,7 @@ def test_an_unresolved_application_and_a_missing_grant_ask_nothing_of_screencapt
     sessions, bridge, _clock = desk(grant="denied")
     answer = begin(sessions)
     assert answer["reason"] == "screen_recording_denied" and bridge.calls == ["preflight"]
-    assert answer["refusal"] == {"kind": "permission", "grant": "screen_recording", "fixable_by": "owner",
+    assert answer["refusal"] == {"capability_unavailable": True, "permission": "screen_recording", "repair": "owner",
                                  "where": "System Settings > Privacy & Security > Screen & System Audio Recording"}
     assert "refusal" not in refusal, "a refusal for another reason carries no grant field"
 
@@ -572,7 +572,7 @@ def test_a_start_error_leaves_no_session_and_asks_for_no_stop(desk):
     assert begin(sessions)["ok"] is True and len(bridge.stores) == 2  # a new store; the old one stays ended
     sessions, bridge, _clock = desk(start=_Error(-3801, "declined"))
     declined = begin(sessions)
-    assert declined["reason"] == "screen_recording_denied" and declined["refusal"]["grant"] == "screen_recording"
+    assert declined["reason"] == "screen_recording_denied" and declined["refusal"]["permission"] == "screen_recording"
 
 
 def test_a_silent_start_is_stopped_and_only_a_confirmed_stop_frees_the_slot(desk):

@@ -17,8 +17,9 @@
    and Home/End/Page/forward delete Fn, the keypad NumericPad), never a modifier the person happens to hold. All events
    of the call exist before the first is posted, each press beside its release, so one the system cannot make fails
    the call with nothing sent. An error once something went down, or the program's own deadline (budget_ms, below the
-   caller's timeout), posts the prepared release of every key and button still down (in its catch, last pressed
-   first), prints "__POSTED__ <json>" (how many events and characters went out) and ends with that error: osascript
+   caller's timeout), posts each press's own prepared release of every key and button still down (in its catch,
+   last pressed first; counted in "posted"), prints "__POSTED__ <json>" (how many events went out and how many
+   characters went down) and ends with that error: osascript
    exits 1, never an ok receipt. A finished mouse button "down" stays down: that is what it was asked for.
    Text goes one grapheme per key-down/up pair (a surrogate pair in one event; CRLF is one line break; a grapheme over
    20 UTF-16 units as its code points) with CGEventKeyboardSetUnicodeString, on the key that gives the character in
@@ -34,9 +35,9 @@ var MOVED = 5, SESSION_TAP = 1, HID_TAP = 0, LINE = 1, SYSTEM_DEFINED = 14;
 var CLASS_BITS = (function () { /* kCGEventFlagMaskNumericPad 0x200000, kCGEventFlagMaskSecondaryFn 0x800000 */
   var bits = {};
   [123, 124, 125, 126].forEach(function (c) { bits[c] = 0xa00000; });
-  [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 115, 119, 116, 121, 117, 114]
-    .forEach(function (c) { bits[c] = 0x800000; });
-  [65, 67, 69, 71, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92].forEach(function (c) { bits[c] = 0x200000; });
+  [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 115, 119, 116, 121, 117, 114, 71]
+    .forEach(function (c) { bits[c] = 0x800000; }); /* 71 keypad clear: a keyboard gives it Fn, not NumericPad */
+  [65, 67, 69, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92].forEach(function (c) { bits[c] = 0x200000; });
   return bits;
 })();
 function run(argv) {
@@ -113,7 +114,7 @@ function run(argv) {
   }
   if (spec.ops.length === 1 && spec.ops[0].op === "resolve") {
     var r = spec.ops[0];
-    return JSON.stringify({layout: (plane(0, 0), layoutId),
+    return JSON.stringify({layout: (plane(0, 0), layoutId), post_events: Boolean($.CGPreflightPostEventAccess()),
                            missing: (r.chars || []).filter(function (ch) { return !keyFor(ch); }),
                            missing_command: (r.command_chars || []).filter(function (ch) { return !commandKey(ch); })});
   }
@@ -135,7 +136,7 @@ function run(argv) {
     }
     chordKeys.push(key);
   }
-  var events = $.CGEventSourceCreate(1), made = [], kept = [], plan = [], held = {}, ups = {}, last = null;
+  var events = $.CGEventSourceCreate(1), made = [], kept = [], plan = [], held = {}, open = {}, last = null;
   var answer = {posted: 0};
   function own(event, what) {
     if (!event) { throw new Error("the system made no " + what + " event; nothing was sent"); }
@@ -147,7 +148,8 @@ function run(argv) {
      release is registered as the prepared event that lets that key or button up. */
   function step(event, tap, wait, fields) {
     var s = Object.assign({event: event, tap: tap, wait: wait}, fields || {});
-    if (s.up) { ups[s.up] = s; }
+    if (s.down) { (open[s.down[0]] = open[s.down[0]] || []).push(s); }
+    if (s.up && open[s.up] && open[s.up].length) { open[s.up].pop().release = s; } /* this press's own release */
     plan.push(s);
   }
   function mouse(button, kind, x, y, clicks) { /* kind: 1 down, 2 up, 3 dragged, 0 moved */
@@ -170,7 +172,8 @@ function run(argv) {
   function systemEvent(n, down) { /* NX key type n as a keyboard's media key sends it; the NSEvent owns its CGEvent */
     var ns = $.NSEvent.otherEventWithTypeLocationModifierFlagsTimestampWindowNumberContextSubtypeData1Data2(
       SYSTEM_DEFINED, {x: 0, y: 0}, down ? 0xa00 : 0xb00, 0, 0, null, 8, (n << 16) | ((down ? 0xa : 0xb) << 8), -1);
-    var ref = ns ? ns.CGEvent : null;
+    var wrapped = ns && !ns.isNil() ? ns.CGEvent : null; /* an object wrapper: a void* parameter would get NULL */
+    var ref = wrapped && !wrapped.isNil() ? ObjC.castObjectToRef(wrapped) : null;
     if (!ref) { throw new Error("the system made no system key event; nothing was sent"); }
     kept.push(ns);
     $.CGEventSetIntegerValueField(ref, 42, TAG);
@@ -239,11 +242,10 @@ function run(argv) {
         parts.forEach(function (piece) {
           var ch = piece === "\n" || piece === "\r\n" ? "\r" : piece;
           var key = ch === "\r" ? {code: 36, mods: []} : (ch === "\t" ? {code: 48, mods: []} : keyFor(ch));
-          if (!key) { answer.override_only++; }
           var code = key ? key.code : NEUTRAL_KEY, flags = 0;
           (key ? key.mods : []).forEach(function (m) { flags |= MODS[m][1]; });
-          step(keyEvent(code, true, flags, ch), SESSION_TAP, 0.002, {down: ["k" + code, code]});
-          step(keyEvent(code, false, flags, ch), SESSION_TAP, wait, {up: "k" + code, typed: true});
+          step(keyEvent(code, true, flags, ch), SESSION_TAP, 0.002, {down: ["k" + code, code], typed: true, override: !key});
+          step(keyEvent(code, false, flags, ch), SESSION_TAP, wait, {up: "k" + code});
         });
       } else if (op.op === "keys" || op.op === "hold") {
         chord(op.mods || [], chordKeys[index], op.op === "hold" ? Math.max(0, Number(op.ms) || 0) : undefined);
@@ -258,23 +260,27 @@ function run(argv) {
       answer.posted++;
       s.posted = true;
       if (s.at) { last = s.at; }
-      if (s.down) { held[s.down[0]] = s.down[1]; }
+      if (s.down) { held[s.down[0]] = s; }
       if (s.up) { delete held[s.up]; }
-      if (s.typed) { answer.chars_sent++; }
+      if (s.typed) { answer.chars_sent++; } /* a character counts once its key went down */
+      if (s.override) { answer.override_only++; }
       if (s.wait && Date.now() - started + s.wait * 1000 >= budget) { throw deadline(); } /* never a shortened hold */
       if (s.wait) { delay(s.wait); }
     });
   } catch (error) {
     Object.keys(held).reverse().forEach(function (name) { /* let up what went down, last first; the error is rethrown */
       try {
-        var prepared = ups[name];
-        if (prepared && !prepared.posted) {
-          $.CGEventPost(prepared.tap, prepared.event);
+        var down = held[name], value = down.down[1];
+        if (down.release && !down.release.posted) { /* the press's own prepared release */
+          $.CGEventPost(down.release.tap, down.release.event);
         } else if (name[0] === "k") {
-          $.CGEventPost(SESSION_TAP, keyEvent(held[name], false, 0));
+          $.CGEventPost(SESSION_TAP, keyEvent(value, false, 0));
         } else if (name[0] === "b") {
-          $.CGEventPost(HID_TAP, own($.CGEventCreateMouseEvent(events, BUTTONS[held[name]][2], last[0], last[1], BUTTONS[held[name]][0]), "mouse"));
+          $.CGEventPost(HID_TAP, own($.CGEventCreateMouseEvent(events, BUTTONS[value][2], last[0], last[1], BUTTONS[value][0]), "mouse"));
+        } else {
+          $.CGEventPost(HID_TAP, systemEvent(value, false));
         }
+        answer.posted++;
       } catch (ignored) { /* nothing more can be done from here */ }
     });
     console.log("__POSTED__ " + JSON.stringify(answer));

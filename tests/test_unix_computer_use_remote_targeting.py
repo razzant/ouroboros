@@ -353,7 +353,7 @@ def test_ssh_input_refused_by_the_remote_mac_is_an_honest_failure(tmp_path, monk
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI, input_stderr=warning))
     out = receipt(api.tools["key"](keys="right"))
     assert out["ok"] is False and out["reason"] == "permission_denied" and "observed_effect" not in out, out
-    assert out["dispatched"] is False and out["refusal"]["grant"] == "post_events" and out["refusal"]["fixable_by"] == "owner"
+    assert out["dispatched"] is False and out["refusal"]["permission"] == "post_events" and out["refusal"]["repair"] == "owner"
 
 
 def test_ssh_cursor_position_answers_fields_as_locally_and_dispatches_nothing(tmp_path, monkeypatch):
@@ -363,7 +363,19 @@ def test_ssh_cursor_position_answers_fields_as_locally_and_dispatches_nothing(tm
     assert "dispatched" not in out and "observed_effect" not in out and '"op":"position"' in calls[-1][-1]
     module, api, calls = ssh(tmp_path, monkeypatch, lambda command: (0, "not a position\n"))
     unread = receipt(api.tools["cursor_position"]())
-    assert "x" not in unread and unread["output"] == "not a position", unread
+    assert unread["ok"] is False and unread["reason"] == "position_unread" and "x" not in unread, unread
+    assert "not a position" in unread["error"]
+
+
+def test_an_ssh_lookup_that_times_out_is_a_refusal_with_its_receipt(tmp_path, monkeypatch):
+    def script(command):
+        if '"op":"resolve"' in command:
+            raise subprocess.TimeoutExpired(["ssh"], 30)
+        return 0, ""
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    out = receipt(api.tools["key"](keys="return a"))
+    assert out["ok"] is False and out["reason"] == "layout_unread" and out["dispatched"] is False, out
+    assert "TimeoutExpired" in out["error"] and not any('"op":"keys"' in argv[-1] for argv in calls)
 
 
 def test_an_ssh_text_that_posts_nothing_has_no_mark_and_one_that_posts_does(tmp_path, monkeypatch):
@@ -384,8 +396,10 @@ def test_an_ssh_text_that_posts_nothing_has_no_mark_and_one_that_posts_does(tmp_
 
 
 def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, monkeypatch):
-    """Windows stops a whole command line at 32,767 characters and the input program alone is about 15,000: a long
-    text would never leave the host. Such a command goes to the remote /bin/sh on ssh's stdin, the same words."""
+    """A command the host cannot start as an argument goes as UTF-8 bytes on ssh's stdin to the account's own login
+    shell (no remote command: a raw remote_exec keeps its shell's syntax; bytes: no LF becomes CRLF on Windows). On
+    Windows the measure is the command line as the launcher quotes it, in UTF-16 units: 5,000 double quotes in a
+    29,000-character command make a line over 33,000 units, which a plain count of characters would have passed."""
     module = load_plugin()
     remote = sys.modules[module.__name__ + ".remote"]
     seen = []
@@ -397,11 +411,15 @@ def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, m
     impl = module._ComputerUse(API(tmp_path / "state"))
     conn = {"backend": "ssh_macos", "host": "mac.invalid", "user": "owner"}
     impl._ssh_run(conn, "echo short")
-    long_command = "printf %s " + "x" * (remote._SSH_ARGV_CHARS + 1)
+    long_command = "printf %s 'line\nnext' " + "x" * 140_000
     impl._ssh_run(conn, long_command)
     (short_argv, short_input), (long_argv, long_input) = seen
     assert short_argv[-1] == "echo short" and short_input is None
-    assert long_argv[-1] == "/bin/sh -s" and long_input == long_command and long_command not in long_argv
+    assert long_argv[-1] == "owner@mac.invalid" and long_input == long_command.encode("utf-8") and long_command not in long_argv
+    quotes = "printf %s " + '"' * 5000 + " " + "q" * 23_900
+    dest = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "owner@mac.invalid"]
+    assert len(quotes) < 30_000 and remote._fits_command_line([*dest, quotes])  # a POSIX host carries it
+    assert not remote._fits_command_line([*dest, quotes], windows=True) and remote._fits_command_line([*dest, "echo short"], windows=True)
 
 
 def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):

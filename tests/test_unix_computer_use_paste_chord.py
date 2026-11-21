@@ -87,7 +87,9 @@ def test_a_refused_paste_chord_posts_nothing_in_the_words_the_receipt_reads(tmp_
         {"layout": ABC, "post": False})
     for run in (turkmen, unread, no_data, denied):
         assert run["error"] is None and run["posted"] == [] and "CGEventSourceCreate" not in run["calls"], run
-        assert run["leaked"] == [] and run["released"] == ([] if run is unread else ["TISInputSource"]), run
+        # Without the right to post the layout is never even read (the grant answers first).
+        assert run["leaked"] == [] and run["released"] == ([] if run in (unread, denied) else ["TISInputSource"]), run
+    assert denied["calls"][:1] == ["CGPreflightPostEventAccess"] and "TISCopyCurrentKeyboardLayoutInputSource" not in denied["calls"]
     assert turkmen["translated"] == [[code, 0, 1, 198, 1, 4] for code in range(128)], "every key code, then the refusal"
     assert turkmen["log"] == ["Unable to get key code for v (no key of com.apple.keylayout.Turkmen gives v under Command); "
                               "the paste chord was not sent"]
@@ -279,6 +281,7 @@ def test_an_ssh_shortcut_hands_its_character_to_the_same_program_as_a_separate_w
     out_dir.mkdir()
     (bin_dir / "osascript").write_text('#!/bin/sh\nn=$(ls "$OUT" | wc -l | tr -d " ")\n'
                                        'for a in "$@"; do printf "%s\\000" "$a"; done > "$OUT/$n"\n'
+                                       'case "$*" in *resolve*) echo \'{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\';; esac\n'
                                        'echo "Command chord: Command + key code 5 (recorded)" >&2\n', encoding="utf-8", newline="\n")
     (bin_dir / "lsappinfo").write_text('#!/bin/sh\n[ "$1" = front ] && echo "ASN:0x0-0x1:" || '
                                        'printf \'"pid"=100\\n"CFBundleIdentifier"="com.apple.Safari"\\n"LSDisplayName"="Safari"\\n\'\n',
