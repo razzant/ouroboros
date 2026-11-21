@@ -1,0 +1,54 @@
+name: "QA #3755 read-only range"
+on:
+  push:
+    branches: [qa/3755-readonly-range]
+permissions:
+  contents: read
+jobs:
+  qa:
+    name: qa (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Verify the harness commit and detach to PRODUCT_HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          product_head="79dc9790b331b40c061ef96444d81dfe9af037a3"
+          [[ "$product_head" =~ ^[0-9a-f]{40}$ ]]
+          harness_head="$(git rev-parse HEAD)"
+          harness_parent="$(git rev-parse "${harness_head}^")"
+          [[ "$harness_parent" == "$product_head" ]]
+          [[ "$(git diff --name-only "${product_head}" "${harness_head}")" == ".github/workflows/qa-3755-readonly-range.yml" ]]
+          git checkout --detach "$product_head"
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          install-project: 'false'
+          interpreter: setup-python
+      - name: Targeted pytest
+        shell: bash
+        run: |
+          python -m pytest \
+            tests/test_delegate_input_files.py \
+            tests/test_delegate_input_files_admission.py \
+            tests/test_delegate_recovery.py \
+            tests/test_delegated_run_profile.py \
+            tests/test_subagent_role_texts.py \
+            tests/test_subagent_surface_descriptions.py \
+            tests/test_tool_description_schemas.py \
+            tests/test_vcs_read_contract.py
