@@ -219,8 +219,10 @@ class TypingCue:
         scope = self._scope
         try:
             client = self._client_factory()
-            if getattr(client, "generation", scope) != scope:  # the chat was chosen for another token
-                self.wake()  # the next read chooses for this one
+            # The chat was chosen for another token: the next read chooses for this one. A cue no read has
+            # scoped yet (``_scope`` None) chose for no token, so it sends as before.
+            if scope is not None and getattr(client, "generation", scope) != scope:
+                self.wake()
                 return
             await client.send_chat_action(chat, "typing")
         except asyncio.CancelledError:

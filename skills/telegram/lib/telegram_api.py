@@ -1104,7 +1104,7 @@ _MENU_TEXTS_EN = {
     "unknown_command": "Unknown command",
     "use_miniapp": "Use the Mini App.",
     "update_failed": "Could not deliver that Telegram update to Ouroboros.",
-    "reply_not_linked": "I can't tell which message this reply is about, so it was not routed. Send it as a new message or reply to a newer one.",
+    "reply_not_linked": "Sent, but not linked to the earlier work: a message from before this bridge update can't be matched safely.",
     "metrics_budget_status": "• **Budget Status:**\n  Spent: `${spent_usd}`\n  Limit: `${total_budget}`\n  Remaining: `${rem}`\n\n• **System Environment:**\n  Branch: `{branch}`\n  BG Thoughts: `{bg_status}`",
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",
     "file_open_app_hint": "Open the app to download it.",

@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import dialogue_store
 from ouroboros.chat_uploads import attachment_views, same_message, stored_refs
-from ouroboros.store import StoreError
+from ouroboros.store import StoreBusy, StoreError, StoreMigrating
 from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, SUBAGENT_MESSAGE_FIELDS
 from ouroboros.utils import utc_now_iso
 
@@ -511,16 +511,23 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     )
     if not logged:
         raise ValueError("message is empty")
-    from ouroboros.chat_references import TELEGRAM_SOURCE, ingress_reply, telegram_reply_room
+    from ouroboros.chat_references import exact_reply_ingress, ingress_reply, telegram_reply_room, with_turn_address
     reply = ingress_reply(drive_root, message.get("task_metadata") or {})
-    if reply and source == TELEGRAM_SOURCE:  # the owner bot's Reply: its room, decided once on its accepted row
-        transport = message.get("transport") if isinstance(message.get("transport"), dict) else {}
-        try:  # ``owner_message_id``: the bridge names a bot message as the target, never his own words
-            room = telegram_reply_room(root, reply, chat_id, bubble="owner_message_id" in transport)
-        except (OSError, ValueError, StoreError):
-            room = None  # unreadable is refused, never guessed to be this conversation
-        if room != 0:
+    if reply and exact_reply_ingress(root, source, chat_id, message_id, message.get("transport")):
+        try:  # the bundled owner bot's Reply: its room, decided once on its accepted row (0: this conversation's)
+            room, decided = telegram_reply_room(root, reply, chat_id)
+        except (OSError, ValueError, StoreError) as exc:
+            if isinstance(exc, (StoreBusy, StoreMigrating)):
+                raise  # not accepted: the bridge says so, and the owner's next try is decided afresh
+            room, decided = None, True  # unreadable for good: refused, never guessed to be this conversation
+        if decided:
             reply = {**reply, "telegram_room_chat_id": room}
+    # The turn carries its own address from here (a replayed obligation too); no sender's value stands.
+    carried = with_turn_address(message.get("task_metadata"), {
+        "source": source, "direction": "in", "transport": message.get("transport"), "client_message_id": message_id,
+        "chat_id": chat_id, "reply_to": reply})
+    if carried != (message.get("task_metadata") or {}):
+        message["task_metadata"] = carried
     if reply:  # a replayed obligation dispatches the same reference
         message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": reply}
     refs = stored_refs((message.get("task_metadata") or {}).get("chat_attachments"))
@@ -565,8 +572,9 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
             if (message.get("task_metadata") or {}).get("chat_attachments"):
                 message["task_metadata"] = {**message["task_metadata"], "chat_attachments": row.get("attachments")}
         ts = str(row.get("ts") or "")
-        if row.get("reply_to"):  # the reference the host resolved when it accepted the row
-            message["task_metadata"] = {**(message.get("task_metadata") or {}), "reply_reference": row["reply_to"]}
+        if row.get("reply_to"):  # the reference the host resolved when it accepted the row, and its turn's address
+            message["task_metadata"] = with_turn_address({**(message.get("task_metadata") or {}),
+                                                          "reply_reference": row["reply_to"]}, row)
         ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.

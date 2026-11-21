@@ -2034,7 +2034,9 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 ### Replies
 
 Reply addresses a row for Ouroboros to interpret, never routes; only the owner's Telegram chat, one feed for
-every room, gives a Reply to a Project's card or notice its own turn there (`skills/telegram/SKILL.md`). A Main
+every room, gives a Reply to any message of a Project its own turn there (owner 18.11, taken to merge; the owner's 20.11
+challenge to a broader design went to the council), and any other Reply there stays its chat's turn
+(`skills/telegram/SKILL.md`). A Main
 reply to a Project message also appears there at its time as the same Main message (owner 28.10, A), without
 telling, waking or resuming anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row
 menus; work cards in menus only, never hover-only. Reply stages the composer's first-line strip

@@ -2,10 +2,13 @@
 
 References describe what the sender pointed at. They do not select work or grant
 authority, with one exception: the bundled owner Telegram bridge's accepted Reply
-to a Project's card or notice opens its turn in that Project (``telegram_reply_room``,
-decided once at acceptance). Hash the persisted row before adding any history/view
-fields. A row the dialogue store cannot answer yet (its archive still importing, or
-unreadable) leaves the reference unresolved; it never blocks the message that carries it.
+to any message of a Project opens its turn in that Project (``telegram_reply_room``,
+decided once at acceptance); every other Reply stays its conversation's ordinary turn.
+Hash the persisted row before adding any history/view fields. A row the dialogue store
+cannot answer yet (its archive still importing, or unreadable) leaves the reference
+unresolved; it never blocks the message that carries it. Only that room decision, on a
+busy store, leaves the bridge's message unaccepted (it says so, and the next try decides
+afresh), never refused for good.
 """
 from __future__ import annotations
 
@@ -112,11 +115,10 @@ def ingress_reply(root, metadata: dict) -> dict:
     return resolve_reply(root, metadata.get("reply_to", ""))
 
 
-def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = None) -> dict:
+def origin_reply(root, task_id: str, metadata=None) -> dict:
     """The answer's host reference to the owner message that began its turn.
 
-    Best-effort enrichment: a busy or unreadable store omits the reference, never the message.
-    ``transport``, when given, also receives that row's ``exact_reply_transport``."""
+    Best-effort enrichment: a busy or unreadable store omits the reference, never the message."""
     if not task_id or not root:
         return {}
     from ouroboros.task_status import load_effective_task_result
@@ -127,43 +129,108 @@ def origin_reply(root, task_id: str, metadata=None, *, transport: dict | None = 
         row = resolve_owner_message_source(root, ref) if ref else None
     except StoreError:
         return {}
-    if transport is not None and row:
-        transport.update(exact_reply_transport(row))
     return reference_from_row(row) if row else {}
 
 
-def telegram_reply_room(root, ref: dict, ingress_chat: int, *, bubble: bool = True) -> int | None:
-    """Where an accepted owner-bot Reply runs: ``0`` keeps the ordinary turn of its own conversation, a
-    Project's chat id opens a separate turn there, ``None`` refuses it without routing it anywhere.
+def telegram_reply_room(root, ref: dict, ingress_chat: int) -> tuple:
+    """Where an accepted owner-bot Reply runs, ``(room, decided)``: ``0`` keeps the ordinary turn of its own
+    conversation, a Project's chat id opens a separate turn there, ``None`` refuses it without routing it anywhere.
 
-    Decided by the target's facts, never by numbers alone: the private chat's physical id (``ingress_chat``) and
-    a local room id are different facts that can be equal. The owner's own words are a quote, not a destination:
-    his row's role or, for a target the store cannot read now, the bridge's fact (``bubble`` False: not a bot
-    message). A work's room is the room rule's (``RoomResolver``: its binding, else its admission); an active
-    Project there opens the turn, a retired one refuses it. Any other target is its row's own room: Main, and this
-    conversation while no Project bears its id, stay ordinary; an active Project's room opens the turn. A blocker,
-    an unknown target, or an id this conversation and a Project share is refused, never guessed. Unreadable
-    registry or store state raises for the caller to refuse."""
-    if not isinstance(ref, dict) or not ref or ref.get("role") == "user":
-        return 0
-    if ref.get("unresolved"):
-        return None if bubble else 0
+    Only a confirmed Project target opens a turn: the room its work lives in (``RoomResolver``: its binding, else
+    its admission) or, for a row no work owns, the room it was written in, as ``room_membership.reply_target_room``
+    decides it. A retired or deleted Project there refuses the Reply, never sends it to Main. Everything else stays
+    the ordinary turn of this conversation: the owner's own words, Main and this conversation, a question (its card
+    is its answer's door), a row no room owns (``target_home`` ``none``). The private chat's physical id
+    (``ingress_chat``) and a local room id are different facts that can be equal: an id they share is this
+    conversation's unless that Project's work is proven (``_project_work_here``). A target the store cannot find or
+    read now is an ordinary turn too, but ``decided`` False: nothing records a room it could not name. Unreadable
+    registry or origin state raises."""
+    if not isinstance(ref, dict) or not ref or ref.get("unresolved"):
+        return 0, False
+    if ref.get("role") == "user" or ref.get("kind") == "question":
+        return 0, True
     from ouroboros.contracts.chat_id_policy import is_project_chat_id
     from ouroboros.project_admission import reserved_project_for_chat
     from ouroboros.projects_registry import RoomResolver
-    from ouroboros.room_membership import TARGET_ABSENT, TARGET_UNKNOWN, TARGET_WORK, reply_target
+    from ouroboros.room_membership import TARGET_ABSENT, TARGET_ROOM, TARGET_UNKNOWN, TARGET_WORK, reply_target
 
     rooms = RoomResolver(root, strict=True)
     home, task, chat = reply_target(rooms, ref)
     if home in (TARGET_ABSENT, TARGET_UNKNOWN):
+        return 0, False
+    room = int(rooms(task) or 0) if home == TARGET_WORK and task else chat if home == TARGET_ROOM else 0
+    if room == 1 or not is_project_chat_id(room):
+        return 0, True
+    if room == ingress_chat:  # the number this conversation and a Project share: the Project's only when proven
+        proven = _project_work_here(root, rooms, task, room) if home == TARGET_WORK and task else False
+        if not proven:
+            return 0, proven is not None
+    return (room if reserved_project_for_chat(root, room).get("lifecycle") == "active" else None), True
+
+
+def _project_work_here(root, rooms, task: str, chat: int):
+    """Whether a work whose room bears the owner's private chat number is proven that Project's: a Project binding on
+    its lineage, or a root begun by a word written in that room or by the owner bot's Reply the host gave that very
+    room; never this conversation's own turn (False). None when the message that began it cannot be named: nothing
+    proves either room. The owner message is read by its host reference; unreadable raises."""
+    from ouroboros.project_dialogue import resolve_owner_message_source
+    from ouroboros.projects_registry import project_chat_for_task
+
+    lineage = rooms.lineage(task)
+    top = str(lineage.get("root_task_id") or task)
+    if any(project_chat_for_task(root, tid) == chat
+           for tid in {task, str(lineage.get("parent_task_id") or ""), top} if tid):
+        return True
+    ref = _origin_ref(root, top)
+    row = resolve_owner_message_source(root, ref) if ref else None
+    if not row:
         return None
-    work = int(rooms(task) or 0) if home == TARGET_WORK and task else 0
-    if work:  # the work's own Project, as the room rule confirms it, whatever number the private chat bears
-        return work if reserved_project_for_chat(root, work).get("lifecycle") == "active" else None
-    project = reserved_project_for_chat(root, chat) if is_project_chat_id(chat) else {}
-    if chat == 1 or (chat == ingress_chat and not project):
-        return 0
-    return chat if chat != ingress_chat and project.get("lifecycle") == "active" else None
+    if not telegram_chat_row(row.get("source"), row.get("chat_id"), row.get("client_message_id")):
+        return True
+    reply = row.get("reply_to")
+    return isinstance(reply, dict) and reply.get("telegram_room_chat_id") == chat
+
+
+def telegram_chat_row(source, chat_id, client_message_id) -> bool:
+    """Whether an owner message is one the Telegram bridge took in its own chat (``tg:[<bot>:]<chat>:<message>``):
+    its chat id is that Telegram chat's physical address, never a room's, whatever room bears the same number.
+    A message the host delivers into a room on the owner's behalf (a late answer, a card press) is the room's."""
+    parts = str(client_message_id or "").split(":")
+    return source == TELEGRAM_SOURCE and parts[0] == "tg" and len(parts) in (3, 4) and parts[-2] == str(chat_id)
+
+
+def bundled_bridge(root) -> bool:
+    """Whether the one skill named ``telegram`` here is the bundled bridge, seeded from the application's own
+    release (``skill_loader._classify_skill_source``: ``native``): a same-named skill from any other source, or two
+    of that name, is an ordinary transport whose Replies are ordinary references."""
+    from pathlib import Path
+
+    from ouroboros.config import SKILL_SOURCE_NATIVE
+    from ouroboros.skill_loader import discover_skill_identity
+
+    try:
+        found = discover_skill_identity(Path(root), "telegram")
+    except Exception:
+        return False
+    return len(found) == 1 and found[0].source == SKILL_SOURCE_NATIVE and not found[0].identity_collision
+
+
+def exact_reply_ingress(root, source, chat_id, client_message_id, transport) -> bool:
+    """Whether an accepted owner Reply has its room decided (``telegram_reply_room``): the bundled bridge's
+    (``bundled_bridge``), under the bot-qualified address it proves (``proven_address``). Any other Reply, the
+    bridge's older botless ids included, stays an ordinary reference."""
+    row = {"source": source, "direction": "in", "transport": transport, "client_message_id": client_message_id,
+           "chat_id": chat_id}
+    return source == TELEGRAM_SOURCE and bool(proven_address(row)) and bundled_bridge(root)
+
+
+def keeps_binding(msg: dict) -> bool:
+    """Whether an owner message leaves its room's binding as it was: the host's delivery of the owner's Telegram act (a
+    late answer to a question, a press on a living card) into the room that act belongs to is no word written
+    there, so it neither binds that room to Telegram nor clears another connector's binding (its turn's own address:
+    ``turn_reply_transport``)."""
+    meta = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else {}
+    return msg.get("source") == TELEGRAM_SOURCE and bool(meta.get("late_answer") or meta.get("card_press"))
 
 
 def proven_address(row: dict) -> dict:
@@ -204,10 +271,10 @@ def exact_reply_transport(row: dict) -> dict:
 
 
 def decided_reply_address(row: dict) -> dict:
-    """Where a routing notice about an accepted owner-bot Reply whose room the host decided answers it: the bot and
-    chat that took it, marked ``reply``, without an anchor; ``{}`` for any other row (its binding stays)."""
+    """Where a routing notice about an accepted owner-bot Reply the host gave a Project, or refused, answers it: the bot
+    and chat that took it, marked ``reply``, without an anchor; ``{}`` for any other row (its binding stays)."""
     reply = row.get("reply_to")
-    address = proven_address(row) if isinstance(reply, dict) and "telegram_room_chat_id" in reply else {}
+    address = proven_address(row) if isinstance(reply, dict) and reply.get("telegram_room_chat_id", 0) != 0 else {}
     return {**address, ADDRESS: REPLY_ADDRESS} if address else {}
 
 
@@ -230,30 +297,103 @@ def _origin_ref(root, task_id: str):
     return ref if isinstance(ref, dict) else None
 
 
-def turn_reply_transport(root, task_id: str) -> dict:
-    """``exact_reply_transport`` of the owner message that began ``task_id``: its questions, media, cards and
-    typing go where its answer does. The accepted row's own facts decide (its host stamp and the bridge's
-    transport), never a comparison of chat numbers; only an owner-bot message is read. ``{}`` for every other
-    task, and when its facts cannot be read."""
+TURN_ADDRESS = "exact_reply_transport"  # the turn's own: the host's at acceptance, never a sender's
+
+
+def with_turn_address(metadata, row: dict) -> dict:
+    """The task metadata of the turn ``row`` begins, carrying that row's ``exact_reply_transport`` (and no other value
+    under its key): every delivery of the turn reads it from the turn itself (``turn_reply_transport``)."""
+    meta = {key: value for key, value in (metadata or {}).items() if key != TURN_ADDRESS}
+    exact = exact_reply_transport(row)
+    return {**meta, TURN_ADDRESS: exact} if exact else meta
+
+
+def _turn_metadata(root, task_id: str) -> dict:
+    """``task_id``'s own metadata: as its running task holds it, else its stored result."""
+    from ouroboros.task_status import load_effective_task_result
+    from supervisor import queue
+
+    with queue._queue_lock:
+        running = queue.RUNNING.get(task_id)
+    task = (running or {}).get("task") if running is not None else load_effective_task_result(
+        root, task_id, materialize_artifacts=False)
+    meta = (task or {}).get("metadata")
+    return meta if isinstance(meta, dict) else {}
+
+
+def turn_reply_transport(root, task_id: str, *, anchor: bool = True, strict: bool = False) -> dict:
+    """Where everything ``task_id``'s turn sends goes (its answer, questions, media, cards, typing; progress and its
+    end's notice without the anchor, ``anchor`` False), when the owner's Telegram chat began it: an accepted exact
+    Reply's address with its strict anchor, as the host accepted it and the turn carries it from its start
+    (``TURN_ADDRESS``), so no read of the source row is needed; his late answer to a question there, the bot and
+    chat that answer came from (``late_answer_surface``). ``{}`` for every other turn: the room's binding, as before.
+    A record that cannot be read answers ``{}`` too, or raises for ``strict``."""
     if not root or not task_id:
         return {}
     try:
-        ref = _origin_ref(root, task_id)
-        if not ref or not str(ref.get("client_message_id") or "").startswith("tg:"):
-            return {}
-        from ouroboros.project_dialogue import resolve_owner_message_source
-
-        row = resolve_owner_message_source(root, ref)
+        meta = _turn_metadata(root, task_id)
     except (OSError, ValueError, TypeError, StoreError):
-        return {}  # best effort, as the reference itself: the delivery keeps the room's own binding
-    return exact_reply_transport(row) if row else {}
+        if strict:
+            raise
+        return {}
+    carried = meta.get(TURN_ADDRESS)
+    if not (isinstance(carried, dict) and carried.get(ADDRESS) == REPLY_ADDRESS):
+        carried = late_answer_surface(root, meta.get("late_answer"))
+    return {key: value for key, value in carried.items() if anchor or key != "exact_reply"} if carried else {}
+
+
+def late_answer_surface(root, late) -> dict:
+    """The Telegram bot and chat the owner's late answer came from, as its question's record keeps it
+    (``answer_surface``, written with the answer the bundled bridge relayed), marked ``reply``, without an anchor;
+    ``{}`` for an answer from anywhere else, and for one recorded before the record kept its surface."""
+    from ouroboros.owner_quiz import late_answer_ref, resolved_late_quiz
+
+    ref = late_answer_ref(late)
+    try:
+        block = resolved_late_quiz(root, ref) if ref else {}
+    except (OSError, ValueError, TypeError, StoreError):
+        return {}
+    surface = block.get("answer_surface") if block.get("answer_source") == TELEGRAM_SOURCE else None
+    if not (isinstance(surface, dict) and surface.get("kind") == "telegram"
+            and str(surface.get("bot_id") or "").isdigit() and str(surface.get("conversation_id") or "")):
+        return {}
+    return {"kind": "telegram", "conversation_id": str(surface["conversation_id"]), "bot_id": str(surface["bot_id"]),
+            ADDRESS: REPLY_ADDRESS}
 
 
 def delivery_transport(root, bound: dict, task_id) -> dict:
     """What a live question, medium, card or typing of ``task_id`` carries: the address of an accepted exact Reply's
     own turn first (it wins on that turn and leaves ``bound``, the room's binding, as it is), else the binding.
-    Its answer takes the same address at the send seam (``origin_reply``'s ``transport``)."""
+    Its answer takes the same address at the send seam (``answer_reference``)."""
     return turn_reply_transport(root, str(task_id or "")) or bound
+
+
+def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool) -> None:
+    """The send seam's quote and address for one answer of ``task_id`` (``meta``, set only where absent): it quotes
+    the owner message that began its turn (``origin_reply``, best effort), and answers where that turn's own address
+    says (``turn_reply_transport``), its own row read or not. A row naming another source keeps the quote it names and
+    the room's binding; a host receipt names its address itself (``host_operation_reply_kwargs``); progress is
+    ``live_transport``'s."""
+    if is_progress:
+        return
+    reply = origin_reply(root, task_id, meta if meta.get("origin_message_ref") else None)
+    if reply:
+        meta.setdefault("reply_to", reply)
+    if (not reply or meta["reply_to"] is reply) and (exact := turn_reply_transport(root, task_id)):
+        meta.setdefault("transport", exact)
+
+
+def live_transport(root, meta: dict, bound: dict, task_id: str, *, role: str, system_type: str,
+                   is_progress: bool) -> dict:
+    """What a row's live frame carries, after its rows are written (never stored): a helper's card or notice, its
+    root's address (``helper_card_address``) where its room has no binding, else that binding with the root's address
+    beside it (``telegram_root``, which only the bundled bridge reads), so another connector bound there keeps the row;
+    an exact Reply's turn's progress, where its answer goes but without the anchor, so Silent mode replaces it as
+    before; ``{}`` for any other row."""
+    address = helper_card_address(root, meta, role=role, system_type=system_type, is_progress=is_progress)
+    if address:
+        return {**bound, "telegram_root": address} if bound else address
+    return turn_reply_transport(root, task_id, anchor=False) if is_progress and task_id else {}
 
 
 def helper_card_address(root, meta: dict, *, role: str, system_type: str, is_progress: bool) -> dict:

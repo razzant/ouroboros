@@ -37,7 +37,7 @@ from .lib.telegram_state import (
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _load_runtime_state, _child_row_held_for_root, _child_final_report,
     _mirror_options, _owner_message_seen, _owner_ingress_fields, _replaceable_progress,
-    _quiet_progress, _reply_target, _reply_ingress_transport, _carried_here,
+    _quiet_progress, _reply_target, _reply_ingress_transport, _carried_here, _bridged,
 )
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_origin import origin_label
@@ -980,12 +980,7 @@ async def _handle_owner_message(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
-    target = _reply_target(api, client.bot_id, chat_id, message)
-    if not target["known"] and quiz_ref is None:  # a bot bubble no map holds: refused here, never guessed (SKILL.md)
-        await client.call("sendMessage", data={"chat_id": str(chat_id), "allow_sending_without_reply": True,
-                                               "text": _LOCALIZED_TEXTS[lang]["reply_not_linked"],
-                                               "reply_to_message_id": message["message_id"]})
-        return
+    target = _reply_target(api, client.bot_id, chat_id, message)  # an unknown bubble: an ordinary turn, unquoted
     photos = message.get("photo") or []
     image_base64 = ""
     image_mime = ""
@@ -1029,6 +1024,11 @@ async def _handle_owner_message(
     finally:
         if parked is not None:
             parked.cleanup()
+    if target.get("unlinked"):
+        try:
+            await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["reply_not_linked"])
+        except Exception:
+            api.log("warning", "Telegram note about an unlinked reply could not be delivered.")
 
 
 def _make_poller(api):
@@ -1038,7 +1038,7 @@ def _make_poller(api):
 def _make_outbound(api, cue: TypingCue | None = None):
     async def handle(event: Dict[str, Any]) -> None:
         try:
-            local_settings = _load_settings(api)
+            local_settings, event = _load_settings(api), _bridged(event)  # a helper's root address, as it reaches here
             chat_id = _target_chat(local_settings, event)
             if not chat_id:
                 return
@@ -1464,7 +1464,7 @@ def register(api):
     api.register_supervised_task("outbox", outbox.run, restart_policy="on_failure", max_restarts=10)
 
     def routed(event):  # each content handler's first filter: no target chat, nothing to save
-        return bool(_target_chat(_load_settings(api), event))
+        return bool(_target_chat(_load_settings(api), _bridged(event)))
     api.subscribe_event("chat.outbound", outbox.subscriber("outbound", _make_outbound(api, cue), decide=True, routed=routed))
     api.subscribe_event("chat.typing", _make_typing(cue))
     api.subscribe_event("chat.photo", outbox.subscriber("photo", _make_photo(api), routed=routed))

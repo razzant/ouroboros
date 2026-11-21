@@ -590,6 +590,19 @@ def _record_routing_receipt(
         log.debug("Routing receipt broadcast failed", exc_info=True)
 
 
+def _settle_refused(ctx: Any, chat_id: int, client_message_id: str, reason: str) -> None:
+    """A refused owner message's named operation ends there, after any restart, as its notice said
+    (``dialogue_store.refuse_dispatch``); best effort: the notice already went."""
+    from ouroboros import dialogue_store
+    from ouroboros.project_dialogue import routing_refusal_cause
+
+    try:
+        dialogue_store.refuse_dispatch(ctx.DRIVE_ROOT, chat_id, client_message_id,
+                                       routing_refusal_cause("project_route", "project_unavailable", reason))
+    except Exception:
+        log.warning("Refused owner message %s could not be recorded as ended", client_message_id, exc_info=True)
+
+
 def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> None:
     """Route one non-command owner message through the canonical decision lane."""
     chat_id = int(incoming["chat_id"])
@@ -612,8 +625,13 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     # a Project opens this message's own turn there, an unavailable target is refused, never sent to Main.
     reply_ref = task_metadata.get("reply_reference")
     telegram_room = (incoming.get("source") == "skill:telegram" and task_metadata.get("_host_operation") is True
-                     and isinstance(reply_ref, dict) and "telegram_room_chat_id" in reply_ref)
+                     and isinstance(reply_ref, dict) and reply_ref.get("telegram_room_chat_id", 0) != 0)
     ingress_chat = chat_id  # the owner's row, its receipts and refusals stay in the conversation he wrote in
+    from ouroboros.chat_references import TURN_ADDRESS, telegram_chat_row
+
+    physical = not telegram_room and telegram_chat_row(incoming.get("source"), chat_id, client_message_id)
+    if not telegram_room:  # only an exact Reply's own turn carries the address its acceptance gave it
+        task_metadata.pop(TURN_ADDRESS, None)
     if telegram_room:
         room = reply_ref["telegram_room_chat_id"]
         try:
@@ -621,10 +639,11 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
                 room = None
         except (OSError, ValueError):
             room = None
-        if room is None:
+        if room is None:  # one notice (its ACK); the named operation ends refused where it was accepted
             _record_routing_receipt(bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
                                     action="project_route", status="project_unavailable",
                                     reason="reply_target_unavailable")
+            _settle_refused(ctx, ingress_chat, client_message_id, "reply_target_unavailable")
             return
         chat_id = room
     from ouroboros.contracts.task_constraint import normalize_task_constraint
@@ -685,8 +704,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # the task's own card carry it. A refusal is told by the promote handler's
         # typed System row (host_initiated) plus that receipt.
         return
-    try:
-        reserved_project = _reserved_project_for_chat(ctx, chat_id)
+    try:  # the owner bot's own chat id is a Telegram address, never a room's: only a decided Reply leaves it
+        reserved_project = {} if physical else _reserved_project_for_chat(ctx, chat_id)
     except (OSError, ValueError) as exc:
         _record_routing_receipt(
             bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,

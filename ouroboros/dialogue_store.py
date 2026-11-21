@@ -819,7 +819,8 @@ def dispatch_facts(root: Any, chat_id: Optional[int], client_message_id: str) ->
         return None
     recorded = json.loads(record["dispatch_input"] or "{}")
     return {"state": record["dispatch"], "process": str(recorded.get("process") or ""),
-            "dispatcher": str(recorded.get("dispatcher") or "")}
+            "dispatcher": str(recorded.get("dispatcher") or ""),
+            **({"refused": str(recorded["refused"])} if recorded.get("refused") else {})}
 
 
 def dispatch_state(root: Any, chat_id: Optional[int], client_message_id: str) -> Optional[str]:
@@ -861,11 +862,28 @@ def complete_dispatch(root: Any, chat_id: Optional[int], client_message_id: str)
         return False
     with transaction(root, write=True) as conn:
         cursor = conn.execute(
-            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=json_object("
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch='completed', dispatch_input=CASE WHEN "
+            "json_extract(dispatch_input, '$.refused') IS NULL THEN json_object("
             "'dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', json_extract(dispatch_input, '$.process')) "
+            "ELSE json_object('dispatcher', json_extract(dispatch_input, '$.dispatcher'), 'process', "
+            "json_extract(dispatch_input, '$.process'), 'refused', json_extract(dispatch_input, '$.refused')) END "
             "WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' AND dispatch='dispatched'",
             (client_message_id, chat_id))
         return cursor.rowcount == 1
+
+
+def refuse_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, cause: str) -> bool:
+    """The owner router refused the accepted row's message before any work began: its typed end (``cause``, the
+    owner-facing sentence its notice said), kept on the row's own dispatch record as ``dispatch_facts``' ``refused``
+    (``complete_dispatch`` keeps it), so the named operation answers it after any restart."""
+    if not client_message_id or not cause or not present(root):
+        return False
+    with transaction(root, write=True) as conn:
+        cursor = conn.execute(
+            "UPDATE dialogue INDEXED BY dialogue_named SET dispatch_input=json_set(coalesce(dispatch_input, '{}'), "
+            "'$.refused', ?) WHERE stream='chat' AND client_message_id=? AND chat_id IS ? AND direction='in' "
+            "AND dispatch IN ('dispatched', 'completed')", (cause, client_message_id, chat_id))
+        return cursor.rowcount >= 1
 
 
 def abandon_dispatch(root: Any, chat_id: Optional[int], client_message_id: str, reason: str) -> bool:

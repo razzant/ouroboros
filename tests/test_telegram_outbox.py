@@ -763,6 +763,33 @@ def test_an_exact_replys_turn_never_leaves_through_another_bot_or_chat(tmp_path)
     _run(scenario)
 
 
+def test_a_message_whose_handler_ends_before_its_next_part_is_never_confirmed_whole(tmp_path):
+    """A stop fell between the first part's answer and the next part's request; after it another bot is in force,
+    so the exact Reply's turn ends before asking for anything: its delivered part keeps its receipt and the rest
+    stays content, kept and shown, never counted delivered (only a handler that finished confirms the whole)."""
+    async def scenario():
+        async with _Origin(close_after=1) as origin:
+            bridge = _Bridge(tmp_path / "state", origin.base)
+            await bridge.publish("chat.outbound", {"text": _LONG, "transport": _exact(), "row_address": "row:answer"})
+            [record] = bridge.records()
+            await bridge.stop()
+        path = tmp_path / "state" / "outbox" / f"{record['id']}.json"
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["parts"][0]["state"] == "confirmed"
+        saved.update(state="sending", parts=saved["parts"][:1])  # as written just before the next part's request
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        async with _Origin() as later:
+            again = _Bridge(tmp_path / "state", later.base, token="654321:OTHER-BOT-TOKEN")
+            await again.drain()
+        [ended] = again.records()
+        assert (ended["state"], ended["reason"]) == ("failed", "telegram_destination_unavailable")
+        assert [(part["state"], part["message_id"]) for part in ended["parts"]] == [("confirmed", 501)]
+        assert ended["held"] is True and f"{record['id']}.event.json" in again.files(), "the rest stays content"
+        assert later.sent() == [] and again.outbox.summary()["delivered"] == 0
+        await again.stop()
+    _run(scenario)
+
+
 def test_a_replaced_bot_never_continues_what_the_old_one_started(tmp_path):
     async def scenario():
         async with _Origin(close_after=1) as first, _Origin() as second:

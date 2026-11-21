@@ -31,7 +31,8 @@ saved is not sent (counted for the Connection form, which says the journal is fa
 next state cannot be written waits for its retry instead of sending.
 
 States: an operation is ``pending`` (saved, waiting for its turn or a token), ``sending``, ``retry_wait``, or
-finished. A finished one is ``confirmed`` (every part it asked for was delivered; its files are removed),
+finished. A finished one is ``confirmed`` (its handler finished and every part it asked for was delivered; its
+files are removed),
 ``unknown``, ``refused``, ``failed`` (stopped: expired after ``MAX_AGE_SEC``, changed before its retry, the token
 changed after a delivered part, the queue full, its handler failing) or ``superseded`` (accepted, its handler later
 asked no more of Telegram: a mirror setting changed while it waited). Telemetry, or an event whose handler asks
@@ -649,8 +650,10 @@ class Outbox:
                 if part.get("state") in _ACTIVE:
                     part.update(state=unreached, **({"reason": _cause(op.failure)} if op.failure else {}))
             record["state"] = _final_state(record["parts"]) if record["parts"] else unreached
-            if not record["parts"] and op.failure is not None:
-                record["reason"] = _cause(op.failure)
+            if op.failure is not None and record["state"] in ("confirmed", "failed"):
+                # A handler that failed may have stopped before asking for its next part: only its completion
+                # confirms the whole. Its delivered parts keep their receipts; the rest stays content (``_keeps``).
+                record.update(state="failed", reason=_cause(op.failure))
         await self._finish(record)
 
     # --- the journal ---

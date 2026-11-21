@@ -1032,7 +1032,9 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     indexed under that origin, a turn's own record told apart by its origin; no room history or routing
     annotation is read. A managed root (a promoted or detached task) answers before the direct turn
     that handed it off; children and retry successors fold into their root, unless a record its
-    retry-aware read went through cannot be read (``task_record_unreadable``). Otherwise ``pending``,
+    retry-aware read went through cannot be read (``task_record_unreadable``). A message the owner router refused
+    before any work began is ``failed`` with the sentence its notice said (``dialogue_store.refuse_dispatch``).
+    Otherwise ``pending``,
     or ``lost`` when the host process or session that accepted the message is gone and nothing else
     answers; a record linked to the message that cannot be read (``task_record_unreadable``) or a
     dialogue range still importing after it (``history_importing``) keeps it ``pending`` with that
@@ -1145,10 +1147,14 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
         stored = load_effective_task_result(ctx.data_dir, target, materialize_artifacts=False) or {}
         if str(stored.get("status") or "") in SETTLED_STATUSES:
             return _task_view(state, target, stored, cancel_owner_matches)
+    from supervisor.message_ingress import dispatch_facts, dispatch_lost, dispatch_taken_over_here
+
+    if refused := (dispatch_facts(inbound, ctx.data_dir) or {}).get("refused"):
+        state.update(status="failed", text=refused)  # the router refused it before any work began, and said so
+        return state
     if not dialogue_store.range_coverage(ctx.data_dir, "chat", lower=accepted.seq)["imported"]:
         state["reason"] = "history_importing"  # an answer may sit in the rows still importing
         return state
-    from supervisor.message_ingress import dispatch_lost, dispatch_taken_over_here
 
     accepted_session = str(inbound.get("session_id") or "")
     live_session = str((read_json_dict(ctx.data_dir / "state" / "state.json") or {}).get("session_id") or "")

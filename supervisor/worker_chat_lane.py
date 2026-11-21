@@ -913,7 +913,8 @@ def _host_operation_failure(metadata: Optional[dict]) -> dict:
 
     meta = metadata or {}
     source = meta.get("origin_message_ref") if meta.get("_host_operation") else None
-    return host_operation_reply_kwargs(source, "failed", str(meta.get("client_message_id") or ""))
+    return host_operation_reply_kwargs(source, "failed", str(meta.get("client_message_id") or ""),
+                                       meta.get("exact_reply_transport"))  # chat_references.TURN_ADDRESS
 
 
 def _rejected_rows(manifest: Any) -> list:
@@ -980,7 +981,8 @@ def _defer_chat_for_restart(task: dict, chat_id: int, metadata: Optional[dict]) 
 
     meta = metadata or {}
     ack = host_operation_reply_kwargs(meta.get("origin_message_ref") if meta.get("_host_operation") else None,
-                                     client_message_id=str(meta.get("client_message_id") or ""))
+                                     client_message_id=str(meta.get("client_message_id") or ""),
+                                     transport=meta.get("exact_reply_transport"))  # chat_references.TURN_ADDRESS
     _pool().send_with_budget(chat_id, "Saved for execution after Restart.",
                             **ack, role="system", system_type="restart_notice")
 

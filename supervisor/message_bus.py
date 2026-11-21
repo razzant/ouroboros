@@ -26,6 +26,7 @@ from supervisor.message_ingress import (  # noqa: F401 - the named ingress's pub
     recover_pending_dispatches)
 from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES
 from ouroboros.projects_registry import RoomResolver, stamp_project_thread
+from ouroboros.chat_references import keeps_binding
 from ouroboros.tools.core import (
     LinkActionsValidationError,
     QuizValidationError,
@@ -281,6 +282,8 @@ class LocalChatBridge:
         """
         chat_id = coerce_chat_identity(msg.get("chat_id", (msg.get("chat") or {}).get("id")), 1)
         transport = msg.get("transport")
+        if keeps_binding(msg):  # the host delivered the owner's Telegram act here: its binding stays
+            return
         if isinstance(transport, dict) and transport and chat_id != 1:  # never the host's marks (chat_references)
             self._chat_transports[chat_id] = {key: value for key, value in transport.items()
                                               if key not in ("exact_reply", "host_address")}
@@ -545,14 +548,7 @@ class LocalChatBridge:
             payload["attachment_manifest"] = [
                 dict(row) for row in attachment_manifest if isinstance(row, dict)
             ]
-        if self._broadcast_fn and not is_a2a_chat_id(chat_id):
-            self._broadcast_fn(payload)
-        if not is_a2a_chat_id(chat_id):
-            publish_event(CHAT_OUTBOUND, {
-                **payload,
-                "text": "",
-                "transport": transport or self.chat_transport(chat_id),
-            })
+        stored = None
         if (
             str(status or "") == "needs_manual_target"
             and isinstance(options, list) and options
@@ -575,10 +571,21 @@ class LocalChatBridge:
                 lines.extend(f"{index}. {label}" for index, label in enumerate(shown, 1))
                 if len(labels) > len(shown):
                     lines.append(f"…and {len(labels) - len(shown)} more in the web chat.")
-                log_chat(
+                # Written first: a skill's copy of the picker names this row, and a Reply to it quotes this list.
+                stored = log_chat(
                     "out", int(chat_id or 0), 0, "\n".join(lines),
                     source="routing_picker", record_type="routing_options",
                 )
+        if self._broadcast_fn and not is_a2a_chat_id(chat_id):
+            self._broadcast_fn(payload)
+        if not is_a2a_chat_id(chat_id):
+            from ouroboros.chat_references import projection_fields
+            publish_event(CHAT_OUTBOUND, {
+                **(projection_fields(stored) if stored else {}),
+                **payload,
+                "text": "",
+                "transport": transport or self.chat_transport(chat_id),
+            })
 
     def send_chat_action(
         self,
@@ -1015,6 +1022,7 @@ class LocalChatBridge:
         from ouroboros.secret_requests import transport_hint
 
         publish_event(CHAT_QUIZ, {
+            **(projection_fields(stored) if stored else {}),  # its parts name its row: a Reply to one quotes it
             "message_origin": message_origin(DATA_DIR, chat_id, task_id),
             "chat_id": int(chat_id or 0),
             "transport": quiz_transport,
@@ -1235,13 +1243,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         if narration is not None:
             meta["narration"] = bool(narration)
         meta.setdefault("narration", False)
-        from ouroboros.chat_references import helper_card_address, origin_reply, projection_fields
-        exact: Dict[str, Any] = {}  # an accepted exact Reply's own turn answers where it was asked (SKILL.md)
-        origin = meta if meta.get("origin_message_ref") else None
-        if not is_progress and (reply := origin_reply(DATA_DIR, task_id, origin, transport=exact)):
-            meta.setdefault("reply_to", reply)
-            if exact and meta["reply_to"] is reply:  # the turn's own answer, not a row naming another source
-                meta.setdefault("transport", exact)
+        from ouroboros.chat_references import answer_reference, live_transport, projection_fields
+        answer_reference(DATA_DIR, meta, task_id, is_progress=is_progress)  # an answer's quote and its address
         progress_meta = meta
         if task_id and DATA_DIR and system_type not in ROOM_FIXED_ROW_TYPES and meta.get("_is_direct_chat") is not True:
             # The one room rule (A4) at the one send seam: a task-addressed host row
@@ -1310,9 +1313,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             meta.update(projection_fields(stored), **rooms, **frame_project(DATA_DIR, stored, rooms.get("also_rooms", [])))
         if _text.strip() in ("", "\u200b"):
             return {"chat_id": chat_id}
-        if "transport" not in meta and not get_bridge().chat_transport(chat_id) and (address := helper_card_address(
-                DATA_DIR, meta, role=role, system_type=system_type, is_progress=is_progress)):
-            meta["transport"] = address  # live only, after the rows are written: a room's binding stays its own
+        if "transport" not in meta and (carried := live_transport(DATA_DIR, meta, get_bridge().chat_transport(
+                chat_id), task_id, role=role, system_type=system_type, is_progress=is_progress)):
+            meta["transport"] = carried  # live only, after the rows are written: a room's binding stays its own
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
 
