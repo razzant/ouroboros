@@ -136,6 +136,21 @@ def test_a_skeleton_read_in_chunks_splices_the_same_whole_and_bounds_only_the_wh
                 assert sv.splice_chunks(chunks, tokenized.parts, limit=len(whole)) == whole
             with pytest.raises(ValueError, match="byte limit"):
                 sv.splice_chunks(iter([skeleton]), tokenized.parts, limit=len(whole) - 1)
+            # The allowance is read before each literal run and each part joins the whole (a read by digest does not
+            # know the whole's size): the refusal comes at the first overrun, before every part is resolved.
+            literal, first = list(tokenized.segments())[:2]
+            assert len(tokenized.parts) > 1
+            named = hashlib.sha256(first).hexdigest()
+            for limit, expected in ((len(literal) - 1, []), (len(literal) + len(first) - 1, [named])):
+                resolved = []
+
+                def counted(digest, parts=tokenized.parts):
+                    resolved.append(digest)
+                    return parts[digest]
+
+                with pytest.raises(ValueError, match="byte limit"):
+                    sv.splice_chunks(iter([skeleton]), counted, limit=limit)
+                assert resolved == expected
 
 
 def test_elements_are_the_outermost_dicts_of_lists_reached_through_dicts():

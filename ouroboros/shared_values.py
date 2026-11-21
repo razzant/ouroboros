@@ -168,26 +168,29 @@ _TOKEN_LONGEST = len(b'{"$shared": ""}') + 64
 
 def splice_chunks(chunks: Iterable[bytes], parts: Parts, *, limit: Optional[int] = None,
                   context: str = "document") -> bytes:
-    """``splice`` of a skeleton read a chunk at a time, refused (``ValueError``) once its whole passes ``limit``.
+    """``splice`` of a skeleton read a chunk at a time, refused (``ValueError``) at the first literal run or part that
+    would carry its whole past ``limit``: no part behind it is resolved.
 
     A token is longer than a small element it names, so a skeleton can be longer than its whole: the bound holds what
     the skeleton spells, and the skeleton itself is never held whole."""
     resolve, whole, held = _resolver(parts, context), bytearray(), b""
+
+    def add(piece: bytes) -> None:  # the allowance is read before a piece joins the whole
+        if limit is not None and len(whole) + len(piece) > limit:
+            raise ValueError("blob exceeds byte limit")
+        whole.extend(piece)
+
     for chunk in chunks:
         held += chunk
         position = 0
         for match in TOKEN_PATTERN.finditer(held):
-            whole += held[position:match.start()]
-            whole += resolve(match.group(1).decode("ascii"))
+            add(held[position:match.start()])
+            add(resolve(match.group(1).decode("ascii")))
             position = match.end()
         keep = max(position, len(held) - _TOKEN_LONGEST + 1)  # a token the chunk's end cut waits for the next one
-        whole += held[position:keep]
+        add(held[position:keep])
         held = held[keep:]
-        if limit is not None and len(whole) > limit:
-            raise ValueError("blob exceeds byte limit")
-    whole += held  # no whole token is left: any was found above
-    if limit is not None and len(whole) > limit:
-        raise ValueError("blob exceeds byte limit")
+    add(held)  # no whole token is left: any was found above
     return bytes(whole)
 
 
