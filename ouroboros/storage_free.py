@@ -437,20 +437,25 @@ class FreeSpace:
         return {"error": "view_changed"} if version and str(version) != answer["version"] else answer
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
-        """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
-        stuck once the ``custody_trash`` job recorded that this very entry survived its removal, or stayed held
-        because its producer marked it again (a moved drive or seat home is named by its task, a discarded scratch
-        handoff by its own entry)."""
-        from ouroboros.task_custody import custody_trash_entries
+        """Credit removal only after a whole enumeration proves absence. A moved entry still listed
+        without a readable identity, or unseen in an incomplete listing, remains deleting. A matching
+        recorded hold or failed removal counts as stuck. Drives and seat homes are named by task;
+        a discarded scratch handoff keeps its own name."""
+        from ouroboros.task_custody import custody_trash_scan
         from ouroboros.workspace_preflight import _RELEASE_MARK
 
-        entries = custody_trash_entries(root) if run["moved"] else []
+        try:
+            entries, complete = custody_trash_scan(root) if run["moved"] else ([], True)
+        except OSError:
+            entries, complete = [], False
         survived = self._survived_trash(root) if entries else {}
         named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
-        waiting = {named[name] for name, identity in entries if survived.get(name) != identity}
-        blocked = {named[name] for name, identity in entries if survived.get(name) == identity}
+        waiting = {named[name] for name, identity in entries if identity is None or survived.get(name) != identity}
+        blocked = {named[name] for name, identity in entries if identity is not None and survived.get(name) == identity}
         deleting = [key for key in run["moved"] if key.split(":", 1)[-1] in waiting]
         stuck = [key for key in run["moved"] if key not in deleting and key.split(":", 1)[-1] in blocked]
+        if not complete:
+            return list(run["removed"]), [key for key in run["moved"] if key not in stuck], stuck
         removed = [key for key in run["moved"] if key not in deleting and key not in stuck] + run["removed"]
         return removed, deleting, stuck
 
