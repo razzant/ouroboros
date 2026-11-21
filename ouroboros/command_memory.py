@@ -170,6 +170,21 @@ def _without_runtime(unit: str) -> Unavailable:
     return Unavailable("unit_without_runtime", f"{unit} has no runtime subgroup (older package or DelegateSubgroup unset)")
 
 
+def _kernel_props(unit_root: Path, cgroup: str) -> tuple:
+    """The user bus can be unreachable from inside the packaged service (observed on a hosted kernel):
+    the same properties then come from the unit's and the manager's cgroup files, which the kernel
+    writes for the layout actually in force. Only what those files show is asserted."""
+    def props(directory: Path, control: str, subgroup: bool) -> dict:
+        controllers = (directory / "cgroup.controllers").read_text(encoding="ascii").split()
+        oom = (directory / "memory.oom.group").read_text(encoding="ascii").strip()
+        out = {"LoadState": "loaded", "ControlGroup": control, "DelegateControllers": " ".join(controllers),
+               "OOMPolicy": "continue" if oom == "0" else "kill"}
+        if subgroup:
+            out["DelegateSubgroup"] = "runtime"  # this process's own cgroup already ends in it
+        return out
+    return props(unit_root, cgroup, True), props(unit_root.parent, cgroup.rsplit("/", 1)[0], False)
+
+
 def _probe() -> Union[Enabled, Unavailable]:
     if not sys.platform.startswith("linux"):
         return Unavailable("platform", "not Linux")
@@ -201,11 +216,12 @@ def _probe() -> Union[Enabled, Unavailable]:
     try:
         service = _show("--user", "show", unit, *(f"--property={name}" for name in props))
         manager = _show("show", f"user@{_uid()}.service", *(f"--property={name}" for name in props))
-    except subprocess.CalledProcessError as exc:
-        tail = " ".join((exc.stderr or "").split())[-200:]
-        return Unavailable("systemctl_unreadable", f"systemctl show failed: {tail}", True)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return Unavailable("systemctl_unreadable", f"systemctl show failed: {exc}", True)
+    except (subprocess.CalledProcessError, OSError, subprocess.SubprocessError) as exc:
+        try:  # a denied or absent bus is not a missing layout: read the same facts from the kernel
+            service, manager = _kernel_props(unit_root, cgroup)
+        except OSError:
+            tail = " ".join((getattr(exc, "stderr", "") or str(exc)).split())[-200:]
+            return Unavailable("systemctl_unreadable", f"systemctl show failed: {tail}", True)
     for found in (_check_unit(service, unit, subgroup=True, cgroup=cgroup),
                   _check_unit(manager, f"user@{_uid()}.service", subgroup=False, cgroup=cgroup)):
         if found is not None:
