@@ -68,6 +68,17 @@ def test_planned_restart_and_quit_teardown_pause_admission_first(monkeypatch):
     assert server_restart._begin_task_teardown(True) == server_restart._shutdown_task_cleanup_args(True)
     assert server_restart._begin_task_teardown(False) == server_restart._shutdown_task_cleanup_args(False)
     assert calls == ["pause", "pause"]
+    # The reason names the stop: Quit is the application's quit, a real external signal stays a signal.
+    from ouroboros import server_process
+
+    args = server_restart._shutdown_task_cleanup_args
+    assert "(the application was quit)" in args(False, "launcher_quit")[1]
+    assert "signal" not in args(False, "launcher_quit")[1] and "signal" not in args(False, "launcher_gone")[1]
+    assert "(external stop/restart signal)" in args(False, "external_signal")[1]
+    # Any other stop (a bus or loop fault) is not called a signal.
+    assert "(the server stopped)" in args(False, "bus_lost")[1] and "signal" not in args(False, "loop_failed")[1]
+    monkeypatch.setattr(server_process, "_stop_source", "launcher_quit")
+    assert server_restart._begin_task_teardown(False)[1] == args(False, "launcher_quit")[1]
     # Both server doors begin their teardown through it, before they read the queue or retire the pool.
     assert "_begin_task_teardown(restart_requested=True)" in inspect.getsource(server_restart._perform_supervisor_restart)
     assert inspect.getsource(server).count("_begin_task_teardown(restart_requested)") == 1
