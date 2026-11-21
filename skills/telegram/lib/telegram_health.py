@@ -172,20 +172,33 @@ def _units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def _cut(text: str, room: int) -> str:
+    """``text`` within ``room`` UTF-16 code units, a cut one said with an ellipsis (an astral character is two)."""
+    if _units(text) <= room:
+        return text
+    used, keep = 1, []
+    for ch in text:
+        used += 2 if ord(ch) > 0xFFFF else 1
+        if used > room:
+            break
+        keep.append(ch)
+    return "".join(keep) + "…" if room > 0 else ""
+
+
 def _collect_tasks_text(state, lang: str = "en", limit: int = TELEGRAM_TEXT_LIMIT) -> str:
     """The works the window shows, from the server's ``/api/state`` body: each work's name, its word and its first
     reason in the server's own sentences. An unread or incomplete projection is unknown. At most twelve lines, and
     with the ``… +N`` line never past ``limit`` UTF-16 code units (Telegram drops a longer message whole)."""
     s = _HEALTH[lang]
     said = _owner_works(state)
-    if said is None:
-        return s["tasks_unknown"]
-    if not said:
-        return s["tasks_idle"]
+    if said is None or not said:
+        return s["tasks_unknown" if said is None else "tasks_idle"]
     lines: list = []
     for work in said[:12]:
-        reason = f": {_reason_words(work, lang)}" if work["reason"] else ""
-        line = f"{_STATE_ICONS.get(work['state'], '❔')} {work['name'] or '—'} — {_chip_word(work, lang)}{reason}"
+        word = _chip_word(work, lang)
+        reason = _reason_words(work, lang) if work["reason"] else ""
+        reason = f": {reason}" if reason and reason.strip().casefold() != word.strip().casefold() else ""
+        line = f"{_STATE_ICONS.get(work['state'], '❔')} {work['name'] or '—'} — {word}{reason}"
         more = len(said) - len(lines) - 1
         tail = f"\n… +{more}" if more else ""
         used = _units("\n".join(lines + [line]) + tail)
@@ -193,9 +206,7 @@ def _collect_tasks_text(state, lang: str = "en", limit: int = TELEGRAM_TEXT_LIMI
             room = limit - _units("\n".join(lines + [""]) + f"\n… +{len(said) - len(lines)}")
             if lines or room < 2:
                 break
-            while _units(line) > room - 1:  # one line longer than the page: cut, said with an ellipsis
-                line = line[:-1]
-            line += "…"
+            line = _cut(line, room)  # one line longer than the page: cut, said with an ellipsis
         lines.append(line)
     if len(said) > len(lines):
         lines.append(f"… +{len(said) - len(lines)}")
@@ -205,8 +216,11 @@ def _collect_tasks_text(state, lang: str = "en", limit: int = TELEGRAM_TEXT_LIMI
 def _build_menu_tasks(state, command_mode: str, lang: str = "en") -> tuple[str, list[list[dict]]]:
     """Read-only list of works (``state``: the ``/api/state`` body). No inline mutations (owner inject-minimization)."""
     t = _LOCALIZED_TEXTS[lang]
-    title = t["tasks_title"]
-    header = f"{title}\n\n" + _collect_tasks_text(state, lang, TELEGRAM_TEXT_LIMIT - _units(f"{title}\n\n"))
+    # the header leaves the body at least its shortest form (the ``… +N`` line), else the title is cut;
+    # the last cut bites only on a catalogue sentence longer than the page
+    title = _cut(t["tasks_title"], TELEGRAM_TEXT_LIMIT - 2 - _units(_collect_tasks_text(state, lang, 0)))
+    header = _cut(f"{title}\n\n" + _collect_tasks_text(state, lang, TELEGRAM_TEXT_LIMIT - _units(f"{title}\n\n")),
+                  TELEGRAM_TEXT_LIMIT)
     keyboard = [
         [{"text": t["btn_refresh"], "callback_data": "nav:tasks"}],
         [{"text": t["btn_back"], "callback_data": "nav:menu"}],
