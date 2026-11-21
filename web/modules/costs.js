@@ -147,8 +147,8 @@ export function roomTimeText(iso, { now = Date.now(), timeZone } = {}) {
     const at = new Date(Math.floor(after / 60000) * 60000 + 60000);
     const zone = timeZone ? { timeZone } : {};
     const day = (date) => date.toLocaleDateString('en-CA', zone);  // YYYY-MM-DD in that zone
-    const date = day(at) === day(new Date(now)) ? '' : `${at.toLocaleDateString([], { month: 'short', day: 'numeric', ...zone })}, `;
-    return date + at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short', ...zone });
+    const date = day(at) === day(new Date(now)) ? '' : `${at.toLocaleDateString('en', { month: 'short', day: 'numeric', ...zone })}, `;
+    return date + at.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short', ...zone });
 }
 
 const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
